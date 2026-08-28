@@ -19,6 +19,7 @@ from ..common.config_coercion import (
     int_from_yaml,
     str_from_yaml,
 )
+from ..common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC
 from .twap import SLICE_INTERVAL_SECONDS
 
 __all__ = [
@@ -179,7 +180,10 @@ class PaperExecutionConfig:
     """``paper_trading.execution`` — fees, min notional, monitor, fill model (§5.4)."""
 
     taker_fee_rate: Decimal = Decimal("0.00045")
-    min_notional_usdc: Decimal = Decimal("10")
+    # The exchange's own minimum order value (the same fact the live config gate
+    # enforces), so the paper clip floor simulates the venue by default; the YAML
+    # key still overrides it for a deliberately different simulation.
+    min_notional_usdc: Decimal = EXCHANGE_MIN_ORDER_NOTIONAL_USDC
     market_monitor: MarketMonitorConfig = field(default_factory=MarketMonitorConfig)
     fill_model: FillModelConfig = field(default_factory=FillModelConfig)
 

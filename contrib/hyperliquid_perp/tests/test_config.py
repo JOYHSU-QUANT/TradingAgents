@@ -26,7 +26,7 @@ from contrib.hyperliquid_perp.domains.perp.risk_gate import (
 )
 from contrib.hyperliquid_perp.domains.perp.target_decision import DecisionConfig
 
-from .conftest import doc_text
+from .conftest import config_text, doc_text
 
 
 @pytest.mark.parametrize(
@@ -684,3 +684,18 @@ def test_the_setup_doc_quotes_the_volume_profile_floor_the_loader_enforces():
     assert f"or at least {MIN_VOLUME_PROFILE_WINDOW}" in setup
     # And the "it is on" side of the same threshold, one row further down.
     assert f"視窗 ≥ {MIN_VOLUME_PROFILE_WINDOW}" in setup
+
+
+def test_the_example_config_quotes_the_market_data_defaults_the_loader_enforces():
+    """The example YAML's ``market_data`` comments, derived rather than retyped.
+
+    ``candle_lookback: 200`` is the field default (PR #125 made the field its
+    single declaration), and the volume-profile comment restates the loader's
+    floor. The SETUP pin above guards the doc; nothing guarded the file an
+    operator actually copies (issue #102).
+    """
+    from contrib.hyperliquid_perp.common.constants import MIN_VOLUME_PROFILE_WINDOW
+
+    example = config_text()
+    assert f"candle_lookback: {MarketDataConfig().candle_lookback} " in example
+    assert f"Must be 0 or >= {MIN_VOLUME_PROFILE_WINDOW}, and <= candle_lookback" in example

@@ -580,6 +580,23 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the remaining duplicated live constants are derived or
+  drift-locked** (issues #102, #122). No behaviour changes. The exchange
+  minimum order value moves to `common.constants.EXCHANGE_MIN_ORDER_NOTIONAL_USDC`
+  (`live.config` re-exports it) and is now the paper `min_notional_usdc`
+  default rather than a second `10`; `live.config.DEFAULT_SCHEDULE_CANCEL_SECONDS`
+  names the kill-switch default and validation's fallback derives from it; the
+  smoke suite's per-test floor is one `live.smoke.SMOKE_MIN_KILL_SWITCH_DEADLINE`
+  shared by the dataclass default and the CLI (pinned `>=` the daemon default,
+  not equal to it by rule); the reconciler's fill cross-check window and its
+  operator warning derive from the backfiller's lookback; the equity-tolerance
+  tests derive their fixtures from the constants and pin the bound on both
+  legs; `LEGAL_NETWORKS` is locked to the SDK client's URL table; and
+  `configs/hyperliquid.example.yaml` plus the RUNBOOK's threshold sentences
+  are pinned to the constants they restate. `RetryableDecisionError` now
+  checks `error_type` against `ERROR_TYPES` at construction, so a producer's
+  typo fails on the raise instead of at the repository write boundary.
+
 - **Breaking for direct callers of `alpha_vantage_common.format_datetime_for_api`**
   (issue #120): it accepts only a `yyyy-mm-dd` string and raises `ValueError`
   for the `"YYYYMMDDTHHMM"` passthrough, the `"%Y-%m-%d %H:%M"` string and

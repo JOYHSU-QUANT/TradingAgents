@@ -115,7 +115,6 @@ from .paper_export import (
 )
 from .safe_mode import _cmd_safe_mode, _stamp_reconciliation_case
 from .smoke import (
-    _SMOKE_MIN_KILL_SWITCH_DEADLINE,
     _build_real_smoke_session,
     _build_smoke_session,
     _cmd_live_smoke,

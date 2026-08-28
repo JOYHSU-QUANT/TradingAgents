@@ -57,6 +57,10 @@ __all__ = [
     "validate_run",
 ]
 
+# The phase2→phase3 entry gate: a paper run must complete this many decision
+# cycles before live is considered. Happens to equal ``live.validation.MIN_LIVE_CYCLES``
+# (the §20.3 acceptance gate on a LIVE run) — two specs, two gates, one number
+# by coincidence; deliberately not tied together (issue #102).
 MIN_CYCLES_FOR_PHASE3 = 30
 
 

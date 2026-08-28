@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -571,6 +572,46 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     assert runbook.count(f"{MIN_KILL_SWITCH_REFRESH_SAMPLES} 筆") == 2
 
 
+def test_the_runbook_quotes_the_gate_thresholds_it_restates_in_prose():
+    """The threshold sentences PR #101 left unpinned (issue #102).
+
+    Same criterion as the test above — a value the code enforces as a hard gate,
+    restated by the doc as a bare literal — applied to the sentences that
+    criterion reaches beyond §20.3: the suite's dead-man floor, the smoke gate's
+    "all N tests" condition, and the ≥N-cycle bar wherever the RUNBOOK states
+    it as a bar. Prose that merely mentions the numbers is deliberately NOT
+    pinned (PR #101 §0.9): a pin on a sentence is a claim about the sentence,
+    and a paraphrase that keeps the meaning must stay free to move.
+    """
+    from contrib.hyperliquid_perp.live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE
+    from contrib.hyperliquid_perp.live.validation import MIN_LIVE_CYCLES
+
+    runbook = doc_text("RUNBOOK-live.md")
+    # §3 and §20.3: the suite refreshes to max(config, floor), and the RUNBOOK
+    # tells the operator so in two places — once as the config key, once as the
+    # measure's reason for reading floored rows.
+    floor_s = int(SMOKE_MIN_KILL_SWITCH_DEADLINE.total_seconds())
+    assert f"`max(schedule_cancel_seconds, {floor_s}s)`，不是寫死的 {floor_s}s" in runbook
+    assert f"`live-smoke` 以 `max(config, {floor_s}s)` 續約" in runbook
+    # §20.2's exit-0 condition, and every "new run-id resets the gate" note
+    # (§5, §20.3, §21.3 today) stating the suite size. Not a COUNT of the notes
+    # — that would pin how often the doc repeats itself — but "no copy says a
+    # different number", which catches a stale copy wherever it sits and
+    # survives the notes being merged or added to.
+    n = len(SMOKE_TEST_KEYS)
+    assert f"| `0` | **全 {n} 項** gate 開" in runbook
+    stated = re.findall(r"(\d+) 項全回 `not_yet_run`", runbook)
+    assert stated and set(stated) == {str(n)}, stated
+    # The ≥N-cycle bar, everywhere the RUNBOOK states it AS a bar: the testnet
+    # pre-flight (§20.3 lead-in), the mode ladder's exit-0 condition, and the
+    # two mainnet_tiny statements (§21.3 lead-in, §21.4). The same
+    # MIN_LIVE_CYCLES gates both modes — validate_live_run is mode-blind.
+    assert f"跑滿 **≥ {MIN_LIVE_CYCLES} cycles**（§20.3）" in runbook
+    assert f"testnet_live_cycles >= {MIN_LIVE_CYCLES}（§20.3 驗收 exit 0）" in runbook
+    assert f"跑滿 ≥ {MIN_LIVE_CYCLES} cycles 後" in runbook
+    assert f"`mainnet_tiny_cycles ≥ {MIN_LIVE_CYCLES}`" in runbook
+
+
 def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, capsys, smoke_seams):
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)
@@ -810,11 +851,13 @@ def test_real_smoke_session_takes_the_kill_switch_deadline_from_config(tmp_path,
     # to prevent. 600 is deliberately off-default: a probe asserting 120 would
     # have passed against the bug.
     from contrib.hyperliquid_perp.cli import _build_smoke_session
-    from contrib.hyperliquid_perp.live.smoke import SmokeContext
+    from contrib.hyperliquid_perp.live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE, SmokeContext
 
-    assert SmokeContext.__dataclass_fields__["kill_switch_deadline"].default == timedelta(
-        seconds=120
+    assert (
+        SmokeContext.__dataclass_fields__["kill_switch_deadline"].default
+        == SMOKE_MIN_KILL_SWITCH_DEADLINE
     )
+    assert timedelta(seconds=600) > SMOKE_MIN_KILL_SWITCH_DEADLINE  # off-default, ABOVE the floor
     cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=600)
     dbp = _seed_genesis_run(tmp_path, cfg)
     args = SimpleNamespace(config=str(cfg), db=str(dbp), run_id="r1", dry_run=False)
@@ -834,6 +877,7 @@ def test_a_short_configured_cover_is_floored_not_inherited(tmp_path, smoke_seams
     # and cancels the resting probe, recorded as "the exchange refused" — which
     # sends the operator to check config and market state, not the clock.
     from contrib.hyperliquid_perp.cli import _build_smoke_session
+    from contrib.hyperliquid_perp.live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE
 
     # 80/5, not 40/5: since the timing invariant started counting the failed
     # attempt's own timeout and the retry's own tick wait, 40/5 is no longer legal
@@ -843,13 +887,14 @@ def test_a_short_configured_cover_is_floored_not_inherited(tmp_path, smoke_seams
     # its 8s term. 80 is the nearest cover that keeps the ORIGINAL point: legal
     # for the daemon, still narrower than the 120s the suite guarantees itself
     # (2026-08-01 round-15 review).
+    assert timedelta(seconds=80) < SMOKE_MIN_KILL_SWITCH_DEADLINE  # legal, yet below the floor
     cfg = _smoke_yaml(tmp_path, schedule_cancel_seconds=80, refresh_interval_seconds=5)
     dbp = _seed_genesis_run(tmp_path, cfg)
     args = SimpleNamespace(config=str(cfg), db=str(dbp), run_id="r1", dry_run=False)
     with Database(dbp) as db:
         session = _build_smoke_session(args, db)
         assert not isinstance(session, int)
-        assert session.kill_switch_deadline == timedelta(seconds=120)
+        assert session.kill_switch_deadline == SMOKE_MIN_KILL_SWITCH_DEADLINE
 
 
 def test_smoke_refuses_a_violating_kill_switch_timing_with_exit_1(tmp_path, capsys, smoke_seams):

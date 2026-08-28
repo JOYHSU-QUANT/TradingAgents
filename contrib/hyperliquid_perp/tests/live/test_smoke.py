@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,6 +20,32 @@ from ..conftest import echo_order_status_cloid
 
 _T0 = datetime(2026, 7, 27, 3, 52, tzinfo=timezone.utc)
 _D = Decimal
+# The suite's dead-man floor in whole seconds, as the deadline token prints it.
+_SMOKE_FLOOR_S = int(smoke.SMOKE_MIN_KILL_SWITCH_DEADLINE.total_seconds())
+
+
+def test_the_smoke_floor_and_the_daemon_default_keep_their_relationship():
+    """Four modules used to spell ``120`` independently (issue #102).
+
+    Two of them are the daemon's (the config default and validation's fallback,
+    which must be EQUAL — a key-omitting run is measured against what it armed
+    with) and two are the suite's (this dataclass default and the CLI floor,
+    which must be equal to each other so the ``deadline=`` the runner records
+    is the cover it installed). Across the pair the rule is weaker on purpose:
+    the suite's per-test cover may exceed the daemon's tick-bounded default but
+    never sit below it — see ``SMOKE_MIN_KILL_SWITCH_DEADLINE`` for why the two
+    are not one constant.
+    """
+    from contrib.hyperliquid_perp.live.config import DEFAULT_SCHEDULE_CANCEL_SECONDS
+    from contrib.hyperliquid_perp.live.validation import (
+        DEFAULT_SCHEDULE_CANCEL_SECONDS as validation_default,
+    )
+
+    daemon_default = timedelta(seconds=DEFAULT_SCHEDULE_CANCEL_SECONDS)
+    assert validation_default == Decimal(DEFAULT_SCHEDULE_CANCEL_SECONDS)
+    floor = smoke.SMOKE_MIN_KILL_SWITCH_DEADLINE
+    assert floor == smoke.SmokeContext.__dataclass_fields__["kill_switch_deadline"].default
+    assert floor >= daemon_default
 
 
 @dataclass
@@ -551,9 +577,10 @@ def test_the_preflight_refresh_records_the_cover_it_installed(live_db):
         rows = _ks_rows(live_db)
     refreshes = [detail for event, detail in rows if event == "kill_switch_refreshed"]
     assert refreshes, f"the pre-flight refresh wrote no row; got {rows}"
-    # It states the cover it installed — max(config, 120s) — because on a run
-    # configured below 120 this row is the ONLY evidence of the longer cover.
-    assert _stated_deadline_seconds(refreshes[0]) == _D(120)
+    # It states the cover it installed — max(config, the suite floor) — because
+    # on a run configured below the floor this row is the ONLY evidence of the
+    # longer cover. Derived from the floor, not retyped (issue #102).
+    assert _stated_deadline_seconds(refreshes[0]) == _D(_SMOKE_FLOOR_S)
     # ...and it is marked as the SUITE's, so it cannot buy §20.3 sample credit.
     assert is_suite_authored(refreshes[0])
 
@@ -654,8 +681,8 @@ def test_test_14_records_every_transition_it_makes(live_db):
     # armed row AND the refreshed one. Only rows[0] was inspected before, so the
     # refresh row (which is what buys §20.3 sample credit) could lose its marker
     # and its deadline token with the suite green (2026-08-01 round-16 probe).
-    assert _stated_deadline_seconds(rows[0][1]) == _D(120)
-    assert _stated_deadline_seconds(rows[1][1]) == _D(120)
+    assert _stated_deadline_seconds(rows[0][1]) == _D(_SMOKE_FLOOR_S)
+    assert _stated_deadline_seconds(rows[1][1]) == _D(_SMOKE_FLOOR_S)
     assert all(is_suite_authored(detail) for _, detail in rows), rows
     # SEPARATED from what the row already said. The deadline regex parses the
     # front; since the round-18 hardening, `is_suite_authored` anchors on the

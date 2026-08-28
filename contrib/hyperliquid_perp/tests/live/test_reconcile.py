@@ -6,6 +6,7 @@ One test per §12.3 case row, plus the safe-mode application semantics of
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -29,12 +30,16 @@ from ..conftest import echo_order_status_cloid
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
 _HEX_SL = "0x" + "cd" * 16
+# The ledger every ``env`` test starts from; the exchange fake defaults to the
+# same value (derived, not restated), so a test that changes neither sees a
+# clean account.
+_LEDGER = Decimal(100)
 
 
 def _clearinghouse(
     *,
-    account_value: str = "100",
-    withdrawable: str = "100",
+    account_value: str = str(_LEDGER),
+    withdrawable: str = str(_LEDGER),
     margin_used: str = "0",
     maintenance: str = "0",
     positions: list[dict] | None = None,
@@ -101,14 +106,14 @@ class _Seams:
         return self.fills
 
 
-@pytest.fixture
-def env(tmp_path):
+@contextmanager
+def _make_env(tmp_path, ledger: Decimal = _LEDGER):
     db = Database(":memory:")
     accounting.initialize_run(
         db,
         run_id="r",
         mode="live",
-        initial_balance_usdc=Decimal(100),
+        initial_balance_usdc=ledger,
         schema_version=SCHEMA_VERSION,
         created_at=_NOW - timedelta(days=1),
     )
@@ -124,8 +129,16 @@ def env(tmp_path):
         payload_dir=tmp_path / "payloads",
         clock=ManualClock(_NOW),
     )
-    yield db, seams, reconciler
-    db.close()
+    try:
+        yield db, seams, reconciler
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def env(tmp_path):
+    with _make_env(tmp_path) as parts:
+        yield parts
 
 
 def test_the_sweep_refreshes_the_kill_switch_across_its_exchange_reads(env, tmp_path):
@@ -813,9 +826,25 @@ def test_a_flat_exchange_clears_a_stale_mirrored_liquidation_estimate(env):
 # -- §12.3: equity tolerance -----------------------------------------------------
 
 
+# The §12.3 rule, spelled once here from the constants that enforce it. The
+# fixtures below derive from these rather than restating the numbers: with the
+# bound hand-picked as ``95`` / ``99.50`` against an unnamed ``max(1, 1%)``, a
+# tolerance loosened to 5% left both tests green while the "beyond" one had
+# stopped testing anything (issue #102).
+_TOL_ABS = reconcile_mod.EQUITY_TOLERANCE_ABS_USDC
+_TOL_REL = reconcile_mod.EQUITY_TOLERANCE_REL
+
+
+def _tolerance_at(exchange_value: Decimal) -> Decimal:
+    # The rule sizes the tolerance on the EXCHANGE's equity, not the ledger's.
+    return max(_TOL_ABS, exchange_value * _TOL_REL)
+
+
 def test_equity_beyond_tolerance_is_a_mismatch(env):
     db, seams, reconciler = env
-    seams.clearinghouse = _clearinghouse(account_value="95")  # ledger says 100
+    # Well outside: a gap several tolerances wide, whichever leg is binding.
+    exchange_value = _LEDGER - 5 * _tolerance_at(_LEDGER)
+    seams.clearinghouse = _clearinghouse(account_value=str(exchange_value))
     report = reconciler.run("heartbeat")
     assert not report.account_reconciled
     (case,) = [c for c in report.cases if c.case_type == "equity_mismatch"]
@@ -823,14 +852,66 @@ def test_equity_beyond_tolerance_is_a_mismatch(env):
     # prices — a drifting key would defeat the once-per-fact dedupe and write
     # one audit row per pass); the live magnitudes live in the detail.
     assert case.exchange_value == "equity_out_of_tolerance"
-    assert "95" in (case.detail or "")
+    assert str(exchange_value) in (case.detail or "")
 
 
 def test_equity_within_tolerance_is_clean(env):
     db, seams, reconciler = env
-    seams.clearinghouse = _clearinghouse(account_value="99.50")  # inside max(1, 1%)
+    exchange_value = _LEDGER - _tolerance_at(_LEDGER) / 2  # inside, on the abs floor
+    seams.clearinghouse = _clearinghouse(account_value=str(exchange_value))
     report = reconciler.run("heartbeat")
     assert report.account_reconciled
+
+
+@pytest.mark.parametrize(
+    "exchange_value",
+    [
+        # Ten times the floor: the RELATIVE leg is binding (10 > 1).
+        pytest.param(Decimal(1000), id="relative-leg"),
+        # Half the floor's worth of equity: the ABSOLUTE leg is binding (1 > 0.5).
+        pytest.param(Decimal(50), id="absolute-leg"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("past_bound", "expect_clean"),
+    [
+        pytest.param(Decimal(0), True, id="at-bound"),
+        pytest.param(Decimal("0.01"), False, id="past-bound"),
+    ],
+)
+def test_the_equity_tolerance_is_a_closed_bound_on_both_legs(
+    tmp_path, exchange_value, past_bound, expect_clean
+):
+    """Exactly AT the tolerance is clean; one cent past it is a mismatch.
+
+    Its own ledger per case, because the ``env`` ledger of 100 is the one value
+    where ``EQUITY_TOLERANCE_ABS_USDC == 100 x EQUITY_TOLERANCE_REL``: there the
+    two legs coincide and neither the comparator (``>`` vs ``>=``) nor a
+    dropped relative term changes any verdict. Here each leg is binding on its
+    own, so either mutation flips one of the four verdicts.
+    """
+    ledger = exchange_value + _tolerance_at(exchange_value) + past_bound
+    with _make_env(tmp_path, ledger=ledger) as (db, seams, reconciler):
+        seams.clearinghouse = _clearinghouse(
+            account_value=str(exchange_value), withdrawable=str(exchange_value)
+        )
+        assert reconciler.run("heartbeat").account_reconciled is expect_clean
+
+
+def test_the_fill_crosscheck_window_is_the_backfillers_lookback():
+    # The KNOWN-EXEMPTION argument in reconcile.py holds only while the cross-
+    # check window equals the backfiller's trailing lookback; the window is
+    # derived from it now, and this keeps a re-typed ``timedelta(hours=6)``
+    # from quietly returning (issue #102).
+    from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK_SECONDS
+
+    assert timedelta(seconds=DEFAULT_LOOKBACK_SECONDS) == reconcile_mod._FILL_CROSSCHECK_LOOKBACK
+    # ...and the operator-facing label says the same window (a whole number of
+    # hours today; the label format is what the log-message test reads through).
+    assert (
+        timedelta(hours=int(reconcile_mod._LOOKBACK_LABEL[:-1]))
+        == reconcile_mod._FILL_CROSSCHECK_LOOKBACK
+    )
 
 
 # -- §12.3: fills ------------------------------------------------------------------
@@ -1513,7 +1594,10 @@ def test_a_missing_genesis_floor_degradation_is_logged(env, caplog):
     with caplog.at_level("WARNING"):
         reconciler.run("heartbeat")
     assert stub.calls == [None]  # the floor really did degrade
-    assert any("degrades to the trailing 6h lookback" in r.getMessage() for r in caplog.records)
+    # The window in the message is derived from the backfiller's lookback, as
+    # the window itself is — a re-typed "6h" here would pin stale wording.
+    expected = f"degrades to the trailing {reconcile_mod._LOOKBACK_LABEL} lookback"
+    assert any(expected in r.getMessage() for r in caplog.records)
 
 
 def test_an_orphan_protection_order_backfills_with_its_role_type(env):

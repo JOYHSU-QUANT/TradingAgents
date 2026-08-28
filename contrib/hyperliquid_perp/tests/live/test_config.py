@@ -17,12 +17,16 @@ from contrib.hyperliquid_perp.config import load_config
 from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskConfig
 from contrib.hyperliquid_perp.live.config import (
     AGGRESSIVE_FILL_BAND_PCT,
+    DEFAULT_SCHEDULE_CANCEL_SECONDS,
     EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
     MAINNET_TINY_MAX_NOTIONAL_USDC,
     MAINNET_TINY_MAX_TARGET_MARGIN_PCT,
+    MIN_SCHEDULE_CANCEL_SECONDS,
     ExecutionMode,
     ExecutionStyle,
+    KillSwitchConfig,
     LiveConfig,
+    LiveExecutionConfig,
     LiveSafetyConfig,
     NotionalCaps,
     RefreshFailedPolicy,
@@ -32,7 +36,7 @@ from contrib.hyperliquid_perp.live.config import (
     validate_live_risk_consistency,
 )
 
-from ..conftest import doc_text
+from ..conftest import config_text, doc_text
 
 
 def _live_block(**overrides) -> dict:
@@ -712,3 +716,56 @@ def test_the_runbook_quotes_the_mainnet_tiny_caps_the_gate_enforces():
     # The same cap restated in the doc's opening warning, which is the first
     # thing an operator reads and the last place a stale number would be noticed.
     assert f"上限 {MAINNET_TINY_MAX_NOTIONAL_USDC} USDC 名目" in runbook
+
+
+def test_the_exchange_minimum_is_one_constant_shared_with_the_paper_default():
+    """``live.config`` re-exports ``common.constants``' object, not a copy.
+
+    ``is``, not ``==``: an equal-but-separate ``Decimal("10")`` is exactly the
+    two-literals shape being closed (issue #102), and it compares equal.
+    """
+    from contrib.hyperliquid_perp.common import constants
+    from contrib.hyperliquid_perp.paper.config import PaperExecutionConfig
+
+    assert EXCHANGE_MIN_ORDER_NOTIONAL_USDC is constants.EXCHANGE_MIN_ORDER_NOTIONAL_USDC
+    assert PaperExecutionConfig().min_notional_usdc is constants.EXCHANGE_MIN_ORDER_NOTIONAL_USDC
+
+
+def test_the_default_deadline_is_the_named_constant():
+    # The field default and the constant three other modules derive from
+    # (validation's fallback, the smoke floor); the derivations are pinned in
+    # tests/live/test_smoke.py. Here: the field itself has not grown a literal.
+    assert KillSwitchConfig().schedule_cancel_seconds == DEFAULT_SCHEDULE_CANCEL_SECONDS
+
+
+def test_the_runbook_quotes_the_exchange_minimum_the_startup_gate_enforces():
+    # §1.3: the one sentence naming the §5 rule-4 gate as a machine threshold,
+    # plus the equity figure it derives from that minimum and the mainnet_tiny
+    # margin cap (10 / 0.6). Both sat as literals (issue #102).
+    runbook = doc_text("RUNBOOK-live.md")
+    assert f"（{EXCHANGE_MIN_ORDER_NOTIONAL_USDC} USDC）才具名 exit 1" in runbook
+    floor_equity = EXCHANGE_MIN_ORDER_NOTIONAL_USDC / (D(MAINNET_TINY_MAX_TARGET_MARGIN_PCT) / 100)
+    assert f"換算約 equity < {floor_equity:.1f} USDC" in runbook
+
+
+def test_the_example_config_quotes_the_live_limits_the_loader_enforces():
+    """The example YAML's ``live:`` comments, derived rather than retyped.
+
+    Every value here is one the loader enforces as a hard limit or arms a run
+    with by default: the exchange minimum (twice — the safety cap's floor and
+    the TWAP clip floor), the mainnet_tiny cap, the example safety cap and IOC
+    band that the §4 dataclass defaults are, and the kill-switch default and
+    its Hyperliquid floor. The file an operator copies had no pin at all while
+    two docs did (issue #102).
+    """
+    example = config_text()
+    safety, execution = LiveSafetyConfig(), LiveExecutionConfig()
+    # Value-bearing fragments only, never the alignment padding between a key
+    # and its comment: a re-aligned column is not a drifted number.
+    assert f"max_notional_usdc: {safety.max_notional_usdc} " in example
+    assert f"# >= {EXCHANGE_MIN_ORDER_NOTIONAL_USDC} (exchange min order)" in example
+    assert f"mainnet_tiny hard-caps at {MAINNET_TINY_MAX_NOTIONAL_USDC} (§21.1)" in example
+    assert f"max_slippage_pct: {execution.max_slippage_pct} " in example
+    assert f"(exchange {EXCHANGE_MIN_ORDER_NOTIONAL_USDC} USDC min) wins over interval" in example
+    assert f"schedule_cancel_seconds: {DEFAULT_SCHEDULE_CANCEL_SECONDS} " in example
+    assert f"# must be > {MIN_SCHEDULE_CANCEL_SECONDS} (Hyperliquid's own floor)" in example

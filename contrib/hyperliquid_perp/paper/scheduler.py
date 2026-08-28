@@ -52,6 +52,8 @@ from decimal import Decimal, localcontext
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
+from ..common.constants import ERROR_TYPES
+from ..common.enum_guard import check_enum
 from ..domains.perp.risk_gate import RiskConfig
 from ..domains.perp.schema import PerpMarketContext
 from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse_target_decision
@@ -98,13 +100,16 @@ class RetryableDecisionError(Exception):
 
     ``error_type`` is a member of the §6.2 vocabulary,
     ``common.constants.ERROR_TYPES`` (the member-by-member rationale lives
-    there); ``check_enum`` enforces it at the write boundary and, for the
-    context guards, at ``ContextRefusal`` construction. Anything the provider
-    does not classify should propagate as a normal exception (a bug, not a
-    retry).
+    there); ``check_enum`` enforces it HERE, at construction — the same
+    posture as ``ContextRefusal`` — so a producer's typo fails on the raise
+    instead of when the daemon tries to record its failure at the repository
+    write boundary (which checks the same set; issue #122). Anything the
+    provider does not classify should propagate as a normal exception (a bug,
+    not a retry).
     """
 
     def __init__(self, error_type: str, message: str) -> None:
+        check_enum(error_type, ERROR_TYPES, name="RetryableDecisionError.error_type")
         super().__init__(f"{error_type}: {message}")
         self.error_type = error_type
         self.message = message

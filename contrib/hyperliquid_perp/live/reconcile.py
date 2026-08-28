@@ -49,6 +49,7 @@ from ..persistence.db import Database
 from ..persistence.ids import exchange_fill_key, usable_fill_tid
 from ..persistence.models import DECIMAL_CONTEXT
 from .fill_backfill import (
+    DEFAULT_LOOKBACK_SECONDS,
     DEFAULT_MAX_PAGES,
     RESPONSE_FILL_CAP,
     BackfillSummary,
@@ -104,9 +105,13 @@ EQUITY_TOLERANCE_ABS_USDC = Decimal("1")
 EQUITY_TOLERANCE_REL = Decimal("0.01")
 
 # The invalid-local-fill cross-check window (§12.3 "SQLite 有 fill，但交易所查
-# 不到"). Mirrors the backfiller's trailing lookback; fills near the window
-# edges are excluded from the verdict — a fill booked milliseconds ago (or one
-# at the window's far edge) can be absent from one read without being invalid.
+# 不到"). DERIVED from the backfiller's trailing lookback, not restated: the
+# KNOWN-EXEMPTION argument below ("inside the window is manual severity,
+# outside it only the equity leg sees it") is true only while the two are
+# equal, and a separate literal here had nothing holding it so (issue #102).
+# Fills near the window edges are excluded from the verdict — a fill booked
+# milliseconds ago (or one at the window's far edge) can be absent from one
+# read without being invalid.
 # KNOWN EXEMPTION (decided 2026-07-17): the window slides, so a local fill
 # older than the lookback is permanently outside this leg's verdict — a
 # double-booked fill caught inside 6h is manual severity, the same fill outside
@@ -114,7 +119,9 @@ EQUITY_TOLERANCE_REL = Decimal("0.01")
 # genesis floor would page the full history every pass (and withhold the
 # verdict whenever the 2000/20-page budget runs out); PR 5's durable
 # "cross-checked-through" watermark extends coverage without that cost.
-_FILL_CROSSCHECK_LOOKBACK = timedelta(hours=6)
+_FILL_CROSSCHECK_LOOKBACK = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)
+# The same window as the operator reads it in the genesis-corruption warning.
+_LOOKBACK_LABEL = f"{DEFAULT_LOOKBACK_SECONDS // 3600}h"
 _FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
 
 # The fail-safe fill-leg fallback: nothing fetched, nothing proven. Shared by
@@ -773,7 +780,7 @@ class LiveReconciler:
             # process-was-down era is owed, so the floor is the newest booked
             # fill — or the run's genesis when none exists yet (§11.2 rule 5).
             # The trailing lookback alone would silently skip any outage longer
-            # than 6h. The §11.2 v12 durable clean-backfill watermark (which
+            # than itself. The §11.2 v12 durable clean-backfill watermark (which
             # hardens this derivation against a crash mid-backfill) lands with
             # PR 5's daemon wiring — decided 2026-07-16.
             since = repo.last_live_fill_time(self._db.conn, self._run_id)
@@ -788,13 +795,14 @@ class LiveReconciler:
                     # corruption (same reading as safe_mode's entered_at) — and
                     # the degradation is money-relevant: the floor silently
                     # becomes the bare trailing lookback, which skips any
-                    # outage longer than 6h. Never degrade without a trace.
+                    # outage longer than itself. Never degrade without a trace.
                     logger.warning(
                         "run %s genesis timestamp %r is missing/unparseable; fill "
-                        "backfill floor degrades to the trailing 6h lookback — an "
+                        "backfill floor degrades to the trailing %s lookback — an "
                         "outage longer than that may leave fills unbooked",
                         self._run_id,
                         genesis_raw,
+                        _LOOKBACK_LABEL,
                     )
         try:
             summary = self._backfiller.backfill(self._clock.now(), since=since)

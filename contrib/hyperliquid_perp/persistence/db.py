@@ -173,19 +173,24 @@ class Database:
         ``migrate=True`` (default) — this command owns the store and upgrades it
         on open. ``migrate=False`` — a reporting command: refuse either mismatch
         rather than touch a store a daemon may own. ``defer_migration=True`` —
-        open as-is, check nothing, and leave the upgrade to the caller once it
+        open as-is, refuse nothing, and leave the upgrade to the caller once it
         HOLDS THE LEASE.
 
         The third policy exists because ``migrate=True`` necessarily runs before
         the lease can be taken (the lease lives in the store being opened), so an
         owning command upgraded the schema underneath a running sibling daemon
         and only THEN discovered it had to refuse — doing the damage on the way
-        to declining to do it. The lease table predates every migration this can
-        apply, so taking the lease against an unmigrated store is safe.
+        to declining to do it. The lease columns arrived in migration v3 and
+        every later migration only ADDS columns and tables, so the lease reads
+        and writes (``SELECT *`` plus a patch-style upsert of the v3 columns)
+        are safe against any store from v3 up — which is every store a current
+        build can meet outside a test.
 
-        A caller that defers MUST call :func:`apply_migrations` once it owns the
-        run; that is the point of deferring, so the timing is deliberately the
-        caller's to choose and is not enforced here (2026-07-31 review).
+        A caller that defers MUST call :meth:`apply_deferred_migration` once it
+        owns the run; that is the point of deferring, so the timing is
+        deliberately the caller's to choose and is not enforced here
+        (2026-07-31 review). :attr:`migration_pending` says whether it still
+        owes one.
         """
         if defer_migration and migrate:
             raise ValueError(
@@ -194,12 +199,14 @@ class Database:
             )
         self._conn = connect(path)
         self._in_transaction = False
-        # True while a deferred upgrade is still owed. Read by the CLI's
-        # ``_migrate_owned_store`` so the "did we open as-is?" question is
-        # answered by the handle itself, not by a local the caller must keep
-        # in step with the constructor call (issue #129).
-        self.migration_pending = defer_migration
+        self._migration_pending = False
         try:
+            if defer_migration:
+                # Owed only when the store is not at this build's version —
+                # behind, or ahead (the deferred apply then refuses by name).
+                # A current store owes nothing, so a caller's "before I
+                # migrate" guards stay quiet on a routine restart.
+                self._migration_pending = stored_schema_version(self._conn) != max(MIGRATIONS)
             if migrate:
                 apply_migrations(self._conn)
             elif not defer_migration:
@@ -233,6 +240,28 @@ class Database:
             # release the already-open connection.
             self._conn.close()
             raise
+
+    @property
+    def migration_pending(self) -> bool:
+        """True while the upgrade a ``defer_migration`` open owes is still unpaid.
+
+        Answered by the handle itself, not by a local the caller must keep in
+        step with the constructor call (issue #129); cleared only by a
+        successful :meth:`apply_deferred_migration`.
+        """
+        return self._migration_pending
+
+    def apply_deferred_migration(self) -> None:
+        """Pay the deferred upgrade — the caller now owns the store.
+
+        A no-op when nothing is owed. Raises :class:`SchemaVersionError` for a
+        store migrated by a NEWER build (nothing is written first), and leaves
+        :attr:`migration_pending` set in that case.
+        """
+        if not self._migration_pending:
+            return
+        apply_migrations(self._conn)
+        self._migration_pending = False
 
     @property
     def conn(self) -> sqlite3.Connection:

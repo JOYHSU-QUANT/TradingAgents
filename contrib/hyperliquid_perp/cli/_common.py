@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from ..config import dotenv_diagnosis
-from ..persistence.db import Database, SchemaVersionError, apply_migrations
+from ..persistence.db import MIGRATIONS, Database, SchemaVersionError, stored_schema_version
 
 
 def _raise_keyboard_interrupt(signum, frame) -> None:
@@ -59,44 +60,91 @@ def _open_existing_db(
         return None
 
 
-def _open_owned_store(path: str | Path) -> Database:
-    """Open a store for a command that OWNS it (``paper``, ``live``).
+def _open_owned_store(path: str | Path) -> Database | None:
+    """Open a store for a command that OWNS it (``paper``, ``live``), or refuse.
 
     An existing store may be owned by a running daemon — this run's previous
-    process, or a sibling run on the same wallet — and the run lease that
+    process, or a sibling run in the same file — and the run lease that
     proves otherwise lives inside the store being opened. Migrating at open
     therefore upgraded the schema underneath that daemon on the way to
-    refusing (issue #129). So an existing store is opened AS-IS and the
-    upgrade is owed to :func:`_migrate_owned_store`, which the caller runs once
-    it holds the lease (``paper``) or has proven nobody else does (``live``).
-    A store that does not exist yet has no owner, so it is created and
-    migrated in full on the way in — the lease table it needs is itself a
-    migration. The real ``live-smoke`` run reaches the same state through
-    :func:`_open_existing_db` (it never creates).
+    refusing (issue #129). So a populated store is opened AS-IS and the
+    upgrade is owed to :func:`_migrate_owned_store`, which the caller runs at
+    the point it owns the store. Two cases are settled here instead:
+
+    * an EMPTY store (no file, or a file with no schema — a ``touch``, or an
+      open that died before its first migration committed) has no owner and
+      no lease table to consult, so it is built in full on the way in;
+    * a store migrated by a NEWER build is refused before anything is written
+      — the deferred open would otherwise let ``paper`` stamp its lease onto a
+      store whose columns it does not know, and refuse only afterwards.
+
+    The real ``live-smoke`` run reaches the deferred state through
+    :func:`_open_existing_db` (it never creates). Returns ``None`` after
+    printing the named refusal.
     """
-    exists = Path(path).exists()
-    return Database(path, migrate=not exists, defer_migration=exists)
+    db = Database(path, migrate=False, defer_migration=True)
+    try:
+        found = stored_schema_version(db.conn)
+        if found == 0:
+            db.apply_deferred_migration()
+        elif found > max(MIGRATIONS):
+            raise SchemaVersionError(
+                f"store schema is v{found} but this build only knows v{max(MIGRATIONS)} — "
+                "it was migrated by a NEWER build. Run the newer build, or restore a "
+                "backup taken before the upgrade."
+            )
+    except SchemaVersionError as exc:
+        db.close()
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+    except BaseException:
+        db.close()
+        raise
+    return db
 
 
-def _migrate_owned_store(db: Database) -> bool:
-    """Run the upgrade :func:`_open_owned_store` deferred; True if it was REFUSED.
+def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
+    """Pay the upgrade :func:`_open_owned_store` deferred; True if it was REFUSED.
 
-    A no-op when nothing is owed (the store was created on open, or a dry run
+    A no-op when nothing is owed (the store was built on open, or a dry run
     opened it read-only), so every owning command calls it unconditionally at
-    the point it owns the store. The "migrated by a NEWER build" refusal is
-    printed here as a named exit 1 — never main()'s exit-2 last resort — and
-    a caller that already holds the lease must make this call inside the
-    lease-releasing ``try`` so that refusal frees the lease instead of parking
-    it on a dead pid for LOCK_STALE_SECONDS.
+    the point it owns ITS RUN. Owning the run is not owning the file, though:
+    the lease is per-``run_id`` while a migration rewrites the whole store, so
+    a sibling run in the same file — a paper run, or the other network's run
+    that RUNBOOK-live §7.3 keeps in the same ``live_trading.db`` — would have
+    its schema upgraded underneath it (issue #129, the store-wide half). When
+    an upgrade is actually owed, any OTHER run's fresh lease in this store
+    refuses it by name; a store that is already current never refuses, so a
+    routine restart beside a running sibling is unaffected.
+
+    Both refusals are printed here as a named exit 1 — never main()'s exit-2
+    last resort — and a caller that already holds the lease must make this
+    call inside the lease-releasing ``try`` so a refusal frees the lease
+    instead of parking it on a dead pid for LOCK_STALE_SECONDS.
     """
+    from ..paper.run_lock import LOCK_STALE_SECONDS
+    from ..paper.scheduler import parse_instant
+    from ..persistence import repository as repo
+
     if not db.migration_pending:
         return False
+    for row in repo.iter_other_run_leases(db.conn, run_id):
+        age = (now - parse_instant(row["lock_heartbeat_at"])).total_seconds()
+        if age < LOCK_STALE_SECONDS:
+            print(
+                f"error: this build needs to migrate the store, but run {row['run_id']!r} "
+                f"in it is being driven by pid {row['lock_pid']} right now (heartbeat "
+                f"{age:.0f}s ago) — upgrading the schema underneath that process would "
+                "corrupt its state. Stop it (or wait for its lease to go stale), or run "
+                "the build it was started with.",
+                file=sys.stderr,
+            )
+            return True
     try:
-        apply_migrations(db.conn)
+        db.apply_deferred_migration()
     except SchemaVersionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return True
-    db.migration_pending = False
     return False
 
 

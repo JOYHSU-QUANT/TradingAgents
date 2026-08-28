@@ -250,7 +250,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # LOCK_STALE_SECONDS, so the operator's corrected re-run was
             # refused for 15 minutes by a message naming a process that no
             # longer exists (2026-07-31 exit check).
-            if _migrate_owned_store(db):
+            if _migrate_owned_store(db, run_id=args.run_id, now=datetime.now(timezone.utc)):
                 return 1
             runner = SmokeTestRunner(session)
             try:

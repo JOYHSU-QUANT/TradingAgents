@@ -3014,6 +3014,100 @@ def test_paper_migrates_a_behind_store_once_it_holds_the_lease(
     assert _stored_version(path) == SCHEMA_VERSION
 
 
+def test_paper_will_not_migrate_under_a_sibling_runs_fresh_lease(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # The store-wide half of #129: the lease is per-run, the migration is
+    # per-file. Two paper runs sharing one --db (the default layout for two
+    # coins) — the OLD build drives "other", the new build starts "r": its
+    # own lease is free, but upgrading now would rewrite the schema under
+    # "other". Refused by name; version unchanged; the lease "r" just took is
+    # released (the refusal sits inside the lease-releasing try).
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def build():
+        path, db = _seed_db(tmp_path)
+        accounting.initialize_run(
+            db, run_id="other", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+        )
+        run_lock_mod.acquire_run_lock(
+            db, "other", pid=os.getpid() + 1, now=datetime.now(timezone.utc)
+        )
+        db.close()
+        return path
+
+    behind, path = _build_one_behind(monkeypatch, build)
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "run 'other'" in err and "needs to migrate the store" in err
+    assert _stored_version(path) == behind
+    probe = connect(path)
+    assert (
+        probe.execute("SELECT lock_pid FROM scheduler_state WHERE run_id = 'r'").fetchone()[0]
+        is None
+    )
+    probe.close()
+
+
+def test_paper_restart_beside_a_sibling_is_unaffected_when_the_store_is_current(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # Negative control for the guard above: nothing owed → no sibling check,
+    # so a routine restart next to a running sibling proceeds to its ordinary
+    # next refusal (here the keyless flat-restart one).
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    path, db = _seed_db(tmp_path)
+    accounting.initialize_run(
+        db, run_id="other", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+    )
+    run_lock_mod.acquire_run_lock(db, "other", pid=os.getpid() + 1, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "needs to migrate the store" not in err
+    assert "OPENROUTER_API_KEY" in err
+
+
+def test_paper_refuses_a_newer_store_before_stamping_its_lease(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # The deferred open must not cost paper the at-open refusal of a store
+    # migrated by a NEWER build: an older binary would otherwise write its
+    # lease into columns it does not know and only then refuse. Named exit 1,
+    # scheduler_state untouched.
+    path, db = _seed_db(tmp_path)
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION + 1, "2099-01-01T00:00:00+00:00"),
+        )
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "NEWER build" in capsys.readouterr().err
+    probe = connect(path)
+    assert (
+        probe.execute("SELECT lock_pid FROM scheduler_state WHERE run_id = 'r'").fetchone() is None
+    )
+    probe.close()
+
+
+def test_paper_builds_an_empty_store_file_in_full(tmp_path, monkeypatch, paper_seams):
+    # A file with no schema (a `touch`, or an open that died before its first
+    # migration committed) has no owner and no lease table to consult, so it
+    # is not "an existing store to defer on" — it is built on the way in and
+    # the command proceeds to the ordinary "run does not exist" refusal.
+    path = tmp_path / "touched.db"
+    path.touch()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1  # "does not exist. Pass --create" — not an exit-2 traceback
+    assert _stored_version(path) == SCHEMA_VERSION
+
+
 def test_paper_create_builds_a_new_store_in_full(tmp_path, monkeypatch, paper_seams):
     # A store that does not exist yet has no daemon to own it, so --create
     # still migrates on open (the lease table it needs is itself a migration).
@@ -4090,7 +4184,10 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
     from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
 
+    acquires: list[tuple[str, int]] = []
+
     def refuse(db, run_id, *, pid, now):
+        acquires.append((run_id, pid))
         raise run_lock_mod.RunLockError("scripted lease refusal")
 
     monkeypatch.setattr(run_lock_mod, "acquire_run_lock", refuse)
@@ -4119,6 +4216,7 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     assert rc == 1
     err = capsys.readouterr().err
     assert "scripted lease refusal" in err  # stopped at the lock, not earlier
+    assert acquires == [("r1", os.getpid())]  # the REAL acquire, for this run
     assert "smoke gate open" in err  # the age line printed
     assert "§20.2 smoke suite" not in err  # NOT the gate refusal
     assert "2026-07-20" in err  # names the oldest pass
@@ -4182,6 +4280,39 @@ def test_live_create_into_a_newer_stores_is_refused_before_the_run_row(
     probe = connect(dbp)
     assert probe.execute("SELECT COUNT(*) FROM runs WHERE run_id = 'r2'").fetchone()[0] == 0
     probe.close()
+
+
+def test_live_will_not_migrate_under_a_paper_siblings_fresh_lease(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The store-wide half of #129 on the live path. A paper run in the same
+    # file is exactly what the wallet-hazard check (_conflicting_run_lease)
+    # deliberately ignores — it signs nothing — but a migration rewrites its
+    # tables all the same. With an upgrade owed, its fresh lease refuses.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+
+    def build():
+        dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+        db = Database(dbp, migrate=False)
+        accounting.initialize_run(
+            db, run_id="paper-ETH", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+        )
+        acquire_run_lock(db, "paper-ETH", pid=999999, now=datetime.now(timezone.utc))
+        db.close()
+        return dbp
+
+    behind, dbp = _build_one_behind(monkeypatch, build)
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "run 'paper-ETH'" in err and "needs to migrate the store" in err
+    assert _stored_version(dbp) == behind
 
 
 def test_live_migrates_a_behind_store_once_nobody_owns_it(

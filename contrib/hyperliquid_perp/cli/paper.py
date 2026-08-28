@@ -129,7 +129,10 @@ def _cmd_paper(argv: list[str]) -> int:
 
     # Opened as-is: the upgrade is owed once the lease is ours, in _run_locked
     # (issue #129 — see _open_owned_store).
-    with _open_owned_store(db_path) as db:
+    db = _open_owned_store(db_path)
+    if db is None:
+        return 1
+    with db:
         existing_run = repo.get_run(db.conn, run_id)
         is_restart = existing_run is not None
         now = clock.now()
@@ -181,7 +184,7 @@ def _cmd_paper(argv: list[str]) -> int:
             # The lease is ours: NOW the schema upgrade is safe, because no
             # sibling can be mid-write against the old one. Inside the
             # lease-releasing try (see _migrate_owned_store).
-            if _migrate_owned_store(db):
+            if _migrate_owned_store(db, run_id=run_id, now=clock.now()):
                 return 1
             from ..engine_bridge import EngineImportError
             from ..paper import accounting

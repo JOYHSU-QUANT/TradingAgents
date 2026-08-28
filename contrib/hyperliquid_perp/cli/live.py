@@ -493,15 +493,34 @@ def _live_startup_recovery(
         return 1
 
     # Opened as-is (issue #129 — see _open_owned_store). Unlike paper, this
-    # command cannot take its lease before the upgrade: the identity, drift
-    # and off-coin checks between here and the lock read tables later
-    # migrations have altered, and --create writes the run row before the
-    # lock. So it asks the two read-only ownership questions first (a fresh
-    # sibling lease on this wallet; a fresh foreign lease on this run) and
-    # migrates once both say nobody owns the store. The definitive lease is
-    # still taken below — a process starting concurrently loses there, having
-    # written nothing the migration cannot share.
-    with _open_owned_store(db_path) as db:
+    # command cannot take its lease before the upgrade: the drift and
+    # off-coin checks between here and the lock read tables later migrations
+    # have altered, and --create writes the run row before the lock. So the
+    # refusals that need only the v1 ``runs`` row and the v3 lease columns run
+    # first — run existence, wallet-sibling lease, run mode, this run's own
+    # lease (read-only) — and the store is migrated once they all pass. The
+    # definitive lease is still taken below; a process starting concurrently
+    # loses there, having written nothing the migration cannot share.
+    db = _open_owned_store(db_path)
+    if db is None:
+        return 1
+    with db:
+        existing_run = repo.get_run(db.conn, run_id)
+        is_restart = existing_run is not None
+        if not is_restart and not args.create:
+            print(
+                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
+                "to start it, or fix --run-id / --db to resume the intended run.",
+                file=sys.stderr,
+            )
+            return 1
+        if is_restart and args.create:
+            print(
+                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
+                "to resume it, or pick a new --run-id for a fresh run.",
+                file=sys.stderr,
+            )
+            return 1
         # BEFORE --create writes the run row and before any wire action: a
         # refusal taken later left a half-created run behind, and the operator's
         # corrected re-run was then rejected as "already exists" (2026-07-31
@@ -533,19 +552,20 @@ def _live_startup_recovery(
                 file=sys.stderr,
             )
             return 1
-        existing_run = repo.get_run(db.conn, run_id)
-        is_restart = existing_run is not None
-        if not is_restart and not args.create:
+        if existing_run is not None and existing_run["mode"] != "live":
+            # Resume validates the run's IDENTITY before any side effect (the
+            # lock, arming the wallet-wide kill switch, reconciliation writes)
+            # — the same discipline as the paper daemon's resume (decided
+            # 2026-07-17). A typo'd --run-id/--db pointing at a paper run
+            # would otherwise arm the kill switch over a paper ledger and
+            # write live snapshots into it. The mode is a v1 column, so this
+            # runs before the migration too: a typo must not upgrade a paper
+            # store on its way to being refused.
             print(
-                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
-                "to start it, or fix --run-id / --db to resume the intended run.",
-                file=sys.stderr,
-            )
-            return 1
-        if is_restart and args.create:
-            print(
-                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
-                "to resume it, or pick a new --run-id for a fresh run.",
+                f"error: run {run_id!r} in {db_path} is a {existing_run['mode']} "
+                "run — resuming it here would arm the kill switch and "
+                f"reconcile a {existing_run['mode']} ledger against the live "
+                "exchange. Fix --run-id / --db.",
                 file=sys.stderr,
             )
             return 1
@@ -554,26 +574,16 @@ def _live_startup_recovery(
         except RunLockError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        if _migrate_owned_store(db):
+        if _migrate_owned_store(db, run_id=run_id, now=now):
             return 1
+        # Re-read across the migration boundary: the checks below are the ones
+        # that may need columns the upgrade just added, and a Row fetched
+        # beforehand structurally cannot carry them.
+        existing_run = repo.get_run(db.conn, run_id)
         if existing_run is not None:
-            # Resume validates the run's IDENTITY before any side effect (the
-            # lock, arming the wallet-wide kill switch, reconciliation writes)
-            # — the same discipline as the paper daemon's resume (decided
-            # 2026-07-17). A typo'd --run-id/--db pointing at a paper run
-            # would otherwise arm the kill switch over a paper ledger and
-            # write live snapshots into it; a coin edit under an existing run
-            # would re-enter manual safe mode every pass with nothing naming
-            # the true cause.
-            if existing_run["mode"] != "live":
-                print(
-                    f"error: run {run_id!r} in {db_path} is a {existing_run['mode']} "
-                    "run — resuming it here would arm the kill switch and "
-                    f"reconcile a {existing_run['mode']} ledger against the live "
-                    "exchange. Fix --run-id / --db.",
-                    file=sys.stderr,
-                )
-                return 1
+            # A coin edit under an existing run would re-enter manual safe
+            # mode every pass with nothing naming the true cause — refused
+            # here, still before any side effect.
             drift = _config_drift_report(existing_run["config_json"], config, coin)
             if drift is not None:
                 kind, message = drift

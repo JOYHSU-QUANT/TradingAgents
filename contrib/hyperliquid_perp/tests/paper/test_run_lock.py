@@ -69,6 +69,14 @@ def test_peek_refuses_exactly_when_acquire_would_and_never_writes(db):
     peek_run_lock(db, "r", now=_T0 + timedelta(seconds=LOCK_STALE_SECONDS))  # stale
     row = _state(db)
     assert (row["lock_pid"], row["lock_heartbeat_at"]) == (101, _T0.isoformat())
+    # The exemption acquire grants its own pid is not a peek's to claim: a
+    # fresh lease stamped with THIS process's pid (a pid recycled after a
+    # crash) still refuses, where acquire would silently re-take it.
+    import os
+
+    acquire_run_lock(db, "r", pid=os.getpid(), now=_T0 + timedelta(seconds=LOCK_STALE_SECONDS))
+    with pytest.raises(RunLockError, match=f"pid {os.getpid()}"):
+        peek_run_lock(db, "r", now=_T0 + timedelta(seconds=LOCK_STALE_SECONDS + 1))
 
 
 def test_same_pid_reacquire_succeeds(db):

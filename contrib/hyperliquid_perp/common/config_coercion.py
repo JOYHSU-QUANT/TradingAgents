@@ -53,7 +53,10 @@ def decimal_from_yaml(value: object) -> Decimal:
     dataclasses' own range checks (``leverage <= 0`` and the like) then raise
     ``decimal.InvalidOperation`` — an ``ArithmeticError`` no config-error
     handler catches, so the operator saw a traceback instead of the key name
-    (issue #128). Refusing here keeps every downstream comparison finite.
+    (issue #128). Refusing here keeps every downstream comparison finite —
+    deliberately for every field, so ``.inf`` can never become an "unlimited"
+    spelling for a cap; a cap that can be switched off gets an explicit
+    sentinel (``0``) the way ``volume_profile_window_candles`` does.
     """
     if isinstance(value, bool):
         raise ValueError(f"expected a number, got a YAML boolean ({value!r})")

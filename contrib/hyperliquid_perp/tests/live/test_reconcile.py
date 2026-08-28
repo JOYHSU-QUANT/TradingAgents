@@ -880,7 +880,7 @@ def test_equity_within_tolerance_is_clean(env):
     ],
 )
 def test_the_equity_tolerance_is_a_closed_bound_on_both_legs(
-    tmp_path, exchange_value, past_bound, expect_clean
+    tmp_path, exchange_value, past_bound, expect_clean, request
 ):
     """Exactly AT the tolerance is clean; one cent past it is a mismatch.
 
@@ -890,6 +890,16 @@ def test_the_equity_tolerance_is_a_closed_bound_on_both_legs(
     dropped relative term changes any verdict. Here each leg is binding on its
     own, so either mutation flips one of the four verdicts.
     """
+    # The ids above claim which leg binds; the constants are PROVISIONAL
+    # (reconcile.py says so), and retuning them can move the crossover past a
+    # fixture so both cases quietly test the same leg — the drift this file's
+    # own history shows (issue #102). Say it, so the retune goes red here.
+    relative_binds = exchange_value * _TOL_REL > _TOL_ABS
+    assert relative_binds is ("relative-leg" in request.node.callspec.id), (
+        exchange_value,
+        _TOL_ABS,
+        _TOL_REL,
+    )
     ledger = exchange_value + _tolerance_at(exchange_value) + past_bound
     with _make_env(tmp_path, ledger=ledger) as (db, seams, reconciler):
         seams.clearinghouse = _clearinghouse(

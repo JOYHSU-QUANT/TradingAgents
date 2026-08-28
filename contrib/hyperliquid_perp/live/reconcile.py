@@ -121,6 +121,15 @@ EQUITY_TOLERANCE_REL = Decimal("0.01")
 # "cross-checked-through" watermark extends coverage without that cost.
 _FILL_CROSSCHECK_LOOKBACK = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)
 # The same window as the operator reads it in the genesis-corruption warning.
+# Whole hours only: a lookback that is not one would render truncated ("5h" for
+# 5h30m) and understate how long an outage can go unbooked, so the label
+# refuses at import rather than round — retuning the backfill window to a
+# fraction of an hour is a change this message has to be rewritten for.
+if DEFAULT_LOOKBACK_SECONDS % 3600:
+    raise ValueError(
+        "fill_backfill.DEFAULT_LOOKBACK_SECONDS must be a whole number of hours; "
+        f"the reconciler's operator warning renders it as hours (got {DEFAULT_LOOKBACK_SECONDS}s)"
+    )
 _LOOKBACK_LABEL = f"{DEFAULT_LOOKBACK_SECONDS // 3600}h"
 _FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
 

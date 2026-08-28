@@ -2304,7 +2304,14 @@ def _disposition_argument(node: ast.Call) -> ast.expr | None:
             f"{name}(...) at line {node.lineno} is called with *args/**kwargs: the "
             "vocabulary scan cannot see where action_taken lands — spell the call out"
         )
-    bound = signature.bind_partial(*node.args, **{k.arg: k.value for k in node.keywords})
+    try:
+        bound = signature.bind_partial(*node.args, **{k.arg: k.value for k in node.keywords})
+    except TypeError as exc:
+        # A call the real signature rejects could never run; say where it is
+        # rather than surfacing inspect's context-free message.
+        raise AssertionError(
+            f"{name}(...) at line {node.lineno} does not fit its signature: {exc}"
+        ) from exc
     return bound.arguments.get("action_taken")
 
 
@@ -2381,8 +2388,9 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        # #104-2 (3): the fills.py-shaped write — a literal handed positionally
-        # to a repository stamp writer from a module that is not reconcile.py.
+        # #104-2 (3): a literal handed positionally to a repository stamp
+        # writer — the shape a module other than reconcile.py would use (none
+        # does today; #104's "fills.py already calls it" was never the case).
         pytest.param(
             "repo.set_reconciliation_action(tx, event_id, 'made_it_up')",
             {"made_it_up"},
@@ -2401,6 +2409,8 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
         # #104-2 (1): the positional construction, with a DIFFERENT literal in
         # the slot before ``action_taken`` (``detail``) that the scan must not
         # mistake for a disposition — the signature, not a number, decides.
+        # This param is the signature-drift pin #104 asked for: a field added
+        # before ``action_taken`` shifts the literal out of its slot and fails.
         pytest.param(
             "ReconciliationCase('orphan_exchange_order', 'BTC', None, '0xab', "
             "'some detail prose', 'made_it_up' if resolved else None)",
@@ -2440,6 +2450,10 @@ def test_the_scan_refuses_a_call_it_cannot_read():
     # locate; skipping it would be the silent miss the scan exists to close.
     with pytest.raises(AssertionError, match="cannot see"):
         _machine_disposition_literals("repo.set_reconciliation_action(*head, 'made_it_up')")
+    # A call the signature rejects could never run; it is reported with its
+    # line rather than as inspect's context-free TypeError.
+    with pytest.raises(AssertionError, match="line 1 does not fit"):
+        _machine_disposition_literals("repo.set_reconciliation_action(tx, 1, 'x', 'extra')")
 
 
 def test_every_constant_carried_stamp_is_checked_at_import():

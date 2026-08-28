@@ -71,9 +71,8 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(avn, "_make_api_request", _reached)
     monkeypatch.setattr(avs, "_make_api_request", _reached)
     monkeypatch.setattr(avi, "_make_api_request", _reached)
-    # The fetch boundaries wrap the call; make them transparent so the seam
-    # above is what fires (yf_retry stays for the Search-backed global news).
-    monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
+    # The fetch boundary wraps the call; make it transparent so the seam
+    # above is what fires.
     monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
     monkeypatch.setattr(yfin, "yf_fetch_unhidden", lambda fn, **kw: fn())
     return reached
@@ -273,7 +272,7 @@ class TestPointToolsRefuseInOneVoice:
                 self.news = []
 
         monkeypatch.setattr(yfnews.yf, "Search", _QuietSearch)
-        monkeypatch.setattr(yfnews, "yf_retry", lambda fn: fn())
+        monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
         out = yfnews.get_global_news_yfinance(value, look_back_days=7)
         assert out != f"No global news found for {value}"
         assert out.startswith("INVALID_CURR_DATE")

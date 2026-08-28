@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -10,7 +11,7 @@ from stockstats import wrap
 from yfinance.exceptions import YFDataException, YFException, YFRateLimitError
 
 from .config import get_config
-from .errors import VendorRateLimitError
+from .errors import VendorRateLimitError, VendorUnavailableError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
@@ -174,9 +175,17 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     What comes out of the window, in order:
 
     * ``YFRateLimitError`` — for :func:`yf_retry`'s mapping.
-    * ``YFDataException`` — yfinance's own "Yahoo is down"/unsupported-session
-      signal, raised regardless of the flag, so not something the library
-      would have answered empty.
+    * ``VendorUnavailableError``, mapped from two things Yahoo answers that
+      are not data: its "Will be right back" page (yfinance's own
+      ``YFDataException``, raised regardless of the flag) and a body that is
+      not JSON. yfinance parses the body before it looks at the status, so a
+      5xx HTML page on ``history``, ``get_news``, ``Search`` or ``info``'s
+      second (fundamentals-timeseries) fetch arrives as a ``JSONDecodeError``
+      rather than the ``OSError`` below; Yahoo answers JSON for every "no
+      data" case (a ``chart.error``, a quoteSummary 404), so an unparsable
+      body is never that. Restored to the empty answer it read as "No news
+      found" or the no-data sentinel; let out raw, the getters' broad handler
+      made prose of it (#136).
     * An ``OSError`` that is NOT an HTTP 404 — a reset, a timeout, a 5xx,
       and a 401/403 (Yahoo refusing this client over a crumb or an IP block).
       A 404 is Yahoo's verdict on the symbol, not a failure of the wire:
@@ -191,12 +200,6 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     was — and logged here, since the library's own error line is skipped once
     its swallow no longer runs. ``hidden_answer`` is required so every call
     site names the library's empty form for its property.
-
-    Known residue (yfinance parses the body before it looks at the status):
-    a 5xx HTML page on ``history``, ``get_news`` or ``info``'s second
-    (fundamentals-timeseries) fetch raises ``JSONDecodeError`` inside the
-    library, which is not an ``OSError`` and is restored here to the empty
-    answer.
     """
     from yfinance.config import YfConfig
 
@@ -208,8 +211,12 @@ def yf_fetch_unhidden(func, *, hidden_answer):
                 return func()
             except YFRateLimitError:
                 raise
-            except YFDataException:
-                raise
+            except (YFDataException, json.JSONDecodeError) as e:
+                # Yahoo answered, but not with data — see the docstring. Mapped
+                # here rather than let out: the getters re-raise VendorError
+                # and nothing else non-OSError, so raw these reached their
+                # broad handler and came back as prose (#136).
+                raise VendorUnavailableError(f"Yahoo Finance answered without data: {e}") from e
             except OSError as e:
                 if _http_status(e) == 404:
                     # 404 alone: a 401/403 is Yahoo refusing this client (a

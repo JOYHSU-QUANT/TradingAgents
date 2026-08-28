@@ -316,7 +316,8 @@ def test_live_smoke_missing_agent_key_carries_the_dotenv_diagnosis(
     import contrib.hyperliquid_perp.cli as cli_mod
 
     monkeypatch.delenv(_SMOKE_ENV, raising=False)
-    monkeypatch.setattr(cli_mod.smoke, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    # Printed by _common._require_agent_key since issue #126 — patch its module.
+    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)
     rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])

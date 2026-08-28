@@ -13,9 +13,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..config import dotenv_diagnosis
-from ..persistence.db import Database
-from ._common import _raise_keyboard_interrupt, _require_api_key
+from ._common import (
+    _migrate_owned_store,
+    _open_owned_store,
+    _raise_keyboard_interrupt,
+    _require_agent_key,
+    _require_api_key,
+)
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report, _norm_network, _run_config_subset
 from .live_loop import _run_live_loop, _still_owns_run
 from .live_shared import (
@@ -138,7 +142,7 @@ def _cmd_live(argv: list[str]) -> int:
         compute_notional_caps,
         validate_live_risk_consistency,
     )
-    from ..live.secrets import agent_key_env_var, load_agent_key
+    from ..live.secrets import load_agent_key
 
     config = load_config_or_exit(args.config)
     if config is None:
@@ -235,9 +239,7 @@ def _cmd_live(argv: list[str]) -> int:
         )
         return 1
 
-    env_var = agent_key_env_var(live_cfg.network)
-    agent_key = load_agent_key(live_cfg.network)
-    if agent_key is None and live_cfg.require_agent_wallet:
+    if live_cfg.require_agent_wallet:
         # §6 rule 6 rides this check too: allow_real_orders: true implies
         # require_agent_wallet: true (a LiveConfig construction invariant), so
         # "real orders asked for, no key" always lands here — a named hard
@@ -248,14 +250,21 @@ def _cmd_live(argv: list[str]) -> int:
             if live_cfg.allow_real_orders
             else "live.require_agent_wallet is true"
         )
-        print(
-            f"error: {env_var} is not set but {detail} — export the "
-            f"{live_cfg.network} agent key, or set require_agent_wallet: false "
-            f"(with allow_real_orders: false) for a keyless gate check. "
-            f"({dotenv_diagnosis(env_var)}.)",
-            file=sys.stderr,
+        agent_key = _require_agent_key(
+            live_cfg.network,
+            demanded_by=detail,
+            remedy=(
+                f"export the {live_cfg.network} agent key, or set "
+                "require_agent_wallet: false (with allow_real_orders: false) for "
+                "a keyless gate check"
+            ),
         )
-        return 1
+        if agent_key is None:
+            return 1
+    else:
+        # A keyless gate check is allowed to run keyless: no refusal, and the
+        # authorization step below is skipped when this is None.
+        agent_key = load_agent_key(live_cfg.network)
 
     try:
         # Live runs are pinned to ``live.network``, not the top-level Phase 1/2
@@ -419,7 +428,12 @@ def _live_startup_recovery(
     from ..live.startup import run_startup_recovery
     from ..live.venue_identity import VenueIdentityMonitor, escalate_identity_fault
     from ..paper import accounting
-    from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from ..paper.run_lock import (
+        RunLockError,
+        acquire_run_lock,
+        peek_run_lock,
+        release_run_lock,
+    )
     from ..persistence import repository as repo
     from ..persistence.models import PositionState
     from ..persistence.schema import SCHEMA_VERSION
@@ -478,7 +492,22 @@ def _live_startup_recovery(
         )
         return 1
 
-    with Database(db_path) as db:
+    # Opened as-is (issue #129 — see _open_owned_store). Unlike paper, this
+    # command cannot take its lease before the upgrade: the drift and
+    # off-coin checks between here and the lock read tables later migrations
+    # have altered, and --create writes the run row before the lock. So the
+    # refusals that need only the v1 ``runs`` row and the v3 lease columns run
+    # first — run existence, wallet-sibling lease, run mode, this run's own
+    # lease (read-only) — and the store is migrated once they all pass. The
+    # definitive lease is still taken below; a process starting concurrently
+    # loses there, having written nothing the migration cannot share. The
+    # peek exempts no pid, not even this one: a lease stamped with a pid the
+    # OS recycled to us after a hard kill refuses here for LOCK_STALE_SECONDS,
+    # where acquire alone would have silently re-taken it.
+    db = _open_owned_store(db_path)
+    if db is None:
+        return 1
+    with db:
         existing_run = repo.get_run(db.conn, run_id)
         is_restart = existing_run is not None
         if not is_restart and not args.create:
@@ -526,24 +555,34 @@ def _live_startup_recovery(
                 file=sys.stderr,
             )
             return 1
-        if existing_run is not None:
+        if existing_run is not None and existing_run["mode"] != "live":
             # Resume validates the run's IDENTITY before any side effect (the
             # lock, arming the wallet-wide kill switch, reconciliation writes)
             # — the same discipline as the paper daemon's resume (decided
             # 2026-07-17). A typo'd --run-id/--db pointing at a paper run
             # would otherwise arm the kill switch over a paper ledger and
-            # write live snapshots into it; a coin edit under an existing run
-            # would re-enter manual safe mode every pass with nothing naming
-            # the true cause.
-            if existing_run["mode"] != "live":
-                print(
-                    f"error: run {run_id!r} in {db_path} is a {existing_run['mode']} "
-                    "run — resuming it here would arm the kill switch and "
-                    f"reconcile a {existing_run['mode']} ledger against the live "
-                    "exchange. Fix --run-id / --db.",
-                    file=sys.stderr,
-                )
-                return 1
+            # write live snapshots into it. The mode is a v1 column, so this
+            # runs before the migration too: a typo must not upgrade a paper
+            # store on its way to being refused.
+            print(
+                f"error: run {run_id!r} in {db_path} is a {existing_run['mode']} "
+                "run — resuming it here would arm the kill switch and "
+                f"reconcile a {existing_run['mode']} ledger against the live "
+                "exchange. Fix --run-id / --db.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            peek_run_lock(db, run_id, now=now)
+        except RunLockError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if _migrate_owned_store(db, run_id=run_id, now=now):
+            return 1
+        if existing_run is not None:
+            # A coin edit under an existing run would re-enter manual safe
+            # mode every pass with nothing naming the true cause — refused
+            # here, still before any side effect.
             drift = _config_drift_report(existing_run["config_json"], config, coin)
             if drift is not None:
                 kind, message = drift

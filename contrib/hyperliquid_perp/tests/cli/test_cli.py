@@ -35,7 +35,7 @@ from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database, connect
+from contrib.hyperliquid_perp.persistence.db import Database, connect, stored_schema_version
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
@@ -613,6 +613,35 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
     db = Database(path)
     assert repo.get_run(db.conn, "fresh") is None  # not created before the key check
     db.close()
+
+
+def test_require_agent_key_returns_the_key_or_prints_the_composed_refusal(capsys, monkeypatch):
+    # Issue #126: the one agent-key refusal both signing entry points route
+    # through. With the key set it returns it and prints nothing; without it
+    # the message is assembled here — variable, the caller's why/remedy, and
+    # the dotenv diagnosis for that SAME variable — so no caller can drop or
+    # misdirect the suffix again (#82).
+    import contrib.hyperliquid_perp.cli as cli_mod
+
+    require = cli_mod._common._require_agent_key
+    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    monkeypatch.setenv("HYPERLIQUID_AGENT_KEY_MAINNET", "0x" + "ab" * 32)
+    assert require("mainnet", remedy="x") == "0x" + "ab" * 32
+    assert capsys.readouterr().err == ""
+
+    monkeypatch.delenv("HYPERLIQUID_AGENT_KEY_MAINNET", raising=False)
+    # The grammar is the helper's: the " but " joiner and the remedy's
+    # terminating period are added here, whether or not the caller wrote one.
+    assert require("mainnet", demanded_by="Y", remedy="do Z.") is None
+    assert capsys.readouterr().err == (
+        "error: HYPERLIQUID_AGENT_KEY_MAINNET is not set but Y — do Z. "
+        "(DIAG[HYPERLIQUID_AGENT_KEY_MAINNET].)\n"
+    )
+    assert require("mainnet", remedy="do Z") is None
+    assert capsys.readouterr().err == (
+        "error: HYPERLIQUID_AGENT_KEY_MAINNET is not set — do Z. "
+        "(DIAG[HYPERLIQUID_AGENT_KEY_MAINNET].)\n"
+    )
 
 
 def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams):
@@ -1319,12 +1348,30 @@ def test_config_drift_falls_back_to_the_raw_comparison_when_a_side_does_not_pars
 
 
 def test_config_drift_never_aborts_on_a_value_the_parser_chokes_on_arithmetically():
-    # A YAML `.nan` survives decimal_from_yaml (Decimal("nan") is legal) and
-    # only detonates in RiskConfig.__post_init__'s `<= 0` check — as
-    # decimal.InvalidOperation, an ArithmeticError, not a ValueError. The raw
-    # comparison this parsed path replaced never raised; a resume must still
-    # get a verdict (here: drift, since the values differ raw) rather than a
-    # traceback before the protection loop is armed.
+    # Regression pin for the ArithmeticError clause of _same_effective_block.
+    # It was added when a YAML `.nan` survived decimal_from_yaml and detonated
+    # in RiskConfig.__post_init__'s `<= 0` check as decimal.InvalidOperation;
+    # since issue #128 the coercion refuses `.nan` as a ValueError, so that
+    # input no longer exercises the clause. A parser is any callable and a
+    # future dataclass invariant can still raise arithmetically — the fallback
+    # must keep yielding a verdict (raw comparison) rather than a traceback
+    # before the protection loop is armed.
+    from decimal import InvalidOperation
+
+    from contrib.hyperliquid_perp.cli._drift import _same_effective_block
+
+    def exploding_parser(block):
+        raise InvalidOperation("range check on a non-finite value")
+
+    assert _same_effective_block(exploding_parser, {"leverage": 2}, {"leverage": 2}) is True
+    assert _same_effective_block(exploding_parser, {"leverage": 2}, {"leverage": 3}) is False
+
+
+def test_config_drift_on_a_nan_stored_value_is_a_named_verdict():
+    # The end-to-end shape the clause above used to be the only guard for: a
+    # genesis carrying `.nan` (written by a build before #128) resumed under a
+    # finite config must report drift, never abort. Today the parser refuses
+    # the stored side as a ValueError and the raw comparison decides.
     stored = _subset_json({"risk": {"leverage": float("nan")}}, "BTC")
     kind, msg = _config_drift_report(stored, {"risk": {"leverage": 2}}, "BTC")
     assert kind == "params" and "risk" in msg
@@ -2891,6 +2938,185 @@ def test_paper_acquire_conflict_with_live_holder_exits_1(tmp_path, capsys, paper
     assert "already being driven" in capsys.readouterr().err
 
 
+def _build_one_behind(monkeypatch, build):
+    """Run ``build()`` with the newest migration hidden, so the store it makes
+    is exactly one schema version behind this build — the deploy-box shape a
+    new binary meets when an older daemon still owns the store. Same staging
+    as ``tests/live/test_persistence.py``'s behind-store test; the real
+    ``MIGRATIONS`` is restored before the command under test opens the store."""
+    import contrib.hyperliquid_perp.persistence.db as db_module
+    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+
+    behind = sorted(MIGRATIONS)[-2]
+    older = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= behind}
+    monkeypatch.setattr(db_module, "MIGRATIONS", older)
+    try:
+        result = build()
+    finally:
+        monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
+    return behind, result
+
+
+def _stored_version(path) -> int:
+    probe = connect(path)
+    try:
+        return stored_schema_version(probe)
+    finally:
+        probe.close()
+
+
+def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # Issue #129: ``paper`` opened the store with the default migrate-on-open
+    # and only THEN reached the lease check, so a new build started by hand on
+    # the deploy box upgraded the schema underneath the still-running old
+    # daemon on its way to being refused. Same policy live-smoke adopted: the
+    # refusal must leave the store byte-for-byte the version the daemon owns.
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def build():
+        path, db = _seed_db(tmp_path)
+        run_lock_mod.acquire_run_lock(db, "r", pid=os.getpid() + 1, now=datetime.now(timezone.utc))
+        db.close()
+        return path
+
+    behind, path = _build_one_behind(monkeypatch, build)
+    assert _stored_version(path) == behind
+
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "already being driven" in capsys.readouterr().err
+    assert _stored_version(path) == behind
+
+
+def test_paper_migrates_a_behind_store_once_it_holds_the_lease(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # The other half of deferring: once the lease IS ours the upgrade must
+    # happen — an owning command that never migrated would run the new build's
+    # SQL against the old schema. The keyless flat-restart refusal fires
+    # inside the lease-holding tail, so exit 1 here proves the migration ran
+    # before it and the store is now current.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    def build():
+        path, db = _seed_db(tmp_path)
+        db.close()
+        return path
+
+    behind, path = _build_one_behind(monkeypatch, build)
+    assert _stored_version(path) == behind
+
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "OPENROUTER_API_KEY" in capsys.readouterr().err
+    assert _stored_version(path) == SCHEMA_VERSION
+
+
+def test_paper_will_not_migrate_under_a_sibling_runs_fresh_lease(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # The store-wide half of #129: the lease is per-run, the migration is
+    # per-file. Two paper runs sharing one --db (the default layout for two
+    # coins) — the OLD build drives "other", the new build starts "r": its
+    # own lease is free, but upgrading now would rewrite the schema under
+    # "other". Refused by name; version unchanged; the lease "r" just took is
+    # released (the refusal sits inside the lease-releasing try).
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    def build():
+        path, db = _seed_db(tmp_path)
+        accounting.initialize_run(
+            db, run_id="other", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+        )
+        run_lock_mod.acquire_run_lock(
+            db, "other", pid=os.getpid() + 1, now=datetime.now(timezone.utc)
+        )
+        db.close()
+        return path
+
+    behind, path = _build_one_behind(monkeypatch, build)
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "run 'other'" in err and "needs to migrate the store" in err
+    assert _stored_version(path) == behind
+    probe = connect(path)
+    assert (
+        probe.execute("SELECT lock_pid FROM scheduler_state WHERE run_id = 'r'").fetchone()[0]
+        is None
+    )
+    probe.close()
+
+
+def test_paper_restart_beside_a_sibling_is_unaffected_when_the_store_is_current(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # Negative control for the guard above: nothing owed → no sibling check,
+    # so a routine restart next to a running sibling proceeds to its ordinary
+    # next refusal (here the keyless flat-restart one).
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    path, db = _seed_db(tmp_path)
+    accounting.initialize_run(
+        db, run_id="other", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+    )
+    run_lock_mod.acquire_run_lock(db, "other", pid=os.getpid() + 1, now=datetime.now(timezone.utc))
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "needs to migrate the store" not in err
+    assert "OPENROUTER_API_KEY" in err
+
+
+def test_paper_refuses_a_newer_store_before_stamping_its_lease(tmp_path, capsys, paper_seams):
+    # The deferred open must not cost paper the at-open refusal of a store
+    # migrated by a NEWER build: an older binary would otherwise write its
+    # lease into columns it does not know and only then refuse. Named exit 1,
+    # scheduler_state untouched.
+    path, db = _seed_db(tmp_path)
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION + 1, "2099-01-01T00:00:00+00:00"),
+        )
+    db.close()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "NEWER build" in capsys.readouterr().err
+    probe = connect(path)
+    assert (
+        probe.execute("SELECT lock_pid FROM scheduler_state WHERE run_id = 'r'").fetchone() is None
+    )
+    probe.close()
+
+
+def test_paper_builds_an_empty_store_file_in_full(tmp_path, capsys, paper_seams):
+    # A file with no schema (a `touch`, or an open that died before its first
+    # migration committed) has no owner and no lease table to consult, so it
+    # is not "an existing store to defer on" — it is built on the way in and
+    # the command proceeds to the ordinary "run does not exist" refusal.
+    path = tmp_path / "touched.db"
+    path.touch()
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    assert "run 'r' does not exist" in capsys.readouterr().err  # not an exit-2 traceback
+    assert _stored_version(path) == SCHEMA_VERSION
+
+
+def test_paper_create_builds_a_new_store_in_full(tmp_path, monkeypatch, paper_seams):
+    # A store that does not exist yet has no daemon to own it, so --create
+    # still migrates on open (the lease table it needs is itself a migration).
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    path = tmp_path / "new.db"
+    rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
+    assert rc == 1  # the keyless fresh-run refusal, after the store exists
+    assert _stored_version(path) == SCHEMA_VERSION
+
+
 def test_paper_configures_logging_for_the_daemon(tmp_path, monkeypatch):
     # The multi-day daemon wires timestamped INFO logging at entry (the other
     # subcommands stay unconfigured); basicConfig itself no-ops when an
@@ -3450,9 +3676,10 @@ def test_live_agent_key_error_diagnoses_the_networks_own_env_var(
 
     mainnet_env = "HYPERLIQUID_AGENT_KEY_MAINNET"
     monkeypatch.delenv(mainnet_env, raising=False)
-    # The message is printed by cli/live.py, so patch THAT module's binding
-    # (each importer holds its own module-global, per the from-import style).
-    monkeypatch.setattr(cli_mod.live, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    # The message is printed by _common._require_agent_key (issue #126), so
+    # patch THAT module's binding (each importer holds its own module-global,
+    # per the from-import style).
+    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     cfg = _live_yaml(tmp_path, live_lines="  mode: mainnet_tiny\n  network: mainnet\n")
 
     rc = cli_main(["live", "--config", str(cfg)])
@@ -3949,11 +4176,20 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     tmp_path, capsys, live_seams, monkeypatch
 ):
     # With all 18 smoke rows passed the gate opens: --loop prints the
-    # oldest-pass age line and moves on to the run lock (pre-held here, so the
-    # command stops at the lease refusal — proof it got PAST the gate).
+    # oldest-pass age line and moves on to the run lock (made to refuse here,
+    # so the command stops at the lease refusal — proof it got PAST the gate).
+    # The refusal is scripted rather than a pre-held lease: since issue #129
+    # a held lease is caught by the read-only peek at open, before the gate.
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
 
+    acquires: list[tuple[str, int]] = []
+
+    def refuse(db, run_id, *, pid, now):
+        acquires.append((run_id, pid))
+        raise run_lock_mod.RunLockError("scripted lease refusal")
+
+    monkeypatch.setattr(run_lock_mod, "acquire_run_lock", refuse)
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = _live_yaml(
@@ -3974,14 +4210,132 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
                 network="testnet",
                 executed_at=datetime(2026, 7, 20, tzinfo=timezone.utc),
             )
-    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
     db.close()
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
     assert rc == 1
     err = capsys.readouterr().err
+    assert "scripted lease refusal" in err  # stopped at the lock, not earlier
+    assert acquires == [("r1", os.getpid())]  # the REAL acquire, for this run
     assert "smoke gate open" in err  # the age line printed
     assert "§20.2 smoke suite" not in err  # NOT the gate refusal
     assert "2026-07-20" in err  # names the oldest pass
+
+
+def test_live_lease_conflict_leaves_a_behind_store_unmigrated(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # Issue #129, the live sibling of the paper test: ``live`` also opened
+    # with migrate-on-open ahead of its lease check. A one-shot recovery run
+    # (no --loop, so no smoke gate) against a run another pid holds must be
+    # refused with the store still at the version that daemon owns.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+
+    def build():
+        dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+        db = Database(dbp, migrate=False)
+        acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
+        db.close()
+        return dbp
+
+    behind, dbp = _build_one_behind(monkeypatch, build)
+    assert _stored_version(dbp) == behind
+
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    assert "already being driven" in capsys.readouterr().err
+    assert _stored_version(dbp) == behind
+
+
+def test_live_create_into_a_newer_store_is_refused_before_the_run_row(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The deferred open no longer refuses a store migrated by a NEWER build at
+    # open, so the refusal must land before --create writes anything: an older
+    # binary pointed at the upgraded store must exit 1 by name with no run row
+    # left behind (or the corrected re-run is rejected as "already exists").
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    db = Database(dbp)
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION + 1, "2099-01-01T00:00:00+00:00"),
+        )
+    db.close()
+
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r2", "--db", str(dbp), "--create"])
+    assert rc == 1
+    assert "NEWER build" in capsys.readouterr().err
+    probe = connect(dbp)
+    assert probe.execute("SELECT COUNT(*) FROM runs WHERE run_id = 'r2'").fetchone()[0] == 0
+    probe.close()
+
+
+def test_live_will_not_migrate_under_a_paper_siblings_fresh_lease(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The store-wide half of #129 on the live path. A paper run in the same
+    # file is exactly what the wallet-hazard check (_conflicting_run_lease)
+    # deliberately ignores — it signs nothing — but a migration rewrites its
+    # tables all the same. With an upgrade owed, its fresh lease refuses.
+    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+
+    def build():
+        dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+        db = Database(dbp, migrate=False)
+        accounting.initialize_run(
+            db, run_id="paper-ETH", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+        )
+        acquire_run_lock(db, "paper-ETH", pid=999999, now=datetime.now(timezone.utc))
+        db.close()
+        return dbp
+
+    behind, dbp = _build_one_behind(monkeypatch, build)
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "run 'paper-ETH'" in err and "needs to migrate the store" in err
+    assert _stored_version(dbp) == behind
+
+
+def test_live_migrates_a_behind_store_once_nobody_owns_it(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The other half for live: with no fresh lease on this run or its wallet
+    # siblings, the upgrade runs before the identity/off-coin reads that need
+    # the newer columns. The testnet --loop smoke-gate refusal fires after
+    # that point, so exit 4 here proves the store is current.
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    behind, dbp = _build_one_behind(
+        monkeypatch, lambda: _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    )
+    assert _stored_version(dbp) == behind
+
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+    assert rc == 4
+    assert "§20.2 smoke suite" in capsys.readouterr().err
+    assert _stored_version(dbp) == SCHEMA_VERSION
 
 
 def _open_smoke_gate(dbp, run_id="r1") -> None:
@@ -4075,23 +4429,31 @@ def test_live_loop_smoke_gate_does_not_apply_to_a_mainnet_run(
     forever — permanently unstartable, which is exactly why the scoping exists.
     The negative control is the testnet test above: same empty table, exit 4.
     """
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
 
-    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    # The lock is scripted to refuse so the command stops there — proof it got
+    # PAST the gate rather than being refused by it. (A pre-held lease no
+    # longer works as the stop: since issue #129 it is caught by the read-only
+    # peek at open, before the gate is ever evaluated.)
+    def refuse(db, run_id, *, pid, now):
+        raise run_lock_mod.RunLockError("scripted lease refusal")
+
+    monkeypatch.setattr(run_lock_mod, "acquire_run_lock", refuse)
+    # The MAINNET key: this is a mainnet run, and the testnet key the fixture
+    # exports does not satisfy it. Without this the test exited 1 at the
+    # agent-key refusal and never reached the gate at all (found 2026-08-28,
+    # when the stop was made explicit).
+    monkeypatch.setenv("HYPERLIQUID_AGENT_KEY_MAINNET", _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = _live_yaml(
         tmp_path,
         live_lines="  mode: mainnet_tiny\n  network: mainnet\n  allow_real_orders: true\n",
     )
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
-    db = Database(dbp)
-    # Lease pre-held so the command stops at the lease refusal — proof it got
-    # PAST the gate rather than being refused by it.
-    acquire_run_lock(db, "r1", pid=999999, now=datetime.now(timezone.utc))
-    db.close()
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
     assert rc == 1  # the lease, not the gate's exit 4
     err = capsys.readouterr().err
+    assert "scripted lease refusal" in err
     assert "§20.2 smoke suite" not in err
     assert "not yet run" not in err
 

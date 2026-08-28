@@ -888,6 +888,44 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
         assert "context_shape" in _columns(upgraded.conn, "ai_inputs")
 
 
+def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_path, monkeypatch):
+    # Issue #129: the handle itself says whether the deferred upgrade is still
+    # owed, so an owning command's "before I migrate" guards (the sibling
+    # lease check) fire only when a migration would actually run. Behind →
+    # owed until paid; current → nothing owed; ahead → refused at open, before
+    # the caller can write anything; empty → built in full (nobody can own it).
+    import contrib.hyperliquid_perp.persistence.db as db_module
+
+    path = tmp_path / "deferred.db"
+    older = {v: MIGRATIONS[v] for v in sorted(MIGRATIONS)[:-1]}
+    monkeypatch.setattr(db_module, "MIGRATIONS", older)
+    Database(path).close()
+    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
+
+    with Database(path, migrate=False, defer_migration=True) as behind:
+        assert behind.migration_pending is True
+        behind.apply_deferred_migration()
+        assert behind.migration_pending is False
+        assert stored_schema_version(behind.conn) == SCHEMA_VERSION
+    with Database(path, migrate=False, defer_migration=True) as current:
+        assert current.migration_pending is False
+        current.apply_deferred_migration()  # nothing owed: a no-op, no raise
+
+    with Database(path) as db, db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION + 1, "2099-01-01T00:00:00+00:00"),
+        )
+    with pytest.raises(SchemaVersionError, match="NEWER build"):
+        Database(path, migrate=False, defer_migration=True)
+
+    empty = tmp_path / "touched.db"
+    empty.touch()
+    with Database(empty, migrate=False, defer_migration=True) as built:
+        assert built.migration_pending is False
+        assert stored_schema_version(built.conn) == SCHEMA_VERSION
+
+
 # ---------------------------------------------------------------------------
 # atomic §12.3 case stamping (2026-07-30 concurrency review)
 # ---------------------------------------------------------------------------

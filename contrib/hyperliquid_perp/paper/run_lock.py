@@ -32,6 +32,7 @@ __all__ = [
     "RunLockError",
     "acquire_run_lock",
     "heartbeat_run_lock",
+    "peek_run_lock",
     "release_run_lock",
 ]
 
@@ -60,6 +61,22 @@ def _holder(state, now: datetime) -> tuple[int, float] | None:
     return int(state["lock_pid"]), age
 
 
+def _refuse_if_held(state, run_id: str, *, pid: int | None, now: datetime) -> None:
+    """Raise :class:`RunLockError` when a FRESH lease belongs to another pid.
+
+    ``pid=None`` exempts nobody — for a caller that has not taken the lease
+    and so cannot legitimately be its holder.
+    """
+    holder = _holder(state, now)
+    if holder is not None and holder[0] != pid:
+        raise RunLockError(
+            f"run {run_id!r} is already being driven by pid {holder[0]} "
+            f"(heartbeat {holder[1]:.0f}s ago). Two processes on one run would "
+            "cancel each other's live orders and double the AI spend. If that "
+            f"process is truly gone, retry after {LOCK_STALE_SECONDS}s."
+        )
+
+
 def acquire_run_lock(db: Database, run_id: str, *, pid: int, now: datetime) -> None:
     """Take the run's lease, or raise :class:`RunLockError` while it is held.
 
@@ -68,17 +85,24 @@ def acquire_run_lock(db: Database, run_id: str, *, pid: int, now: datetime) -> N
     A stale lease (holder crashed) is taken over silently.
     """
     with db.transaction() as conn:
-        holder = _holder(repo.get_scheduler_state(conn, run_id), now)
-        if holder is not None and holder[0] != pid:
-            raise RunLockError(
-                f"run {run_id!r} is already being driven by pid {holder[0]} "
-                f"(heartbeat {holder[1]:.0f}s ago). Two processes on one run would "
-                "cancel each other's live orders and double the AI spend. If that "
-                f"process is truly gone, retry after {LOCK_STALE_SECONDS}s."
-            )
+        _refuse_if_held(repo.get_scheduler_state(conn, run_id), run_id, pid=pid, now=now)
         repo.upsert_scheduler_state(
             conn, run_id, lock_pid=pid, lock_heartbeat_at=now, updated_at=now
         )
+
+
+def peek_run_lock(db: Database, run_id: str, *, now: datetime) -> None:
+    """:func:`acquire_run_lock`'s refusal without its write.
+
+    For a command that must know "does a live process own this run?" BEFORE it
+    is ready to take the lease itself — ``live`` migrates the store ahead of
+    reads and writes that the lease cannot precede (issue #129). Any fresh
+    holder refuses (a peeker holds nothing, so there is no own pid to exempt).
+    Read-only, so it proves nothing against a process starting concurrently:
+    the caller still takes the real lease later, and the loser of that race
+    exits there.
+    """
+    _refuse_if_held(repo.get_scheduler_state(db.conn, run_id), run_id, pid=None, now=now)
 
 
 def heartbeat_run_lock(db: Database, run_id: str, *, pid: int, now: datetime) -> None:

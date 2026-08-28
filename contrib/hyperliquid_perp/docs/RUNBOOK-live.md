@@ -155,8 +155,14 @@ python -m contrib.hyperliquid_perp live-smoke \
 > `--gate-status` 的唯讀政策——它不能在別的 daemon 腳底下升 schema）。所以剛拉了帶
 > 新 migration 的 code 之後，這一步會先 exit 1 說 schema 版本不符。先讓一個**擁有這個
 > store 的**指令升級它，再回來跑：`safe-mode --status --run-id <id> --db <db>` 是最輕的
-> 一個（純診斷、不碰交易所、不 arm 錢包）；真跑的 `live-smoke`（不帶 `--dry-run`）
-> 也會在取得 lease 後自行升級。
+> 一個（純診斷、不碰交易所、不 arm 錢包）——但它**不做**下面那個 sibling 檢查，跑之前
+> 自己確認同一個 db 檔沒有別的 run 在跑；`paper` 與真跑的 `live-smoke`（不帶
+> `--dry-run`）是**取得本 run 的 lease 之後**才升級，`live` 則是先以唯讀方式確認本 run
+> 沒有活 lease、同錢包沒有活的 sibling 才升級（它的 lease 在 identity 檢查之後才取）。
+> 三者都是：本 run 被別的 process 握著時退出、store 版本不動；而且只要**真的需要升級**，
+> 同一個 db 檔裡**任何**其他 run 有活 lease（例如 §7.3 共用 `live_trading.db` 的另一個
+> network 的 run、或同檔的 paper run）也會具名退出——先停掉那個 daemon 再升（issue #129）。
+> store 已是最新版時不擋，sibling 還在跑照樣可以重啟。
 
 ### 3.2 為 restart 系列（測 15/16/17）備妥前置
 
@@ -798,8 +804,9 @@ mode 切換都手動改 config（§22／§26）。
 | `effective_notional_cap ... below the exchange minimum`（exit 1） | 入金遠低於交易所最小單（約 equity < 16.7 USDC）；見 §1.3。想吃滿 100 USDC 名目上限另需 ≥ ~167 USDC。 |
 | `--loop` 報 §20.2 smoke gate 未過（exit 4） | 先跑 `live-smoke`（§3），`--gate-status` 確認 yes 再 `--loop`。 |
 | `live-smoke` 報 run lock 被持有（exit 1） | 同一 run 的 `live --loop`／`paper` 還在跑；先停掉（或等 lease 過期）再跑 smoke。 |
-| `live-smoke`／`live` 報同 db 另一個 run 正在跑（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。**停掉它，或等 lease 過期**。不同網路的 run、以及 paper run，都不會觸發這條。⚠️ 換 `--db` 不是解法——危害綁錢包不綁 store，換 store 只會讓檢查瞎掉。 |
-| `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status`／`live-smoke --dry-run` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑。最輕的升級指令是 `safe-mode --status`（純診斷、不碰交易所、不 arm 錢包）；真跑的 `live-smoke`（不帶 `--dry-run`）也會在取得 lease 之後自己 migrate。 |
+| `live-smoke`／`live` 報同 db 另一個 run 正在跑、提到 ACCOUNT-wide（exit 1） | 同網路的姊妹 run 還持著新鮮 lease；kill switch／`updateLeverage`／§19.3 掃單是整帳戶層級，會扒掉它的護欄。**停掉它，或等 lease 過期**。不同網路的 run、以及 paper run，不會觸發**這一條**（但會觸發下一條）。⚠️ 換 `--db` 不是解法——危害綁錢包不綁 store，換 store 只會讓檢查瞎掉。 |
+| `this build needs to migrate the store, but run 'X' in it is being driven by pid N`（exit 1） | code 升級後帶了新 migration，而同一個 db 檔裡**任何**其他 run（不分網路、含 paper run）還有活 lease；migration 改的是整個檔，會在那個 daemon 腳底下換 schema。**停掉它（或等 lease 過期）再跑**，或先用它那個版本的 code。store 已是最新版時不會出現這條。 |
+| `store schema is vN; this build needs vM`（exit 1） | code 升級後帶了新 migration，而 `validate`／`export`／`--gate-status`／`live-smoke --dry-run` 是純報表指令、**刻意不自動 migrate**（免得升級一個 daemon 正在用的 store）。先停掉 daemon，再跑擁有這個 store 的指令（paper store 用 `paper --run-id ...`，live store 用 `live --run-id ...`）讓它 migrate，然後重跑——`paper`／`live`／真跑的 `live-smoke`（不帶 `--dry-run`）都是確認沒人擁有這個 run（且同檔沒有其他活 lease）之後才 migrate，見 §3.1。最輕的升級指令是 `safe-mode --status`（純診斷、不碰交易所、不 arm 錢包），但它**不做**同檔 sibling 檢查，跑之前自己確認同一個 db 檔沒有別的 run 在跑。 |
 | `store schema is vN but this build only knows vM`（拒絕開啟） | 這個 store 被**更新版**的 code migrate 過，現在用舊 binary 開它會用不認得的欄位寫穿它。跑回新版 code，或還原升級前的備份。 |
 | `live-smoke` 報 pre-flight recovery 沒過（exit 4） | run 狀態不乾淨；`safe-mode --status` 查 open case、照 §6 處置後重跑。**注意 config 錯誤不會走這條**：kill-switch timing 違規在 `live-smoke` 與 `live` 一樣是啟動前的具名 **exit 1**（訊息直接指名 `schedule_cancel_seconds`／`refresh_interval_seconds`／`network_timeout_s` 三個 knob），所以 supervisor 依 1／4 分流仍然正確。 |
 | `OPENROUTER_API_KEY is not set`（exit 1，只有 `--loop`） | `--loop` 要跑 4h AI cycle；依 §1.4 設好 key。不加 `--loop` 的 `live` 不需要 key。 |

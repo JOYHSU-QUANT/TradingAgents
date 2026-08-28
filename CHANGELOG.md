@@ -10,6 +10,49 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: a YAML `.nan` / `.inf` in a Decimal config field is a
+  named config error, not a traceback** (issue #128). `decimal_from_yaml`
+  accepted the non-finite float PyYAML produces, and the config dataclasses'
+  own range checks (`risk.leverage <= 0` and the like) then raised
+  `decimal.InvalidOperation` — an `ArithmeticError` the config-error lane does
+  not catch, so the operator got exit 2 and a decimal traceback instead of the
+  key name. The converter now refuses non-finite values as a `ValueError`
+  (`config key 'leverage': expected a finite number, got nan`), so every
+  downstream comparison is finite; the drift comparator's `ArithmeticError`
+  clause stays as defence in depth with its test re-pointed at a parser that
+  actually raises one.
+- **hyperliquid_perp `paper` / `live`: the store is migrated only once no
+  other process owns it** (issue #129). Both opened the store with migrate-on-open and
+  reached the lease check afterwards, so a new build started by hand while the
+  old daemon still ran upgraded the schema underneath it on the way to being
+  refused — the ordering `live-smoke` already corrected. An existing store is
+  now opened as-is; `paper` migrates inside the lease-holding block, and
+  `live` — whose identity/off-coin reads and `--create` write sit between the
+  open and its lock — first asks two read-only ownership questions (a fresh
+  sibling lease on the wallet; a fresh lease on the run itself, via the new
+  `run_lock.peek_run_lock`) and migrates once both say nobody owns the store,
+  still taking the real lease later — so a held lease now refuses `live`
+  before the §20.2 smoke-gate check rather than after it (a run that is both
+  gate-closed and lease-held exits 1 with the lease message, not 4). The three
+  commands share `cli._common._migrate_owned_store`, which also closes the
+  store-wide half of the hazard: the lease is per-run but a migration rewrites
+  the whole file, so when an upgrade is actually owed, a fresh lease on ANY
+  other run in the store — the other network's run RUNBOOK-live §7.3 keeps in
+  the same `live_trading.db`, or a paper sibling — refuses it by name (a store
+  that is already current never refuses). `Database`'s deferred open now
+  settles the two edge cases itself: a store migrated by a NEWER build is
+  refused at open, before `paper` or `live-smoke` stamps a lease into columns
+  it does not know, and an empty store (no file, or a file with no schema yet)
+  has no owner, so it is built in full on the way in.
+- **hyperliquid_perp: one agent-key refusal for both signing entry points**
+  (issue #126). `live` and `live-smoke` each carried their own copy of the
+  "agent key is not set" check — which is how #82 fixed one and missed the
+  other. `cli._common._require_agent_key` now owns it, alongside
+  `_require_api_key`; the two commands' messages are unchanged, and the
+  `dotenv_diagnosis` suffix is appended by the helper for the network's actual
+  variable so no caller can drop or misdirect it. The `MIN_VOLUME_PROFILE_WINDOW`
+  comment also records why that floor stays in `common.constants` rather than
+  on a `MarketDataConfig` field.
 - **dataflows: `get_prediction_markets` refuses an unusable `curr_date`
   instead of dropping it** (issue #139). Its `curr_date` does not bound the
   data — Polymarket serves live odds only — and was read solely by

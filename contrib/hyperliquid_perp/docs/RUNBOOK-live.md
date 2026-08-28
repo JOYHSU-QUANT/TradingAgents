@@ -155,8 +155,9 @@ python -m contrib.hyperliquid_perp live-smoke \
 > `--gate-status` 的唯讀政策——它不能在別的 daemon 腳底下升 schema）。所以剛拉了帶
 > 新 migration 的 code 之後，這一步會先 exit 1 說 schema 版本不符。先讓一個**擁有這個
 > store 的**指令升級它，再回來跑：`safe-mode --status --run-id <id> --db <db>` 是最輕的
-> 一個（純診斷、不碰交易所、不 arm 錢包）；真跑的 `live-smoke`（不帶 `--dry-run`）
-> 也會在取得 lease 後自行升級。
+> 一個（純診斷、不碰交易所、不 arm 錢包）；`paper`／`live`／真跑的 `live-smoke`
+> （不帶 `--dry-run`）三個取 lease 的指令都是**取得 lease 之後**才升級——lease 被別的
+> process 握著時它們退出，store 版本不動（issue #129）。
 
 ### 3.2 為 restart 系列（測 15/16/17）備妥前置
 

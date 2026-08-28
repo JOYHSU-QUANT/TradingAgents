@@ -10,12 +10,12 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from ..config import dotenv_diagnosis
-from ..persistence.db import SchemaVersionError, apply_migrations
 from ._common import (
     _existing_run_row,
+    _migrate_owned_store,
     _open_existing_db,
     _raise_keyboard_interrupt,
+    _require_agent_key,
     _require_live_run_mode,
 )
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report
@@ -239,28 +239,19 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # finally is the only cleanup that exists (2026-07-31).
             signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
         try:
-            if lock_pid is not None:
-                # The lease is ours: NOW the schema upgrade is safe, because no
-                # sibling can be mid-write against the old one. Deferred from
-                # open (see _open_existing_db) so a refusal above cannot leave a
-                # migrated store behind as its only lasting effect.
-                #
-                # Deferring also moved the "migrated by a NEWER build" refusal
-                # here, so it has to be caught: uncaught it reached main()'s
-                # last-resort handler as exit 2 ("fatal: unexpected error"),
-                # losing the named exit 1 the RUNBOOK documents and a supervisor
-                # branches on — the very failure the sibling commit was fixing.
-                # Inside the lease-releasing try, not before it. A `return 1`
-                # taken above the block that owns `finally: release_run_lock`
-                # left the lease stamped with this now-dead pid for the full
-                # LOCK_STALE_SECONDS, so the operator's corrected re-run was
-                # refused for 15 minutes by a message naming a process that no
-                # longer exists (2026-07-31 exit check).
-                try:
-                    apply_migrations(db.conn)
-                except SchemaVersionError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    return 1
+            # A real run holds the lease here: NOW the schema upgrade is safe,
+            # because no sibling can be mid-write against the old one.
+            # Deferred from open (see _open_existing_db) so a refusal above
+            # cannot leave a migrated store behind as its only lasting effect;
+            # a dry run opened read-only and owes nothing, so this no-ops.
+            # Inside the lease-releasing try, not before it: a `return 1`
+            # taken above the block that owns `finally: release_run_lock`
+            # left the lease stamped with this now-dead pid for the full
+            # LOCK_STALE_SECONDS, so the operator's corrected re-run was
+            # refused for 15 minutes by a message naming a process that no
+            # longer exists (2026-07-31 exit check).
+            if _migrate_owned_store(db):
+                return 1
             runner = SmokeTestRunner(session)
             try:
                 try:
@@ -498,7 +489,6 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from ..live.authorization import AgentAuthorizationError, verify_agent_authorization
     from ..live.order_gate import RealOrderGate
-    from ..live.secrets import agent_key_env_var, load_agent_key
     from ..live.smoke import SmokeContext
     from ..paper.engine import AssetSpec
 
@@ -516,19 +506,14 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
             "error: wallet_address is not configured (needed for the smoke suite).", file=sys.stderr
         )
         return 1
-    agent_key = load_agent_key(live_cfg.network)
+    agent_key = _require_agent_key(
+        live_cfg.network,
+        remedy=(
+            "the smoke suite signs real testnet orders. "
+            f"Export the {live_cfg.network} agent key, or use --dry-run"
+        ),
+    )
     if agent_key is None:
-        env_var = agent_key_env_var(live_cfg.network)
-        # Same diagnosis suffix every other key-check refusal carries (grep
-        # ``dotenv_diagnosis``): "not set" alone cannot tell an operator that
-        # the .env line they wrote lost to an earlier blank assignment, or
-        # that python-dotenv is missing (#82).
-        print(
-            f"error: {env_var} is not set — the smoke suite signs real testnet orders. "
-            f"Export the {live_cfg.network} agent key, or use --dry-run. "
-            f"({dotenv_diagnosis(env_var)}.)",
-            file=sys.stderr,
-        )
         return 1
     try:
         client = HyperliquidClient.from_config(config, network=live_cfg.network)

@@ -11,6 +11,7 @@ from contrib.hyperliquid_perp.paper.run_lock import (
     RunLockError,
     acquire_run_lock,
     heartbeat_run_lock,
+    peek_run_lock,
     release_run_lock,
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -53,6 +54,21 @@ def test_stale_heartbeat_is_taken_over(db):
     row = _state(db)
     assert row["lock_pid"] == 202
     assert row["lock_heartbeat_at"] == takeover_at.isoformat()
+
+
+def test_peek_refuses_exactly_when_acquire_would_and_never_writes(db):
+    # Issue #129: `live` needs acquire's verdict before it is ready to take the
+    # lease. Same message, same staleness boundary, no own-pid exemption (a
+    # peeker holds nothing) — and the store is untouched on every outcome (no
+    # lease row for a free run, the holder's row intact for a held one).
+    peek_run_lock(db, "r", now=_T0)
+    assert _state(db) is None
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    with pytest.raises(RunLockError, match="pid 101"):
+        peek_run_lock(db, "r", now=_T0 + timedelta(seconds=LOCK_STALE_SECONDS - 1))
+    peek_run_lock(db, "r", now=_T0 + timedelta(seconds=LOCK_STALE_SECONDS))  # stale
+    row = _state(db)
+    assert (row["lock_pid"], row["lock_heartbeat_at"]) == (101, _T0.isoformat())
 
 
 def test_same_pid_reacquire_succeeds(db):

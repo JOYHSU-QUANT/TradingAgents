@@ -17,9 +17,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..config import dotenv_diagnosis
-from ..persistence.db import Database
 from . import _provider, paper_export
-from ._common import _raise_keyboard_interrupt, _require_api_key
+from ._common import (
+    _migrate_owned_store,
+    _open_owned_store,
+    _raise_keyboard_interrupt,
+    _require_api_key,
+)
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report, _run_config_subset
 
 logger = logging.getLogger(__name__)
@@ -123,7 +127,9 @@ def _cmd_paper(argv: list[str]) -> int:
     )
     funding_source = _provider._HistoryFundingSource(market)
 
-    with Database(db_path) as db:
+    # Opened as-is: the upgrade is owed once the lease is ours, in _run_locked
+    # (issue #129 — see _open_owned_store).
+    with _open_owned_store(db_path) as db:
         existing_run = repo.get_run(db.conn, run_id)
         is_restart = existing_run is not None
         now = clock.now()
@@ -172,6 +178,11 @@ def _cmd_paper(argv: list[str]) -> int:
 
         def _run_locked() -> int:
             """The lease-holding tail of ``paper``: create/reconcile, then the loop."""
+            # The lease is ours: NOW the schema upgrade is safe, because no
+            # sibling can be mid-write against the old one. Inside the
+            # lease-releasing try (see _migrate_owned_store).
+            if _migrate_owned_store(db):
+                return 1
             from ..engine_bridge import EngineImportError
             from ..paper import accounting
             from ..paper.engine import PaperExecutionEngine

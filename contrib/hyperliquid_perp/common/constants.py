@@ -34,6 +34,12 @@ __all__ = [
 # would fail. ``volume_profile`` imports this name; so does the loader's
 # ``market_data_config`` parser.
 #
+# That two-layer readership is also why this floor does not live on a
+# ``MarketDataConfig`` field the way ``candle_lookback``'s default does: that
+# default's readers (the fetch and the cross-field check) are all in the config
+# layer, so the field IS its single declaration (PR #125). Moving this floor
+# there would make the compute module import the config module to read it.
+#
 # See that module for WHY the floor is twelve rather than some other number.
 MIN_VOLUME_PROFILE_WINDOW = 12
 

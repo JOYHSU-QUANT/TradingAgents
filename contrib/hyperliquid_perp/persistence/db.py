@@ -194,6 +194,11 @@ class Database:
             )
         self._conn = connect(path)
         self._in_transaction = False
+        # True while a deferred upgrade is still owed. Read by the CLI's
+        # ``_migrate_owned_store`` so the "did we open as-is?" question is
+        # answered by the handle itself, not by a local the caller must keep
+        # in step with the constructor call (issue #129).
+        self.migration_pending = defer_migration
         try:
             if migrate:
                 apply_migrations(self._conn)

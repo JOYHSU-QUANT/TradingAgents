@@ -47,13 +47,23 @@ def decimal_from_yaml(value: object) -> Decimal:
     Booleans are rejected: YAML 1.1 reads ``yes``/``no`` as bools, and
     ``Decimal(str(True))`` would otherwise die as an opaque
     ``InvalidOperation`` instead of a config error naming the value.
+
+    Non-finite values are rejected too: YAML ``.nan`` / ``.inf`` / ``-.inf``
+    parse to floats that ``Decimal`` accepts without complaint, and the config
+    dataclasses' own range checks (``leverage <= 0`` and the like) then raise
+    ``decimal.InvalidOperation`` — an ``ArithmeticError`` no config-error
+    handler catches, so the operator saw a traceback instead of the key name
+    (issue #128). Refusing here keeps every downstream comparison finite.
     """
     if isinstance(value, bool):
         raise ValueError(f"expected a number, got a YAML boolean ({value!r})")
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
     except InvalidOperation:
         raise ValueError(f"expected a number, got {value!r}") from None
+    if not result.is_finite():
+        raise ValueError(f"expected a finite number, got {value!r}")
+    return result
 
 
 def int_from_yaml(value: object) -> int:

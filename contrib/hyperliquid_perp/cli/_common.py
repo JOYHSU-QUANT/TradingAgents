@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from ..config import dotenv_diagnosis
-from ..persistence.db import Database, SchemaVersionError
+from ..persistence.db import Database, SchemaVersionError, apply_migrations
 
 
 def _raise_keyboard_interrupt(signum, frame) -> None:
@@ -46,7 +46,8 @@ def _open_existing_db(
       (2026-07-31). It takes no lease, so this remains a deliberate exception.
     * ``defer_migration=True`` for the real ``live-smoke`` run, which owns the
       store but cannot prove it until it holds the lease — it migrates itself
-      once it does. See :class:`Database` for why that ordering matters.
+      once it does, via :func:`_migrate_owned_store`. See :class:`Database` for
+      why that ordering matters.
     """
     if not Path(path).exists():
         print(f"error: database {path!r} does not exist.", file=sys.stderr)
@@ -56,6 +57,47 @@ def _open_existing_db(
     except SchemaVersionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
+
+
+def _open_owned_store(path: str | Path) -> Database:
+    """Open a store for a command that OWNS it (``paper``, ``live``).
+
+    An existing store may be owned by a running daemon — this run's previous
+    process, or a sibling run on the same wallet — and the run lease that
+    proves otherwise lives inside the store being opened. Migrating at open
+    therefore upgraded the schema underneath that daemon on the way to
+    refusing (issue #129). So an existing store is opened AS-IS and the
+    upgrade is owed to :func:`_migrate_owned_store`, which the caller runs once
+    it holds the lease (``paper``) or has proven nobody else does (``live``).
+    A store that does not exist yet has no owner, so it is created and
+    migrated in full on the way in — the lease table it needs is itself a
+    migration. The real ``live-smoke`` run reaches the same state through
+    :func:`_open_existing_db` (it never creates).
+    """
+    exists = Path(path).exists()
+    return Database(path, migrate=not exists, defer_migration=exists)
+
+
+def _migrate_owned_store(db: Database) -> bool:
+    """Run the upgrade :func:`_open_owned_store` deferred; True if it was REFUSED.
+
+    A no-op when nothing is owed (the store was created on open, or a dry run
+    opened it read-only), so every owning command calls it unconditionally at
+    the point it owns the store. The "migrated by a NEWER build" refusal is
+    printed here as a named exit 1 — never main()'s exit-2 last resort — and
+    a caller that already holds the lease must make this call inside the
+    lease-releasing ``try`` so that refusal frees the lease instead of parking
+    it on a dead pid for LOCK_STALE_SECONDS.
+    """
+    if not db.migration_pending:
+        return False
+    try:
+        apply_migrations(db.conn)
+    except SchemaVersionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return True
+    db.migration_pending = False
+    return False
 
 
 def _existing_run_row(conn, run_id: str, db_label: str, *, not_found_hint: str = ""):
@@ -120,3 +162,34 @@ def _require_api_key() -> bool:
         file=sys.stderr,
     )
     return False
+
+
+def _require_agent_key(network: str, *, remedy: str, demanded_by: str | None = None) -> str | None:
+    """The network's agent key, or ``None`` after printing the abort message.
+
+    The one encoding of the "agent key is not set" refusal for every command
+    that signs (``live`` when ``require_agent_wallet`` is on, the real
+    ``live-smoke`` run), the agent-key counterpart of :func:`_require_api_key`.
+    Issue #82 was this logic copied into two subcommands and fixed in one; a
+    third signing entry point would have copied it again (issue #126).
+
+    The message is ``error: <VAR> is not set[ but <demanded_by>] — <remedy>
+    (<diagnosis>.)``: ``demanded_by`` names the setting that demands the key
+    when the command itself does not; ``remedy`` is the instruction, joined
+    and terminated here. The ``dotenv_diagnosis`` suffix is appended for the
+    network's ACTUAL variable, so no caller can drop it or diagnose the wrong
+    one.
+    """
+    from ..live.secrets import agent_key_env_var, load_agent_key
+
+    agent_key = load_agent_key(network)
+    if agent_key is not None:
+        return agent_key
+    env_var = agent_key_env_var(network)
+    because = f" but {demanded_by}" if demanded_by else ""
+    print(
+        f"error: {env_var} is not set{because} — {remedy.rstrip('.')}. "
+        f"({dotenv_diagnosis(env_var)}.)",
+        file=sys.stderr,
+    )
+    return None

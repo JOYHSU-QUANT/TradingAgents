@@ -13,9 +13,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..config import dotenv_diagnosis
-from ..persistence.db import Database
-from ._common import _raise_keyboard_interrupt, _require_api_key
+from ._common import (
+    _migrate_owned_store,
+    _open_owned_store,
+    _raise_keyboard_interrupt,
+    _require_agent_key,
+    _require_api_key,
+)
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report, _norm_network, _run_config_subset
 from .live_loop import _run_live_loop, _still_owns_run
 from .live_shared import (
@@ -138,7 +142,7 @@ def _cmd_live(argv: list[str]) -> int:
         compute_notional_caps,
         validate_live_risk_consistency,
     )
-    from ..live.secrets import agent_key_env_var, load_agent_key
+    from ..live.secrets import load_agent_key
 
     config = load_config_or_exit(args.config)
     if config is None:
@@ -235,9 +239,7 @@ def _cmd_live(argv: list[str]) -> int:
         )
         return 1
 
-    env_var = agent_key_env_var(live_cfg.network)
-    agent_key = load_agent_key(live_cfg.network)
-    if agent_key is None and live_cfg.require_agent_wallet:
+    if live_cfg.require_agent_wallet:
         # §6 rule 6 rides this check too: allow_real_orders: true implies
         # require_agent_wallet: true (a LiveConfig construction invariant), so
         # "real orders asked for, no key" always lands here — a named hard
@@ -248,14 +250,21 @@ def _cmd_live(argv: list[str]) -> int:
             if live_cfg.allow_real_orders
             else "live.require_agent_wallet is true"
         )
-        print(
-            f"error: {env_var} is not set but {detail} — export the "
-            f"{live_cfg.network} agent key, or set require_agent_wallet: false "
-            f"(with allow_real_orders: false) for a keyless gate check. "
-            f"({dotenv_diagnosis(env_var)}.)",
-            file=sys.stderr,
+        agent_key = _require_agent_key(
+            live_cfg.network,
+            demanded_by=detail,
+            remedy=(
+                f"export the {live_cfg.network} agent key, or set "
+                "require_agent_wallet: false (with allow_real_orders: false) for "
+                "a keyless gate check"
+            ),
         )
-        return 1
+        if agent_key is None:
+            return 1
+    else:
+        # A keyless gate check is allowed to run keyless: no refusal, and the
+        # authorization step below is skipped when this is None.
+        agent_key = load_agent_key(live_cfg.network)
 
     try:
         # Live runs are pinned to ``live.network``, not the top-level Phase 1/2
@@ -419,7 +428,12 @@ def _live_startup_recovery(
     from ..live.startup import run_startup_recovery
     from ..live.venue_identity import VenueIdentityMonitor, escalate_identity_fault
     from ..paper import accounting
-    from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from ..paper.run_lock import (
+        RunLockError,
+        acquire_run_lock,
+        peek_run_lock,
+        release_run_lock,
+    )
     from ..persistence import repository as repo
     from ..persistence.models import PositionState
     from ..persistence.schema import SCHEMA_VERSION
@@ -478,23 +492,16 @@ def _live_startup_recovery(
         )
         return 1
 
-    with Database(db_path) as db:
-        existing_run = repo.get_run(db.conn, run_id)
-        is_restart = existing_run is not None
-        if not is_restart and not args.create:
-            print(
-                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
-                "to start it, or fix --run-id / --db to resume the intended run.",
-                file=sys.stderr,
-            )
-            return 1
-        if is_restart and args.create:
-            print(
-                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
-                "to resume it, or pick a new --run-id for a fresh run.",
-                file=sys.stderr,
-            )
-            return 1
+    # Opened as-is (issue #129 — see _open_owned_store). Unlike paper, this
+    # command cannot take its lease before the upgrade: the identity, drift
+    # and off-coin checks between here and the lock read tables later
+    # migrations have altered, and --create writes the run row before the
+    # lock. So it asks the two read-only ownership questions first (a fresh
+    # sibling lease on this wallet; a fresh foreign lease on this run) and
+    # migrates once both say nobody owns the store. The definitive lease is
+    # still taken below — a process starting concurrently loses there, having
+    # written nothing the migration cannot share.
+    with _open_owned_store(db_path) as db:
         # BEFORE --create writes the run row and before any wire action: a
         # refusal taken later left a half-created run behind, and the operator's
         # corrected re-run was then rejected as "already exists" (2026-07-31
@@ -525,6 +532,29 @@ def _live_startup_recovery(
                 "separate store only hides them from this check.",
                 file=sys.stderr,
             )
+            return 1
+        existing_run = repo.get_run(db.conn, run_id)
+        is_restart = existing_run is not None
+        if not is_restart and not args.create:
+            print(
+                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
+                "to start it, or fix --run-id / --db to resume the intended run.",
+                file=sys.stderr,
+            )
+            return 1
+        if is_restart and args.create:
+            print(
+                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
+                "to resume it, or pick a new --run-id for a fresh run.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            peek_run_lock(db, run_id, now=now)
+        except RunLockError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if _migrate_owned_store(db):
             return 1
         if existing_run is not None:
             # Resume validates the run's IDENTITY before any side effect (the

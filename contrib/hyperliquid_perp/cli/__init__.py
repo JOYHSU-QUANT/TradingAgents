@@ -69,6 +69,7 @@ from ._common import (
     _existing_run_row,
     _open_existing_db,
     _raise_keyboard_interrupt,
+    _require_agent_key,
     _require_api_key,
     _require_live_run_mode,
 )

@@ -376,7 +376,12 @@ def live_snapshot_note(
     history (#30).
 
     Returns ``""`` when curr_date is close enough to today or unparseable —
-    same degrade-never-raise contract as :func:`data_lag_note`.
+    same degrade-never-raise contract as :func:`data_lag_note`. That silence
+    is only honest when the date came from inside the program (the graph's
+    own ``end_date``, as the StockTwits block receives it): a getter whose
+    ``curr_date`` the model supplies must judge it with :func:`date_refusal`
+    first, or a string no sibling tool accepts is served here as an
+    undisclosed live report (#139).
     """
     today_str = today or date.today().strftime("%Y-%m-%d")
     curr_dt = _parse_day(curr_date, "curr_date")

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from .utils import live_snapshot_note
+from .utils import date_refusal, live_snapshot_note
 
 logger = logging.getLogger(__name__)
 
@@ -80,16 +80,28 @@ def get_prediction_markets(
             fetched live; when curr_date sits behind the wall clock (beyond
             the shared live-snapshot bound) the report leads with a
             disclosure so today's odds are not read as that date's odds.
-            ``None`` skips the check. The open/forward-looking filter stays
-            on the wall clock either way — the prices are today's regardless.
+            ``None`` skips the check. A date that is supplied but does not
+            parse is refused with the shared ``INVALID_CURR_DATE`` sentinel
+            before any request. The open/forward-looking filter stays on the
+            wall clock either way — the prices are today's regardless.
 
     Returns:
         A markdown report of the most-traded open markets matching the topic,
         each with its implied probability, traded volume, resolution date, and
-        recent (1-week) move.
+        recent (1-week) move — or the sentinel.
     """
     if limit is None:
         limit = DEFAULT_LIMIT
+
+    # Refused for the fundamentals getters' reason (#89) — their curr_date is
+    # likewise a disclosure input, not a bound — but before the request rather
+    # than after it: nothing Gamma answers outranks the date here (#139).
+    if (
+        refusal := date_refusal(
+            curr_date, what="prediction-market probabilities", kind="point", omitted_ok=True
+        )
+    ) is not None:
+        return refusal
 
     try:
         data = _request("public-search", {"q": topic, "limit_per_type": 20})

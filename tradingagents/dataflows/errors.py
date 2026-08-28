@@ -53,7 +53,16 @@ class NoMarketDataError(VendorError):
 
 
 class VendorRateLimitError(VendorError):
-    """A vendor throttled the request; the router skips to the next vendor."""
+    """A vendor throttled the request; the router skips to the next vendor.
+
+    ``latches_vendor`` says whether the refusal is about this client's
+    standing with the vendor — the default, and what lets the router skip the
+    vendor for a while instead of re-discovering the throttle per tool call
+    (#114). A subclass sets it False when its raise carries a narrower fact
+    than that (see ``SoSoValueRateLimitError``).
+    """
+
+    latches_vendor = True
 
 
 class VendorUnavailableError(VendorError):

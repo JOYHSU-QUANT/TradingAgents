@@ -76,6 +76,30 @@ def test_invalid_key_not_mislabeled_as_rate_limit(monkeypatch):
 
 
 @pytest.mark.unit
+def test_premium_endpoint_is_an_entitlement_verdict_not_a_throttle(monkeypatch):
+    # A free key asking a premium-only endpoint gets a "premium endpoint"
+    # notice: an entitlement the key lacks, not a throttle it will outlive.
+    # Classified as a rate limit it would now keep every free Alpha Vantage
+    # endpoint unasked for the router's latch window (#114). The daily-quota
+    # notice also mentions the premium plans and must stay a rate limit.
+    premium = (
+        '{"Information": "Thank you for using Alpha Vantage! This is a premium endpoint. '
+        'You may subscribe to any of the premium plans to instantly unlock all premium endpoints"}'
+    )
+    monkeypatch.setattr(av.requests, "get", _patched_get(premium))
+    with pytest.raises(av.AlphaVantageNotConfiguredError, match="premium endpoint"):
+        av._make_api_request("TIME_SERIES_DAILY_ADJUSTED", {"symbol": "AAPL"})
+
+    quota = (
+        '{"Information": "our standard API rate limit is 25 requests per day. Please subscribe '
+        'to any of the premium plans to instantly remove all daily rate limits."}'
+    )
+    monkeypatch.setattr(av.requests, "get", _patched_get(quota))
+    with pytest.raises(av.AlphaVantageRateLimitError):
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
+
+@pytest.mark.unit
 def test_http_429_is_classified_as_a_rate_limit(monkeypatch):
     # #72: a status-code throttle used to become a bare requests.HTTPError via
     # raise_for_status() — outside the taxonomy, so it fell into each caller's

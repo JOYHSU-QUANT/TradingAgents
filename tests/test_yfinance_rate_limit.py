@@ -29,6 +29,7 @@ from tradingagents.dataflows.errors import (
     VendorRateLimitError,
     VendorUnavailableError,
 )
+from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
 
 
 def _throttled(*a, **k):
@@ -83,15 +84,8 @@ def test_yf_retry_lets_other_errors_out_immediately(monkeypatch):
 
 
 # --- the latch: one caller discovers a throttle, the rest are spared it (#86) ---
-
-
-@pytest.fixture()
-def frozen_clock(monkeypatch):
-    """A settable monotonic clock, so latch windows are stepped, not slept."""
-    clock = {"t": 1000.0}
-    monkeypatch.setattr(su.time, "monotonic", lambda: clock["t"])
-    monkeypatch.setattr(su.time, "sleep", lambda s: None)
-    return clock
+# (frozen_clock comes from conftest: it steps the clock the latch and the
+# backoff ladder both read.)
 
 
 def _exhaust_the_ladder():
@@ -148,7 +142,7 @@ def test_the_latch_spares_a_different_tool_the_same_discovery(frozen_clock, monk
 def test_the_latch_holds_for_its_window_and_lets_go_on_the_deadline(frozen_clock):
     _exhaust_the_ladder()
 
-    frozen_clock["t"] += su._THROTTLE_LATCH_TTL_S - 1
+    frozen_clock["t"] += THROTTLE_LATCH_TTL_S - 1
     blocked = mock.Mock(return_value="ok")
     with pytest.raises(VendorRateLimitError):
         su.yf_retry(blocked)
@@ -165,13 +159,74 @@ def test_the_latch_holds_for_its_window_and_lets_go_on_the_deadline(frozen_clock
 @pytest.mark.unit
 def test_being_served_clears_the_latch(frozen_clock):
     _exhaust_the_ladder()
-    frozen_clock["t"] += su._THROTTLE_LATCH_TTL_S
+    frozen_clock["t"] += THROTTLE_LATCH_TTL_S
 
     assert su.yf_retry(lambda: "ok") == "ok"
 
     # Not merely expired — dropped, so no stale deadline is left behind for a
-    # later call to reason about.
-    assert su._throttle_latch_remaining_s() is None
+    # later call to reason about. (remaining_s reads None either way once the
+    # window has passed, so it is the recorded deadline itself that is pinned.)
+    assert not VENDOR_THROTTLE_LATCH.has_deadline(su.YFINANCE_VENDOR)
+
+
+def _arm_then(outcome):
+    """A fetch during which a sibling thread arms the latch (#114).
+
+    ``yf_retry`` raises before calling when the latch is live, so the only way
+    a call can meet a live latch is to have one armed while it is in flight.
+    Modelled inline rather than with a real thread: what is under test is what
+    the answered-branch does with the deadline it finds, not the race.
+    """
+
+    def fetch():
+        VENDOR_THROTTLE_LATCH.arm(su.YFINANCE_VENDOR)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    return fetch
+
+
+@pytest.mark.unit
+def test_a_restored_failure_does_not_clear_a_live_latch():
+    # yf_fetch_unhidden restores a swallowed failure to the caller's hidden
+    # answer, and that value used to reach yf_retry looking exactly like data
+    # — so the answered-branch dropped a deadline a sibling had just armed and
+    # the next tool re-discovered the throttle at the price of a ladder
+    # (#114). Not a verdict bug: the caller still gets the empty frame.
+    out = su.yf_fetch_statement(_arm_then(ValueError("boom")))
+    assert out.empty
+    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is not None
+
+
+@pytest.mark.unit
+def test_a_restored_404_does_not_clear_a_live_latch():
+    # The other restore path: Yahoo's verdict on the symbol comes back as the
+    # hidden answer too, and is likewise not this client's standing with Yahoo.
+    assert su.yf_fetch_unhidden(_arm_then(_http_error(404)), hidden_answer=list) == []
+    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is not None
+
+
+@pytest.mark.unit
+def test_a_served_fetch_still_clears_a_live_latch():
+    # The discrimination for the two above: the same in-flight arm, but the
+    # fetch actually answers — that is the fresher evidence, and the deadline
+    # goes.
+    assert su.yf_fetch_unhidden(_arm_then("data"), hidden_answer=list) == "data"
+    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
+
+
+@pytest.mark.unit
+def test_yf_retry_keeps_no_opinion_about_return_values():
+    # The signal is a type yf_retry defines, not a shape it recognises: a bare
+    # callable that returns the very value the restore paths hand back — an
+    # empty frame — is an answer, and clears the latch. The pd knowledge stays
+    # in yf_fetch_unhidden.
+    import pandas as pd
+
+    out = su.yf_retry(_arm_then(pd.DataFrame()))
+    assert out.empty
+    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
 
 
 @pytest.mark.unit
@@ -188,11 +243,11 @@ def test_only_an_exhausted_throttle_arms_the_latch(frozen_clock):
         return out
 
     assert su.yf_retry(flaky) == "ok"
-    assert su._throttle_latch_remaining_s() is None
+    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
 
     with pytest.raises(ValueError):
         su.yf_retry(mock.Mock(side_effect=ValueError("boom")))
-    assert su._throttle_latch_remaining_s() is None
+    assert VENDOR_THROTTLE_LATCH.remaining_s(su.YFINANCE_VENDOR) is None
 
 
 # --- the statement boundary: throttles and transport failures un-hidden ---

@@ -27,6 +27,7 @@ from .polymarket import get_prediction_markets as get_polymarket_prediction_mark
 from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
 from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
+from .throttle import VENDOR_THROTTLE_LATCH
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -313,10 +314,35 @@ def route_to_vendor(method: str, *args, **kwargs):
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
+        # A vendor that refused this client with a rate limit recently is
+        # skipped in its turn without a request (#114) — this lane is the one
+        # point every vendor's throttle passes through, so the memory lives
+        # here once, keyed by vendor because a quota is spent per key, not per
+        # endpoint. The chain goes on in its configured order, and the skip is
+        # recorded as the fallback verdict, so a chain with nothing else to
+        # say degrades the way it would have after contacting the vendor.
+        remaining = VENDOR_THROTTLE_LATCH.remaining_s(vendor)
+        if remaining is not None:
+            logger.info(
+                "Vendor %r rate limited a recent request; skipping it for %s without "
+                "contacting it (%.0fs left).",
+                vendor,
+                method,
+                remaining,
+            )
+            if first_rate_limit is None:
+                first_rate_limit = VendorRateLimitError(
+                    f"Vendor {vendor!r} rate limited a recent request; skipped without "
+                    f"contacting it for another {remaining:.0f}s"
+                )
+            continue
+
         try:
-            return impl_func(*args, **kwargs)
+            result = impl_func(*args, **kwargs)
         except VendorRateLimitError as e:
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
+            if e.latches_vendor:
+                VENDOR_THROTTLE_LATCH.arm(vendor)
             if first_rate_limit is None:
                 first_rate_limit = e
             continue
@@ -358,6 +384,13 @@ def route_to_vendor(method: str, *args, **kwargs):
             if first_error is None:
                 first_error = e
             continue
+        # The vendor answered, so an answer just received outranks any deadline
+        # a sibling thread recorded while this call was in flight. Only a
+        # raised throttle arms the latch, so a vendor that renders a partial
+        # throttle into its report (Deribit, when not every request was
+        # refused) is never skipped on the strength of it.
+        VENDOR_THROTTLE_LATCH.clear(vendor)
+        return result
 
     # If any vendor reported "no data", the symbol is genuinely unavailable.
     # Return one explicit, instructive sentinel rather than a vendor-specific

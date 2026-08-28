@@ -580,6 +580,41 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **A vendor's rate limit is now discovered once per cycle by the router, for
+  every vendor** (issue #114). `route_to_vendor`'s rate-limit lane is the one
+  point every vendor's throttle passes through, so it now remembers a vendor
+  that has just raised `VendorRateLimitError` for a short window and skips it
+  in its turn without contacting it — the chain goes on in its configured
+  order, and a chain with nothing else to say degrades exactly as it would
+  have after being refused again (the throttle for a core category, the
+  `DATA_UNAVAILABLE` sentinel for an optional one). Alpha Vantage's per-key
+  daily quota, Deribit, and any vendor registered later are covered without a
+  per-family copy. The memory is one latch in the new `dataflows.throttle`
+  module, keyed by vendor name, with the yfinance latch PR #113 put in
+  `yf_retry` now its `"yfinance"` entry rather than a second window: **that
+  boundary keeps reading and writing it** because the verification snapshot
+  builder calls into it directly rather than through the router, and what
+  Yahoo tells that caller — a throttle exhausted, or an answer served — now
+  counts for the routed tools too. Only a raised throttle arms the latch — a
+  vendor that renders a partial throttle into its report (Deribit, when not
+  every request was refused) is still contacted next time — and a
+  `VendorRateLimitError` subclass can say its raise is not about the client's
+  standing (`latches_vendor = False`): `SoSoValueRateLimitError` does, because
+  it reaches the router only when the throttled call also had no usable
+  cache, while its sibling tools answer the same throttle with a stale-cache
+  report that a latch would have turned into `DATA_UNAVAILABLE`.
+  Alpha Vantage's "premium endpoint" notice is no longer classified as a rate
+  limit: it says the key lacks an entitlement it will not gain by waiting, so
+  it now raises `AlphaVantageNotConfiguredError` like an invalid key (the
+  router still moves to the next vendor; the notice stops being described as
+  transient, and stops keeping every free endpoint unasked for the window).
+  The daily-quota notice, which also mentions the premium plans, stays a rate
+  limit. Separately, a failure
+  `yf_fetch_unhidden` restores to the library's empty answer (a 404, an
+  expected library condition, a scraper bug) no longer reaches `yf_retry`
+  looking like data: it travels as an internal signal, so it neither clears
+  a throttle latch a sibling thread had just armed nor makes `yf_retry`
+  inspect return values. Cost only — what any caller gets is unchanged.
 - **hyperliquid_perp: the remaining duplicated live constants are derived or
   drift-locked** (issues #102, #122). No behaviour changes. The exchange
   minimum order value moves to `common.constants.EXCHANGE_MIN_ORDER_NOTIONAL_USDC`

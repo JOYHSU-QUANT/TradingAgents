@@ -182,6 +182,10 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     Raises:
         AlphaVantageRateLimitError: When API rate limit is exceeded — whether
             reported as an HTTP 429 or as a notice in an HTTP 200 body (#72)
+        AlphaVantageNotConfiguredError: When the notice says the key is
+            invalid or missing (#991), or that the endpoint is premium-only
+            for this key — an entitlement the key lacks, not a throttle it
+            will outlive (#114)
         NoMarketDataError: When the body is an ``Error Message`` rejection
             envelope — Alpha Vantage's "Invalid API call" answer for a symbol
             or parameter it cannot serve — or a JSON body that is not an
@@ -258,13 +262,23 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     # Alpha Vantage reports problems via "Information" / "Note". Classify so a
     # genuine rate limit and an invalid/missing key aren't conflated (#991):
     # rate-limit phrasing is checked first because those notices also mention
-    # "API key" ("your API key ... 25 requests per day"). A non-string notice
-    # (no such shape has been observed) is unclassifiable and falls through.
+    # "API key" ("your API key ... 25 requests per day") and the premium plans
+    # ("subscribe to any of the premium plans ... to remove all daily rate
+    # limits"). A premium-only endpoint is then its own verdict: the key lacks
+    # an entitlement it will not gain by waiting, so it is not a throttle —
+    # and the router now remembers a throttle vendor-wide for a while (#114),
+    # which would have kept every free endpoint unasked for the window over
+    # one premium refusal. A non-string notice (no such shape has been
+    # observed) is unclassifiable and falls through.
     notice = response_json.get("Information") or response_json.get("Note")
     if isinstance(notice, str) and notice:
         low = notice.lower()
-        if any(m in low for m in ("rate limit", "requests per day", "call frequency", "premium")):
+        if any(m in low for m in ("rate limit", "requests per day", "call frequency")):
             raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: {notice}")
+        if "premium endpoint" in low:
+            raise AlphaVantageNotConfiguredError(
+                f"Alpha Vantage {function_name} is a premium endpoint for this key: {notice}"
+            )
         if "api key" in low or "apikey" in low:
             # Reuse the existing "not configured" error so a bad key surfaces as
             # a real, actionable failure rather than a mislabeled rate limit (#991).

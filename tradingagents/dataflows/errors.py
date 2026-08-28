@@ -14,6 +14,9 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
 The number of types is the number of distinct router reactions, not the number
 of human-describable causes: empty and stale data get identical handling, so
 they share ``NoMarketDataError`` and differ only in the free-text ``detail``.
+A reaction includes how the failure is logged — ``VendorUnavailableError``
+continues the chain like a transport failure but without the traceback that
+lane reserves for a bug, which is what earns it a type of its own.
 
 ``UnsupportedIndicatorError`` sits outside that tree on purpose: naming an
 indicator no vendor computes is a caller mistake, not a vendor condition. The

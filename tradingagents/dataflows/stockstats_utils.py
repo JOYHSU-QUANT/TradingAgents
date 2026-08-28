@@ -185,7 +185,10 @@ def yf_fetch_unhidden(func, *, hidden_answer):
       data" case (a ``chart.error``, a quoteSummary 404), so an unparsable
       body is never that. Restored to the empty answer it read as "No news
       found" or the no-data sentinel; let out raw, the getters' broad handler
-      made prose of it (#136).
+      made prose of it (#136). It leaves before :func:`yf_retry`'s
+      answered-branch, so it neither clears nor arms the throttle latch: an
+      outage is not this client's standing with Yahoo, and the next tool's
+      single probe costs no backoff ladder.
     * An ``OSError`` that is NOT an HTTP 404 — a reset, a timeout, a 5xx,
       and a 401/403 (Yahoo refusing this client over a crumb or an IP block).
       A 404 is Yahoo's verdict on the symbol, not a failure of the wire:

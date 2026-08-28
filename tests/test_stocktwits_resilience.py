@@ -217,8 +217,9 @@ class TestFreshness:
     def test_unparseable_curr_date_renders_without_a_note_and_logs(self, caplog):
         # Deliberately NOT the routed getters' INVALID_CURR_DATE refusal
         # (#139): this block's curr_date is the graph's own end_date, so a bad
-        # one is a programming error the helper logs, and a "fix the date and
-        # retry" sentinel would instruct an analyst that never called a tool.
+        # one is a programming error the helper logs — and the get_news call
+        # beside this one in the sentiment analyst already surfaces it as
+        # INVALID_END_DATE, so a second sentinel would add nothing.
         payload = {"messages": [_message(created_at=f"{_day(0)}T09:00:00Z")]}
         with (
             caplog.at_level("WARNING", logger="tradingagents.dataflows.utils"),

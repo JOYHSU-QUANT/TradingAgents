@@ -253,9 +253,10 @@ def date_refusal(
     required ``str`` arguments, so the model cannot send it (the tool schema
     rejects a null before the getter runs) and a ``None`` that arrives came
     from a direct caller — passed on, it reached a ``strptime`` as a TypeError
-    outside every vendor lane. The fundamentals getters are the stated
-    exception: they pass ``omitted_ok=True`` because there ``None`` means the
-    model omitted the argument, which keeps the date-less fallback lane (#73).
+    outside every vendor lane. The fundamentals getters and the
+    prediction-market getter are the stated exceptions: they pass
+    ``omitted_ok=True`` because there ``None`` means the model omitted the
+    argument, which keeps the date-less fallback lane (#73, #139).
     Any other value was supplied, so one that will not parse — the empty string
     included — is a request that cannot be answered, not a request for no bound.
 

@@ -28,9 +28,10 @@ Breaking changes within the 0.x line are called out explicitly.
   and that the argument should be omitted rather than guessed. The
   StockTwits block, the helper's other unguarded caller, is deliberately
   unchanged: its `curr_date` is the graph's own `end_date`, not a model
-  argument, so an unparseable one is logged and rendered without a note
-  rather than answered with a retry instruction the sentiment analyst could
-  not act on.
+  argument, so an unparseable one is a programming error: the helper logs
+  it, the block renders without a note, and the `get_news` call beside it
+  in the sentiment analyst already surfaces the same bad date as
+  `INVALID_END_DATE`.
 - **dataflows: a Yahoo outage page is no longer read as "no data" on the
   yfinance paths that parse the body before the status** (issue #136).
   `Ticker.history`, `get_news`, `Search` and the second

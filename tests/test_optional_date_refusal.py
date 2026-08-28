@@ -3,8 +3,7 @@ getters as from the core ones (#119), and the two loose ends PR #118 left on the
 same theme are closed (#120).
 
 The seven date-bounded getters behind the optional categories
-(``interface.OPTIONAL_CATEGORIES``; Polymarket's ``curr_date`` is an optional
-disclosure input rather than a bound and is not covered here) used to answer ``""``/``"abc"``/``"2026/08/18"`` with a raise — a bare
+(``interface.OPTIONAL_CATEGORIES``) used to answer ``""``/``"abc"``/``"2026/08/18"`` with a raise — a bare
 ``strptime`` ValueError from four of them, a vendor-typed error from Deribit and
 the two SoSoValue twins — which ``route_to_vendor``'s optional lane rendered as
 ``DATA_UNAVAILABLE: optional <category> could not be retrieved``. In the same
@@ -16,6 +15,14 @@ on price alone, over an argument that was its own to fix.
 Every network seam here raises, so each refusal test also pins that the vendor
 was never asked; the usable-date tests pin the opposite, so a gate that refused
 everything could not pass.
+
+The eighth optional getter, Polymarket's, is the one #119 left out: its
+``curr_date`` is a disclosure input rather than a bound, and was read only by
+``live_snapshot_note``, which degrades to ``""`` on a date it cannot parse — so
+the string every getter above refuses drew a full, undisclosed live report
+(#139). It refuses in the same voice now, with one difference the fundamentals
+getters share (#73): ``None`` means the argument was omitted and stays the
+no-disclosure lane, so it has its own class below rather than a row in the table.
 """
 
 import contextlib
@@ -30,6 +37,7 @@ import tradingagents.dataflows.deribit as deribit
 import tradingagents.dataflows.farside as farside
 import tradingagents.dataflows.fear_greed as fear_greed
 import tradingagents.dataflows.fred as fred
+import tradingagents.dataflows.polymarket as polymarket
 import tradingagents.dataflows.sosovalue as sosovalue
 import tradingagents.dataflows.sosovalue_macro as sosovalue_macro
 import tradingagents.dataflows.sosovalue_treasuries as sosovalue_treasuries
@@ -62,6 +70,7 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(sosovalue_treasuries, "_load_snapshot", _reached)
     monkeypatch.setattr(deribit, "_request", _reached)
     monkeypatch.setattr(fred, "_request", _reached)
+    monkeypatch.setattr(polymarket, "_request", _reached)
     return reached
 
 
@@ -164,6 +173,40 @@ class TestOptionalGettersRefuseInOneVoice:
 
         monkeypatch.setattr(deribit, "_utc_now", _no_clock)
         assert deribit.get_options_market_data("BTC", "2026/08/18").startswith("INVALID_CURR_DATE")
+
+
+def _prediction_markets(d):
+    return polymarket.get_prediction_markets("Fed", None, d)
+
+
+_PM_WHAT = "prediction-market probabilities"
+
+
+@pytest.mark.unit
+class TestPredictionMarketsRefuseInTheSameVoice:
+    """See the module docstring: the same sentence as the table above for a
+    supplied-but-unusable date, with ``None`` kept as the omitted lane."""
+
+    @pytest.mark.parametrize("value", [v for v in _UNUSABLE if v is not None])
+    def test_a_supplied_unusable_date_is_refused_before_the_fetch(self, monkeypatch, value):
+        reached = _no_network(monkeypatch)
+        assert _prediction_markets(value) == invalid_date_sentinel(
+            value, what=_PM_WHAT, kind="point"
+        )
+        assert not reached
+
+    @pytest.mark.parametrize("value", [None, _GOOD, "2026-6-5"])
+    def test_omitted_and_usable_dates_still_reach_the_vendor(self, monkeypatch, value):
+        reached = _no_network(monkeypatch)
+        assert _asked(reached, _prediction_markets, value), value
+
+    def test_the_refusal_is_served_through_the_router(self, monkeypatch):
+        # prediction_markets is an optional category: a raise here would be
+        # rendered as "this source is down", the verdict #119 closed.
+        _no_network(monkeypatch)
+        monkeypatch.setattr(config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG))
+        out = interface.route_to_vendor("get_prediction_markets", "Fed", None, "abc")
+        assert out == invalid_date_sentinel("abc", what=_PM_WHAT, kind="point")
 
 
 @pytest.mark.unit

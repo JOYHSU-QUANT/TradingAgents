@@ -10,6 +10,28 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: `get_prediction_markets` refuses an unusable `curr_date`
+  instead of dropping it** (issue #139). Its `curr_date` does not bound the
+  data — Polymarket serves live odds only — and was read solely by
+  `live_snapshot_note`, which degrades to `""` on a date it cannot parse, so
+  `"2026/08/18"` drew a full report with no disclosure: today's odds, served
+  as that date's, in the same turn every sibling tool answered
+  `INVALID_CURR_DATE` (#119). The getter now refuses a supplied-but-unusable
+  date with the shared sentinel before any request, as the two fundamentals
+  getters — whose `curr_date` is the same kind of disclosure-only input —
+  have since #89; `None` remains the no-disclosure lane, and the empty
+  string, being supplied, is refused rather than treated as omitted. The
+  judge is the strict one those getters use, so a datetime object or an ISO
+  timestamp — which the disclosure helper's lenient reader used to accept —
+  is refused too; the tool schema has always declared `yyyy-mm-dd`, and its
+  description and the news analyst's hint now say the format is enforced
+  and that the argument should be omitted rather than guessed. The
+  StockTwits block, the helper's other unguarded caller, is deliberately
+  unchanged: its `curr_date` is the graph's own `end_date`, not a model
+  argument, so an unparseable one is a programming error: the helper logs
+  it, the block renders without a note, and the `get_news` call beside it
+  in the sentiment analyst already surfaces the same bad date as
+  `INVALID_END_DATE`.
 - **dataflows: a Yahoo outage page is no longer read as "no data" on the
   yfinance paths that parse the body before the status** (issue #136).
   `Ticker.history`, `get_news`, `Search` and the second
@@ -42,8 +64,8 @@ Breaking changes within the 0.x line are called out explicitly.
   calendar and BTC treasuries — now answer the shared `INVALID_CURR_DATE`
   sentinel before any request for a `curr_date` that does not parse (`""`,
   `"abc"`, `"2026/08/18"`, `None`), the verdict the core-category tools have
-  given since #109/#111 (Polymarket's `curr_date` is an optional disclosure
-  input rather than a bound, and is unchanged). They used
+  given since #109/#111 (Polymarket's `curr_date`, a disclosure input rather
+  than a bound, was left unchanged here — see #139 above). They used
   to raise — a bare `strptime` ValueError from four of them, a vendor-typed
   error from the other three — which `route_to_vendor`'s optional lane
   rendered as `DATA_UNAVAILABLE: optional <category> could not be

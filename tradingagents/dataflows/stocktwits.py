@@ -173,7 +173,12 @@ def fetch_stocktwits_messages(
         # the wall clock means these are *today's* messages — disclose that,
         # and skip the lag check (a historical date cannot meaningfully trail
         # a live stream). Otherwise flag a stalled stream via the newest
-        # rendered message's age.
+        # rendered message's age. No date_refusal gate here, unlike the
+        # routed getters (#139): curr_date is the graph's own end_date, not a
+        # model argument, so a bad one is a programming error the helper logs
+        # — and the get_news call beside this one in the sentiment analyst
+        # already answers INVALID_END_DATE for it (see live_snapshot_note's
+        # docstring).
         note = live_snapshot_note(curr_date, "these StockTwits messages are")
         if not note and newest_date:
             note = data_lag_note(newest_date, curr_date, MAX_MESSAGE_LAG_DAYS, "StockTwits message")

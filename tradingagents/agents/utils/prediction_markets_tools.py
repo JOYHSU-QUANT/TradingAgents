@@ -17,7 +17,8 @@ def get_prediction_markets(
         str | None,
         "The date you are analysing, yyyy-mm-dd (today's date from your "
         "context). Prices are always live; this only lets the report disclose "
-        "when they are newer than the analysis date.",
+        "when they are newer than the analysis date. Omit it rather than send "
+        "any other format: a supplied value that is not yyyy-mm-dd is refused.",
     ] = None,
 ) -> str:
     """
@@ -31,9 +32,13 @@ def get_prediction_markets(
         topic (str): Event keyword(s) to search
         limit (int): Max markets to return; omit for a default of 6
         curr_date (str): Analysis date yyyy-mm-dd; enables the live-price
-            disclosure when it trails the fetch date
+            disclosure when it trails the fetch date. Omit it rather than
+            send any other format.
 
     Returns:
-        str: A formatted markdown report of matching prediction markets
+        str: A formatted markdown report of matching prediction markets, or
+        an INVALID_CURR_DATE sentinel if curr_date is supplied but is not a
+        usable yyyy-mm-dd date (retry with a valid date or without it; do not
+        fabricate values)
     """
     return route_to_vendor("get_prediction_markets", topic, limit, curr_date)

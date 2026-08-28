@@ -75,8 +75,8 @@ OPTIONAL_NEWS_TOOLS = (
             "get_prediction_markets(topic, limit, curr_date) for live market-implied "
             "probabilities of forward-looking events (e.g. 'Fed rate cut', "
             "'recession 2026', geopolitical or sector events); always pass today's "
-            "date as curr_date so the report can flag prices newer than the "
-            "analysis date"
+            "date as curr_date, in yyyy-mm-dd, so the report can flag prices newer "
+            "than the analysis date (any other format is refused)"
         ),
     ),
     # The macro calendar is asset-agnostic and bound on BOTH paths: it takes

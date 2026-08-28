@@ -253,9 +253,10 @@ def date_refusal(
     required ``str`` arguments, so the model cannot send it (the tool schema
     rejects a null before the getter runs) and a ``None`` that arrives came
     from a direct caller — passed on, it reached a ``strptime`` as a TypeError
-    outside every vendor lane. The fundamentals getters are the stated
-    exception: they pass ``omitted_ok=True`` because there ``None`` means the
-    model omitted the argument, which keeps the date-less fallback lane (#73).
+    outside every vendor lane. The fundamentals getters and the
+    prediction-market getter are the stated exceptions: they pass
+    ``omitted_ok=True`` because there ``None`` means the model omitted the
+    argument, which keeps the date-less fallback lane (#73, #139).
     Any other value was supplied, so one that will not parse — the empty string
     included — is a request that cannot be answered, not a request for no bound.
 
@@ -376,7 +377,12 @@ def live_snapshot_note(
     history (#30).
 
     Returns ``""`` when curr_date is close enough to today or unparseable —
-    same degrade-never-raise contract as :func:`data_lag_note`.
+    same degrade-never-raise contract as :func:`data_lag_note`. That silence
+    is only honest when the date came from inside the program (the graph's
+    own ``end_date``, as the StockTwits block receives it): a getter whose
+    ``curr_date`` the model supplies must judge it with :func:`date_refusal`
+    first, or a string no sibling tool accepts is served here as an
+    undisclosed live report (#139).
     """
     today_str = today or date.today().strftime("%Y-%m-%d")
     curr_dt = _parse_day(curr_date, "curr_date")

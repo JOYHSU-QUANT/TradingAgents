@@ -214,6 +214,24 @@ class TestFreshness:
             out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date=_day(0))
         assert "Data lag" not in out
 
+    def test_unparseable_curr_date_renders_without_a_note_and_logs(self, caplog):
+        # Deliberately NOT the routed getters' INVALID_CURR_DATE refusal
+        # (#139): this block's curr_date is the graph's own end_date, so a bad
+        # one is a programming error the helper logs — and the get_news call
+        # beside this one in the sentiment analyst already surfaces it as
+        # INVALID_END_DATE, so a second sentinel would add nothing.
+        payload = {"messages": [_message(created_at=f"{_day(0)}T09:00:00Z")]}
+        with (
+            caplog.at_level("WARNING", logger="tradingagents.dataflows.utils"),
+            patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)),
+        ):
+            out = stocktwits.fetch_stocktwits_messages("NVDA", curr_date="2026/08/18")
+        assert "INVALID_CURR_DATE" not in out
+        assert "live values" not in out
+        assert "Data lag" not in out
+        assert "to the moon" in out
+        assert any("unparseable curr_date" in r.getMessage() for r in caplog.records)
+
     def test_unparseable_timestamps_degrade_to_no_note(self):
         payload = {"messages": [_message(created_at="???"), _message(created_at=None)]}
         with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):

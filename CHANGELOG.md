@@ -592,11 +592,11 @@ Breaking changes within the 0.x line are called out explicitly.
   per-family copy. The latch mechanism and its window move to the new
   `dataflows.throttle` module; the router holds one latch keyed by vendor
   name, and **the yfinance latch PR #113 put in `yf_retry` stays its own**,
-  for two reasons: that boundary sits behind the OHLCV cache `load_ohlcv`
-  reads first, so a symbol whose bars are on disk is still served while Yahoo
-  is being stood off from (a router-level skip would refuse it in front of
-  the cache), and the verification snapshot builder calls into it without
-  routing. Only a raised throttle arms the router's latch — a vendor that
+  for two reasons: the indicator path reaches that boundary only after the
+  OHLCV cache `load_ohlcv` reads first, so a symbol whose bars are on disk is
+  still served while Yahoo is being stood off from (a router-level skip would
+  refuse it in front of the cache), and the verification snapshot builder
+  calls into it without routing. Only a raised throttle arms the router's latch — a vendor that
   renders a partial throttle into its report (Deribit, when not every request
   was refused) is still contacted next time — and a `VendorRateLimitError`
   subclass can say its raise is not about the client's standing

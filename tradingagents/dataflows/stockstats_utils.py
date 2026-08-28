@@ -13,23 +13,23 @@ from yfinance.exceptions import YFDataException, YFException, YFRateLimitError
 from .config import get_config
 from .errors import VendorRateLimitError, VendorUnavailableError
 from .symbol_utils import NoMarketDataError, normalize_symbol
+from .throttle import ThrottleLatch
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
 # Vantage vendor shares the same single definition (#70).
-from .throttle import ThrottleLatch
 from .utils import MAX_OHLCV_STALE_DAYS, normalize_iso_date, safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
 
 # Yahoo's standing with this client (#86): yfinance's own latch, not an entry
-# in the router's. It sits at the network boundary, BEHIND the OHLCV cache
-# load_ohlcv reads first, so a symbol whose bars are on disk keeps being
-# served from them while the latch holds — the router's latch sits in front
-# of the whole getter and would refuse that answer (#114). It also serves the
-# verification snapshot builder (agents.utils.market_data_validation_tools),
-# which calls in here without routing. One key: a 429 is about the client,
-# not an endpoint.
+# in the router's. It sits at the network boundary — for the indicator path
+# and the verification snapshot, BEHIND the OHLCV cache load_ohlcv reads
+# first, so a symbol whose bars are on disk keeps being served from them
+# while the latch holds, where the router's latch sits in front of the whole
+# getter and would refuse that answer (#114). The snapshot builder
+# (agents.utils.market_data_validation_tools) also calls in here without
+# routing. One key: a 429 is about the client, not an endpoint.
 _YF_THROTTLE_LATCH = ThrottleLatch()
 _YF_LATCH_KEY = "yfinance"
 
@@ -48,11 +48,12 @@ def reset_yf_throttle_latch() -> None:
 class YFinanceRateLimitError(VendorRateLimitError):
     """Yahoo throttled a request, or this module is still standing off from one.
 
-    ``latches_vendor`` is False because the standing-off is done here, behind
-    the OHLCV cache: a routed yfinance call in the window is either served
-    from disk or refused at once by :func:`yf_retry`, so the router has
-    nothing to save by skipping the getter — and skipping it would turn the
-    cache-served answer into a refusal (#114).
+    ``latches_vendor`` is False because the standing-off is done here, at the
+    network boundary: a routed yfinance call in the window is refused at once
+    by :func:`yf_retry` if it gets that far, so the router has nothing to save
+    by skipping the getter — and for the indicator path, which reads the
+    OHLCV cache before reaching here, skipping it would turn a cache-served
+    answer into a refusal (#114).
     """
 
     latches_vendor = False

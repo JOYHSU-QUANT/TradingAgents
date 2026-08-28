@@ -99,8 +99,13 @@ def test_premium_endpoint_is_an_entitlement_verdict_not_a_throttle(monkeypatch):
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
 
     # Any other premium-flavoured refusal still raises rather than coming back
-    # to the caller as data — the bare substring was the catch-all before.
-    other = '{"Information": "The entitlement parameter requires a premium membership."}'
+    # to the caller as data — the bare substring was the catch-all before —
+    # and one that names the key is still an entitlement verdict, not "invalid
+    # or missing" (the wrong remedy for a key that is fine).
+    other = (
+        '{"Information": "Your API key does not include access to this premium feature; '
+        'please upgrade."}'
+    )
     monkeypatch.setattr(av.requests, "get", _patched_get(other))
     with pytest.raises(av.AlphaVantageNotConfiguredError, match="premium-only"):
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})

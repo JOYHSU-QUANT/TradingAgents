@@ -481,35 +481,38 @@ def test_a_throttle_that_does_not_latch_the_vendor_leaves_it_contacted():
 
 
 @pytest.mark.unit
-def test_yfinance_stands_off_behind_its_own_cache_not_at_the_router():
-    # yfinance's latch lives in yf_retry, behind the OHLCV cache load_ohlcv
-    # reads first, so a symbol whose bars are on disk is still served while
-    # Yahoo is being stood off from. Latched at the router as well, the same
-    # call would be refused in front of that cache — a different verdict, not
-    # a cheaper one. So the router never latches yfinance: its rate-limit
-    # type says so, the getter keeps being called, and a cache-served answer
-    # does not disturb the standing-off either.
+def test_yfinance_stands_off_at_its_own_boundary_not_at_the_router():
+    # yfinance's latch lives in yf_retry. The indicator getter reads the OHLCV
+    # cache (load_ohlcv) before it gets there, so a symbol whose bars are on
+    # disk is still served while Yahoo is being stood off from; latched at
+    # the router as well, the same call would be refused in front of that
+    # cache — a different verdict, not a cheaper one. So the router never
+    # latches yfinance: its rate-limit type says so, the getter keeps being
+    # called, and a cache-served answer does not disturb the standing-off.
     import tradingagents.dataflows.stockstats_utils as su
 
     assert not su.YFinanceRateLimitError.latches_vendor
 
-    set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
-    su._YF_THROTTLE_LATCH.arm("yfinance")  # what an exhausted ladder does
+    set_config({"data_vendors": {"technical_indicators": "yfinance,alpha_vantage"}})
+    su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)  # what an exhausted ladder does
 
-    def yfinance_getter(symbol, *a, **k):
+    def yfinance_indicators(symbol, *a, **k):
         # A cache hit never reaches yf_retry; a miss is refused there at once.
         if symbol == "CACHED":
-            return "BARS FROM DISK"
+            return "RSI FROM BARS ON DISK"
         return su.yf_retry(lambda: "never reached")
 
+    def indicators(symbol):
+        return interface.route_to_vendor("get_indicators", symbol, "rsi", "2026-06-01", 30)
+
     with _chain(
-        "get_stock_data", {"yfinance": yfinance_getter, "alpha_vantage": _returns("AV_DATA")}
+        "get_indicators", {"yfinance": yfinance_indicators, "alpha_vantage": _returns("AV_RSI")}
     ):
-        assert _stock("UNCACHED") == "AV_DATA"
-        assert _stock("CACHED") == "BARS FROM DISK"
-        assert _stock("UNCACHED") == "AV_DATA"  # the router did not latch yfinance
+        assert indicators("UNCACHED") == "AV_RSI"
+        assert indicators("CACHED") == "RSI FROM BARS ON DISK"
+        assert indicators("UNCACHED") == "AV_RSI"  # the router did not latch yfinance
     assert VENDOR_THROTTLE_LATCH.remaining_s("yfinance") is None
-    assert su._YF_THROTTLE_LATCH.remaining_s("yfinance") is not None
+    assert su._YF_THROTTLE_LATCH.remaining_s(su._YF_LATCH_KEY) is not None
 
 
 @pytest.mark.unit

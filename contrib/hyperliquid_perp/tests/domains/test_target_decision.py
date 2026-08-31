@@ -20,6 +20,7 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetSide,
     decision_format_instructions,
     extract_json_block,
+    format_fingerprint,
     parse_target_decision,
 )
 
@@ -648,6 +649,21 @@ def test_format_instructions_advertise_effective_cap():
     text = decision_format_instructions(DecisionConfig(), max_pct=60)
     assert "from 0 to 60 in steps of 1" in text
     assert "from 0 to 100" not in text
+
+
+def test_format_fingerprint_follows_the_numbers_the_model_is_shown():
+    # The third segmentation key (issue #129) is a digest of the RENDERED
+    # block: the same config renders the same value, and any number the
+    # config puts in the text — a confidence bar from ``decision:``, or the
+    # effective ceiling ``risk.max_target_margin_pct`` caps the grid to —
+    # moves it, with nothing to deploy or bump.
+    base = format_fingerprint(decision_format_instructions(DecisionConfig(), max_pct=60))
+    assert base == format_fingerprint(decision_format_instructions(DecisionConfig(), max_pct=60))
+    assert len(base) == 16
+    int(base, 16)  # hex, as the column and the RUNBOOK say
+    edited = DecisionConfig(min_confidence=Decimal("0.5"))
+    assert format_fingerprint(decision_format_instructions(edited, max_pct=60)) != base
+    assert format_fingerprint(decision_format_instructions(DecisionConfig(), max_pct=40)) != base
 
 
 def test_decision_config_rejects_bad_grid():

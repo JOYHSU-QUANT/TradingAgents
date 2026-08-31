@@ -227,7 +227,10 @@ class _EngineDecisionProvider:
         from ..domains.perp.context_guards import context_refusal
         from ..domains.perp.prompt_context import context_shape, render_market_context
         from ..domains.perp.schema import interval_to_ms
-        from ..domains.perp.target_decision import decision_format_instructions
+        from ..domains.perp.target_decision import (
+            decision_format_instructions,
+            format_fingerprint,
+        )
         from ..engine_bridge import _build_context
         from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
         from ..paper.scheduler import DecisionInput, RetryableDecisionError
@@ -300,11 +303,16 @@ class _EngineDecisionProvider:
         # unchanged, so adding this key is not a PROMPT_VERSION bump.
         shape = context_shape(ctx)
         format_text = decision_format_instructions(self._decision, max_pct=self._max_pct)
+        # The third key (issue #129): the format block is rendered from the
+        # live config, so its numbers move on a YAML edit that touches neither
+        # of the other two — a content digest of the text the model is shown.
+        fingerprint = format_fingerprint(format_text)
         payload = {
             "coin": coin,
             "as_of": as_of.isoformat(),
             "prompt_version": PROMPT_VERSION,
             "context_shape": shape,
+            "format_fingerprint": fingerprint,
             "context_text": context_text,
             "format_instructions": format_text,
         }
@@ -338,6 +346,7 @@ class _EngineDecisionProvider:
             input_payload_hash=f"sha256:{digest}",
             prompt_version=PROMPT_VERSION,
             context_shape=shape,
+            format_fingerprint=fingerprint,
             model=self._engine_config["deep_think_llm"],
         )
 

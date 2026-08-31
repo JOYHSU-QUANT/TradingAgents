@@ -25,7 +25,7 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
-from ..conftest import insert_decision_attempts
+from ..conftest import insert_decision_attempts, stamp_prompt_regimes
 
 _T0 = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
 _D = Decimal
@@ -2489,6 +2489,42 @@ def test_a_covering_stamp_with_no_firing_at_all_still_suppresses(tmp_path):
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=60))
     assert report.unprotected_window_count == 0
     assert report.live_ready
+
+
+def test_prompt_regimes_split_the_live_cycles_and_print_before_the_verdict(tmp_path):
+    # Issue #129: the same three-key split the paper report prints, over the
+    # LIVE cycle vocabulary — ``completed`` only, so an invalid_output cycle
+    # that carried an input row is left out and the buckets sum to cycle_count.
+    db = _healthy(tmp_path)
+    insert_decision_attempts(
+        db,
+        ["invalid_output"],
+        run_id="r",
+        start=_T0 + timedelta(hours=4 * MIN_LIVE_CYCLES),
+        mode="live",
+    )
+    before = ("phase2-target-v4", "price|market|funding|indicators(rsi_14)|position", "aaaa")
+    after = ("phase2-target-v4", "price|market|funding|indicators(rsi_14)|position", "bbbb")
+    stamp_prompt_regimes(
+        db, [before] * 10 + [after] * (MIN_LIVE_CYCLES - 10) + [after], mode="live"
+    )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert report.prompt_regimes == (
+        repo.PromptRegime(*before, 10),
+        repo.PromptRegime(*after, MIN_LIVE_CYCLES - 10),
+    )
+    assert sum(r.cycles for r in report.prompt_regimes) == report.cycle_count
+    assert report.live_ready  # informational: a straddled run is not a shortfall
+    lines = report.summary_lines()
+    first = next(i for i, line in enumerate(lines) if line.startswith("prompt_regime: "))
+    assert lines[first] == (
+        "prompt_regime: prompt_version=phase2-target-v4"
+        " context_shape=price|market|funding|indicators(rsi_14)|position"
+        " format_fingerprint=aaaa cycles=10"
+    )
+    assert lines[first + 1].endswith(f"format_fingerprint=bbbb cycles={MIN_LIVE_CYCLES - 10}")
+    assert lines[first + 2] == "live_ready: yes"
 
 
 def _make_report(**overrides) -> LiveValidationReport:

@@ -131,6 +131,10 @@ class DecisionInput:
     # The prompt's section structure (prompt_context.context_shape), the
     # second segmentation key beside prompt_version (issue #97).
     context_shape: str | None = None
+    # The third: a content digest of the format block
+    # (target_decision.format_fingerprint) — the half of the prompt the other
+    # two keys do not cover, whose numbers move on a config edit (issue #129).
+    format_fingerprint: str | None = None
     model: str | None = None
 
     def __post_init__(self) -> None:
@@ -149,13 +153,14 @@ class DecisionInput:
                 "DecisionInput.candle_start and candle_end must be provided "
                 "together (or both omitted)"
             )
-        # The two segmentation keys are one pair too: a row stamped with a
-        # version but no shape would be indistinguishable from pre-v10
-        # history, which the review reads as "shape unknown".
-        if (self.prompt_version is None) != (self.context_shape is None):
+        # The three segmentation keys are one set too: a row stamped with a
+        # version but no shape (or no fingerprint) would be indistinguishable
+        # from pre-v10 / pre-v11 history, which the review reads as "unknown".
+        keys = (self.prompt_version, self.context_shape, self.format_fingerprint)
+        if any(k is None for k in keys) and not all(k is None for k in keys):
             raise ValueError(
-                "DecisionInput.prompt_version and context_shape must be provided "
-                "together (or both omitted)"
+                "DecisionInput.prompt_version, context_shape and format_fingerprint "
+                "must be provided together (or all omitted)"
             )
         # An inverted window (start after end) is a malformed §5 row the same way
         # a half-present pair is; the spec pair is one candle's [start, end].

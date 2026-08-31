@@ -455,6 +455,20 @@ def test_build_input_carries_the_context_shape_beside_the_prompt_version(tmp_pat
         payload = json.load(fh)
     assert payload["context_shape"] == expected
     assert payload["prompt_version"] == decision_input.prompt_version
+    # The third key (issue #129): a digest of the format block AS RENDERED
+    # for this provider — its config and its effective ceiling — so the row,
+    # the payload and the text the model is shown all agree on one value.
+    from contrib.hyperliquid_perp.domains.perp.target_decision import (
+        decision_format_instructions,
+        format_fingerprint,
+    )
+
+    expected_fingerprint = format_fingerprint(
+        decision_format_instructions(DecisionConfig(), max_pct=60)
+    )
+    assert decision_input.format_fingerprint == expected_fingerprint
+    assert payload["format_fingerprint"] == expected_fingerprint
+    assert format_fingerprint(payload["format_instructions"]) == expected_fingerprint
     # The payload's own copy of the prompt text, which nothing else pins: the
     # stored artifact is what an audit reads months later, and the model is fed
     # a SEPARATE attribute (``self._context_text``), so a payload written empty
@@ -5365,16 +5379,17 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     ``PROMPT_VERSION`` to a value that has never been used before (rollbacks
     included — see the RUNBOOK), then update the digest here.
     """
-    import hashlib
-
     from contrib.hyperliquid_perp import cli as _cli
     from contrib.hyperliquid_perp.domains.perp.target_decision import (
         DecisionConfig,
         decision_format_instructions,
+        format_fingerprint,
     )
 
+    # The same digest the daemon stamps on ai_inputs.format_fingerprint (issue
+    # #129), so "the block changed" means one thing in the test and the data.
     block = decision_format_instructions(DecisionConfig())
-    digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:16]
+    digest = format_fingerprint(block)
     # Compared as one tuple so a mismatch shows both halves at once — which one
     # drifted is the whole diagnosis.
     # v4 (2026-08-27) bumped the version for the CONTEXT's new Position:

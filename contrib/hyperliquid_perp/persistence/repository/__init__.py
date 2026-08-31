@@ -49,6 +49,7 @@ from .account import (
 )
 from .cloid_registry import get_cloid_by_hex, get_cloid_by_logical, insert_cloid_mapping
 from .decisions import (
+    PromptRegime,
     find_in_progress_attempt,
     get_decision_attempt,
     insert_account_snapshot,
@@ -56,6 +57,7 @@ from .decisions import (
     insert_ai_output,
     insert_decision_attempt,
     insert_position_snapshot,
+    prompt_regime_counts,
     update_decision_attempt,
 )
 from .events import (
@@ -144,6 +146,7 @@ __all__ = [
     "MACHINE_DISPOSITIONS",
     "PROTECTION_ORDER_EVENT_TYPES",
     "PROVISIONAL_DISPOSITIONS",
+    "PromptRegime",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
     "RESTING_ORDER_STATUSES",
@@ -217,6 +220,7 @@ __all__ = [
     "newest_live_fill_order_key",
     "next_live_attempt_index",
     "posted_exchange_fee",
+    "prompt_regime_counts",
     "require_current_account_state",
     "require_live_fill_basis",
     "set_funding_status",

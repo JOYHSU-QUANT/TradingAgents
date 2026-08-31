@@ -524,16 +524,26 @@ def test_decision_input_rejects_half_candle_window():
     DecisionInput(context=ctx)
 
 
-def test_decision_input_rejects_a_half_segmentation_pair():
+def test_decision_input_rejects_a_partial_segmentation_key_set():
     ctx = _ctx(_T0)
-    # prompt_version and context_shape are the two segmentation keys of one
-    # ai_inputs row (issue #97): a version with no shape would be filed with
-    # pre-v10 history, which the review reads as "shape unknown".
-    with pytest.raises(ValueError, match="context_shape"):
-        DecisionInput(context=ctx, prompt_version="v1")
-    with pytest.raises(ValueError, match="context_shape"):
-        DecisionInput(context=ctx, context_shape="price|market|funding|indicators()")
-    DecisionInput(context=ctx, prompt_version="v1", context_shape="price|market")
+    # prompt_version, context_shape and format_fingerprint are the three
+    # segmentation keys of one ai_inputs row (issues #97, #129): a row carrying
+    # some but not all would be filed with pre-v10 / pre-v11 history, which the
+    # review reads as "unknown". Every proper subset is rejected, not just the
+    # historical version-without-shape pair.
+    keys = {
+        "prompt_version": "v1",
+        "context_shape": "price|market|funding|indicators()",
+        "format_fingerprint": "97aa0feaa4496d6f",
+    }
+    for missing in keys:
+        partial = {name: value for name, value in keys.items() if name != missing}
+        with pytest.raises(ValueError, match="format_fingerprint"):
+            DecisionInput(context=ctx, **partial)
+    for only in keys:
+        with pytest.raises(ValueError, match="format_fingerprint"):
+            DecisionInput(context=ctx, **{only: keys[only]})
+    DecisionInput(context=ctx, **keys)
 
 
 def test_decision_input_rejects_inverted_candle_window():

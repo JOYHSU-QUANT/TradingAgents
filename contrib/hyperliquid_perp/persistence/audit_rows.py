@@ -126,6 +126,7 @@ def write_ai_input(
             input_payload_hash=decision_input.input_payload_hash,
             prompt_version=decision_input.prompt_version,
             context_shape=decision_input.context_shape,
+            format_fingerprint=decision_input.format_fingerprint,
             model=decision_input.model,
         )
         repo.update_decision_attempt(txn, attempt_id, input_id=input_id, timestamp=now)

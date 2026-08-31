@@ -137,6 +137,13 @@ class ValidationReport:
     # report can therefore state a streak without the matching line, exactly as
     # it can for those six, and the tests own that.
     shortfalls: tuple[str, ...] = ()
+    # The run's cycles split by the three prompt segmentation keys
+    # (``prompt_version``, ``context_shape``, ``format_fingerprint`` —
+    # phase2-data §5.2), in order of first appearance, so a run that straddled
+    # a prompt regime is visible on the report instead of only to a hand-written
+    # SQL (issue #129). Counted over the same statuses as ``cycle_count``, so
+    # the ``cycles`` sum to it. Informational: never gates.
+    prompt_regimes: tuple[repo.PromptRegime, ...] = ()
 
     def __post_init__(self) -> None:
         # Every INTEGRITY count must have exactly one printed failure line and
@@ -234,12 +241,33 @@ class ValidationReport:
             f"net_funding_pnl: {_fmt(self.net_funding_pnl)}",
             f"no_decision_streak: {self.streaks.no_decision}",
             f"stale_feed_refusal_streak: {self.streaks.stale_feed}",
-            f"phase3_ready: {'yes' if self.phase3_ready else 'no'}",
         ]
+        lines.extend(prompt_regime_lines(self.prompt_regimes))
+        lines.append(f"phase3_ready: {'yes' if self.phase3_ready else 'no'}")
         lines.extend(f"failure: {reason}" for reason in self.failures)
         lines.extend(f"shortfall: {reason}" for reason in self.shortfalls)
         lines.extend(f"warning: {reason}" for reason in self.warnings)
         return lines
+
+
+def prompt_regime_lines(regimes: tuple[repo.PromptRegime, ...]) -> list[str]:
+    """One ``prompt_regime:`` line per segmentation bucket, first seen first.
+
+    Shared with the live report (``live.validation``) so the two print the
+    same shape. A ``None`` key prints ``n/a`` — a row from before the column
+    existed, which the reader must not mistake for a distinct regime.
+    """
+
+    def _key(value: str | None) -> str:
+        return "n/a" if value is None else value
+
+    return [
+        f"prompt_regime: prompt_version={_key(r.prompt_version)}"
+        f" context_shape={_key(r.context_shape)}"
+        f" format_fingerprint={_key(r.format_fingerprint)}"
+        f" cycles={r.cycles}"
+        for r in regimes
+    ]
 
 
 def _dec_or_none(value) -> Decimal | None:
@@ -448,6 +476,7 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
             (run_id,),
         )
         streaks = trailing_failure_streaks(conn, run_id)
+        prompt_regimes = repo.prompt_regime_counts(conn, run_id, statuses=_COMPLETED_CYCLE_STATUSES)
         order_count = _count(conn, "SELECT COUNT(*) FROM orders WHERE run_id = ?", (run_id,))
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         rejected_order_count = _count(
@@ -611,4 +640,5 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
         warnings=tuple(warnings),
         streaks=streaks,
         shortfalls=tuple(line for line in (no_decision_shortfall(streaks, now=now),) if line),
+        prompt_regimes=prompt_regimes,
     )

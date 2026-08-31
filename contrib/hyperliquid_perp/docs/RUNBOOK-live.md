@@ -401,6 +401,11 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 | `4` | 一致但未到 gate（cycles/orders 未滿、smoke 未跑**或 failed/errored**、**kill-switch daemon refresh 事件數 < 100**（live-smoke 寫的列不計，見下）、**`no_decision_streak` ≥ 3**——最近連續 ≥3 個 cycle 都沒出決策（不分成因；報告另印 `stale_feed_refusal_streak` 讓你分辨是不是 RUNBOOK §7 的 `freshness limit`），倉位只靠 SL/TP 撐著；下一個決策 cycle 自動歸零，run 停掉超過 2 個 cycle 後也不再套用） | 繼續跑；smoke 紅的修好後 `live-smoke --only <key>` 重跑（latest-per-key 覆蓋）；streak 亮了先看 `stale_feed_refusal_streak`：等於 streak 就查交易所 K 線 API（K 線視窗與年齡都只量交易所自己的時鐘，issue #124 起主機時鐘造不出這條拒跑；`timedatectl` 另由 log 的 skew WARNING 提醒），否則看 `decision_attempts.error_type` |
 | `5` | integrity failure（dedupe error、orphan、position/replay mismatch、unprotected 秒數 > 0、refresh rate < 99%、**`kill_switch_fired_count` > 0**、**run 仍在 MANUAL safe mode**；mainnet_tiny 另含未解 reconciliation／daily-loss 破線） | 先調查再相信結果 |
 
+報告在 `live_ready:` 之前另印 `prompt_regime:` 行——每組 `(prompt_version, context_shape,
+format_fingerprint)` 的 cycle 數（只數 `completed`，與 `cycle_count` 同口徑；依首見順序）。
+不影響 exit code：多於一行＝run 跨過 prompt 制度邊界；`n/a` 是該欄寫入時還不存在，
+不是另一個制度。三個鍵的定義見 [RUNBOOK §4](./RUNBOOK.md)。
+
 > smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only
 > <key>` 重跑，latest-per-key 覆蓋），歸 exit 4 的「未到 gate」。exit 5 保留給不可
 > 補救的 integrity 條件（見下方累積制警告框）。

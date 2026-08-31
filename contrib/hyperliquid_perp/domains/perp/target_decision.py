@@ -21,6 +21,7 @@ Everything here is pure (no I/O, no clock); amounts are :class:`~decimal.Decimal
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ __all__ = [
     "TargetSide",
     "decision_format_instructions",
     "extract_json_block",
+    "format_fingerprint",
     "parse_target_decision",
     "validate_target_decision",
 ]
@@ -526,6 +528,26 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
 # --------------------------------------------------------------------------
 # Output-format contract appended to the engine context
 # --------------------------------------------------------------------------
+
+
+def format_fingerprint(format_text: str) -> str:
+    """The third prompt segmentation key: a content digest of the format block.
+
+    ``prompt_version`` marks a code change by hand and ``context_shape`` marks
+    the context's section structure; neither covers the FORMAT half of the
+    prompt, which :func:`decision_format_instructions` renders from the live
+    config — the legal grid, the effective ceiling, both confidence bars and
+    the deadband are numbers in that text, and a ``decision:`` / ``risk:``
+    YAML edit changes what the model reads with no deploy and nothing to bump
+    (issue #129). So this key is a digest of the RENDERED text, not a shape:
+    any change to those numbers, or to the block's wording, moves it. The
+    same digest the version-pin test computes (the first 16 hex characters
+    of SHA-256 over UTF-8), so the two agree on what "the block changed"
+    means. Stored on ``ai_inputs.format_fingerprint`` (schema v11) and in the
+    payload JSON; ``GROUP BY prompt_version, context_shape,
+    format_fingerprint`` is the full segmentation.
+    """
+    return hashlib.sha256(format_text.encode("utf-8")).hexdigest()[:16]
 
 
 def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None = None) -> str:

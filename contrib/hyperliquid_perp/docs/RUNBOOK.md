@@ -163,9 +163,15 @@ payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的
 prompt 不同）不管來自 code 還是 YAML 都自動落進資料裡。翻動這些 key 仍然是跨越量測邊界（A/B 量測窗內**禁止翻動**，
 與夾帶 vendor 變更同罪）——差別是現在資料會自己標出來，不靠人記得。標籤裡的數字變了
 （`candle_interval`、`funding_zscore_window_days`）屬於**內容**變更，`context_shape` 不動，
-由下面的 config drift 警告承接。**兩個鍵都不涵蓋 format 那一半**：`decision:` 的格線／門檻
-會渲染進 `decision_format_instructions` 的文字，改 YAML 就換數字、不 bump 也不改 shape——
-比照 A/B 規則，量測窗內禁止翻動。另一條紀律：**改 `context_shape` 的字串文法**（排序、
+由下面的 config drift 警告承接。**format 那一半由第三個鍵承接**：`decision:` 的格線／門檻
+（與 `risk.max_target_margin_pct` 壓出的有效上限）會渲染進 `decision_format_instructions` 的文字，
+改 YAML 就換數字、不 bump 也不改 shape——schema v11 起 `ai_inputs` 多一欄 **`format_fingerprint`**
+（`domains/perp/target_decision.format_fingerprint`：渲染文字的 SHA-256 前 16 個 hex，同時寫進
+payload JSON），`--context-only` 也印一行 `format_fingerprint: …`。它是**內容指紋不是 shape**：
+那段文字任何改動都換值，prompt v5 調門檻數字時也會再變一次。所以完整切段鍵是三個：
+**`GROUP BY prompt_version, context_shape, format_fingerprint`**；`validate` 會依三鍵印每組的
+cycle 數（`prompt_regime:` 行，見 §6），一眼看出 run 有沒有跨段。翻動這些 key 仍是跨越量測
+邊界、量測窗內禁止翻動——差別只是資料現在會自己標出來。另一條紀律：**改 `context_shape` 的字串文法**（排序、
 改名、加段）等同改 prompt 契約，同一個 commit 要 bump `PROMPT_VERSION`，否則新舊文法的
 字串會在同一欄裡互相撞桶。`volume_profile_window_candles` 預設 `0` 的理由不變：
 merge 進來不動任何既有 prompt，分段點是「你改 config 那一刻」，由你選。
@@ -293,7 +299,10 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `1` | 操作錯誤（db／run 不存在） | 檢查 `--db`／`--run-id` |
 
 報告中的 `warning:` 行（超時 pending funding、config drift）不影響 exit code，
-但寫結論前要看過。
+但寫結論前要看過。`prompt_regime:` 行（每組 `(prompt_version, context_shape,
+format_fingerprint)` 的 cycle 數，依首見順序，只數計入 `cycle_count` 的 cycle）同樣不影響
+exit code：多於一行＝這個 run 跨過 prompt 制度邊界，跨段指標要分開讀（§4）；`n/a` 是該欄
+在寫入時還不存在（v10 前無 shape、v11 前無 fingerprint），不是另一個制度。
 
 ## 7. 快速故障排除
 

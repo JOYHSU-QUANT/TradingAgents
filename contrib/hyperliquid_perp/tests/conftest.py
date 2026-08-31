@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from contrib.hyperliquid_perp.common.instants import parse_instant
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id as derive_attempt_id
 
@@ -309,4 +310,42 @@ def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode=
                 attempt_count=1,
                 status=status,
                 error_type=error_type,
+            )
+
+
+def stamp_prompt_regimes(db, regimes, *, run_id="r", mode="paper", symbol="BTC"):
+    """Give the run's attempts (in scheduled order) an ``ai_inputs`` row each.
+
+    ``regimes`` holds one ``(prompt_version, context_shape,
+    format_fingerprint)`` per attempt, or ``None`` for a cycle that failed
+    before ``build_input`` and so never wrote an input row. ``input_id`` is
+    stamped straight onto the attempt row: ``update_decision_attempt`` refuses
+    terminal rows by design, and these are seeded terminal.
+    """
+    rows = db.conn.execute(
+        "SELECT decision_attempt_id, scheduled_at FROM decision_attempts"
+        " WHERE run_id = ? ORDER BY scheduled_at",
+        (run_id,),
+    ).fetchall()
+    assert len(rows) == len(regimes), "one regime (or None) per attempt"
+    with db.transaction() as conn:
+        for row, regime in zip(rows, regimes, strict=True):
+            if regime is None:
+                continue
+            version, shape, fingerprint = regime
+            input_id = f"{row['decision_attempt_id']}#in1"
+            repo.insert_ai_input(
+                conn,
+                input_id=input_id,
+                timestamp=parse_instant(row["scheduled_at"]),
+                mode=mode,
+                run_id=run_id,
+                symbol=symbol,
+                prompt_version=version,
+                context_shape=shape,
+                format_fingerprint=fingerprint,
+            )
+            conn.execute(
+                "UPDATE decision_attempts SET input_id = ? WHERE decision_attempt_id = ?",
+                (input_id, row["decision_attempt_id"]),
             )

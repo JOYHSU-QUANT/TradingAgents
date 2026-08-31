@@ -1761,6 +1761,55 @@ def test_build_context_hands_the_parsed_market_data_block_to_the_fetch_and_the_b
     assert handed["market_data"].volume_profile_window_candles == 0
 
 
+def test_build_context_forwards_the_position_inputs_to_the_builder_verbatim(monkeypatch):
+    # The one link in the chain nothing else can see (issue #134): the provider
+    # reads the books, the builder prices them, and THIS hands one to the
+    # other. Dropping it — ``position=None`` here — leaves every other test
+    # green while the daemons' prompts silently lose their Position: section,
+    # a failure whose only symptom is a section that never appears (the same
+    # blind spot the market_data wiring pin above exists for). The default is
+    # pinned in the same call: the one-shot lane, which passes nothing, must
+    # reach the builder as an explicit "no books".
+    handed = {}
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            return []
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    def _builder(*args, **kwargs):
+        handed["position"] = kwargs.get("position", "ABSENT")
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+
+    sentinel = object()
+    bridge_mod._build_context({}, "BTC", position=sentinel)
+    assert handed["position"] is sentinel
+    bridge_mod._build_context({}, "BTC")
+    assert handed["position"] is None
+
+
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():
     # The daemon reads its clock BEFORE the market fetch, so a boundary that
     # closes while the five REST calls run (each riding the full

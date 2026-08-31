@@ -8,6 +8,10 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation-only: this module keeps its imports function-local
+    from ..domains.perp.marginal_cost import PositionSource
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +133,7 @@ class _EngineDecisionProvider:
         decision_cfg,
         payload_dir: Path,
         on_blocking_read=None,
-        position_source=None,
+        position_source: PositionSource | None = None,
     ) -> None:
         from ..engine_bridge import _build_engine_config
 
@@ -142,10 +146,13 @@ class _EngineDecisionProvider:
         # passes a kill-switch refresh here. ``None`` for paper and the one-shot
         # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
         self._on_blocking_read = on_blocking_read
-        # ``() -> BookPosition | None`` — the run's books, read at build time
-        # (``paper.position_facts.read_book_position``, bound by the paper and
-        # live wirings). ``None`` leaves the context position-blind and the
-        # prompt without its ``Position:`` section (prompt v4).
+        # ``marginal_cost.PositionSource`` — the run's books, read at build
+        # time (``paper.position_facts.read_book_position``, bound by the paper
+        # and live wirings). ``None`` leaves the context position-blind and the
+        # prompt without its ``Position:`` section (prompt v4). The books it
+        # returns reach the builder as a declared parameter, so a harness that
+        # builds a context directly can supply a position without going
+        # through this constructor at all (issue #134).
         self._position_source = position_source
         # The fill-cost parameters the position section prices with: the
         # ``paper_trading.execution`` block, parsed ONCE here (the startup
@@ -158,49 +165,47 @@ class _EngineDecisionProvider:
         self._execution = PaperTradingConfig.from_dict(config.get("paper_trading")).execution
         self._engine_config, self._analysts = _build_engine_config(config)
 
-    def _attach_position(self, ctx, *, max_pct: int):
-        """The context with its ``Position:`` section, or unchanged if it has none.
+    def _position_inputs(self, *, max_pct: int):
+        """This cycle's books plus the rules a move is priced under, or ``None``.
 
-        Priced by ``marginal_cost.build_position_context`` from the books the
-        source reads, this cycle's mark/funding and ``self._execution``.
+        Handed to ``_build_context`` so the ``Position:`` section is assembled
+        by the builder, at the same mark and funding as the rest of the
+        context (issue #134) — this method only READS. ``None`` is the
+        position-blind context: no source wired (the one-shot CLI paths and
+        ``object.__new__``-built providers), or a run whose books do not exist
+        yet. Any OTHER exception (a store failure, a DTO guard tripped by a
+        book state nothing expected) propagates: it is a bug, not a degraded
+        state, and it surfaces the way the audit read one statement later
+        already does. What "surfaces" means differs by lane and is a known
+        asymmetry, decided 2026-08-27: the live driver's pump guard fails only
+        that cycle closed (``api_failed``), while the paper scheduler has no
+        such guard and the daemon exits for systemd to restart — the same fate
+        a failing ``_insert_ai_input`` has had since PR 4, kept rather than
+        masked behind a WARNING.
+
         ``max_pct`` is the EFFECTIVE grid ceiling the caller also hands the
         format block, so the cost table and the advertised ceiling cannot
-        disagree. Omitted — with the pricer's own WARNING — when the books
-        are unusable. Any OTHER exception (a store failure, a DTO guard
-        tripped by a book state the pricer did not expect) propagates: it is
-        a bug, not a degraded state, and it surfaces the way the audit read
-        one statement later already does. What "surfaces" means differs by
-        lane and is a known asymmetry, decided 2026-08-27: the live driver's
-        pump guard fails only that cycle closed (``api_failed``), while the
-        paper scheduler has no such guard and the daemon exits for systemd
-        to restart — the same fate a failing ``_insert_ai_input`` has had
-        since PR 4, kept rather than masked behind a WARNING.
+        disagree.
         """
         if self._position_source is None:
-            return ctx
-        from dataclasses import replace
-
-        from ..domains.perp.marginal_cost import build_position_context
+            return None
+        from ..domains.perp.marginal_cost import PositionInputs, PositionPricing
 
         book = self._position_source()
         if book is None:
             logger.warning("position section omitted: the run has no books yet")
-            return ctx
-        position = build_position_context(
-            size=book.size,
-            entry_price=book.entry_price,
-            wallet_balance=book.wallet_balance,
-            mark=ctx.mark_price,
-            leverage=self._risk.leverage,
-            funding_rate=ctx.funding_rate,
-            grid_min=self._decision.ai_target_margin_min_pct,
-            grid_max=max_pct,
-            grid_step=self._decision.target_margin_step_pct,
-            taker_fee_rate=self._execution.taker_fee_rate,
-            slippage_bps=self._execution.fill_model.slippage_bps,
-            last_fill_at=book.last_fill_at,
+            return None
+        return PositionInputs(
+            book=book,
+            pricing=PositionPricing(
+                leverage=self._risk.leverage,
+                grid_min=self._decision.ai_target_margin_min_pct,
+                grid_max=max_pct,
+                grid_step=self._decision.target_margin_step_pct,
+                taker_fee_rate=self._execution.taker_fee_rate,
+                slippage_bps=self._execution.fill_model.slippage_bps,
+            ),
         )
-        return ctx if position is None else replace(ctx, position=position)
 
     def build_input(self, *, coin: str, as_of: datetime):
         from ..domains.perp import risk_gate
@@ -212,9 +217,23 @@ class _EngineDecisionProvider:
         from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
         from ..paper.scheduler import DecisionInput, RetryableDecisionError
 
+        # One ceiling for both: the cost table's rows and the format block's
+        # advertised maximum come from this same value.
+        max_pct = risk_gate.effective_max_target_margin_pct(self._risk, self._decision)
+        # Read BEFORE the fetch, so the builder can price the section at the
+        # same snapshot the rest of the context is built from. That also puts
+        # the read ahead of the four context guards below — deliberate: a
+        # refused cycle now makes three local SQLite reads it used to skip.
+        # They are cheap, they touch no network and spend nothing, and the
+        # alternative (assembling the section after the guards) is exactly the
+        # second construction path issue #134 removed.
+        position = self._position_inputs(max_pct=max_pct)
         try:
             ctx, _client = _build_context(
-                self._config, coin, on_blocking_read=self._on_blocking_read
+                self._config,
+                coin,
+                on_blocking_read=self._on_blocking_read,
+                position=position,
             )
         except MalformedResponseError as exc:
             # BEFORE the ExchangeError clause below — that is this error's BASE
@@ -258,13 +277,9 @@ class _EngineDecisionProvider:
         refusal = context_refusal(ctx, coin, self._config, now=as_of)
         if refusal is not None:
             raise RetryableDecisionError(refusal.error_type, refusal.message)
-        # After the guards: a refused context spends nothing, so it reads no
-        # books either. The DecisionInput below carries THIS context, so the
-        # ai_inputs row and the payload describe the prompt with its section.
-        # One ceiling for both: the cost table's rows and the format block's
-        # advertised maximum come from this same value.
-        max_pct = risk_gate.effective_max_target_margin_pct(self._risk, self._decision)
-        ctx = self._attach_position(ctx, max_pct=max_pct)
+        # The DecisionInput below carries THIS context — the one the builder
+        # already put the position section on — so the ai_inputs row and the
+        # payload describe the prompt the model is actually shown.
         context_text = render_market_context(ctx)
         # The prompt's structure, kept beside the version stamp (issue #97):
         # a section that appears or disappears on a config edit alone — no

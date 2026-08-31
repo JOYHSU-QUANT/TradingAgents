@@ -212,6 +212,7 @@ def test_build_market_context_end_to_end(meta_and_asset_ctxs, candle_snapshot, f
         market_data=_MD,
         indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14", "macd"],
         exchange_time=None,
+        position=None,
     )
 
     assert ctx.coin == "BTC"
@@ -239,7 +240,7 @@ def test_build_market_context_carries_the_exchange_clock_through(
     snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)
-    kwargs = {"market_data": _MD, "indicator_names": ["rsi_14"]}
+    kwargs = {"market_data": _MD, "indicator_names": ["rsi_14"], "position": None}
     stamp = datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc)
     with_clock = build_market_context(
         "BTC", snapshot, candles, funding, exchange_time=stamp, **kwargs
@@ -252,6 +253,123 @@ def test_build_market_context_carries_the_exchange_clock_through(
         build_market_context("BTC", snapshot, candles, funding, **kwargs)
 
 
+def _priced_at_50k(snapshot):
+    """The fixture snapshot repriced to round numbers the position math shows.
+
+    Mark 50,000 with funding 1 bp/h, so a 0.005 BTC long entered at the mark
+    is notional 250 on a 1,000 wallet — 25% committed, no unrealized PnL, and
+    an 8h holding cost of 0.0001 * 8 * 250 = 0.20 USDC. Every figure below is
+    hand-computed from those, never re-derived by calling the pricer.
+    """
+    from dataclasses import replace
+
+    return replace(
+        snapshot,
+        mark_price=Decimal(50000),
+        oracle_price=Decimal(50000),
+        prev_day_price=Decimal(50000),
+        mid_price=Decimal(50000),
+        funding=Decimal("0.0001"),
+    )
+
+
+def _long_at_50k():
+    from contrib.hyperliquid_perp.domains.perp.marginal_cost import (
+        BookPosition,
+        PositionInputs,
+        PositionPricing,
+    )
+
+    return PositionInputs(
+        book=BookPosition(
+            size=Decimal("0.005"),
+            entry_price=Decimal(50000),
+            wallet_balance=Decimal(1000),
+            last_fill_at=None,
+        ),
+        pricing=PositionPricing(
+            leverage=Decimal(1),
+            grid_min=0,
+            grid_max=60,
+            grid_step=1,
+            taker_fee_rate=Decimal("0.00045"),
+            slippage_bps=Decimal(5),
+        ),
+    )
+
+
+def test_the_position_section_is_priced_onto_the_context_at_its_own_snapshot(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # Issue #134: the section is assembled HERE, from the same snapshot the
+    # Mark: and Funding: lines are printed from — so the context has one
+    # construction path and the two readings cannot be of different markets.
+    snapshot = _priced_at_50k(mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC"))
+    ctx = build_market_context(
+        "BTC",
+        snapshot,
+        mapper.map_candles(candle_snapshot),
+        mapper.map_funding_history(funding_history),
+        market_data=_MD,
+        indicator_names=["rsi_14"],
+        exchange_time=None,
+        position=_long_at_50k(),
+    )
+    pos = ctx.position
+    assert pos is not None
+    assert pos.notional == Decimal(250)
+    assert pos.margin_pct == Decimal(25)
+    assert pos.unrealized_pnl == Decimal(0)
+    assert pos.holding_cost_8h == Decimal("0.2")
+    # The ceiling the caller declared legal is a printed row, so the model is
+    # never shown a table that stops short of the margin it may ask for.
+    assert max(row.target_margin_pct for row in pos.cost_rows) == 60
+
+
+def test_a_position_the_books_cannot_price_leaves_the_context_position_blind(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # The pricer's fail-closed rule reaches the context unchanged: a wallet
+    # wiped out below the position's loss has no basis to price a move
+    # against, so the section is absent rather than half-filled.
+    from dataclasses import replace
+
+    snapshot = _priced_at_50k(mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC"))
+    inputs = _long_at_50k()
+    broke = replace(inputs, book=replace(inputs.book, wallet_balance=Decimal(0)))
+    ctx = build_market_context(
+        "BTC",
+        snapshot,
+        mapper.map_candles(candle_snapshot),
+        mapper.map_funding_history(funding_history),
+        market_data=_MD,
+        indicator_names=["rsi_14"],
+        exchange_time=None,
+        position=broke,
+    )
+    assert ctx.position is None
+
+
+def test_the_position_argument_has_no_default(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # Same rule as exchange_time: a caller with no books must write
+    # ``position=None`` and mean it, because the default it would otherwise
+    # inherit silently produces a position-blind prompt on a lane that has
+    # books — the one failure nothing downstream can see.
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    with pytest.raises(TypeError, match="position"):
+        build_market_context(
+            "BTC",
+            snapshot,
+            mapper.map_candles(candle_snapshot),
+            mapper.map_funding_history(funding_history),
+            market_data=_MD,
+            indicator_names=["rsi_14"],
+            exchange_time=None,
+        )
+
+
 def test_volume_profile_is_absent_unless_a_window_is_configured(
     meta_and_asset_ctxs, candle_snapshot, funding_history
 ):
@@ -261,7 +379,7 @@ def test_volume_profile_is_absent_unless_a_window_is_configured(
     snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)
-    kwargs = {"indicator_names": ["rsi_14"], "exchange_time": None}
+    kwargs = {"indicator_names": ["rsi_14"], "exchange_time": None, "position": None}
     assert (
         build_market_context(
             "BTC", snapshot, candles, funding, market_data=MarketDataConfig(), **kwargs
@@ -300,6 +418,7 @@ def test_volume_profile_is_cut_from_the_same_candles_as_the_indicators(
         market_data=MarketDataConfig(volume_profile_window_candles=30),
         indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14"],
         exchange_time=None,
+        position=None,
     )
     assert ctx.volume_profile is not None
     assert ctx.volume_profile == compute_volume_profile(candles, 30)
@@ -322,6 +441,7 @@ def test_volume_profile_stays_none_when_the_window_cannot_be_filled(
         market_data=MarketDataConfig(volume_profile_window_candles=30),
         indicator_names=["rsi_14"],
         exchange_time=None,
+        position=None,
     )
     assert ctx.volume_profile is None
 
@@ -341,6 +461,7 @@ def test_build_market_context_with_zero_candles(meta_and_asset_ctxs, funding_his
         market_data=_MD,
         indicator_names=["rsi_14", "atr_14"],
         exchange_time=None,
+        position=None,
     )
 
     assert ctx.candle_count == 0
@@ -374,6 +495,7 @@ def test_build_market_context_funding_window_days_plumbs_to_zscore(
             market_data=MarketDataConfig(funding_zscore_window_days=days),
             indicator_names=["rsi_14"],
             exchange_time=None,
+            position=None,
         )
 
     wide = _ctx_with_window(30)
@@ -400,6 +522,7 @@ def test_context_indicators_are_read_only(meta_and_asset_ctxs, candle_snapshot, 
         market_data=_MD,
         indicator_names=["rsi_14"],
         exchange_time=None,
+        position=None,
     )
     with pytest.raises(TypeError):
         ctx.indicators["rsi_14"] = 99.9

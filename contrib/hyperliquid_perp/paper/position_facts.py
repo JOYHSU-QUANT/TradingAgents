@@ -9,36 +9,18 @@ both. Reads only; pricing is
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-from decimal import Decimal
-
 from ..common.instants import parse_instant
+
+# The DTO itself lives in ``domains/`` — the context builder assembles the
+# position section and must not import ``paper/`` — and is re-exported here,
+# beside its only reader, for the wirings and tests written against this path
+# (the thin-re-export convention of PR #121).
+from ..domains.perp.marginal_cost import BookPosition
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import PositionState
 
 __all__ = ["BookPosition", "read_book_position"]
-
-
-@dataclass(frozen=True)
-class BookPosition:
-    """The books' position facts: signed size, entry, wallet balance, newest fill.
-
-    ``size == 0`` is flat (``entry_price`` then ``None``, as on
-    :class:`~..persistence.models.PositionState`). ``wallet_balance`` is the
-    ledger's — realized PnL, fees and funding already posted — so the caller
-    adds only unrealized PnL at its own mark to reach equity.
-    ``last_fill_at`` is the run's newest fill of ANY kind (the same
-    ``fills.timestamp`` maximum ``ai_inputs.last_fill_time`` records), not
-    the position's opening time — the books do not keep one, and "when did
-    this position last change" is the honest fact for a churn-aware prompt.
-    """
-
-    size: Decimal
-    entry_price: Decimal | None
-    wallet_balance: Decimal
-    last_fill_at: datetime | None
 
 
 def read_book_position(db: Database, run_id: str, coin: str) -> BookPosition | None:

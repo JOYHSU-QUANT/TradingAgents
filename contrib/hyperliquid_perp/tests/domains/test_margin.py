@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
+from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier, funding_cost
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
     UnknownCoinError,
@@ -24,6 +24,26 @@ def _multi_tier() -> MarginSchedule:
             MarginTier(Decimal(50_000), Decimal(10)),
         ),
     )
+
+
+def test_the_prompt_and_the_books_read_one_funding_hour_with_opposite_signs():
+    # Issue #134: the prompt's holding cost and the ledger's funding P&L were
+    # two spellings of ``notional * rate`` with opposite signs, so a change to
+    # one could leave the model told a rebate was a cost while the books
+    # credited it. Now one formula and one negation — and this is the pairing
+    # itself, which neither side's own arithmetic test can see.
+    #
+    # Hand-computed: a 250 USDC long at 1 bp/h pays 250 * 0.0001 = 0.025.
+    from contrib.hyperliquid_perp.paper.accounting import funding_pnl
+
+    notional, rate = Decimal(250), Decimal("0.0001")
+    assert funding_cost(notional, rate) == Decimal("0.025")  # cost-signed: it PAYS
+    assert funding_pnl(notional, rate) == Decimal("-0.025")  # income-signed: it LOSES
+    # A short at the same positive rate receives it, both ways round — so the
+    # sign follows the position, and the two readings stay exact negations.
+    assert funding_cost(-notional, rate) == Decimal("-0.025")
+    assert funding_pnl(-notional, rate) == Decimal("0.025")
+    assert funding_pnl(-notional, rate) == -funding_cost(-notional, rate)
 
 
 def test_single_tier_rate_and_zero_deduction():

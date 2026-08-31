@@ -1,8 +1,9 @@
 """Assemble market data + indicators into a :class:`PerpMarketContext`.
 
-Pure functions only — given the snapshot, candles and funding history, the
-output is deterministic (``as_of`` is taken from the latest candle close, not the
-wall clock), so this is straightforward to unit-test with recorded HL JSON.
+Pure functions only — given the snapshot, candles, funding history and the
+run's books, the output is deterministic (``as_of`` is taken from the latest
+candle close, not the wall clock), so this is straightforward to unit-test with
+recorded HL JSON.
 
 Two computations carry the design's "no NaN in the prompt" rule:
 
@@ -20,6 +21,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .indicators import compute_indicators
+from .marginal_cost import PositionInputs, build_position_context
 from .market_data_config import MarketDataConfig
 from .schema import (
     Candle,
@@ -119,6 +121,7 @@ def build_market_context(
     market_data: MarketDataConfig,
     indicator_names: Sequence[str],
     exchange_time: datetime | None,
+    position: PositionInputs | None,
     host_time_at_exchange_read: datetime | None = None,
 ) -> PerpMarketContext:
     """Build the full :class:`PerpMarketContext` from raw domain inputs.
@@ -143,6 +146,18 @@ def build_market_context(
     spot (the guard falls back to the caller's host clock, against which a
     window a slow host cut looks current), so it must never be reachable by
     forgetting a kwarg.
+
+    ``position`` — the run's books plus the rules a move is priced under — is
+    required for the same reason and fills the ``Position:`` section here,
+    beside ``volume_profile``, rather than being grafted on afterwards
+    (issue #134). ``None`` is the position-blind context: no books wired (the
+    one-shot CLI), or none seeded yet. The pricer's own fail-closed rule still
+    applies — books it cannot price (non-positive equity) yield ``None`` plus
+    its WARNING, and the section is omitted. Assembling it here is what makes
+    ``PerpMarketContext`` single-construction-path: the section is priced at
+    the very ``snapshot.mark_price`` / ``snapshot.funding`` the rest of the
+    context is built from, so the ``Mark:`` line and the notional under it are
+    the same reading by construction, not by a later cross-check.
     """
     if candles:
         # Anchor the funding window on the raw epoch-ms integer, not a float
@@ -167,6 +182,16 @@ def build_market_context(
     # regime describe the same window of history. ``None`` whenever the feature
     # is off or the window is unusable — the renderer then omits the section.
     volume_profile = compute_volume_profile(candles, market_data.volume_profile_window_candles)
+    # Priced at the snapshot's own mark and funding — the same two values the
+    # ``Mark:`` and ``Funding:`` lines print — so the section cannot quote a
+    # notional or a holding cost against a different reading of the market.
+    position_context = (
+        None
+        if position is None
+        else build_position_context(
+            position, mark=snapshot.mark_price, funding_rate=snapshot.funding
+        )
+    )
 
     return PerpMarketContext(
         coin=coin,
@@ -190,4 +215,5 @@ def build_market_context(
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
         volume_profile=volume_profile,
+        position=position_context,
     )

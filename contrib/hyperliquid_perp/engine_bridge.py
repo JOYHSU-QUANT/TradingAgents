@@ -45,6 +45,7 @@ from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicator_vocab import indicator_names
+from .domains.perp.marginal_cost import PositionInputs
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.schema import PerpMarketContext, PerpPosition
 from .domains.perp.target_decision import DecisionConfig
@@ -134,7 +135,11 @@ def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionCon
 
 
 def _build_context(
-    config: dict, coin: str, *, on_blocking_read: Callable[[], None] | None = None
+    config: dict,
+    coin: str,
+    *,
+    on_blocking_read: Callable[[], None] | None = None,
+    position: PositionInputs | None = None,
 ) -> tuple[PerpMarketContext, HyperliquidClient]:
     """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``.
 
@@ -155,6 +160,16 @@ def _build_context(
 
     ``None`` for every other caller (the one-shot CLI paths), where no dead man's
     switch is being held open.
+
+    ``position`` is handed straight to the builder, which prices the prompt's
+    ``Position:`` section from it (issue #134). Its default is the one
+    genuinely position-blind caller — the one-shot CLI, which has no local
+    books at all: it reads the venue's own position separately and prints it
+    UNDER the rendered context, deliberately outside the prompt (see
+    ``target_decision.decision_format_instructions`` for why that lane stays
+    blind). Defaulted rather than required here, unlike on the builder, so
+    that lane says nothing about a position it does not have; the daemon
+    lanes pass theirs explicitly.
     """
     # The same parse ``load_config`` already ran on this block, so on a loaded
     # config it cannot raise; absent or blank keys take the field defaults.
@@ -221,6 +236,7 @@ def _build_context(
         market_data=market_data,
         indicator_names=indicators,
         exchange_time=exchange_time,
+        position=position,
         host_time_at_exchange_read=host_time_at_exchange_read,
     )
     return ctx, client

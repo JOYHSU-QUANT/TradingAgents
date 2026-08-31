@@ -1017,7 +1017,7 @@ class PerpMarketContext:
             # short allowlist ``margin`` is not on — that guard walks
             # top-level statements only, and this branch runs only when a
             # position is attached, never on a config load.
-            from .margin import position_notional, unrealized_pnl
+            from .margin import funding_cost, position_notional, unrealized_pnl
 
             # Both non-None on an open position (PositionContext's guard).
             assert pos.unrealized_pnl is not None and pos.entry_price is not None
@@ -1035,11 +1035,16 @@ class PerpMarketContext:
             )
             # The holding cost is funding on the SIGNED notional at this mark,
             # over the horizon the section states — checked against the
-            # Funding: section's own rate so the two cannot disagree.
+            # Funding: section's own rate so the two cannot disagree, and
+            # through ``funding_cost`` so this check cannot be the copy of the
+            # formula that drifts (issue #134; the books' income-signed
+            # reading negates the same function).
             assert pos.holding_cost_8h is not None
             _check_derived(
                 "PerpMarketContext.position.holding_cost_8h",
                 float(pos.holding_cost_8h),
-                float(self.funding_rate * HOLDING_COST_HOURS * pos.size * self.mark_price),
+                float(
+                    funding_cost(pos.size * self.mark_price, self.funding_rate) * HOLDING_COST_HOURS
+                ),
                 f"funding_rate * {HOLDING_COST_HOURS}h * size * mark_price",
             )

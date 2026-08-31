@@ -16,6 +16,9 @@ import pytest
 
 from contrib.hyperliquid_perp.domains.perp.marginal_cost import (
     MAX_COST_ROWS,
+    BookPosition,
+    PositionInputs,
+    PositionPricing,
     build_position_context,
     display_targets,
 )
@@ -45,7 +48,31 @@ _BASE = {
 
 
 def _build(**overrides):
-    return build_position_context(**{**_BASE, **overrides})
+    """Price ``_BASE`` (with overrides) through the DTOs the builder hands over.
+
+    Kept flat here so every case below still reads as "the worked example with
+    ONE number changed"; the split into books / pricing / this cycle's market
+    is the pricer's, and doing it in one place is what keeps the cases from
+    restating it fifteen times.
+    """
+    kw = {**_BASE, **overrides}
+    inputs = PositionInputs(
+        book=BookPosition(
+            size=kw["size"],
+            entry_price=kw["entry_price"],
+            wallet_balance=kw["wallet_balance"],
+            last_fill_at=kw["last_fill_at"],
+        ),
+        pricing=PositionPricing(
+            leverage=kw["leverage"],
+            grid_min=kw["grid_min"],
+            grid_max=kw["grid_max"],
+            grid_step=kw["grid_step"],
+            taker_fee_rate=kw["taker_fee_rate"],
+            slippage_bps=kw["slippage_bps"],
+        ),
+    )
+    return build_position_context(inputs, mark=kw["mark"], funding_rate=kw["funding_rate"])
 
 
 def _row(pos, target):
@@ -191,6 +218,25 @@ def test_an_open_position_without_an_entry_is_rejected():
 def test_non_positive_mark_or_leverage_is_rejected(field):
     with pytest.raises(ValueError, match=field):
         _build(**{field: D(0)})
+
+
+@pytest.mark.parametrize("field", ["taker_fee_rate", "slippage_bps"])
+def test_a_negative_fill_cost_is_rejected_when_the_rules_are_built(field):
+    # On PositionPricing, not inside the pricing loop: a negative cost still
+    # carries the name of the config field it came from here, where a row
+    # promising the account is PAID to trade would just be a smaller number.
+    with pytest.raises(ValueError, match="fee/slippage"):
+        PositionPricing(
+            leverage=D(1),
+            grid_min=0,
+            grid_max=60,
+            grid_step=1,
+            **{
+                "taker_fee_rate": D("0.00045"),
+                "slippage_bps": D(5),
+                field: D(-1),
+            },
+        )
 
 
 # --------------------------------------------------------------------------

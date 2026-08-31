@@ -29,16 +29,26 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, localcontext
 
 from ...common.constants import HOLDING_COST_HOURS
 from ...common.decimal_context import DECIMAL_CONTEXT
-from .margin import account_equity, unrealized_pnl
+from .margin import account_equity, funding_cost, unrealized_pnl
 from .risk_gate import CurrentPositionState
 from .schema import MarginalCostRow, PositionContext, PositionSide, derive_round_trip_rate
 
-__all__ = ["MAX_COST_ROWS", "build_position_context", "display_targets"]
+__all__ = [
+    "MAX_COST_ROWS",
+    "BookPosition",
+    "PositionInputs",
+    "PositionPricing",
+    "PositionSource",
+    "build_position_context",
+    "display_targets",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +60,85 @@ logger = logging.getLogger(__name__)
 # paper grid: coarse enough to scan, fine enough that no legal target is more
 # than 2 points from a printed row.
 MAX_COST_ROWS = 13
+
+
+@dataclass(frozen=True)
+class BookPosition:
+    """The books' position facts: signed size, entry, wallet balance, newest fill.
+
+    Read from a run's store by ``paper.position_facts.read_book_position`` (the
+    paper ledger and the live store keep the same tables) and priced here. It
+    lives in ``domains/`` rather than beside its reader because the context
+    builder — which must not import ``paper/`` — names it as an input.
+
+    ``size == 0`` is flat (``entry_price`` then ``None``, as on
+    ``persistence.models.PositionState``). ``wallet_balance`` is the ledger's
+    — realized PnL, fees and funding already posted — so the pricer adds only
+    unrealized PnL at its own mark to reach equity. ``last_fill_at`` is the
+    run's newest fill of ANY kind (the same ``fills.timestamp`` maximum
+    ``ai_inputs.last_fill_time`` records), not the position's opening time —
+    the books do not keep one, and "when did this position last change" is the
+    honest fact for a churn-aware prompt.
+    """
+
+    size: Decimal
+    entry_price: Decimal | None
+    wallet_balance: Decimal
+    last_fill_at: datetime | None
+
+
+@dataclass(frozen=True)
+class PositionPricing:
+    """What a move costs and which moves are legal — the config half of the section.
+
+    ``leverage`` is the CONFIGURED ``risk.leverage`` (the same imputation the
+    gate sizes on; the local books carry no per-position leverage).
+    ``grid_max`` must already be the EFFECTIVE ceiling
+    (``risk_gate.effective_max_target_margin_pct``) so no printed row names a
+    margin the gate would clamp — the caller hands that same value to the
+    format block, which is what keeps the cost table and the advertised
+    ceiling from disagreeing.
+    """
+
+    leverage: Decimal
+    grid_min: int
+    grid_max: int
+    grid_step: int
+    taker_fee_rate: Decimal
+    slippage_bps: Decimal
+
+    def __post_init__(self) -> None:
+        # Here rather than inside the pricing loop, so a bad config value is
+        # rejected while it still has the name of the field it came from
+        # rather than surfacing as an arithmetic surprise several derivations
+        # later. Mirrors PositionContext's own guards.
+        if self.leverage <= 0:
+            raise ValueError(f"PositionPricing.leverage must be > 0, got {self.leverage}")
+        if self.taker_fee_rate < 0 or self.slippage_bps < 0:
+            raise ValueError("PositionPricing fee/slippage must be >= 0")
+
+
+@dataclass(frozen=True)
+class PositionInputs:
+    """Everything the position section needs that the market fetch does not supply.
+
+    One optional bundle rather than two independent parameters: "the books say
+    X, priced under these rules" is a single state, and a caller must not be
+    able to supply half of it. ``None`` in :func:`.context_builder.
+    build_market_context` is the position-blind context — no books wired (the
+    one-shot CLI) or none seeded yet.
+    """
+
+    book: BookPosition
+    pricing: PositionPricing
+
+
+# How a wiring hands the daemon provider its books: bound over the run's store
+# at construction, called once per cycle (the fresh-run provider is built
+# before the ledger is seeded, so the read must be able to answer "no books
+# yet"). Named so the seam is a declared type rather than a bare callable
+# passed by keyword (issue #134).
+PositionSource = Callable[[], BookPosition | None]
 
 
 def display_targets(lo: int, hi: int, step: int, max_rows: int = MAX_COST_ROWS) -> list[int]:
@@ -76,32 +165,15 @@ def display_targets(lo: int, hi: int, step: int, max_rows: int = MAX_COST_ROWS) 
 
 
 def build_position_context(
-    *,
-    size: Decimal,
-    entry_price: Decimal | None,
-    wallet_balance: Decimal,
-    mark: Decimal,
-    leverage: Decimal,
-    funding_rate: Decimal,
-    grid_min: int,
-    grid_max: int,
-    grid_step: int,
-    taker_fee_rate: Decimal,
-    slippage_bps: Decimal,
-    last_fill_at: datetime | None,
+    inputs: PositionInputs, *, mark: Decimal, funding_rate: Decimal
 ) -> PositionContext | None:
     """Price the account's position and every displayed legal move, or ``None``.
 
-    ``size`` is the signed position size from the books (``0`` = flat, and
-    then ``entry_price`` is ignored); ``wallet_balance`` is the ledger's
-    (realized PnL, fees and funding already posted — execution §6.1), so
-    equity is ``wallet_balance + unrealized`` at ``mark``. ``leverage`` is
-    the CONFIGURED ``risk.leverage`` — the same imputation the gate sizes on
-    (``CurrentPositionState.from_signed_size``); the local books carry no
-    per-position leverage. ``funding_rate`` is the current hourly rate;
-    ``grid_*`` is the legal target grid with ``grid_max`` already the
-    EFFECTIVE ceiling (``risk_gate.effective_max_target_margin_pct``), so no
-    row names a margin the gate would clamp.
+    ``inputs`` is the books (:class:`BookPosition`) plus the rules a move is
+    priced under (:class:`PositionPricing`); ``mark`` and ``funding_rate`` are
+    THIS cycle's, from the same market snapshot the rest of the context is
+    built from — which is why the section can never quote a notional or a PnL
+    at a mark the ``Mark:`` line above it disagrees with.
 
     ``None`` — the section is omitted — when equity is not positive: a
     margin-called account has no basis to price a move against, and the gate
@@ -109,8 +181,8 @@ def build_position_context(
     """
     if mark <= 0:
         raise ValueError(f"mark must be > 0, got {mark}")
-    if leverage <= 0:
-        raise ValueError(f"leverage must be > 0, got {leverage}")
+    book, pricing = inputs.book, inputs.pricing
+    size, entry_price, leverage = book.size, book.entry_price, pricing.leverage
     with localcontext(DECIMAL_CONTEXT):
         # The §6.1 formulas by name, never re-derived inline (margin.py's
         # rule): a flat account has no unrealized PnL, so its equity IS the
@@ -121,14 +193,14 @@ def build_position_context(
             if entry_price is None:
                 raise ValueError("an open position needs an entry_price")
             unrealized = unrealized_pnl(size, mark, entry_price)
-        equity = account_equity(wallet_balance, unrealized)
+        equity = account_equity(book.wallet_balance, unrealized)
         if equity <= 0:
             logger.warning(
                 "position section omitted: account equity %s is not positive at mark %s "
                 "(wallet %s) — nothing to price a move against",
                 equity,
                 mark,
-                wallet_balance,
+                book.wallet_balance,
             )
             return None
         if size == 0:
@@ -141,10 +213,10 @@ def build_position_context(
                 margin_pct=None,
                 equity=equity,
                 leverage=leverage,
-                last_fill_at=last_fill_at,
+                last_fill_at=book.last_fill_at,
                 holding_cost_8h=None,
-                taker_fee_rate=taker_fee_rate,
-                slippage_bps=slippage_bps,
+                taker_fee_rate=pricing.taker_fee_rate,
+                slippage_bps=pricing.slippage_bps,
             )
         # The gate's own imputation (notional at mark, margin at the
         # configured leverage) — the ONE derivation, so the margin% the model
@@ -156,12 +228,15 @@ def build_position_context(
         assert state.margin_pct is not None  # equity > 0 was checked above
         notional = abs(state.signed_notional)
         margin_pct = state.margin_pct
-        # Signed like the ledger's funding posting: a long pays a positive
-        # rate, a short receives it. Positive here = the position PAYS.
-        holding = funding_rate * HOLDING_COST_HOURS * state.signed_notional
-        rate = derive_round_trip_rate(taker_fee_rate, slippage_bps)
+        # The §6.5 hourly formula by name, over the horizon this section
+        # states. COST-signed: a long pays a positive rate, a short receives
+        # it, so positive here = the position PAYS. The books state the same
+        # hour income-signed (``paper.accounting.funding_pnl``); one formula,
+        # one negation, so the two cannot drift apart (issue #134).
+        holding = funding_cost(state.signed_notional, funding_rate) * HOLDING_COST_HOURS
+        rate = derive_round_trip_rate(pricing.taker_fee_rate, pricing.slippage_bps)
         rows = []
-        for target in display_targets(grid_min, grid_max, grid_step):
+        for target in display_targets(pricing.grid_min, pricing.grid_max, pricing.grid_step):
             trade_notional = abs(Decimal(target) - margin_pct) / 100 * equity * leverage
             if trade_notional == 0:
                 continue  # already there: nothing to trade, no breakeven to state
@@ -182,9 +257,9 @@ def build_position_context(
             margin_pct=margin_pct,
             equity=equity,
             leverage=leverage,
-            last_fill_at=last_fill_at,
+            last_fill_at=book.last_fill_at,
             holding_cost_8h=holding,
-            taker_fee_rate=taker_fee_rate,
-            slippage_bps=slippage_bps,
+            taker_fee_rate=pricing.taker_fee_rate,
+            slippage_bps=pricing.slippage_bps,
             cost_rows=tuple(rows),
         )

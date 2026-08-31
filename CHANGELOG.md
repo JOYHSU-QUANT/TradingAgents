@@ -694,40 +694,58 @@ Breaking changes within the 0.x line are called out explicitly.
   `3 x 4h`), so its `capped at` label is not printed by any shipped
   configuration; the host-clock fallback shares the stale limit as its
   future tolerance, so its 1d future bound widened from 12h to 28h with it
-  (pinned by a test). Future side (issue #93, **behaviour change**): on the
-  exchange-clock path a candle closing more than sixty seconds AFTER the
-  exchange's clock is refused, instead of being tolerated up to the stale
-  limit. A closed bar never leads the exchange's clock (`_build_context`
-  reads the candles before the clock — a test now pins that order), so what
-  that branch catches is the still-forming bar a host running AHEAD pulls
-  through `get_candles`' `close_time <= end` filter — partial OHLCV that
-  understates ATR and skews RSI/EMA, which at 1m–4h bars the old
-  3 × interval tolerance could never see. A fetch landing within a host
-  lead of a bar's close admits that bar; the guard refuses it when more
-  than a minute of the bar is still missing and passes it inside the last
-  minute (so 1m bars are never refused on this branch). The refusal names
-  the host's lead and NTP as the cause when the paired reading shows the
-  host ahead by at least the lead; when the pair shows less than that it
-  names the two remaining shapes — the host clock stepping back between
-  the candle read and the clock read, or a context that did not come from
-  a live fetch — and a context with no paired reading at all gets "either
-  the host ran ahead or this is not a live fetch". It is classed
-  `stale_market_data`, so a host left running ahead accumulates toward
-  exit 4 (RUNBOOK §7 says so; a refused cycle is rescheduled on the
-  `scheduled_at + 4h` grid, so the next fetch lands at the same phase of
-  the bar and keeps refusing until the clock is fixed). The host-clock
-  fallback keeps the shared bound: there the daemon's clock reading
-  precedes the fetch and a boundary closing in between legitimately lands
-  ahead of it. The sixty seconds rests on a 2026-08-26 measurement against
-  the public API recorded beside the constant (l2Book `time` never behind
-  a kept bar's close, and advancing as server time on the thinnest perps
-  too). Tests: a healthy 1d feed passes every cycle of a day and its last
-  second on both clocks, a three-day-old daily feed is still refused and a
-  27h-old one is not, the limit sits between one bar and the uncapped
-  bound for every interval, the 90-minute-lead example refuses when the
-  fetch lands in the last 90 minutes of a bar and passes earlier in it, a
-  lead inside the tolerance passes, 1m bars never refuse on a lead, the
-  lead bound is exclusive and not below the skew warn floor.
+  (pinned by a test). Future side (issue #93): on the exchange-clock path a
+  candle closing more than sixty seconds AFTER the exchange's clock was
+  refused, instead of being tolerated up to the stale limit — the
+  still-forming bar a host running AHEAD pulled through `get_candles`'
+  host-cut window. Superseded within this same unreleased span by issue
+  #124 (next entry), which moves the window cut itself onto the exchange's
+  clock so no live fetch can produce such a bar; the tolerance, its
+  three-way cause wording and the "candles before the clock" read order
+  went with it. Tests (the #92 half): a healthy 1d feed passes every cycle
+  of a day and its last second on both clocks, a three-day-old daily feed
+  is still refused and a 27h-old one is not, the limit sits between one
+  bar and the uncapped bound for every interval.
+
+- **Hyperliquid: the candle and funding windows are cut at the exchange's
+  clock, not the host's** (issue #124, **behaviour change**).
+  `ExchangeMarketData.get_candles` / `get_funding_history` take a required,
+  keyword-only, tz-aware `end` and read no host clock at all;
+  `_build_context` reads the exchange's clock (public `l2Book` `time`)
+  FIRST and hands that same reading to both fetches (the order is pinned by
+  a test, the other way round from #93 — a clock read after the fetch would
+  pass a bar that closed during it while the response carried its OHLCV as
+  captured before the close). Consequences an operator should know: a host
+  running AHEAD no longer admits the forming bar — the context's `as_of` is
+  the previous CLOSED bar's close, the guard passes and the cycle decides,
+  where #93 refused the cycle and blamed the clock; a host running BEHIND
+  no longer truncates either window (the newest funding settlements were
+  silently missing from the z-score sample before). The freshness guard's
+  exchange-clock path therefore has ONE stale cause ("the feed stopped
+  advancing" — the host's clock cannot have truncated a window it did not
+  cut; the skew is carried as information) and NO lead tolerance: any
+  candle closing after the exchange's clock is a context no live fetch
+  produced (replay, hand-built, or candles and clock from different
+  fetches). The skew WARNING still fires past one minute and now says what
+  a steady offset does reach — the durable record's host-side stamps and
+  the settlement hour funding accrual asks for — not the market data, and
+  not the rolling decision cadence. `cli._provider`'s funding-rate lookup
+  is the one windowed read that deliberately passes the host clock (it
+  looks up a past hour; a miss is `pending`, never a wrong rate). The
+  residual trust is now on the `l2Book` stamp alone (RUNBOOK §7 says so): a
+  venue stamp that regressed would look exactly like a stalled feed. One
+  accepted edge: a bar closing in the sub-second gap between the clock
+  read and the candle fetch sits outside the window for that cycle, so
+  `as_of` — and with it the analysts' `trade_date` — is one bar older;
+  with `candle_interval: 1d` at a UTC midnight that is the previous day.
+  Tests: the acceptance fixture (4h bars, exchange 3h30 into the forming
+  bar, host 90 minutes ahead) returns the previous closed bar and the guard
+  passes; the cut is inclusive at a bar's close; both windows end at the
+  clock handed in; a naive `end` is refused before any request; `end` has
+  no default on the port or the reader; the stale verdict names the feed
+  under every skew; any lead — including one inside the old minute — reads
+  as a non-live context under every pairing; the module carries no lead
+  tolerance.
 - **Hyperliquid: the market-context freshness guard and the no-decision
   escalation policy each have their own module.** The exchange-clock rewrite
   (PR #91) had grown the freshness guard to ~200 lines inside

@@ -224,7 +224,7 @@ _FAILURE_BACKOFF_FRACTION = 0.5
 # (the fill backfill's and the reconcile fill cross-check's own inline one), the
 # day-roll baseline read, and — since 2026-08-01 — the decision cycle's five
 # market-data reads in ``engine_bridge._build_context`` (perp meta, snapshot,
-# candles, the exchange clock, funding), which ``driver.pump()`` runs on
+# the exchange clock, candles, funding), which ``driver.pump()`` runs on
 # this same thread.
 #
 # That last one is why this is 3 rather than 5. Those reads share

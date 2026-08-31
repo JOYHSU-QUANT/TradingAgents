@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ...common.constants import CYCLE_INTERVAL, ERROR_TYPES, STALE_MARKET_DATA_ERROR
 from ...common.enum_guard import check_enum
@@ -69,6 +69,25 @@ def _utc_stamp(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_ONE_MS = timedelta(milliseconds=1)
+
+
+def _delta_ms(later: datetime, earlier: datetime) -> int:
+    """``later - earlier`` in whole milliseconds, by integer arithmetic.
+
+    Every bound in this module is compared in milliseconds against stamps the
+    exchange sent as integer ms, so the subtraction must be exact:
+    ``int(delta.total_seconds() * 1000)`` goes through a float and can read
+    an hours-scale delta 1ms short, which would let a context sitting exactly
+    on ``limit_ms`` pass or refuse by rounding rather than by the limit.
+    Floors (``//``) rather than truncates, so a sub-millisecond negative reads
+    as ``-1``, not ``0`` — the inputs that can carry sub-ms fractions (the
+    host readings) only ever feed the skew note and the fallback path's
+    minutes-wide bounds, where that millisecond changes nothing.
+    """
+    return (later - earlier) // _ONE_MS
+
+
 # How old the newest candle may be, counted in candle intervals.
 # ``get_candles`` drops the still-forming bar, so a healthy feed's newest CLOSED
 # candle is under one interval old, and each bar the exchange fails to publish
@@ -94,7 +113,7 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # one timedelta, so the value was written out here and drift-locked instead.)
 # The label refuses a cadence that is not whole hours at import, like the
 # reconciler's lookback label — see ``whole_hours_label``.
-_DECISION_CYCLE_MS = int(CYCLE_INTERVAL.total_seconds() * 1000)
+_DECISION_CYCLE_MS = CYCLE_INTERVAL // _ONE_MS
 _CYCLE_LABEL = whole_hours_label(CYCLE_INTERVAL, what="common.constants.CYCLE_INTERVAL")
 _MAX_CANDLE_AGE_CEILING_MS = _MAX_CANDLE_AGE_INTERVALS * _DECISION_CYCLE_MS
 _MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
@@ -271,33 +290,40 @@ def freshness_refusal(
     exchange_now = ctx.exchange_time
     if exchange_now is None:
         return _host_clock_freshness_refusal(ctx, coin, host_now, limit_ms, limit_basis)
-    age_ms = int((exchange_now - ctx.as_of).total_seconds() * 1000)
+    age_ms = _delta_ms(exchange_now, ctx.as_of)
     # Skew is measured between the two readings ``_build_context`` took
     # ADJACENTLY, never against ``now``: the daemon's ``now`` is its own clock
     # reading from before the fetch, so subtracting it would report the fetch's
     # elapsed time as clock error. A context that carries an exchange clock but
     # no paired host reading (hand-built) simply has no skew to report.
     host_at_read = ctx.host_time_at_exchange_read
-    skew_ms = (
-        None if host_at_read is None else int((host_at_read - exchange_now).total_seconds() * 1000)
-    )
+    skew_ms = None if host_at_read is None else _delta_ms(host_at_read, exchange_now)
     skew_note = _host_clock_skew_note(skew_ms, host_at_read)
     if skew_ms is not None and abs(skew_ms) >= _CLOCK_SKEW_WARN_MS:
         # Log-only, never a gate — and since issue #124 not a factor in the
         # verdict either: both market windows are cut at the exchange's clock
         # (``_build_context`` reads it first and hands it to both fetches), so
         # a host offset neither truncates the candles nor admits a bar the
-        # exchange has not closed. What still runs on this host's clock is
-        # the decision schedule (``scheduled_at`` and the 4h grid), every
-        # timestamp the durable record carries, and the kill switch's own
-        # deadline check (which has its own, tighter bound) — so the notice
-        # stays, and says exactly what the offset does and does not reach.
-        # Built from the same ``skew_note`` the refusals carry so the two
-        # cannot drift.
+        # exchange has not closed. What a STEADY offset still reaches is what
+        # this host stamps or derives from its own clock: the durable
+        # record's host-side stamps (``decision_attempts.timestamp`` /
+        # ``scheduled_at`` / ``next_decision_at`` — the candle and funding
+        # stamps in the same rows are the exchange's), and
+        # the settlement hour the paper engine's funding accrual asks for
+        # (``engine._accrue_funding`` walks hours up to the host's ``now``;
+        # a host ahead asks for an hour the exchange has not settled and
+        # books it ``pending``). The decision cadence itself is NOT on the
+        # list: it is a rolling interval measured on this one clock
+        # (``paper.scheduler``), which a steady offset cannot move — only a
+        # clock jump can. The kill switch has its own, tighter check. So the
+        # notice stays, and says exactly what the offset does and does not
+        # reach. Built from the same ``skew_note`` the refusals carry so the
+        # two cannot drift.
         logger.warning(
             "%s Fix time sync (NTP). The market data is unaffected — the candle "
             "and funding windows are cut at the exchange's clock (%s) — but the "
-            "decision schedule and every timestamp this host records run on its own",
+            "stamps this host writes from its own clock (timestamp, scheduled_at, "
+            "next_decision_at) and the settlement hour funding accrual asks for run on it",
             skew_note,
             _utc_stamp(exchange_now),
         )
@@ -415,7 +441,7 @@ def _host_clock_freshness_refusal(
     validates network_timeout_s as a number but sets no upper bound, so a
     deployment choosing minutes-long timeouts would need this revisited.)
     """
-    age_ms = int((moment - ctx.as_of).total_seconds() * 1000)
+    age_ms = _delta_ms(moment, ctx.as_of)
     if age_ms < -limit_ms:
         return ContextRefusal(
             STALE_CONTEXT_ERROR,

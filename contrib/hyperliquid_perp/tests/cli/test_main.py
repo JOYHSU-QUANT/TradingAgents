@@ -1433,11 +1433,15 @@ def test_freshness_guard_measures_skew_between_the_paired_readings_not_now(caplo
     assert "10h 0m 0s ahead of the exchange's" in warned[0]
     assert "Fix time sync (NTP)" in warned[0]
     # It says exactly what the offset reaches (issue #124): not the market
-    # data — both windows are cut at the exchange's clock — but the decision
-    # schedule and every timestamp this host records. The pre-#124 warning
-    # named a forming bar a host ahead could pull in; that shape is gone.
+    # data — both windows are cut at the exchange's clock — but the stamps
+    # this host writes from its own clock and the settlement hour funding
+    # accrual asks for. Not the decision cadence: that is a rolling interval
+    # on this one clock, which a steady offset cannot move. The pre-#124
+    # warning named a forming bar a host ahead could pull in; that shape is
+    # gone.
     assert "cut at the exchange's clock" in warned[0]
-    assert "decision schedule" in warned[0]
+    assert "settlement hour" in warned[0]
+    assert "decision schedule" not in warned[0]
     assert "has not closed" not in warned[0]
 
 

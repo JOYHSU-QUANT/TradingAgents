@@ -426,7 +426,11 @@ def _live_startup_recovery(
     from ..live.reconcile import LiveReconciler
     from ..live.safe_mode import SafeModeManager
     from ..live.startup import run_startup_recovery
-    from ..live.venue_identity import VenueIdentityMonitor, escalate_identity_fault
+    from ..live.venue_identity import (
+        EscalationHolder,
+        VenueIdentityMonitor,
+        escalate_identity_fault,
+    )
     from ..paper import accounting
     from ..paper.run_lock import (
         RunLockError,
@@ -1058,7 +1062,7 @@ def _live_startup_recovery(
                         # this finally: a busy DB must not discard the verdict.
                         try:
                             if escalate_identity_fault(
-                                identity, safe_mode, site="§18.2 shutdown disarm cross-check"
+                                identity, safe_mode, site=EscalationHolder.SHUTDOWN
                             ):
                                 shutdown_problem = (
                                     "venue identity fault latched — the exchange kept "

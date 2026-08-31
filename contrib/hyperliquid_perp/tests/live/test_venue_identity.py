@@ -31,6 +31,8 @@ from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
 from contrib.hyperliquid_perp.live.safe_mode import REASON_IDENTITY_FAULT, SafeModeManager
 from contrib.hyperliquid_perp.live.venue_identity import (
     UNREADABLE_PROBE_LATCH_THRESHOLD as K,
+    EscalationHolder,
+    ProbeSite,
     VenueIdentityMonitor,
     describe_order_status_failure,
     escalate_identity_fault,
@@ -42,18 +44,11 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
+from ..conftest import doc_text, identity_latch_rows, misrouted_order_status
+
 _NOW = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
 _OURS = "0x" + "ab" * 16
 _OURS_2 = "0x" + "cd" * 16
-_STRANGER = "0x" + "ee" * 16
-
-
-def _misrouted(oid: str = "4242") -> dict:
-    """An orderStatus answer about SOMEONE ELSE's order (carries its own cloid)."""
-    return {
-        "status": "order",
-        "order": {"order": {"oid": oid, "cloid": _STRANGER}, "status": "open"},
-    }
 
 
 def _unknown() -> dict:
@@ -102,17 +97,11 @@ def _monitor(db, venue, *, payload_dir=None, clock=None) -> VenueIdentityMonitor
     )
 
 
-def _latch_rows(db) -> list:
-    return [
-        e
-        for e in repo.iter_protection_order_events(db.conn, "r")
-        if e["event_type"] == "identity_fault_latched"
-    ]
-
-
-def _probe_expecting_unreadable(monitor, cloid=_OURS, site="test"):
+def _probe_expecting_unreadable(
+    monitor, cloid=_OURS, site=ProbeSite.RECONCILE_ABSENT_SETTLE, role=None
+):
     with pytest.raises(MalformedResponseError) as info:
-        monitor.probe(cloid, site=site)
+        monitor.probe(cloid, site=site, role=role)
     return info.value
 
 
@@ -120,16 +109,16 @@ def _probe_expecting_unreadable(monitor, cloid=_OURS, site="test"):
 
 
 def test_the_kth_consecutive_unreadable_answer_latches_and_the_k_minus_first_does_not(db):
-    monitor = _monitor(db, _Venue([_misrouted() for _ in range(K)]))
+    monitor = _monitor(db, _Venue([misrouted_order_status() for _ in range(K)]))
     for _ in range(K - 1):
-        _probe_expecting_unreadable(monitor, site="reconcile absent-order settle")
+        _probe_expecting_unreadable(monitor, site=ProbeSite.RECONCILE_ABSENT_SETTLE)
     assert monitor.unreadable_streak == K - 1
     assert monitor.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
-    _probe_expecting_unreadable(monitor, site="kill-switch disarm cross-check")
+    _probe_expecting_unreadable(monitor, site=ProbeSite.KILL_SWITCH_DISARM_CROSS_CHECK)
     assert monitor.latched is True
-    (row,) = _latch_rows(db)
+    (row,) = identity_latch_rows(db)
     assert row["symbol"] == "BTC"
     assert row["cloid_hex"] == _OURS
     assert f"{K} consecutive" in row["detail"]
@@ -140,12 +129,16 @@ def test_the_kth_consecutive_unreadable_answer_latches_and_the_k_minus_first_doe
 
 
 def test_a_transport_failure_neither_counts_nor_resets(db):
-    script = [*[_misrouted() for _ in range(K - 1)], ExchangeRequestError("down"), _misrouted()]
+    script = [
+        *[misrouted_order_status() for _ in range(K - 1)],
+        ExchangeRequestError("down"),
+        misrouted_order_status(),
+    ]
     monitor = _monitor(db, _Venue(script))
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor)
     with pytest.raises(ExchangeRequestError):
-        monitor.probe(_OURS, site="test")
+        monitor.probe(_OURS, site=ProbeSite.RECONCILE_ABSENT_SETTLE)
     assert monitor.unreadable_streak == K - 1  # untouched either way
     assert monitor.latched is False
     _probe_expecting_unreadable(monitor)
@@ -154,42 +147,47 @@ def test_a_transport_failure_neither_counts_nor_resets(db):
 
 def test_any_readable_answer_ends_the_streak_including_unknown_oid(db):
     script = [
-        *[_misrouted() for _ in range(K - 1)],
+        *[misrouted_order_status() for _ in range(K - 1)],
         _unknown(),
-        *[_misrouted() for _ in range(K - 1)],
+        *[misrouted_order_status() for _ in range(K - 1)],
     ]
     monitor = _monitor(db, _Venue(script))
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor)
-    assert monitor.probe(_OURS, site="test") is None  # the parser's verdict, untouched
+    # The parser's verdict, untouched.
+    assert monitor.probe(_OURS, site=ProbeSite.RECONCILE_ABSENT_SETTLE) is None
     assert monitor.unreadable_streak == 0
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor)
     assert monitor.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
 
 def test_an_unreadable_answer_carries_its_whole_payload_and_lands_on_disk(db, tmp_path):
     payload_dir = tmp_path / "payloads"
-    monitor = _monitor(db, _Venue([_misrouted("777")]), payload_dir=payload_dir)
+    monitor = _monitor(db, _Venue([misrouted_order_status("777")]), payload_dir=payload_dir)
     exc = _probe_expecting_unreadable(monitor)
     # ``str(exc)`` can name the two cloids; only the payload names the stranger's oid.
-    assert exc.payload == _misrouted("777")
+    assert exc.payload == misrouted_order_status("777")
     (path,) = sorted(payload_dir.glob("orderStatus-*.json"))
     assert _OURS.lower() in path.name.lower()
     assert json.loads(path.read_text(encoding="utf-8"))["order"]["order"]["oid"] == "777"
 
 
 def test_without_a_payload_dir_the_payload_is_still_attached_and_nothing_is_written(db, tmp_path):
-    monitor = _monitor(db, _Venue([_misrouted()]))
+    monitor = _monitor(db, _Venue([misrouted_order_status()]))
     exc = _probe_expecting_unreadable(monitor)
-    assert exc.payload == _misrouted()
+    assert exc.payload == misrouted_order_status()
     assert list(tmp_path.iterdir()) == []
 
 
 def test_the_latch_row_is_once_per_episode_and_a_recurrence_writes_a_new_one(db, tmp_path):
     payload_dir = tmp_path / "payloads"
-    script = [*[_misrouted() for _ in range(K + 3)], _unknown(), *[_misrouted() for _ in range(K)]]
+    script = [
+        *[misrouted_order_status() for _ in range(K + 3)],
+        _unknown(),
+        *[misrouted_order_status() for _ in range(K)],
+    ]
     # A clock that moves between round-trips, as the wall clock does: the
     # payload file name is stamped from it, and a frozen clock would make
     # every refusal of one cloid overwrite the last.
@@ -198,22 +196,22 @@ def test_the_latch_row_is_once_per_episode_and_a_recurrence_writes_a_new_one(db,
     for _ in range(K + 3):
         clock.advance(1)
         _probe_expecting_unreadable(monitor)
-    assert len(_latch_rows(db)) == 1
+    assert len(identity_latch_rows(db)) == 1
     # The evidence is bounded per CLOID, not per answer or per episode: under
     # the manual safe mode the latch raises, the §17 sync keeps probing every
     # tick, and a cloid that flaps readable/unreadable starts a new episode on
     # every flap — either budget would fill the payload_dir without bound.
     # The latch row still names the file this cloid's evidence lives in.
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1
-    assert "payload " in _latch_rows(db)[0]["detail"]
+    assert "payload " in identity_latch_rows(db)[0]["detail"]
 
-    monitor.probe(_OURS, site="test")  # readable: the episode is over
+    monitor.probe(_OURS, site=ProbeSite.RECONCILE_ABSENT_SETTLE)  # readable: the episode is over
     assert monitor.latched is False
     for _ in range(K):
         clock.advance(1)
         _probe_expecting_unreadable(monitor)
     assert monitor.latched is True
-    assert len(_latch_rows(db)) == 2
+    assert len(identity_latch_rows(db)) == 2
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1  # same cloid, same file
 
 
@@ -226,17 +224,17 @@ def test_a_misroute_of_one_cloid_latches_despite_coherent_answers_about_others(d
     # file per cloid regardless.
     payload_dir = tmp_path / "payloads"
     clock = ManualClock(_NOW)
-    script = [_misrouted(), _unknown()] * K
+    script = [misrouted_order_status(), _unknown()] * K
     monitor = _monitor(db, _Venue(script), payload_dir=payload_dir, clock=clock)
     for i in range(K):
         assert monitor.latched is False
         clock.advance(1)
         _probe_expecting_unreadable(monitor, cloid=_OURS)
         clock.advance(1)
-        assert monitor.probe(_OURS_2, site="test") is None
+        assert monitor.probe(_OURS_2, site=ProbeSite.RECONCILE_ABSENT_SETTLE) is None
         assert monitor.unreadable_streak == i + 1  # untouched by the other cloid
     assert monitor.latched is True
-    (row,) = _latch_rows(db)
+    (row,) = identity_latch_rows(db)
     assert row["cloid_hex"] == _OURS
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1
 
@@ -246,30 +244,32 @@ def test_two_cloids_below_threshold_do_not_latch_in_aggregate(db):
     # orders each three answers deep must not read as one fault of six — that
     # would let ordinary multi-order flakiness impersonate the identity fault.
     venue = _Venue()
-    venue.by_cloid = {_OURS: _misrouted("1"), _OURS_2: _misrouted("2")}
+    venue.by_cloid = {_OURS: misrouted_order_status("1"), _OURS_2: misrouted_order_status("2")}
     monitor = _monitor(db, venue)
     for _ in range(K - 2):
         _probe_expecting_unreadable(monitor, cloid=_OURS)
         _probe_expecting_unreadable(monitor, cloid=_OURS_2)
     assert monitor.unreadable_streak == K - 2
     assert monitor.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
 
 def test_a_readable_answer_resets_only_its_own_cloids_streak(db):
     venue = _Venue()
-    venue.by_cloid = {_OURS: _misrouted("1")}
+    venue.by_cloid = {_OURS: misrouted_order_status("1")}
     monitor = _monitor(db, venue)
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor, cloid=_OURS)
-    assert monitor.probe(_OURS_2, site="test") is None  # coherent, other cloid
+    assert (
+        monitor.probe(_OURS_2, site=ProbeSite.RECONCILE_ABSENT_SETTLE) is None
+    )  # coherent, other cloid
     assert monitor.unreadable_streak == K - 1  # _OURS keeps its count
     _probe_expecting_unreadable(monitor, cloid=_OURS)
     assert monitor.latched is True
 
 
 def test_a_failed_latch_row_write_drops_neither_the_latch_nor_the_raise(db):
-    monitor = _monitor(db, _Venue([_misrouted() for _ in range(K)]))
+    monitor = _monitor(db, _Venue([misrouted_order_status() for _ in range(K)]))
 
     def _busy(**_kwargs):
         raise sqlite3.OperationalError("database is locked")
@@ -280,7 +280,7 @@ def test_a_failed_latch_row_write_drops_neither_the_latch_nor_the_raise(db):
         # must keep seeing the fault it knows how to handle.
         _probe_expecting_unreadable(monitor)
     assert monitor.latched is True
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
 
 def test_the_failure_clause_separates_the_two_families():
@@ -308,21 +308,28 @@ def _gate() -> RealOrderGate:
 def test_escalation_enters_manual_only_once_the_latch_is_up_and_is_idempotent(db):
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
-    monitor = _monitor(db, _Venue([_misrouted() for _ in range(K)]))
+    monitor = _monitor(db, _Venue([misrouted_order_status() for _ in range(K)]))
 
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor)
-    assert escalate_identity_fault(monitor, safe_mode, site="test") is False
+    assert (
+        escalate_identity_fault(monitor, safe_mode, site=EscalationHolder.PROTECTION_SYNC) is False
+    )
     assert safe_mode.current() is None
     assert gate.manual_safe_mode is False
 
     _probe_expecting_unreadable(monitor)
-    assert escalate_identity_fault(monitor, safe_mode, site="§18.2 shutdown") is True
+    assert escalate_identity_fault(monitor, safe_mode, site=EscalationHolder.SHUTDOWN) is True
     state = safe_mode.current()
     assert state is not None and state.is_manual and state.reason == REASON_IDENTITY_FAULT
     assert gate.manual_safe_mode is True
     # Re-read by the next holder: no second history row, same episode.
-    assert escalate_identity_fault(monitor, safe_mode, site="§12 reconciliation") is True
+    assert (
+        escalate_identity_fault(
+            monitor, safe_mode, site=EscalationHolder.RECONCILIATION, trigger="heartbeat"
+        )
+        is True
+    )
     entered = [
         e for e in repo.iter_safe_mode_events(db.conn, "r") if e["reason"] == REASON_IDENTITY_FAULT
     ]
@@ -334,11 +341,11 @@ def test_a_persisted_shutdown_escalation_is_what_the_next_boot_hydrates(db):
     # The kill-switch site's whole point (issue #80): the process that found
     # the fault is exiting, so the bound has to outlive it. A FRESH manager —
     # what the next ``live --run-id`` builds — hydrates the manual state.
-    monitor = _monitor(db, _Venue([_misrouted() for _ in range(K)]))
+    monitor = _monitor(db, _Venue([misrouted_order_status() for _ in range(K)]))
     for _ in range(K):
         _probe_expecting_unreadable(monitor)
     escalate_identity_fault(
-        monitor, SafeModeManager(db=db, run_id="r", gate=_gate()), site="§18.2 shutdown"
+        monitor, SafeModeManager(db=db, run_id="r", gate=_gate()), site=EscalationHolder.SHUTDOWN
     )
 
     next_boot_gate = _gate()
@@ -508,7 +515,7 @@ def test_the_reconciler_the_kill_switch_and_protection_feed_one_streak(db, tmp_p
     assert K == 5, "the choreography below is written for a threshold of five"
     clock = ManualClock(_NOW)
     client = _Client(clock)
-    client.by_cloid = {_OURS: _misrouted("1")}
+    client.by_cloid = {_OURS: misrouted_order_status("1")}
     monitor = _monitor(db, client, payload_dir=tmp_path / "payloads", clock=clock)
     _live_order(db, order_id="o1", cloid_hex=_OURS)
 
@@ -535,7 +542,7 @@ def test_the_reconciler_the_kill_switch_and_protection_feed_one_streak(db, tmp_p
     assert "answered unusably (venue identity fault)" in failure
     assert monitor.unreadable_streak == 3
     assert monitor.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
     clock.advance(60)
     protection = _protection(db, client, monitor)
@@ -544,7 +551,7 @@ def test_the_reconciler_the_kill_switch_and_protection_feed_one_streak(db, tmp_p
     assert protection._row_still_rests({"cloid_hex": _OURS}, role="stop_loss") is False
     assert monitor.latched is True
     assert protection.identity.latched is True  # the engine's read: the same monitor
-    (row,) = _latch_rows(db)
+    (row,) = identity_latch_rows(db)
     assert "protection stop_loss no-op guard" in row["detail"]
     assert monitor.latched_site == "protection stop_loss no-op guard"
     # One cloid refused, one file — whichever consumer's refusal came first.
@@ -566,7 +573,7 @@ def test_a_reconcile_pass_escalates_the_latch_under_its_own_reason(db, tmp_path)
     not in extra rows.
     """
     client = _Client(ManualClock(_NOW))
-    client.by_cloid = {_OURS: _misrouted()}
+    client.by_cloid = {_OURS: misrouted_order_status()}
     monitor = _monitor(db, client, payload_dir=tmp_path / "payloads")
     _live_order(db, order_id="o1", cloid_hex=_OURS)
     reconciler = _reconciler(db, client, monitor, tmp_path)
@@ -611,10 +618,10 @@ def test_the_reconciler_escalates_after_its_own_safe_mode_bookkeeping(db, tmp_pa
     # cannot cost the pass its mismatch bookkeeping. Moving the escalation
     # ahead of the verdict branch flips this recorded order.
     client = _Client(ManualClock(_NOW))
-    client.by_cloid = {_OURS: _misrouted()}
+    client.by_cloid = {_OURS: misrouted_order_status()}
     monitor = _monitor(db, client, payload_dir=tmp_path / "payloads")
     for _ in range(K):
-        _probe_expecting_unreadable(monitor, site="protection stop_loss no-op guard")
+        _probe_expecting_unreadable(monitor, site=ProbeSite.PROTECTION_NOOP_GUARD, role="stop_loss")
     assert monitor.latched is True
     _live_order(db, order_id="o1", cloid_hex=_OURS)
 
@@ -650,19 +657,25 @@ def test_a_failed_evidence_write_is_retried_and_the_latch_row_admits_the_gap(
         return None  # the writer's own contract: None = could not write
 
     monkeypatch.setattr(vi_mod, "write_raw_payload", _flaky_write)
-    monitor = _monitor(db, _Venue([_misrouted() for _ in range(K)]), payload_dir=tmp_path / "p")
+    monitor = _monitor(
+        db, _Venue([misrouted_order_status() for _ in range(K)]), payload_dir=tmp_path / "p"
+    )
     for _ in range(K):
         _probe_expecting_unreadable(monitor)
     assert len(calls) == K  # every refusal retried the write
-    (row,) = _latch_rows(db)
+    (row,) = identity_latch_rows(db)
     assert "payload capture FAILED" in row["detail"]
 
     # ...and once a write finally lands, the row's clause names the file.
     monkeypatch.setattr(vi_mod, "write_raw_payload", lambda **kw: "payloads/orderStatus-x.json")
-    monitor2 = _monitor(db, _Venue([_misrouted() for _ in range(K)]), payload_dir=tmp_path / "p")
+    monitor2 = _monitor(
+        db, _Venue([misrouted_order_status() for _ in range(K)]), payload_dir=tmp_path / "p"
+    )
     for _ in range(K):
         _probe_expecting_unreadable(monitor2)
-    assert any("payloads/orderStatus-x.json" in (r["detail"] or "") for r in _latch_rows(db))
+    assert any(
+        "payloads/orderStatus-x.json" in (r["detail"] or "") for r in identity_latch_rows(db)
+    )
 
 
 def test_a_reconcile_pass_that_latches_first_enters_manual_with_the_identity_reason(db, tmp_path):
@@ -670,10 +683,10 @@ def test_a_reconcile_pass_that_latches_first_enters_manual_with_the_identity_rea
     # finished by ONE reconcile pass — no unclean-pass history behind it — so
     # the reconciler's escalation is the FIRST manual entry, under its own reason.
     client = _Client(ManualClock(_NOW))
-    client.by_cloid = {_OURS: _misrouted()}
+    client.by_cloid = {_OURS: misrouted_order_status()}
     monitor = _monitor(db, client, payload_dir=tmp_path / "payloads")
     for _ in range(K - 1):
-        _probe_expecting_unreadable(monitor, site="protection stop_loss no-op guard")
+        _probe_expecting_unreadable(monitor, site=ProbeSite.PROTECTION_NOOP_GUARD, role="stop_loss")
     _live_order(db, order_id="o1", cloid_hex=_OURS)
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
@@ -691,7 +704,7 @@ def test_a_private_monitor_bounds_a_consumer_built_without_the_shared_one(db, tm
     # reconciler wired the old way (no ``identity``) still latches on its own.
     clock = ManualClock(_NOW)
     client = _Client(clock)
-    client.by_cloid = {_OURS: _misrouted()}
+    client.by_cloid = {_OURS: misrouted_order_status()}
     _live_order(db, order_id="o1", cloid_hex=_OURS)
     reconciler = LiveReconciler(
         db=db,
@@ -707,6 +720,72 @@ def test_a_private_monitor_bounds_a_consumer_built_without_the_shared_one(db, tm
     for _ in range(K):
         clock.advance(60)
         reconciler.run("heartbeat")
-    (row,) = _latch_rows(db)
+    (row,) = identity_latch_rows(db)
     assert "reconcile absent-order settle" in row["detail"]
     assert len(list((tmp_path / "payloads").glob("orderStatus-*.json"))) == 1
+
+
+# -- the closed site vocabulary (issue #132) -------------------------------------
+#
+# The site is the operator's only handle on WHERE the fault was seen — it is
+# what the latch row, the safe-mode detail and the RUNBOOK's triage steps key
+# on — so it is a closed set, checked at the call, not a free string that the
+# next consumer spells its own way.
+
+
+def test_an_unregistered_probe_site_is_refused_before_any_round_trip(db):
+    venue = _Venue([misrouted_order_status()])
+    monitor = _monitor(db, venue)
+    with pytest.raises(ValueError):
+        monitor.probe(_OURS, site="kill-switch disarm crosscheck")  # a typo, not a member
+    with pytest.raises(ValueError):
+        # A RENDERED label is not a member either: the role is a separate field.
+        monitor.probe(_OURS, site="protection stop_loss no-op guard")
+    assert venue.asked == []  # refused at the call, whatever the venue would have said
+    assert monitor.unreadable_streak == 0
+
+
+def test_a_sites_dynamic_field_must_pair_with_its_member(db):
+    venue = _Venue()
+    monitor = _monitor(db, venue)
+    with pytest.raises(ValueError, match="needs role"):
+        monitor.probe(_OURS, site=ProbeSite.PROTECTION_NOOP_GUARD)
+    with pytest.raises(ValueError, match="takes no role"):
+        monitor.probe(_OURS, site=ProbeSite.KILL_SWITCH_DISARM_CROSS_CHECK, role="stop_loss")
+    with pytest.raises(ValueError, match="role must be one of"):
+        monitor.probe(_OURS, site=ProbeSite.PROTECTION_RECOVERY_PROBE, role="entry")
+    # (The rendered labels themselves are pinned where the rows are written —
+    # the consumer tests above assert the exact pre-#132 strings.)
+
+
+def test_an_unregistered_escalation_holder_is_refused_even_with_nothing_latched(db):
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    monitor = _monitor(db, _Venue())
+    with pytest.raises(ValueError):
+        escalate_identity_fault(monitor, safe_mode, site="§18.2 shutdown")  # not a member
+    with pytest.raises(ValueError, match="needs trigger"):
+        escalate_identity_fault(monitor, safe_mode, site=EscalationHolder.RECONCILIATION)
+    with pytest.raises(ValueError, match="trigger must be one of"):
+        escalate_identity_fault(
+            monitor, safe_mode, site=EscalationHolder.RECONCILIATION, trigger="hearbeat"
+        )
+    assert safe_mode.current() is None
+
+
+def test_the_runbook_site_table_is_the_vocabulary():
+    # The RUNBOOK's ``venue_identity_fault`` table and the two enums are ONE
+    # list: a member added without its row, or a row without its member, is red.
+    import re
+
+    rows = re.findall(
+        r"^\| (probe|holder) \| `([^`]+)` \|$", doc_text("RUNBOOK-live.md"), flags=re.MULTILINE
+    )
+    assert {label for family, label in rows if family == "probe"} == {m.value for m in ProbeSite}
+    assert {label for family, label in rows if family == "holder"} == {
+        m.value for m in EscalationHolder
+    }
+
+
+def test_the_seam_must_be_callable_at_construction(db):
+    with pytest.raises(TypeError, match="orderStatus seam"):
+        VenueIdentityMonitor(query_order_by_cloid=_Venue(), db=db, run_id="r", symbol="BTC")

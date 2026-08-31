@@ -42,7 +42,9 @@ from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 from ..conftest import (
     assert_paired_sweep_refreshes,
     assert_payload_dir,
+    identity_latch_rows,
     insert_decision_attempts,
+    misrouted_order_status,
     record_reconciliation_sweep_wiring,
 )
 from ..live.test_startup import _clearinghouse
@@ -4812,10 +4814,7 @@ def test_a_venue_identity_fault_latched_at_shutdown_persists_manual_for_the_next
 
     live_seams.rest_enabled = True
     # Every orderStatus answer about our order names a STRANGER's identity.
-    live_seams.order_status[hex_id] = {
-        "status": "order",
-        "order": {"order": {"oid": "4242", "cloid": "0x" + "ee" * 16}, "status": "open"},
-    }
+    live_seams.order_status[hex_id] = misrouted_order_status()
 
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
     err = capsys.readouterr().err
@@ -4828,11 +4827,7 @@ def test_a_venue_identity_fault_latched_at_shutdown_persists_manual_for_the_next
         state = SafeModeManager(db=db, run_id="r1", gate=None).current()
         assert state is not None and state.is_manual
         assert state.reason == REASON_IDENTITY_FAULT
-        latch_rows = [
-            e
-            for e in repo.iter_protection_order_events(db.conn, "r1")
-            if e["event_type"] == "identity_fault_latched"
-        ]
+        latch_rows = identity_latch_rows(db, "r1")
         assert len(latch_rows) == 1
         assert "kill-switch disarm cross-check" in latch_rows[0]["detail"]
     finally:

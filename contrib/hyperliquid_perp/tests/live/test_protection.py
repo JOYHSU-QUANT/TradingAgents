@@ -23,7 +23,7 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 
-from ..conftest import echo_order_status_cloid
+from ..conftest import echo_order_status_cloid, identity_latch_rows, misrouted_order_status
 
 _NOW = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
 _TICK = Decimal("1")
@@ -1651,12 +1651,7 @@ def test_an_unreadable_recovery_answer_is_recorded_under_its_own_cause(env):
     client.place_script = ["raise"]  # ack lost -> recovery probe runs
     # The venue answers, but for ANOTHER order: parse_order_status raises
     # MalformedResponseError rather than handing back a stranger's status.
-    client.status_script = [
-        {
-            "status": "order",
-            "order": {"order": {"oid": 4242, "cloid": "0x" + "cd" * 16}, "status": "open"},
-        }
-    ]
+    client.status_script = [misrouted_order_status()]
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(),
@@ -1695,10 +1690,7 @@ def test_an_unreadable_recovery_reason_does_not_leak_into_later_attempt_rows(env
     # Three attempts: only the FIRST one's recovery probe answers unusably.
     client.place_script = ["raise", "raise", "raise"]
     client.status_script = [
-        {
-            "status": "order",
-            "order": {"order": {"oid": 4242, "cloid": "0x" + "cd" * 16}, "status": "open"},
-        },
+        misrouted_order_status(),
         {"status": "unknownOid"},
         {"status": "unknownOid"},
     ]
@@ -1732,29 +1724,7 @@ def test_an_unreadable_recovery_reason_does_not_leak_into_later_attempt_rows(env
 # ladder into a §17.2 emergency close of a healthy, protected position — with
 # nothing but a logger.warning to show for it.
 
-_STRANGER_CLOID = "0x" + "cd" * 16
 _OUR_ROW = {"cloid_hex": "0x" + "a" * 32}
-
-
-def _misrouted_status(oid: str = "4242") -> dict:
-    """An orderStatus answer about SOMEONE ELSE's order.
-
-    Carries its own ``cloid``, so ``echo_order_status_cloid`` leaves it alone
-    and ``parse_order_status`` raises rather than handing back a stranger's
-    status — the shape of a venue that misroutes identity lookups.
-    """
-    return {
-        "status": "order",
-        "order": {"order": {"oid": oid, "cloid": _STRANGER_CLOID}, "status": "open"},
-    }
-
-
-def _latch_rows(db) -> list:
-    return [
-        e
-        for e in repo.iter_protection_order_events(db.conn, "r")
-        if e["event_type"] == "identity_fault_latched"
-    ]
 
 
 def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env):
@@ -1769,7 +1739,7 @@ def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    client.status_script = [_misrouted_status() for _ in range(K)]
+    client.status_script = [misrouted_order_status() for _ in range(K)]
     # fired_total=1 latches row-suspicion, which is what makes the no-op guard
     # ask the exchange at all; an unreadable answer never caches, so every one
     # of these calls really does probe.
@@ -1778,11 +1748,11 @@ def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env
     for _ in range(K - 1):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     assert mgr.identity.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
     assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     assert mgr.identity.latched is True
-    rows = _latch_rows(db)
+    rows = identity_latch_rows(db)
     assert len(rows) == 1
     assert f"{K} consecutive" in rows[0]["detail"], rows[0]["detail"]
     # The row names the probe's own verdict, so triage does not have to guess
@@ -1802,13 +1772,13 @@ def test_the_latched_identity_fault_writes_one_audit_row_per_episode(env):
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    client.status_script = [_misrouted_status() for _ in range(K + 6)]
+    client.status_script = [misrouted_order_status() for _ in range(K + 6)]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
     for _ in range(K + 6):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     assert mgr.identity.latched is True
-    assert len(_latch_rows(db)) == 1
+    assert len(identity_latch_rows(db)) == 1
 
 
 def test_a_readable_answer_ends_the_unreadable_streak(env):
@@ -1825,9 +1795,9 @@ def test_a_readable_answer_ends_the_unreadable_streak(env):
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
     client.status_script = [
-        *[_misrouted_status() for _ in range(K - 1)],
+        *[misrouted_order_status() for _ in range(K - 1)],
         {"status": "unknownOid"},
-        *[_misrouted_status() for _ in range(K - 1)],
+        *[misrouted_order_status() for _ in range(K - 1)],
     ]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
@@ -1835,7 +1805,7 @@ def test_a_readable_answer_ends_the_unreadable_streak(env):
         assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     # 2K-1 probes, but never K unreadable ones IN A ROW.
     assert mgr.identity.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
 
 def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault(env):
@@ -1853,9 +1823,9 @@ def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
     client.status_script = [
-        *[_misrouted_status() for _ in range(K - 1)],
+        *[misrouted_order_status() for _ in range(K - 1)],
         ExchangeRequestError("status endpoint down"),
-        _misrouted_status(),
+        misrouted_order_status(),
     ]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
@@ -1866,7 +1836,7 @@ def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault
     # The timeout: did NOT push the streak over the line on its own.
     assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
     assert mgr.identity.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
     # ...and did not wipe the K-1 unreadable answers before it either.
     assert mgr._row_still_rests(_OUR_ROW, role="stop_loss") is False
@@ -1889,7 +1859,7 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    client.status_script = [_misrouted_status() for _ in range(K)]
+    client.status_script = [misrouted_order_status() for _ in range(K)]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
     # K-1 from the no-op guard...
@@ -1916,7 +1886,7 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
         is False
     )
     assert mgr.identity.latched is True
-    assert len(_latch_rows(db)) == 1
+    assert len(identity_latch_rows(db)) == 1
 
 
 def _established(db, client, gate):
@@ -1956,7 +1926,7 @@ def test_the_no_op_guards_alone_cannot_latch_within_one_sync(env):
     mgr = _established(db, client, gate)
 
     before = len(client.status_queries)
-    client.status_script = [_misrouted_status() for _ in range(50)]
+    client.status_script = [misrouted_order_status() for _ in range(50)]
     client.place_script = ["ok"] * 20
     client.modify_script = ["ok"] * 20
     mgr._kill_switch.fired_total = 1  # rows are suspect: the guards must ask
@@ -1971,7 +1941,7 @@ def test_the_no_op_guards_alone_cannot_latch_within_one_sync(env):
     assert guard_probes > 0, "the guards never asked — this test would be vacuous"
     assert guard_probes < K, f"guards alone made {guard_probes} probes, threshold is {K}"
     assert mgr.identity.latched is False
-    assert _latch_rows(db) == []
+    assert identity_latch_rows(db) == []
 
 
 def test_a_persistently_misrouting_venue_latches_within_a_few_syncs(env):
@@ -1993,7 +1963,7 @@ def test_a_persistently_misrouting_venue_latches_within_a_few_syncs(env):
     client, gate = _FakeClient(), _gate()
     mgr = _established(db, client, gate)
 
-    client.status_script = [_misrouted_status() for _ in range(200)]
+    client.status_script = [misrouted_order_status() for _ in range(200)]
     client.place_script = ["raise", "ok"] + ["raise"] * 40
     client.modify_script = ["raise", "ok"] + ["raise"] * 40
     mgr._kill_switch.fired_total = 1
@@ -2011,7 +1981,7 @@ def test_a_persistently_misrouting_venue_latches_within_a_few_syncs(env):
     assert mgr.identity.latched is True
     assert syncs == 2  # measured: the worst cloid's streak crosses on sync 2
     assert mgr.identity.unreadable_streak >= K
-    assert len(_latch_rows(db)) == 1
+    assert len(identity_latch_rows(db)) == 1
 
 
 def test_a_failed_latch_audit_write_neither_crashes_the_tick_nor_drops_the_latch(env):
@@ -2028,7 +1998,7 @@ def test_a_failed_latch_audit_write_neither_crashes_the_tick_nor_drops_the_latch
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
-    client.status_script = [_misrouted_status() for _ in range(K)]
+    client.status_script = [misrouted_order_status() for _ in range(K)]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
     def _busy(*_args, **_kwargs):
@@ -2059,9 +2029,9 @@ def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env
     _seed_long(db)
     client, gate = _FakeClient(), _gate()
     client.status_script = [
-        *[_misrouted_status() for _ in range(K)],
+        *[misrouted_order_status() for _ in range(K)],
         {"status": "unknownOid"},
-        *[_misrouted_status() for _ in range(K)],
+        *[misrouted_order_status() for _ in range(K)],
     ]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
@@ -2076,4 +2046,4 @@ def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env
         mgr._row_still_rests(_OUR_ROW, role="stop_loss")
     assert mgr.identity.latched is True
     # A second episode, a second row — the two are distinguishable in the trail.
-    assert len(_latch_rows(db)) == 2
+    assert len(identity_latch_rows(db)) == 2

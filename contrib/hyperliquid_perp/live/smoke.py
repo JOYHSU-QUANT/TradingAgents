@@ -1111,7 +1111,8 @@ class SmokeTestRunner:
             # The documented unknownOid marker: the exchange never saw it, so
             # nothing landed and there is nothing to book.
             return exc
-        exchange_order_id, status_word = resolved
+        exchange_order_id = resolved.exchange_order_id
+        status_word = resolved.status
         local_status = local_status_for_exchange_status(status_word)
         try:
             self._insert_probe_row(
@@ -1378,14 +1379,14 @@ class SmokeTestRunner:
                     f"orderStatus answered unknownOid for a cloid the exchange "
                     f"booked (oid {booked_oid})"
                 )
-            oid, status = resolved
+            oid, status = resolved.exchange_order_id, resolved.status
             return SmokeStepResult(
                 "passed", detail=f"orderStatus resolved the cloid to oid {oid} ({status})"
             )
         if resolved is not None:
             raise _SmokeAbort(
                 f"orderStatus resolved a cloid the venue refused to book "
-                f"(oid {resolved[0]}) — the submit ack and orderStatus disagree"
+                f"(oid {resolved.exchange_order_id}) — the submit ack and orderStatus disagree"
             )
         return SmokeStepResult(
             "passed",

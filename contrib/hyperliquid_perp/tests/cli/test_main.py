@@ -1027,22 +1027,19 @@ def test_context_refusal_freshness_limit_has_a_floor(exchange_time):
     assert msg is not None and "raised to the 30m floor" in msg
 
 
-def test_freshness_ceiling_tracks_the_decision_cycle():
-    # Drift lock. The freshness module writes the ceiling out instead of
-    # importing CYCLE_INTERVAL (that import drags the paper engine into the
-    # keyless --context-only path), so this test is what keeps "3 x the 4h
-    # decision cycle" — the phrase the refusal message prints at an operator —
-    # true.
-    from contrib.hyperliquid_perp.paper.scheduler import CYCLE_INTERVAL
-
-    # Both halves: the cycle constant tracks the scheduler, AND the ceiling is
-    # three of it — a mutation setting the ceiling to 4 x cycle passed every
+def test_freshness_ceiling_is_three_shared_decision_cycles():
+    # The ceiling used to be written out here and drift-locked against the
+    # scheduler's CYCLE_INTERVAL; it now derives from the shared cadence in
+    # ``common.constants`` (issue #122). What still needs pinning is the
+    # multiplier — a mutation setting the ceiling to 4 x cycle passed every
     # other test in this file (1d still takes the 28h raise, the cap tests
-    # compare against the ceiling itself), so the derivation is pinned too.
+    # compare against the ceiling itself) — and that the label names THAT
+    # cadence (the whole-hours guard behind it is the helper's own test).
+    from contrib.hyperliquid_perp.common.constants import CYCLE_INTERVAL
+
     cycle_ms = int(CYCLE_INTERVAL.total_seconds() * 1000)
-    assert cycle_ms == freshness_mod._DECISION_CYCLE_MS
     assert 3 * cycle_ms == freshness_mod._MAX_CANDLE_AGE_CEILING_MS
-    assert f"{int(CYCLE_INTERVAL.total_seconds()) // 3600}h" == freshness_mod._CYCLE_LABEL
+    assert f"{CYCLE_INTERVAL // timedelta(hours=1)}h" == freshness_mod._CYCLE_LABEL
 
 
 def test_the_freshness_floor_label_is_derived_from_the_floor():

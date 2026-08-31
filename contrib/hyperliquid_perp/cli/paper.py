@@ -559,7 +559,7 @@ def _paper_loop(
     :class:`~.paper.run_lock.RunLockError` out of the loop (see
     :func:`~.paper.run_lock.heartbeat_run_lock`).
     """
-    from ..paper.no_decision import note_cycle_outcome
+    from ..common.no_decision import note_cycle_outcome
     from ..paper.reconcile import backfill_pending_funding
     from ..paper.run_lock import heartbeat_run_lock
     from ..paper.scheduler import CycleEvent

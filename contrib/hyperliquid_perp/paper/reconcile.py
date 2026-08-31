@@ -39,11 +39,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+from ..common.instants import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from . import accounting
 from .engine import FundingSource
-from .scheduler import parse_instant
 
 __all__ = [
     "STALE_PENDING_FUNDING",

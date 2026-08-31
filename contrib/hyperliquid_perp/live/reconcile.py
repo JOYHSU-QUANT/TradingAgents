@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.enum_guard import check_enum
+from ..common.instants import whole_hours_label
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,
@@ -125,12 +126,9 @@ _FILL_CROSSCHECK_LOOKBACK = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)
 # 5h30m) and understate how long an outage can go unbooked, so the label
 # refuses at import rather than round — retuning the backfill window to a
 # fraction of an hour is a change this message has to be rewritten for.
-if DEFAULT_LOOKBACK_SECONDS % 3600:
-    raise ValueError(
-        "fill_backfill.DEFAULT_LOOKBACK_SECONDS must be a whole number of hours; "
-        f"the reconciler's operator warning renders it as hours (got {DEFAULT_LOOKBACK_SECONDS}s)"
-    )
-_LOOKBACK_LABEL = f"{DEFAULT_LOOKBACK_SECONDS // 3600}h"
+_LOOKBACK_LABEL = whole_hours_label(
+    _FILL_CROSSCHECK_LOOKBACK, what="fill_backfill.DEFAULT_LOOKBACK_SECONDS"
+)
 _FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
 
 # The fail-safe fill-leg fallback: nothing fetched, nothing proven. Shared by

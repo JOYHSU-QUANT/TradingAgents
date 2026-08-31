@@ -13,10 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from ..common.instants import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import PositionState
-from .scheduler import parse_instant
 
 __all__ = ["BookPosition", "read_book_position"]
 

@@ -8,6 +8,12 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
+from contrib.hyperliquid_perp.common.no_decision import (
+    NO_DECISION_STREAK_THRESHOLD,
+    no_decision_shortfall,
+    note_cycle_outcome,
+    trailing_failure_streaks,
+)
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
@@ -22,12 +28,6 @@ from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine
 from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider
-from contrib.hyperliquid_perp.paper.no_decision import (
-    NO_DECISION_STREAK_THRESHOLD,
-    no_decision_shortfall,
-    note_cycle_outcome,
-    trailing_failure_streaks,
-)
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput, PaperScheduler
 from contrib.hyperliquid_perp.paper.validation import validate_run
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -841,7 +841,7 @@ def test_streak_is_dated_by_when_the_cycle_terminalized_not_by_its_slot(tmp_path
 def test_streak_recency_window_boundary_is_exclusive(tmp_path):
     # Pins the comparison direction: exactly at the window the streak still
     # describes the run, one second past it does not.
-    from contrib.hyperliquid_perp.paper.no_decision import _STREAK_RECENCY_WINDOW
+    from contrib.hyperliquid_perp.common.no_decision import _STREAK_RECENCY_WINDOW
 
     db = _bare_run(tmp_path)
     last = _insert_outcomes(db, [_STALE] * NO_DECISION_STREAK_THRESHOLD)
@@ -856,7 +856,7 @@ def test_streaks_reject_an_impossible_pair():
     # The query cannot build these, but the type is also constructed by hand.
     # A stale subset larger than its superset would make the shortfall claim
     # "all refused as stale market data" over a mixed streak.
-    from contrib.hyperliquid_perp.paper.no_decision import TrailingFailureStreaks
+    from contrib.hyperliquid_perp.common.no_decision import TrailingFailureStreaks
 
     with pytest.raises(ValueError, match="cannot exceed"):
         TrailingFailureStreaks(1, 2, None)
@@ -867,7 +867,7 @@ def test_streaks_reject_an_impossible_pair():
 def test_shortfall_helper_withholds_a_verdict_it_cannot_date():
     # A run whose newest terminal stamp is unreadable cannot be dated, so the
     # helper reports nothing rather than fabricating a current-state verdict.
-    from contrib.hyperliquid_perp.paper.no_decision import TrailingFailureStreaks
+    from contrib.hyperliquid_perp.common.no_decision import TrailingFailureStreaks
 
     undatable = TrailingFailureStreaks(NO_DECISION_STREAK_THRESHOLD, 0, None)
     assert no_decision_shortfall(undatable, now=_T0) is None
@@ -882,7 +882,7 @@ def test_no_decision_shortfall_reports_a_streak_stamped_in_the_future():
     # gate. A stamp ahead of ``now`` is trivially recent; only the size of a
     # POSITIVE gap can make a streak stale. Pinned across the whole future
     # side, not just the race-sized one.
-    from contrib.hyperliquid_perp.paper.no_decision import TrailingFailureStreaks
+    from contrib.hyperliquid_perp.common.no_decision import TrailingFailureStreaks
 
     for ahead_by in (timedelta(milliseconds=5), timedelta(seconds=30), timedelta(days=3)):
         ahead = TrailingFailureStreaks(NO_DECISION_STREAK_THRESHOLD, 0, _T0 + ahead_by)
@@ -895,7 +895,7 @@ def test_note_cycle_outcome_escalates_to_error_at_the_threshold(caplog):
     import logging
 
     streak = 0
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"):
         for _ in range(NO_DECISION_STREAK_THRESHOLD + 1):
             streak = note_cycle_outcome(streak, "api_failed", STALE_MARKET_DATA_ERROR, run_id="r")
     assert streak == NO_DECISION_STREAK_THRESHOLD + 1
@@ -917,7 +917,7 @@ def test_note_cycle_outcome_is_reset_by_a_cycle_that_decided(caplog):
     import logging
 
     streak = 0
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"):
         streak = note_cycle_outcome(streak, "api_failed", STALE_MARKET_DATA_ERROR, run_id="r")
         streak = note_cycle_outcome(streak, "api_failed", STALE_MARKET_DATA_ERROR, run_id="r")
         assert streak == 2
@@ -937,7 +937,7 @@ def test_note_cycle_outcome_counts_any_failure_class(caplog):
     import logging
 
     streak = 0
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"):
         for _ in range(NO_DECISION_STREAK_THRESHOLD):
             streak = note_cycle_outcome(streak, "api_failed", "connection", run_id="r")
     assert streak == NO_DECISION_STREAK_THRESHOLD

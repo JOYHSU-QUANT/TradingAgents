@@ -1978,9 +1978,9 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
 
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
+    from contrib.hyperliquid_perp.common.no_decision import NO_DECISION_STREAK_THRESHOLD
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
     from contrib.hyperliquid_perp.paper.clock import ManualClock
-    from contrib.hyperliquid_perp.paper.no_decision import NO_DECISION_STREAK_THRESHOLD
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
 
     path, db = _seed_db(tmp_path)
@@ -2030,7 +2030,7 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(
@@ -2123,7 +2123,7 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(

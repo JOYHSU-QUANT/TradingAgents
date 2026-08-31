@@ -259,7 +259,7 @@ def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode=
 
     Each outcome is a bare status string, or a ``(status, error_type)`` pair
     when the test needs the §6.2 class the row carries — the acceptance
-    validators key on it (``paper.no_decision.trailing_failure_streaks``), so
+    validators key on it (``common.no_decision.trailing_failure_streaks``), so
     tests about those verdicts have to be able to set it.
     """
     with db.transaction() as conn:

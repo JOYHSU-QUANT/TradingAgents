@@ -24,8 +24,9 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ...common.constants import ERROR_TYPES, STALE_MARKET_DATA_ERROR
+from ...common.constants import CYCLE_INTERVAL, ERROR_TYPES, STALE_MARKET_DATA_ERROR
 from ...common.enum_guard import check_enum
+from ...common.instants import whole_hours_label
 from .schema import PerpMarketContext, interval_to_ms
 
 __all__ = [
@@ -85,28 +86,16 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # cycles of stale data (except where that would sit under a single healthy bar
 # — then one bar plus one cycle, 28h for 1d), and never so tight that ordinary
 # jitter refuses a cycle.
-# The ceiling states three DECISION cycles, but is written out rather than
-# derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
-# would pull the whole paper engine into the keyless --context-only path to read
-# one timedelta. That costs about 25ms, and the RECIPE matters more than the
-# figure — re-measure rather than trust it. Time the MARGINAL import, the only
-# one this decision is about: import ``engine_bridge`` (this module's caller,
-# already loaded — with ``paper.config`` — before any guard runs), then time
-# ``importlib.import_module("contrib.hyperliquid_perp.paper.scheduler")``.
-# Importing this module alone and then timing it answers a different
-# question (roughly twice the figure, since ``paper.config`` is not yet paid).
-# Repeated runs land within a few ms of each other. A cold interpreter reports
-# ~100ms instead and answers a different question: roughly three quarters of
-# that is already paid by the time this line is reached.
-# That leaves the value duplicated, so a
-# drift-lock test asserts the two against each other — a changed cycle length
-# fails a test instead of silently leaving this bound, and the operator-facing
-# "3 x the 4h decision cycle" text, lying. (Extracting CYCLE_INTERVAL into a
-# dependency-free module the way indicator_vocab holds REGIME_INDICATORS would
-# remove the duplication outright; it belongs with the scheduler refactor, not
-# here.)
-_DECISION_CYCLE_MS = 4 * 60 * 60_000
-_CYCLE_LABEL = "4h"
+# The ceiling states three DECISION cycles, so it is DERIVED from the cadence
+# it names, ``common.constants.CYCLE_INTERVAL``, and a changed cycle length
+# moves this bound — and the operator-facing "3 x the 4h decision cycle" text —
+# with it. (Until issue #122 the cadence lived on ``paper.scheduler``, whose
+# import would have pulled the whole paper engine into this keyless module for
+# one timedelta, so the value was written out here and drift-locked instead.)
+# The label refuses a cadence that is not whole hours at import, like the
+# reconciler's lookback label — see ``whole_hours_label``.
+_DECISION_CYCLE_MS = int(CYCLE_INTERVAL.total_seconds() * 1000)
+_CYCLE_LABEL = whole_hours_label(CYCLE_INTERVAL, what="common.constants.CYCLE_INTERVAL")
 _MAX_CANDLE_AGE_CEILING_MS = _MAX_CANDLE_AGE_INTERVALS * _DECISION_CYCLE_MS
 _MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
 

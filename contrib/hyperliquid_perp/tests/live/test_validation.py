@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.common.no_decision import TrailingFailureStreaks
 from contrib.hyperliquid_perp.live import smoke
 from contrib.hyperliquid_perp.live.fills import ExchangeFill, post_live_fill
 from contrib.hyperliquid_perp.live.validation import (
@@ -20,7 +21,6 @@ from contrib.hyperliquid_perp.live.validation import (
     validate_live_run,
 )
 from contrib.hyperliquid_perp.paper import accounting
-from contrib.hyperliquid_perp.paper.no_decision import TrailingFailureStreaks
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
@@ -2914,7 +2914,7 @@ def test_live_no_decision_streak_is_a_shortfall_not_a_failure(tmp_path):
     # constant, the query and the helper); what is live-specific, and only
     # testable here, is that it reaches ``shortfalls``/``live_ready`` rather
     # than ``failures``.
-    from contrib.hyperliquid_perp.paper.no_decision import NO_DECISION_STREAK_THRESHOLD
+    from contrib.hyperliquid_perp.common.no_decision import NO_DECISION_STREAK_THRESHOLD
 
     db = Database(tmp_path / "live.db")
     _init_live_run(db)

@@ -32,8 +32,8 @@ still pending long past settlement (their P&L is uncounted by design) and a
 config drift recorded at the last resume.
 
 The no-decision escalation policy the gate's last condition rests on (issue
-#50) — threshold, streak query, shortfall wording — is :mod:`.no_decision`'s;
-this module only consumes it.
+#50) — threshold, streak query, shortfall wording — is
+:mod:`..common.no_decision`'s; this module only consumes it.
 """
 
 from __future__ import annotations
@@ -43,13 +43,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 
+from ..common.instants import parse_instant
+from ..common.no_decision import (
+    TrailingFailureStreaks,
+    no_decision_shortfall,
+    trailing_failure_streaks,
+)
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import DECIMAL_CONTEXT
 from . import accounting
-from .no_decision import TrailingFailureStreaks, no_decision_shortfall, trailing_failure_streaks
 from .reconcile import STALE_PENDING_FUNDING
-from .scheduler import parse_instant
 
 __all__ = [
     "MIN_CYCLES_FOR_PHASE3",

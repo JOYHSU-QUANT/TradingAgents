@@ -7,9 +7,11 @@ reason ``config.load_config`` had to lazy-import ``live.config``.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 
 __all__ = [
+    "CYCLE_INTERVAL",
     "ERROR_TYPES",
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
     "HOLDING_COST_HOURS",
@@ -97,6 +99,19 @@ RANGE_MIDPOINT = 0.5
 # made the dependency two-way; it sits here instead, and ``live.config``
 # re-exports it for its own callers (issue #102).
 EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
+
+# The rolling decision cadence (phase2-spec §3): one decision every four hours,
+# rolling from the actual decision instant, never a fixed UTC boundary. Here
+# rather than on the paper scheduler that drives it because four readers in
+# three layers state things in units of it and none may import the scheduler
+# for a timedelta: the scheduler itself, the live driver's default
+# ``cycle_interval``, the no-decision policy's recency window
+# (:mod:`.no_decision`) and the freshness guard's age ceiling
+# (``domains.perp.freshness``). While this lived in ``paper.scheduler`` the
+# guard wrote "3 x 4h" out by hand and drift-locked it, since importing the
+# scheduler pulled the whole paper engine into the keyless ``--context-only``
+# path (issue #122). ``paper.scheduler`` re-exports it for its own callers.
+CYCLE_INTERVAL = timedelta(hours=4)
 
 # The legal network vocabulary, shared by config.py's ``network`` validation
 # and live/config.py's ``live.network`` validation. Deliberately duplicated

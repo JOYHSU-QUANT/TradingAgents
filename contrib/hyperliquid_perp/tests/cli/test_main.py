@@ -2,10 +2,10 @@
 
 Covers the deterministic seams that do not need a live engine or network:
 ``_build_engine_config`` (config overlay onto the engine DEFAULT_CONFIG) and
-``_load_position`` (wallet/​error/​success branches) — defined in
-``engine_bridge`` and exercised as ``bridge_mod`` — the pre-LLM context guards
+``_load_position`` (wallet/​error/​success branches), both defined in
+``engine_bridge`` and exercised as ``bridge_mod``; the pre-LLM context guards
 (``domains.perp.context_guards``, exercised as ``guards_mod``; the freshness
-guard's own pieces as ``freshness_mod``), plus ``main.py``'s entry-point shells
+guard's own pieces as ``freshness_mod``); and ``main.py``'s entry-point shells
 (``run_engine`` / ``run_context_only`` / ``main``), exercised as ``main_mod``.
 Patch targets follow the DEFINING module: main reaches every bridge symbol
 through ``engine_bridge.X`` attribute access and every guard through
@@ -52,8 +52,8 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
 def test_indicator_names_handles_null_and_empty():
     # A bare `indicators:` in YAML parses to None — it must fall back to the
     # defaults, not crash the downstream iteration; an explicit [] is honoured.
-    assert vocab_mod.indicator_names({}) == vocab_mod.DEFAULT_INDICATORS
-    assert vocab_mod.indicator_names({"indicators": None}) == vocab_mod.DEFAULT_INDICATORS
+    assert vocab_mod.indicator_names({}) == list(vocab_mod.DEFAULT_INDICATORS)
+    assert vocab_mod.indicator_names({"indicators": None}) == list(vocab_mod.DEFAULT_INDICATORS)
     assert vocab_mod.indicator_names({"indicators": []}) == []
     assert vocab_mod.indicator_names({"indicators": ["rsi_14"]}) == ["rsi_14"]
 

@@ -103,7 +103,7 @@ EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
 # The rolling decision cadence (phase2-spec §3): one decision every four hours,
 # rolling from the actual decision instant, never a fixed UTC boundary. Here
 # rather than on the paper scheduler that drives it because four readers in
-# three layers state things in units of it and none may import the scheduler
+# four layers state things in units of it and none may import the scheduler
 # for a timedelta: the scheduler itself, the live driver's default
 # ``cycle_interval``, the no-decision policy's recency window
 # (:mod:`.no_decision`) and the freshness guard's age ceiling

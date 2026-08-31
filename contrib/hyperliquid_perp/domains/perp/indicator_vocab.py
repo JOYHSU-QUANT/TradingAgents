@@ -51,8 +51,9 @@ def supported_indicators() -> list[str]:
 
 # The default indicator set is "everything the engine supports" by construction
 # — a hand-kept literal would drift silently past the loader's vocabulary check
-# (which only sees operator-written lists, never this default).
-DEFAULT_INDICATORS = supported_indicators()
+# (which only sees operator-written lists, never this default). A tuple: it is
+# a shared module constant, and ``indicator_names`` hands callers a fresh list.
+DEFAULT_INDICATORS = tuple(supported_indicators())
 
 
 def indicator_names(config: dict) -> list[str]:

@@ -28,8 +28,9 @@ time, giving the same seam a second patch surface where a stub applied to the
 wrong one is silently invisible to the other side's callers. One lookup site
 means one patch surface: a test stubbing a function here, or a collaborator of
 one (``HyperliquidClient``, ``HyperliquidMarketData``, …), always patches
-``engine_bridge`` itself — and, by the same rule, nothing defined elsewhere is
-re-bound here (the context guards are patched on ``context_guards``).
+``engine_bridge`` itself. The same rule is why the context guards, which
+moved to ``context_guards``, are NOT re-exported from here: they are patched
+on their own module, and a second binding here would be the second surface.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ from .paper.config import PaperTradingConfig
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_ANALYSTS = ["market", "social", "news"]
+_DEFAULT_ANALYSTS = ("market", "social", "news")
 
 
 def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:

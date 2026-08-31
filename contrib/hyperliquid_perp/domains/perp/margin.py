@@ -39,6 +39,7 @@ __all__ = [
     "MarginTier",
     "MarginSchedule",
     "account_equity",
+    "funding_cost",
     "position_notional",
     "unrealized_pnl",
 ]
@@ -65,6 +66,20 @@ def unrealized_pnl(size: Decimal, mark_price: Decimal, entry_price: Decimal) -> 
 def account_equity(wallet_balance: Decimal, total_unrealized_pnl: Decimal) -> Decimal:
     """``wallet_balance + total_unrealized_pnl`` (§6.1)."""
     return wallet_balance + total_unrealized_pnl
+
+
+def funding_cost(signed_position_notional: Decimal, funding_rate: Decimal) -> Decimal:
+    """``signed_position_notional * funding_rate`` — one hour's funding, COST-signed (§6.5).
+
+    Positive means the position PAYS: a long (positive notional) at a positive
+    rate pays, a short receives. The ledger states the same quantity the other
+    way round — income positive — so ``paper.accounting.funding_pnl`` is this
+    negated, and the prompt's holding cost (``marginal_cost``) is this times
+    the horizon it states. One formula, three readers: a sign that drifted in
+    one copy would have the prompt calling a rebate a cost while the books
+    credited it (issue #134).
+    """
+    return signed_position_notional * funding_rate
 
 
 @dataclass(frozen=True)

@@ -44,6 +44,23 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
 )
 
+
+def _assert_position_blind(result):
+    """A ``_build_context`` stand-in that pins the one-shot lane's ``position=None``.
+
+    Since ``position`` became required (issue #134), most stand-ins in this
+    file absorb it with ``**_kw`` — which means deleting ``position=None`` from
+    ``main.py`` would leave the whole suite green and fail only at runtime.
+    One stand-in checks what actually arrived, so that deletion is caught here.
+    """
+
+    def _stand_in(config, coin, **kw):
+        assert kw == {"position": None}, f"the one-shot lane passed {kw!r}"
+        return result()
+
+    return _stand_in
+
+
 # --------------------------------------------------------------------------
 # _build_engine_config — overlay the perp ``engine`` block onto DEFAULT_CONFIG
 # --------------------------------------------------------------------------
@@ -413,7 +430,9 @@ def _stub_engine(
             # tests are about what happens AFTER the context guards pass.
             return datetime.now(timezone.utc)
 
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_Ctx(), object()))
+    monkeypatch.setattr(
+        bridge_mod, "_build_context", _assert_position_blind(lambda: (_Ctx(), object()))
+    )
     monkeypatch.setattr(main_mod, "render_market_context", lambda ctx: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "0xReadOnly")
     monkeypatch.setattr(
@@ -525,7 +544,9 @@ def test_run_engine_aborts_on_insufficient_candles(monkeypatch, capsys):
         # operator-facing diagnosis: "wait for warm-up" vs "engine broken").
         indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
 
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_ThinCtx(), object()))
+    monkeypatch.setattr(
+        bridge_mod, "_build_context", lambda config, coin, **_kw: (_ThinCtx(), object())
+    )
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -577,7 +598,7 @@ def test_run_context_only_warns_and_exits_4_on_degraded_context(
     # RUNBOOK refusal will look. The degraded verdict also exits 4 (the repo's
     # probe convention) so a preflight can gate on the code, not stderr text.
     ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
@@ -599,7 +620,7 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
         exchange_time=None,
         as_of=datetime.now(timezone.utc),  # a live feed clears the staleness guard
     )
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
@@ -621,7 +642,7 @@ def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):
     monkeypatch.setattr(
         bridge_mod,
         "_build_context",
-        lambda config, coin: fetched.append("fetched") or (object(), object()),
+        lambda config, coin, **_kw: fetched.append("fetched") or (object(), object()),
     )
     rc = main_mod.run_context_only({"risk": {"max_target_margin_pct": 150}}, "BTC")
     assert rc == 1
@@ -677,7 +698,9 @@ def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
         candle_count = 200  # past the warm-up gate -> not under-warm
         indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
 
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_DeadCtx(), object()))
+    monkeypatch.setattr(
+        bridge_mod, "_build_context", lambda config, coin, **_kw: (_DeadCtx(), object())
+    )
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -698,7 +721,7 @@ def test_run_engine_aborts_when_only_atr_fails(monkeypatch, capsys):
         indicators = {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": None}
 
     monkeypatch.setattr(
-        bridge_mod, "_build_context", lambda config, coin: (_AtrDeadCtx(), object())
+        bridge_mod, "_build_context", lambda config, coin, **_kw: (_AtrDeadCtx(), object())
     )
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
@@ -719,7 +742,9 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
         candle_count = 200
         indicators = {"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0}  # no atr_14 key
 
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (_NoAtrCtx(), object()))
+    monkeypatch.setattr(
+        bridge_mod, "_build_context", lambda config, coin, **_kw: (_NoAtrCtx(), object())
+    )
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -758,7 +783,7 @@ def test_run_engine_refuses_untradeable_regime_indicators(
 ):
     _stub_engine(monkeypatch)
     ctx = SimpleNamespace(candle_count=candle_count, indicators=ctx_indicators)
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine(config, "BTC")
@@ -1624,7 +1649,7 @@ def test_build_context_fails_closed_when_the_exchange_clock_is_unreadable(monkey
     monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     with pytest.raises(MalformedResponseError, match="'time' is unusable"):
-        bridge_mod._build_context({}, "BTC")
+        bridge_mod._build_context({}, "BTC", position=None)
 
 
 def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monkeypatch):
@@ -1675,7 +1700,7 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
     monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
-    bridge_mod._build_context({}, "BTC")
+    bridge_mod._build_context({}, "BTC", position=None)
     assert handed["coin"] == "BTC"
     assert handed["exchange_time"] == exchange_clock
     # ...and the host reading is taken ADJACENT to that read — between the
@@ -1749,16 +1774,70 @@ def test_build_context_hands_the_parsed_market_data_block_to_the_fetch_and_the_b
         "funding_zscore_window_days": 7,
         "volume_profile_window_candles": 30,
     }
-    bridge_mod._build_context({"market_data": block}, "BTC")
+    bridge_mod._build_context({"market_data": block}, "BTC", position=None)
     assert handed["market_data"] == MarketDataConfig(**block)
     assert fetched == {"interval": "1h", "lookback": 50, "window_days": 7}
     # Absent block -> every field at its default, and a blank key
     # (`volume_profile_window_candles:`) is treated like absent.
-    bridge_mod._build_context({}, "BTC")
+    bridge_mod._build_context({}, "BTC", position=None)
     assert handed["market_data"] == MarketDataConfig()
     assert fetched == {"interval": "4h", "lookback": 200, "window_days": 30}
-    bridge_mod._build_context({"market_data": {"volume_profile_window_candles": None}}, "BTC")
+    bridge_mod._build_context(
+        {"market_data": {"volume_profile_window_candles": None}}, "BTC", position=None
+    )
     assert handed["market_data"].volume_profile_window_candles == 0
+
+
+def test_build_context_forwards_the_position_inputs_to_the_builder_verbatim(monkeypatch):
+    # The one link in the chain nothing else can see (issue #134): the provider
+    # reads the books, the builder prices them, and THIS hands one to the
+    # other. Dropping it — ``position=None`` here — leaves every other test
+    # green while the daemons' prompts silently lose their Position: section,
+    # a failure whose only symptom is a section that never appears (the same
+    # blind spot the market_data wiring pin above exists for). And there is no
+    # default to fall into: this, not the builder, is the seam callers reach
+    # for, so omitting the argument has to be a TypeError rather than a
+    # silently position-blind prompt.
+    handed = {}
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            return []
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    def _builder(*args, **kwargs):
+        handed["position"] = kwargs.get("position", "ABSENT")
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+
+    sentinel = object()
+    bridge_mod._build_context({}, "BTC", position=sentinel)
+    assert handed["position"] is sentinel
+    bridge_mod._build_context({}, "BTC", position=None)
+    assert handed["position"] is None
+    with pytest.raises(TypeError, match="position"):
+        bridge_mod._build_context({}, "BTC")
 
 
 def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():
@@ -1811,7 +1890,7 @@ def test_run_engine_aborts_on_a_stale_context(monkeypatch, capsys):
     # feed costs nothing and exits 1 with the cause on stderr.
     _stub_engine(monkeypatch)
     ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
     calls = []
     monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
@@ -1825,7 +1904,7 @@ def test_run_context_only_warns_on_a_stale_context(monkeypatch, capsys):
     # a stale context is the one degraded state whose rendering looks entirely
     # healthy (real prices, real indicators, a real regime).
     ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin: (ctx, object()))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
     monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
     monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")
@@ -2164,7 +2243,7 @@ def test_main_loads_dotenv_before_key_check(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
-    def _stop(config, coin):
+    def _stop(config, coin, **_kw):
         raise ExchangeError("stop before any network call")
 
     monkeypatch.setattr(bridge_mod, "_build_context", _stop)

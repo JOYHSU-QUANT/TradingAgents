@@ -2,43 +2,27 @@
 
 One read shared by the paper daemon and the live loop: both keep the same
 ``current_positions`` / ``current_account_state`` / ``fills`` tables, and the
-``cli._provider._EngineDecisionProvider`` that renders the section runs in
-both. Reads only; pricing is
+``cli._provider._EngineDecisionProvider`` that READS these books runs in
+both. Reads only; the section is priced by
+``domains.perp.context_builder.build_market_context`` and rendered by
+``domains.perp.prompt_context``; the pricing itself is
 :func:`..domains.perp.marginal_cost.build_position_context`'s.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-from decimal import Decimal
-
 from ..common.instants import parse_instant
+
+# The DTO itself moved to ``domains/`` — the context builder assembles the
+# position section and must not import ``paper/`` — and is re-exported here,
+# beside its only reader, so the import path callers already use keeps working
+# (the same thin-shim shape as ``domains/perp/config_coercion.py``).
+from ..domains.perp.marginal_cost import BookPosition
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import PositionState
 
 __all__ = ["BookPosition", "read_book_position"]
-
-
-@dataclass(frozen=True)
-class BookPosition:
-    """The books' position facts: signed size, entry, wallet balance, newest fill.
-
-    ``size == 0`` is flat (``entry_price`` then ``None``, as on
-    :class:`~..persistence.models.PositionState`). ``wallet_balance`` is the
-    ledger's — realized PnL, fees and funding already posted — so the caller
-    adds only unrealized PnL at its own mark to reach equity.
-    ``last_fill_at`` is the run's newest fill of ANY kind (the same
-    ``fills.timestamp`` maximum ``ai_inputs.last_fill_time`` records), not
-    the position's opening time — the books do not keep one, and "when did
-    this position last change" is the honest fact for a churn-aware prompt.
-    """
-
-    size: Decimal
-    entry_price: Decimal | None
-    wallet_balance: Decimal
-    last_fill_at: datetime | None
 
 
 def read_book_position(db: Database, run_id: str, coin: str) -> BookPosition | None:

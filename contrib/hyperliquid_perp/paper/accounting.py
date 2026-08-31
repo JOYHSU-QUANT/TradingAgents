@@ -40,6 +40,7 @@ from ..common.enum_guard import check_enum
 from ..domains.perp.margin import (
     MarginSchedule,
     account_equity,
+    funding_cost,
     position_notional,
     unrealized_pnl,
 )
@@ -102,6 +103,12 @@ def _dec_or_none(value: object) -> Decimal | None:
 # ``position_notional`` / ``unrealized_pnl`` / ``account_equity`` live in
 # ``domains.perp.margin`` (the liquidation search shares them) and are
 # re-exported here so accounting stays the one-stop module for the §6 formulas.
+# ``funding_cost`` is imported from there too but deliberately kept OUT of
+# ``__all__``: it is COST-signed, and this module's public reading of that hour
+# is the ledger's ``funding_pnl`` (income positive). Two names for one formula
+# is the point; advertising both signs from one namespace is a trap. (The name
+# is still bound here, so a direct import reaches it — the guard is against
+# star-imports and against anyone reading ``__all__`` as the module's surface.)
 
 
 def available_balance(equity: Decimal, used_initial_margin_total: Decimal) -> Decimal:
@@ -152,8 +159,15 @@ def fee_for_notional(fill_notional: Decimal, taker_fee_rate: Decimal) -> Decimal
 
 
 def funding_pnl(signed_position_notional: Decimal, funding_rate: Decimal) -> Decimal:
-    """``-signed_position_notional * funding_rate`` — income positive, cost negative (§6.5)."""
-    return -signed_position_notional * funding_rate
+    """``-signed_position_notional * funding_rate`` — income positive, cost negative (§6.5).
+
+    The ledger's sign convention over :func:`~..domains.perp.margin.funding_cost`,
+    which states the same hour COST-signed for the prompt. The negation is the
+    whole difference between the two readings, and it lives here — written out
+    once — so the formula itself cannot drift between the books and what the
+    model is told a position costs to hold (issue #134).
+    """
+    return -funding_cost(signed_position_notional, funding_rate)
 
 
 def used_initial_margin(notionals: Iterable[Decimal], leverage: Decimal) -> Decimal:

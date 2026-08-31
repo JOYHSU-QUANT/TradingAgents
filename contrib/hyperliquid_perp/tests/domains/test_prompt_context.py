@@ -13,7 +13,12 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.marginal_cost import build_position_context
+from contrib.hyperliquid_perp.domains.perp.marginal_cost import (
+    BookPosition,
+    PositionInputs,
+    PositionPricing,
+    build_position_context,
+)
 from contrib.hyperliquid_perp.domains.perp.prompt_context import (
     context_shape,
     render_market_context,
@@ -600,7 +605,23 @@ def _position(**overrides):
         "last_fill_at": _FILL_AT,
     }
     base.update(overrides)
-    return build_position_context(**base)
+    inputs = PositionInputs(
+        book=BookPosition(
+            size=base["size"],
+            entry_price=base["entry_price"],
+            wallet_balance=base["wallet_balance"],
+            last_fill_at=base["last_fill_at"],
+        ),
+        pricing=PositionPricing(
+            leverage=base["leverage"],
+            grid_min=base["grid_min"],
+            grid_max=base["grid_max"],
+            grid_step=base["grid_step"],
+            taker_fee_rate=base["taker_fee_rate"],
+            slippage_bps=base["slippage_bps"],
+        ),
+    )
+    return build_position_context(inputs, mark=base["mark"], funding_rate=base["funding_rate"])
 
 
 def _open_position(**overrides):

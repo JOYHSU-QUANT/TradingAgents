@@ -45,6 +45,7 @@ from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicator_vocab import indicator_names
+from .domains.perp.marginal_cost import PositionInputs
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.schema import PerpMarketContext, PerpPosition
 from .domains.perp.target_decision import DecisionConfig
@@ -134,7 +135,11 @@ def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionCon
 
 
 def _build_context(
-    config: dict, coin: str, *, on_blocking_read: Callable[[], None] | None = None
+    config: dict,
+    coin: str,
+    *,
+    on_blocking_read: Callable[[], None] | None = None,
+    position: PositionInputs | None,
 ) -> tuple[PerpMarketContext, HyperliquidClient]:
     """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``.
 
@@ -155,6 +160,19 @@ def _build_context(
 
     ``None`` for every other caller (the one-shot CLI paths), where no dead man's
     switch is being held open.
+
+    ``position`` is handed straight to the builder, which prices the prompt's
+    ``Position:`` section from it (issue #134). REQUIRED, with no default, for
+    the same reason the builder requires it — and it matters MORE here: this,
+    not the builder, is the composition seam callers actually reach for, so a
+    default would put the builder's guard permanently out of reach. Forgetting
+    it would cost a silently position-blind prompt and a ``context_shape``
+    quietly missing its ``position`` token, with nothing raising. The one-shot
+    CLI writes ``position=None`` and means it: it has no local books, and
+    reads the venue's own position separately to print UNDER the rendered
+    context, deliberately outside the prompt (see
+    ``target_decision.decision_format_instructions`` for why that lane stays
+    blind).
     """
     # The same parse ``load_config`` already ran on this block, so on a loaded
     # config it cannot raise; absent or blank keys take the field defaults.
@@ -221,6 +239,7 @@ def _build_context(
         market_data=market_data,
         indicator_names=indicators,
         exchange_time=exchange_time,
+        position=position,
         host_time_at_exchange_read=host_time_at_exchange_read,
     )
     return ctx, client

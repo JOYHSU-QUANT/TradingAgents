@@ -220,6 +220,82 @@ def test_non_positive_mark_or_leverage_is_rejected(field):
         _build(**{field: D(0)})
 
 
+@pytest.mark.parametrize(
+    ("size", "entry_price"),
+    [
+        # A flat row that kept a stale entry: the pricer's flat branch hardcodes
+        # entry_price=None, so this used to be dropped in silence — no log, no
+        # symptom, a corrupt store fact simply gone.
+        (D(0), D(50000)),
+        # An open position with no entry at all, and one entered at zero: both
+        # reach unrealized_pnl and produce garbage equity, which either surfaces
+        # two modules later in PositionContext or comes out non-positive and
+        # gets REPORTED AS INSOLVENCY, which it is not.
+        (D("0.01"), None),
+        (D("0.01"), D(0)),
+        (D("0.01"), D(-1)),
+    ],
+)
+def test_the_books_size_and_entry_must_agree_before_anything_is_priced(size, entry_price):
+    # The same pairing persistence.models.PositionState enforces on the row
+    # this is read from, restated on the type that leaves the store.
+    with pytest.raises(ValueError, match="BookPosition"):
+        BookPosition(size=size, entry_price=entry_price, wallet_balance=D(1000), last_fill_at=None)
+
+
+def test_a_flat_book_without_an_entry_and_an_open_one_with_a_positive_entry_are_accepted():
+    # The negative cases above are only meaningful if the legal pair passes.
+    assert BookPosition(
+        size=D(0), entry_price=None, wallet_balance=D(1000), last_fill_at=None
+    ).size == D(0)
+    assert BookPosition(
+        size=D("0.01"), entry_price=D(50000), wallet_balance=D(1000), last_fill_at=None
+    ).entry_price == D(50000)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        # An inverted grid: display_targets returns no points, so an OPEN
+        # position reaches PositionContext with no cost rows and is refused
+        # there — at pricing time, deep in a cycle, naming a DTO instead of the
+        # config key. Rejected here it names grid_min/grid_max at construction.
+        ({"grid_min": 60, "grid_max": 30}, "grid_min"),
+        # Above the percent-of-equity range every grid bound upstream lives in.
+        ({"grid_max": 150}, "grid_max"),
+        ({"grid_min": -1}, "grid_min"),
+        # A zero step makes display_targets raise mid-pricing instead.
+        ({"grid_step": 0}, "grid_step"),
+    ],
+)
+def test_an_unusable_target_grid_is_rejected_when_the_rules_are_built(overrides, expected):
+    base = {
+        "leverage": D(1),
+        "grid_min": 0,
+        "grid_max": 60,
+        "grid_step": 1,
+        "taker_fee_rate": D("0.00045"),
+        "slippage_bps": D(5),
+    }
+    with pytest.raises(ValueError, match=expected):
+        PositionPricing(**{**base, **overrides})
+
+
+def test_a_grid_whose_ceiling_sits_on_its_floor_is_legal():
+    # ``<=``, not ``<``: the effective ceiling is min(ai_target_margin_max_pct,
+    # risk.max_target_margin_pct), and a legal pair (grid min 60, cap 60) drives
+    # it onto the floor. A stricter guard would reject a config the loader accepts.
+    pricing = PositionPricing(
+        leverage=D(1),
+        grid_min=60,
+        grid_max=60,
+        grid_step=1,
+        taker_fee_rate=D("0.00045"),
+        slippage_bps=D(5),
+    )
+    assert pricing.grid_min == pricing.grid_max == 60
+
+
 @pytest.mark.parametrize("field", ["taker_fee_rate", "slippage_bps"])
 def test_a_negative_fill_cost_is_rejected_when_the_rules_are_built(field):
     # On PositionPricing, not inside the pricing loop: a negative cost still

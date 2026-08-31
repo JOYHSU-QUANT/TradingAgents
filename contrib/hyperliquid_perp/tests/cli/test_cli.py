@@ -81,13 +81,21 @@ def _perp_ctx(as_of: datetime, coin: str = "BTC") -> PerpMarketContext:
 def _stub_provider(**attrs):
     """A provider built past ``__init__`` (which imports the engine), pre-fed.
 
-    Carries what ``build_input`` reads BEFORE whichever seam a case is
-    exercising. ``_max_pct`` / ``_pricing`` are among them since the position
-    section moved into the builder (issue #134): the real ``__init__``
-    resolves both once, and build_input reads the books before the market
-    fetch, so a stub without them raises AttributeError instead of reaching
-    the guard under test. The class-level ``_position_source = None`` keeps
-    every stub book-free unless the case wires one.
+    Skips ``__init__`` (which imports the engine) and presets what the
+    build-through path reads: ``_decision`` for the format block, ``_max_pct``
+    for the ceiling it advertises, and ``_pricing`` for the books' half of the
+    position section. Guard-refusal cases never reach any of them — the guards
+    fire first — but a stub that omits them fails with AttributeError instead
+    of the refusal under test, which reads as a broken guard.
+
+    Deliberately NOT a stand-in for ``__init__``'s own work: the values below
+    are literals, so nothing here exercises how the real provider DERIVES the
+    effective ceiling or maps it onto ``PositionPricing``. That derivation is
+    pinned by ``test_the_provider_resolves_one_effective_ceiling_at_construction``,
+    which constructs the real thing.
+
+    The class-level ``_position_source = None`` keeps every stub book-free
+    unless the case wires one.
     """
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
     from contrib.hyperliquid_perp.domains.perp.marginal_cost import PositionPricing
@@ -97,9 +105,7 @@ def _stub_provider(**attrs):
     provider = object.__new__(_EngineDecisionProvider)
     provider._config = {}
     provider._on_blocking_read = None
-    provider._risk = RiskConfig(leverage=D(1), max_target_margin_pct=60)
     provider._decision = DecisionConfig()
-    provider._execution = execution
     provider._max_pct = 60
     provider._pricing = PositionPricing(
         leverage=D(1),
@@ -112,6 +118,52 @@ def _stub_provider(**attrs):
     for name, value in attrs.items():
         setattr(provider, name, value)
     return provider
+
+
+def test_the_provider_resolves_one_effective_ceiling_at_construction(tmp_path, monkeypatch):
+    # The only test that runs the real __init__ (the engine import is stubbed).
+    # It exists because _stub_provider hands every other test a hardcoded
+    # ceiling, so nothing else can see how the provider DERIVES one.
+    #
+    # The cap BINDS here, which is what makes it discriminating: a grid ceiling
+    # of 40 under an allocation cap of 60 means min() and either input alone
+    # give three different answers. Under the usual fixture (grid 100, cap 60)
+    # they coincide at 60 and the derivation is unobservable.
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.domains.perp.marginal_cost import PositionPricing
+    from contrib.hyperliquid_perp.paper.config import PaperExecutionConfig
+
+    monkeypatch.setattr(
+        bridge_mod, "_build_engine_config", lambda config: ({"deep_think_llm": "m"}, [])
+    )
+    risk = RiskConfig(leverage=D(3), max_target_margin_pct=60)
+    decision = DecisionConfig(ai_target_margin_max_pct=40, target_margin_step_pct=5)
+    provider = _EngineDecisionProvider(
+        {},
+        risk_cfg=risk,
+        decision_cfg=decision,
+        payload_dir=tmp_path,
+        position_source=lambda: None,
+    )
+    assert provider._max_pct == 40  # not 60 (the cap) and not 100 (the grid default)
+    # ...and the ONE ceiling reaches the cost table's rules as ``grid_max``,
+    # with every other field mapped from the config it belongs to. Compared
+    # whole: a swapped grid_min/grid_max, or a fee read off the wrong block,
+    # is invisible to any per-field spot check that only looks at the ceiling.
+    execution = PaperExecutionConfig()
+    assert provider._pricing == PositionPricing(
+        leverage=D(3),
+        grid_min=0,
+        grid_max=40,
+        grid_step=5,
+        taker_fee_rate=execution.taker_fee_rate,
+        slippage_bps=execution.fill_model.slippage_bps,
+    )
+    # The books are required, not optional: a wiring that forgot them would
+    # otherwise ship a silently position-blind prompt.
+    with pytest.raises(TypeError, match="position_source"):
+        _EngineDecisionProvider({}, risk_cfg=risk, decision_cfg=decision, payload_dir=tmp_path)
 
 
 def _seed_db(tmp_path):
@@ -5409,9 +5461,9 @@ def test_build_input_hands_the_books_and_the_effective_ceiling_to_the_builder(
 
 
 def test_build_input_without_a_position_source_stays_position_blind(tmp_path, monkeypatch):
-    # The one-shot CLI paths and object.__new__-built providers never wire a
-    # source: the builder is told so explicitly, so the prompt keeps no
-    # section and the shape keeps no suffix.
+    # A provider built through object.__new__ never wires a source (the
+    # constructor requires one, so no production wiring can reach this): the
+    # builder is told so explicitly rather than left to infer it.
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=1))
     handed = {}

@@ -140,7 +140,6 @@ class _EngineDecisionProvider:
         from ..engine_bridge import _build_engine_config
 
         self._config = config
-        self._risk = risk_cfg
         self._decision = decision_cfg
         self._payload_dir = payload_dir
         # Live only: ``build_input`` runs on the single-threaded tick and makes
@@ -167,23 +166,24 @@ class _EngineDecisionProvider:
         # config carries, and the prompt says "assumptions" for that reason.
         from ..paper.config import PaperTradingConfig
 
-        self._execution = PaperTradingConfig.from_dict(config.get("paper_trading")).execution
+        execution = PaperTradingConfig.from_dict(config.get("paper_trading")).execution
         # ONE effective ceiling, resolved here rather than per cycle: it is a
         # pure function of two objects frozen at construction, and the cost
         # table and the format block must advertise the same number. As a
         # single attribute read twice that identity is structural; recomputed
         # at each call site it was only a comment. Building the pricing rules
         # here also moves their rejection (``PositionPricing.__post_init__``)
-        # into the daemon's pre-flight, where every other config error already
-        # surfaces, instead of into the first cycle.
+        # off the cycle path and onto provider construction — which is
+        # pre-flight on a fresh run, and post-reconciliation on a restart
+        # (see cli/paper.py), but either way before any decision is made.
         self._max_pct = risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg)
         self._pricing = PositionPricing(
             leverage=risk_cfg.leverage,
             grid_min=decision_cfg.ai_target_margin_min_pct,
             grid_max=self._max_pct,
             grid_step=decision_cfg.target_margin_step_pct,
-            taker_fee_rate=self._execution.taker_fee_rate,
-            slippage_bps=self._execution.fill_model.slippage_bps,
+            taker_fee_rate=execution.taker_fee_rate,
+            slippage_bps=execution.fill_model.slippage_bps,
         )
         self._engine_config, self._analysts = _build_engine_config(config)
 
@@ -193,9 +193,12 @@ class _EngineDecisionProvider:
         Handed to ``_build_context`` so the ``Position:`` section is assembled
         by the builder, at the same mark and funding as the rest of the
         context (issue #134) — this method only READS. ``None`` is the
-        position-blind context: no source wired (the one-shot CLI paths and
-        ``object.__new__``-built providers), or a run whose books do not exist
-        yet. Any OTHER exception (a store failure, a DTO guard tripped by a
+        position-blind context: a run whose books do not exist yet, or — since
+        the constructor made the source required — a test provider built
+        through ``object.__new__``, which the class-level default serves. The
+        one-shot CLI reaches a position-blind context by a different route
+        entirely: it never builds this class, and writes ``position=None`` at
+        the ``_build_context`` seam itself. Any OTHER exception (a store failure, a DTO guard tripped by a
         book state nothing expected) propagates: it is a bug, not a degraded
         state, and it surfaces the way the audit read one statement later
         already does. What "surfaces" means differs by lane and is a known

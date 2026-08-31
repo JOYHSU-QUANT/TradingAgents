@@ -126,15 +126,18 @@ class PositionPricing:
     slippage_bps: Decimal
 
     def __post_init__(self) -> None:
-        # Every field, and each named in its own message: rejected here, a bad
-        # config value still carries the name of the field it came from, where
-        # the same value found downstream surfaces as an arithmetic surprise
-        # in another module. ``DecisionConfig`` already constrains the grid for
-        # the one production caller, so these are defence in depth for any
-        # other construction — but without them an inverted grid builds fine,
-        # ``display_targets`` returns no points, and an OPEN position renders
-        # the cost table's preamble over nothing, which is exactly the "header
-        # over empty rows" this module's docstring claims to be closed against.
+        # Every field, each named in the message that rejects it: a bad config
+        # value caught here still carries the name it came from, where the same
+        # value found downstream surfaces as an arithmetic surprise in another
+        # module. WHERE it fails is the whole merit — the bad PROMPT is already
+        # unreachable, since an inverted grid leaves ``display_targets`` with no
+        # points and ``PositionContext`` then refuses an open position carrying
+        # no cost rows. But that refusal comes at pricing time, deep in a cycle,
+        # naming a DTO rather than the config key; these come at construction,
+        # which for the daemon is before it decides anything.
+        # ``DecisionConfig``/``RiskConfig`` already constrain every one of these
+        # for the one production caller, so this is defence in depth for any
+        # other construction (a replay harness, a per-coin override).
         for name in ("taker_fee_rate", "slippage_bps"):
             if getattr(self, name) < 0:
                 raise ValueError(f"PositionPricing.{name} must be >= 0, got {getattr(self, name)}")

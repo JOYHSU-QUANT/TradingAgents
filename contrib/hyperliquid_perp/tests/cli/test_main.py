@@ -44,6 +44,23 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
 )
 
+
+def _assert_position_blind(result):
+    """A ``_build_context`` stand-in that pins the one-shot lane's ``position=None``.
+
+    Since ``position`` became required (issue #134), most stand-ins in this
+    file absorb it with ``**_kw`` — which means deleting ``position=None`` from
+    ``main.py`` would leave the whole suite green and fail only at runtime.
+    One stand-in checks what actually arrived, so that deletion is caught here.
+    """
+
+    def _stand_in(config, coin, **kw):
+        assert kw == {"position": None}, f"the one-shot lane passed {kw!r}"
+        return result()
+
+    return _stand_in
+
+
 # --------------------------------------------------------------------------
 # _build_engine_config — overlay the perp ``engine`` block onto DEFAULT_CONFIG
 # --------------------------------------------------------------------------
@@ -414,7 +431,7 @@ def _stub_engine(
             return datetime.now(timezone.utc)
 
     monkeypatch.setattr(
-        bridge_mod, "_build_context", lambda config, coin, **_kw: (_Ctx(), object())
+        bridge_mod, "_build_context", _assert_position_blind(lambda: (_Ctx(), object()))
     )
     monkeypatch.setattr(main_mod, "render_market_context", lambda ctx: "ctx text")
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "0xReadOnly")

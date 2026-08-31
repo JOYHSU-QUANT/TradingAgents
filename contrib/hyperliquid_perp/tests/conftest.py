@@ -250,8 +250,12 @@ def misrouted_order_status(oid: str = "4242") -> dict:
     }
 
 
-def identity_latch_rows(db, run_id: str = "r") -> list:
-    """The ``identity_fault_latched`` rows a run wrote (the §13.5 latch's audit trail)."""
+def identity_latch_rows(db, *, run_id: str) -> list:
+    """The ``identity_fault_latched`` rows a run wrote (the §13.5 latch's audit trail).
+
+    ``run_id`` is required: a default would let a test on some other run
+    assert ``== []`` against rows it never looked at.
+    """
     return [
         e
         for e in repo.iter_protection_order_events(db.conn, run_id)

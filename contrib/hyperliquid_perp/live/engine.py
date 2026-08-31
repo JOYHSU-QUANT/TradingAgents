@@ -724,7 +724,7 @@ class LiveExecutionEngine:
         # the helper re-enters on the level, not the edge, for the same reason
         # the ``_no_data_streak`` escalation above does.
         if escalate_identity_fault(
-            self._protection.identity, self._safe_mode, site=EscalationHolder.PROTECTION_SYNC
+            self._protection.identity, self._safe_mode, holder=EscalationHolder.PROTECTION_SYNC
         ):
             # The CLI's per-tick log only fires when a tick DID something, and a
             # latched run whose every tick is otherwise a no-op must not go

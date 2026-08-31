@@ -1062,7 +1062,7 @@ def _live_startup_recovery(
                         # this finally: a busy DB must not discard the verdict.
                         try:
                             if escalate_identity_fault(
-                                identity, safe_mode, site=EscalationHolder.SHUTDOWN
+                                identity, safe_mode, holder=EscalationHolder.SHUTDOWN
                             ):
                                 shutdown_problem = (
                                     "venue identity fault latched — the exchange kept "

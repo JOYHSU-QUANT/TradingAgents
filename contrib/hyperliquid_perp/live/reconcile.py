@@ -769,7 +769,7 @@ class LiveReconciler:
         # after the pass's own bookkeeping — see escalate_identity_fault for
         # why every holder runs it last and on the level.
         if escalate_identity_fault(
-            self._identity, safe_mode, site=EscalationHolder.RECONCILIATION, trigger=trigger
+            self._identity, safe_mode, holder=EscalationHolder.RECONCILIATION, trigger=trigger
         ):
             logger.error(
                 "reconciliation (%s): venue-identity fault latched — manual safe mode", trigger

@@ -94,14 +94,17 @@ def _fill(template: str, *, field: str, value: str | None, vocabulary: frozenset
     return template.replace(placeholder, value)
 
 
-class ProbeSite(str, Enum):
+class ProbeSite(Enum):
     """The closed set of consumers that read orderStatus through the monitor.
 
     One member per call site of :meth:`VenueIdentityMonitor.probe`, spelled
     exactly as the label the ``identity_fault_latched`` row and the safe-mode
     detail carry (the RUNBOOK's ``venue_identity_fault`` table is pinned to
     these values). The two protection sites take the ``role`` they asked about
-    as their one dynamic field; :meth:`label` renders it (issue #132).
+    as their one dynamic field; :meth:`label` renders it (issue #132). NOT a
+    ``str`` enum, unlike the persisted vocabularies elsewhere: the values are
+    templates, and a member that quacked like a string could reach a log line
+    or a row unrendered — ``{role}`` and all — without a sound.
     """
 
     PROTECTION_NOOP_GUARD = "protection {role} no-op guard"
@@ -115,7 +118,7 @@ class ProbeSite(str, Enum):
         return _fill(self.value, field="role", value=role, vocabulary=PROTECTIVE_ORDER_ROLES)
 
 
-class EscalationHolder(str, Enum):
+class EscalationHolder(Enum):
     """The closed set of safe-mode holders that escalate the latch.
 
     The counterpart of :class:`ProbeSite` for :func:`escalate_identity_fault`:
@@ -438,13 +441,15 @@ def escalate_identity_fault(
     monitor: VenueIdentityMonitor,
     safe_mode: SafeModeManager,
     *,
-    site: EscalationHolder,
+    holder: EscalationHolder,
     trigger: str | None = None,
 ) -> bool:
     """Enter manual safe mode if the shared latch is up; True when it was.
 
-    ``site`` is the acting holder; the reconciliation holder passes the pass's
-    ``trigger`` too. Both are checked before the latch is read (see ``_fill``).
+    ``holder`` is the acting safe-mode holder (a probe SITE is where the fault
+    was observed — see ``ProbeSite``); the reconciliation holder passes the
+    pass's ``trigger`` too. Both are checked before the latch is read (see
+    ``_fill``).
 
     Called by each holder of the safe-mode machine AFTER the probe sites it
     drives have run, and LAST in that holder's own bookkeeping: ``enter``
@@ -467,21 +472,21 @@ def escalate_identity_fault(
     skip startup recovery: the boot still arms the switch and reconciles under
     it, but the verdict cannot pass and no cycle starts until §13.6 releases.
     """
-    holder = EscalationHolder(site).label(trigger=trigger)  # checked even when not latched
+    acted = EscalationHolder(holder).label(trigger=trigger)  # checked even when not latched
     if not monitor.latched:
         return False
     # Both names, because they can differ and each answers a different triage
-    # question: ``site`` is the holder that acted (whose lane the escalation
-    # ran in), ``latched_site`` is where the fault was observed — without it,
-    # a latch collected by the kill-switch cross-check would be filed under
-    # whichever holder escalated first (2026-08-27 round-1 review).
+    # question: ``holder`` is who acted (whose lane the escalation ran in),
+    # ``latched_site`` is where the fault was observed — without it, a latch
+    # collected by the kill-switch cross-check would be filed under whichever
+    # holder escalated first (2026-08-27 round-1 review).
     observed = monitor.latched_site or "unknown probe site"
     safe_mode.enter(
         "manual",
         REASON_IDENTITY_FAULT,
         detail=(
             "orderStatus answered unusably on consecutive §8.3 identity probes "
-            f"(latched at the {observed}; escalated by {holder})"
+            f"(latched at the {observed}; escalated by {acted})"
         ),
     )
     return True

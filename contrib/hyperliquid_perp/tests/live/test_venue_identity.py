@@ -114,11 +114,11 @@ def test_the_kth_consecutive_unreadable_answer_latches_and_the_k_minus_first_doe
         _probe_expecting_unreadable(monitor, site=ProbeSite.RECONCILE_ABSENT_SETTLE)
     assert monitor.unreadable_streak == K - 1
     assert monitor.latched is False
-    assert identity_latch_rows(db) == []
+    assert identity_latch_rows(db, run_id="r") == []
 
     _probe_expecting_unreadable(monitor, site=ProbeSite.KILL_SWITCH_DISARM_CROSS_CHECK)
     assert monitor.latched is True
-    (row,) = identity_latch_rows(db)
+    (row,) = identity_latch_rows(db, run_id="r")
     assert row["symbol"] == "BTC"
     assert row["cloid_hex"] == _OURS
     assert f"{K} consecutive" in row["detail"]
@@ -160,7 +160,7 @@ def test_any_readable_answer_ends_the_streak_including_unknown_oid(db):
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor)
     assert monitor.latched is False
-    assert identity_latch_rows(db) == []
+    assert identity_latch_rows(db, run_id="r") == []
 
 
 def test_an_unreadable_answer_carries_its_whole_payload_and_lands_on_disk(db, tmp_path):
@@ -196,14 +196,14 @@ def test_the_latch_row_is_once_per_episode_and_a_recurrence_writes_a_new_one(db,
     for _ in range(K + 3):
         clock.advance(1)
         _probe_expecting_unreadable(monitor)
-    assert len(identity_latch_rows(db)) == 1
+    assert len(identity_latch_rows(db, run_id="r")) == 1
     # The evidence is bounded per CLOID, not per answer or per episode: under
     # the manual safe mode the latch raises, the §17 sync keeps probing every
     # tick, and a cloid that flaps readable/unreadable starts a new episode on
     # every flap — either budget would fill the payload_dir without bound.
     # The latch row still names the file this cloid's evidence lives in.
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1
-    assert "payload " in identity_latch_rows(db)[0]["detail"]
+    assert "payload " in identity_latch_rows(db, run_id="r")[0]["detail"]
 
     monitor.probe(_OURS, site=ProbeSite.RECONCILE_ABSENT_SETTLE)  # readable: the episode is over
     assert monitor.latched is False
@@ -211,7 +211,7 @@ def test_the_latch_row_is_once_per_episode_and_a_recurrence_writes_a_new_one(db,
         clock.advance(1)
         _probe_expecting_unreadable(monitor)
     assert monitor.latched is True
-    assert len(identity_latch_rows(db)) == 2
+    assert len(identity_latch_rows(db, run_id="r")) == 2
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1  # same cloid, same file
 
 
@@ -234,7 +234,7 @@ def test_a_misroute_of_one_cloid_latches_despite_coherent_answers_about_others(d
         assert monitor.probe(_OURS_2, site=ProbeSite.RECONCILE_ABSENT_SETTLE) is None
         assert monitor.unreadable_streak == i + 1  # untouched by the other cloid
     assert monitor.latched is True
-    (row,) = identity_latch_rows(db)
+    (row,) = identity_latch_rows(db, run_id="r")
     assert row["cloid_hex"] == _OURS
     assert len(list(payload_dir.glob("orderStatus-*.json"))) == 1
 
@@ -251,7 +251,7 @@ def test_two_cloids_below_threshold_do_not_latch_in_aggregate(db):
         _probe_expecting_unreadable(monitor, cloid=_OURS_2)
     assert monitor.unreadable_streak == K - 2
     assert monitor.latched is False
-    assert identity_latch_rows(db) == []
+    assert identity_latch_rows(db, run_id="r") == []
 
 
 def test_a_readable_answer_resets_only_its_own_cloids_streak(db):
@@ -280,7 +280,7 @@ def test_a_failed_latch_row_write_drops_neither_the_latch_nor_the_raise(db):
         # must keep seeing the fault it knows how to handle.
         _probe_expecting_unreadable(monitor)
     assert monitor.latched is True
-    assert identity_latch_rows(db) == []
+    assert identity_latch_rows(db, run_id="r") == []
 
 
 def test_the_failure_clause_separates_the_two_families():
@@ -313,20 +313,21 @@ def test_escalation_enters_manual_only_once_the_latch_is_up_and_is_idempotent(db
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor)
     assert (
-        escalate_identity_fault(monitor, safe_mode, site=EscalationHolder.PROTECTION_SYNC) is False
+        escalate_identity_fault(monitor, safe_mode, holder=EscalationHolder.PROTECTION_SYNC)
+        is False
     )
     assert safe_mode.current() is None
     assert gate.manual_safe_mode is False
 
     _probe_expecting_unreadable(monitor)
-    assert escalate_identity_fault(monitor, safe_mode, site=EscalationHolder.SHUTDOWN) is True
+    assert escalate_identity_fault(monitor, safe_mode, holder=EscalationHolder.SHUTDOWN) is True
     state = safe_mode.current()
     assert state is not None and state.is_manual and state.reason == REASON_IDENTITY_FAULT
     assert gate.manual_safe_mode is True
     # Re-read by the next holder: no second history row, same episode.
     assert (
         escalate_identity_fault(
-            monitor, safe_mode, site=EscalationHolder.RECONCILIATION, trigger="heartbeat"
+            monitor, safe_mode, holder=EscalationHolder.RECONCILIATION, trigger="heartbeat"
         )
         is True
     )
@@ -345,7 +346,7 @@ def test_a_persisted_shutdown_escalation_is_what_the_next_boot_hydrates(db):
     for _ in range(K):
         _probe_expecting_unreadable(monitor)
     escalate_identity_fault(
-        monitor, SafeModeManager(db=db, run_id="r", gate=_gate()), site=EscalationHolder.SHUTDOWN
+        monitor, SafeModeManager(db=db, run_id="r", gate=_gate()), holder=EscalationHolder.SHUTDOWN
     )
 
     next_boot_gate = _gate()
@@ -542,7 +543,7 @@ def test_the_reconciler_the_kill_switch_and_protection_feed_one_streak(db, tmp_p
     assert "answered unusably (venue identity fault)" in failure
     assert monitor.unreadable_streak == 3
     assert monitor.latched is False
-    assert identity_latch_rows(db) == []
+    assert identity_latch_rows(db, run_id="r") == []
 
     clock.advance(60)
     protection = _protection(db, client, monitor)
@@ -551,7 +552,7 @@ def test_the_reconciler_the_kill_switch_and_protection_feed_one_streak(db, tmp_p
     assert protection._row_still_rests({"cloid_hex": _OURS}, role="stop_loss") is False
     assert monitor.latched is True
     assert protection.identity.latched is True  # the engine's read: the same monitor
-    (row,) = identity_latch_rows(db)
+    (row,) = identity_latch_rows(db, run_id="r")
     assert "protection stop_loss no-op guard" in row["detail"]
     assert monitor.latched_site == "protection stop_loss no-op guard"
     # One cloid refused, one file — whichever consumer's refusal came first.
@@ -663,7 +664,7 @@ def test_a_failed_evidence_write_is_retried_and_the_latch_row_admits_the_gap(
     for _ in range(K):
         _probe_expecting_unreadable(monitor)
     assert len(calls) == K  # every refusal retried the write
-    (row,) = identity_latch_rows(db)
+    (row,) = identity_latch_rows(db, run_id="r")
     assert "payload capture FAILED" in row["detail"]
 
     # ...and once a write finally lands, the row's clause names the file.
@@ -674,7 +675,8 @@ def test_a_failed_evidence_write_is_retried_and_the_latch_row_admits_the_gap(
     for _ in range(K):
         _probe_expecting_unreadable(monitor2)
     assert any(
-        "payloads/orderStatus-x.json" in (r["detail"] or "") for r in identity_latch_rows(db)
+        "payloads/orderStatus-x.json" in (r["detail"] or "")
+        for r in identity_latch_rows(db, run_id="r")
     )
 
 
@@ -720,7 +722,7 @@ def test_a_private_monitor_bounds_a_consumer_built_without_the_shared_one(db, tm
     for _ in range(K):
         clock.advance(60)
         reconciler.run("heartbeat")
-    (row,) = identity_latch_rows(db)
+    (row,) = identity_latch_rows(db, run_id="r")
     assert "reconcile absent-order settle" in row["detail"]
     assert len(list((tmp_path / "payloads").glob("orderStatus-*.json"))) == 1
 
@@ -762,12 +764,12 @@ def test_an_unregistered_escalation_holder_is_refused_even_with_nothing_latched(
     safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
     monitor = _monitor(db, _Venue())
     with pytest.raises(ValueError):
-        escalate_identity_fault(monitor, safe_mode, site="§18.2 shutdown")  # not a member
+        escalate_identity_fault(monitor, safe_mode, holder="§18.2 shutdown")  # not a member
     with pytest.raises(ValueError, match="needs trigger"):
-        escalate_identity_fault(monitor, safe_mode, site=EscalationHolder.RECONCILIATION)
+        escalate_identity_fault(monitor, safe_mode, holder=EscalationHolder.RECONCILIATION)
     with pytest.raises(ValueError, match="trigger must be one of"):
         escalate_identity_fault(
-            monitor, safe_mode, site=EscalationHolder.RECONCILIATION, trigger="hearbeat"
+            monitor, safe_mode, holder=EscalationHolder.RECONCILIATION, trigger="hearbeat"
         )
     assert safe_mode.current() is None
 

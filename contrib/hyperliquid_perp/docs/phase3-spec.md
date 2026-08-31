@@ -1191,7 +1191,8 @@ venue identity fault（連續多次 orderStatus 答非所問，見下）
 交易所對**同一個 cloid** 連續 `venue_identity.UNREADABLE_PROBE_LATCH_THRESHOLD` 次回出讀不出
 是它的答案（誤路由的身分，或這個 build 認不得的形狀）時，共用的
 `VenueIdentityMonitor` 於跨越門檻的那一次寫一列 `identity_fault_latched`（每個 episode 一列，
-不是每次；`detail` 記下跨線的站點），並為每個被拒答的 cloid 留一份整包回應在 `payloads/`。計數
+不是每次；`detail` 記下跨線的站點——站點字樣是 `venue_identity.ProbeSite`／`EscalationHolder`
+的封閉詞彙，對照表在 RUNBOOK `venue_identity_fault` 節），並為每個被拒答的 cloid 留一份整包回應在 `payloads/`。計數
 **每個 cloid 一條、整個 process 共用**：§17 protection 的兩個探測點、§12 reconciliation 每張單的
 orderStatus tiebreaker／settle、§18.2 shutdown 的 disarm 交叉檢查全部經它讀 orderStatus，
 transport 失敗中性（不計不清）、讀得懂只歸零**該 cloid** 的串。升級由握有 safe-mode 機器的三方

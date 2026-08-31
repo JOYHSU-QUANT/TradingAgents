@@ -4827,7 +4827,7 @@ def test_a_venue_identity_fault_latched_at_shutdown_persists_manual_for_the_next
         state = SafeModeManager(db=db, run_id="r1", gate=None).current()
         assert state is not None and state.is_manual
         assert state.reason == REASON_IDENTITY_FAULT
-        latch_rows = identity_latch_rows(db, "r1")
+        latch_rows = identity_latch_rows(db, run_id="r1")
         assert len(latch_rows) == 1
         assert "kill-switch disarm cross-check" in latch_rows[0]["detail"]
     finally:

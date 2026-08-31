@@ -303,12 +303,12 @@ def test_interval_to_ms_unknown_raises_valueerror():
         interval_to_ms("4H")
 
 
-def test_parse_interval_resolves_the_member_once_for_both_readers():
+def test_parse_interval_accepts_a_string_or_a_member_and_names_a_bad_one():
     # The context's constructor used to validate through interval_to_ms and
-    # then look the member up a second time (issue #122); one parse now serves
-    # the check, the millisecond table and the stored ``.value`` coercion (the
-    # coercion itself is pinned by the enum-interval test below), and it
-    # accepts a member as readily as its string.
+    # then look the member up a second time (issue #122); both now go through
+    # this one parser (the coercion it feeds is pinned by the enum-interval
+    # test below). What is pinned here is the parser's own contract: a member
+    # passes through, a string resolves, and a bad value is named.
     assert parse_interval("4h") is CandleInterval.H4
     assert parse_interval(CandleInterval.D1) is CandleInterval.D1
     with pytest.raises(ValueError, match="unsupported candle interval '4H'"):

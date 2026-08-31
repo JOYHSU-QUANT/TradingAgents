@@ -902,7 +902,7 @@ def test_refusals_carry_the_error_type_the_validators_count():
     assert guards_mod.context_refusal(dead, "BTC", {}, now=_NOW).error_type == "server_error"
 
 
-def test_context_refusal_error_is_the_message_view_of_the_same_verdict():
+def test_context_refusal_message_is_the_message_view_of_the_same_verdict():
     # The one-shot shells print a sentence and exit; only the daemon needs the
     # class. Pin that the two never disagree about WHETHER to refuse — a
     # wrapper that fell out of step would let --context-only pass a context the

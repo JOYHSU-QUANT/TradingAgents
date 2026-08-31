@@ -855,13 +855,16 @@ class PerpMarketContext:
 
     indicators: Mapping[str, float | None] = field(default_factory=dict)
     market_regime: MarketRegime = MarketRegime.RANGING
-    # The exchange's own clock, read during the same fetch that produced
-    # ``as_of`` (UTC). The freshness guard measures candle age against THIS
-    # when present, not the host clock: ``as_of`` is cut from a window the
-    # host clock bounded, so a host that runs behind makes a stale window
-    # look current (issue #51). ``None`` only for contexts that did not come
-    # from a live ``_build_context`` fetch (fixtures, replays) — the guard
-    # then falls back to the caller's clock, blind spot and all.
+    # The exchange's own clock, read by ``_build_context`` BEFORE the candle
+    # fetch and handed to it as the window's end (UTC; issues #51, #124), so
+    # ``as_of`` — the newest bar that window kept — is at or before this by
+    # construction, whatever the host's clock reads. The freshness guard
+    # measures candle age against THIS when present, not the host clock.
+    # ``None`` only for contexts that did not come from a live
+    # ``_build_context`` fetch (fixtures, replays) — the guard then falls
+    # back to the caller's clock, and on that path a window cut by a host
+    # running behind still looks current (the issue-#51 blind spot, which
+    # only the exchange-clock path closes).
     exchange_time: datetime | None = None
     # This host's clock as read at the SAME INSTANT as ``exchange_time`` (UTC).
     # The two are only ever subtracted from each other, and that difference is

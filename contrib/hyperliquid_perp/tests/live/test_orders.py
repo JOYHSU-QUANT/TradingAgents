@@ -1006,7 +1006,13 @@ def test_order_status_cloid_match_is_case_insensitive():
         "status": "order",
         "order": {"order": {"oid": 7, "cloid": _HEX.upper()}, "status": "resting"},
     }
-    assert parse_order_status(payload, expected_cloid_hex=_HEX) == ("7", "resting")
+    reading = parse_order_status(payload, expected_cloid_hex=_HEX)
+    # By NAME, not position: both members are strings, so a parser that swapped
+    # them would still equal ``("7", "resting")``-shaped expectations written
+    # the other way round (issue #132).
+    assert reading is not None
+    assert reading.exchange_order_id == "7"
+    assert reading.status == "resting"
 
 
 def test_order_status_unknownoid_needs_no_cloid_echo():

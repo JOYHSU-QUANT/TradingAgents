@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -62,6 +63,8 @@ from .payloads import payload_column, write_raw_payload
 __all__ = [
     "LiveOrderPreSubmitError",
     "LiveOrderSubmitter",
+    "OrderStatusQuery",
+    "OrderStatusReading",
     "SubmitOutcome",
     "SubmitOutcomeKind",
     "is_known_exchange_status",
@@ -70,6 +73,28 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# The orderStatus SEAM, ``cloid_hex -> raw payload`` (the signed client's
+# ``query_order_by_cloid``), named once so every wiring point that takes it
+# declares the same contract (issue #132). The payload stays ``Any`` on
+# purpose: :func:`parse_order_status` is its one reader and owns the shape.
+OrderStatusQuery = Callable[[str], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class OrderStatusReading:
+    """What :func:`parse_order_status` read off a KNOWN order: its oid and status word.
+
+    Named fields, and NOT a tuple: both members are strings, so a
+    ``tuple[str, str]`` let a caller swap them and type-check green (issue
+    #132) — a dataclass also refuses the positional unpack that would hide
+    the swap. ``status`` is the venue's RAW word — classify it with
+    :func:`local_status_for_exchange_status` / :func:`is_known_exchange_status`,
+    never compare it to a local status directly.
+    """
+
+    exchange_order_id: str
+    status: str
 
 
 class LiveOrderPreSubmitError(RuntimeError):
@@ -800,7 +825,8 @@ class LiveOrderSubmitter:
                     "exchange order id) — refusing to resend (§8.3 rule 5)"
                 )
             return None
-        exchange_order_id, exchange_status = parsed
+        exchange_order_id = parsed.exchange_order_id
+        exchange_status = parsed.status
         raw_path = self._write_raw_payload("orderStatus", cloid_hex, status_payload)
         now = self._clock.now()
         local_status = local_status_for_exchange_status(exchange_status)
@@ -988,8 +1014,8 @@ def is_known_exchange_status(exchange_status: str) -> bool:
     return exchange_status in _EXCHANGE_TO_LOCAL_STATUS
 
 
-def parse_order_status(payload: Any, *, expected_cloid_hex: str) -> tuple[str, str] | None:
-    """(exchange_order_id, status) from an orderStatus payload; None = unknown.
+def parse_order_status(payload: Any, *, expected_cloid_hex: str) -> OrderStatusReading | None:
+    """The :class:`OrderStatusReading` in an orderStatus payload; None = unknown.
 
     The Info endpoint answers ``{"status": "unknownOid"}`` for a cloid it has
     never seen, and ``{"status": "order", "order": {"order": {...}, "status":
@@ -1027,7 +1053,7 @@ def parse_order_status(payload: Any, *, expected_cloid_hex: str) -> tuple[str, s
                     f"orderStatus for cloid {expected_cloid_hex} answered with cloid "
                     f"{echoed!r} — refusing to read another order's status as this one's",
                 )
-            return (str(inner["oid"]), status)
+            return OrderStatusReading(exchange_order_id=str(inner["oid"]), status=status)
     raise _refused(payload, f"orderStatus payload not recognised: {payload!r}")
 
 

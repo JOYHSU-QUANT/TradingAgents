@@ -63,7 +63,7 @@ from .cancel import cancel_bot_order_with_evidence
 from .config import KillSwitchConfig
 from .order_gate import RealOrderGate
 from .orders import local_status_for_exchange_status
-from .venue_identity import VenueIdentityMonitor, describe_order_status_failure
+from .venue_identity import ProbeSite, VenueIdentityMonitor, describe_order_status_failure
 
 __all__ = [
     "KillSwitchManager",
@@ -1084,7 +1084,7 @@ class KillSwitchManager:
         "make SQLite agree with what the exchange just said" rule the §8.3
         recovery back-fill follows.
         """
-        parsed = self._identity.probe(cloid_hex, site="kill-switch disarm cross-check")
+        parsed = self._identity.probe(cloid_hex, site=ProbeSite.KILL_SWITCH_DISARM_CROSS_CHECK)
         if parsed is None:
             if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid_hex):
                 logger.warning(
@@ -1107,7 +1107,8 @@ class KillSwitchManager:
             # it needs a stronger proof of receipt than we currently record, which
             # is PR 3/4 territory (exchange fill events, reconciliation).
             return True
-        exchange_order_id, exchange_status = parsed
+        exchange_order_id = parsed.exchange_order_id
+        exchange_status = parsed.status
         local_status = local_status_for_exchange_status(exchange_status)
         # LIVE_ORDER_STATUSES is the codebase's authority on "non-terminal", and
         # it is partition-guarded against its terminal half — a bare

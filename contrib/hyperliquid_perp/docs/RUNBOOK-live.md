@@ -595,6 +595,22 @@ disarm 交叉檢查，走的是同一個 `VenueIdentityMonitor`——所以故�
 機會。下一次 `live --run-id` 開機會把 manual 狀態 hydrate 回來：照樣 arm、照樣對帳，但 verdict
 不會過、不開新 cycle，直到 §13.6 人工解除——而不是每次 shutdown 都只留一行 log、每次都擋住 disarm。
 
+站點名稱是**封閉詞彙**（`live/venue_identity.py`）：`ProbeSite` 是探測站點，寫在 `identity_fault_latched`
+的 `latest from the …` 與 safe-mode detail 的 `latched at the …`；`EscalationHolder` 是升級方，寫在
+`escalated by …`。`{role}`／`{trigger}` 是動態欄，分別只能是 `PROTECTIVE_ORDER_ROLES`／
+`RECONCILIATION_TRIGGERS` 的成員。本表與 enum 同源（`test_venue_identity` 釘住集合相等，多一員或少一列都會紅）：
+
+| 家族 | 字樣 |
+|---|---|
+| probe | `protection {role} no-op guard` |
+| probe | `protection {role} recovery probe` |
+| probe | `reconcile orphan-order tiebreaker` |
+| probe | `reconcile absent-order settle` |
+| probe | `kill-switch disarm cross-check` |
+| holder | `§17 protection sync` |
+| holder | `§12 reconciliation, {trigger}` |
+| holder | `§18.2 shutdown disarm cross-check` |
+
 **為什麼是 manual**：這種故障不會自癒。會把一次身分查詢誤路由的 venue，下一次照樣誤路由，
 所以 recoverable（下一輪乾淨對帳就自動解除）等於把 run 放回原本那個無限迴圈：
 no-op 守衛會對一張**其實還掛在簿上**的停損無限重修，而失蹤 ack 的復原探測可以把一整條
@@ -607,7 +623,7 @@ gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 
 **怎麼查**：
 
 1. 先看 `identity_fault_latched` 那列的 `detail`——它會指出最後一次是哪個站點（protection 的
-   哪個 role、reconcile、還是 kill-switch disarm）、哪個 cloid、以及交易所實際回了什麼。
+   哪個 role、reconcile、還是 kill-switch disarm；字樣見上表）、哪個 cloid、以及交易所實際回了什麼。
    **整包回應**在 `payloads/<run_id>/orderStatus-<cloid>-*.json`——裡面有對方的 oid 與本文，
    `str(exc)` 只說得出兩個 cloid。存檔規則（每個 cloid 存幾份、為什麼有上限）以
    `live/venue_identity.py` 的 `_note_unreadable` docstring 為準，這裡不複述。

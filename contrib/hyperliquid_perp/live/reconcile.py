@@ -57,7 +57,7 @@ from .fill_backfill import (
     FillBackfiller,
 )
 from .fills import ENVELOPE_FACT_KEY_PREFIX
-from .orders import local_status_for_exchange_status
+from .orders import OrderStatusQuery, local_status_for_exchange_status
 from .payloads import write_raw_payload
 from .safe_mode import (
     REASON_INVALID_LOCAL_FILL,
@@ -69,6 +69,8 @@ from .safe_mode import (
     SafeModeManager,
 )
 from .venue_identity import (
+    EscalationHolder,
+    ProbeSite,
     VenueIdentityMonitor,
     describe_order_status_failure,
     escalate_identity_fault,
@@ -466,7 +468,7 @@ class LiveReconciler:
         coin: str,
         fetch_open_orders: Callable[[], Any],
         fetch_clearinghouse: Callable[[], Any],
-        query_order_by_cloid: Callable[[str], Any] | None = None,
+        query_order_by_cloid: OrderStatusQuery | None = None,
         fetch_fills: Callable[[int, int], Any] | None = None,
         backfiller: FillBackfiller | None = None,
         stream: LiveWsStream | None = None,
@@ -767,7 +769,7 @@ class LiveReconciler:
         # after the pass's own bookkeeping — see escalate_identity_fault for
         # why every holder runs it last and on the level.
         if escalate_identity_fault(
-            self._identity, safe_mode, site=f"§12 reconciliation, {trigger}"
+            self._identity, safe_mode, holder=EscalationHolder.RECONCILIATION, trigger=trigger
         ):
             logger.error(
                 "reconciliation (%s): venue-identity fault latched — manual safe mode", trigger
@@ -1211,7 +1213,7 @@ class LiveReconciler:
         cloid = local["cloid_hex"]
         oid = str(order.get("oid", "?"))
         try:
-            parsed = self._identity.probe(cloid, site="reconcile orphan-order tiebreaker")
+            parsed = self._identity.probe(cloid, site=ProbeSite.RECONCILE_ORPHAN_TIEBREAKER)
         except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
             # Log-at-origin, same as _settle_absent_order's sibling tiebreaker:
             # the case detail is an in-memory value (and its row write is
@@ -1246,7 +1248,8 @@ class LiveReconciler:
             fact_key=_local_terminal_read_failure_fact_key(cloid),
         )
         if parsed is not None:
-            exchange_order_id, raw_status = parsed
+            exchange_order_id = parsed.exchange_order_id
+            raw_status = parsed.status
             local_status = local_status_for_exchange_status(raw_status)
             if local_status in repo.LIVE_ORDER_STATUSES:
                 # Confirmed live: the terminal row was wrong (the usual story:
@@ -1422,7 +1425,7 @@ class LiveReconciler:
         cloid = row["cloid_hex"]
         order_id = row["order_id"]
         try:
-            parsed = self._identity.probe(cloid, site="reconcile absent-order settle")
+            parsed = self._identity.probe(cloid, site=ProbeSite.RECONCILE_ABSENT_SETTLE)
         except Exception as exc:  # noqa: BLE001
             # See the sibling in _maybe_reopen_terminal_order: same fact key
             # and disposition for both failure families, the clause alone
@@ -1470,7 +1473,8 @@ class LiveReconciler:
                     updated_at=now,
                 )
             return True, case
-        exchange_order_id, raw_status = parsed
+        exchange_order_id = parsed.exchange_order_id
+        raw_status = parsed.status
         local_status = local_status_for_exchange_status(raw_status)
         if local_status in repo.LIVE_ORDER_STATUSES:
             # Still live per orderStatus; open_orders was merely behind. Not a

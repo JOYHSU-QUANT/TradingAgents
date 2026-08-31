@@ -230,6 +230,39 @@ def synthetic_bar(**over):
     return base
 
 
+# A cloid no test registers as its own: the identity a MISROUTING venue answers
+# with (see misrouted_order_status), distinct from every "ours" constant the
+# consumers' tests mint.
+_STRANGER_CLOID = "0x" + "ee" * 16
+
+
+def misrouted_order_status(oid: str = "4242") -> dict:
+    """An orderStatus answer about SOMEONE ELSE's order — the venue misrouting.
+
+    Carries its own ``cloid``, so :func:`echo_order_status_cloid` leaves it
+    alone and ``parse_order_status`` raises rather than handing back a
+    stranger's status. The one shape every §13.5 venue-identity test scripts
+    (issue #132: it used to live once per test module).
+    """
+    return {
+        "status": "order",
+        "order": {"order": {"oid": oid, "cloid": _STRANGER_CLOID}, "status": "open"},
+    }
+
+
+def identity_latch_rows(db, *, run_id: str) -> list:
+    """The ``identity_fault_latched`` rows a run wrote (the §13.5 latch's audit trail).
+
+    ``run_id`` is required: a default would let a test on some other run
+    assert ``== []`` against rows it never looked at.
+    """
+    return [
+        e
+        for e in repo.iter_protection_order_events(db.conn, run_id)
+        if e["event_type"] == "identity_fault_latched"
+    ]
+
+
 def echo_order_status_cloid(payload, cloid_hex):
     """Echo the queried cloid into a canned orderStatus payload, like the venue.
 

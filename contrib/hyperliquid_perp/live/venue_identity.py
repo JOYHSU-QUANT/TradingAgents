@@ -46,27 +46,98 @@ question we happened to ask"). This module is that shared counter:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..common.enum_guard import check_enum
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from .orders import parse_order_status
+from .order_gate import PROTECTIVE_ORDER_ROLES
+from .orders import OrderStatusQuery, OrderStatusReading, parse_order_status
 from .payloads import write_raw_payload
 from .safe_mode import REASON_IDENTITY_FAULT, SafeModeManager
 
 __all__ = [
     "UNREADABLE_PROBE_LATCH_THRESHOLD",
+    "EscalationHolder",
+    "ProbeSite",
     "VenueIdentityMonitor",
     "describe_order_status_failure",
     "escalate_identity_fault",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _fill(template: str, *, field: str, value: str | None, vocabulary: frozenset[str]) -> str:
+    """Render one site label: the template's single dynamic field, or none.
+
+    The label is the operator's only handle on WHERE a fault was seen (the
+    latch row, the safe-mode detail, the log line), so both halves of the
+    pairing fail loud: a template with the field needs the value (else the
+    RUNBOOK's placeholder text lands on a real row), a value for a template
+    without it would be silently dropped. The value is drawn from the closed
+    set that owns it, so the dynamic column is as bounded as the static one.
+    """
+    placeholder = "{" + field + "}"
+    if (placeholder in template) != (value is not None):
+        raise ValueError(
+            f"site {template!r} {'needs' if value is None else 'takes no'} {field}; got {value!r}"
+        )
+    if value is None:
+        return template
+    check_enum(value, vocabulary, name=field)
+    return template.replace(placeholder, value)
+
+
+class ProbeSite(Enum):
+    """The closed set of consumers that read orderStatus through the monitor.
+
+    One member per call site of :meth:`VenueIdentityMonitor.probe`, spelled
+    exactly as the label the ``identity_fault_latched`` row and the safe-mode
+    detail carry (the RUNBOOK's ``venue_identity_fault`` table is pinned to
+    these values). The two protection sites take the ``role`` they asked about
+    as their one dynamic field; :meth:`label` renders it (issue #132). NOT a
+    ``str`` enum, unlike the persisted vocabularies elsewhere: the values are
+    templates, and a member that quacked like a string could reach a log line
+    or a row unrendered — ``{role}`` and all — without a sound.
+    """
+
+    PROTECTION_NOOP_GUARD = "protection {role} no-op guard"
+    PROTECTION_RECOVERY_PROBE = "protection {role} recovery probe"
+    RECONCILE_ORPHAN_TIEBREAKER = "reconcile orphan-order tiebreaker"
+    RECONCILE_ABSENT_SETTLE = "reconcile absent-order settle"
+    KILL_SWITCH_DISARM_CROSS_CHECK = "kill-switch disarm cross-check"
+
+    def label(self, *, role: str | None = None) -> str:
+        """The rendered site text; ``role`` iff the member names one."""
+        return _fill(self.value, field="role", value=role, vocabulary=PROTECTIVE_ORDER_ROLES)
+
+
+class EscalationHolder(Enum):
+    """The closed set of safe-mode holders that escalate the latch.
+
+    The counterpart of :class:`ProbeSite` for :func:`escalate_identity_fault`:
+    where a fault was OBSERVED is a probe site, who ACTED on it is one of
+    these, and the safe-mode detail names both. The reconciliation holder
+    carries the pass's ``trigger`` (``RECONCILIATION_TRIGGERS``) as its one
+    dynamic field.
+    """
+
+    PROTECTION_SYNC = "§17 protection sync"
+    RECONCILIATION = "§12 reconciliation, {trigger}"
+    SHUTDOWN = "§18.2 shutdown disarm cross-check"
+
+    def label(self, *, trigger: str | None = None) -> str:
+        """The rendered holder text; ``trigger`` iff the member names one."""
+        return _fill(
+            self.value, field="trigger", value=trigger, vocabulary=repo.RECONCILIATION_TRIGGERS
+        )
+
 
 # §17 / §13.5: how many CONSECUTIVE unreadable orderStatus answers ABOUT ONE
 # CLOID latch the venue-identity fault. Counted per cloid (decided 2026-08-27,
@@ -145,13 +216,22 @@ class VenueIdentityMonitor:
     def __init__(
         self,
         *,
-        query_order_by_cloid: Callable[[str], Any],
+        query_order_by_cloid: OrderStatusQuery,
         db: Database,
         run_id: str,
         symbol: str,
         payload_dir: Path | None = None,
         clock: Clock | None = None,
     ) -> None:
+        # CI runs no type checker, so the ``OrderStatusQuery`` contract is
+        # enforced here, at construction — not on the first probe, inside a
+        # fail-soft ``except`` lane that would read a mis-wiring as a
+        # transport failure and carry on (issue #132).
+        if not callable(query_order_by_cloid):
+            raise TypeError(
+                "query_order_by_cloid must be the orderStatus seam (cloid_hex -> payload), "
+                f"got {type(query_order_by_cloid).__name__}"
+            )
         self._query = query_order_by_cloid
         self._db = db
         self._run_id = run_id
@@ -173,10 +253,11 @@ class VenueIdentityMonitor:
         # cloid -> the payload file already holding that cloid's refused answer
         # (see _note_unreadable for why evidence is bounded per cloid).
         self._evidence: dict[str, str] = {}
-        # The site whose probe crossed the threshold (None until first latch;
-        # kept at the most recent crossing) — read by escalate_identity_fault
-        # so the safe-mode row can name where the fault was OBSERVED, not just
-        # which holder happened to escalate it.
+        # The rendered label of the site whose probe crossed the threshold
+        # (None until first latch; kept at the most recent crossing) — read by
+        # escalate_identity_fault so the safe-mode row can name where the
+        # fault was OBSERVED, not just which holder happened to escalate it.
+        # Only ``ProbeSite.label`` can produce it (see probe).
         self._latched_site: str | None = None
 
     @property
@@ -186,7 +267,7 @@ class VenueIdentityMonitor:
 
     @property
     def latched_site(self) -> str | None:
-        """The probe site whose answer crossed the threshold, if any yet."""
+        """The rendered label of the probe site whose answer crossed the threshold."""
         return self._latched_site
 
     @property
@@ -201,14 +282,19 @@ class VenueIdentityMonitor:
         """
         return self.unreadable_streak >= UNREADABLE_PROBE_LATCH_THRESHOLD
 
-    def probe(self, cloid_hex: str, *, site: str) -> tuple[str, str] | None:
+    def probe(
+        self, cloid_hex: str, *, site: ProbeSite, role: str | None = None
+    ) -> OrderStatusReading | None:
         """``query_order_by_cloid`` + ``parse_order_status``, counted.
 
-        Returns what the parser returns (``(exchange_oid, status)`` or ``None``
-        for the documented ``unknownOid`` marker) and raises what it raises —
-        the caller's verdict logic is untouched; this only observes. ``site``
-        names the asking consumer for the log line and the latch row, so triage
-        does not have to guess which question got the answer.
+        Returns what the parser returns (an :class:`OrderStatusReading`, or
+        ``None`` for the documented ``unknownOid`` marker) and raises what it
+        raises — the caller's verdict logic is untouched; this only observes.
+        ``site`` names the asking consumer for the log line and the latch row,
+        so triage does not have to guess which question got the answer; the
+        protection sites also pass the ``role`` they asked about. An
+        unregistered site or an unpaired ``role`` raises ``ValueError``
+        before any round-trip (see ``_fill``).
 
         Three outcomes, three different effects on the streak:
 
@@ -232,11 +318,12 @@ class VenueIdentityMonitor:
           (only §13.6 does, by design); it lets a LATER recurrence latch again
           and leave its own audit row.
         """
+        label = ProbeSite(site).label(role=role)  # the pairing check, before any round-trip
         payload = self._query(cloid_hex)
         try:
             parsed = parse_order_status(payload, expected_cloid_hex=cloid_hex)
         except MalformedResponseError as exc:
-            self._note_unreadable(site=site, cloid_hex=cloid_hex, exc=exc, payload=payload)
+            self._note_unreadable(site=label, cloid_hex=cloid_hex, exc=exc, payload=payload)
             raise
         self._streaks.pop(cloid_hex, None)
         return parsed
@@ -351,9 +438,18 @@ class VenueIdentityMonitor:
 
 
 def escalate_identity_fault(
-    monitor: VenueIdentityMonitor, safe_mode: SafeModeManager, *, site: str
+    monitor: VenueIdentityMonitor,
+    safe_mode: SafeModeManager,
+    *,
+    holder: EscalationHolder,
+    trigger: str | None = None,
 ) -> bool:
     """Enter manual safe mode if the shared latch is up; True when it was.
+
+    ``holder`` is the acting safe-mode holder (a probe SITE is where the fault
+    was observed — see ``ProbeSite``); the reconciliation holder passes the
+    pass's ``trigger`` too. Both are checked before the latch is read (see
+    ``_fill``).
 
     Called by each holder of the safe-mode machine AFTER the probe sites it
     drives have run, and LAST in that holder's own bookkeeping: ``enter``
@@ -376,20 +472,21 @@ def escalate_identity_fault(
     skip startup recovery: the boot still arms the switch and reconciles under
     it, but the verdict cannot pass and no cycle starts until §13.6 releases.
     """
+    acted = EscalationHolder(holder).label(trigger=trigger)  # checked even when not latched
     if not monitor.latched:
         return False
     # Both names, because they can differ and each answers a different triage
-    # question: ``site`` is the holder that acted (whose lane the escalation
-    # ran in), ``latched_site`` is where the fault was observed — without it,
-    # a latch collected by the kill-switch cross-check would be filed under
-    # whichever holder escalated first (2026-08-27 round-1 review).
+    # question: ``holder`` is who acted (whose lane the escalation ran in),
+    # ``latched_site`` is where the fault was observed — without it, a latch
+    # collected by the kill-switch cross-check would be filed under whichever
+    # holder escalated first (2026-08-27 round-1 review).
     observed = monitor.latched_site or "unknown probe site"
     safe_mode.enter(
         "manual",
         REASON_IDENTITY_FAULT,
         detail=(
             "orderStatus answered unusably on consecutive §8.3 identity probes "
-            f"(latched at the {observed}; escalated by {site})"
+            f"(latched at the {observed}; escalated by {acted})"
         ),
     )
     return True

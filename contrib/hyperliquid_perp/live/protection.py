@@ -66,7 +66,7 @@ from .config import AGGRESSIVE_FILL_BAND_PCT, LiveProtectionConfig
 from .kill_switch import KillSwitchManager, refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import is_known_exchange_status, local_status_for_exchange_status
-from .venue_identity import VenueIdentityMonitor, describe_order_status_failure
+from .venue_identity import ProbeSite, VenueIdentityMonitor, describe_order_status_failure
 
 __all__ = ["ProtectionManager", "ProtectionOutcome"]
 
@@ -347,7 +347,9 @@ class ProtectionManager:
             # confirmed, so it does not count as evidence.
             return False
         try:
-            parsed = self._identity.probe(str(hexid), site=f"protection {role} no-op guard")
+            parsed = self._identity.probe(
+                str(hexid), site=ProbeSite.PROTECTION_NOOP_GUARD, role=role
+            )
         except Exception as exc:  # noqa: BLE001 — an unresolvable read must not crash the tick
             # One lane for both families, named apart in the log: a transport
             # failure heals; an answer about someone else's order does not, and
@@ -385,17 +387,17 @@ class ProtectionManager:
         # resting status — so delegating the whole question would answer "yes, it
         # rests" for a word we cannot classify, which is the exact fail-OPEN this
         # docstring promises not to do (2026-08-01 malformed-response review).
-        if not is_known_exchange_status(parsed[1]):
+        if not is_known_exchange_status(parsed.status):
             logger.warning(
                 "orderStatus answered %r for the resting %s (cloid %s) — a word this "
                 "build cannot classify, so it is NOT evidence of a resting order "
                 "(fail-closed)",
-                parsed[1],
+                parsed.status,
                 role,
                 hexid,
             )
             return False
-        if local_status_for_exchange_status(parsed[1]) not in _RESTING_ORDER_STATUSES:
+        if local_status_for_exchange_status(parsed.status) not in _RESTING_ORDER_STATUSES:
             return False
         # Positively confirmed live — for THIS order only. The next sync takes the
         # free path for this cloid; every other row stays suspect until it is
@@ -949,7 +951,9 @@ class ProtectionManager:
         eventually emergency-close is the safe fallback) and never crash the tick.
         """
         try:
-            parsed = self._identity.probe(hexid, site=f"protection {role} recovery probe")
+            parsed = self._identity.probe(
+                hexid, site=ProbeSite.PROTECTION_RECOVERY_PROBE, role=role
+            )
         except MalformedResponseError as exc:
             # The venue ANSWERED and the answer was unusable — a misrouted
             # identity, or a shape we cannot read. Handed to the caller so its
@@ -973,7 +977,8 @@ class ProtectionManager:
         # the sibling call in _row_still_rests).
         if parsed is None:
             return False  # the exchange does not know this cloid — nothing landed
-        exchange_oid, exchange_status = parsed
+        exchange_oid = parsed.exchange_order_id
+        exchange_status = parsed.status
         if not is_known_exchange_status(exchange_status):
             # A word this build cannot classify is not a POSITIVE confirmation,
             # and this method's whole contract is that it only returns True on

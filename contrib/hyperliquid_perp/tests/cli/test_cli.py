@@ -1510,7 +1510,7 @@ def test_history_funding_source_escalates_after_consecutive_failures(caplog):
     from contrib.hyperliquid_perp.cli import _HistoryFundingSource
 
     class _BrokenMarket:
-        def get_funding_history(self, coin, days):
+        def get_funding_history(self, coin, days, *, end):
             raise RuntimeError("endpoint gone")
 
     source = _HistoryFundingSource(_BrokenMarket())
@@ -1519,10 +1519,46 @@ def test_history_funding_source_escalates_after_consecutive_failures(caplog):
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli._provider"):
         for _ in range(threshold):
             assert source.rate_at("BTC", when) is None
-    levels = [r.levelno for r in caplog.records if "funding history fetch failed" in r.getMessage()]
+    failures = [r for r in caplog.records if "funding history fetch failed" in r.getMessage()]
+    levels = [r.levelno for r in failures]
     assert len(levels) == threshold
     assert all(lv == logging.WARNING for lv in levels[:-1])
     assert levels[-1] == logging.ERROR
+    # The failure counted must be the fake's, not a TypeError from a call
+    # site that drifted from the fake's signature: ``rate_at`` swallows
+    # every exception alike, so without this the test would count three
+    # "failures" and stay green with the ``end=`` wiring gone.
+    assert all("endpoint gone" in r.getMessage() for r in failures)
+
+
+def test_history_funding_source_hands_its_own_clock_to_the_window_end():
+    """The ``end=`` wiring of the one deliberately host-clocked windowed read.
+
+    Pinned on the HAPPY path with a recording fake — the escalation test
+    above cannot see a dropped ``end=`` (the resulting TypeError is swallowed
+    like any other failure). Issue #124: this read looks up a PAST hour, so
+    it passes the host's clock rather than fetching the exchange's; that
+    clock must be tz-aware and current, and a miss must be a quiet
+    ``None`` (pending), not a counted failure.
+    """
+    from contrib.hyperliquid_perp.cli import _HistoryFundingSource
+
+    calls = []
+
+    class _RecordingMarket:
+        def get_funding_history(self, coin, days, *, end):
+            calls.append((coin, days, end))
+            return []
+
+    source = _HistoryFundingSource(_RecordingMarket())
+    before = datetime.now(timezone.utc)
+    assert source.rate_at("BTC", datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)) is None
+    after = datetime.now(timezone.utc)
+    assert len(calls) == 1
+    coin, days, end = calls[0]
+    assert coin == "BTC" and days >= source._MIN_WINDOW_DAYS
+    assert end.tzinfo is not None and before <= end <= after
+    assert source._consecutive_failures == {}
 
 
 def test_sigterm_shim_raises_keyboard_interrupt():

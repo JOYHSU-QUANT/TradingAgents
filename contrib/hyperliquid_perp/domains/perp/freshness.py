@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ...common.constants import CYCLE_INTERVAL, ERROR_TYPES, STALE_MARKET_DATA_ERROR
 from ...common.enum_guard import check_enum
@@ -53,7 +53,7 @@ def _format_duration_ms(ms: int) -> str:
     of thirty-odd hours reads better as ``"30h 0m 0s"`` than as ``"1d 6h"``,
     and the collision the seconds exist for cannot happen in either band (the
     widest limit, one 1d bar plus one decision cycle, is under the two-day
-    band, and the future tolerance is a minute).
+    band, and the exchange-clock path tolerates no lead at all).
     """
     seconds, minutes = ms // 1000 % 60, ms // 60_000 % 60
     hours, days = ms // 3_600_000, ms // 86_400_000
@@ -67,6 +67,27 @@ def _format_duration_ms(ms: int) -> str:
 def _utc_stamp(moment: datetime) -> str:
     """``moment`` as a UTC ISO stamp; the tz is normalized, never assumed."""
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_ONE_MS = timedelta(milliseconds=1)
+
+
+def _delta_ms(later: datetime, earlier: datetime) -> int:
+    """``later - earlier`` in whole milliseconds, by integer arithmetic.
+
+    Every bound in this module is compared in milliseconds against stamps the
+    exchange sent as integer ms, so the subtraction must be exact:
+    ``int(delta.total_seconds() * 1000)`` goes through a float and reads
+    some deltas 1ms short (e.g. 65788957ms → 65788956.99999999 → 65788956;
+    0.43% of 3M random deltas under three days, measured 2026-08-31 and
+    pinned by a test), which would let a context sitting exactly on
+    ``limit_ms`` pass or refuse by rounding rather than by the limit.
+    Floors (``//``) rather than truncates, so a sub-millisecond negative reads
+    as ``-1``, not ``0`` — the inputs that can carry sub-ms fractions (the
+    host readings) only ever feed the skew note and the fallback path's
+    minutes-wide bounds, where that millisecond changes nothing.
+    """
+    return (later - earlier) // _ONE_MS
 
 
 # How old the newest candle may be, counted in candle intervals.
@@ -94,7 +115,7 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # one timedelta, so the value was written out here and drift-locked instead.)
 # The label refuses a cadence that is not whole hours at import, like the
 # reconciler's lookback label — see ``whole_hours_label``.
-_DECISION_CYCLE_MS = int(CYCLE_INTERVAL.total_seconds() * 1000)
+_DECISION_CYCLE_MS = CYCLE_INTERVAL // _ONE_MS
 _CYCLE_LABEL = whole_hours_label(CYCLE_INTERVAL, what="common.constants.CYCLE_INTERVAL")
 _MAX_CANDLE_AGE_CEILING_MS = _MAX_CANDLE_AGE_INTERVALS * _DECISION_CYCLE_MS
 _MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
@@ -118,8 +139,8 @@ def _candle_age_limit(interval_ms: int, interval: str) -> tuple[int, str]:
     lands under one bar the limit becomes one bar plus one decision cycle:
     the bar due at the boundary has a whole cycle to appear before the feed
     is called stopped. A cycle, not the seconds it actually takes (the bar
-    reads closed the moment the exchange's clock passes its close — see the
-    measurement on ``_CANDLE_LEAD_TOLERANCE_MS``), because the guard is
+    reads closed the moment the exchange's clock passes its close — the
+    2026-08-26 measurement recorded on ``market_data.get_candles``), because the guard is
     stated in decision cycles throughout and "24h plus a few seconds" would
     refuse the first cycle after any hiccup in that publishing at all. For 1d
     that is 28h: a daily feed that misses a bar is refused once the newest
@@ -225,16 +246,19 @@ def freshness_refusal(
     is one reason it runs first.
 
     The age is measured against the EXCHANGE's clock when the context carries
-    one (``ctx.exchange_time``, read by ``_build_context`` in the same fetch as
-    the candles): the candle window is cut by the host clock, so a host that
-    runs behind truncates it by the same amount and the newest bar looks
-    ordinary against that same host clock — the guard was blind to a host
-    three days slow (issue #51). Measured against the exchange's clock the age
-    is the real one, and the existing limit refuses it — the stale side needs
-    no second threshold. The FUTURE side does have its own
-    (``_CANDLE_LEAD_TOLERANCE_MS``): a closed bar never leads the exchange's
-    clock, so a lead past a minute is the still-forming bar a host running
-    ahead admitted, whatever the stale limit is (issue #93).
+    one (``ctx.exchange_time``, read by ``_build_context`` BEFORE the candle
+    fetch and handed to it as the window's end — issues #51 and #124). The
+    window's newest bar is then at most one interval behind that clock on a
+    healthy feed and never ahead of it, whatever the host's clock does: a
+    host behind truncates nothing (the blindness of #51, when the host cut
+    the window) and a host ahead admits no still-forming bar (the partial
+    OHLCV of #93, same cause). Measured against that same clock the age is
+    the real one, the existing limit refuses it, and the stale side needs
+    neither a second threshold nor a second cause — an age past the limit
+    means the exchange published no newer closed candle. The FUTURE side
+    needs no tolerance at all: ``as_of <= exchange_time`` holds by
+    construction for a live fetch, so a lead of any size is a context that
+    did not come from one.
 
     ``now`` is the HOST clock, and it has exactly ONE use: the fallback
     measuring clock for a context with no ``exchange_time`` (fixtures,
@@ -268,182 +292,108 @@ def freshness_refusal(
     exchange_now = ctx.exchange_time
     if exchange_now is None:
         return _host_clock_freshness_refusal(ctx, coin, host_now, limit_ms, limit_basis)
-    age_ms = int((exchange_now - ctx.as_of).total_seconds() * 1000)
+    age_ms = _delta_ms(exchange_now, ctx.as_of)
     # Skew is measured between the two readings ``_build_context`` took
     # ADJACENTLY, never against ``now``: the daemon's ``now`` is its own clock
     # reading from before the fetch, so subtracting it would report the fetch's
     # elapsed time as clock error. A context that carries an exchange clock but
     # no paired host reading (hand-built) simply has no skew to report.
     host_at_read = ctx.host_time_at_exchange_read
-    skew_ms = (
-        None if host_at_read is None else int((host_at_read - exchange_now).total_seconds() * 1000)
-    )
+    skew_ms = None if host_at_read is None else _delta_ms(host_at_read, exchange_now)
     skew_note = _host_clock_skew_note(skew_ms, host_at_read)
     if skew_ms is not None and abs(skew_ms) >= _CLOCK_SKEW_WARN_MS:
-        # Log-only, never a gate: the age check below is what decides, and it
-        # is measured entirely between exchange-side values. This is the
-        # operator's early notice — a 2h-slow host still PASSES with 4h bars
-        # (the data is 6h old, inside the 12h limit) but is one outage away
-        # from not passing, and "fix NTP" is cheaper before that. Built from
-        # the same ``skew_note`` the refusals carry so the two cannot drift.
-        #
-        # It does NOT say the decision is unaffected, because for a host
-        # running AHEAD it can be: ``get_candles`` cuts its window at this
-        # host's clock and keeps ``close_time <= end``, so a lead admits the
-        # still-forming bar, whose partial OHLCV understates ATR and skews
-        # RSI/EMA. The lead check below refuses that bar once it is more than
-        # ``_CANDLE_LEAD_TOLERANCE_MS`` past the exchange's clock; a lead
-        # inside the tolerance can still admit it in the last seconds of a
-        # bar, which is what this notice is for.
+        # Log-only, never a gate — and since issue #124 not a factor in the
+        # verdict either: both market windows are cut at the exchange's clock
+        # (``_build_context`` reads it first and hands it to both fetches), so
+        # a host offset neither truncates the candles nor admits a bar the
+        # exchange has not closed. What a STEADY offset still reaches is what
+        # this host stamps or derives from its own clock: the durable
+        # record's host-side stamps (``decision_attempts.timestamp`` /
+        # ``scheduled_at`` / ``next_decision_at``; the candle stamps in the
+        # linked ``ai_inputs`` row and ``funding_events.funding_timestamp``
+        # are the exchange's), and the settlement hour the paper engine's
+        # funding accrual asks for (``engine._process_funding`` walks hours
+        # up to the host's ``now``; a host ahead asks for an hour the
+        # exchange has not settled and books it ``pending``). The decision
+        # cadence itself is NOT on the
+        # list: it is a rolling interval measured on this one clock
+        # (``paper.scheduler``), which a steady offset cannot move — only a
+        # clock jump can. The kill switch has its own, tighter check. So the
+        # notice stays, and says exactly what the offset does and does not
+        # reach. Built from the same ``skew_note`` the refusals carry so the
+        # two cannot drift.
         logger.warning(
-            "%s Fix time sync (NTP): the candle window this host asks for is "
-            "offset from the exchange's clock (%s) by the same amount, and a "
-            "host running AHEAD can pull in a bar the exchange has not closed",
+            "%s Fix time sync (NTP). The market data is unaffected — the candle "
+            "and funding windows are cut at the exchange's clock (%s) — but the "
+            "stamps this host writes from its own clock (timestamp, scheduled_at, "
+            "next_decision_at) and the settlement hour funding accrual asks for run on it",
             skew_note,
             _utc_stamp(exchange_now),
         )
-    # A candle closing AFTER the exchange's clock by more than the tolerance —
-    # the still-forming bar a host running AHEAD pulls through get_candles'
-    # ``close_time <= end`` filter (issue #93). Its own bound, not the stale
-    # limit: a CLOSED bar never closes after the exchange's clock (the clock is
-    # read after the candles, and the exchange publishes a bar as closed at
-    # its boundary), so the only legitimate lead is the error between two
-    # exchange-side stamps, and the stale limit (12h for 4h bars) let every
-    # host lead under one interval through unseen.
-    if age_ms < -_CANDLE_LEAD_TOLERANCE_MS:
-        # The lead cannot exceed the host's own lead when the bar came from a
-        # live fetch with a steady host clock (the window was cut at
-        # ``host_at_read`` minus the fetch gap, and the exchange's clock only
-        # advanced since). A paired reading that does NOT show the host ahead
-        # by at least this much therefore leaves two shapes: the host clock
-        # STEPPED back between the candle read and the clock read (an NTP
-        # step, suspend/resume — the fallback path's docstring lists the same
-        # events), or the context was replayed or hand-built. Name both; the
-        # first is a production event and must not be waved off as replay.
-        if skew_ms is not None and skew_ms >= -age_ms:
-            cause = (
-                f"{skew_note} The candle window this host asked for ends that far "
-                "in the exchange's future, so it kept a bar the exchange has not "
-                "closed — its OHLCV is partial (understated ATR, skewed RSI/EMA). "
-                "Fix time sync (NTP) before trusting any cycle. Refusing to run "
-                "the engine on a candle the exchange has not closed."
-            )
-        elif skew_ms is None:
-            cause = (
-                f"{skew_note} Either this host's clock ran ahead when the candle "
-                "window was cut, admitting a bar the exchange has not closed, or "
-                "this context did not come from a live market fetch. Refusing to "
-                "run the engine on a context whose age cannot be established."
-            )
-        else:
-            cause = (
-                f"{skew_note} No host lead that size was recorded beside the "
-                "exchange's clock: either this host's clock stepped back between "
-                "the candle read and the clock read (an NTP step, suspend/resume "
-                "— check the system log), or this context did not come from a "
-                "live market fetch. Refusing to run the engine on a context whose "
-                "age cannot be established."
-            )
+    if age_ms < 0:
+        # A candle closing AFTER the exchange's clock. No live fetch produces
+        # this: ``get_candles`` keeps ``close_time <= end`` with ``end`` the
+        # very reading compared here, so ``as_of <= exchange_time`` holds by
+        # construction whatever the host's clock does (issue #124; until then
+        # the window was cut at the host's clock, a host running ahead
+        # admitted the forming bar, and this branch carried a one-minute
+        # tolerance for the disagreement between two exchange-side stamps —
+        # there is one stamp now, so there is nothing to tolerate). A lead of
+        # any size therefore means the context was not produced by
+        # ``_build_context``: a replay, a hand-built context, or a candle set
+        # and a clock taken from different fetches. The skew note rides along
+        # as information; it is not a cause here.
         return ContextRefusal(
             STALE_CONTEXT_ERROR,
             f"the newest {coin} candle closes at {_utc_stamp(ctx.as_of)}, which is "
             f"{_format_duration_ms(-age_ms)} AFTER the exchange's clock "
-            f"({_utc_stamp(exchange_now)}) — more than the "
-            f"{_format_duration_ms(_CANDLE_LEAD_TOLERANCE_MS)} a closed candle can "
-            f"lead it by. {cause}",
+            f"({_utc_stamp(exchange_now)}). A live fetch cannot produce this — the "
+            "candle window is cut at that same clock reading — so this context did "
+            "not come from a live market fetch (a replay, a hand-built context, or "
+            f"candles and clock taken from different fetches). {skew_note} Refusing "
+            "to run the engine on a context whose age cannot be established.",
         )
     if age_ms > limit_ms:
-        # Name the cause only as far as the two clocks license. A host behind
-        # by S shifts the candle window back by S, so S is how much of this age
-        # the clock can account for: past the whole limit it is sufficient on
-        # its own, below the warn floor it is irrelevant, and in between it is
-        # a contributor the operator must check ALONGSIDE the feed. Claiming
-        # either cause outright in that middle band would send half the
-        # investigations down the wrong path — the same coin-flip the
-        # host-clock-only fallback below still has to live with.
-        if skew_ms is None:
-            cause = f"{skew_note} The cause cannot be narrowed further from here."
-        elif skew_ms < -limit_ms:
-            cause = (
-                f"{skew_note} An offset that large by itself puts the newest "
-                "candle this host can ask for past the limit — fix time sync "
-                "(NTP) before trusting any cycle."
-            )
-        elif skew_ms <= -_CLOCK_SKEW_WARN_MS:
-            cause = (
-                f"{skew_note} That shifts the candle window back by the same "
-                f"amount, so it accounts for {_format_duration_ms(-skew_ms)} of "
-                "this age but not all of it — check time sync (NTP) AND the "
-                "exchange's candle feed."
-            )
-        else:
-            cause = (
-                f"{skew_note} The market data feed itself stopped advancing: the "
-                "exchange published no newer closed candle."
-            )
+        # One cause, since issue #124: the window was cut at the exchange's
+        # clock, so this host's clock — whatever the paired reading says —
+        # cannot have truncated it, and an age past the limit means the
+        # exchange published no newer closed candle. (Until then a host
+        # behind by S shifted the window back by S, and this branch split the
+        # blame by how much of the age S accounted for.) The skew note rides
+        # along as operator information, not as a cause.
         return ContextRefusal(
             STALE_CONTEXT_ERROR,
             f"the newest {coin} candle closed at {_utc_stamp(ctx.as_of)}, "
             f"{_format_duration_ms(age_ms)} before the exchange's clock "
             f"({_utc_stamp(exchange_now)}) — past the {_format_duration_ms(limit_ms)} "
-            f"freshness limit ({limit_basis}). {cause} This context describes a "
-            "market other than the current one. Refusing to run the engine on "
-            "market data this old.",
+            f"freshness limit ({limit_basis}). The market data feed itself stopped "
+            "advancing: the exchange published no newer closed candle (the candle "
+            "window is cut at the exchange's own clock, so this host's clock cannot "
+            f"have truncated it). {skew_note} This context describes a market other "
+            "than the current one. Refusing to run the engine on market data this old.",
         )
     return None
 
 
-# Host-vs-exchange clock skew at or past which the guard logs a warning (and
-# names the host clock as the cause in a refusal). Log-only — the age check
-# against the exchange's clock is the gate — so this is an operator nudge, not
-# a correctness bound: one minute is far outside anything NTP leaves behind and
-# far inside ``_MAX_CANDLE_AGE_FLOOR_MS``, the floor of the limit the skew would
-# have to reach to matter. (Named, not written out as "30m": this is one of the
+# Host-vs-exchange clock skew at or past which the guard logs a warning (the
+# refusal messages carry the same note as information; since issue #124 no
+# verdict turns on it — the market windows are cut at the exchange's clock).
+# Log-only — the age check against the exchange's clock is the gate — so this
+# is an operator nudge, not a correctness bound: one minute is far outside
+# anything NTP leaves behind and far inside ``_MAX_CANDLE_AGE_FLOOR_MS``, the
+# floor of the limit. (Named, not written out as "30m": this is one of the
 # sites that would keep quoting the old number if that constant moved.)
 # Deliberately NOT the kill switch's 5s ``_MAX_CLOCK_SKEW_S``: that bound is
 # about absolute scheduleCancel deadlines, where seconds change the protection
 # window; here seconds change nothing, and importing live.kill_switch would
 # drag the live package into the keyless --context-only path.
-_CLOCK_SKEW_WARN_MS = 60_000
-
-# How far past the EXCHANGE's clock the newest candle's close may sit before
-# the guard calls it a bar the exchange has not closed (issue #93). Only the
-# exchange-clock path uses it; the host-clock fallback keeps the stale limit
-# as its future tolerance because there the daemon's clock reading precedes
-# the fetch and a boundary closing in between legitimately lands ahead of it.
 #
-# On the exchange-clock path no such shape exists: ``_build_context`` reads
-# the candles FIRST and the exchange's clock after, so a bar that closed
-# during the fetch is simply not in the candle response, and a closed bar's
-# close_time is at or before the exchange's clock by construction. What can
-# legitimately remain is the disagreement between two exchange-side stamps —
-# the l2Book ``time`` and the candle service's boundaries. Measured
-# 2026-08-26 against the public API (BTC, 1m bars, 114 paired reads over
-# 240s, sampled every 2s): l2Book time minus the newest kept bar's
-# close_time was never negative and bottomed at 7.2s right after each
-# boundary — the measuring host's own 6s lag behind the exchange (stable
-# within ±0.4s over the run) plus the sampling period — and the bar the
-# host kept was always one the exchange's clock had passed. That leaves no
-# observed disagreement between the two exchange-side stamps beyond the 2s
-# sampling resolution; a minute is well above that. The same run showed the
-# forming bar present in every candleSnapshot response, reading as closed
-# the moment the exchange's clock passed its close — no publish step. And
-# the l2Book ``time`` is the SERVER's clock, not the book's last update:
-# sampled the same day on the three thinnest perps by 24h volume (under
-# $50k each) it advanced with every read exactly as BTC's did, so a coin
-# that trades rarely does not hand the guard a stale stamp. What it lets
-# through
-# is bounded too: a host ahead by H admits the forming bar when the fetch
-# lands within H of the bar's close, and that bar leads the exchange's clock
-# by the time still left to its close — so a refusal means more than a
-# minute of the bar was missing, and a pass means less. At the 1m interval
-# that is every admitted bar, so there a host lead is never refused on this
-# branch (the bar is missing under a minute of trades). The bound cannot
-# sit below ``_CLOCK_SKEW_WARN_MS``: a live fetch's lead is at most the
-# host's own lead (the window was cut at the host's clock before the
-# exchange's was read), so a refusal here with the note saying the clocks
-# "agree" would contradict itself — a test pins the ordering.
-_CANDLE_LEAD_TOLERANCE_MS = 60_000
+# The l2Book ``time`` this skew is measured against is the SERVER's clock, not
+# the book's last update (measured 2026-08-26 on the three thinnest perps by
+# 24h volume, under $50k each: it advanced with every read exactly as BTC's
+# did), so a coin that trades rarely does not hand the guard — or the window
+# cut — a stale stamp.
+_CLOCK_SKEW_WARN_MS = 60_000
 
 
 def _host_clock_skew_note(skew_ms: int | None, host_at_read: datetime | None) -> str:
@@ -471,9 +421,11 @@ def _host_clock_freshness_refusal(
     verdict this measurement cannot support.
 
     What it DOES catch is the clock JUMPING between the two readings that
-    produced these timestamps — ``moment`` and ``get_candles``' own window end
-    — from a host resuming from suspend, an NTP step, a container clock
-    resyncing; and a ``ctx`` that never came from a live fetch. Do not name a
+    produced these timestamps — ``moment`` and whatever host reading cut the
+    context's candle window (a live fetch cuts it at the exchange's clock and
+    always carries that clock, so this path never sees one) — from a host
+    resuming from suspend, an NTP step, a container clock resyncing; and a
+    ``ctx`` that never came from a live fetch. Do not name a
     direction: the two readings happen in opposite orders on the two paths
     (the daemon reads its clock first and fetches after; the one-shot callers
     let ``now`` default, AFTER the fetch), so the same branch means a forward
@@ -492,7 +444,7 @@ def _host_clock_freshness_refusal(
     validates network_timeout_s as a number but sets no upper bound, so a
     deployment choosing minutes-long timeouts would need this revisited.)
     """
-    age_ms = int((moment - ctx.as_of).total_seconds() * 1000)
+    age_ms = _delta_ms(moment, ctx.as_of)
     if age_ms < -limit_ms:
         return ContextRefusal(
             STALE_CONTEXT_ERROR,

@@ -132,15 +132,17 @@ def build_market_context(
     declared once (on :class:`MarketDataConfig`), so a caller cannot build a
     context from a different default than the config loader validated.
 
-    ``exchange_time`` is the exchange's clock as read during the same fetch
-    (see ``PerpMarketContext.exchange_time``); it is carried through untouched
-    — nothing here measures against it, the freshness guard does.
+    ``exchange_time`` is the exchange's clock as read during the same fetch —
+    since issue #124 the very reading the candle window was cut at (see
+    ``PerpMarketContext.exchange_time``); it is carried through untouched —
+    nothing here measures against it, the freshness guard does.
 
     REQUIRED, with no default, even though the field it fills is optional: a
     caller with no exchange clock has to write ``exchange_time=None`` and mean
     it. The default it would otherwise inherit is precisely the issue-#51 blind
-    spot (the guard falls back to the host clock, which also bounded the candle
-    window), so it must never be reachable by forgetting a kwarg.
+    spot (the guard falls back to the caller's host clock, against which a
+    window a slow host cut looks current), so it must never be reachable by
+    forgetting a kwarg.
     """
     if candles:
         # Anchor the funding window on the raw epoch-ms integer, not a float

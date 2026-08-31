@@ -141,7 +141,7 @@ def _build_context(
     ``on_blocking_read`` is called between the network reads below. It exists for
     ONE caller — the live loop, where this runs on the single-threaded tick and
     the five reads here (constructing the client fetches perp meta, then
-    snapshot, candles, the exchange clock, funding) are the longest run of
+    snapshot, the exchange clock, candles, funding) are the longest run of
     back-to-back REST calls in the system, each riding the full
     ``network_timeout_s``. Left unrefreshed, this chain would set
     ``kill_switch._MAX_UNREFRESHED_REST_CALLS`` to its own length — four when
@@ -185,14 +185,17 @@ def _build_context(
     print(f"Fetching {coin} market data from {client.network} (read-only)...", file=sys.stderr)
     snapshot = market.get_market_snapshot(coin)
     _between_reads()
-    candles = market.get_candles(coin, market_data.candle_interval, market_data.candle_lookback)
-    _between_reads()
-    # The exchange's clock, read right after the candles it will be measured
-    # against (issue #51): the candle window above is bounded by the HOST
-    # clock, so it alone cannot reveal a host that runs behind. Keyless
-    # (public l2Book), so --context-only gets the same check as the daemon.
-    # A read that fails or answers without a timestamp propagates like the
-    # other reads — fail-closed, the guard cannot measure without it.
+    # The exchange's clock, read BEFORE the two windows it bounds (issues #51,
+    # #124): both fetches below cut their window at this value, so a host
+    # clock that runs behind truncates nothing and one that runs ahead admits
+    # no bar the exchange has not closed. Before, not after — a bar that
+    # closes during the candle fetch is then simply outside the window,
+    # whereas a clock read after the fetch would pass that bar's close_time
+    # while the response carried its OHLCV as captured before the close. The
+    # freshness guard measures the candles' age against this same reading.
+    # Keyless (public l2Book), so --context-only gets the same clock as the
+    # daemon. A read that fails or answers without a timestamp propagates like
+    # the other reads — fail-closed, nothing below can cut a window without it.
     exchange_time = market.get_exchange_time(coin)
     # Adjacent to the read above — that adjacency is the whole point. A host
     # reading taken anywhere else (the scheduler's ``as_of``, the guard's own
@@ -201,7 +204,13 @@ def _build_context(
     # time as clock skew.
     host_time_at_exchange_read = datetime.now(tz=timezone.utc)
     _between_reads()
-    funding = market.get_funding_history(coin, market_data.funding_zscore_window_days)
+    candles = market.get_candles(
+        coin, market_data.candle_interval, market_data.candle_lookback, end=exchange_time
+    )
+    _between_reads()
+    funding = market.get_funding_history(
+        coin, market_data.funding_zscore_window_days, end=exchange_time
+    )
     _between_reads()
 
     ctx = build_market_context(

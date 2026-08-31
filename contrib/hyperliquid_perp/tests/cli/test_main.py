@@ -826,11 +826,12 @@ def _ctx_closing_at(
 #
 # The exchange-clock branch runs twice: with the paired host reading agreeing
 # with the exchange, and with this host two hours BEHIND it (issue #122). Past
-# the warn floor, so every stale verdict on that param picks its "check time
-# sync AND the feed" wording instead of blaming the feed alone — and what must
-# NOT move is the verdict: the age is measured between two exchange-side
-# stamps, so a mutation that folded the skew into it would pass the first two
-# params (skew zero or unknown) while shifting every bound below by 2h.
+# the warn floor, so every verdict on that param carries the "behind the
+# exchange's" note — and what must NOT move is the verdict: the age is
+# measured between two exchange-side stamps (and since issue #124 the window
+# is cut at one of them), so a mutation that folded the skew into it would
+# pass the first two params (skew zero or unknown) while shifting every bound
+# below by 2h.
 _BOTH_CLOCKS = pytest.mark.parametrize(
     ("exchange_time", "host_skew"),
     [
@@ -1153,17 +1154,18 @@ def test_context_refusal_future_bound_is_exclusive_on_the_host_clock():
 
 
 def test_context_refusal_candle_lead_bound_is_exclusive_on_the_exchange_clock():
-    # Issue #93: on the exchange-clock path the future tolerance is the
-    # one-minute lead bound, not the stale limit. Exactly at it passes; one
-    # millisecond past it refuses. Skew is left at zero so the refusal is
-    # the non-live-context wording, not the host-clock one.
-    lead = timedelta(milliseconds=freshness_mod._CANDLE_LEAD_TOLERANCE_MS)
-    at_bound = _ctx_closing_at(_NOW + lead, exchange_time=_NOW)
+    # On the exchange-clock path there is NO future tolerance (issue #124; the
+    # one-minute lead bound of #93 went with the host-cut window it existed
+    # for): a candle closing exactly at the exchange's clock is closed and
+    # passes, one millisecond past it is a context no live fetch produced.
+    # Skew is left at zero so nothing but the lead is in play.
+    at_bound = _ctx_closing_at(_NOW, exchange_time=_NOW)
     assert guards_mod.context_refusal_message(at_bound, "BTC", {}, now=_NOW) is None
-    past = _ctx_closing_at(_NOW + lead + timedelta(milliseconds=1), exchange_time=_NOW)
+    past = _ctx_closing_at(_NOW + timedelta(milliseconds=1), exchange_time=_NOW)
     msg = guards_mod.context_refusal_message(past, "BTC", {}, now=_NOW)
     assert msg is not None and _AFTER[_NOW] in msg
-    assert "1m 0s a closed candle can lead it by" in msg
+    assert "did not come from a live market fetch" in msg
+    assert "closed candle can lead it by" not in msg
 
 
 def test_context_refusal_flags_a_clock_that_jumped():
@@ -1187,42 +1189,44 @@ def test_context_refusal_flags_a_clock_that_jumped():
     assert "backward" not in msg and "forward" not in msg
 
 
-def _host_offset_ctx(offset, *, exchange_clock=True, interval="4h", into_bar=None):
-    """A live fetch by a host whose clock is ``offset`` from the exchange's.
-
-    Models get_candles faithfully: the window ends at the HOST's clock
-    (``_NOW + offset``) and keeps ``close_time <= end``, with bars closing
-    every ``interval`` and the exchange's clock ``into_bar`` into the forming
-    one (default: sitting exactly on a boundary, so a bar just closed). The
-    newest kept bar is therefore the latest boundary at or before the host's
-    clock — a host BEHIND truncates the window by its lag (issue #51); a host
-    AHEAD by more than the time left in the forming bar keeps that bar,
-    which the exchange has not closed (issue #93). Returns ``(ctx, host)``.
+def _host_cut_ctx(offset, *, interval="4h"):
+    """A context whose candle window was cut at a HOST clock ``offset`` from
+    ``_NOW``, with no exchange clock on it — the pre-#124 shape, which only a
+    fixture or replay can still produce (a live fetch cuts the window at the
+    exchange's clock and always carries that clock). Bars close every
+    ``interval`` on the boundary at ``_NOW``; the newest kept bar is the last
+    close at or before the host's clock. Returns ``(ctx, host)``.
     """
     bar = timedelta(milliseconds=interval_to_ms(interval))
     host = _NOW + offset
-    newest = _NOW + (bar - (bar if into_bar is None else into_bar))
+    newest = _NOW
     if newest > host:
         newest -= -((host - newest) // bar) * bar  # back to the last close <= host
-    ctx = _ctx_closing_at(
-        newest,
-        interval=interval,
-        exchange_time=_NOW if exchange_clock else None,
-        host_skew=offset if exchange_clock else None,
-    )
-    return ctx, host
+    return _ctx_closing_at(newest, interval=interval), host
 
 
-def _host_clock_offset_ctx(offset_hours, *, exchange_clock):
-    return _host_offset_ctx(timedelta(hours=offset_hours), exchange_clock=exchange_clock)
+def _exchange_cut_ctx(offset, *, interval="4h", into_bar):
+    """A live fetch since issue #124 by a host whose clock is ``offset`` from
+    the exchange's.
+
+    Models ``_build_context`` + ``get_candles`` faithfully: the exchange's
+    clock (``_NOW``) is read first and cuts the window (``close_time <= end``),
+    with bars closing every ``interval`` and the exchange's clock ``into_bar``
+    into the forming one. The newest kept bar is therefore the last close at
+    or before the EXCHANGE's clock — ``_NOW - into_bar`` — whatever the host's
+    clock reads; ``offset`` reaches the context only as the paired host
+    reading (the skew note), never the window.
+    """
+    return _ctx_closing_at(_NOW - into_bar, interval=interval, exchange_time=_NOW, host_skew=offset)
 
 
 def test_freshness_guard_without_an_exchange_clock_is_blind_to_a_clock_behind():
     # The fallback path's known asymmetry, pinned so it stays a documented gap
     # rather than an assumption: with NO exchange clock on the context the
-    # guard has only the host clock, which also bounded the candle window.
+    # guard has only the host clock, which (on this fixture shape) also
+    # bounded the candle window.
     def verdict(offset_hours):
-        ctx, host = _host_clock_offset_ctx(offset_hours, exchange_clock=False)
+        ctx, host = _host_cut_ctx(timedelta(hours=offset_hours))
         return guards_mod.context_refusal_message(ctx, "BTC", {}, now=host)
 
     # Behind: the candles are truncated by the same amount, so the age reads
@@ -1233,38 +1237,74 @@ def test_freshness_guard_without_an_exchange_clock_is_blind_to_a_clock_behind():
     assert "freshness limit" in verdict(+24)
 
 
-def test_freshness_guard_catches_a_clock_that_runs_behind_via_the_exchange_clock():
-    # Issue #51 closed: measured against the exchange's clock the day-old
-    # window IS a day old, whatever the host clock says. Same fixture shape as
-    # the blind test above, differing only in the exchange clock being present
-    # — that difference is the whole fix.
-    ctx, _host = _host_clock_offset_ctx(-24, exchange_clock=True)
-    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
+def test_freshness_guard_passes_a_host_behind_because_the_window_is_cut_at_the_exchange_clock(
+    caplog,
+):
+    # Issue #51 closed at the source (issue #124): the same day-behind host
+    # as the blind test above, but a live fetch — the window was cut at the
+    # exchange's clock, so nothing was truncated and the newest bar is the
+    # one that just closed. The verdict passes; the skew warning still tells
+    # the operator to fix NTP, and says what the offset does and does not
+    # reach.
+    ctx = _exchange_cut_ctx(-timedelta(hours=24), into_bar=timedelta(0))
+    assert ctx.as_of == _NOW
+    with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
+        assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
+    warned = [r.getMessage() for r in caplog.records if "Fix time sync" in r.getMessage()]
+    assert len(warned) == 1
+    assert "24h 0m 0s behind the exchange's" in warned[0]
+    assert "cut at the exchange's clock" in warned[0]
+    # ...and a GENUINELY stale context on the same host is still refused, for
+    # the feed — the host's clock, however far behind, cannot have truncated a
+    # window it did not cut. This is the discriminating half: the pre-#124
+    # message named the clock here.
+    stale = _ctx_closing_at(
+        _NOW - timedelta(hours=24), exchange_time=_NOW, host_skew=-timedelta(hours=24)
+    )
+    msg = guards_mod.context_refusal_message(stale, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "24h 0m 0s before the exchange's clock" in msg
     assert "12h 0m 0s freshness limit (3 x 4h)" in msg
-    # And the cause is no longer a coin-flip: the host clock is named, with
-    # its direction and size, as what truncated the window.
-    assert "24h 0m 0s behind the exchange's" in msg
-    assert "fix time sync (NTP)" in msg
-    assert "feed itself stopped advancing" not in msg
+    assert "feed itself stopped advancing" in msg
+    assert "cannot have truncated it" in msg
+    assert "24h 0m 0s behind the exchange's" in msg  # carried as information
+    assert "time sync" not in msg
 
 
-def test_freshness_guard_splits_the_blame_when_the_skew_is_only_part_of_the_age():
-    # The honest middle band: a host 6h behind with 4h bars contributes 6h of a
-    # 20h age but cannot account for all of it. Naming EITHER cause outright
-    # here would send half the investigations down the wrong path, so the
-    # message must name the offset's SIZE and point at both.
-    ctx = _ctx_closing_at(
-        _NOW - timedelta(hours=20), exchange_time=_NOW, host_skew=-timedelta(hours=6)
-    )
+@pytest.mark.parametrize(
+    "host_skew",
+    [
+        pytest.param(-timedelta(hours=6), id="behind-part-of-the-age"),
+        pytest.param(-timedelta(hours=12, seconds=1), id="behind-more-than-the-limit"),
+        pytest.param(
+            -timedelta(milliseconds=freshness_mod._CLOCK_SKEW_WARN_MS), id="at-warn-floor"
+        ),
+        pytest.param(timedelta(hours=3), id="ahead"),
+        pytest.param(timedelta(seconds=3), id="agrees"),
+    ],
+)
+def test_freshness_guard_names_the_feed_whatever_the_skew(host_skew):
+    # One cause on the stale side since issue #124: the window is cut at the
+    # exchange's clock, so no host offset — behind by part of the age, by
+    # more than the whole limit, or ahead — can have truncated it. The
+    # pre-#124 branch split the blame by how much of the age the offset
+    # accounted for; every one of those sentences must be gone, and the skew
+    # must appear only as the note.
+    ctx = _ctx_closing_at(_NOW - timedelta(hours=20), exchange_time=_NOW, host_skew=host_skew)
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "accounts for 6h 0m 0s of this age but not all of it" in msg
-    assert "check time sync (NTP) AND the exchange's candle feed" in msg
-    # Neither single-cause sentence appears.
+    assert "20h 0m 0s before the exchange's clock" in msg
+    assert "feed itself stopped advancing" in msg
+    assert "accounts for" not in msg
     assert "by itself puts the newest" not in msg
-    assert "feed itself stopped advancing" not in msg
+    assert "check time sync" not in msg
+    assert "fix time sync" not in msg
+    if abs(host_skew) >= timedelta(milliseconds=freshness_mod._CLOCK_SKEW_WARN_MS):
+        assert (
+            "behind the exchange's" if host_skew < timedelta(0) else "ahead of the exchange's"
+        ) in msg
+    else:
+        assert "agrees with the exchange's" in msg
 
 
 def test_freshness_guard_names_the_feed_when_the_host_clock_agrees():
@@ -1283,19 +1323,19 @@ def test_freshness_guard_names_the_feed_when_the_host_clock_agrees():
 def test_freshness_guard_reports_the_skew_as_unknown_without_a_paired_reading(caplog):
     # The shape schema.py allows and _build_context never produces: an
     # exchange clock with no host reading taken beside it. The age is still
-    # real (measured between exchange-side values), so the verdict is the
-    # same; what the guard cannot do is narrow the cause, and it must say so
-    # rather than pick one — and it must not warn about a skew it never
-    # measured.
+    # real (measured between exchange-side values) and so is the cause (the
+    # window was cut at the exchange's clock, issue #124), so the verdict and
+    # its sentence are the same; what the guard cannot report is the skew,
+    # and it must say so rather than invent one — and it must not warn about
+    # a skew it never measured.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=14), exchange_time=_NOW, paired=False)
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
         msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "14h 0m 0s before the exchange's clock" in msg
     assert "no paired host-clock reading, so the skew is unknown" in msg
-    assert "cannot be narrowed further from here" in msg
-    # Neither single-cause sentence, and no "agrees" either — nothing was measured.
-    assert "feed itself stopped advancing" not in msg
+    assert "feed itself stopped advancing" in msg
+    # No "agrees" — nothing was measured.
     assert "fix time sync" not in msg
     assert "agrees with the exchange's" not in msg
     assert not [r for r in caplog.records if "Fix time sync" in r.getMessage()]
@@ -1306,36 +1346,36 @@ def test_freshness_guard_reports_the_skew_as_unknown_without_a_paired_reading(ca
     assert not [r for r in caplog.records if "Fix time sync" in r.getMessage()]
 
 
-def test_freshness_guard_sole_cause_bound_on_the_skew_is_exclusive():
-    # The boundary between "the offset by itself puts the newest candle past
-    # the limit" and "it accounts for part of this age": PR #91 made it a
-    # strict `<` (an offset equal to the limit alone yields age == limit,
-    # which the age check calls fresh), and the age boundaries in this file
-    # all have their exclusive case pinned — this one did not.
+def test_freshness_guard_stale_message_carries_the_skew_note_with_size_and_direction():
+    # The skew is information in a stale refusal, not a cause (issue #124),
+    # but it is still the operator's only in-message hint that NTP needs
+    # attention: size and direction must be spelled out, and the verdict's
+    # cause must read the same beside it.
     age = _NOW - timedelta(hours=20)
-    at_limit = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-timedelta(hours=12))
-    msg = guards_mod.context_refusal_message(at_limit, "BTC", {}, now=_NOW)
+    ctx = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-timedelta(hours=12, seconds=1))
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "accounts for 12h 0m 0s of this age but not all of it" in msg
-    assert "by itself puts the newest" not in msg
-    past_limit = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-timedelta(hours=12, seconds=1))
-    msg = guards_mod.context_refusal_message(past_limit, "BTC", {}, now=_NOW)
+    assert "12h 0m 1s behind the exchange's" in msg
+    assert "feed itself stopped advancing" in msg
+    ctx = _ctx_closing_at(age, exchange_time=_NOW, host_skew=timedelta(minutes=90))
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "by itself puts the newest" in msg
-    assert "but not all of it" not in msg
+    assert "1h 30m 0s ahead of the exchange's" in msg
+    assert "feed itself stopped advancing" in msg
 
 
-def test_freshness_guard_cause_wording_floor_on_the_skew_is_inclusive():
-    # The other edge of the middle band: at exactly the warn floor the offset
-    # is named as a contributor (`<=`); one millisecond under it the clocks
-    # "agree" and the feed alone is blamed. The log-warning test pins the same
-    # floor on a FRESH context; this pins the refusal wording it selects.
+def test_freshness_guard_skew_note_floor_is_inclusive_in_the_refusal():
+    # The note's own edge: at exactly the warn floor the offset is spelled
+    # out (`>=`); one millisecond under it the clocks "agree". The
+    # log-warning test pins the same floor on a FRESH context; this pins the
+    # note the refusal carries — the cause reads the same on both sides.
     age = _NOW - timedelta(hours=14)
     floor = timedelta(milliseconds=freshness_mod._CLOCK_SKEW_WARN_MS)
     at_floor = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-floor)
     msg = guards_mod.context_refusal_message(at_floor, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "accounts for 1m 0s of this age but not all of it" in msg
+    assert "1m 0s behind the exchange's" in msg
+    assert "feed itself stopped advancing" in msg
     under = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-(floor - timedelta(milliseconds=1)))
     msg = guards_mod.context_refusal_message(under, "BTC", {}, now=_NOW)
     assert msg is not None
@@ -1392,10 +1432,17 @@ def test_freshness_guard_measures_skew_between_the_paired_readings_not_now(caplo
     assert len(warned) == 1
     assert "10h 0m 0s ahead of the exchange's" in warned[0]
     assert "Fix time sync (NTP)" in warned[0]
-    # It must NOT tell the operator the decision is unaffected: a host ahead
-    # pulls the still-forming bar through get_candles' filter.
-    assert "decisions stay correct" not in warned[0]
-    assert "has not closed" in warned[0]
+    # It says exactly what the offset reaches (issue #124): not the market
+    # data — both windows are cut at the exchange's clock — but the stamps
+    # this host writes from its own clock and the settlement hour funding
+    # accrual asks for. Not the decision cadence: that is a rolling interval
+    # on this one clock, which a steady offset cannot move. The pre-#124
+    # warning named a forming bar a host ahead could pull in; that shape is
+    # gone.
+    assert "cut at the exchange's clock" in warned[0]
+    assert "settlement hour" in warned[0]
+    assert "decision schedule" not in warned[0]
+    assert "has not closed" not in warned[0]
 
 
 def test_freshness_guard_skew_warning_has_a_floor(caplog):
@@ -1416,10 +1463,10 @@ def test_freshness_guard_skew_warning_has_a_floor(caplog):
 
 
 def test_freshness_guard_flags_a_candle_closing_past_the_exchanges_clock():
-    # The future side reached WITHOUT a host lead: the paired reading says the
-    # clocks agree, and a live fetch cannot produce a bar ahead of the exchange
-    # by more than the host's own lead, so the guard must say this context did
-    # not come from a live fetch rather than blame a clock it measured as fine.
+    # The future side: the paired reading says the clocks agree, and since
+    # issue #124 a live fetch cannot produce a bar ahead of the exchange's
+    # clock at all (the window is cut at that reading), so the guard says
+    # this context did not come from a live fetch rather than blame a clock.
     ctx = _ctx_closing_at(_NOW + timedelta(hours=13), exchange_time=_NOW)
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
@@ -1429,123 +1476,120 @@ def test_freshness_guard_flags_a_candle_closing_past_the_exchanges_clock():
     assert "Fix time sync" not in msg
 
 
-def _host_ahead_ctx(lead, *, interval="4h", into_bar):
-    return _host_offset_ctx(lead, interval=interval, into_bar=into_bar)[0]
+def test_freshness_guard_passes_a_host_ahead_because_the_window_is_cut_at_the_exchange_clock(
+    caplog,
+):
+    # Issue #93's example, closed at the source (issue #124): NTP drift of
+    # +90 minutes with 4h bars, a fetch 30 minutes before the forming bar's
+    # close. The host-cut window used to keep that bar (close <= host clock)
+    # and the guard refused the cycle a step later, spending a decision cycle
+    # while the correct bar sat in the same response. Cut at the exchange's
+    # clock, the forming bar never enters: ``as_of`` is the previous CLOSED
+    # bar's close, the verdict passes, and the cycle decides. The skew
+    # warning still fires — the clock is wrong, it just cannot reach the
+    # market data any more.
+    ctx = _exchange_cut_ctx(timedelta(minutes=90), into_bar=timedelta(hours=3, minutes=30))
+    assert ctx.as_of == _NOW - timedelta(hours=3, minutes=30)
+    with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
+        assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
+    warned = [r.getMessage() for r in caplog.records if "Fix time sync" in r.getMessage()]
+    assert len(warned) == 1 and "1h 30m 0s ahead of the exchange's" in warned[0]
+    assert guards_mod.context_refusal(ctx, "BTC", {}, now=_NOW) is None
 
 
-def test_freshness_guard_refuses_the_forming_bar_a_host_ahead_pulls_in():
-    # Issue #93's example: NTP drift of +90 minutes with 4h bars. A fetch in
-    # the last 90 minutes of a bar has the host's window end past the bar's
-    # close, so get_candles keeps the still-forming bar and the indicators run
-    # on partial OHLCV. Under the shared 12h tolerance the guard was silent;
-    # now the bar is 30 minutes ahead of the exchange's clock, past the
-    # one-minute lead a closed candle can have, and the refusal names the
-    # host clock.
-    ctx = _host_ahead_ctx(timedelta(minutes=90), into_bar=timedelta(hours=3, minutes=30))
-    assert ctx.as_of == _NOW + timedelta(minutes=30)
+def test_freshness_guard_refuses_any_lead_whatever_the_paired_skew_says():
+    # Mutation pin for the collapse (issue #124): the lead branch has ONE
+    # cause left — not a live fetch — and reaches it for every pairing. A
+    # host lead larger than the bar's lead (the pre-#124 "kept a bar the
+    # exchange has not closed" shape), one smaller than it (the pre-#124
+    # "stepped back" shape) and no pairing at all must all read the same,
+    # and none may send the operator to NTP for a lead no clock produced.
+    for skew, paired in (
+        (timedelta(minutes=90), True),
+        (timedelta(minutes=30), True),
+        (timedelta(minutes=10), True),
+        (timedelta(0), True),
+        (None, False),
+    ):
+        ctx = _ctx_closing_at(
+            _NOW + timedelta(minutes=30), exchange_time=_NOW, host_skew=skew, paired=paired
+        )
+        msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
+        assert msg is not None, skew
+        assert "30m 0s AFTER the exchange's clock" in msg, skew
+        assert "did not come from a live market fetch" in msg, skew
+        assert "cut at that same clock reading" in msg, skew
+        assert "has not closed" not in msg, skew
+        assert "stepped back" not in msg, skew
+        assert "Fix time sync" not in msg, skew
+        # ...and the class is still the one the no-decision streak counts (#50).
+        assert (
+            guards_mod.context_refusal(ctx, "BTC", {}, now=_NOW).error_type == "stale_market_data"
+        )
+
+
+def test_freshness_guard_refuses_a_lead_smaller_than_the_old_tolerance():
+    # The one-minute tolerance of #93 is gone with the shape it excused: a
+    # 30-second lead, which the host-cut window could legitimately produce
+    # (a host 40s ahead in the last 40s of a bar), is now a context no live
+    # fetch made. Pinned so the tolerance does not quietly come back.
+    ctx = _ctx_closing_at(_NOW + timedelta(seconds=30), exchange_time=_NOW)
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "30m 0s AFTER the exchange's clock" in msg
-    assert "1h 30m 0s ahead of the exchange's" in msg
-    assert "kept a bar the exchange has not closed" in msg
-    assert "Fix time sync (NTP)" in msg
-    assert "did not come from a live market fetch" not in msg
-    assert "Refusing to run the engine on a candle the exchange has not closed" in msg
-    # ...and the class is the one the no-decision streak counts (#50), so a
-    # host left running ahead accumulates toward exit 4 — RUNBOOK §7 says so.
-    assert guards_mod.context_refusal(ctx, "BTC", {}, now=_NOW).error_type == "stale_market_data"
-
-
-def test_freshness_guard_blames_the_host_when_its_lead_exactly_equals_the_bars():
-    # Zero fetch gap: the bar leads the exchange by exactly the host's lead
-    # (the window was cut at the very instant the clock pair was read). Still
-    # the live shape, so the host is blamed — the comparison is `>=`, and a
-    # strict `>` re-labelled this as "stepped back / not a live fetch".
-    ctx = _host_ahead_ctx(timedelta(minutes=30), into_bar=timedelta(hours=3, minutes=30))
-    assert ctx.as_of == _NOW + timedelta(minutes=30)
-    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
-    assert msg is not None and "kept a bar the exchange has not closed" in msg
-    assert "stepped back" not in msg
-
-
-def test_freshness_guard_names_a_clock_step_when_the_lead_outruns_the_paired_skew():
-    # The paired reading shows the host only 10 minutes ahead, yet the bar
-    # leads by 30: no steady host clock produces that from a live fetch, so
-    # the message names the two shapes that do — a clock stepping back between
-    # the candle read and the clock read, or a non-live context — and does
-    # NOT tell the operator to fix NTP for a lead the pair cannot explain.
-    ctx = _ctx_closing_at(
-        _NOW + timedelta(minutes=30), exchange_time=_NOW, host_skew=timedelta(minutes=10)
-    )
-    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
-    assert msg is not None
-    assert "10m 0s ahead of the exchange's" in msg
-    assert "stepped back between the candle read and the clock read" in msg
+    assert "0m 30s AFTER the exchange's clock" in msg
     assert "did not come from a live market fetch" in msg
-    assert "Fix time sync" not in msg
 
 
-def test_freshness_guard_passes_a_host_ahead_whose_window_kept_a_closed_bar():
-    # The same 90-minute lead earlier in the bar: the forming bar closes 3h
-    # after the exchange's clock, the host's window ends 90 minutes after it,
-    # so get_candles drops the forming bar and the newest kept one is CLOSED
-    # (an hour old). The skew warning fires; the verdict does not — the lead
-    # bound is about the bar, not the clock.
-    ctx = _host_ahead_ctx(timedelta(minutes=90), into_bar=timedelta(hours=1))
-    assert ctx.as_of == _NOW - timedelta(hours=1)
+def test_freshness_guard_passes_a_host_ahead_on_one_minute_bars_too():
+    # The tightest interval no longer needs its own carve-out: a host 45s
+    # ahead with 1m bars, fetching 15s before the forming bar's close, used
+    # to admit that bar (lead 15s, inside the tolerance — and the constant's
+    # comment promised 1m bars were never refused). Cut at the exchange's
+    # clock the newest kept bar is the one that closed 45s ago, on every
+    # interval alike.
+    ctx = _exchange_cut_ctx(timedelta(seconds=45), interval="1m", into_bar=timedelta(seconds=45))
+    assert ctx.as_of == _NOW - timedelta(seconds=45)
+    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
+    # ...and a host a whole bar ahead changes nothing either.
+    ctx = _exchange_cut_ctx(timedelta(minutes=5), interval="1m", into_bar=timedelta(milliseconds=1))
+    assert ctx.as_of == _NOW - timedelta(milliseconds=1)
     assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
 
 
-def test_freshness_guard_tolerates_a_lead_inside_the_bound():
-    # Within the tolerance the forming bar can still be admitted — a host 40s
-    # ahead keeps it in the last 40s of every bar — and the guard lets it
-    # through: the bar is missing at most those seconds of trading, and a
-    # bound tighter than the clocks' own disagreement would refuse healthy
-    # fetches. The skew note (under the warn floor) says the clocks agree.
-    ctx = _host_ahead_ctx(
-        timedelta(seconds=40), into_bar=timedelta(hours=3, minutes=59, seconds=30)
-    )
-    assert ctx.as_of == _NOW + timedelta(seconds=30)
-    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
-
-
-def test_freshness_guard_never_refuses_a_host_lead_on_one_minute_bars():
-    # The tightest interval, where the constant's comment claims a host lead
-    # is never refused on this branch: a forming 1m bar leads the exchange's
-    # clock by under a minute however far ahead the host is, so the bound
-    # (a minute, exclusive) lets every such bar through. Pinned so a later
-    # "tightening" of the bound does not turn 1m deployments into a refusal
-    # streak. Host 45s ahead, fetch 15s before the bar's close: lead 15s.
-    ctx = _host_ahead_ctx(timedelta(seconds=45), interval="1m", into_bar=timedelta(seconds=45))
-    assert ctx.as_of == _NOW + timedelta(seconds=15)
-    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
-    # ...and the largest lead a 1m bar can have — the host's window end lands
-    # a whole bar ahead — is still inside the bound.
-    ctx = _host_ahead_ctx(timedelta(minutes=5), interval="1m", into_bar=timedelta(milliseconds=1))
-    assert ctx.as_of == _NOW + timedelta(seconds=59, milliseconds=999)
-    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
-
-
-def test_freshness_guard_names_both_causes_for_a_lead_without_a_paired_reading():
+def test_freshness_guard_names_no_host_cause_for_a_lead_without_a_paired_reading():
     # An exchange clock with no host reading beside it (schema allows it;
-    # _build_context never produces it): the lead is real but nothing says
-    # whether the host cut the window ahead or the context was replayed.
+    # _build_context never produces it): the lead is real, the skew is
+    # unknown, and — since the window is cut at the exchange's clock — the
+    # host's clock is not a candidate cause either way.
     ctx = _ctx_closing_at(_NOW + timedelta(minutes=30), exchange_time=_NOW, paired=False)
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "skew is unknown" in msg
-    assert "Either this host's clock ran ahead" in msg
-    assert "or this context did not come from a live market fetch" in msg
+    assert "did not come from a live market fetch" in msg
+    assert "host's clock ran ahead" not in msg
 
 
-def test_the_candle_lead_bound_is_not_below_the_skew_warn_floor():
-    # A live fetch's lead is at most the host's own lead (the window is cut at
-    # the host's clock BEFORE the exchange's is read), so any refusal on the
-    # lead bound from a live fetch carries a skew of at least that size. Were
-    # the bound under the warn floor, such a refusal would print "agrees with
-    # the exchange's" beside "Fix time sync" — the note and the verdict
-    # contradicting each other in one sentence.
-    assert freshness_mod._CANDLE_LEAD_TOLERANCE_MS >= freshness_mod._CLOCK_SKEW_WARN_MS
+def test_delta_ms_is_exact_where_the_float_route_reads_a_millisecond_short():
+    # The reason ``_delta_ms`` exists, pinned on a value where the float
+    # route actually fails: 65788957ms (a shade over 18h) comes out of
+    # ``int(delta.total_seconds() * 1000)`` as 65788956. The guard compares
+    # ages against ms limits, so a boundary case would otherwise pass or
+    # refuse by rounding. Both sides of the pin are asserted so the test
+    # cannot go quietly vacuous if Python's float formatting ever changes.
+    later = _NOW + timedelta(milliseconds=65_788_957)
+    delta = later - _NOW
+    assert int(delta.total_seconds() * 1000) == 65_788_956  # the float route's error
+    assert freshness_mod._delta_ms(later, _NOW) == 65_788_957
+    # ...and the floor semantics the docstring states for a sub-ms negative.
+    assert freshness_mod._delta_ms(_NOW, _NOW + timedelta(microseconds=500)) == -1
+
+
+def test_freshness_module_carries_no_candle_lead_tolerance():
+    # The constant, its 40-line justification and the "not below the warn
+    # floor" ordering pin all belonged to the host-cut window. A tolerance
+    # reintroduced here would be a second bound on a branch that now has an
+    # exact answer (``as_of <= exchange_time`` by construction).
+    assert not hasattr(freshness_mod, "_CANDLE_LEAD_TOLERANCE_MS")
 
 
 def test_build_context_fails_closed_when_the_exchange_clock_is_unreadable(monkeypatch):
@@ -1561,10 +1605,10 @@ def test_build_context_fails_closed_when_the_exchange_clock_is_unreadable(monkey
         def get_market_snapshot(self, coin):
             return object()
 
-        def get_candles(self, coin, interval, lookback):
-            return []
+        def get_candles(self, coin, interval, lookback, *, end):  # pragma: no cover
+            raise AssertionError("the clock read must abort the build before the candles")
 
-        def get_funding_history(self, coin, window_days):  # pragma: no cover - never reached
+        def get_funding_history(self, coin, window_days, *, end):  # pragma: no cover
             raise AssertionError("the clock read must abort the build before funding")
 
         def get_exchange_time(self, coin):
@@ -1586,7 +1630,8 @@ def test_build_context_fails_closed_when_the_exchange_clock_is_unreadable(monkey
 def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monkeypatch):
     # The wiring pin (mutation-checked: dropping the get_exchange_time call or
     # the exchange_time= kwarg in _build_context fails this). The clock must be
-    # the one read in THIS fetch, not a default.
+    # the one read in THIS fetch, not a default — and since issue #124 it is
+    # also the clock BOTH windowed reads are cut at.
     exchange_clock = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
     handed = {}
     stamps = {}
@@ -1599,12 +1644,14 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
         def get_market_snapshot(self, coin):
             return object()
 
-        def get_candles(self, coin, interval, lookback):
+        def get_candles(self, coin, interval, lookback, *, end):
             order.append("candles")
+            handed["candle_end"] = end
+            stamps["candles_entered"] = datetime.now(timezone.utc)
             return []
 
-        def get_funding_history(self, coin, window_days):
-            stamps["funding_entered"] = datetime.now(timezone.utc)
+        def get_funding_history(self, coin, window_days, *, end):
+            handed["funding_end"] = end
             return []
 
         def get_exchange_time(self, coin):
@@ -1635,15 +1682,18 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
     # clock call returning and the next REST call starting. Bracketing it that
     # way, rather than merely "some time during the build", is what makes this
     # discriminating: moving the capture down to the builder call would still
-    # sit inside the build but would fold the funding read's latency into the
-    # skew, which is the whole defect the pairing exists to avoid.
-    assert stamps["clock_returned"] <= handed["host_at_read"] <= stamps["funding_entered"]
-    # The clock is read AFTER the candles (issue #93): the guard's lead bound
-    # rests on a closed bar never closing after an exchange clock read later
-    # than the candle window was cut. Read the clock first and a bar closing
-    # during the fetch would lead it by the fetch gap — a healthy cycle
-    # refused, and blamed on a replay.
-    assert order == ["candles", "clock"]
+    # sit inside the build but would fold the candle and funding reads' latency
+    # into the skew, which is the whole defect the pairing exists to avoid.
+    assert stamps["clock_returned"] <= handed["host_at_read"] <= stamps["candles_entered"]
+    # The clock is read BEFORE the candles (issue #124) and is the window's
+    # end for both windowed reads: a bar closing during the candle fetch is
+    # then simply outside the window, whereas a clock read AFTER the fetch
+    # (the pre-#124 order, issue #93) would pass that bar's close_time while
+    # the response carried its OHLCV as captured before the close. The value
+    # handed down must be the reading itself, not a re-read or the host's.
+    assert order == ["clock", "candles"]
+    assert handed["candle_end"] is exchange_clock
+    assert handed["funding_end"] is exchange_clock
 
 
 def test_build_context_hands_the_parsed_market_data_block_to_the_fetch_and_the_builder(
@@ -1667,11 +1717,11 @@ def test_build_context_hands_the_parsed_market_data_block_to_the_fetch_and_the_b
         def get_market_snapshot(self, coin):
             return object()
 
-        def get_candles(self, coin, interval, lookback):
+        def get_candles(self, coin, interval, lookback, *, end):
             fetched["interval"], fetched["lookback"] = interval, lookback
             return []
 
-        def get_funding_history(self, coin, window_days):
+        def get_funding_history(self, coin, window_days, *, end):
             fetched["window_days"] = window_days
             return []
 

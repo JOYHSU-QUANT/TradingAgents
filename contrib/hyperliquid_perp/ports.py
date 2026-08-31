@@ -16,6 +16,7 @@ matching method signatures.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from .domains.perp.schema import Candle, FundingPoint, MarketSnapshot
@@ -23,18 +24,30 @@ from .domains.perp.schema import Candle, FundingPoint, MarketSnapshot
 
 @runtime_checkable
 class ExchangeMarketData(Protocol):
-    """Read-only public market data. No auth, no wallet required."""
+    """Read-only public market data. No auth, no wallet required.
+
+    The two windowed reads take their upper bound as an explicit, tz-aware
+    ``end`` and never substitute the host's clock (issue #124): the caller
+    decides which clock cuts the window — the context build hands in the
+    exchange's own, read before the fetch — and the reader's job is only to
+    honour it. A default here would let a host-clock offset back into the
+    indicators unseen.
+    """
 
     def get_market_snapshot(self, coin: str) -> MarketSnapshot:
         """Latest mark/oracle/funding/OI snapshot for ``coin``."""
         ...
 
-    def get_candles(self, coin: str, interval: str, lookback: int) -> list[Candle]:
-        """Up to ``lookback`` most recent ``interval`` candles, oldest first."""
+    def get_candles(
+        self, coin: str, interval: str, lookback: int, *, end: datetime
+    ) -> list[Candle]:
+        """Up to ``lookback`` ``interval`` candles CLOSED as of ``end``, oldest first."""
         ...
 
-    def get_funding_history(self, coin: str, window_days: int) -> list[FundingPoint]:
-        """Funding observations over the trailing ``window_days``, oldest first."""
+    def get_funding_history(
+        self, coin: str, window_days: int, *, end: datetime
+    ) -> list[FundingPoint]:
+        """Funding observations over the ``window_days`` trailing ``end``, oldest first."""
         ...
 
 

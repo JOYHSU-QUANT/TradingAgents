@@ -163,7 +163,7 @@ payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的
 （`Candles: 200 x 4h`、`30d z-score`）也不取每 cycle 隨資料有無變動的 `Mid:`／`Premium:`
 行，否則每個 cycle 自成一段。
 
-所以切段鍵是兩個：**`GROUP BY prompt_version, context_shape`**。`prompt_version` 仍是人工
+context 那一半的切段鍵因此是兩個（**`prompt_version, context_shape`**；format 那一半的第三個鍵見下段）。`prompt_version` 仍是人工
 指定、退役值不得重用的 code 改版戳；`context_shape` 則讓「多一段／少一段」（含 `indicators` 清單重排——列數不變但
 prompt 不同）不管來自 code 還是 YAML 都自動落進資料裡。翻動這些 key 仍然是跨越量測邊界（A/B 量測窗內**禁止翻動**，
 與夾帶 vendor 變更同罪）——差別是現在資料會自己標出來，不靠人記得。標籤裡的數字變了
@@ -306,8 +306,11 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 報告中的 `warning:` 行（超時 pending funding、config drift）不影響 exit code，
 但寫結論前要看過。`prompt_regime:` 行（每組 `(prompt_version, context_shape,
 format_fingerprint)` 的 cycle 數，依首見順序，只數計入 `cycle_count` 的 cycle）同樣不影響
-exit code：多於一行＝這個 run 跨過 prompt 制度邊界，跨段指標要分開讀（§4）；`n/a` 是該欄
-在寫入時還不存在（v10 前無 shape、v11 前無 fingerprint），不是另一個制度。
+exit code：**三鍵齊全的行多於一行**＝這個 run 跨過 prompt 制度邊界，跨段指標要分開讀（§4）；
+`n/a` 是該欄在寫入時還不存在（v10 前無 shape、v11 前無 fingerprint），不是另一個制度——
+一個 run 跨過 v11 部署點會多出一行 `n/a` 桶，那是同一個制度的舊列。行是**桶**不是**段**：
+A→B→A 翻回去仍只印兩行。另有一條自我檢查：各桶總和應等於 `cycle_count`，不等時印
+`warning:`（有已決策的 attempt 沒有 `ai_inputs` 列——手工修過的 store），這時分佈是部分的。
 
 ## 7. 快速故障排除
 
@@ -318,7 +321,7 @@ exit code：多於一行＝這個 run 跨過 prompt 制度邊界，跨段指標�
 | `config not found` / `invalid config` | 對照 example 修 `hyperliquid.local.yaml`；strict 解析會擋未知 key。 |
 | `--context-only` 不印倉位行／完整輪報 no usable account equity（exit 1） | `wallet_address` 還是佔位符；填真實唯讀地址。 |
 | 太年輕的標的每 4h 一筆 `api_failed` | 市場資料 warmup 不足，暖機完成前屬預期行為。 |
-| 每 4h 一筆 `api_failed`，`error_type` **空**、`error_message` 以 `non-retryable:` 開頭 | 程式缺陷，不是環境問題（store 讀出來的狀態踩到 DTO 守衛、engine 回傳形狀壞掉……）。log 同一時間有 ERROR traceback，那才是要修的東西。不會自癒、也**不會讓 daemon 退出**（systemd 的 `NRestarts` 不會動，別拿它當健康訊號）；不走 3 次 ladder，直接 terminal；連續 3 筆起 log 升級 ERROR、`validate` 印 `shortfall:`（exit 4）。修 code 後部署。live 車道自 Phase 3 起就是這個語意，paper 於 issue #134 對齊。 |
+| 每 4h 一筆 `api_failed`，`error_type` **空**、`error_message` 以 `non-retryable:` 開頭 | 非 Retryable 例外——**通常是程式缺陷**（store 讀出來的狀態踩到 DTO 守衛、engine 回傳形狀壞掉……），但主機問題也會落到這一列，看 `error_message` 裡的 repr 分辨：`sqlite3.OperationalError`（store 被鎖超過 busy_timeout、檔案系統壞）、`MemoryError` 是主機不是 code（payload 寫檔的 `OSError` 例外——它已被歸類成 `server_error`，走 ladder）。log 同一時間有 ERROR traceback，那才是要修的東西。不會自癒、也**不會讓 daemon 退出**（systemd 的 `NRestarts` 不會動，別拿它當健康訊號）；不走 3 次 ladder，直接 terminal；連續 3 筆起 log 升級 ERROR、`validate` 印 `shortfall:`（exit 4）。修 code（或主機）後部署。live 車道自 Phase 3 起就是這個語意，paper 於 issue #134 對齊。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `every technical indicator failed` 或 `… is/are unavailable`（點名 `atr_14`／`ema_20`／`ema_50` 中死掉的那些） | indicator 引擎（stockstats）壞掉或 regime 指標算不出來——三者任一缺席 regime 都會被捏造成 RANGING，daemon 與 one-shot 同樣拒跑（不燒 LLM）。（非空的 `indicators:` 清單漏配三者任一現在直接在 config load 擋下；會走到這裡的 config 成因只剩刻意的 `indicators: []`。）修 stockstats 相容性後，`--context-only` 走同一套 guard：照樣渲染但印同一句 refusal 警告並 exit 4（健康 context 是 exit 0），可拿來免 key 驗證修好了沒。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `… freshness limit` | K 線 feed 停止推進。context 的 `as_of` 取自最後一根**收盤** K 線，健康 feed 不足一個 interval 舊；超過 `3 × candle_interval`（夾在下限與上限之間——下限＝`domains/perp/freshness.py` 的 `_MAX_CANDLE_AGE_FLOOR_MS`，目前 30 分鐘；上限＝三個決策 cycle，目前 12 小時；**但上限不會壓到一根健康 K 線以下**：`candle_interval: 1d` 的最新收盤 bar 在一天內會從 0 老化到 24h，所以 1d 的界限是「一根 bar ＋ 一個決策 cycle」＝28 小時——日線 feed 漏掉一根，最新收盤 bar 超過 28h 舊就拒跑（漏掉的 boundary 之後第一或第二個 cycle——相鄰 cycle 間隔超過 4h，寬限窗內最多只落得下一個）。目前出貨的 interval 沒有一個真的被 12 小時上限夾到（會被夾的是「大於一個 cycle、不超過三個」的 bar；4h 剛好是一個 cycle、走 `3 x 4h`，1d 走上面的加寬），所以 `… capped at` 這個由來標籤目前不會印出來。這些數字以程式碼的常數為準，訊息本身也會印出生效上限）就拒跑，不燒 LLM。訊息會印出該根 K 線的收盤時戳、實際年齡、生效上限與上限的由來（`3 x 4h`／`… raised to the 30m floor`／`one 1d bar plus one 4h decision cycle`）。**倉位不會被動到**：拒的只有 4h 一次的新決策，30 秒節奏的 monitor tick（清算／`gap_stop_fill`／SL・TP）照常跑——它讀的是 snapshot 的 mark price，與 K 線 endpoint 是不同資料路徑，K 線停了不代表保護瞎了。**成因只有一個＝feed 沒推進**：K 線視窗本身就是用**交易所自己的時鐘**截的（同一次抓取先讀 public `l2Book` 的 `time`，再以它當 K 線與 funding 視窗的上界，issue #124），年齡也是拿同一個讀數量的，所以主機時鐘偏移既推不動視窗、也進不了年齡——訊息會明寫 feed 沒推進，並附上本機與交易所時鐘的差距供參考（偏移 ≥1 分鐘另有 WARNING 提醒修 NTP，因為排程格線與所有紀錄時戳仍走主機時鐘；但那不是這個拒跑的成因）。查交易所 K 線 API 狀態。**這條拒跑信任交易所自己的 `l2Book` `time`**（2026-08-26 實測是伺服器時鐘、冷門幣也每次前進）：若那個時戳本身壞掉（倒退或停住），視窗會被它截短、症狀與 feed 停滯完全同形——守衛刻意沒有第二個參考時鐘，這是接受的殘餘風險。**不再是完全無聲的無限期狀態**：這類 cycle 的 `error_type` 記成 `stale_market_data`（不再與會自癒的環境失敗共用 `server_error`），連續第 3 筆起 log 從 WARNING 升成 ERROR，`validate` 也會把 `no_decision_streak ≥ 3` 列成 exit 4 的 `shortfall:`（該判準**不分 error class**——feed 停滯、l2Book 掛掉、連線問題一律計入，因為對操作員來說都是「連續 N 個 cycle 出不了決策」；報告另印 `stale_feed_refusal_streak` 供分辨。feed 恢復、下一個 cycle 出得了決策就自動歸零；run 停掉超過 2 個 cycle 後也不再套用，已封存的驗收 run 不會被永久判死）。`--context-only` 走同一套 guard：照樣渲染但印同一句警告並 exit 4。live run 的對應行為見 [RUNBOOK-live.md](./RUNBOOK-live.md)（tick 節奏不同，~10s）。 |
 | error_message 是 `… AFTER the exchange's clock … did not come from a live market fetch` | 最新那根 K 線的收盤時戳落在**交易所時鐘之後**——不論多少。live 抓取做不出這種 context：`_build_context` **先**讀交易所時鐘、再以它當 `get_candles` 的視窗上界（`close_time <= end`，issue #124），所以 `as_of` 構造上不會晚於交易所時鐘；本機時鐘再快也只會拿到上一根**已收盤**的 bar（#93 那種「主機快 H、落在 bar 最後 H 內抓到未收盤 bar」的拒跑已不存在，`1m` 到 `1d` 一視同仁，也沒有 1 分鐘容忍值了）。會走到這列只剩：replay／手工 fixture，或 K 線與時鐘取自不同次抓取。若在生產 log 看到，查是不是餵了非 live 的輸入，不是查 NTP（訊息附的時鐘差距只是參考）。這種拒跑仍記成 `stale_market_data`、計入 no-decision streak。 |

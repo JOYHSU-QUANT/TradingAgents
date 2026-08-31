@@ -648,7 +648,17 @@ def _paper_loop(
                         "protection-only mode until the books verify again.",
                         file=sys.stderr,
                     )
-            if result.event is CycleEvent.API_FAILED:
+            if result.event is CycleEvent.API_FAILED and result.error_type is None:
+                # A non-retryable error (issue #134): the AI was never asked
+                # and no ladder ran, so the "API failed N times" line below
+                # would file a bug as an outage. The traceback is already in
+                # the log at ERROR; this line only points at it.
+                print(
+                    "decision cycle failed closed on a non-retryable error — see the "
+                    "ERROR traceback above; holding position until the next cycle.",
+                    file=sys.stderr,
+                )
+            elif result.event is CycleEvent.API_FAILED:
                 logger.warning(
                     "decision API failed %s times for %s — holding position until the next cycle",
                     result.attempt_count,

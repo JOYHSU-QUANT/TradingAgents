@@ -876,6 +876,23 @@ def test_rows_from_before_a_key_existed_print_n_a_not_a_regime_of_their_own(tmp_
     db.close()
 
 
+def test_a_decided_attempt_without_an_input_row_makes_the_split_a_warning(tmp_path):
+    # The self-check behind "the buckets sum to cycle_count": no writer
+    # produces a decided attempt without an ai_inputs row, so one can only
+    # come from a repaired or pruned store — and the report must say the
+    # split is partial rather than print buckets that quietly disagree with
+    # the count printed above them.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_OK, _OK, _OK])
+    stamp_prompt_regimes(db, [_V4, None, _V4])
+    report = validate_run(db, run_id="r")
+    assert report.cycle_count == 3
+    assert report.prompt_regimes == (repo.PromptRegime(*_V4, 2),)
+    assert report.phase3_ready is False  # short of 30, unrelated to the warning
+    assert any("cover 2 of 3 cycles" in line for line in report.warnings)
+    db.close()
+
+
 def test_a_run_with_no_decided_cycle_prints_no_regime_line(tmp_path):
     db = _bare_run(tmp_path)
     _insert_outcomes(db, [_BLIP, _BLIP])

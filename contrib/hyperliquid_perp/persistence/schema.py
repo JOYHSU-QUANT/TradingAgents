@@ -686,9 +686,11 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     #
     # ``idx_fills_run_timestamp`` — ``fills.MAX(timestamp) WHERE run_id`` is
     # read once per cycle (``ai_inputs.last_fill_time`` and the prompt's
-    # position section share the read) and was a full-table scan; the same
-    # pair serves the acceptance validator's "a fill at or before this order"
-    # orphan probe.
+    # position section share the read) and was a full-table scan. The
+    # acceptance validator's "a fill at or before this order" orphan probe
+    # filters on ``(run_id, symbol, timestamp)``, so this index narrows it to
+    # the run's rows but does not cover it — a single-coin run makes the
+    # difference moot, and the per-cycle read is the one that matters.
     11: (
         "ALTER TABLE ai_inputs ADD COLUMN format_fingerprint TEXT",
         "CREATE INDEX idx_fills_run_timestamp ON fills (run_id, timestamp)",

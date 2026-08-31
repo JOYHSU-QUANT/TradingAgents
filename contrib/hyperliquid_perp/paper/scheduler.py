@@ -568,6 +568,13 @@ class PaperScheduler:
         an outage does: ERROR from the third, ``validate`` exit 4 — the
         signal that used to be systemd's restart count. Only a failure of the
         fail record itself still propagates, as it does on the live lane.
+
+        "Non-retryable" is not the same as "a bug": everything that is not a
+        :class:`RetryableDecisionError` lands here, and that includes host
+        trouble the provider does not classify — a ``sqlite3.OperationalError``
+        past ``busy_timeout`` on a books read, a ``MemoryError``. (The payload
+        write's ``OSError`` IS classified, as ``server_error``.) The repr in
+        ``error_message`` is what tells the two apart; the RUNBOOK's row says so.
         """
         logger.exception(
             "decision attempt %s try %d hit a non-retryable error — failing the cycle closed",

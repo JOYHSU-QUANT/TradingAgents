@@ -1674,6 +1674,15 @@ def validate_live_run(
             "not machine-verifiable from the store; confirm it before go-live"
         )
 
+    # Same self-check as the paper report: the buckets are counted through
+    # ``decision_attempts.input_id`` and must sum to ``cycle_count``.
+    regime_total = sum(r.cycles for r in prompt_regimes)
+    if regime_total != cycle_count:
+        warnings.append(
+            f"prompt_regime buckets cover {regime_total} of {cycle_count} cycles — "
+            "decided attempt(s) without an ai_inputs row; the split is partial"
+        )
+
     return LiveValidationReport(
         run_id=run_id,
         execution_mode=run_execution_mode,

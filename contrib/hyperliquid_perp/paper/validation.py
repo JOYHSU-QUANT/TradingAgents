@@ -609,6 +609,17 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
             "funding_timestamp — corrupt stored row(s); their funding P&L stays "
             "uncounted until the store is repaired"
         )
+    # The regime buckets are counted through ``decision_attempts.input_id``
+    # and must sum to ``cycle_count`` (every decided cycle stamped one). A
+    # shortfall means a decided attempt with no input row — a hand-repaired
+    # or pruned store — and the split is then partial; say so rather than
+    # print buckets that quietly disagree with the count above them.
+    regime_total = sum(r.cycles for r in prompt_regimes)
+    if regime_total != cycle_count:
+        warnings.append(
+            f"prompt_regime buckets cover {regime_total} of {cycle_count} cycles — "
+            "decided attempt(s) without an ai_inputs row; the split is partial"
+        )
     if sched_state is not None and sched_state["last_config_drift_status"] == "drift":
         warnings.append(
             "config drift recorded at last resume "

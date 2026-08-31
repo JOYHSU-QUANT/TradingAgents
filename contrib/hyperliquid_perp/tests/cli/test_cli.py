@@ -2960,6 +2960,67 @@ def test_paper_flat_restart_reconciliation_error_exits_1_and_stamps_breadcrumb(
     db.close()
 
 
+def test_paper_loop_names_an_untyped_failure_instead_of_counting_api_tries(
+    tmp_path, monkeypatch, capsys
+):
+    # Issue #134: a non-retryable bug fails the cycle closed with no §6.2
+    # class and no ladder — the AI was never asked, so "decision API failed 1
+    # times" would file a bug as an outage for anyone scraping the log.
+    from datetime import timedelta
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+
+    path, db = _seed_db(tmp_path)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(
+        reconcile_mod, "backfill_pending_funding", lambda db_, *, run_id, now, funding_source: None
+    )
+    monkeypatch.setattr(cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, d: True)
+    untyped = PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="r#001",
+        scheduled_at=_T0,
+        attempt_count=1,
+        next_decision_at=_T0 + timedelta(hours=4),
+        error_type=None,
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return False
+
+    class _Scheduler:
+        def poll(self):
+            return untyped
+
+        def next_due_at(self):
+            return None
+
+    def stop_after_one(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", stop_after_one)
+    with pytest.raises(KeyboardInterrupt):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            _Scheduler(),
+            ManualClock(_T0),
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=False,
+        )
+    err = capsys.readouterr().err
+    assert "non-retryable error" in err
+    assert "decision API failed" not in err
+    db.close()
+
+
 def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatch):
     # RuntimeError out of backfill_pending_funding is fail-loud by design:
     # nothing in the loop may contain it (main() maps it to exit 2, already

@@ -47,7 +47,8 @@ class _HistoryFundingSource:
 
     def rate_at(self, coin: str, funding_timestamp: datetime):
         hour = funding_timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        age = datetime.now(timezone.utc) - hour
+        now = datetime.now(timezone.utc)
+        age = now - hour
         needed_days = max(self._MIN_WINDOW_DAYS, age.days + 2)
         cached = self._cache.get(coin)
         if (
@@ -56,7 +57,15 @@ class _HistoryFundingSource:
             or cached[1] < needed_days
         ):
             try:
-                points = self._market.get_funding_history(coin, needed_days)
+                # The HOST clock cuts this window, deliberately — the one
+                # windowed read that does not take the exchange's (issue
+                # #124). This looks up a PAST hour, and the only thing a host
+                # clock offset can do to it is a miss: a host behind by S has
+                # no points for the last S, so a fresh hour reads ``None``
+                # and the event stays pending until a later poll — never a
+                # wrong rate. Reading the exchange's clock here would add a
+                # REST call per refresh to buy nothing the caller can use.
+                points = self._market.get_funding_history(coin, needed_days, end=now)
             except Exception as exc:  # noqa: BLE001 — a rate fetch failure means "pending"
                 failures = self._consecutive_failures.get(coin, 0) + 1
                 self._consecutive_failures[coin] = failures

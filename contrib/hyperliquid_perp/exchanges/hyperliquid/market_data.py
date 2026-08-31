@@ -3,13 +3,18 @@
 Calls the SDK ``Info`` endpoints, then hands the raw JSON to :mod:`mapper`.
 No Hyperliquid field names appear here; SDK exceptions are translated to
 :class:`ExchangeRequestError` so callers stay SDK-agnostic.
+
+No host clock is read anywhere in this module. Both windowed reads take
+their upper bound as an explicit ``end`` — the exchange's own clock, from
+:meth:`HyperliquidMarketData.get_exchange_time` — so the host's clock can
+neither truncate a window (issue #51) nor admit a bar the exchange has not
+closed (issue #124).
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from ...domains.perp.margin import MarginSchedule
 from ...domains.perp.schema import Candle, FundingPoint, MarketSnapshot, interval_to_ms
@@ -19,10 +24,24 @@ from .sdk_client import HyperliquidClient, call_sdk
 logger = logging.getLogger(__name__)
 
 _MS_PER_DAY = 24 * 60 * 60_000
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+def _epoch_ms(moment: datetime) -> int:
+    """``moment`` as epoch milliseconds, by integer arithmetic.
+
+    The window ends below are compared against the exchange's own
+    ``close_time`` stamps, so the millisecond the exchange sent
+    (``mapper.map_exchange_time``) must come back out exactly:
+    ``int(moment.timestamp() * 1000)`` can land 1ms short (the drift
+    ``context_builder`` avoids for ``as_of_ms`` for the same reason), and 1ms
+    short of a bar's close would drop a bar the exchange has closed. A naive
+    ``moment`` is refused by name — the subtraction would raise anyway, but
+    about mixing offsets, not about the clock the caller handed in.
+    """
+    if moment.tzinfo is None:
+        raise ValueError("market data window end must be timezone-aware (UTC)")
+    return (moment - _EPOCH) // timedelta(milliseconds=1)
 
 
 class HyperliquidMarketData:
@@ -45,21 +64,46 @@ class HyperliquidMarketData:
         raw = call_sdk(self._info.meta_and_asset_ctxs)
         return mapper.map_sz_decimals(raw, coin), mapper.map_margin_schedule(raw, coin)
 
-    def get_candles(self, coin: str, interval: str, lookback: int) -> list[Candle]:
-        end = _now_ms()
+    def get_candles(
+        self, coin: str, interval: str, lookback: int, *, end: datetime
+    ) -> list[Candle]:
+        """Up to ``lookback`` candles CLOSED as of ``end``, oldest first.
+
+        ``end`` is the EXCHANGE's clock (:meth:`get_exchange_time`), read by
+        the caller BEFORE this fetch — never the host's, and required rather
+        than defaulted to ``time.time()`` on purpose (issue #124). A window
+        cut at the host's clock admitted, for a host running ahead, the bar
+        the exchange had not closed yet — its partial OHLCV understates ATR
+        and skews RSI/EMA — and for a host running behind it truncated the
+        window by the lag (issue #51). Cut at the exchange's own clock neither
+        can happen, whatever the host's clock does, and the freshness guard's
+        future-side check is left with nothing a live fetch can trip. A
+        default would be a silent road back to the host clock.
+
+        Read-before-fetch is part of the contract, not a detail: a clock read
+        AFTER the candles would let a bar that closed during the fetch pass
+        the ``close_time <= end`` filter below while the response carried its
+        OHLCV as captured before that close — the very defect this closes.
+        """
+        end_ms = _epoch_ms(end)
         # Pad the window so we comfortably clear `lookback` closed candles (the +1
         # absorbs the still-forming bar dropped just below).
-        start = end - (lookback + 1) * interval_to_ms(interval)
-        raw = call_sdk(self._info.candles_snapshot, coin, interval, start, end)
+        start = end_ms - (lookback + 1) * interval_to_ms(interval)
+        raw = call_sdk(self._info.candles_snapshot, coin, interval, start, end_ms)
         # Identity echo (2026-08-17): a misrouted response must never feed indicators.
         candles = mapper.map_candles(raw, expected_coin=coin, expected_interval=interval)
         # ``candleSnapshot`` is end-inclusive, so the most recent bar is usually the
-        # *currently-forming* one (``open_time <= end < close_time``): its OHLCV is
-        # partial, which understates ATR and skews RSI/EMA, and its future close_time
-        # would set the context's ``as_of`` ahead of now. Indicators must run on closed
-        # candles only — the live price is carried separately by ``mark_price``. Drop any
-        # bar whose close is still in the future.
-        settled = [c for c in candles if c.close_time <= end]
+        # *currently-forming* one (``open_time <= end < close_time``). Measured
+        # 2026-08-26 against the public API (BTC, 1m bars, 114 paired reads over
+        # 240s): it was present in every response and read as closed the moment
+        # the exchange's clock passed its close — no publish step — so "closed as
+        # of the exchange's clock" is exactly ``close_time <= end``. Its OHLCV is
+        # partial, which understates ATR and skews RSI/EMA, and its future
+        # close_time would set the context's ``as_of`` ahead of the exchange's
+        # clock. Indicators must run on closed candles only — the live price is
+        # carried separately by ``mark_price``. Drop any bar the exchange's clock
+        # has not passed.
+        settled = [c for c in candles if c.close_time <= end_ms]
         dropped_live = len(candles) - len(settled)
         if dropped_live:
             logger.debug(
@@ -84,24 +128,38 @@ class HyperliquidMarketData:
             )
         return trimmed
 
-    def get_funding_history(self, coin: str, window_days: int) -> list[FundingPoint]:
-        end = _now_ms()
-        start = end - window_days * _MS_PER_DAY
-        raw = call_sdk(self._info.funding_history, coin, start, end)
+    def get_funding_history(
+        self, coin: str, window_days: int, *, end: datetime
+    ) -> list[FundingPoint]:
+        """Funding observations over the ``window_days`` trailing ``end``, oldest first.
+
+        Same ``end`` discipline as :meth:`get_candles`: the context build
+        hands in the exchange's clock, so a host running behind no longer
+        loses the newest funding points to a window that ended early (they
+        fell between the host's clock and the newest candle's close, and the
+        z-score sample silently lacked them). A caller that only needs a
+        PAST hour and can tolerate a miss (``cli._provider``'s rate lookup,
+        where a miss is "pending", never a wrong rate) may pass its own
+        clock, and says so at the call site.
+        """
+        end_ms = _epoch_ms(end)
+        start = end_ms - window_days * _MS_PER_DAY
+        raw = call_sdk(self._info.funding_history, coin, start, end_ms)
         # Identity echo: same discipline as get_candles above.
         return mapper.map_funding_history(raw, expected_coin=coin)
 
     def get_exchange_time(self, coin: str) -> datetime:
         """The exchange's clock, from the public ``l2Book`` snapshot for ``coin``.
 
-        The one timestamp in this class the HOST clock does not bound: the two
-        windows above are cut at ``_now_ms()``, so a host clock that runs
-        behind truncates them by the same amount and the newest candle looks
-        ordinary (issue #51). Keyless, so the daemon and ``--context-only``
-        read the same clock. ``coin`` only gives the answer an identity to
-        echo-check; the book itself is not used. Like ``get_asset_meta``, not
-        on the ``ExchangeMarketData`` port: the paper engine's snapshot
-        provider has no use for it — ``engine_bridge._build_context`` does.
+        The clock the two windows above are cut at: ``engine_bridge._build_context``
+        reads this FIRST and hands it to both as ``end``, so a host clock that
+        runs behind truncates nothing and one that runs ahead admits nothing
+        the exchange has not closed (issues #51, #124) — and the freshness
+        guard measures candle age against this same reading. Keyless, so the
+        daemon and ``--context-only`` read the same clock. ``coin`` only gives
+        the answer an identity to echo-check; the book itself is not used. Like
+        ``get_asset_meta``, not on the ``ExchangeMarketData`` port: the paper
+        engine's snapshot provider has no use for it — ``_build_context`` does.
         """
         raw = call_sdk(self._info.l2_snapshot, coin)
         return mapper.map_exchange_time(raw, expected_coin=coin)

@@ -1510,7 +1510,11 @@ def test_history_funding_source_escalates_after_consecutive_failures(caplog):
     from contrib.hyperliquid_perp.cli import _HistoryFundingSource
 
     class _BrokenMarket:
-        def get_funding_history(self, coin, days):
+        def get_funding_history(self, coin, days, *, end):
+            # The signature matters: the source swallows EVERY exception, so a
+            # fake that rejected the call's ``end=`` would fail the same way
+            # and this test would pass without the endpoint ever "breaking".
+            assert end.tzinfo is not None
             raise RuntimeError("endpoint gone")
 
     source = _HistoryFundingSource(_BrokenMarket())

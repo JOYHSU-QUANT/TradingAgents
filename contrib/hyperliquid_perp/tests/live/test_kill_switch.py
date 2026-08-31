@@ -1925,11 +1925,11 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
             reads.append("snapshot")
             return object()
 
-        def get_candles(self, coin, interval, lookback):
+        def get_candles(self, coin, interval, lookback, *, end):
             reads.append("candles")
             return []
 
-        def get_funding_history(self, coin, window_days):
+        def get_funding_history(self, coin, window_days, *, end):
             reads.append("funding")
             return []
 

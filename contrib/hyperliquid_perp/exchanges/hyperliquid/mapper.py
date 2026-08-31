@@ -603,12 +603,13 @@ def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime
 
     ``l2Book`` is the info endpoint whose answer carries the exchange's own
     time (``"time"``, epoch ms) without needing a wallet address —
-    ``metaAndAssetCtxs`` has no timestamp at all, the candle / funding windows
-    are bounded by the HOST clock on request, and ``clearinghouseState``
-    carries one but only for a configured address, which the keyless
-    ``--context-only`` path does not have. It is the clock the freshness guard
-    (``domains.perp.freshness``) measures candle age against, so the stamp IS
-    load-bearing here: unlike
+    ``metaAndAssetCtxs`` has no timestamp at all, the candle / funding
+    responses carry only their own bar / settlement stamps, and
+    ``clearinghouseState`` carries one but only for a configured address,
+    which the keyless ``--context-only`` path does not have. It is the clock
+    the candle and funding windows are cut at (``market_data``, issue #124)
+    and the one the freshness guard (``domains.perp.freshness``) measures
+    candle age against, so the stamp IS load-bearing here: unlike
     ``signed_client.exchange_time``, where an absent field only degrades a
     check, a missing or unparseable ``time`` raises
     :class:`MalformedResponseError` — the guard has no other way to establish

@@ -77,9 +77,11 @@ def _delta_ms(later: datetime, earlier: datetime) -> int:
 
     Every bound in this module is compared in milliseconds against stamps the
     exchange sent as integer ms, so the subtraction must be exact:
-    ``int(delta.total_seconds() * 1000)`` goes through a float and can read
-    an hours-scale delta 1ms short, which would let a context sitting exactly
-    on ``limit_ms`` pass or refuse by rounding rather than by the limit.
+    ``int(delta.total_seconds() * 1000)`` goes through a float and reads
+    some deltas 1ms short (e.g. 65788957ms → 65788956.99999999 → 65788956;
+    0.43% of 3M random deltas under three days, measured 2026-08-31 and
+    pinned by a test), which would let a context sitting exactly on
+    ``limit_ms`` pass or refuse by rounding rather than by the limit.
     Floors (``//``) rather than truncates, so a sub-millisecond negative reads
     as ``-1``, not ``0`` — the inputs that can carry sub-ms fractions (the
     host readings) only ever feed the skew note and the fallback path's
@@ -307,12 +309,13 @@ def freshness_refusal(
         # exchange has not closed. What a STEADY offset still reaches is what
         # this host stamps or derives from its own clock: the durable
         # record's host-side stamps (``decision_attempts.timestamp`` /
-        # ``scheduled_at`` / ``next_decision_at`` — the candle and funding
-        # stamps in the same rows are the exchange's), and
-        # the settlement hour the paper engine's funding accrual asks for
-        # (``engine._accrue_funding`` walks hours up to the host's ``now``;
-        # a host ahead asks for an hour the exchange has not settled and
-        # books it ``pending``). The decision cadence itself is NOT on the
+        # ``scheduled_at`` / ``next_decision_at``; the candle stamps in the
+        # linked ``ai_inputs`` row and ``funding_events.funding_timestamp``
+        # are the exchange's), and the settlement hour the paper engine's
+        # funding accrual asks for (``engine._process_funding`` walks hours
+        # up to the host's ``now``; a host ahead asks for an hour the
+        # exchange has not settled and books it ``pending``). The decision
+        # cadence itself is NOT on the
         # list: it is a rolling interval measured on this one clock
         # (``paper.scheduler``), which a steady offset cannot move — only a
         # clock jump can. The kill switch has its own, tighter check. So the

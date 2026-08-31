@@ -33,16 +33,13 @@ def _epoch_ms(moment: datetime) -> int:
     The window ends below are compared against the exchange's own
     ``close_time`` stamps, so the millisecond the exchange sent
     (``mapper.map_exchange_time``) must come back out exactly — 1ms short of
-    a bar's close would drop a bar the exchange has closed. Integer
-    arithmetic makes that exact by construction rather than by float luck:
-    ``int(moment.timestamp() * 1000)`` happens NOT to drift at this magnitude
-    (measured 2026-08-31: 5M values across the 2026 range, built both by
-    ``fromtimestamp`` and by microsecond field, zero mismatches — so the 1ms
-    drift ``context_builder`` guards ``as_of_ms`` against was not reproduced),
-    but the exactness here should not rest on that measurement holding for
-    every future magnitude. A naive ``moment`` is refused by name — the
-    subtraction would raise anyway, but about mixing offsets, not about the
-    clock the caller handed in.
+    a bar's close would drop a bar the exchange has closed. ``timedelta``
+    floor division is integer arithmetic on microseconds, so the result is
+    exact by construction and rests on no float behaviour at all (the
+    ``int(ts * 1000)`` route goes through a float; whether it happens to
+    round-trip at a given magnitude is beside the point here). A naive
+    ``moment`` is refused by name — the subtraction would raise anyway, but
+    about mixing offsets, not about the clock the caller handed in.
     """
     if moment.tzinfo is None:
         raise ValueError("market data window end must be timezone-aware (UTC)")

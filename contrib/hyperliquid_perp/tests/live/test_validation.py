@@ -2527,6 +2527,24 @@ def test_prompt_regimes_split_the_live_cycles_and_print_before_the_verdict(tmp_p
     assert lines[first + 2] == "live_ready: yes"
 
 
+def test_a_decided_live_attempt_without_an_input_row_makes_the_split_a_warning(tmp_path):
+    # The live copy of the paper self-check: the buckets are counted through
+    # the same status tuple as cycle_count, so a decided attempt with no
+    # ai_inputs row (a repaired store) prints a warning — never a verdict.
+    db = _healthy(tmp_path)
+    regimes: list = [("phase2-target-v4", "price|market|funding|indicators()", "aaaa")]
+    regimes = regimes * MIN_LIVE_CYCLES
+    regimes[3] = None
+    stamp_prompt_regimes(db, regimes, mode="live")
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert sum(r.cycles for r in report.prompt_regimes) == MIN_LIVE_CYCLES - 1
+    assert any(
+        f"cover {MIN_LIVE_CYCLES - 1} of {MIN_LIVE_CYCLES} cycles" in w for w in report.warnings
+    )
+    assert report.live_ready
+
+
 def _make_report(**overrides) -> LiveValidationReport:
     base = {
         "run_id": "r",

@@ -5169,7 +5169,7 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
 
 
 def test_the_live_loop_wires_the_books_as_the_provider_position_source(tmp_path, monkeypatch):
-    # Prompt v4 on the live lane: the same read_book_position binding the paper
+    # Prompt v4 on the live lane: the same read_books binding the paper
     # daemon makes, over THIS run's store — dropped, None, or bound to the
     # wrong run/coin would leave the live prompt silently position-blind.
     built = _drive_live_loop_construction(
@@ -5398,15 +5398,16 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
 
 
 def _book(**overrides):
-    from contrib.hyperliquid_perp.paper.position_facts import BookPosition
+    """The books as ``read_books`` returns them: an open long, one fill booked."""
+    from contrib.hyperliquid_perp.paper.position_facts import BookFacts
+    from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
 
     base = {
-        "size": D("0.005"),
-        "entry_price": D(50000),
-        "wallet_balance": D(1000),
-        "last_fill_at": datetime(2026, 3, 14, 20, 0, tzinfo=timezone.utc),
+        "ledger": AccountLedger(wallet_balance=D(1000)),
+        "position": PositionState(coin="BTC", size=D("0.005"), entry_price=D(50000)),
+        "last_fill_time": "2026-03-14T20:00:00+00:00",
     }
-    return BookPosition(**{**base, **overrides})
+    return BookFacts(**{**base, **overrides})
 
 
 def _provider_with_source(tmp_path, monkeypatch, ctx, source, handed=None):
@@ -5459,7 +5460,11 @@ def test_build_input_hands_the_books_and_the_effective_ceiling_to_the_builder(
     decision_input = provider.build_input(coin="BTC", as_of=as_of)
     position = handed["position"]
     assert isinstance(position, PositionInputs)
-    assert position.book is book
+    # The builder gets the prompt-side view of the ONE read; the driver's
+    # ai_inputs row gets the whole read, on the input (issue #134) — the same
+    # object, so the two cannot describe different books.
+    assert position.book == book.position_facts
+    assert decision_input.books is book
     assert position.pricing.grid_max == 60
     assert position.pricing.leverage == D(1)
     assert position.pricing.taker_fee_rate == PaperExecutionConfig().taker_fee_rate
@@ -5537,11 +5542,11 @@ def test_build_input_reads_the_books_once_before_the_fetch_even_if_the_cycle_is_
 
 
 def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
-    """``source`` is ``read_book_position`` bound over THIS run's store, in order."""
-    from contrib.hyperliquid_perp.paper.position_facts import read_book_position
+    """``source`` is ``read_books`` bound over THIS run's store, in order."""
+    from contrib.hyperliquid_perp.paper.position_facts import read_books
     from contrib.hyperliquid_perp.persistence.db import Database
 
-    assert source.func is read_book_position
+    assert source.func is read_books
     db, bound_run, bound_coin = source.args
     assert isinstance(db, Database)
     assert (bound_run, bound_coin) == (run_id, coin)
@@ -5550,7 +5555,7 @@ def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
 def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
     tmp_path, monkeypatch, paper_seams
 ):
-    # The paper lane: _build_provider binds read_book_position over the run's
+    # The paper lane: _build_provider binds read_books over the run's
     # store, so a fresh run's very first prompt already carries the section
     # (the books are seeded before the first cycle). The recorder stops the
     # command right at the provider pre-flight, before initialize_run.

@@ -61,10 +61,11 @@ from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse
 from ..persistence import audit_rows, repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import decision_attempt_id as derive_attempt_id
-from ..persistence.models import DECIMAL_CONTEXT, PositionState
+from ..persistence.models import DECIMAL_CONTEXT
 from . import accounting
 from .clock import Clock
 from .engine import AssetSpec, PaperExecutionEngine, PlanStartResult
+from .position_facts import BookFacts, read_books
 
 __all__ = [
     "CYCLE_INTERVAL",
@@ -136,6 +137,12 @@ class DecisionInput:
     # two keys do not cover, whose numbers move on a config edit (issue #129).
     format_fingerprint: str | None = None
     model: str | None = None
+    # The books the position section was priced from — ledger, position, the
+    # newest fill's stamp — so the ``ai_inputs`` row is written from the SAME
+    # read rather than a second one (issue #134). ``None``: the provider
+    # carries no books (a test double, a replay harness) and the driver reads
+    # them itself.
+    books: BookFacts | None = None
 
     def __post_init__(self) -> None:
         # Path and hash are two halves of one artifact (phase2-data §5: the
@@ -681,17 +688,22 @@ class PaperScheduler:
     def _insert_ai_input(
         self, now: datetime, input_id: str, attempt_id: str, decision_input: DecisionInput
     ) -> None:
-        """Record what the AI is about to see: market context + paper account state."""
+        """Record what the AI is about to see: market context + paper account state.
+
+        The account side comes from the books the provider read for the
+        prompt's position section and carried on the input (issue #134): one
+        read per cycle feeds both the prompt and this row, so the two cannot
+        describe different books. A provider that carries none (a test double,
+        a replay harness) gets the pre-#134 read here instead.
+        """
         ctx = decision_input.context
         conn = self._db.conn
-        ledger = repo.get_current_account_state(conn, self._run_id)
-        if ledger is None:
+        books = decision_input.books or read_books(self._db, self._run_id, self._coin)
+        if books is None:
             raise ValueError(
                 f"run {self._run_id!r} has no account state; call accounting.initialize_run first"
             )
-        position = repo.get_current_position(conn, self._run_id, self._coin) or PositionState.flat(
-            self._coin
-        )
+        ledger, position = books.ledger, books.position
         valuations = (
             []
             if position.is_flat
@@ -725,6 +737,7 @@ class PaperScheduler:
             leverage=self._risk.leverage,
             max_target_margin_pct=self._risk.max_target_margin_pct,
             liquidation_price=liq_price,
+            last_fill_time=books.last_fill_time,
             active_twap=bool(active_plans),
             remaining_twap_qty=remaining_twap if active_plans else None,
         )

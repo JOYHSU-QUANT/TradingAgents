@@ -281,6 +281,39 @@ def test_driver_runs_a_full_cycle(tmp_path):
     assert driver.pump() is None
 
 
+def test_driver_writes_the_audit_row_from_the_books_the_provider_carried(tmp_path):
+    # Issue #134 on the live lane: the same one-read contract the paper
+    # scheduler keeps — books carried on the input are written as-is, and the
+    # prologue makes none of the three reads; a bookless input still gets the
+    # lane's own read (and its own "no ledger" refusal, unchanged).
+    from contrib.hyperliquid_perp.paper.position_facts import read_books
+
+    # read_books' three statements (the prologue's SL/TP read is another fact).
+    reads = (
+        "SELECT * FROM current_account_state",
+        "SELECT * FROM current_positions",
+        "MAX(timestamp) FROM fills",
+    )
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    books = read_books(db, "r", "BTC")
+    provider._di = DecisionInput(context=_decision_input().context, books=books)
+    statements: list[str] = []
+    original = driver._persist_ai_input
+
+    def traced(*args, **kwargs):
+        db.conn.set_trace_callback(statements.append)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            db.conn.set_trace_callback(None)
+
+    driver._persist_ai_input = traced
+    assert driver.pump() == "cycle_started"
+    assert statements and not [s for s in statements if any(r in s for r in reads)]
+    row = db.conn.execute("SELECT wallet_balance FROM ai_inputs WHERE run_id='r'").fetchone()
+    assert row["wallet_balance"] == str(books.ledger.wallet_balance) == "4000"
+
+
 def test_driver_build_failure_is_api_failed(tmp_path):
     err = RetryableDecisionError("connection", "market data unreachable")
     db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=err)

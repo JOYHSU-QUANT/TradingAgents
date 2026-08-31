@@ -524,6 +524,76 @@ def test_decision_input_rejects_half_candle_window():
     DecisionInput(context=ctx)
 
 
+# The three statements ``read_books`` issues. The prologue's SL/TP read off
+# ``current_positions`` (``SELECT stop_loss_price, take_profit_price ...``) is
+# a different fact and stays where it is.
+_BOOK_READS = (
+    "SELECT * FROM current_account_state",
+    "SELECT * FROM current_positions",
+    "MAX(timestamp) FROM fills",
+)
+
+
+def _trace_audit_prologue(db, scheduler):
+    """Record every SQL statement ``_insert_ai_input`` issues (and nothing else's)."""
+    statements: list[str] = []
+    original = scheduler._insert_ai_input
+
+    def traced(*args, **kwargs):
+        db.conn.set_trace_callback(statements.append)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            db.conn.set_trace_callback(None)
+
+    scheduler._insert_ai_input = traced
+    return statements
+
+
+def test_the_audit_row_is_written_from_the_books_the_provider_carried(tmp_path):
+    # Issue #134: the provider reads the books once for the prompt's position
+    # section and carries them on the DecisionInput; the ai_inputs prologue
+    # writes THOSE, making none of its own three reads. Measured on the SQL
+    # the prologue issues, so a re-read sneaking back in fails here rather
+    # than only showing up as a second scan in a profile.
+    from contrib.hyperliquid_perp.paper.position_facts import read_books
+
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    carried = {}
+
+    def build_input(*, coin, as_of):
+        carried["books"] = read_books(db, "r", coin)
+        return DecisionInput(context=_ctx(as_of), books=carried["books"])
+
+    provider.build_input = build_input
+    statements = _trace_audit_prologue(db, scheduler)
+    result = scheduler.poll()
+    assert result is not None and result.event is CycleEvent.COMPLETED
+    assert statements, "the prologue ran"
+    assert not [s for s in statements if any(read in s for read in _BOOK_READS)]
+    row = db.conn.execute("SELECT wallet_balance, last_fill_time FROM ai_inputs").fetchone()
+    assert (row["wallet_balance"], row["last_fill_time"]) == (
+        str(carried["books"].ledger.wallet_balance),
+        carried["books"].last_fill_time,
+    )
+    db.close()
+
+
+def test_the_audit_row_falls_back_to_its_own_read_for_a_provider_without_books(tmp_path):
+    # The retained path: a provider that carries no books (every scripted
+    # double here, a replay harness) still gets a correct row — from the one
+    # read the prologue makes itself, the way it did before #134.
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    statements = _trace_audit_prologue(db, scheduler)
+    result = scheduler.poll()
+    assert result is not None and result.event is CycleEvent.COMPLETED
+    for read in _BOOK_READS:
+        assert sum(read in s for s in statements) == 1, read
+    row = db.conn.execute("SELECT wallet_balance, last_fill_time FROM ai_inputs").fetchone()
+    assert (row["wallet_balance"], row["last_fill_time"]) == ("1000", None)
+    db.close()
+
+
 def test_decision_input_rejects_a_partial_segmentation_key_set():
     ctx = _ctx(_T0)
     # prompt_version, context_shape and format_fingerprint are the three

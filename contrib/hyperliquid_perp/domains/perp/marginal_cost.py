@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, localcontext
@@ -45,7 +44,6 @@ __all__ = [
     "BookPosition",
     "PositionInputs",
     "PositionPricing",
-    "PositionSource",
     "build_position_context",
     "display_targets",
 ]
@@ -66,7 +64,7 @@ MAX_COST_ROWS = 13
 class BookPosition:
     """The books' position facts: signed size, entry, wallet balance, newest fill.
 
-    Read from a run's store by ``paper.position_facts.read_book_position`` (the
+    Derived from a run's store by ``paper.position_facts.read_books`` (the
     paper ledger and the live store keep the same tables) and priced here. It
     lives in ``domains/`` rather than beside its reader because the context
     builder — which must not import ``paper/`` — names it as an input.
@@ -168,14 +166,6 @@ class PositionInputs:
 
     book: BookPosition
     pricing: PositionPricing
-
-
-# How a wiring hands the daemon provider its books: bound over the run's store
-# at construction, called once per cycle (the fresh-run provider is built
-# before the ledger is seeded, so the read must be able to answer "no books
-# yet"). Named so the seam is a declared type rather than a bare callable
-# passed by keyword (issue #134).
-PositionSource = Callable[[], BookPosition | None]
 
 
 def display_targets(lo: int, hi: int, step: int, max_rows: int = MAX_COST_ROWS) -> list[int]:

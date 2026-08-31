@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotation-only: this module keeps its imports function-local
-    from ..domains.perp.marginal_cost import PositionSource
+    from ..paper.position_facts import BookFacts, BookSource
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ class _EngineDecisionProvider:
         decision_cfg,
         payload_dir: Path,
         on_blocking_read=None,
-        position_source: PositionSource,
+        position_source: BookSource,
     ) -> None:
         from ..domains.perp import risk_gate
         from ..domains.perp.marginal_cost import PositionPricing
@@ -147,8 +147,8 @@ class _EngineDecisionProvider:
         # passes a kill-switch refresh here. ``None`` for paper and the one-shot
         # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
         self._on_blocking_read = on_blocking_read
-        # ``marginal_cost.PositionSource`` — the run's books, read at build
-        # time (``paper.position_facts.read_book_position``, bound by the paper
+        # ``position_facts.BookSource`` — the run's books, read at build
+        # time (``paper.position_facts.read_books``, bound by the paper
         # and live wirings). REQUIRED, with no default: both wirings pass one,
         # and a new one that forgot to would produce a silently position-blind
         # prompt (prompt v4's section simply absent, the ``|position`` token
@@ -187,41 +187,42 @@ class _EngineDecisionProvider:
         )
         self._engine_config, self._analysts = _build_engine_config(config)
 
-    def _position_inputs(self):
-        """This cycle's books plus the rules a move is priced under, or ``None``.
+    def _read_books(self) -> BookFacts | None:
+        """This cycle's books — the ONE read behind the prompt and the audit row.
 
-        Handed to ``_build_context`` so the ``Position:`` section is assembled
-        by the builder, at the same mark and funding as the rest of the
-        context (issue #134) — this method only READS. ``None`` is the
-        position-blind context: a run whose books do not exist yet, or — since
-        the constructor made the source required — a test provider built
-        through ``object.__new__``, which the class-level default serves. The
-        one-shot CLI reaches a position-blind context by a different route
-        entirely: it never builds this class, and writes ``position=None`` at
-        the ``_build_context`` seam itself. Any OTHER exception (a store failure, a DTO guard tripped by a
-        book state nothing expected) propagates: it is a bug, not a degraded
-        state, and it surfaces the way the audit read one statement later
-        already does. What "surfaces" means differs by lane and is a known
-        asymmetry, decided 2026-08-27: the live driver's pump guard fails only
-        that cycle closed (``api_failed``), while the paper scheduler has no
-        such guard and the daemon exits for systemd to restart — the same fate
-        a failing ``_insert_ai_input`` has had since PR 4, kept rather than
-        masked behind a WARNING.
-
-        The pricing half is ``self._pricing``, built once at construction —
-        its ``grid_max`` is the same ``self._max_pct`` the format block is
-        rendered from, so the cost table and the advertised ceiling cannot
-        disagree.
+        ``None`` is the position-blind context: a run whose books do not exist
+        yet, or — since the constructor made the source required — a test
+        provider built through ``object.__new__``, which the class-level
+        default serves. The one-shot CLI reaches a position-blind context by a
+        different route entirely: it never builds this class, and writes
+        ``position=None`` at the ``_build_context`` seam itself. Any OTHER
+        exception (a store failure, a DTO guard tripped by a book state nothing
+        expected) propagates: it is a bug, not a degraded state, and both
+        drivers fail that cycle closed (``api_failed``, ``error_type`` empty)
+        rather than the daemon (issue #134).
         """
         if self._position_source is None:
             return None
+        books = self._position_source()
+        if books is None:
+            logger.warning("position section omitted: the run has no books yet")
+        return books
+
+    def _position_inputs(self, books: BookFacts | None):
+        """The books plus the rules a move is priced under, or ``None``.
+
+        Handed to ``_build_context`` so the ``Position:`` section is assembled
+        by the builder, at the same mark and funding as the rest of the
+        context (issue #134). The pricing half is ``self._pricing``, built
+        once at construction — its ``grid_max`` is the same ``self._max_pct``
+        the format block is rendered from, so the cost table and the
+        advertised ceiling cannot disagree.
+        """
+        if books is None:
+            return None
         from ..domains.perp.marginal_cost import PositionInputs
 
-        book = self._position_source()
-        if book is None:
-            logger.warning("position section omitted: the run has no books yet")
-            return None
-        return PositionInputs(book=book, pricing=self._pricing)
+        return PositionInputs(book=books.position_facts, pricing=self._pricing)
 
     def build_input(self, *, coin: str, as_of: datetime):
         from ..domains.perp.context_guards import context_refusal
@@ -241,8 +242,10 @@ class _EngineDecisionProvider:
         # refused cycle now makes three local SQLite reads it used to skip.
         # They are cheap, they touch no network and spend nothing, and the
         # alternative (assembling the section after the guards) is exactly the
-        # second construction path issue #134 removed.
-        position = self._position_inputs()
+        # second construction path issue #134 removed. The same books ride the
+        # DecisionInput to the driver's ai_inputs row (``books=`` below).
+        books = self._read_books()
+        position = self._position_inputs(books)
         try:
             ctx, _client = _build_context(
                 self._config,
@@ -348,6 +351,7 @@ class _EngineDecisionProvider:
             context_shape=shape,
             format_fingerprint=fingerprint,
             model=self._engine_config["deep_think_llm"],
+            books=books,
         )
 
     def request_decision(self, decision_input):

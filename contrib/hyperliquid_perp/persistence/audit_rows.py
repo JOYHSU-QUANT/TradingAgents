@@ -10,9 +10,11 @@ these columns' values), so the mapping lives here exactly once.
 These are pure adapters: no policy of their own. The deliberate paper/live
 differences stay visible at the call sites and arrive as parameters:
 
-- how the account ledger is acquired (paper raises its own ``ValueError``
-  pointing at ``accounting.initialize_run``; live uses
-  ``repo.require_current_account_state``) — the caller passes ``ledger``;
+- how the account ledger is acquired (both lanes carry the books the prompt
+  was built from on the ``DecisionInput`` and fall back to one read; paper
+  raises its own ``ValueError`` pointing at ``accounting.initialize_run`` when
+  there are none, live uses ``repo.require_current_account_state``) — the
+  caller passes ``ledger``, ``position`` and ``last_fill_time``;
 - ``remaining_twap_qty`` (paper sums the active plans' remaining quantities;
   live reports None until fills are attributed to plans) — the caller passes
   the value;
@@ -61,6 +63,7 @@ def write_ai_input(
     leverage: Decimal,
     max_target_margin_pct: int,
     liquidation_price: Decimal | None,
+    last_fill_time: str | None,
     active_twap: bool,
     remaining_twap_qty: Decimal | None,
 ) -> None:
@@ -72,7 +75,11 @@ def write_ai_input(
     the ``ai_inputs`` row and stamps ``input_id`` onto the attempt row, so a
     crash never leaves an attempt pointing at an input that was never
     persisted. ``liquidation_price`` is the engine-owned estimate, computed by
-    the caller (the same value the engine trades on).
+    the caller (the same value the engine trades on). ``last_fill_time`` is the
+    storage-form stamp of the run's newest fill, read by the caller together
+    with the ledger and the position (``paper.position_facts.read_books`` —
+    the one books read the prompt's position section shares, issue #134) and
+    written verbatim.
     """
     ctx = decision_input.context
     conn = db.conn
@@ -85,7 +92,6 @@ def write_ai_input(
     )
     with localcontext(DECIMAL_CONTEXT):
         notional = position_notional(position.size, ctx.mark_price)
-    last_fill = repo.last_fill_time(conn, run_id)
     side = "flat" if position.is_flat else ("long" if position.is_long else "short")
     with db.transaction() as txn:
         repo.insert_ai_input(
@@ -120,7 +126,7 @@ def write_ai_input(
             take_profit_price=take_profit,
             active_twap=active_twap,
             remaining_twap_qty=remaining_twap_qty,
-            last_fill_time=last_fill,
+            last_fill_time=last_fill_time,
             max_target_margin_pct=Decimal(max_target_margin_pct),
             input_payload_path=decision_input.input_payload_path,
             input_payload_hash=decision_input.input_payload_hash,

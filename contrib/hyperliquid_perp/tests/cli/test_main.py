@@ -823,9 +823,21 @@ def _ctx_closing_at(
 # exchange-clock witnesses; the stale one is folded in here), so the clamp
 # had no test at all on the branch production takes. (The ceiling itself is
 # helper-level only since issue #92: no configurable interval reaches it.)
+#
+# The exchange-clock branch runs twice: with the paired host reading agreeing
+# with the exchange, and with this host two hours BEHIND it (issue #122). Past
+# the warn floor, so every stale verdict on that param picks its "check time
+# sync AND the feed" wording instead of blaming the feed alone — and what must
+# NOT move is the verdict: the age is measured between two exchange-side
+# stamps, so a mutation that folded the skew into it would pass the first two
+# params (skew zero or unknown) while shifting every bound below by 2h.
 _BOTH_CLOCKS = pytest.mark.parametrize(
-    "exchange_time",
-    [pytest.param(None, id="host-clock"), pytest.param(_NOW, id="exchange-clock")],
+    ("exchange_time", "host_skew"),
+    [
+        pytest.param(None, None, id="host-clock"),
+        pytest.param(_NOW, timedelta(0), id="exchange-clock"),
+        pytest.param(_NOW, -timedelta(hours=2), id="exchange-clock-host-behind"),
+    ],
 )
 # ...and the phrase each branch prints for a stale age / a candle ahead of it.
 _BEFORE = {None: "before now", _NOW: "before the exchange's clock"}
@@ -905,36 +917,42 @@ def test_context_refusal_error_is_the_message_view_of_the_same_verdict():
 
 
 @_BOTH_CLOCKS
-def test_context_refusal_passes_a_live_candle_feed(exchange_time):
+def test_context_refusal_passes_a_live_candle_feed(exchange_time, host_skew):
     # The healthy witness. get_candles drops the still-forming bar, so on a
     # healthy feed the newest CLOSED candle is under one interval old — and a
     # full interval, the case here, is what a single unpublished boundary
     # already looks like. Refusing that would refuse a cycle over ordinary
     # exchange jitter.
-    ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=exchange_time)
+    ctx = _ctx_closing_at(
+        _NOW - timedelta(hours=4), exchange_time=exchange_time, host_skew=host_skew
+    )
     assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
 
 
 @_BOTH_CLOCKS
-def test_context_refusal_freshness_bound_is_exclusive(exchange_time):
+def test_context_refusal_freshness_bound_is_exclusive(exchange_time, host_skew):
     # Exactly at 3 x 4h is fresh, one second past it is not: pins the
     # comparison as a strict `>` on both measuring clocks. A `>=` would refuse
     # a feed that the boundary case here calls healthy.
-    at_limit = _ctx_closing_at(_NOW - timedelta(hours=12), exchange_time=exchange_time)
+    at_limit = _ctx_closing_at(
+        _NOW - timedelta(hours=12), exchange_time=exchange_time, host_skew=host_skew
+    )
     assert guards_mod.context_refusal_message(at_limit, "BTC", {}, now=_NOW) is None
-    past_limit = _ctx_closing_at(_NOW - timedelta(hours=12, seconds=1), exchange_time=exchange_time)
+    past_limit = _ctx_closing_at(
+        _NOW - timedelta(hours=12, seconds=1), exchange_time=exchange_time, host_skew=host_skew
+    )
     assert "freshness limit" in guards_mod.context_refusal_message(past_limit, "BTC", {}, now=_NOW)
 
 
 @_BOTH_CLOCKS
-def test_context_refusal_freshness_limit_tracks_the_candle_interval(exchange_time):
+def test_context_refusal_freshness_limit_tracks_the_candle_interval(exchange_time, host_skew):
     # The bound is N x interval, not a fixed span: 5h is a healthy age for 4h
     # bars and a stalled feed for 1h bars. A hardcoded hour count would pass
     # one of these two and fail the other.
     age = _NOW - timedelta(hours=5)
-    four_hourly = _ctx_closing_at(age, exchange_time=exchange_time)
+    four_hourly = _ctx_closing_at(age, exchange_time=exchange_time, host_skew=host_skew)
     assert guards_mod.context_refusal_message(four_hourly, "BTC", {}, now=_NOW) is None
-    hourly = _ctx_closing_at(age, interval="1h", exchange_time=exchange_time)
+    hourly = _ctx_closing_at(age, interval="1h", exchange_time=exchange_time, host_skew=host_skew)
     assert "freshness limit" in guards_mod.context_refusal_message(hourly, "BTC", {}, now=_NOW)
 
 
@@ -959,7 +977,7 @@ def test_context_refusal_freshness_limit_is_capped_at_three_decision_cycles():
 
 
 @_BOTH_CLOCKS
-def test_context_refusal_passes_a_healthy_daily_feed_all_day(exchange_time):
+def test_context_refusal_passes_a_healthy_daily_feed_all_day(exchange_time, host_skew):
     # Issue #92. A 1d bar closes at 00:00 UTC and get_candles drops the
     # forming one, so across the day the newest CLOSED bar ages from zero to
     # 24h with the exchange healthy and the clocks agreeing. Under the 12h cap
@@ -973,13 +991,16 @@ def test_context_refusal_passes_a_healthy_daily_feed_all_day(exchange_time):
     moments.append(midnight + timedelta(hours=23, minutes=59, seconds=59))
     for now in moments:
         ctx = _ctx_closing_at(
-            midnight, interval="1d", exchange_time=None if exchange_time is None else now
+            midnight,
+            interval="1d",
+            exchange_time=None if exchange_time is None else now,
+            host_skew=host_skew,
         )
         assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=now) is None, now
 
 
 @_BOTH_CLOCKS
-def test_context_refusal_still_refuses_a_daily_feed_that_stopped(exchange_time):
+def test_context_refusal_still_refuses_a_daily_feed_that_stopped(exchange_time, host_skew):
     # The other half of #92: raising the bound for 1d must not reopen the hole
     # the cap closed. The limit is one bar plus one decision cycle (28h): a
     # bar that is late by less than a cycle is tolerated (the exchange may be
@@ -987,7 +1008,9 @@ def test_context_refusal_still_refuses_a_daily_feed_that_stopped(exchange_time):
     # feed down for three days is refused outright — with the label saying
     # WHY the bound is 28h and not the 12h cap.
     def verdict(age):
-        ctx = _ctx_closing_at(_NOW - age, interval="1d", exchange_time=exchange_time)
+        ctx = _ctx_closing_at(
+            _NOW - age, interval="1d", exchange_time=exchange_time, host_skew=host_skew
+        )
         return guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
 
     msg = verdict(timedelta(days=3))
@@ -1018,15 +1041,25 @@ def test_the_candle_age_limit_never_sits_below_one_bar_nor_above_the_uncapped_bo
 
 
 @_BOTH_CLOCKS
-def test_context_refusal_freshness_limit_has_a_floor(exchange_time):
+def test_context_refusal_freshness_limit_has_a_floor(exchange_time, host_skew):
     # The other end: 3 x 1m would refuse a whole cycle over three minutes of
-    # feed jitter, far tighter than the 4h decision cadence needs.
+    # feed jitter, far tighter than the 4h decision cadence needs. (On the
+    # host-behind param the 2h skew exceeds this 30m limit outright, so the
+    # refusal's cause lands on the "offset that large by itself" branch rather
+    # than the "contributor" one the 4h/1d cases take; the assertions here read
+    # the limit's basis, not the cause, so both params pin the same floor.)
     minutely = _ctx_closing_at(
-        _NOW - timedelta(minutes=20), interval="1m", exchange_time=exchange_time
+        _NOW - timedelta(minutes=20),
+        interval="1m",
+        exchange_time=exchange_time,
+        host_skew=host_skew,
     )
     assert guards_mod.context_refusal_message(minutely, "BTC", {}, now=_NOW) is None
     past_floor = _ctx_closing_at(
-        _NOW - timedelta(minutes=31), interval="1m", exchange_time=exchange_time
+        _NOW - timedelta(minutes=31),
+        interval="1m",
+        exchange_time=exchange_time,
+        host_skew=host_skew,
     )
     msg = guards_mod.context_refusal_message(past_floor, "BTC", {}, now=_NOW)
     assert msg is not None and "raised to the 30m floor" in msg
@@ -1063,12 +1096,14 @@ def test_the_freshness_floor_label_is_derived_from_the_floor():
 
 
 @_BOTH_CLOCKS
-def test_refusal_age_carries_seconds_past_the_limit(exchange_time):
+def test_refusal_age_carries_seconds_past_the_limit(exchange_time, host_skew):
     # The whole reason _format_duration_ms grew a seconds field: at minute
     # resolution every age in the first minute past the limit renders AS the
     # limit, and the message reads "X is past the X limit". 30 seconds over is
     # the case that must not collide.
-    ctx = _ctx_closing_at(_NOW - timedelta(hours=12, seconds=30), exchange_time=exchange_time)
+    ctx = _ctx_closing_at(
+        _NOW - timedelta(hours=12, seconds=30), exchange_time=exchange_time, host_skew=host_skew
+    )
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert f"12h 0m 30s {_BEFORE[exchange_time]}" in msg
@@ -1076,20 +1111,24 @@ def test_refusal_age_carries_seconds_past_the_limit(exchange_time):
 
 
 @_BOTH_CLOCKS
-def test_refusal_age_reads_in_days_once_it_is_long(exchange_time):
+def test_refusal_age_reads_in_days_once_it_is_long(exchange_time, host_skew):
     # A feed down for days renders as days, not a three-figure hour count. The
     # limit is capped far below this band, so the two can never collide here.
-    ctx = _ctx_closing_at(_NOW - timedelta(days=5, hours=3), exchange_time=exchange_time)
+    ctx = _ctx_closing_at(
+        _NOW - timedelta(days=5, hours=3), exchange_time=exchange_time, host_skew=host_skew
+    )
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None and f"5d 3h {_BEFORE[exchange_time]}" in msg
 
 
 @_BOTH_CLOCKS
-def test_refusal_age_stays_in_hours_for_an_overnight_outage(exchange_time):
+def test_refusal_age_stays_in_hours_for_an_overnight_outage(exchange_time, host_skew):
     # The day form starts at two days, not one: the most common real outage
     # length reads better as hours. Pins the readability choice the constant
     # exists for — a threshold of one day renders this as "1d 6h".
-    ctx = _ctx_closing_at(_NOW - timedelta(hours=30), exchange_time=exchange_time)
+    ctx = _ctx_closing_at(
+        _NOW - timedelta(hours=30), exchange_time=exchange_time, host_skew=host_skew
+    )
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None and f"30h 0m 0s {_BEFORE[exchange_time]}" in msg
 

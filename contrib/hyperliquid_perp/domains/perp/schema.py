@@ -115,17 +115,27 @@ _INTERVAL_MS = {
 }
 
 
-def interval_to_ms(interval: str) -> int:
-    """``interval`` as milliseconds; ``ValueError`` naming the value if unsupported."""
+def parse_interval(interval: str) -> CandleInterval:
+    """``interval`` as its :class:`CandleInterval` member; ``ValueError`` naming it if unsupported.
+
+    The one place the string is resolved: :func:`interval_to_ms` and
+    :class:`PerpMarketContext`'s constructor both go through it, so the check
+    and its message live once (issue #122).
+    """
     # ``CandleInterval(interval)`` raises ValueError on an unknown value (e.g. a
     # mis-cased "4H"); translate it into the same clear message the caller expects.
     try:
-        return _INTERVAL_MS[CandleInterval(interval)]
+        return CandleInterval(interval)
     except ValueError:
         raise ValueError(
             f"unsupported candle interval {interval!r}; "
             f"choose from {[i.value for i in CandleInterval]}"
         ) from None
+
+
+def interval_to_ms(interval: str) -> int:
+    """``interval`` as milliseconds; ``ValueError`` naming the value if unsupported."""
+    return _INTERVAL_MS[parse_interval(interval)]
 
 
 # --------------------------------------------------------------------------
@@ -973,10 +983,9 @@ class PerpMarketContext:
         # Validate ``candle_interval`` against the single source of truth
         # (:class:`CandleInterval`) so an unsupported value fails here at
         # construction — cheap to spot — rather than later inside the guard.
-        # The lookup IS :func:`interval_to_ms`'s, so the check and its message
-        # live once; a value it accepts is a member by construction.
-        interval_to_ms(self.candle_interval)
-        interval = CandleInterval(self.candle_interval)
+        # The parse IS :func:`interval_to_ms`'s, so the check and its message
+        # live once, and one lookup serves both the check and the coercion.
+        interval = parse_interval(self.candle_interval)
         # Store the plain ``.value`` string ("4h"), never the enum member: a caller
         # passing ``CandleInterval.H4`` itself would otherwise be stored as a
         # ``(str, Enum)`` member that renders as ``"CandleInterval.H4"`` (not ``"4h"``)

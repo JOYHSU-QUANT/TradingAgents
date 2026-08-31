@@ -594,6 +594,68 @@ def test_the_audit_row_falls_back_to_its_own_read_for_a_provider_without_books(t
     db.close()
 
 
+# --------------------------------------------------------------------------
+# non-retryable errors fail the cycle closed, never the daemon (issue #134)
+# --------------------------------------------------------------------------
+
+
+def test_a_bug_in_build_input_fails_the_cycle_closed_without_a_ladder(tmp_path, caplog):
+    import logging
+
+    # Snapshots: the failed cycle's best-effort cycle-end snapshot, then the
+    # recovered cycle's gate and ITS cycle-end snapshot.
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [_decision("long", 1)], [_snap(), _snap(), _snap()]
+    )
+
+    def broken(*, coin, as_of):
+        raise RuntimeError("a DTO guard tripped")
+
+    provider.build_input = broken
+    with caplog.at_level(logging.ERROR):
+        result = scheduler.poll()
+    # Terminal at once — no 10s/30s ladder, the try counter at 1 — the row
+    # carrying no §6.2 class and the cause under the live lane's prefix.
+    assert result is not None and result.event is CycleEvent.API_FAILED
+    assert result.error_type is None and result.attempt_count == 1
+    row = _attempt_row(db, result.decision_attempt_id)
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    assert row["error_message"] == "non-retryable: RuntimeError('a DTO guard tripped')"
+    assert provider.decide_calls == 0
+    # The traceback reaches the log at ERROR — the daemon no longer exits, so
+    # this is where the bug is now found.
+    record = next(r for r in caplog.records if "non-retryable" in r.getMessage())
+    assert record.levelno == logging.ERROR and record.exc_info is not None
+    # The next cycle is on schedule (scheduled + 4h) and starts normally.
+    assert result.next_decision_at == _T0 + CYCLE_INTERVAL
+    assert scheduler.poll() is None
+    clock.set(_T0 + CYCLE_INTERVAL)
+    provider.build_input = _FakeProvider.build_input.__get__(provider)
+    fresh = scheduler.poll()
+    assert fresh is not None and fresh.event is CycleEvent.COMPLETED
+    db.close()
+
+
+def test_a_bug_in_the_engine_call_fails_the_cycle_closed_after_the_input_row(tmp_path):
+    # The same guard past the audit write: the ai_inputs row for the try
+    # stays (it describes what the AI was about to see), the attempt is
+    # api_failed with no class, and nothing is re-asked.
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [RuntimeError("engine bug")], [_snap()]
+    )
+    result = scheduler.poll()
+    assert result is not None and result.event is CycleEvent.API_FAILED
+    assert result.error_type is None
+    row = _attempt_row(db, result.decision_attempt_id)
+    assert (row["status"], row["error_type"]) == ("api_failed", None)
+    assert row["error_message"].startswith("non-retryable: RuntimeError(")
+    assert row["input_id"] == f"{result.decision_attempt_id}#in1"
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_inputs").fetchone()[0] == 1
+    assert provider.decide_calls == 1
+    db.close()
+
+
 def test_decision_input_rejects_a_partial_segmentation_key_set():
     ctx = _ctx(_T0)
     # prompt_version, context_shape and format_fingerprint are the three
@@ -663,18 +725,19 @@ def test_poll_result_shape_guards():
             next_decision_at=_T0,
             error_type="server_error",
         )
-    # ``error_type`` is present exactly on an api_failed result — the loop
-    # escalates on it (issue #50), so a failed cycle that carried none would
-    # silently reset the streak, and a decided one that carried a class would
-    # advance it.
-    with pytest.raises(ValueError, match="error_type"):
-        PollResult(
-            event=CycleEvent.API_FAILED,
-            decision_attempt_id="a",
-            scheduled_at=_T0,
-            attempt_count=1,
-            next_decision_at=_T0,
-        )
+    # ``error_type`` is present only on an api_failed result — the loop's
+    # streak counter keys on the EVENT and reads the class for wording alone
+    # (issue #50), so a decided cycle carrying a class is the malformed one.
+    # An api_failed result MAY carry none: a non-retryable bug fails the cycle
+    # closed with no §6.2 class (issue #134), and the counter names that
+    # "unclassified" rather than resetting.
+    PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="a",
+        scheduled_at=_T0,
+        attempt_count=1,
+        next_decision_at=_T0,
+    )
     with pytest.raises(ValueError, match="error_type"):
         PollResult(
             event=CycleEvent.COMPLETED,

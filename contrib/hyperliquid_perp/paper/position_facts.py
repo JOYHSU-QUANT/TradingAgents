@@ -2,8 +2,10 @@
 
 One read shared by the paper daemon and the live loop: both keep the same
 ``current_positions`` / ``current_account_state`` / ``fills`` tables, and the
-``cli._provider._EngineDecisionProvider`` that renders the section runs in
-both. Reads only; pricing is
+``cli._provider._EngineDecisionProvider`` that READS these books runs in
+both. Reads only; the section is priced by
+``domains.perp.context_builder.build_market_context`` and rendered by
+``domains.perp.prompt_context``; the pricing itself is
 :func:`..domains.perp.marginal_cost.build_position_context`'s.
 """
 
@@ -11,10 +13,10 @@ from __future__ import annotations
 
 from ..common.instants import parse_instant
 
-# The DTO itself lives in ``domains/`` — the context builder assembles the
+# The DTO itself moved to ``domains/`` — the context builder assembles the
 # position section and must not import ``paper/`` — and is re-exported here,
-# beside its only reader, for the wirings and tests written against this path
-# (the thin-re-export convention of PR #121).
+# beside its only reader, so the import path callers already use keeps working
+# (the same thin-shim shape as ``domains/perp/config_coercion.py``).
 from ..domains.perp.marginal_cost import BookPosition
 from ..persistence import repository as repo
 from ..persistence.db import Database

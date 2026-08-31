@@ -139,7 +139,7 @@ def _build_context(
     coin: str,
     *,
     on_blocking_read: Callable[[], None] | None = None,
-    position: PositionInputs | None = None,
+    position: PositionInputs | None,
 ) -> tuple[PerpMarketContext, HyperliquidClient]:
     """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``.
 
@@ -162,14 +162,17 @@ def _build_context(
     switch is being held open.
 
     ``position`` is handed straight to the builder, which prices the prompt's
-    ``Position:`` section from it (issue #134). Its default is the one
-    genuinely position-blind caller — the one-shot CLI, which has no local
-    books at all: it reads the venue's own position separately and prints it
-    UNDER the rendered context, deliberately outside the prompt (see
+    ``Position:`` section from it (issue #134). REQUIRED, with no default, for
+    the same reason the builder requires it — and it matters MORE here: this,
+    not the builder, is the composition seam callers actually reach for, so a
+    default would put the builder's guard permanently out of reach. Forgetting
+    it would cost a silently position-blind prompt and a ``context_shape``
+    quietly missing its ``position`` token, with nothing raising. The one-shot
+    CLI writes ``position=None`` and means it: it has no local books, and
+    reads the venue's own position separately to print UNDER the rendered
+    context, deliberately outside the prompt (see
     ``target_decision.decision_format_instructions`` for why that lane stays
-    blind). Defaulted rather than required here, unlike on the builder, so
-    that lane says nothing about a position it does not have; the daemon
-    lanes pass theirs explicitly.
+    blind).
     """
     # The same parse ``load_config`` already ran on this block, so on a loaded
     # config it cannot raise; absent or blank keys take the field defaults.

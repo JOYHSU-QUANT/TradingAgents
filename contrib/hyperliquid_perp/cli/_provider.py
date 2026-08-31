@@ -133,8 +133,10 @@ class _EngineDecisionProvider:
         decision_cfg,
         payload_dir: Path,
         on_blocking_read=None,
-        position_source: PositionSource | None = None,
+        position_source: PositionSource,
     ) -> None:
+        from ..domains.perp import risk_gate
+        from ..domains.perp.marginal_cost import PositionPricing
         from ..engine_bridge import _build_engine_config
 
         self._config = config
@@ -148,11 +150,14 @@ class _EngineDecisionProvider:
         self._on_blocking_read = on_blocking_read
         # ``marginal_cost.PositionSource`` — the run's books, read at build
         # time (``paper.position_facts.read_book_position``, bound by the paper
-        # and live wirings). ``None`` leaves the context position-blind and the
-        # prompt without its ``Position:`` section (prompt v4). The books it
-        # returns reach the builder as a declared parameter, so a harness that
-        # builds a context directly can supply a position without going
-        # through this constructor at all (issue #134).
+        # and live wirings). REQUIRED, with no default: both wirings pass one,
+        # and a new one that forgot to would produce a silently position-blind
+        # prompt (prompt v4's section simply absent, the ``|position`` token
+        # missing from ``context_shape``) with nothing raising. The class-level
+        # ``_position_source = None`` above still serves the tests that skip
+        # ``__init__`` via ``object.__new__``. The books it returns reach the
+        # builder as a declared parameter, so a harness that builds a context
+        # directly can supply a position without this constructor (issue #134).
         self._position_source = position_source
         # The fill-cost parameters the position section prices with: the
         # ``paper_trading.execution`` block, parsed ONCE here (the startup
@@ -163,9 +168,26 @@ class _EngineDecisionProvider:
         from ..paper.config import PaperTradingConfig
 
         self._execution = PaperTradingConfig.from_dict(config.get("paper_trading")).execution
+        # ONE effective ceiling, resolved here rather than per cycle: it is a
+        # pure function of two objects frozen at construction, and the cost
+        # table and the format block must advertise the same number. As a
+        # single attribute read twice that identity is structural; recomputed
+        # at each call site it was only a comment. Building the pricing rules
+        # here also moves their rejection (``PositionPricing.__post_init__``)
+        # into the daemon's pre-flight, where every other config error already
+        # surfaces, instead of into the first cycle.
+        self._max_pct = risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg)
+        self._pricing = PositionPricing(
+            leverage=risk_cfg.leverage,
+            grid_min=decision_cfg.ai_target_margin_min_pct,
+            grid_max=self._max_pct,
+            grid_step=decision_cfg.target_margin_step_pct,
+            taker_fee_rate=self._execution.taker_fee_rate,
+            slippage_bps=self._execution.fill_model.slippage_bps,
+        )
         self._engine_config, self._analysts = _build_engine_config(config)
 
-    def _position_inputs(self, *, max_pct: int):
+    def _position_inputs(self):
         """This cycle's books plus the rules a move is priced under, or ``None``.
 
         Handed to ``_build_context`` so the ``Position:`` section is assembled
@@ -183,32 +205,22 @@ class _EngineDecisionProvider:
         a failing ``_insert_ai_input`` has had since PR 4, kept rather than
         masked behind a WARNING.
 
-        ``max_pct`` is the EFFECTIVE grid ceiling the caller also hands the
-        format block, so the cost table and the advertised ceiling cannot
+        The pricing half is ``self._pricing``, built once at construction —
+        its ``grid_max`` is the same ``self._max_pct`` the format block is
+        rendered from, so the cost table and the advertised ceiling cannot
         disagree.
         """
         if self._position_source is None:
             return None
-        from ..domains.perp.marginal_cost import PositionInputs, PositionPricing
+        from ..domains.perp.marginal_cost import PositionInputs
 
         book = self._position_source()
         if book is None:
             logger.warning("position section omitted: the run has no books yet")
             return None
-        return PositionInputs(
-            book=book,
-            pricing=PositionPricing(
-                leverage=self._risk.leverage,
-                grid_min=self._decision.ai_target_margin_min_pct,
-                grid_max=max_pct,
-                grid_step=self._decision.target_margin_step_pct,
-                taker_fee_rate=self._execution.taker_fee_rate,
-                slippage_bps=self._execution.fill_model.slippage_bps,
-            ),
-        )
+        return PositionInputs(book=book, pricing=self._pricing)
 
     def build_input(self, *, coin: str, as_of: datetime):
-        from ..domains.perp import risk_gate
         from ..domains.perp.context_guards import context_refusal
         from ..domains.perp.prompt_context import context_shape, render_market_context
         from ..domains.perp.schema import interval_to_ms
@@ -217,9 +229,6 @@ class _EngineDecisionProvider:
         from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
         from ..paper.scheduler import DecisionInput, RetryableDecisionError
 
-        # One ceiling for both: the cost table's rows and the format block's
-        # advertised maximum come from this same value.
-        max_pct = risk_gate.effective_max_target_margin_pct(self._risk, self._decision)
         # Read BEFORE the fetch, so the builder can price the section at the
         # same snapshot the rest of the context is built from. That also puts
         # the read ahead of the four context guards below — deliberate: a
@@ -227,7 +236,7 @@ class _EngineDecisionProvider:
         # They are cheap, they touch no network and spend nothing, and the
         # alternative (assembling the section after the guards) is exactly the
         # second construction path issue #134 removed.
-        position = self._position_inputs(max_pct=max_pct)
+        position = self._position_inputs()
         try:
             ctx, _client = _build_context(
                 self._config,
@@ -287,7 +296,7 @@ class _EngineDecisionProvider:
         # metadata, not prompt text: the model sees context_text/format_text
         # unchanged, so adding this key is not a PROMPT_VERSION bump.
         shape = context_shape(ctx)
-        format_text = decision_format_instructions(self._decision, max_pct=max_pct)
+        format_text = decision_format_instructions(self._decision, max_pct=self._max_pct)
         payload = {
             "coin": coin,
             "as_of": as_of.isoformat(),

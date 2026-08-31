@@ -82,20 +82,33 @@ def _stub_provider(**attrs):
     """A provider built past ``__init__`` (which imports the engine), pre-fed.
 
     Carries what ``build_input`` reads BEFORE whichever seam a case is
-    exercising. ``_risk`` / ``_decision`` are among them since the position
-    section moved into the builder (issue #134): build_input resolves the
-    effective grid ceiling and reads the books before the market fetch, so a
-    stub without them raises AttributeError instead of reaching the guard
-    under test. The class-level ``_position_source = None`` keeps every stub
-    book-free unless the case wires one.
+    exercising. ``_max_pct`` / ``_pricing`` are among them since the position
+    section moved into the builder (issue #134): the real ``__init__``
+    resolves both once, and build_input reads the books before the market
+    fetch, so a stub without them raises AttributeError instead of reaching
+    the guard under test. The class-level ``_position_source = None`` keeps
+    every stub book-free unless the case wires one.
     """
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.domains.perp.marginal_cost import PositionPricing
+    from contrib.hyperliquid_perp.paper.config import PaperExecutionConfig
 
+    execution = PaperExecutionConfig()
     provider = object.__new__(_EngineDecisionProvider)
     provider._config = {}
     provider._on_blocking_read = None
     provider._risk = RiskConfig(leverage=D(1), max_target_margin_pct=60)
     provider._decision = DecisionConfig()
+    provider._execution = execution
+    provider._max_pct = 60
+    provider._pricing = PositionPricing(
+        leverage=D(1),
+        grid_min=0,
+        grid_max=60,
+        grid_step=1,
+        taker_fee_rate=execution.taker_fee_rate,
+        slippage_bps=execution.fill_model.slippage_bps,
+    )
     for name, value in attrs.items():
         setattr(provider, name, value)
     return provider
@@ -159,7 +172,6 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     # environmental failures, so the worst case is an api_failed cycle whose
     # error_message names the cause.
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
-    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
     from contrib.hyperliquid_perp.domains.perp import context_guards as guards_mod
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
@@ -170,15 +182,11 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
     monkeypatch.setattr(guards_mod, "warmup_threshold", lambda config: 1)
 
-    provider = object.__new__(_EngineDecisionProvider)
-    provider._config = {}
-    provider._risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
-    provider._decision = DecisionConfig()
     # A FILE where the payload directory must go: mkdir(exist_ok=True) still
     # raises FileExistsError (an OSError) — the same landing zone as ENOSPC.
     blocked = tmp_path / "payloads"
     blocked.write_text("not a directory", encoding="utf-8")
-    provider._payload_dir = blocked
+    provider = _stub_provider(_payload_dir=blocked)
 
     with pytest.raises(RetryableDecisionError) as exc_info:
         provider.build_input(coin="BTC", as_of=as_of)
@@ -355,19 +363,14 @@ def test_build_input_measures_freshness_against_the_cycle_clock(tmp_path, monkey
     # guard calling datetime.now() itself would refuse it; the daemon's single
     # time base must not.
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
-    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=1))
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
 
-    provider = object.__new__(_EngineDecisionProvider)
-    provider._config = {}
-    provider._on_blocking_read = None
-    provider._risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
-    provider._decision = DecisionConfig()
-    provider._payload_dir = tmp_path / "payloads"
-    provider._engine_config = {"deep_think_llm": "model-x"}
+    provider = _stub_provider(
+        _payload_dir=tmp_path / "payloads", _engine_config={"deep_think_llm": "model-x"}
+    )
 
     decision_input = provider.build_input(coin="BTC", as_of=as_of)
     assert decision_input.candle_end == ctx.as_of  # built through, not refused
@@ -378,20 +381,18 @@ def test_build_input_carries_the_context_shape_beside_the_prompt_version(tmp_pat
     # ai_inputs row gets it) AND in the payload JSON (so the artifact is
     # self-describing), computed from the very context that was rendered.
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
-    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
-    from contrib.hyperliquid_perp.domains.perp.prompt_context import context_shape
+    from contrib.hyperliquid_perp.domains.perp.prompt_context import (
+        context_shape,
+        render_market_context,
+    )
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=1))
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
 
-    provider = object.__new__(_EngineDecisionProvider)
-    provider._config = {}
-    provider._on_blocking_read = None
-    provider._risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
-    provider._decision = DecisionConfig()
-    provider._payload_dir = tmp_path / "payloads"
-    provider._engine_config = {"deep_think_llm": "model-x"}
+    provider = _stub_provider(
+        _payload_dir=tmp_path / "payloads", _engine_config={"deep_think_llm": "model-x"}
+    )
 
     decision_input = provider.build_input(coin="BTC", as_of=as_of)
     expected = context_shape(ctx)
@@ -402,6 +403,12 @@ def test_build_input_carries_the_context_shape_beside_the_prompt_version(tmp_pat
         payload = json.load(fh)
     assert payload["context_shape"] == expected
     assert payload["prompt_version"] == decision_input.prompt_version
+    # The payload's own copy of the prompt text, which nothing else pins: the
+    # stored artifact is what an audit reads months later, and the model is fed
+    # a SEPARATE attribute (``self._context_text``), so a payload written empty
+    # — or without the key — would keep every cycle trading correctly while the
+    # §5 artifact and the hash over it described nothing.
+    assert payload["context_text"] == render_market_context(ctx)
 
 
 def test_validate_exit_codes(tmp_path, capsys):
@@ -5345,10 +5352,10 @@ def _provider_with_source(tmp_path, monkeypatch, ctx, source, handed=None):
     ``tests/domains/test_context_builder.py``.
     """
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
-    from contrib.hyperliquid_perp.paper.config import PaperExecutionConfig
 
     def _stand_in(config, coin, **kw):
         if handed is not None:
+            handed.setdefault("order", []).append("fetch")
             handed.update(kw)
         return ctx, None
 
@@ -5357,7 +5364,6 @@ def _provider_with_source(tmp_path, monkeypatch, ctx, source, handed=None):
         _payload_dir=tmp_path / "payloads",
         _engine_config={"deep_think_llm": "model-x"},
         _position_source=source,
-        _execution=PaperExecutionConfig(),
     )
 
 
@@ -5372,6 +5378,9 @@ def test_build_input_hands_the_books_and_the_effective_ceiling_to_the_builder(
     # format block advertises, so the cost table and the ceiling cannot
     # disagree.
     from contrib.hyperliquid_perp.domains.perp.marginal_cost import PositionInputs
+    from contrib.hyperliquid_perp.domains.perp.target_decision import (
+        decision_format_instructions,
+    )
     from contrib.hyperliquid_perp.paper.config import PaperExecutionConfig
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
@@ -5388,11 +5397,15 @@ def test_build_input_hands_the_books_and_the_effective_ceiling_to_the_builder(
     assert position.pricing.leverage == D(1)
     assert position.pricing.taker_fee_rate == PaperExecutionConfig().taker_fee_rate
     assert position.pricing.slippage_bps == PaperExecutionConfig().fill_model.slippage_bps
-    # ...and the ceiling the model is TOLD about, rendered in the SAME call
-    # from the same value: a drift between the two is what this pins.
+    # ...and the ceiling the model is TOLD about is rendered from that SAME
+    # number. Compared against the whole block rather than a "60" substring:
+    # the block mentions other numbers, so a substring would pass on a
+    # ceiling that drifted to any value whose text happens to contain 60.
     with open(decision_input.input_payload_path, encoding="utf-8") as fh:
         payload = json.load(fh)
-    assert "60" in payload["format_instructions"]
+    assert payload["format_instructions"] == decision_format_instructions(
+        DecisionConfig(), max_pct=position.pricing.grid_max
+    )
 
 
 def test_build_input_without_a_position_source_stays_position_blind(tmp_path, monkeypatch):
@@ -5403,10 +5416,12 @@ def test_build_input_without_a_position_source_stays_position_blind(tmp_path, mo
     ctx = _perp_ctx(as_of - timedelta(hours=1))
     handed = {}
     provider = _provider_with_source(tmp_path, monkeypatch, ctx, None, handed)
-    decision_input = provider.build_input(coin="BTC", as_of=as_of)
+    provider.build_input(coin="BTC", as_of=as_of)
+    # The handoff is the whole assertion: the stand-in returns a fixed
+    # position-free context whatever it is passed, so anything read off the
+    # result would pass just as well on a fully-populated PositionInputs. What
+    # the builder then does with a None is pinned in test_context_builder.
     assert handed["position"] is None
-    assert decision_input.context.position is None
-    assert "position" not in decision_input.context_shape
 
 
 def test_build_input_omits_the_section_when_the_books_do_not_exist_yet(
@@ -5419,11 +5434,11 @@ def test_build_input_omits_the_section_when_the_books_do_not_exist_yet(
     handed = {}
     provider = _provider_with_source(tmp_path, monkeypatch, ctx, lambda: None, handed)
     with caplog.at_level(logging.WARNING):
-        decision_input = provider.build_input(coin="BTC", as_of=as_of)
+        provider.build_input(coin="BTC", as_of=as_of)
     # "No books yet" reaches the builder as the same position-blind None a
-    # missing source does — one state, not two.
+    # missing source does — one state, not two — and says so in the log, which
+    # is the only place the two causes are told apart.
     assert handed["position"] is None
-    assert decision_input.context.position is None
     assert "no books yet" in caplog.text
 
 
@@ -5439,16 +5454,19 @@ def test_build_input_reads_the_books_once_before_the_fetch_even_if_the_cycle_is_
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=20))  # stale: refused
-    calls = []
+    handed = {}
 
     def _source():
-        calls.append(1)
+        handed.setdefault("order", []).append("read")
         return _book()
 
-    provider = _provider_with_source(tmp_path, monkeypatch, ctx, _source)
+    provider = _provider_with_source(tmp_path, monkeypatch, ctx, _source, handed)
     with pytest.raises(RetryableDecisionError):
         provider.build_input(coin="BTC", as_of=as_of)
-    assert calls == [1]
+    # Both halves of the name measured: the read happened, it happened once,
+    # and it happened before the fetch — the ordering is what lets the builder
+    # price the section at the very snapshot that fetch returns.
+    assert handed["order"] == ["read", "fetch"]
 
 
 def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:

@@ -86,6 +86,24 @@ class BookPosition:
     wallet_balance: Decimal
     last_fill_at: datetime | None
 
+    def __post_init__(self) -> None:
+        # The same pairing ``persistence.models.PositionState`` enforces on the
+        # row this is read from, restated on the type that leaves the store —
+        # so a reader that ever builds one from somewhere else (a replay
+        # harness, a fixture) cannot smuggle in the two states the pricer
+        # would otherwise mishandle: a flat position carrying a stale entry
+        # (silently dropped on the flat branch, no log, no symptom) or an open
+        # one entered at zero or below (garbage equity that either surfaces
+        # three modules later in ``PositionContext``, or comes out
+        # non-positive and gets reported as insolvency, which it is not).
+        if self.size == 0:
+            if self.entry_price is not None:
+                raise ValueError("a flat BookPosition (size 0) carries no entry_price")
+        elif self.entry_price is None or self.entry_price <= 0:
+            raise ValueError(
+                f"an open BookPosition must carry entry_price > 0, got {self.entry_price}"
+            )
+
 
 @dataclass(frozen=True)
 class PositionPricing:
@@ -108,14 +126,30 @@ class PositionPricing:
     slippage_bps: Decimal
 
     def __post_init__(self) -> None:
-        # Here rather than inside the pricing loop, so a bad config value is
-        # rejected while it still has the name of the field it came from
-        # rather than surfacing as an arithmetic surprise several derivations
-        # later. Mirrors PositionContext's own guards.
+        # Every field, and each named in its own message: rejected here, a bad
+        # config value still carries the name of the field it came from, where
+        # the same value found downstream surfaces as an arithmetic surprise
+        # in another module. ``DecisionConfig`` already constrains the grid for
+        # the one production caller, so these are defence in depth for any
+        # other construction — but without them an inverted grid builds fine,
+        # ``display_targets`` returns no points, and an OPEN position renders
+        # the cost table's preamble over nothing, which is exactly the "header
+        # over empty rows" this module's docstring claims to be closed against.
+        for name in ("taker_fee_rate", "slippage_bps"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"PositionPricing.{name} must be >= 0, got {getattr(self, name)}")
         if self.leverage <= 0:
             raise ValueError(f"PositionPricing.leverage must be > 0, got {self.leverage}")
-        if self.taker_fee_rate < 0 or self.slippage_bps < 0:
-            raise ValueError("PositionPricing fee/slippage must be >= 0")
+        if self.grid_step < 1:
+            raise ValueError(f"PositionPricing.grid_step must be >= 1, got {self.grid_step}")
+        # ``<=``, not ``<``: the effective ceiling is
+        # ``min(ai_target_margin_max_pct, risk.max_target_margin_pct)``, which
+        # a legal config (grid min 60, cap 60) can drive down onto the floor.
+        if not 0 <= self.grid_min <= self.grid_max <= 100:
+            raise ValueError(
+                "PositionPricing needs 0 <= grid_min <= grid_max <= 100, got "
+                f"grid_min={self.grid_min}, grid_max={self.grid_max}"
+            )
 
 
 @dataclass(frozen=True)
@@ -124,9 +158,9 @@ class PositionInputs:
 
     One optional bundle rather than two independent parameters: "the books say
     X, priced under these rules" is a single state, and a caller must not be
-    able to supply half of it. ``None`` in :func:`.context_builder.
-    build_market_context` is the position-blind context — no books wired (the
-    one-shot CLI) or none seeded yet.
+    able to supply half of it. ``None`` in
+    :func:`.context_builder.build_market_context` is the position-blind
+    context — no books wired (the one-shot CLI) or none seeded yet.
     """
 
     book: BookPosition

@@ -103,10 +103,12 @@ def _dec_or_none(value: object) -> Decimal | None:
 # ``position_notional`` / ``unrealized_pnl`` / ``account_equity`` live in
 # ``domains.perp.margin`` (the liquidation search shares them) and are
 # re-exported here so accounting stays the one-stop module for the §6 formulas.
-# ``funding_cost`` is imported from there too but deliberately NOT re-exported:
-# it is COST-signed, and this module's public reading of that hour is the
-# ledger's ``funding_pnl`` (income positive). Two names for one formula is the
-# point; two importable names for opposite signs in one namespace is a trap.
+# ``funding_cost`` is imported from there too but deliberately kept OUT of
+# ``__all__``: it is COST-signed, and this module's public reading of that hour
+# is the ledger's ``funding_pnl`` (income positive). Two names for one formula
+# is the point; advertising both signs from one namespace is a trap. (The name
+# is still bound here, so a direct import reaches it — the guard is against
+# star-imports and against anyone reading ``__all__`` as the module's surface.)
 
 
 def available_balance(equity: Decimal, used_initial_margin_total: Decimal) -> Decimal:

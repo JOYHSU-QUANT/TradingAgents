@@ -225,7 +225,7 @@ def test_a_negative_fill_cost_is_rejected_when_the_rules_are_built(field):
     # On PositionPricing, not inside the pricing loop: a negative cost still
     # carries the name of the config field it came from here, where a row
     # promising the account is PAID to trade would just be a smaller number.
-    with pytest.raises(ValueError, match="fee/slippage"):
+    with pytest.raises(ValueError, match=field):
         PositionPricing(
             leverage=D(1),
             grid_min=0,

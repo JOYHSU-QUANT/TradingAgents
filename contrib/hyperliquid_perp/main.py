@@ -90,7 +90,10 @@ def run_context_only(config: dict, coin: str) -> int:
     # for why the smoke run validates at all).
     if engine_bridge._load_risk_decision(config) is None:
         return 1
-    ctx, client = engine_bridge._build_context(config, coin)
+    # No local books on this lane, said rather than omitted (issue #134): the
+    # venue's own position is read below and printed UNDER the context, never
+    # into the prompt.
+    ctx, client = engine_bridge._build_context(config, coin, position=None)
 
     print("\n" + "=" * 64)
     print(f"PerpMarketContext - {coin}")
@@ -143,7 +146,8 @@ def run_engine(config: dict, coin: str) -> int:
             f"({dotenv_diagnosis('OPENROUTER_API_KEY')}.)"
         )
 
-    ctx, client = engine_bridge._build_context(config, coin)
+    # Position-blind by design on the one-shot lane — see run_context_only.
+    ctx, client = engine_bridge._build_context(config, coin, position=None)
     # All four pre-LLM context guards (warm-up, fully-dead indicator set,
     # missing/dead regime indicators, stale feed) live in
     # context_guards.context_refusal, shared with the daemon provider.

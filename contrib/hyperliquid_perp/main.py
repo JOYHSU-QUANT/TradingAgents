@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from . import engine_bridge
 from .audit.decision_log import log_target_decision
 from .config import dotenv_diagnosis, load_dotenv_files, wallet_address
-from .domains.perp import risk_gate
+from .domains.perp import context_guards, risk_gate
 from .domains.perp.prompt_context import context_shape, render_market_context
 from .domains.perp.target_decision import (
     decision_format_instructions,
@@ -105,7 +105,7 @@ def run_context_only(config: dict, coin: str) -> int:
     # shared guard the trading paths refuse on — a refused context *looks* like
     # real data (a plausible default-"ranging" regime, or prices and indicators
     # that are internally consistent but describe a market hours or days old).
-    refusal = engine_bridge._context_refusal_error(ctx, coin, config)
+    refusal = context_guards.context_refusal_message(ctx, coin, config)
     if refusal is not None:
         engine_bridge._warn_dual(
             "degraded context: %s",
@@ -146,8 +146,8 @@ def run_engine(config: dict, coin: str) -> int:
     ctx, client = engine_bridge._build_context(config, coin)
     # All four pre-LLM context guards (warm-up, fully-dead indicator set,
     # missing/dead regime indicators, stale feed) live in
-    # _context_refusal, shared with the daemon provider.
-    refusal = engine_bridge._context_refusal_error(ctx, coin, config)
+    # context_guards.context_refusal, shared with the daemon provider.
+    refusal = context_guards.context_refusal_message(ctx, coin, config)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)
         return 1

@@ -22,7 +22,7 @@ _STOCKSTATS_COLUMN = {
 # The indicators classify_regime reads. Any of them being None (or absent) makes
 # the regime silently default to RANGING — hiding a volatile or trending market —
 # so the config loader requires all three in a non-empty ``indicators:`` list and
-# engine_bridge._context_refusal refuses a context where any of them is unusable.
+# context_guards.context_refusal refuses a context where any of them is unusable.
 # One tuple feeds both so the load-time rule and the runtime guard cannot drift.
 REGIME_INDICATORS = ("atr_14", "ema_20", "ema_50")
 
@@ -47,6 +47,27 @@ _MIN_CANDLES = {
 
 def supported_indicators() -> list[str]:
     return list(_STOCKSTATS_COLUMN)
+
+
+# The default indicator set is "everything the engine supports" by construction
+# — a hand-kept literal would drift silently past the loader's vocabulary check
+# (which only sees operator-written lists, never this default).
+DEFAULT_INDICATORS = supported_indicators()
+
+
+def indicator_names(config: dict) -> list[str]:
+    """Configured indicator names, defaulting when the key is absent or ``null``.
+
+    A bare ``indicators:`` in YAML parses to ``None`` (not a missing key), so a
+    plain ``.get(..., default)`` would return ``None`` and crash the downstream
+    iteration; an explicit empty list is honoured as "no indicators". Here,
+    beside the vocabulary it resolves against, because two unrelated readers
+    need the same resolution — the context build (which indicators to compute)
+    and the warm-up guard (how many candles they need) — and neither is the
+    other's home (issue #122).
+    """
+    names = config.get("indicators")
+    return list(names) if names is not None else list(DEFAULT_INDICATORS)
 
 
 def required_candles(names: Sequence[str]) -> int:

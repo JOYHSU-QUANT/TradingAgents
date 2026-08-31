@@ -1,6 +1,6 @@
-"""Guards for the common/ layer's two prose-only contracts.
+"""Guards for the package's prose-only layering contracts.
 
-Neither invariant is exercised anywhere else:
+None of these invariants is exercised anywhere else:
 
 - the compat shims at the old ``domains/perp`` paths keep re-exporting the
   same objects — every in-tree importer was repointed to ``common``, so
@@ -8,13 +8,18 @@ Neither invariant is exercised anywhere else:
   consumer (deploy/paper cherry-picks), not the test suite;
 - ``common/`` stays at the bottom of the import graph — the rule in
   ``common/__init__``'s docstring that nothing there imports from another
-  ``hyperliquid_perp`` package would otherwise be enforced by review only.
+  ``hyperliquid_perp`` package would otherwise be enforced by review only;
+- the config loader, the pre-LLM context guards and the no-decision policy
+  keep their load-time import closures below the SDK, the store and the
+  engines (issue #122).
 """
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
+
+import pytest
 
 from contrib.hyperliquid_perp import common as common_pkg
 from contrib.hyperliquid_perp.common import config_coercion, decimal_context, enum_guard
@@ -117,6 +122,33 @@ def _load_time_import_closure(source: Path, root: Path = _SOURCE_ROOT) -> set[st
             elif tail and (module / "__init__.py").is_file():
                 queue.append(module / "__init__.py")
     return seen
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "common/no_decision.py",
+        "domains/perp/freshness.py",
+        "domains/perp/context_guards.py",
+    ],
+)
+def test_the_context_guard_family_and_the_no_decision_policy_stay_below_the_engines(module):
+    # Issue #122. The four pre-LLM guards and the no-decision policy are read
+    # by both engines and by the keyless entry points, so they must sit BELOW
+    # the SDK, the persistence package, ``paper`` and ``live`` — a claim that
+    # was prose in ``freshness``'s docstring until the guards moved out of
+    # ``engine_bridge`` (which imports the SDK at module level) and the policy
+    # out of ``paper`` (whose scheduler import loaded the whole paper engine).
+    # Pinned as a load-time import closure, like the config loader's, so a
+    # convenience import of ``exchanges``/``persistence``/``paper`` added to
+    # any of the three fails here by name. (``common/`` is also covered by the
+    # tree-wide check below; it is listed so the policy's acceptance is stated
+    # once, beside the guards it serves.)
+    closure = _load_time_import_closure(_SOURCE_ROOT / module)
+    offenders = {
+        t for t in closure if not (t.startswith("common.") or t.startswith("domains.perp."))
+    }
+    assert not offenders, f"{module} reaches above domains/common at load time: {sorted(offenders)}"
 
 
 def test_the_closure_walk_reaches_an_import_two_hops_away(tmp_path):

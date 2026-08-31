@@ -178,7 +178,7 @@ class DecisionProvider(Protocol):
     每次呼叫 AI 前記錄一次 — the record must exist before the paid call).
     Both raise :class:`RetryableDecisionError` for §3.1-retryable failures.
     ``build_input`` must return a context that already passed the pre-LLM
-    guards (``engine_bridge._context_refusal``); drivers do not re-check before
+    guards (``context_guards.context_refusal``); drivers do not re-check before
     spending the paid call.
     """
 

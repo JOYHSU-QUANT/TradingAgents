@@ -1,17 +1,18 @@
 """Tests for the orchestration glue in ``main.py`` and ``engine_bridge.py``.
 
 Covers the deterministic seams that do not need a live engine or network:
-``_build_engine_config`` (config overlay onto the engine DEFAULT_CONFIG),
-``_load_position`` (wallet/​error/​success branches) and the pre-LLM context
-guards — all defined in ``engine_bridge`` and exercised as ``bridge_mod`` —
-plus ``main.py``'s entry-point shells (``run_engine`` / ``run_context_only`` /
-``main``), exercised as ``main_mod``. Patch targets follow the DEFINING module:
-main reaches every bridge symbol through ``engine_bridge.X`` attribute access,
-so bridge functions and their collaborators are ALWAYS patched on
-``bridge_mod`` — even when the test drives a main entry point — while main's
-own imports (``build_graph``, ``wallet_address``, …) are patched on
-``main_mod``. The full ``run_engine`` path needs a key + network and is left
-to integration testing.
+``_build_engine_config`` (config overlay onto the engine DEFAULT_CONFIG) and
+``_load_position`` (wallet/​error/​success branches) — defined in
+``engine_bridge`` and exercised as ``bridge_mod`` — the pre-LLM context guards
+(``domains.perp.context_guards``, exercised as ``guards_mod``; the freshness
+guard's own pieces as ``freshness_mod``), plus ``main.py``'s entry-point shells
+(``run_engine`` / ``run_context_only`` / ``main``), exercised as ``main_mod``.
+Patch targets follow the DEFINING module: main reaches every bridge symbol
+through ``engine_bridge.X`` attribute access and every guard through
+``context_guards.X``, so each is ALWAYS patched on its own module — even when
+the test drives a main entry point — while main's own imports
+(``build_graph``, ``wallet_address``, …) are patched on ``main_mod``. The full
+``run_engine`` path needs a key + network and is left to integration testing.
 """
 
 from __future__ import annotations
@@ -25,7 +26,11 @@ from types import SimpleNamespace
 import pytest
 
 from contrib.hyperliquid_perp import engine_bridge as bridge_mod, main as main_mod
-from contrib.hyperliquid_perp.domains.perp import freshness as freshness_mod
+from contrib.hyperliquid_perp.domains.perp import (
+    context_guards as guards_mod,
+    freshness as freshness_mod,
+    indicator_vocab as vocab_mod,
+)
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
@@ -47,10 +52,10 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
 def test_indicator_names_handles_null_and_empty():
     # A bare `indicators:` in YAML parses to None — it must fall back to the
     # defaults, not crash the downstream iteration; an explicit [] is honoured.
-    assert bridge_mod._indicator_names({}) == bridge_mod._DEFAULT_INDICATORS
-    assert bridge_mod._indicator_names({"indicators": None}) == bridge_mod._DEFAULT_INDICATORS
-    assert bridge_mod._indicator_names({"indicators": []}) == []
-    assert bridge_mod._indicator_names({"indicators": ["rsi_14"]}) == ["rsi_14"]
+    assert vocab_mod.indicator_names({}) == vocab_mod.DEFAULT_INDICATORS
+    assert vocab_mod.indicator_names({"indicators": None}) == vocab_mod.DEFAULT_INDICATORS
+    assert vocab_mod.indicator_names({"indicators": []}) == []
+    assert vocab_mod.indicator_names({"indicators": ["rsi_14"]}) == ["rsi_14"]
 
 
 def test_resolve_coin_warns_when_multiple_configured(capsys):
@@ -740,7 +745,7 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
         # (RUNBOOK): the empty list loads cleanly ("no indicators" is a
         # deliberate choice, warm-up threshold 0) but every engine cycle is
         # refused at the regime guard — all three regime names are absent. If
-        # someone later special-cases empty lists in _context_refusal_error,
+        # someone later special-cases empty lists in context_refusal_message,
         # this fails. candle_count 5 sits below the default indicator set's
         # threshold (50): the regime message only appears if the empty list
         # really zeroes the warm-up threshold — a fallback to the default set
@@ -763,7 +768,7 @@ def test_run_engine_refuses_untradeable_regime_indicators(
 
 
 # --------------------------------------------------------------------------
-# _context_refusal_error — market-data freshness (issue #37)
+# context_refusal_message — market-data freshness (issue #37)
 # --------------------------------------------------------------------------
 
 _NOW = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
@@ -833,7 +838,7 @@ def test_context_refusal_flags_a_stalled_candle_feed():
     # the three guards above pass it — it just describes 14h ago. Host-clock
     # fallback path (no exchange clock on the context).
     ctx = _ctx_closing_at(_NOW - timedelta(hours=14))
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     # Named numbers, not a bare "stale": an operator must be able to tell a
     # 14h-old feed from a 3-day-old one without reading the code.
@@ -873,16 +878,16 @@ def test_refusals_carry_the_error_type_the_validators_count():
         ("candle ahead of the host clock", _ctx_closing_at(ahead), _NOW),
         ("age unmeasurable", _ctx_closing_at(_NOW, interval="4H", exchange_time=_NOW), _NOW),
     ):
-        refusal = bridge_mod._context_refusal(ctx, "BTC", {}, now=now)
+        refusal = guards_mod.context_refusal(ctx, "BTC", {}, now=now)
         assert refusal is not None, label
         assert refusal.error_type == "stale_market_data", label
 
     thin = _ctx_closing_at(_NOW, candle_count=5, exchange_time=_NOW)
     thin.indicators = dict.fromkeys(thin.indicators)
-    assert bridge_mod._context_refusal(thin, "BTC", {}, now=_NOW).error_type == "server_error"
+    assert guards_mod.context_refusal(thin, "BTC", {}, now=_NOW).error_type == "server_error"
     dead = _ctx_closing_at(_NOW, exchange_time=_NOW)
     dead.indicators = dict.fromkeys(dead.indicators)
-    assert bridge_mod._context_refusal(dead, "BTC", {}, now=_NOW).error_type == "server_error"
+    assert guards_mod.context_refusal(dead, "BTC", {}, now=_NOW).error_type == "server_error"
 
 
 def test_context_refusal_error_is_the_message_view_of_the_same_verdict():
@@ -894,8 +899,8 @@ def test_context_refusal_error_is_the_message_view_of_the_same_verdict():
         _ctx_closing_at(_NOW - timedelta(hours=14), exchange_time=_NOW),
         _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW),
     ):
-        typed = bridge_mod._context_refusal(ctx, "BTC", {}, now=_NOW)
-        message = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+        typed = guards_mod.context_refusal(ctx, "BTC", {}, now=_NOW)
+        message = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
         assert message == (None if typed is None else typed.message)
 
 
@@ -907,7 +912,7 @@ def test_context_refusal_passes_a_live_candle_feed(exchange_time):
     # already looks like. Refusing that would refuse a cycle over ordinary
     # exchange jitter.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=exchange_time)
-    assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
 
 
 @_BOTH_CLOCKS
@@ -916,9 +921,9 @@ def test_context_refusal_freshness_bound_is_exclusive(exchange_time):
     # comparison as a strict `>` on both measuring clocks. A `>=` would refuse
     # a feed that the boundary case here calls healthy.
     at_limit = _ctx_closing_at(_NOW - timedelta(hours=12), exchange_time=exchange_time)
-    assert bridge_mod._context_refusal_error(at_limit, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(at_limit, "BTC", {}, now=_NOW) is None
     past_limit = _ctx_closing_at(_NOW - timedelta(hours=12, seconds=1), exchange_time=exchange_time)
-    assert "freshness limit" in bridge_mod._context_refusal_error(past_limit, "BTC", {}, now=_NOW)
+    assert "freshness limit" in guards_mod.context_refusal_message(past_limit, "BTC", {}, now=_NOW)
 
 
 @_BOTH_CLOCKS
@@ -928,9 +933,9 @@ def test_context_refusal_freshness_limit_tracks_the_candle_interval(exchange_tim
     # one of these two and fail the other.
     age = _NOW - timedelta(hours=5)
     four_hourly = _ctx_closing_at(age, exchange_time=exchange_time)
-    assert bridge_mod._context_refusal_error(four_hourly, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(four_hourly, "BTC", {}, now=_NOW) is None
     hourly = _ctx_closing_at(age, interval="1h", exchange_time=exchange_time)
-    assert "freshness limit" in bridge_mod._context_refusal_error(hourly, "BTC", {}, now=_NOW)
+    assert "freshness limit" in guards_mod.context_refusal_message(hourly, "BTC", {}, now=_NOW)
 
 
 def test_context_refusal_freshness_limit_is_capped_at_three_decision_cycles():
@@ -942,7 +947,7 @@ def test_context_refusal_freshness_limit_is_capped_at_three_decision_cycles():
     # exactly one cycle and takes the uncapped 3 x 4h; 1d takes the one-bar
     # raise below, #92), so the branch is exercised on the helper with
     # synthetic bars — the config would reject them, which is why there is
-    # no end-to-end witness through _context_refusal_error.
+    # no end-to-end witness through context_refusal_message.
     limit, how = freshness_mod._candle_age_limit(_hours_ms(6), "6h")
     assert limit == freshness_mod._MAX_CANDLE_AGE_CEILING_MS
     assert how == "3 x 6h capped at 3 x the 4h decision cycle"
@@ -970,7 +975,7 @@ def test_context_refusal_passes_a_healthy_daily_feed_all_day(exchange_time):
         ctx = _ctx_closing_at(
             midnight, interval="1d", exchange_time=None if exchange_time is None else now
         )
-        assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=now) is None, now
+        assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=now) is None, now
 
 
 @_BOTH_CLOCKS
@@ -983,7 +988,7 @@ def test_context_refusal_still_refuses_a_daily_feed_that_stopped(exchange_time):
     # WHY the bound is 28h and not the 12h cap.
     def verdict(age):
         ctx = _ctx_closing_at(_NOW - age, interval="1d", exchange_time=exchange_time)
-        return bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+        return guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
 
     msg = verdict(timedelta(days=3))
     assert msg is not None
@@ -1019,11 +1024,11 @@ def test_context_refusal_freshness_limit_has_a_floor(exchange_time):
     minutely = _ctx_closing_at(
         _NOW - timedelta(minutes=20), interval="1m", exchange_time=exchange_time
     )
-    assert bridge_mod._context_refusal_error(minutely, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(minutely, "BTC", {}, now=_NOW) is None
     past_floor = _ctx_closing_at(
         _NOW - timedelta(minutes=31), interval="1m", exchange_time=exchange_time
     )
-    msg = bridge_mod._context_refusal_error(past_floor, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(past_floor, "BTC", {}, now=_NOW)
     assert msg is not None and "raised to the 30m floor" in msg
 
 
@@ -1064,7 +1069,7 @@ def test_refusal_age_carries_seconds_past_the_limit(exchange_time):
     # limit, and the message reads "X is past the X limit". 30 seconds over is
     # the case that must not collide.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=12, seconds=30), exchange_time=exchange_time)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert f"12h 0m 30s {_BEFORE[exchange_time]}" in msg
     assert "12h 0m 0s freshness limit" in msg
@@ -1075,7 +1080,7 @@ def test_refusal_age_reads_in_days_once_it_is_long(exchange_time):
     # A feed down for days renders as days, not a three-figure hour count. The
     # limit is capped far below this band, so the two can never collide here.
     ctx = _ctx_closing_at(_NOW - timedelta(days=5, hours=3), exchange_time=exchange_time)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None and f"5d 3h {_BEFORE[exchange_time]}" in msg
 
 
@@ -1085,7 +1090,7 @@ def test_refusal_age_stays_in_hours_for_an_overnight_outage(exchange_time):
     # length reads better as hours. Pins the readability choice the constant
     # exists for — a threshold of one day renders this as "1d 6h".
     ctx = _ctx_closing_at(_NOW - timedelta(hours=30), exchange_time=exchange_time)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None and f"30h 0m 0s {_BEFORE[exchange_time]}" in msg
 
 
@@ -1095,17 +1100,17 @@ def test_context_refusal_future_bound_is_exclusive_on_the_host_clock():
     # passes, one second past it refuses. (The exchange-clock path has its own,
     # far tighter future bound — issue #93, pinned below.)
     at_bound = _ctx_closing_at(_NOW + timedelta(hours=12))
-    assert bridge_mod._context_refusal_error(at_bound, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(at_bound, "BTC", {}, now=_NOW) is None
     past_bound = _ctx_closing_at(_NOW + timedelta(hours=12, seconds=1))
-    msg = bridge_mod._context_refusal_error(past_bound, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(past_bound, "BTC", {}, now=_NOW)
     assert msg is not None and _AFTER[None] in msg
     # Sharing the stale limit means the fallback's future tolerance for 1d
     # moved with issue #92, from the 12h cap to 28h. Pinned so the widening
     # is a recorded consequence, not a surprise.
     daily = _ctx_closing_at(_NOW + timedelta(hours=28), interval="1d")
-    assert bridge_mod._context_refusal_error(daily, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(daily, "BTC", {}, now=_NOW) is None
     daily = _ctx_closing_at(_NOW + timedelta(hours=28, seconds=1), interval="1d")
-    assert "28h 0m 1s AFTER" in bridge_mod._context_refusal_error(daily, "BTC", {}, now=_NOW)
+    assert "28h 0m 1s AFTER" in guards_mod.context_refusal_message(daily, "BTC", {}, now=_NOW)
 
 
 def test_context_refusal_candle_lead_bound_is_exclusive_on_the_exchange_clock():
@@ -1115,9 +1120,9 @@ def test_context_refusal_candle_lead_bound_is_exclusive_on_the_exchange_clock():
     # the non-live-context wording, not the host-clock one.
     lead = timedelta(milliseconds=freshness_mod._CANDLE_LEAD_TOLERANCE_MS)
     at_bound = _ctx_closing_at(_NOW + lead, exchange_time=_NOW)
-    assert bridge_mod._context_refusal_error(at_bound, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(at_bound, "BTC", {}, now=_NOW) is None
     past = _ctx_closing_at(_NOW + lead + timedelta(milliseconds=1), exchange_time=_NOW)
-    msg = bridge_mod._context_refusal_error(past, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(past, "BTC", {}, now=_NOW)
     assert msg is not None and _AFTER[_NOW] in msg
     assert "1m 0s a closed candle can lead it by" in msg
 
@@ -1130,7 +1135,7 @@ def test_context_refusal_flags_a_clock_that_jumped():
     # clock JUMPING between the two readings, or a ctx that never came from a
     # live fetch; either way the timestamps are incomparable.
     future = _ctx_closing_at(_NOW + timedelta(hours=13))
-    msg = bridge_mod._context_refusal_error(future, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(future, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "jumped between the two readings" in msg
     assert "did not come from a live market fetch" in msg
@@ -1179,7 +1184,7 @@ def test_freshness_guard_without_an_exchange_clock_is_blind_to_a_clock_behind():
     # guard has only the host clock, which also bounded the candle window.
     def verdict(offset_hours):
         ctx, host = _host_clock_offset_ctx(offset_hours, exchange_clock=False)
-        return bridge_mod._context_refusal_error(ctx, "BTC", {}, now=host)
+        return guards_mod.context_refusal_message(ctx, "BTC", {}, now=host)
 
     # Behind: the candles are truncated by the same amount, so the age reads
     # ordinary and NOTHING fires — the run would trade on a day-old market.
@@ -1195,7 +1200,7 @@ def test_freshness_guard_catches_a_clock_that_runs_behind_via_the_exchange_clock
     # the blind test above, differing only in the exchange clock being present
     # — that difference is the whole fix.
     ctx, _host = _host_clock_offset_ctx(-24, exchange_clock=True)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "24h 0m 0s before the exchange's clock" in msg
     assert "12h 0m 0s freshness limit (3 x 4h)" in msg
@@ -1214,7 +1219,7 @@ def test_freshness_guard_splits_the_blame_when_the_skew_is_only_part_of_the_age(
     ctx = _ctx_closing_at(
         _NOW - timedelta(hours=20), exchange_time=_NOW, host_skew=-timedelta(hours=6)
     )
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "accounts for 6h 0m 0s of this age but not all of it" in msg
     assert "check time sync (NTP) AND the exchange's candle feed" in msg
@@ -1229,7 +1234,7 @@ def test_freshness_guard_names_the_feed_when_the_host_clock_agrees():
     ctx = _ctx_closing_at(
         _NOW - timedelta(hours=14), exchange_time=_NOW, host_skew=timedelta(seconds=3)
     )
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "agrees with the exchange's" in msg
     assert "feed itself stopped advancing" in msg
@@ -1245,7 +1250,7 @@ def test_freshness_guard_reports_the_skew_as_unknown_without_a_paired_reading(ca
     # measured.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=14), exchange_time=_NOW, paired=False)
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
-        msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+        msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "14h 0m 0s before the exchange's clock" in msg
     assert "no paired host-clock reading, so the skew is unknown" in msg
@@ -1258,7 +1263,7 @@ def test_freshness_guard_reports_the_skew_as_unknown_without_a_paired_reading(ca
     # ...and a fresh unpaired context passes without a warning.
     fresh = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW, paired=False)
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
-        assert bridge_mod._context_refusal_error(fresh, "BTC", {}, now=_NOW) is None
+        assert guards_mod.context_refusal_message(fresh, "BTC", {}, now=_NOW) is None
     assert not [r for r in caplog.records if "Fix time sync" in r.getMessage()]
 
 
@@ -1270,12 +1275,12 @@ def test_freshness_guard_sole_cause_bound_on_the_skew_is_exclusive():
     # all have their exclusive case pinned — this one did not.
     age = _NOW - timedelta(hours=20)
     at_limit = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-timedelta(hours=12))
-    msg = bridge_mod._context_refusal_error(at_limit, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(at_limit, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "accounts for 12h 0m 0s of this age but not all of it" in msg
     assert "by itself puts the newest" not in msg
     past_limit = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-timedelta(hours=12, seconds=1))
-    msg = bridge_mod._context_refusal_error(past_limit, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(past_limit, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "by itself puts the newest" in msg
     assert "but not all of it" not in msg
@@ -1289,11 +1294,11 @@ def test_freshness_guard_cause_wording_floor_on_the_skew_is_inclusive():
     age = _NOW - timedelta(hours=14)
     floor = timedelta(milliseconds=freshness_mod._CLOCK_SKEW_WARN_MS)
     at_floor = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-floor)
-    msg = bridge_mod._context_refusal_error(at_floor, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(at_floor, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "accounts for 1m 0s of this age but not all of it" in msg
     under = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-(floor - timedelta(milliseconds=1)))
-    msg = bridge_mod._context_refusal_error(under, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(under, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "agrees with the exchange's" in msg
     assert "feed itself stopped advancing" in msg
@@ -1311,7 +1316,7 @@ def test_context_refusal_rejects_a_class_outside_the_error_type_registry():
     # is what enforces it, so this is the positive witness of the same check.
     from contrib.hyperliquid_perp.common.constants import ERROR_TYPES
 
-    assert {freshness_mod.UNUSABLE_CONTEXT_ERROR, freshness_mod.STALE_CONTEXT_ERROR} <= ERROR_TYPES
+    assert {guards_mod.UNUSABLE_CONTEXT_ERROR, freshness_mod.STALE_CONTEXT_ERROR} <= ERROR_TYPES
 
 
 def test_the_error_type_registry_has_one_definition():
@@ -1335,7 +1340,7 @@ def test_freshness_guard_measures_skew_between_the_paired_readings_not_now(caplo
     # says the clocks agree: no warning, and the verdict is unaffected.
     ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW)
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
-        verdict = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW + timedelta(hours=10))
+        verdict = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW + timedelta(hours=10))
     assert verdict is None
     assert not [r for r in caplog.records if "This host's clock" in r.getMessage()]
     # ...and a genuine 10h lead, recorded in the pair, does warn.
@@ -1343,7 +1348,7 @@ def test_freshness_guard_measures_skew_between_the_paired_readings_not_now(caplo
         _NOW - timedelta(hours=4), exchange_time=_NOW, host_skew=timedelta(hours=10)
     )
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
-        assert bridge_mod._context_refusal_error(ahead, "BTC", {}, now=_NOW) is None
+        assert guards_mod.context_refusal_message(ahead, "BTC", {}, now=_NOW) is None
     warned = [r.getMessage() for r in caplog.records if "This host's clock" in r.getMessage()]
     assert len(warned) == 1
     assert "10h 0m 0s ahead of the exchange's" in warned[0]
@@ -1361,13 +1366,13 @@ def test_freshness_guard_skew_warning_has_a_floor(caplog):
     just_under = timedelta(milliseconds=freshness_mod._CLOCK_SKEW_WARN_MS - 1)
     ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW, host_skew=-just_under)
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
-        assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+        assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
     assert not [r for r in caplog.records if "Fix time sync" in r.getMessage()]
     # Exactly at the floor fires (>=): pins the comparison direction.
     at_floor = timedelta(milliseconds=freshness_mod._CLOCK_SKEW_WARN_MS)
     ctx = _ctx_closing_at(_NOW - timedelta(hours=4), exchange_time=_NOW, host_skew=-at_floor)
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
-        assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+        assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
     assert [r for r in caplog.records if "1m 0s behind the exchange's" in r.getMessage()]
 
 
@@ -1377,7 +1382,7 @@ def test_freshness_guard_flags_a_candle_closing_past_the_exchanges_clock():
     # by more than the host's own lead, so the guard must say this context did
     # not come from a live fetch rather than blame a clock it measured as fine.
     ctx = _ctx_closing_at(_NOW + timedelta(hours=13), exchange_time=_NOW)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "13h 0m 0s AFTER the exchange's clock" in msg
     assert "agrees with the exchange's" in msg
@@ -1399,7 +1404,7 @@ def test_freshness_guard_refuses_the_forming_bar_a_host_ahead_pulls_in():
     # host clock.
     ctx = _host_ahead_ctx(timedelta(minutes=90), into_bar=timedelta(hours=3, minutes=30))
     assert ctx.as_of == _NOW + timedelta(minutes=30)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "30m 0s AFTER the exchange's clock" in msg
     assert "1h 30m 0s ahead of the exchange's" in msg
@@ -1409,7 +1414,7 @@ def test_freshness_guard_refuses_the_forming_bar_a_host_ahead_pulls_in():
     assert "Refusing to run the engine on a candle the exchange has not closed" in msg
     # ...and the class is the one the no-decision streak counts (#50), so a
     # host left running ahead accumulates toward exit 4 — RUNBOOK §7 says so.
-    assert bridge_mod._context_refusal(ctx, "BTC", {}, now=_NOW).error_type == "stale_market_data"
+    assert guards_mod.context_refusal(ctx, "BTC", {}, now=_NOW).error_type == "stale_market_data"
 
 
 def test_freshness_guard_blames_the_host_when_its_lead_exactly_equals_the_bars():
@@ -1419,7 +1424,7 @@ def test_freshness_guard_blames_the_host_when_its_lead_exactly_equals_the_bars()
     # strict `>` re-labelled this as "stepped back / not a live fetch".
     ctx = _host_ahead_ctx(timedelta(minutes=30), into_bar=timedelta(hours=3, minutes=30))
     assert ctx.as_of == _NOW + timedelta(minutes=30)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None and "kept a bar the exchange has not closed" in msg
     assert "stepped back" not in msg
 
@@ -1433,7 +1438,7 @@ def test_freshness_guard_names_a_clock_step_when_the_lead_outruns_the_paired_ske
     ctx = _ctx_closing_at(
         _NOW + timedelta(minutes=30), exchange_time=_NOW, host_skew=timedelta(minutes=10)
     )
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "10m 0s ahead of the exchange's" in msg
     assert "stepped back between the candle read and the clock read" in msg
@@ -1449,7 +1454,7 @@ def test_freshness_guard_passes_a_host_ahead_whose_window_kept_a_closed_bar():
     # bound is about the bar, not the clock.
     ctx = _host_ahead_ctx(timedelta(minutes=90), into_bar=timedelta(hours=1))
     assert ctx.as_of == _NOW - timedelta(hours=1)
-    assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
 
 
 def test_freshness_guard_tolerates_a_lead_inside_the_bound():
@@ -1462,7 +1467,7 @@ def test_freshness_guard_tolerates_a_lead_inside_the_bound():
         timedelta(seconds=40), into_bar=timedelta(hours=3, minutes=59, seconds=30)
     )
     assert ctx.as_of == _NOW + timedelta(seconds=30)
-    assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
 
 
 def test_freshness_guard_never_refuses_a_host_lead_on_one_minute_bars():
@@ -1474,12 +1479,12 @@ def test_freshness_guard_never_refuses_a_host_lead_on_one_minute_bars():
     # streak. Host 45s ahead, fetch 15s before the bar's close: lead 15s.
     ctx = _host_ahead_ctx(timedelta(seconds=45), interval="1m", into_bar=timedelta(seconds=45))
     assert ctx.as_of == _NOW + timedelta(seconds=15)
-    assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
     # ...and the largest lead a 1m bar can have — the host's window end lands
     # a whole bar ahead — is still inside the bound.
     ctx = _host_ahead_ctx(timedelta(minutes=5), interval="1m", into_bar=timedelta(milliseconds=1))
     assert ctx.as_of == _NOW + timedelta(seconds=59, milliseconds=999)
-    assert bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
 
 
 def test_freshness_guard_names_both_causes_for_a_lead_without_a_paired_reading():
@@ -1487,7 +1492,7 @@ def test_freshness_guard_names_both_causes_for_a_lead_without_a_paired_reading()
     # _build_context never produces it): the lead is real but nothing says
     # whether the host cut the window ahead or the context was replayed.
     ctx = _ctx_closing_at(_NOW + timedelta(minutes=30), exchange_time=_NOW, paired=False)
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
     assert "skew is unknown" in msg
     assert "Either this host's clock ran ahead" in msg
@@ -1679,17 +1684,17 @@ def test_context_refusal_tolerates_a_candle_closing_during_the_fetch():
     # this shape cannot arise — that path's future bound is the one-minute
     # candle lead (issue #93), pinned in its own tests above.
     just_ahead = _ctx_closing_at(_NOW + timedelta(minutes=4), interval="1m")
-    assert bridge_mod._context_refusal_error(just_ahead, "BTC", {}, now=_NOW) is None
+    assert guards_mod.context_refusal_message(just_ahead, "BTC", {}, now=_NOW) is None
 
 
 def test_context_refusal_defaults_to_the_wall_clock():
     # The one-shot callers pass no clock. The default must be a real reading,
     # not a skipped check — this context is months old whenever the suite runs.
     stale = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
-    assert "freshness limit" in bridge_mod._context_refusal_error(stale, "BTC", {})
+    assert "freshness limit" in guards_mod.context_refusal_message(stale, "BTC", {})
     # ...and the same default does not manufacture a refusal for a live feed.
     live = _ctx_closing_at(datetime.now(timezone.utc))
-    assert bridge_mod._context_refusal_error(live, "BTC", {}) is None
+    assert guards_mod.context_refusal_message(live, "BTC", {}) is None
 
 
 def test_context_refusal_fails_closed_on_an_unmeasurable_interval():
@@ -1698,7 +1703,7 @@ def test_context_refusal_fails_closed_on_an_unmeasurable_interval():
     # age established — refuse rather than skip the check. Not run under both
     # clocks: the interval is resolved before the guard looks at either.
     ctx = _ctx_closing_at(_NOW, interval="4H")
-    msg = bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert "freshness cannot be checked" in msg
     assert "4H" in msg  # the offending value is named
 
@@ -1709,7 +1714,7 @@ def test_context_refusal_reports_warmup_before_staleness():
     # the window is short" is actionable, "the data is old" follows from it.
     ctx = _ctx_closing_at(_NOW - timedelta(days=30), candle_count=5)
     ctx.indicators = {"rsi_14": None, "ema_20": None, "ema_50": None, "atr_14": None}
-    assert "under-warmed" in bridge_mod._context_refusal_error(ctx, "BTC", {}, now=_NOW)
+    assert "under-warmed" in guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
 
 
 def test_run_engine_aborts_on_a_stale_context(monkeypatch, capsys):

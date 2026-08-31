@@ -195,10 +195,11 @@ class _EngineDecisionProvider:
 
     def build_input(self, *, coin: str, as_of: datetime):
         from ..domains.perp import risk_gate
+        from ..domains.perp.context_guards import context_refusal
         from ..domains.perp.prompt_context import context_shape, render_market_context
         from ..domains.perp.schema import interval_to_ms
         from ..domains.perp.target_decision import decision_format_instructions
-        from ..engine_bridge import _build_context, _context_refusal
+        from ..engine_bridge import _build_context
         from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
         from ..paper.scheduler import DecisionInput, RetryableDecisionError
 
@@ -226,7 +227,7 @@ class _EngineDecisionProvider:
         # All four pre-LLM context guards (under-warm data, fully-dead
         # indicator set, missing/dead regime indicators atr_14/ema_20/ema_50,
         # a stale candle feed), shared with the one-shot path (see
-        # engine_bridge._context_refusal) — a dead or absent regime indicator
+        # context_guards.context_refusal) — a dead or absent regime indicator
         # would otherwise let every cycle trade on a fabricated-calm RANGING
         # regime, and a stalled feed would let it trade on the past.
         # Deliberate (reviewed): they ride the §3.1 ladder to an api_failed
@@ -245,7 +246,7 @@ class _EngineDecisionProvider:
         # guard uses it ONLY as the fallback measuring clock a live fetch never
         # needs; the host-vs-exchange skew comes from the context's own paired
         # host reading, taken adjacent to the exchange one.
-        refusal = _context_refusal(ctx, coin, self._config, now=as_of)
+        refusal = context_refusal(ctx, coin, self._config, now=as_of)
         if refusal is not None:
             raise RetryableDecisionError(refusal.error_type, refusal.message)
         # After the guards: a refused context spends nothing, so it reads no

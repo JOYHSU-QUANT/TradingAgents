@@ -52,8 +52,9 @@ from decimal import Decimal, localcontext
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from ..common.constants import ERROR_TYPES
+from ..common.constants import CYCLE_INTERVAL, ERROR_TYPES
 from ..common.enum_guard import check_enum
+from ..common.instants import parse_instant
 from ..domains.perp.risk_gate import RiskConfig
 from ..domains.perp.schema import PerpMarketContext
 from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse_target_decision
@@ -80,19 +81,15 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# The rolling decision interval (spec §3) and the §3.1 retry ladder: after the
-# first failure wait 10s, after the second 30s, after the third → api_failed.
-CYCLE_INTERVAL = timedelta(hours=4)
+# The rolling decision interval (spec §3) is ``common.constants.CYCLE_INTERVAL``
+# and the store's timestamp decoder is ``common.instants.parse_instant``; both
+# stay in ``__all__`` for the callers that always imported them from here
+# (issue #122 moved the definitions down so the freshness guard and the
+# no-decision policy could read them without importing this module — and, with
+# it, the whole paper engine). The §3.1 retry ladder: after the first failure
+# wait 10s, after the second 30s, after the third → api_failed.
 MAX_DECISION_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (10, 30)
-
-
-def parse_instant(text: str) -> datetime:
-    """Decode a stored ISO-8601 UTC timestamp (the repository's storage form)."""
-    value = datetime.fromisoformat(text)
-    if value.tzinfo is None:  # the write boundary never stores naive stamps
-        raise ValueError(f"stored timestamp {text!r} is naive; the store is corrupt")
-    return value
 
 
 class RetryableDecisionError(Exception):
@@ -181,7 +178,7 @@ class DecisionProvider(Protocol):
     每次呼叫 AI 前記錄一次 — the record must exist before the paid call).
     Both raise :class:`RetryableDecisionError` for §3.1-retryable failures.
     ``build_input`` must return a context that already passed the pre-LLM
-    guards (``engine_bridge._context_refusal``); drivers do not re-check before
+    guards (``context_guards.context_refusal``); drivers do not re-check before
     spending the paid call.
     """
 

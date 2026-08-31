@@ -116,13 +116,13 @@ from typing import NamedTuple
 
 from ..common.config_coercion import int_from_yaml
 from ..common.decimal_context import DECIMAL_CONTEXT
-from ..paper import accounting
-from ..paper.no_decision import (
+from ..common.instants import parse_instant
+from ..common.no_decision import (
     TrailingFailureStreaks,
     no_decision_shortfall,
     trailing_failure_streaks,
 )
-from ..paper.scheduler import parse_instant
+from ..paper import accounting
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import DEFAULT_SCHEDULE_CANCEL_SECONDS as _CONFIG_DEFAULT_DEADLINE_S, ExecutionMode
@@ -395,7 +395,7 @@ class LiveValidationReport:
     # visible rather than merely absent from the count.
     invalid_output_count: int
     # Trailing cycles that reached no decision, and the stale-feed subset of
-    # them (issue #50; see paper.no_decision.trailing_failure_streaks). Past the
+    # them (issue #50; see common.no_decision.trailing_failure_streaks). Past the
     # threshold — and while still recent — the run is holding a position on
     # SL/TP alone with nothing deciding for it, which is "not at the gate"
     # however many cycles came before; the validator turns that into a

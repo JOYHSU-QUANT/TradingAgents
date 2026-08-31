@@ -23,9 +23,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from ..common.instants import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from .scheduler import parse_instant
 
 __all__ = [
     "LOCK_STALE_SECONDS",

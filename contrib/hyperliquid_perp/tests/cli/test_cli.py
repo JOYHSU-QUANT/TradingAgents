@@ -70,7 +70,7 @@ def _perp_ctx(as_of: datetime, coin: str = "BTC") -> PerpMarketContext:
         funding_window_days=30,
         funding_sample_count=0,
         # A healthy indicator set: build_input now applies the shared
-        # _context_refusal_error guards, and a context without a usable atr_14
+        # context_guards.context_refusal guards, and a context without a usable atr_14
         # is (correctly) refused before it reaches the code under test.
         indicators={"rsi_14": 55.0, "ema_20": 50000.0, "ema_50": 49000.0, "atr_14": 1200.0},
     )
@@ -135,6 +135,7 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     # error_message names the cause.
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.domains.perp import context_guards as guards_mod
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
@@ -142,7 +143,7 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     # **kw absorbs on_blocking_read: the live provider passes the kill-switch
     # refresh so _build_context's market reads do not form one unrefreshed chain.
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
-    monkeypatch.setattr(bridge_mod, "_warmup_threshold", lambda config: 1)
+    monkeypatch.setattr(guards_mod, "warmup_threshold", lambda config: 1)
 
     provider = object.__new__(_EngineDecisionProvider)
     provider._config = {}
@@ -225,7 +226,7 @@ def test_build_input_files_an_unreadable_answer_apart_from_a_disconnect(monkeypa
         # Under-warmed feed: candle_count 100 sits below the monkeypatched
         # threshold (150) but above the default indicator set's 50, so the
         # daemon's build_input must both ride the one-shot path's warm-up
-        # guard and actually consult _warmup_threshold(config) — a guard
+        # guard and actually consult warmup_threshold(config) — a guard
         # falling back to a hardcoded/default threshold clears 100 and
         # reports a different refusal. Keys present with all-None values
         # (compute_indicators' real under-warm output): the shape also
@@ -265,23 +266,26 @@ def test_build_input_refuses_untradeable_indicators(
     monkeypatch, candle_count, indicators, expected_msg
 ):
     # The daemon shares the one-shot path's pre-LLM context guards (see
-    # engine_bridge._context_refusal_error) and rides them down the retry ladder.
+    # context_guards.context_refusal) and rides them down the retry ladder.
     from types import SimpleNamespace
 
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+    from contrib.hyperliquid_perp.domains.perp import context_guards as guards_mod
     from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
 
     # Threshold monkeypatched to 150 — a value the default indicator set's 50
     # can't mimic: candle_count 200 clears the warm-up gate, 100 exercises it
-    # only if the guard really reads _warmup_threshold(config).
+    # only if the guard really reads warmup_threshold(config). Patched on the
+    # DEFINING module: the guard looks the name up in context_guards' globals,
+    # and engine_bridge deliberately keeps no second binding to patch.
     ctx = SimpleNamespace(candle_count=candle_count, indicators=indicators)
     # Keyword-only `on_blocking_read` included: the provider always passes it,
     # so a two-arg stand-in raises TypeError before the guard under test runs.
     monkeypatch.setattr(
         bridge_mod, "_build_context", lambda config, coin, on_blocking_read=None: (ctx, None)
     )
-    monkeypatch.setattr(bridge_mod, "_warmup_threshold", lambda config: 150)
+    monkeypatch.setattr(guards_mod, "warmup_threshold", lambda config: 150)
 
     # Only _config is needed: the guard fires before the risk/decision/payload
     # attributes are ever read.
@@ -1978,9 +1982,9 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
 
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
+    from contrib.hyperliquid_perp.common.no_decision import NO_DECISION_STREAK_THRESHOLD
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
     from contrib.hyperliquid_perp.paper.clock import ManualClock
-    from contrib.hyperliquid_perp.paper.no_decision import NO_DECISION_STREAK_THRESHOLD
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
 
     path, db = _seed_db(tmp_path)
@@ -2030,7 +2034,7 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(
@@ -2123,7 +2127,7 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.paper.no_decision"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(

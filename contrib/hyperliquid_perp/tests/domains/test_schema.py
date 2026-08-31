@@ -28,6 +28,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     derive_profile_shape,
     derive_round_trip_rate,
     interval_to_ms,
+    parse_interval,
 )
 
 from .test_volume_profile import _shaped
@@ -300,6 +301,18 @@ def test_interval_to_ms_unknown_raises_valueerror():
     # value rather than silently selecting a wrong interval.
     with pytest.raises(ValueError, match="4H"):
         interval_to_ms("4H")
+
+
+def test_parse_interval_accepts_a_string_or_a_member_and_names_a_bad_one():
+    # The context's constructor used to validate through interval_to_ms and
+    # then look the member up a second time (issue #122); both now go through
+    # this one parser (the coercion it feeds is pinned by the enum-interval
+    # test below). What is pinned here is the parser's own contract: a member
+    # passes through, a string resolves, and a bad value is named.
+    assert parse_interval("4h") is CandleInterval.H4
+    assert parse_interval(CandleInterval.D1) is CandleInterval.D1
+    with pytest.raises(ValueError, match="unsupported candle interval '4H'"):
+        parse_interval("4H")
 
 
 def test_perp_market_context_host_reading_must_be_aware_and_paired():

@@ -9,6 +9,14 @@ acceptance validator by contract, and a writer the running loops call did not
 belong under that sentence (issue #94). Here the policy has a home whose
 docstring is true of every function in it.
 
+In ``common/`` rather than ``paper/`` (issue #122): the consumers are the
+paper AND live sides — both validators, both running loops — and neither owns
+the policy, so ``live`` importing ``paper`` for it drew a dependency that
+described no real ownership (the same reason ``ERROR_TYPES`` moved down from
+the persistence package). It reads the store through plain ``sqlite3`` and
+needs only the cadence and the timestamp decoder, both of which live beside
+it now; importing it no longer loads the paper scheduler — and, through it,
+the whole paper engine — as its old ``paper.scheduler`` import did.
 """
 
 from __future__ import annotations
@@ -18,8 +26,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..common.constants import STALE_MARKET_DATA_ERROR
-from .scheduler import CYCLE_INTERVAL, parse_instant
+from .constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
+from .instants import parse_instant
 
 __all__ = [
     "NO_DECISION_STREAK_THRESHOLD",

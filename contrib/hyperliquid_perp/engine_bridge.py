@@ -2,15 +2,17 @@
 
 Extracted verbatim from ``main.py`` (2026-08-18): the symbols ``cli.py`` had
 been lazy-importing from the legacy entry point — market-context assembly
-(:func:`_build_context`), the pre-LLM context guards
-(:func:`_context_refusal`), the engine-config overlay
+(:func:`_build_context`), the engine-config overlay
 (:func:`_build_engine_config` with :class:`EngineImportError`), risk/decision
 config parsing (:func:`_load_risk_decision`) and coin resolution
 (:func:`_resolve_coin`) — plus what the call graph drags along: their private
 helpers, and the position reads (:func:`_load_position`) both of ``main.py``'s
 paths share. ``main.py`` keeps only the Phase-1 CLI shell (arg parsing,
 ``run_context_only`` / ``run_engine``, ``main``), so neither entry point
-reaches into the other for the plumbing both share.
+reaches into the other for the plumbing both share. The pre-LLM context
+guards came along too and have since moved down to
+:mod:`.domains.perp.context_guards` (issue #122) — they are domain logic, and
+the entry points call them there, not through this module.
 
 Top level rather than ``integration/`` on purpose: ``integration/`` is the
 LLM-graph wiring seam (trading_graph), while this module composes exchange
@@ -25,8 +27,10 @@ TOP-LEVEL from-import would break that: it copies the binding once at import
 time, giving the same seam a second patch surface where a stub applied to the
 wrong one is silently invisible to the other side's callers. One lookup site
 means one patch surface: a test stubbing a function here, or a collaborator of
-one (``HyperliquidClient``, ``_warmup_threshold``, …), always patches
-``engine_bridge`` itself.
+one (``HyperliquidClient``, ``HyperliquidMarketData``, …), always patches
+``engine_bridge`` itself. The same rule is why the context guards, which
+moved to ``context_guards``, are NOT re-exported from here: they are patched
+on their own module, and a second binding here would be the second surface.
 """
 
 from __future__ import annotations
@@ -40,16 +44,7 @@ from decimal import Decimal
 from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
-from .domains.perp.freshness import (
-    UNUSABLE_CONTEXT_ERROR,
-    ContextRefusal,
-    freshness_refusal,
-)
-from .domains.perp.indicator_vocab import (
-    REGIME_INDICATORS,
-    required_candles,
-    supported_indicators,
-)
+from .domains.perp.indicator_vocab import indicator_names
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.schema import PerpMarketContext, PerpPosition
 from .domains.perp.target_decision import DecisionConfig
@@ -61,11 +56,7 @@ from .paper.config import PaperTradingConfig
 
 logger = logging.getLogger(__name__)
 
-# The default set is "everything the engine supports" by construction — a
-# hand-kept literal here would drift silently past the loader's vocabulary
-# check (which only sees operator-written lists, never this default).
-_DEFAULT_INDICATORS = supported_indicators()
-_DEFAULT_ANALYSTS = ["market", "social", "news"]
+_DEFAULT_ANALYSTS = ("market", "social", "news")
 
 
 def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
@@ -113,109 +104,6 @@ def _resolve_coin(coin: str | None, config: dict) -> str:
             file=sys.stderr,
         )
     return str(coins[0]).upper()
-
-
-def _indicator_names(config: dict) -> list[str]:
-    """Configured indicator names, defaulting when the key is absent or ``null``.
-
-    A bare ``indicators:`` in YAML parses to ``None`` (not a missing key), so a
-    plain ``.get(..., default)`` would return ``None`` and crash the downstream
-    iteration; an explicit empty list is honoured as "no indicators".
-    """
-    names = config.get("indicators")
-    return list(names) if names is not None else list(_DEFAULT_INDICATORS)
-
-
-def _warmup_threshold(config: dict) -> int:
-    """Candles the configured indicators need before they read as real signal."""
-    return required_candles(_indicator_names(config))
-
-
-def _context_refusal(
-    ctx: PerpMarketContext, coin: str, config: dict, *, now: datetime | None = None
-) -> ContextRefusal | None:
-    """Why this context must not be traded on, or ``None`` if usable.
-
-    Single source of truth for the four pre-LLM context guards — warm-up,
-    fully-dead indicator set, missing/dead regime indicators
-    (atr_14/ema_20/ema_50), stale feed, in that order: an
-    under-warmed context legitimately has all-None indicators, so the dead-set
-    diagnosis only means "the indicator engine broke" once the warm-up bar is
-    cleared. Shared by the one-shot path (print + exit 1), the daemon
-    provider (retry ladder -> api_failed cycle), and
-    ``--context-only`` (render + warn) so the entry points can't drift apart —
-    the daemon missing guards the one-shot had is exactly the drift this
-    helper exists to prevent.
-
-    The three "cannot be reasoned over" guards are written out here; the
-    staleness verdict is :func:`~.domains.perp.freshness.freshness_refusal`'s,
-    and ``now`` — the HOST clock, whose only use is the fallback measuring
-    clock for a context that carries no exchange clock — is passed straight
-    through to it. Which clock the age is measured against, and what ``now``
-    is NOT used for, is documented there.
-    """
-    # Refuse to reason over under-warmed data: if fewer candles came back than
-    # the configured indicators need, every indicator is None and the regime is
-    # a guess — refuse before spending an LLM call on a hollow context.
-    needed = _warmup_threshold(config)
-    if ctx.candle_count < needed:
-        return ContextRefusal(
-            UNUSABLE_CONTEXT_ERROR,
-            f"only {ctx.candle_count} candles available for {coin}, but the "
-            f"configured indicators need {needed}. Refusing to run the engine on "
-            "under-warmed market data.",
-        )
-    # Past the warm-up gate every configured indicator has enough candles, so a
-    # fully-None known-indicator set is not under-warm — it means the indicator
-    # engine (stockstats) failed on every column (version drift, bad frame). That
-    # set is indistinguishable from a warm-up dict downstream: the regime silently
-    # defaults to RANGING. Refuse it before spending an LLM call on signals that
-    # are all dead.
-    known = set(supported_indicators())
-    computed = [v for k, v in ctx.indicators.items() if k in known]
-    if computed and all(v is None for v in computed):
-        return ContextRefusal(
-            UNUSABLE_CONTEXT_ERROR,
-            f"every technical indicator failed to compute for {coin} despite "
-            f"{ctx.candle_count} candles — the indicator engine (stockstats) is likely "
-            "broken or incompatible. Refusing to run the engine on a fully-dead "
-            "indicator set.",
-        )
-    # The regime trio (see REGIME_INDICATORS for why they are load-bearing):
-    # refuse whether a name was dropped from the configured indicator set
-    # entirely or computed to None (stockstats failing on that column past the
-    # warm-up gate — dead columns slipping past the all-dead guard above);
-    # either way, do not trade on a fabricated-calm regime.
-    dead = [name for name in REGIME_INDICATORS if ctx.indicators.get(name) is None]
-    if dead:
-        verb = "is" if len(dead) == 1 else "are"
-        return ContextRefusal(
-            UNUSABLE_CONTEXT_ERROR,
-            f"{', '.join(dead)} {verb} unavailable for {coin} (not in the "
-            f"configured indicator set, or failed to compute despite "
-            f"{ctx.candle_count} candles) — the regime would silently default "
-            "to RANGING, hiding a volatile or trending market. Refusing to run "
-            "the engine without usable regime indicators.",
-        )
-    # Freshness — last of the four on purpose: those three say "this context
-    # cannot be reasoned over at all", this one says "it is well-formed but out
-    # of date". Why a stale context passes the three above, which clock the
-    # age is measured against, and what ``now`` is for: see the guard itself.
-    return freshness_refusal(ctx, coin, now=now)
-
-
-def _context_refusal_error(
-    ctx: PerpMarketContext, coin: str, config: dict, *, now: datetime | None = None
-) -> str | None:
-    """:func:`_context_refusal`'s sentence alone, or ``None`` if usable.
-
-    The view for the two callers that only report it: ``main.run_engine``
-    prints it and exits 1, ``main.run_context_only`` (the ``--context-only``
-    path) renders it as a warning and exits 4. Only the daemon provider, which
-    writes the durable attempt row, needs the §6.2 class alongside it.
-    """
-    refusal = _context_refusal(ctx, coin, config, now=now)
-    return None if refusal is None else refusal.message
 
 
 def _load_risk_decision(config: dict) -> tuple[risk_gate.RiskConfig, DecisionConfig] | None:
@@ -271,7 +159,7 @@ def _build_context(
     # The same parse ``load_config`` already ran on this block, so on a loaded
     # config it cannot raise; absent or blank keys take the field defaults.
     market_data = MarketDataConfig.from_dict(config.get("market_data"))
-    indicator_names = _indicator_names(config)
+    indicators = indicator_names(config)
 
     def _between_reads() -> None:
         """Refresh whatever the caller is holding open, between blocking reads.
@@ -322,7 +210,7 @@ def _build_context(
         candles,
         funding,
         market_data=market_data,
-        indicator_names=indicator_names,
+        indicator_names=indicators,
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
     )
@@ -451,7 +339,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         _warn_dual(msg, stderr=f"warning: {msg}")
     # ``is not None`` (not ``or``) so an explicit empty list is preserved as a
     # deliberate "no analysts" choice rather than silently replaced by the default
-    # — matches the _indicator_names pattern above. A blank YAML value (None) still
+    # — matches ``indicator_vocab.indicator_names``. A blank YAML value (None) still
     # falls back to the default.
     raw_analysts = eng_cfg.get("selected_analysts")
     selected = list(raw_analysts if raw_analysts is not None else _DEFAULT_ANALYSTS)

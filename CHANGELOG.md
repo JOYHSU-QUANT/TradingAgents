@@ -580,6 +580,30 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the context guards and the no-decision policy now live
+  below the engines** (issue #122; pure relocation, no behaviour change). The
+  decision cadence `CYCLE_INTERVAL` and the store's timestamp decoder
+  `parse_instant` moved from `paper/scheduler.py` to `common/constants.py`
+  and the new `common/instants.py` (the scheduler still re-exports both), so
+  the freshness guard derives its "3 x the 4h decision cycle" ceiling from
+  the shared constant instead of drift-locking a hand-written copy, and
+  `paper/no_decision.py` — the issue-#50 escalation policy both engines and
+  both validators consume — moved to `common/no_decision.py`, where importing
+  it no longer loads the paper engine (its logger is now
+  `contrib.hyperliquid_perp.common.no_decision`). The four pre-LLM context
+  guards moved from `engine_bridge.py` to `domains/perp/context_guards.py`
+  as public names (`context_refusal`, `context_refusal_message`,
+  `warmup_threshold`, `UNUSABLE_CONTEXT_ERROR`), with `indicator_names` /
+  `DEFAULT_INDICATORS` beside the vocabulary they resolve in
+  `indicator_vocab.py`; `engine_bridge` keeps no re-exports, so tests patch
+  `context_guards.warmup_threshold` directly. A shared `whole_hours_label`
+  replaces the two hand-rolled whole-hours label guards, `schema.parse_interval`
+  resolves a candle interval once for both `interval_to_ms` and the context's
+  constructor, and `tests/common/test_layering.py` pins the guard family's and
+  the policy's load-time import closures to `domains.perp` + `common`. The
+  freshness tests' exchange-clock branch now also runs with the host two
+  hours behind the exchange, pinning that skew changes the refusal's wording
+  and never its verdict.
 - **A vendor's rate limit is now discovered once per cycle by the router, for
   every vendor** (issue #114). `route_to_vendor`'s rate-limit lane is the one
   point every vendor's throttle passes through, so it now remembers a vendor

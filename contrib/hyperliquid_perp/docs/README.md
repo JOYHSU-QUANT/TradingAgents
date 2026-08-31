@@ -121,7 +121,7 @@ TradingAgents/
     └── hyperliquid_perp/
         ├── exchanges/
         ├── domains/
-        ├── common/                      # 跨層共用（enum guard · YAML coercion · decimal context · 常數 · atomic write）
+        ├── common/                      # 跨層共用（enum guard · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label · no_decision.py no-decision 升級政策）
         ├── integration/                 # bridge to the unmodified engine
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── persistence/                 # Phase 2 SQLite source of truth
@@ -136,7 +136,7 @@ TradingAgents/
         │   └── hyperliquid.local.yaml     🔒 gitignored
         ├── docs/
         ├── ports.py
-        ├── engine_bridge.py               # main/cli 共用的組裝層（context/guards/engine config）
+        ├── engine_bridge.py               # main/cli 共用的組裝層（context build/engine config；guards 在 domains/perp/context_guards.py）
         ├── main.py
         ├── .gitignore
         └── README.md

@@ -418,7 +418,7 @@ def test_load_config_rejects_unknown_indicator_names(tmp_path, text):
         # The three regime names alone are a legal minimal set.
         ("indicators: [atr_14, ema_20, ema_50]\n", ["atr_14", "ema_20", "ema_50"]),
         # An explicit empty list is a deliberate "no indicators" choice
-        # (_indicator_names honours it); element validation must not reject it.
+        # (indicator_vocab.indicator_names honours it); element validation must not reject it.
         ("indicators: []\n", []),
     ],
 )

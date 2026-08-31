@@ -132,8 +132,8 @@ def _conflicting_run_lease(
     message, while the cost of a false pass is a stripped dead-man switch on a
     live wallet.
     """
+    from ..common.instants import parse_instant
     from ..paper.run_lock import LOCK_STALE_SECONDS
-    from ..paper.scheduler import parse_instant
     from ..persistence import repository as repo
 
     if own_network is None:

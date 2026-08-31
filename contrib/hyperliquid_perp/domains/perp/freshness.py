@@ -4,8 +4,8 @@ Extracted from ``engine_bridge`` (issue #94): the exchange-clock rewrite
 (PR #91) grew the guard from ~50 lines to ~200 inside a module whose job is
 composing exchange reads into engine inputs. This module owns the verdict —
 :func:`freshness_refusal` and the pieces it is built from — and
-``engine_bridge._context_refusal`` calls it as the last of the four pre-LLM
-guards.
+:func:`~.context_guards.context_refusal` calls it as the last of the four
+pre-LLM guards.
 
 SDK-free and persistence-free on purpose: it imports only :mod:`.schema` (for
 the context type and :func:`~.schema.interval_to_ms`) and ``common``. A
@@ -13,9 +13,10 @@ domain module that reached into the exchange adapter or the store would
 invert the package's layering; staying below both is also what lets
 :class:`ContextRefusal` validate its class against
 ``common.constants.ERROR_TYPES`` without importing the persistence package
-that admits the same set at the write boundary. (Its one caller,
-``engine_bridge``, imports the SDK at module level, so this does NOT make the
-``--context-only`` path SDK-free — that is a property of the caller.)
+that admits the same set at the write boundary. The layering is pinned as an
+import-closure test (``tests/common/test_layering.py``), not left to prose;
+it is a property of the guard family, not of the ``--context-only`` command,
+which fetches live candles through the SDK regardless.
 """
 
 from __future__ import annotations
@@ -24,13 +25,13 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ...common.constants import ERROR_TYPES, STALE_MARKET_DATA_ERROR
+from ...common.constants import CYCLE_INTERVAL, ERROR_TYPES, STALE_MARKET_DATA_ERROR
 from ...common.enum_guard import check_enum
+from ...common.instants import whole_hours_label
 from .schema import PerpMarketContext, interval_to_ms
 
 __all__ = [
     "STALE_CONTEXT_ERROR",
-    "UNUSABLE_CONTEXT_ERROR",
     "ContextRefusal",
     "freshness_refusal",
 ]
@@ -85,28 +86,16 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # cycles of stale data (except where that would sit under a single healthy bar
 # — then one bar plus one cycle, 28h for 1d), and never so tight that ordinary
 # jitter refuses a cycle.
-# The ceiling states three DECISION cycles, but is written out rather than
-# derived from the scheduler's CYCLE_INTERVAL: importing paper.scheduler here
-# would pull the whole paper engine into the keyless --context-only path to read
-# one timedelta. That costs about 25ms, and the RECIPE matters more than the
-# figure — re-measure rather than trust it. Time the MARGINAL import, the only
-# one this decision is about: import ``engine_bridge`` (this module's caller,
-# already loaded — with ``paper.config`` — before any guard runs), then time
-# ``importlib.import_module("contrib.hyperliquid_perp.paper.scheduler")``.
-# Importing this module alone and then timing it answers a different
-# question (roughly twice the figure, since ``paper.config`` is not yet paid).
-# Repeated runs land within a few ms of each other. A cold interpreter reports
-# ~100ms instead and answers a different question: roughly three quarters of
-# that is already paid by the time this line is reached.
-# That leaves the value duplicated, so a
-# drift-lock test asserts the two against each other — a changed cycle length
-# fails a test instead of silently leaving this bound, and the operator-facing
-# "3 x the 4h decision cycle" text, lying. (Extracting CYCLE_INTERVAL into a
-# dependency-free module the way indicator_vocab holds REGIME_INDICATORS would
-# remove the duplication outright; it belongs with the scheduler refactor, not
-# here.)
-_DECISION_CYCLE_MS = 4 * 60 * 60_000
-_CYCLE_LABEL = "4h"
+# The ceiling states three DECISION cycles, so it is DERIVED from the cadence
+# it names, ``common.constants.CYCLE_INTERVAL``, and a changed cycle length
+# moves this bound — and the operator-facing "3 x the 4h decision cycle" text —
+# with it. (Until issue #122 the cadence lived on ``paper.scheduler``, whose
+# import would have pulled the whole paper engine into this keyless module for
+# one timedelta, so the value was written out here and drift-locked instead.)
+# The label refuses a cadence that is not whole hours at import, like the
+# reconciler's lookback label — see ``whole_hours_label``.
+_DECISION_CYCLE_MS = int(CYCLE_INTERVAL.total_seconds() * 1000)
+_CYCLE_LABEL = whole_hours_label(CYCLE_INTERVAL, what="common.constants.CYCLE_INTERVAL")
 _MAX_CANDLE_AGE_CEILING_MS = _MAX_CANDLE_AGE_INTERVALS * _DECISION_CYCLE_MS
 _MAX_CANDLE_AGE_FLOOR_MS = 30 * 60_000
 
@@ -207,18 +196,13 @@ class ContextRefusal:
         check_enum(self.error_type, ERROR_TYPES, name="ContextRefusal.error_type")
 
 
-# The §6.2 class for the three guards that describe a context nothing can be
-# reasoned over: a broken indicator engine or a too-young listing is an
-# environmental failure like any other, and the run recovers on its own once
-# the coin warms up or stockstats is fixed. Those guards live in
-# ``engine_bridge._context_refusal``; the word lives here, beside its sibling,
-# so both classes the guard family writes are bound to the registry in one
-# place (:class:`ContextRefusal` refuses any word outside it).
-UNUSABLE_CONTEXT_ERROR = "server_error"
-# ...and for the freshness guard's verdicts, which do NOT recover on their own:
-# a feed that stopped advancing, or an age that cannot be established, blocks
-# every cycle until a human fixes the feed or the host clock. Imported, never
-# spelled out here — the acceptance validators query on this exact word.
+# The §6.2 class for the freshness guard's verdicts, which do NOT recover on
+# their own: a feed that stopped advancing, or an age that cannot be
+# established, blocks every cycle until a human fixes the feed or the host
+# clock. Imported, never spelled out here — the acceptance validators query on
+# this exact word. (The three "cannot be reasoned over" guards write
+# ``context_guards.UNUSABLE_CONTEXT_ERROR`` instead, beside the guards that
+# use it; :class:`ContextRefusal` binds both words to the registry.)
 STALE_CONTEXT_ERROR = STALE_MARKET_DATA_ERROR
 
 
@@ -231,7 +215,7 @@ def freshness_refusal(
     upstream compares it to a clock: a feed that stalled — or a snapshot
     replayed from an earlier run — yields a context whose indicators all
     compute cleanly and whose regime reads healthy, so the three "cannot be
-    reasoned over" guards in ``engine_bridge._context_refusal`` pass it. It
+    reasoned over" guards in ``context_guards.context_refusal`` pass it. It
     merely describes the past. That same ``as_of`` becomes the engine's
     ``trade_date`` (cli), so a stale feed also silently moves the analysts'
     whole research window to an earlier day.

@@ -29,10 +29,15 @@ cycle counts as done.
 The AI/market seam is the injected :class:`DecisionProvider` (production wires
 the TradingAgents engine; tests script outcomes), which signals a retryable
 failure by raising :class:`RetryableDecisionError`. Anything else is a bug —
-and a bug fails THAT CYCLE closed (``api_failed`` with no §6.2 class, the
-traceback logged at ERROR, the position and its SL/TP held, the next cycle on
-schedule), never the daemon: the live driver's rule since PR 5, adopted here
-in issue #134 so the two lanes stop meaning different things by "failed".
+and a bug raised BEFORE the AI answers (the books read, the market fetch,
+the ``ai_inputs`` row, the call itself) fails THAT CYCLE closed
+(``api_failed`` with no §6.2 class, the traceback logged at ERROR, the
+position and its SL/TP held, the next cycle on schedule) rather than the
+daemon: the live driver's rule for the same stretch, adopted here in issue
+#134 so the two lanes stop meaning different things by "failed". A bug
+AFTER the answer — in ``_finalize``'s gate, plan start or audit commit —
+still propagates: by then a paid-for decision and possibly a committed plan
+exist, and swallowing that is a different, undecided trade-off.
 
 Restart safety of a half-finished cycle: the successful AI response is
 persisted onto the attempt row (``pending_raw_response``) *before* the gate
@@ -120,8 +125,10 @@ class RetryableDecisionError(Exception):
 class DecisionInput:
     """Everything one AI call sees, built by the provider before the call.
 
-    ``context`` is the market side of the ``ai_inputs`` row; the paper-account
-    side is read from the store by the scheduler at insert time. The payload
+    ``context`` is the market side of the ``ai_inputs`` row; the account side
+    rides along as ``books`` (the one read the position section was priced
+    from), and the driver reads it itself only for an input that carries
+    none. The payload
     path/hash point at the full JSON the provider persisted (phase2-data §5:
     SQLite keeps the summary + path + hash, never the whole prompt).
     """
@@ -566,8 +573,11 @@ class PaperScheduler:
         position and its SL/TP held, and the next cycle on schedule. A bug
         that recurs every cycle therefore reads as the same no-decision streak
         an outage does: ERROR from the third, ``validate`` exit 4 — the
-        signal that used to be systemd's restart count. Only a failure of the
-        fail record itself still propagates, as it does on the live lane.
+        signal that used to be systemd's restart count. Scope: the three
+        statements of the try in ``_execute`` — a failure of the fail record
+        itself still propagates (as on the live lane), and so does anything
+        in ``_finalize``, which is deliberately outside this guard (module
+        docstring).
 
         "Non-retryable" is not the same as "a bug": everything that is not a
         :class:`RetryableDecisionError` lands here, and that includes host

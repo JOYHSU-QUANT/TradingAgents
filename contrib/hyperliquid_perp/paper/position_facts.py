@@ -76,9 +76,14 @@ def read_books(db: Database, run_id: str, coin: str) -> BookFacts | None:
 
     ``None`` is the "no books yet" case only: a fresh run's provider is built
     pre-flight, before the run row exists, and only CALLED after the ledger
-    is seeded — but the section must degrade to "omitted" rather than raise
-    if that ordering ever changes. Three reads, one per table, and the only
-    place in the cycle that makes them.
+    is seeded (``initialize_run`` writes the run row and the ledger in one
+    transaction, before the scheduler is built). Should that ordering ever
+    change, this read answers ``None`` rather than raising — the provider
+    logs it and hands the builder a position-blind context — and the
+    driver's audit prologue then refuses the cycle on the same missing
+    ledger, so the cycle ends ``api_failed`` rather than silently
+    position-blind. Three reads, one per table, and the only place in the
+    cycle that makes them.
     """
     ledger = repo.get_current_account_state(db.conn, run_id)
     if ledger is None:

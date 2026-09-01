@@ -205,7 +205,13 @@ class _EngineDecisionProvider:
             return None
         books = self._position_source()
         if books is None:
-            logger.warning("position section omitted: the run has no books yet")
+            # Unreachable on the production wirings (initialize_run precedes
+            # the first cycle); said in the log anyway, and the driver's audit
+            # prologue will refuse the cycle on the same missing ledger.
+            logger.warning(
+                "position section omitted: the run has no books yet "
+                "(the audit row will refuse this cycle on the same missing ledger)"
+            )
         return books
 
     def _position_inputs(self, books: BookFacts | None):

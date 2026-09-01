@@ -84,10 +84,13 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 > 用 Task Scheduler「工作失敗時重新啟動」或 NSSM）——重啟 reconciliation 本來
 > 就設計成安全冪等，而無監管時半夜 crash 到被發現之間，持倉完全沒有 SL/TP 看管。
 > 監管會拉回來的是 daemon **真的退出**的情況（store 壞掉、lease 被搶、export 的
-> fail-loud 例外等）；decision cycle 內的**程式缺陷**（非 Retryable 例外）不再讓
-> daemon 退出——該 cycle 記成 `api_failed`（`error_type` 空、`error_message` 以
-> `non-retryable:` 開頭）、log 印 ERROR traceback、倉位與 SL/TP 照舊看管、下個
-> cycle 照排，與 live 車道同一套語意（見 §7）。
+> fail-loud 例外等）；decision cycle **前半**（讀帳本、抓市場、寫 `ai_inputs`、呼叫
+> AI——即 AI 回答之前）的**程式缺陷**（非 Retryable 例外）不再讓 daemon 退出——該
+> cycle 記成 `api_failed`（`error_type` 空、`error_message` 以 `non-retryable:` 開頭）、
+> log 印 ERROR traceback、倉位與 SL/TP 照舊看管、下個 cycle 照排，與 live 車道對
+> 這一段的語意一致（見 §7）。AI 回答**之後**的 gate／下單／`ai_outputs` 寫入
+> （`_finalize`）沒有這層守衛，那裡的缺陷仍會讓 daemon 退出、由監管拉回（刻意保留：
+> 那時已有付費的決策與可能已 commit 的 plan，不該被無聲吞掉）。
 > 注意：protection-only 自我了結與 keyless 停止走的也是 exit 1，監管會把它拉
 > 回來、再進 protection-only——反覆重啟不是修復，看到這個模式仍要照 §5 人工
 > 調查。手動掛 tmux／screen 也可以，但要接受上述無人看管的空窗。無論哪種方式，
@@ -269,7 +272,8 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
   具名 exit 1（沒有倉位需要看護）。
 
 `api_failed` cycle（網路／API 問題）是預期會偶發的，計入
-`api_failed_count`、不進 30 輪門檻；連續大量出現才需要查網路。注意只有
+`api_failed_count`、不進 30 輪門檻；連續大量出現才需要查網路——**先看
+`error_type`**：空的那種不是網路，是非 Retryable 例外（通常是程式缺陷），照 §7 那列處理。注意只有
 LLM 呼叫**之前**的失敗（連線、warmup、payload 寫入）零 AI 花費——LLM 逾時／
 限流類的 api_failed 每次嘗試（最多 3 次）都已產生費用。
 

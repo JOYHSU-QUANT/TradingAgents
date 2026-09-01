@@ -403,8 +403,14 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 
 報告在 `live_ready:` 之前另印 `prompt_regime:` 行——每組 `(prompt_version, context_shape,
 format_fingerprint)` 的 cycle 數（只數 `completed`，與 `cycle_count` 同口徑；依首見順序）。
-不影響 exit code：多於一行＝run 跨過 prompt 制度邊界；`n/a` 是該欄寫入時還不存在，
-不是另一個制度。三個鍵的定義見 [RUNBOOK §4](./RUNBOOK.md)。
+不影響 exit code：**三鍵齊全的行多於一行**＝run 跨過 prompt 制度邊界；`n/a` 是該欄寫入時
+還不存在（跨過 v11 部署點的 run 會多一行 `n/a` 桶），不是另一個制度；行是桶不是段。各桶
+總和應等於 `cycle_count`，不等時印 `warning:`。三個鍵的定義見 [RUNBOOK §4](./RUNBOOK.md)。
+
+另：live 車道的 `api_failed` 列若 `error_type` **空**、`error_message` 以 `non-retryable:`
+開頭，是非 Retryable 例外（通常是程式缺陷，主機問題看 repr 分辨）——driver 把該 cycle
+fail closed、倉位與 SL/TP 照舊、下個 cycle 照排，daemon 不退出；連續 3 筆走 no-decision
+streak 升級。判讀同 [RUNBOOK §7](./RUNBOOK.md) 那一列。
 
 > smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only
 > <key>` 重跑，latest-per-key 覆蓋），歸 exit 4 的「未到 gate」。exit 5 保留給不可

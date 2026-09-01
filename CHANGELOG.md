@@ -10,6 +10,22 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: the reconciler's fill cross-check window follows the
+  backfiller it holds** (issues #149, #159, #151). The invalid-local-fill
+  cross-check window was a module constant derived from
+  `fill_backfill.DEFAULT_LOOKBACK_SECONDS`, equal to every `FillBackfiller`'s
+  own `lookback_seconds` only by coincidence — the first wiring to pass a
+  narrower lookback through would have had the cross-check call every local
+  fill between the two windows "a fill the exchange denies". The window (and
+  the operator warning that renders it) is now read off the bound
+  backfiller's new `lookback` property at each sweep; the whole-hours refusal
+  moves from import to the binding. `LiveReconciler` refuses a non-callable
+  `fetch_open_orders` / `fetch_clearinghouse` / `fetch_fills` at construction
+  instead of reading it as a failed exchange read every sweep, and
+  `set_reconciliation_action` — the daemon's overwriting `action_taken`
+  writer — accepts machine vocabulary (`MACHINE_DISPOSITIONS`) only; a
+  human's disposition goes through `stamp_reconciliation_action_if_unset`.
+
 - **hyperliquid_perp: a YAML `.nan` / `.inf` in a Decimal config field is a
   named config error, not a traceback** (issue #128). `decimal_from_yaml`
   accepted the non-finite float PyYAML produces, and the config dataclasses'

@@ -9,6 +9,7 @@ from ...common.enum_guard import check_enum
 from ._base import _insert
 from ._vocab import (
     _RECONCILIATION_TRIGGERS,
+    MACHINE_DISPOSITIONS,
     PROVISIONAL_DISPOSITIONS,
     RECONCILIATION_CASE_TYPES,
 )
@@ -167,16 +168,23 @@ def iter_exchange_reconciliation_events(
 
 
 def set_reconciliation_action(conn: sqlite3.Connection, event_id: int, action_taken: str) -> None:
-    """Stamp a case row's disposition (the §12.3 v10/v11 ``action_taken`` writer).
+    """Stamp a case row's disposition — the DAEMON's §12.3 v10/v11 ``action_taken`` writer.
 
     Case rows are a log — resolution never rewrites ``case_type`` or the
     observed values, it only records what was DONE about the sighting (PR 4's
     sweep marking a malformed payload inspected, a drift audited, an orphan
     order cancelled). The row must exist; a second stamp overwrites the first
     (the disposition can be revised, the observation cannot).
+
+    Machine vocabulary ONLY, checked at the write (issue #151): what lands
+    here decides BY STRING whether the fact key may reopen
+    (``PROVISIONAL_DISPOSITIONS``), so a word outside ``MACHINE_DISPOSITIONS``
+    would shut a key forever with no error — and this is the overwriting
+    writer, the one a human's answer must never pass through. A human's
+    disposition is free prose and goes through
+    :func:`stamp_reconciliation_action_if_unset`.
     """
-    if not action_taken or not action_taken.strip():
-        raise ValueError("action_taken must be a non-empty string")
+    check_enum(action_taken, MACHINE_DISPOSITIONS, name="action_taken")
     cur = conn.execute(
         "UPDATE exchange_reconciliation_events SET action_taken = ? WHERE event_id = ?",
         (action_taken, event_id),

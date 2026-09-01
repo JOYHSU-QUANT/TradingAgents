@@ -10,6 +10,7 @@ import pytest
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck
 from contrib.hyperliquid_perp.live.config import ExecutionMode, KillSwitchConfig
+from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK_SECONDS
 from contrib.hyperliquid_perp.live.kill_switch import KillSwitchManager
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
@@ -632,6 +633,8 @@ def test_a_short_position_cancels_an_ask_side_close_order(env):
 
 class _StubBackfiller:
     """A fully-wired fill leg, so legs_skipped cannot withhold the release."""
+
+    lookback = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)  # the reconciler reads it
 
     def backfill(self, now, *, since=None):
         from contrib.hyperliquid_perp.live.fill_backfill import BackfillSummary

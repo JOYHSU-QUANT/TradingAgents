@@ -427,8 +427,8 @@ def route_to_vendor(method: str, *args, **kwargs):
             # status is the vendor answering about this request (the 404 a
             # boundary leaves alone), as is a requests HTTPError with no
             # status to read; a ValueError-flavoured requests exception
-            # (MissingSchema, InvalidJSONError) is a bug or an answer, not
-            # the wire. The status or the class only, never the text: a
+            # (MissingSchema, InvalidURL, JSONDecodeError) is a bug or an
+            # answer, not the wire. The status or the class only, never the text: a
             # requests message quotes the request URL, API key included.
             if first_outage is None and isinstance(e, OSError) and not isinstance(e, ValueError):
                 status = http_status(e)

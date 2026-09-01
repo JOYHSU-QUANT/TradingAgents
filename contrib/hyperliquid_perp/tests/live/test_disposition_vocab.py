@@ -97,7 +97,9 @@ def _machine_disposition_literals(source: str) -> set[str]:
     constants are the import-time loop's job, computed values the runtime
     guard's; f-strings are skipped (``f"settled_{status}"`` is derived in
     ``_vocab`` and guarded at runtime); a literal forwarded through a local
-    wrapper or an aliased import is invisible (the repository writers check
+    wrapper or an aliased import is invisible (``set_reconciliation_action``
+    re-checks the set at the write since issue #151, but
+    ``stamp_reconciliation_action_if_unset`` carries human prose and checks
     only non-emptiness, so such a wrapper must not be introduced); a starred
     call fails the scan loudly rather than being skipped; and any literal
     nested inside the argument (a helper's own string arguments) IS reported —

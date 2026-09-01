@@ -38,9 +38,10 @@ def parse_instant(text: str) -> datetime:
 def whole_hours_label(span: timedelta, *, what: str) -> str:
     """``span`` as ``"6h"``; ``ValueError`` naming ``what`` if it is not whole hours.
 
-    Meant for module-level constants, so the raise lands at import time — a
-    retuned window that is no longer whole hours is a change the message
-    rendering it has to be rewritten for, not rounded past.
+    Meant for module-level constants and construction-time bindings, so the
+    raise lands at import or at start-up, before the first cycle — a retuned
+    window that is no longer whole hours is a change the message rendering it
+    has to be rewritten for, not rounded past.
     """
     if span % _HOUR:
         raise ValueError(

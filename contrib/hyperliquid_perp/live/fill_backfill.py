@@ -159,7 +159,7 @@ class FillBackfiller:
         self._fetch = fetch
         self._processor = processor
         self._clock = clock or WallClock()
-        self._lookback = lookback_seconds
+        self._lookback = timedelta(seconds=lookback_seconds)
         self._max_pages = max_pages
         self._response_cap = response_fill_cap
         # §18.2: called after every page. A backfill runs on the single-threaded
@@ -175,6 +175,16 @@ class FillBackfiller:
         # switch to refresh and left it unwired on that basis — it does have one
         # (2026-07-31 deadline review).
         self._refresh_kill_switch = refresh_kill_switch
+
+    @property
+    def lookback(self) -> timedelta:
+        """The trailing window THIS instance reads, as a span.
+
+        Read by the reconciler's invalid-local-fill cross-check, whose window
+        must be this instance's (issue #149; the argument is on
+        ``LiveReconciler._crosscheck_window``).
+        """
+        return self._lookback
 
     def _window_start(self, stamp: datetime, since: datetime | None) -> datetime:
         """Where this pass must start reading: the trailing window, or the gap's start.
@@ -206,7 +216,7 @@ class FillBackfiller:
         # offset-naive and offset-aware", far from the caller that got it wrong. Every
         # instant in this system is aware UTC; neither is accepted.
         _require_aware(stamp, name="now")
-        floor = stamp - timedelta(seconds=self._lookback)
+        floor = stamp - self._lookback
         if since is None:
             return floor
         _require_aware(since, name="since")

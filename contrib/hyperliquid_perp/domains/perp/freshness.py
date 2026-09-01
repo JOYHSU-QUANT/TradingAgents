@@ -113,8 +113,9 @@ _MAX_CANDLE_AGE_INTERVALS = 3
 # with it. (Until issue #122 the cadence lived on ``paper.scheduler``, whose
 # import would have pulled the whole paper engine into this keyless module for
 # one timedelta, so the value was written out here and drift-locked instead.)
-# The label refuses a cadence that is not whole hours at import, like the
-# reconciler's lookback label — see ``whole_hours_label``.
+# The label refuses a cadence that is not whole hours at import (the
+# reconciler's lookback label does the same when its backfiller is bound) —
+# see ``whole_hours_label``.
 _DECISION_CYCLE_MS = CYCLE_INTERVAL // _ONE_MS
 _CYCLE_LABEL = whole_hours_label(CYCLE_INTERVAL, what="common.constants.CYCLE_INTERVAL")
 _MAX_CANDLE_AGE_CEILING_MS = _MAX_CANDLE_AGE_INTERVALS * _DECISION_CYCLE_MS

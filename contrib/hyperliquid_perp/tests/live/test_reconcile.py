@@ -12,8 +12,10 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.common.instants import whole_hours_label
 from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
 from contrib.hyperliquid_perp.live.config import ExecutionMode
+from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK_SECONDS, FillBackfiller
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
 from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
@@ -106,6 +108,24 @@ class _Seams:
         return self.fills
 
 
+def _reconciler_over(db, seams, backfiller, **overrides):
+    """A reconciler over ``seams`` for run "r"; ``overrides`` replace any constructor kwarg."""
+    return LiveReconciler(
+        **{
+            "db": db,
+            "run_id": "r",
+            "coin": "BTC",
+            "fetch_open_orders": seams.fetch_open_orders,
+            "fetch_clearinghouse": seams.fetch_clearinghouse,
+            "query_order_by_cloid": seams.query_order_by_cloid,
+            "fetch_fills": None,
+            "backfiller": backfiller,
+            "clock": ManualClock(_NOW),
+            **overrides,
+        }
+    )
+
+
 @contextmanager
 def _make_env(tmp_path, ledger: Decimal = _LEDGER):
     db = Database(":memory:")
@@ -118,16 +138,8 @@ def _make_env(tmp_path, ledger: Decimal = _LEDGER):
         created_at=_NOW - timedelta(days=1),
     )
     seams = _Seams()
-    reconciler = LiveReconciler(
-        db=db,
-        run_id="r",
-        coin="BTC",
-        fetch_open_orders=seams.fetch_open_orders,
-        fetch_clearinghouse=seams.fetch_clearinghouse,
-        query_order_by_cloid=seams.query_order_by_cloid,
-        fetch_fills=seams.fetch_fills,
-        payload_dir=tmp_path / "payloads",
-        clock=ManualClock(_NOW),
+    reconciler = _reconciler_over(
+        db, seams, None, fetch_fills=seams.fetch_fills, payload_dir=tmp_path / "payloads"
     )
     try:
         yield db, seams, reconciler
@@ -908,36 +920,112 @@ def test_the_equity_tolerance_is_a_closed_bound_on_both_legs(
         assert reconciler.run("heartbeat").account_reconciled is expect_clean
 
 
-def test_the_module_refuses_to_import_with_a_fractional_hour_lookback(monkeypatch):
-    # The operator warning renders the lookback in whole hours, so a lookback
-    # that is not one is refused at import rather than rendered truncated. Same
-    # shape as the stamp-constant guard test below: defeat the import cache and
-    # prove the guard is what refuses.
-    import importlib
+def _recording_fills_seam():
+    """A ``(start_ms, end_ms) -> []`` seam that remembers the windows it was asked for."""
+    calls: list[tuple[int, int]] = []
 
-    from contrib.hyperliquid_perp.live import fill_backfill as fill_backfill_mod
+    def fetch(start_ms, end_ms):
+        calls.append((start_ms, end_ms))
+        return []
 
-    monkeypatch.setattr(fill_backfill_mod, "DEFAULT_LOOKBACK_SECONDS", 5 * 3600 + 1800)
-    with pytest.raises(ValueError, match="whole number of hours"):
-        importlib.reload(reconcile_mod)
-    monkeypatch.undo()
-    importlib.reload(reconcile_mod)
+    return calls, fetch
 
 
-def test_the_fill_crosscheck_window_is_the_backfillers_lookback():
-    # The KNOWN-EXEMPTION argument in reconcile.py holds only while the cross-
-    # check window equals the backfiller's trailing lookback; the window is
-    # derived from it now, and this keeps a re-typed ``timedelta(hours=6)``
-    # from quietly returning (issue #102).
-    from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK_SECONDS
-
-    assert timedelta(seconds=DEFAULT_LOOKBACK_SECONDS) == reconcile_mod._FILL_CROSSCHECK_LOOKBACK
-    # ...and the operator-facing label says the same window (a whole number of
-    # hours today; the label format is what the log-message test reads through).
-    assert (
-        timedelta(hours=int(reconcile_mod._LOOKBACK_LABEL[:-1]))
-        == reconcile_mod._FILL_CROSSCHECK_LOOKBACK
+def _backfiller_with_lookback(seconds, fetch=lambda start_ms, end_ms: []):
+    # ``processor=None`` is safe: an empty page ends the ladder before the
+    # processor is touched (the same shape test_ws_stream uses).
+    return FillBackfiller(
+        fetch=fetch, processor=None, clock=ManualClock(_NOW), lookback_seconds=seconds
     )
+
+
+def test_a_fractional_hour_lookback_is_refused_when_the_backfiller_is_bound(env, monkeypatch):
+    # The operator warning renders the lookback in whole hours, so a lookback
+    # that is not one is refused where the backfiller is BOUND — at
+    # construction (both production sites) or on a later attachment — before
+    # the first sweep, rather than rendered truncated ("5h" for 5h30m). It
+    # refused at import while the window was a module constant. Both sources
+    # of the window refuse, each naming its owner.
+    db, seams, reconciler = env
+    fractional = _backfiller_with_lookback(5 * 3600 + 1800)
+    refusal = "FillBackfiller.lookback must be a whole number of hours"
+    with pytest.raises(ValueError, match=refusal):
+        _reconciler_over(db, seams, fractional)
+    with pytest.raises(ValueError, match=refusal):
+        reconciler._backfiller = fractional
+    assert reconciler._backfiller is None  # the refused binding did not land
+    monkeypatch.setattr(reconcile_mod, "DEFAULT_LOOKBACK_SECONDS", 5 * 3600 + 1800)
+    with pytest.raises(
+        ValueError, match="DEFAULT_LOOKBACK_SECONDS must be a whole number of hours"
+    ):
+        _reconciler_over(db, seams, None)
+
+
+def test_a_stand_in_backfiller_without_a_lookback_is_refused_by_name(env):
+    # The cross-check window is read off the backfiller, so an object without
+    # one is a mis-wiring named where it is bound (like the seams), not an
+    # AttributeError inside a guarded leg on the first sweep.
+    db, seams, reconciler = env
+    with pytest.raises(TypeError, match="backfiller must be a FillBackfiller"):
+        _reconciler_over(db, seams, object())
+    with pytest.raises(TypeError, match="backfiller must be a FillBackfiller"):
+        reconciler._backfiller = object()
+
+
+def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog):
+    # The KNOWN-EXEMPTION argument in reconcile.py holds only while the cross-
+    # check window equals the backfiller's trailing lookback — THIS backfiller's,
+    # not the module default the two used to share by coincidence (issue #149,
+    # after #102): the first wiring that passes lookback_seconds through from
+    # config must move the window AND the operator warning with it, or every
+    # local fill between the two windows reads as "a fill the exchange denies".
+    db, seams, _ = env
+    one_hour = 3600
+    assert one_hour != DEFAULT_LOOKBACK_SECONDS  # the test proves nothing if they agree
+    backfill_calls, backfill_fetch = _recording_fills_seam()
+    crosscheck_calls, crosscheck_fetch = _recording_fills_seam()
+    backfiller = _backfiller_with_lookback(one_hour, fetch=backfill_fetch)
+    reconciler = _reconciler_over(db, seams, backfiller, fetch_fills=crosscheck_fetch)
+    # Corrupt the genesis so the backfill floor degrades to the bare lookback
+    # (the one path that renders the window for the operator) — the backfill
+    # window is then the lookback alone, comparable to the cross-check's.
+    with db.transaction() as conn:
+        conn.execute("UPDATE runs SET created_at = 'not-a-timestamp' WHERE run_id = 'r'")
+    with caplog.at_level("WARNING"):
+        report = reconciler.run("heartbeat")
+    assert report.legs_skipped == ()
+    expected_start = int((_NOW - timedelta(seconds=one_hour)).timestamp() * 1000)
+    assert [start for start, _ in crosscheck_calls] == [expected_start]  # the cross-check window
+    assert [start for start, _ in backfill_calls] == [expected_start]  # ...is the backfill window
+    assert any("degrades to the trailing 1h lookback" in r.getMessage() for r in caplog.records)
+
+
+def test_a_backfiller_attached_after_construction_moves_the_window_with_it(env):
+    # ``_backfiller`` is a plain attribute (the tests above attach stubs to it
+    # after the fact, and a wiring with a circular construction order could do
+    # the same), so the window is read off the backfiller held at SWEEP time
+    # — bound at construction, a later attachment would leave the cross-check
+    # on the default while the backfill leg ran a narrower window: the #149
+    # false premise, back through the side door.
+    db, seams, _ = env
+    calls, fetch = _recording_fills_seam()
+    reconciler = _reconciler_over(db, seams, None, fetch_fills=fetch)
+    reconciler._backfiller = _backfiller_with_lookback(3600)
+    reconciler.run("heartbeat")
+    expected_start = int((_NOW - timedelta(seconds=3600)).timestamp() * 1000)
+    assert [start for start, _ in calls] == [expected_start]
+
+
+def test_a_reconciler_without_a_backfiller_cross_checks_over_the_module_default(env):
+    # No backfill leg, no parity to keep: the window is only "how far back the
+    # cross-check reads", and the module default stands in (decided
+    # 2026-09-01) — the reads-only wiring keeps the window it always had.
+    db, seams, _ = env
+    calls, fetch = _recording_fills_seam()
+    reconciler = _reconciler_over(db, seams, None, fetch_fills=fetch)
+    assert "fill_backfill" in reconciler.run("heartbeat").legs_skipped
+    expected_start = int((_NOW - timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)).timestamp() * 1000)
+    assert [start for start, _ in calls] == [expected_start]
 
 
 # -- §12.3: fills ------------------------------------------------------------------
@@ -1101,9 +1189,13 @@ def test_a_digest_keyed_malformed_sighting_blocks_until_a_human_stamps_it(env):
     assert any("malformed fill sighting" in e for e in report.errors)
     (row,) = _cases(db, "fill_malformed")
     assert row["action_taken"] is None
-    # A human stamping action_taken clears the block on the next pass.
+    # A human stamping action_taken clears the block on the next pass — through
+    # the human's writer: the daemon's overwriting one takes machine vocabulary
+    # only (issue #151).
     with db.transaction() as conn:
-        repo.set_reconciliation_action(conn, row["event_id"], "resolved_manual")
+        assert repo.stamp_reconciliation_action_if_unset(
+            conn, row["event_id"], "human: inspected the payload"
+        )
     report = reconciler.run("heartbeat")
     assert report.fills_reconciled
 
@@ -1340,6 +1432,8 @@ def test_a_capped_fill_window_withholds_invalid_fill_verdicts(env):
 
 class _StubBackfiller:
     """Records the ``since`` each pass was asked to cover; books nothing."""
+
+    lookback = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)  # the reconciler reads it
 
     def __init__(self):
         self.calls = []
@@ -1620,9 +1714,13 @@ def test_a_missing_genesis_floor_degradation_is_logged(env, caplog):
     with caplog.at_level("WARNING"):
         reconciler.run("heartbeat")
     assert stub.calls == [None]  # the floor really did degrade
-    # The window in the message is derived from the backfiller's lookback, as
-    # the window itself is — a re-typed "6h" here would pin stale wording.
-    expected = f"degrades to the trailing {reconcile_mod._LOOKBACK_LABEL} lookback"
+    # The window in the message is the stub's (default) lookback, rendered by
+    # the one production renderer — a re-typed "6h" (or a `// 3600` that
+    # truncates the way the renderer refuses to) would pin stale wording. That
+    # the label follows a NON-default backfiller is pinned by
+    # test_the_fill_crosscheck_window_is_the_backfillers_own_lookback.
+    label = whole_hours_label(stub.lookback, what="test")
+    expected = f"degrades to the trailing {label} lookback"
     assert any(expected in r.getMessage() for r in caplog.records)
 
 
@@ -1806,6 +1904,28 @@ def test_a_fully_wired_clean_pass_reports_no_skipped_legs(env):
     report = reconciler.run("heartbeat")
     assert report.clean
     assert report.legs_skipped == ()
+
+
+@pytest.mark.parametrize("seam_name", ["fetch_open_orders", "fetch_clearinghouse", "fetch_fills"])
+def test_a_non_callable_exchange_seam_is_refused_at_construction(env, seam_name):
+    # Each seam is called inside a fail-soft ``except Exception`` lane, so a
+    # mis-wired one (a payload passed where a reader was meant) would surface
+    # only as "open_orders failed: 'dict' object is not callable" — an unclean
+    # pass every sweep, never a crash (issue #159). Refused at construction
+    # instead, like VenueIdentityMonitor's orderStatus seam.
+    db, seams, _ = env
+    payload = {"marginSummary": {}}  # a payload where a reader was meant
+    seams_given = {"fetch_fills": seams.fetch_fills, seam_name: payload}
+    with pytest.raises(TypeError, match=f"{seam_name} must be the exchange seam"):
+        _reconciler_over(db, seams, None, **seams_given)
+
+
+def test_fetch_fills_alone_may_be_absent(env):
+    # ``None`` is the reads-only wiring, not a mis-wiring: the leg is skipped
+    # and says so. The other two seams have no such wiring and take no None.
+    db, seams, _ = env
+    reconciler = _reconciler_over(db, seams, None, fetch_fills=None)
+    assert "invalid_local_fill_crosscheck" in reconciler.run("heartbeat").legs_skipped
 
 
 def test_short_position_sl_coverage_counts_only_buy_side_stops(env):

@@ -108,30 +108,29 @@ EQUITY_TOLERANCE_ABS_USDC = Decimal("1")
 EQUITY_TOLERANCE_REL = Decimal("0.01")
 
 # The invalid-local-fill cross-check window (§12.3 "SQLite 有 fill，但交易所查
-# 不到"). DERIVED from the backfiller's trailing lookback, not restated: the
-# KNOWN-EXEMPTION argument below ("inside the window is manual severity,
-# outside it only the equity leg sees it") is true only while the two are
-# equal, and a separate literal here had nothing holding it so (issue #102).
-# Fills near the window edges are excluded from the verdict — a fill booked
-# milliseconds ago (or one at the window's far edge) can be absent from one
-# read without being invalid.
-# KNOWN EXEMPTION (decided 2026-07-17): the window slides, so a local fill
-# older than the lookback is permanently outside this leg's verdict — a
-# double-booked fill caught inside 6h is manual severity, the same fill outside
-# it is seen only by the equity-tolerance leg. Accepted for PR 4 because a
-# genesis floor would page the full history every pass (and withhold the
-# verdict whenever the 2000/20-page budget runs out); PR 5's durable
-# "cross-checked-through" watermark extends coverage without that cost.
-_FILL_CROSSCHECK_LOOKBACK = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)
-# The same window as the operator reads it in the genesis-corruption warning.
-# Whole hours only: a lookback that is not one would render truncated ("5h" for
-# 5h30m) and understate how long an outage can go unbooked, so the label
-# refuses at import rather than round — retuning the backfill window to a
-# fraction of an hour is a change this message has to be rewritten for.
-_LOOKBACK_LABEL = whole_hours_label(
-    _FILL_CROSSCHECK_LOOKBACK, what="fill_backfill.DEFAULT_LOOKBACK_SECONDS"
-)
+# 不到") is NOT a module constant: it is the trailing lookback of the backfiller
+# the reconciler holds, read at each sweep — ``LiveReconciler._crosscheck_window``
+# (issue #149, after #102) carries the KNOWN EXEMPTION that says why the two
+# must be one number. Fills near the window edges are excluded from the
+# verdict — a fill booked milliseconds ago (or one at the window's far edge)
+# can be absent from one read without being invalid.
 _FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
+
+
+def _require_seam(name: str, value: Any, shape: str) -> None:
+    """Refuse a non-callable where an exchange read was meant, naming the seam.
+
+    CI runs no type checker, so the seams are checked at construction — not on
+    the first sweep, where each is called inside a fail-soft ``except
+    Exception`` lane (the two account reads in ``run()``, the cross-check
+    fetch) that would read a mis-wiring as "open_orders failed: ... not
+    callable", record an unclean pass, and carry on forever without crashing
+    (issue #159; the same argument ``VenueIdentityMonitor`` makes for the
+    orderStatus seam).
+    """
+    if not callable(value):
+        raise TypeError(f"{name} must be the exchange seam ({shape}), got {type(value).__name__}")
+
 
 # The fail-safe fill-leg fallback: nothing fetched, nothing proven. Shared by
 # every "the backfill could not run/complete" path so the two sites can never
@@ -237,7 +236,9 @@ def _clip(text: str | None) -> str | None:
 # silence #84 is about. Only the fill-booked stamp reaches ``guarded``, which
 # would turn a raise into an unclean verdict. Checking here gives all four
 # the same answer, and a rename nobody classified in
-# repo.MACHINE_DISPOSITIONS cannot start the daemon at all.
+# repo.MACHINE_DISPOSITIONS cannot start the daemon at all. (Since issue #151
+# repo.set_reconciliation_action re-checks the set at the write; this loop
+# stays the start-up refusal.)
 _FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
 _READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
 _FILL_BACKFILLED_DISPOSITION = "backfilled"
@@ -477,13 +478,21 @@ class LiveReconciler:
         refresh_kill_switch: Callable[[], None] | None = None,
         identity: VenueIdentityMonitor | None = None,
     ) -> None:
+        # See _require_seam. ``fetch_fills`` alone may be None — the reads-only
+        # wiring, reported through ``legs_skipped``.
+        _require_seam("fetch_open_orders", fetch_open_orders, "() -> frontendOpenOrders list")
+        _require_seam(
+            "fetch_clearinghouse", fetch_clearinghouse, "() -> clearinghouseState payload"
+        )
+        if fetch_fills is not None:
+            _require_seam("fetch_fills", fetch_fills, "(start_ms, end_ms) -> fills list")
         self._db = db
         self._run_id = run_id
         self._coin = coin
         self._fetch_open_orders = fetch_open_orders
         self._fetch_clearinghouse = fetch_clearinghouse
         self._fetch_fills = fetch_fills
-        self._backfiller = backfiller
+        self._backfiller = backfiller  # the setter checks what the cross-check reads off it
         self._stream = stream
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
@@ -530,6 +539,82 @@ class LiveReconciler:
         """Refresh the dead man's switch across this sweep's blocking work (§18.2)."""
         if self._refresh_kill_switch is not None:
             self._refresh_kill_switch()
+
+    @property
+    def _backfiller(self) -> FillBackfiller | None:
+        return self._backfiller_slot
+
+    @_backfiller.setter
+    def _backfiller(self, backfiller: FillBackfiller | None) -> None:
+        """Bind the fill leg — and check, on the binding, what the cross-check reads off it.
+
+        The window and its operator label follow whichever backfiller is bound
+        (see ``_crosscheck_window``), so both refusals sit here rather than in
+        ``__init__``: a stand-in without a ``lookback`` is named as a mis-wiring
+        (the ``_require_seam`` policy, one seam over) instead of surfacing as
+        an AttributeError inside a guarded leg, and a fractional-hour lookback
+        is refused before the first sweep whether the backfiller arrived at
+        construction (both production sites) or was attached afterwards
+        (tests). It refused at import while the window was a module constant.
+        """
+        if backfiller is not None and not hasattr(backfiller, "lookback"):
+            raise TypeError(
+                "backfiller must be a FillBackfiller (its .lookback is the cross-check "
+                f"window), got {type(backfiller).__name__}"
+            )
+        # Checked BEFORE the slot is written, so a refused binding does not land.
+        candidate, owner = self._window_of(backfiller)
+        whole_hours_label(candidate, what=owner)
+        self._backfiller_slot = backfiller
+
+    @staticmethod
+    def _window_of(backfiller: FillBackfiller | None) -> tuple[timedelta, str]:
+        """``backfiller``'s cross-check window and the name of what owns it; see ``_crosscheck_window``."""
+        if backfiller is None:
+            return timedelta(
+                seconds=DEFAULT_LOOKBACK_SECONDS
+            ), "fill_backfill.DEFAULT_LOOKBACK_SECONDS"
+        return backfiller.lookback, "FillBackfiller.lookback"
+
+    def _crosscheck_window(self) -> tuple[timedelta, str]:
+        """The invalid-local-fill cross-check window and the name of what owns it.
+
+        The window is the bound backfiller's trailing lookback, read off it at
+        each sweep — not bound at construction and not restated from the
+        module default (issue #149, after #102). The KNOWN EXEMPTION below
+        holds only while the two windows are one number, and the default
+        equals every instance's lookback only until the first wiring passes
+        ``lookback_seconds`` through from config — a cross-check still pinned
+        to the default would then call every local fill between the two
+        windows "a fill the exchange denies" and open manual cases on a false
+        premise.
+
+        KNOWN EXEMPTION (decided 2026-07-17): the window slides, so a local
+        fill older than the lookback is permanently outside this leg's verdict
+        — a double-booked fill caught inside the window is manual severity,
+        the same fill outside it is seen only by the equity-tolerance leg.
+        Accepted for PR 4 because a genesis floor would page the full history
+        every pass (and withhold the verdict whenever the 2000/20-page budget
+        runs out); PR 5's durable "cross-checked-through" watermark extends
+        coverage without that cost.
+
+        With no backfiller (reads-only wirings: tests, offline verdicts) there
+        is no backfill leg for the window to keep parity with, and it is only
+        "how far back the cross-check reads": the module default stands in
+        (decided 2026-09-01). The owner name is what a refusal names.
+        """
+        return self._window_of(self._backfiller)
+
+    def _lookback_label(self) -> str:
+        """The cross-check window as the operator reads it in the genesis-corruption warning.
+
+        Whole hours only: a lookback that is not one would render truncated
+        ("5h" for 5h30m) and understate how long an outage can go unbooked, so
+        this refuses rather than round — retuning the backfill window to a
+        fraction of an hour is a change that message has to be rewritten for.
+        """
+        span, owner = self._crosscheck_window()
+        return whole_hours_label(span, what=owner)
 
     # ------------------------------------------------------------------ run
 
@@ -821,7 +906,7 @@ class LiveReconciler:
                         "outage longer than that may leave fills unbooked",
                         self._run_id,
                         genesis_raw,
-                        _LOOKBACK_LABEL,
+                        self._lookback_label(),
                     )
         try:
             summary = self._backfiller.backfill(self._clock.now(), since=since)
@@ -932,7 +1017,8 @@ class LiveReconciler:
             # ReconciliationReport.legs_skipped.
             legs_skipped.append("invalid_local_fill_crosscheck")
         if self._fetch_fills is not None:
-            window_start = now - _FILL_CROSSCHECK_LOOKBACK
+            lookback, _owner = self._crosscheck_window()
+            window_start = now - lookback
             logger.debug(
                 "invalid-local-fill cross-check window %s → %s; local fills older "
                 "than the window are outside this leg's verdict (known exemption, "

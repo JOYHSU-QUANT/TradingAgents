@@ -979,11 +979,12 @@ def test_stamping_a_case_another_writer_already_disposed_of_preserves_the_origin
     assert _action_of(db, event_id) == "resolved_fill_booked"  # the daemon's record survived
 
     # Negative control — the two writers differ on purpose: the daemon keeps the
-    # overwriting writer, because revising its own disposition is legitimate
-    # there and it already does read/test/write inside one transaction.
+    # overwriting writer, because revising its own disposition (to another
+    # machine word) is legitimate there and it already does read/test/write
+    # inside one transaction.
     with db.transaction() as conn:
-        repo.set_reconciliation_action(conn, event_id, "resolved_manual")
-    assert _action_of(db, event_id) == "resolved_manual"
+        repo.set_reconciliation_action(conn, event_id, "backfilled")
+    assert _action_of(db, event_id) == "backfilled"
 
 
 def test_stamping_a_nonexistent_case_raises_rather_than_reporting_a_lost_race(db):
@@ -997,12 +998,37 @@ def test_stamping_a_nonexistent_case_raises_rather_than_reporting_a_lost_race(db
 def test_stamping_with_a_blank_action_is_refused(db):
     # The audit row's whole value is what the human attested; a blank (or
     # whitespace) disposition would clear the verdict block while recording
-    # nothing — the same guard set_reconciliation_action carries.
+    # nothing. (The daemon's writer refuses a blank too, as one more word
+    # outside its vocabulary — the test below.)
     event_id = _open_case(db)
     for blank in ("", "   "):
         with db.transaction() as conn, pytest.raises(ValueError, match="non-empty"):
             repo.stamp_reconciliation_action_if_unset(conn, event_id, blank)
     assert _action_of(db, event_id) is None  # and the case stays open, not half-stamped
+
+
+def test_the_daemon_writer_refuses_a_word_outside_the_machine_vocabulary(db):
+    # set_reconciliation_action is the OVERWRITING writer, and what it writes
+    # decides by string whether the fact key reopens (PROVISIONAL_DISPOSITIONS):
+    # a word nobody classified in MACHINE_DISPOSITIONS would shut the key
+    # forever with no error. Refused at the write (issue #151) — the belt to
+    # reconcile.py's import-time brace, for a literal that reaches the writer
+    # some way the constants loop and the AST scan cannot see.
+    event_id = _open_case(db)
+    for word in ("made_it_up", "", "   "):
+        with (
+            db.transaction() as conn,
+            pytest.raises(ValueError, match="action_taken must be one of"),
+        ):
+            repo.set_reconciliation_action(conn, event_id, word)
+    assert _action_of(db, event_id) is None
+    # Negative control: a human's prose is exactly what the if-unset writer is
+    # for — not vocabulary, and not refused.
+    with db.transaction() as conn:
+        assert repo.stamp_reconciliation_action_if_unset(
+            conn, event_id, "human: made it up, on purpose"
+        )
+    assert _action_of(db, event_id) == "human: made it up, on purpose"
 
 
 # ---------------------------------------------------------------------------

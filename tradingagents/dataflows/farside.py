@@ -648,10 +648,11 @@ def _load_flows(asset: str) -> _FlowSnapshot:
     except (requests.RequestException, VendorUnavailableError, FarsideError) as e:
         # What the context-adding raises below wrap the failure as: the
         # boundary's outage verdict keeps its type (the router logs a Farside
-        # 5xx without a traceback, like any vendor's); a transport failure or
-        # a structural break is this module's own error — the policy
-        # ``sosovalue_common.load_rolling_snapshot`` applies to its family.
-        wrap_cls = type(e) if isinstance(e, VendorError) else FarsideError
+        # 5xx without a traceback, like any vendor's); a transport failure —
+        # a Cloudflare 403 included, which the router then does not count as
+        # an outage — or a structural break is this module's own error. Named
+        # rather than ``type(e)``: every type this wraps takes one message.
+        wrap_cls = VendorUnavailableError if isinstance(e, VendorUnavailableError) else FarsideError
         if cached:
             fetched_at = cached["fetched_at"]
             age = _days_stale(fetched_at)

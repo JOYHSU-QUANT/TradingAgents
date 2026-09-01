@@ -30,7 +30,7 @@ from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
 from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
 from .throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
-from .utils import sanitize_untrusted
+from .utils import http_status, sanitize_untrusted
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -416,20 +416,29 @@ def route_to_vendor(method: str, *args, **kwargs):
             logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
             if first_error is None:
                 first_error = e
-            # A transport failure — a reset, a timeout (requests' exceptions
-            # are all OSError) — is the vendor being unreachable, the same
-            # fact as the outage lane above for the verdict below. NOT a
-            # ``requests.HTTPError``: the vendor answered, and its boundary
-            # left the status alone on purpose (a 4xx is its answer about
-            # this request, not an outage — ``raise_for_http_status``). The
-            # exception's class only, never its text: a requests message
-            # quotes the request URL, query string (an API key) included.
-            if (
-                first_outage is None
-                and isinstance(e, OSError)
-                and not isinstance(e, requests.HTTPError)
-            ):
-                first_outage = (vendor, f"could not be reached: {type(e).__name__}")
+            # The same fact as the outage lane above, for the verdict below,
+            # read off the exception: a transport failure — a reset, a
+            # timeout; requests' and curl_cffi's exceptions are all OSError —
+            # is the vendor being unreachable, and an answered status can say
+            # as much: a 5xx, or a 401/403 refusing this client (what the
+            # yfinance window lets out raw for exactly that reason). Judged
+            # by the status the exception carries, never by its class —
+            # yfinance's HTTPError is curl_cffi's, not requests'. Any other
+            # status is the vendor answering about this request (the 404 a
+            # boundary leaves alone), as is a requests HTTPError with no
+            # status to read; a ValueError-flavoured requests exception
+            # (MissingSchema, InvalidJSONError) is a bug or an answer, not
+            # the wire. The status or the class only, never the text: a
+            # requests message quotes the request URL, API key included.
+            if first_outage is None and isinstance(e, OSError) and not isinstance(e, ValueError):
+                status = http_status(e)
+                if status is None:
+                    if not isinstance(e, requests.HTTPError):
+                        first_outage = (vendor, f"could not be reached: {type(e).__name__}")
+                elif status >= 500:
+                    first_outage = (vendor, f"answered HTTP {status}")
+                elif status in (401, 403):
+                    first_outage = (vendor, f"answered HTTP {status}, refusing this client")
             continue
         # The vendor returned, so a result just received outranks any deadline
         # a sibling thread recorded while this call was in flight ("returned",
@@ -471,12 +480,15 @@ def route_to_vendor(method: str, *args, **kwargs):
         reason = f" ({last_no_data.detail})" if last_no_data.detail else ""
         if first_outage is not None:
             down_vendor, outage = first_outage
+            # Chain-order neutral on purpose: the vendor that was down may be
+            # the primary or the fallback, and either way the others' "no
+            # data" went unconfirmed by it.
             verdict = (
-                f": vendor '{down_vendor}' was unavailable ({outage}) and the remaining "
+                f": vendor '{down_vendor}' was unavailable ({outage}) and the other "
                 f"configured vendor(s) had no usable data{reason}. Treat the symbol as "
-                f"unconfirmed rather than invalid: the source that would normally "
-                f"serve it could not be reached, and the fallback's answer alone does "
-                f"not settle whether it is valid, delisted, or not covered."
+                f"unconfirmed rather than invalid: a source that would normally serve "
+                f"it was unavailable, and the others' answers alone do not settle "
+                f"whether it is valid, delisted, or not covered."
             )
         else:
             verdict = (
@@ -495,7 +507,11 @@ def route_to_vendor(method: str, *args, **kwargs):
     # surfacing instead would abort the call and point at the wrong remedy
     # (#137). Unless a vendor was DOWN: then the name may be one that vendor
     # computes, and the outage is the fact to surface — the typo stays in the
-    # logs, as the vendor failure does in the other case. A chain exhausted by
+    # logs, as the vendor failure does in the other case. Among the vendors'
+    # own failures the FIRST met still wins, an outage included: a missing
+    # key ahead of a down fallback surfaces the key, since that is the
+    # standing misconfiguration the operator has to fix either way, and the
+    # outage is in the logs. A chain exhausted by
     # nothing but rate limits (e.g. a single-vendor chain hitting a 429 with
     # no cache) must degrade like any other failure, not fall through to the
     # bare no-vendor RuntimeError below: a throttle is the fallback verdict so

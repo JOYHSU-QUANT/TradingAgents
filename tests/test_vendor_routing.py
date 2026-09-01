@@ -8,6 +8,7 @@ were swallowed without a trace).
 
 import copy
 import json
+import types
 import unittest
 from unittest import mock
 
@@ -572,6 +573,7 @@ class OutageVerdictTests(unittest.TestCase):
         self.assertIn("HTTP 503", out)  # what the down vendor said rides along
         self.assertIn("no rows", out)  # and so does the fallback's own detail
         self.assertIn("unconfirmed rather than invalid", out)
+        self.assertIn("the other configured vendor(s) had no usable data (no rows)", out)
         self.assertNotIn("may be invalid", out)
         # The shared tail every reader keys on is the same literal as the
         # symbol-wording variant's.
@@ -600,12 +602,58 @@ class OutageVerdictTests(unittest.TestCase):
         self.assertNotIn("may be invalid", out)
 
     def test_a_4xx_the_boundary_left_alone_is_the_vendor_answering_not_down(self):
-        # A requests.HTTPError is an OSError too, but it means the vendor
-        # answered — its boundary left the status alone on purpose (a 404,
-        # a 403) — so the no-data verdict stands as one on the symbol.
+        # A requests.HTTPError is an OSError too, but a 404 means the vendor
+        # answered about this request — its boundary left the status alone on
+        # purpose — so the no-data verdict stands as one on the symbol.
         set_config({"data_vendors": {"core_stock_apis": "alpha_vantage,yfinance"}})
-        not_found = _raises(requests.HTTPError("404 Client Error: Not Found for url: /query"))
+        not_found = _raises(
+            requests.HTTPError(
+                "404 Client Error: Not Found for url: /query",
+                response=types.SimpleNamespace(status_code=404),
+            )
+        )
         with _chain("get_stock_data", {"alpha_vantage": not_found, "yfinance": _no_data}):
+            out = _stock()
+        self.assertIn("may be invalid", out)
+        self.assertNotIn("was unavailable", out)
+
+    def test_the_status_is_read_off_the_exception_not_its_library(self):
+        # yfinance fetches through curl_cffi, whose HTTPError is an OSError
+        # but not requests' — and its un-hidden window lets a 401/403 (Yahoo
+        # refusing this client) and a 5xx out raw. Both are the vendor being
+        # unavailable, said by status; a class check would have called them
+        # "could not be reached" (false: Yahoo answered) or, worse, pinned
+        # the rule to one library.
+        from curl_cffi.requests import exceptions as curl_exceptions
+
+        def _curl(status):
+            return _raises(
+                curl_exceptions.HTTPError(
+                    f"HTTP Error {status}", 0, types.SimpleNamespace(status_code=status)
+                )
+            )
+
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        with _chain("get_stock_data", {"yfinance": _curl(503), "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("vendor 'yfinance' was unavailable (answered HTTP 503)", out)
+        with _chain("get_stock_data", {"yfinance": _curl(403), "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("was unavailable (answered HTTP 403, refusing this client)", out)
+        self.assertNotIn("could not be reached", out)
+        # And a status that is an answer about the request is not an outage,
+        # whichever library raised it.
+        with _chain("get_stock_data", {"yfinance": _curl(404), "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("may be invalid", out)
+
+    def test_a_requests_exception_that_is_a_value_error_is_not_an_outage(self):
+        # MissingSchema / InvalidURL are code bugs dressed as requests
+        # exceptions (they are ValueError too): the traceback lane keeps them,
+        # and the sentinel must not say the vendor was unreachable.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        bug = _raises(requests.exceptions.MissingSchema("Invalid URL 'query': No scheme"))
+        with _chain("get_stock_data", {"yfinance": bug, "alpha_vantage": _no_data}):
             out = _stock()
         self.assertIn("may be invalid", out)
         self.assertNotIn("was unavailable", out)

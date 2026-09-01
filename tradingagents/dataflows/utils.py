@@ -401,12 +401,25 @@ def live_snapshot_note(
     )
 
 
+def http_status(exc: BaseException) -> int | None:
+    """The HTTP status an ``HTTPError`` carries, or ``None`` for any other error.
+
+    Both transport libraries attach the response: curl_cffi's
+    ``raise_for_status`` builds ``HTTPError(msg, 0, response)`` and requests'
+    sets ``.response`` the same way (measured, curl_cffi 0.15.0). The one
+    library-neutral way to read a status off an exception — the two
+    ``HTTPError`` classes share no base below ``OSError``.
+    """
+    return getattr(getattr(exc, "response", None), "status_code", None)
+
+
 def raise_for_http_status(response, vendor: str) -> None:
     """Raise ``VendorUnavailableError`` for a 5xx; otherwise ``response.raise_for_status()``.
 
     The one status decision at a vendor's request boundary — the 5xx check
-    and the library's own raise in a fixed order, so no call site can put
-    ``raise_for_status()`` first and silently restore what this exists for.
+    and the library's own raise in one call, in a fixed order, so a boundary
+    has nothing of its own to sequence (a bare ``raise_for_status()`` ahead
+    of the 5xx check would silently restore what this exists for).
     A 5xx is the vendor being down, and ``route_to_vendor`` reacts to that
     by behaviour — the chain goes on, logged without the traceback its
     generic lane reserves for a bug, and a fallback's "no data" is then
@@ -415,10 +428,13 @@ def raise_for_http_status(response, vendor: str) -> None:
     a ``requests.HTTPError``, which that generic lane logs as a bug and the
     no-data verdict then hides (#142). Every other status keeps the vendor's
     own handling: a 4xx is the vendor's answer about this client or this
-    request (a 401/403 refusal, a 404), not an outage, so it leaves as the
-    ``requests.HTTPError`` it always did; a status the vendor classifies
-    itself (FRED's 400 with the reason in its body, Alpha Vantage's 429) is
-    checked before this is called.
+    request (a 401/403 refusal, a 404), which is the vendor's boundary to
+    judge, not this helper's, so it leaves as the ``requests.HTTPError`` it
+    always did; a status the vendor classifies itself (FRED's 400 with the
+    reason in its body, Alpha Vantage's 429) is checked before this is
+    called. (The router reads the status off an exception that carries one
+    and counts a 401/403 — the vendor refusing this client — as an outage
+    for its verdict; see ``route_to_vendor``.)
 
     The message carries the status code only, never the body: a 5xx body is
     the vendor's error page, and this message travels into a sentinel the

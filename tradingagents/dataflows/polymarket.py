@@ -34,10 +34,12 @@ def _request(path: str, params: dict) -> dict:
 
     A 5xx, or a 2xx whose body is not JSON, raises ``VendorUnavailableError``
     (the shared boundary helpers) rather than the ``requests.HTTPError`` /
-    ``ValueError`` it used to: Gamma answered without data, and that verdict
-    belongs to the router — the caller's transport handler below is not it
-    (a 5xx read there as a "network error" and a non-JSON body reached the
-    router's generic lane as a bug, #142). A 4xx keeps raising as before.
+    ``requests.JSONDecodeError`` it used to: Gamma answered without data,
+    and that verdict belongs to the router — the caller's transport handler
+    below is not it. Both used to land there (a ``requests`` JSON decode
+    error is a ``RequestException`` too) and come back as a "network error"
+    paragraph the router read as a successful answer (#142). A 4xx keeps
+    raising as before.
     """
     response = requests.get(f"{GAMMA_BASE}/{path}", params=params, timeout=REQUEST_TIMEOUT)
     raise_for_http_status(response, "Polymarket")

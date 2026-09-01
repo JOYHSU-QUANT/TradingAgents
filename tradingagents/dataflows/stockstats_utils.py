@@ -17,7 +17,7 @@ from .throttle import ThrottleLatch
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
 # Vantage vendor shares the same single definition (#70).
-from .utils import MAX_OHLCV_STALE_DAYS, normalize_iso_date, safe_ticker_component
+from .utils import MAX_OHLCV_STALE_DAYS, http_status, normalize_iso_date, safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
@@ -148,16 +148,6 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
 _UNHIDE_LOCK = threading.Lock()
 
 
-def _http_status(exc: BaseException) -> int | None:
-    """The HTTP status an ``HTTPError`` carries, or ``None`` for any other error.
-
-    Both transport libraries attach the response: curl_cffi's
-    ``raise_for_status`` builds ``HTTPError(msg, 0, response)`` and requests'
-    sets ``.response`` the same way (measured, curl_cffi 0.15.0).
-    """
-    return getattr(getattr(exc, "response", None), "status_code", None)
-
-
 def yf_fetch_unhidden(func, *, hidden_answer):
     """Run one yfinance call with the library's exception swallow switched off.
 
@@ -226,7 +216,7 @@ def yf_fetch_unhidden(func, *, hidden_answer):
                 # broad handler and came back as prose (#136).
                 raise VendorUnavailableError(f"Yahoo Finance answered without data: {e}") from e
             except OSError as e:
-                if _http_status(e) == 404:
+                if http_status(e) == 404:
                     # 404 alone: a 401/403 is Yahoo refusing this client (a
                     # crumb or an IP block, the case _make_request's cookie
                     # switch exists for), which must reach the fallback chain

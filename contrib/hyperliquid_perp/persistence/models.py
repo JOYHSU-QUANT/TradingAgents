@@ -23,8 +23,9 @@ from enum import Enum
 # The persistence layer's import path for the ONE decimal context — the
 # canonical definition (and rationale) lives in common/decimal_context.py.
 # This re-export is kept, not slated for removal like the domains/perp compat
-# shims were (issue #78): the paper/live writers and the repository read it
-# from here, and tests/common/test_layering.py pins it to the common object.
+# shims were (issue #78): the paper/live engines and the rest of the
+# persistence layer read it from here, and tests/common/test_layering.py
+# pins it to the common object.
 from ..common.decimal_context import DECIMAL_CONTEXT
 
 __all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]

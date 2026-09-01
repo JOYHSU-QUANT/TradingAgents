@@ -116,24 +116,34 @@ def _load_time_import_closure(source: Path, root: Path = _SOURCE_ROOT) -> set[st
     dotted tail to its file (:func:`_module_file`). A tail with no file — the
     bare package root ``""``, or a name that is an attribute of a package's
     ``__init__`` — is kept in the result (it may be an offender) but not
-    walked. Every package ON THE WAY to a resolved tail is walked too — the
-    interpreter runs ``domains/__init__.py`` and ``domains/perp/__init__.py``
-    before ``domains/perp/schema.py`` — but is not itself reported, so an
-    allowlist names modules, not their ancestors. ``root`` is a parameter
-    only so the walk itself can be tested on a synthetic tree.
+    walked. Every package ON THE WAY to a resolved tail is walked too, and so
+    are ``source``'s own packages and the root ``__init__`` — the interpreter
+    runs ``domains/__init__.py`` and ``domains/perp/__init__.py`` before
+    ``domains/perp/schema.py``, whoever imports it — but none of them is
+    reported itself, so an allowlist names modules, not their ancestors.
+    ``root`` is a parameter only so the walk itself can be tested on a
+    synthetic tree.
     """
     seen: set[str] = set()
     walked = {source}
     queue = [source]
+
+    def walk_packages_of(tail: str) -> None:
+        parts = tail.split(".") if tail else []
+        for depth in range(1, len(parts) + 1):
+            module = _module_file(".".join(parts[:depth]), root)
+            if module is not None and module not in walked:
+                walked.add(module)
+                queue.append(module)
+
+    if (root / "__init__.py").is_file():  # ``""`` deliberately has no file
+        walked.add(root / "__init__.py")
+        queue.append(root / "__init__.py")
+    walk_packages_of(".".join(source.resolve().relative_to(root).parent.parts))
     while queue:
         for tail in _in_package_imports(queue.pop(), root) - seen:
             seen.add(tail)
-            parts = tail.split(".") if tail else []
-            for depth in range(1, len(parts) + 1):
-                module = _module_file(".".join(parts[:depth]), root)
-                if module is not None and module not in walked:
-                    walked.add(module)
-                    queue.append(module)
+            walk_packages_of(tail)
     return seen
 
 
@@ -248,6 +258,25 @@ def test_a_bare_package_tail_below_the_floor_is_not_an_offender(tmp_path):
         "",
         "commonplace",
     }
+
+
+def test_the_closure_walk_runs_the_source_modules_own_packages(tmp_path):
+    # The interpreter runs ``domains/__init__.py``, ``domains/perp/__init__.py``
+    # and the root ``__init__`` before ``domains/perp/guard.py`` WHATEVER guard
+    # imports, so the walk seeds itself with them. Guard's own import stays
+    # inside ``common``, whose packages are not guard's: only the seed reaches
+    # ``persistence`` and ``live`` here. (Every real ``__init__`` on the way is
+    # import-free today, which is exactly why nothing but this would notice.)
+    for pkg in ("common", "domains", "domains/perp"):
+        (tmp_path / pkg).mkdir()
+        (tmp_path / pkg / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "__init__.py").write_text("from .live import x\n", encoding="utf-8")
+    perp = tmp_path / "domains" / "perp"
+    (perp / "__init__.py").write_text("from ...persistence import db\n", encoding="utf-8")
+    (tmp_path / "common" / "constants.py").write_text("", encoding="utf-8")
+    (perp / "guard.py").write_text("from ...common.constants import K\n", encoding="utf-8")
+    closure = _load_time_import_closure(perp / "guard.py", root=tmp_path)
+    assert closure == {"common.constants", "persistence", "live"}
 
 
 def test_package_sources_reaches_subpackages_in_path_order(tmp_path):

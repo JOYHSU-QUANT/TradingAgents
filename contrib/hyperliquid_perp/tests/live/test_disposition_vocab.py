@@ -224,8 +224,10 @@ def test_every_repository_writer_with_a_positional_action_taken_is_mapped():
         name
         for module in modules
         for name, function in inspect.getmembers(module, inspect.isfunction)
-        if function.__module__ == repo.__name__
-        or function.__module__.startswith(repo.__name__ + ".")
+        if (
+            function.__module__ == repo.__name__
+            or function.__module__.startswith(repo.__name__ + ".")
+        )
         and not name.startswith("_")
         and any(
             p.name == "action_taken" and p.kind is not p.KEYWORD_ONLY

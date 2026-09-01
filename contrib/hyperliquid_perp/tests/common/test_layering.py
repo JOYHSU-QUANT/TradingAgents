@@ -116,17 +116,24 @@ def _load_time_import_closure(source: Path, root: Path = _SOURCE_ROOT) -> set[st
     dotted tail to its file (:func:`_module_file`). A tail with no file — the
     bare package root ``""``, or a name that is an attribute of a package's
     ``__init__`` — is kept in the result (it may be an offender) but not
-    walked. ``root`` is a parameter only so the walk itself can be tested on
-    a synthetic tree.
+    walked. Every package ON THE WAY to a resolved tail is walked too — the
+    interpreter runs ``domains/__init__.py`` and ``domains/perp/__init__.py``
+    before ``domains/perp/schema.py`` — but is not itself reported, so an
+    allowlist names modules, not their ancestors. ``root`` is a parameter
+    only so the walk itself can be tested on a synthetic tree.
     """
     seen: set[str] = set()
+    walked = {source}
     queue = [source]
     while queue:
         for tail in _in_package_imports(queue.pop(), root) - seen:
             seen.add(tail)
-            module = _module_file(tail, root)
-            if module is not None:
-                queue.append(module)
+            parts = tail.split(".") if tail else []
+            for depth in range(1, len(parts) + 1):
+                module = _module_file(".".join(parts[:depth]), root)
+                if module is not None and module not in walked:
+                    walked.add(module)
+                    queue.append(module)
     return seen
 
 
@@ -208,10 +215,13 @@ def test_a_bare_package_tail_below_the_floor_is_not_an_offender(tmp_path):
     # today, so pin both on a synthetic tree — where the real offenders must
     # stay red: the package root, a sibling package, and a package whose NAME
     # merely starts with a floor package's (the trap a dotless prefix test
-    # would walk into).
+    # would walk into). The tree also plants an import in an ANCESTOR package's
+    # ``__init__`` (``domains/``): the interpreter runs it before any module
+    # below it, so the walk must reach it even though no tail names it.
     for pkg in ("common", "domains", "domains/perp"):
         (tmp_path / pkg).mkdir()
         (tmp_path / pkg / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "domains" / "__init__.py").write_text("from ..paper import p\n", encoding="utf-8")
     perp = tmp_path / "domains" / "perp"
     (perp / "schema.py").write_text("from ...persistence import db\n", encoding="utf-8")
     (perp / "guard.py").write_text(
@@ -226,12 +236,18 @@ def test_a_bare_package_tail_below_the_floor_is_not_an_offender(tmp_path):
     assert closure == {
         "domains.perp.schema",
         "persistence",  # reached THROUGH schema: the second hop
+        "paper",  # reached through the ancestor ``domains/__init__.py``
         "domains.perp",
         "common",
         "",
         "commonplace",
     }
-    assert {t for t in closure if _above_the_floor(t)} == {"persistence", "", "commonplace"}
+    assert {t for t in closure if _above_the_floor(t)} == {
+        "persistence",
+        "paper",
+        "",
+        "commonplace",
+    }
 
 
 def test_package_sources_reaches_subpackages_in_path_order(tmp_path):

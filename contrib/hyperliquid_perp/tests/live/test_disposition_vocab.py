@@ -14,7 +14,9 @@ construction-time refusal — stays in ``test_reconcile.py``.
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
+import pkgutil
 
 import pytest
 
@@ -206,14 +208,24 @@ def test_every_repository_writer_with_a_positional_action_taken_is_mapped():
     # The map spells NAMES, and a name it lacks is a positional slot the scan
     # never resolves — the blind spot the helper's docstring admits for
     # wrappers, opened silently by the next repository writer. So the
-    # repository half is derived from the namespace: every public repository
-    # function that takes ``action_taken`` other than keyword-only (the
-    # generic keyword catch covers those) must be in the map.
-    # ``ReconciliationCase`` is the one non-repository entry.
+    # repository half is derived from the package: every public repository
+    # function — in the facade or in any submodule, since a writer reachable
+    # by its module path is a writer — that takes ``action_taken`` other than
+    # keyword-only (the generic keyword catch covers those) must be in the
+    # map. ``ReconciliationCase`` is the one non-repository entry.
+    modules = [
+        repo,
+        *(
+            importlib.import_module(f"{repo.__name__}.{m.name}")
+            for m in pkgutil.iter_modules(repo.__path__)
+        ),
+    ]
     positional = {
         name
-        for name, function in inspect.getmembers(repo, inspect.isfunction)
-        if not name.startswith("_")
+        for module in modules
+        for name, function in inspect.getmembers(module, inspect.isfunction)
+        if function.__module__.startswith(repo.__name__)
+        and not name.startswith("_")
         and any(
             p.name == "action_taken" and p.kind is not p.KEYWORD_ONLY
             for p in inspect.signature(function).parameters.values()

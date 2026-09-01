@@ -353,8 +353,10 @@ def context_shape(ctx: PerpMarketContext) -> str:
     the fixed sections in render order, the indicator rows by configured name
     (in render order — a reorder is a different prompt), and the optional
     volume-profile section when it is present. It is stored beside
-    ``prompt_version`` on every ``ai_inputs`` row (issue #97) so the paper
-    review can segment on ``(prompt_version, context_shape)`` and a
+    ``prompt_version`` on every ``ai_inputs`` row (issue #97) — and beside
+    ``format_fingerprint``, the format block's content digest, since v11
+    (issue #129; ``target_decision.format_fingerprint``) — so the paper
+    review can segment on all three keys and a
     config-only change that adds or removes a section — flipping
     ``market_data.volume_profile_window_candles``, editing ``indicators`` —
     lands in the data by itself, with no code deploy and nobody remembering

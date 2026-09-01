@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...common.enum_guard import check_enum
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import _ATTEMPT_STATUSES, _MODES, ERROR_TYPES
 
 __all__ = [
+    "PromptRegime",
     "find_in_progress_attempt",
     "get_decision_attempt",
     "insert_account_snapshot",
@@ -18,6 +20,7 @@ __all__ = [
     "insert_ai_output",
     "insert_decision_attempt",
     "insert_position_snapshot",
+    "prompt_regime_counts",
     "update_decision_attempt",
 ]
 
@@ -81,6 +84,53 @@ def get_decision_attempt(conn: sqlite3.Connection, decision_attempt_id: str) -> 
         "SELECT * FROM decision_attempts WHERE decision_attempt_id = ?",
         (decision_attempt_id,),
     ).fetchone()
+
+
+class PromptRegime(NamedTuple):
+    """One bucket of the prompt segmentation: the three keys and its cycle count.
+
+    ``None`` in a key is a row written before the column existed (v10 for the
+    shape, v11 for the fingerprint) — "unknown", not "none of that kind".
+    """
+
+    prompt_version: str | None
+    context_shape: str | None
+    format_fingerprint: str | None
+    cycles: int
+
+
+def prompt_regime_counts(
+    conn: sqlite3.Connection, run_id: str, *, statuses: Iterable[str]
+) -> tuple[PromptRegime, ...]:
+    """The run's cycles split by ``(prompt_version, context_shape, format_fingerprint)``.
+
+    One row per bucket, ordered by the bucket's FIRST cycle, so a run that
+    straddled a prompt-regime boundary reads as before / after (issue #129).
+    Counted over ``decision_attempts`` in ``statuses`` — the caller passes the
+    same set its ``cycle_count`` uses, so the buckets sum to that number —
+    through the attempt's ``input_id``, i.e. the try that reached the terminal
+    status: one count per CYCLE, never one per retried try, and the keys are
+    the ones the decided-on prompt carried. A status the vocabulary rejects
+    fails here rather than matching nothing.
+    """
+    statuses = tuple(statuses)
+    for status in statuses:
+        check_enum(status, _ATTEMPT_STATUSES, name="status")
+    placeholders = ", ".join("?" for _ in statuses)
+    rows = conn.execute(
+        "SELECT i.prompt_version, i.context_shape, i.format_fingerprint, COUNT(*) AS cycles"
+        " FROM decision_attempts a JOIN ai_inputs i ON i.input_id = a.input_id"
+        f" WHERE a.run_id = ? AND a.status IN ({placeholders})"
+        " GROUP BY i.prompt_version, i.context_shape, i.format_fingerprint"
+        " ORDER BY MIN(a.scheduled_at)",
+        (run_id, *statuses),
+    ).fetchall()
+    return tuple(
+        PromptRegime(
+            row["prompt_version"], row["context_shape"], row["format_fingerprint"], row["cycles"]
+        )
+        for row in rows
+    )
 
 
 def find_in_progress_attempt(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:

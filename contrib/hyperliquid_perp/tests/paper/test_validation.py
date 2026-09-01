@@ -33,7 +33,7 @@ from contrib.hyperliquid_perp.paper.validation import validate_run
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
-from ..conftest import insert_decision_attempts
+from ..conftest import insert_decision_attempts, stamp_prompt_regimes
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -793,6 +793,113 @@ def test_streak_clears_once_a_cycle_decides_again(tmp_path):
     report = validate_run(db, run_id="r", now=recovered + timedelta(hours=1))
     assert report.streaks.no_decision == 0
     assert report.phase3_ready
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# prompt regimes — the three segmentation keys on the report (issue #129)
+# --------------------------------------------------------------------------
+
+_V4 = ("phase2-target-v4", "price|market|funding|indicators(rsi_14)|position", "aaaa0000aaaa0000")
+# The same prompt after a ``decision.min_confidence`` edit: nothing to bump,
+# the shape unchanged — only the format block's digest moves.
+_V4_EDITED = (_V4[0], _V4[1], "bbbb0000bbbb0000")
+
+
+def test_prompt_regimes_split_the_cycles_by_the_three_keys_in_first_seen_order(tmp_path):
+    db = _bare_run(tmp_path)
+    # Five attempts: the api_failed one carried an input row (it failed at the
+    # AI call) but never decided, so it is outside cycle_count and outside the
+    # split; invalid_output decided (fail-closed) and counts, as it does there.
+    _insert_outcomes(db, [_OK, _OK, ("invalid_output", None), _OK, _BLIP])
+    stamp_prompt_regimes(db, [_V4, _V4, _V4_EDITED, _V4_EDITED, _V4_EDITED])
+    report = validate_run(db, run_id="r")
+    assert report.prompt_regimes == (
+        repo.PromptRegime(*_V4, 2),
+        repo.PromptRegime(*_V4_EDITED, 2),
+    )
+    assert sum(r.cycles for r in report.prompt_regimes) == report.cycle_count == 4
+    lines = report.summary_lines()
+    first = next(i for i, line in enumerate(lines) if line.startswith("prompt_regime: "))
+    assert lines[first] == (
+        "prompt_regime: prompt_version=phase2-target-v4"
+        " context_shape=price|market|funding|indicators(rsi_14)|position"
+        " format_fingerprint=aaaa0000aaaa0000 cycles=2"
+    )
+    assert lines[first + 1].endswith("format_fingerprint=bbbb0000bbbb0000 cycles=2")
+    # Right before the verdict: a metric, not a failure / shortfall / warning.
+    assert lines[first + 2] == "phase3_ready: no"
+    db.close()
+
+
+def test_a_single_regime_prints_one_line_and_never_gates(tmp_path):
+    # A run that straddled a regime boundary is still phase3-ready: the split
+    # is information for the review, not an acceptance condition (exit 0/4/5
+    # unchanged).
+    db = _bare_run(tmp_path)
+    last = _insert_outcomes(db, [_OK] * 30)
+    stamp_prompt_regimes(db, [_V4] * 30)
+    single = validate_run(db, run_id="r", now=last + timedelta(hours=1))
+    assert single.prompt_regimes == (repo.PromptRegime(*_V4, 30),)
+    assert single.phase3_ready
+    assert [line for line in single.summary_lines() if line.startswith("prompt_regime: ")] == [
+        "prompt_regime: prompt_version=phase2-target-v4"
+        " context_shape=price|market|funding|indicators(rsi_14)|position"
+        " format_fingerprint=aaaa0000aaaa0000 cycles=30"
+    ]
+    db.close()
+
+    (tmp_path / "straddled").mkdir()
+    db = _bare_run(tmp_path / "straddled")
+    last = _insert_outcomes(db, [_OK] * 30)
+    stamp_prompt_regimes(db, [_V4] * 15 + [_V4_EDITED] * 15)
+    straddled = validate_run(db, run_id="r", now=last + timedelta(hours=1))
+    assert len(straddled.prompt_regimes) == 2
+    assert straddled.phase3_ready
+    assert straddled.shortfalls == () and straddled.warnings == ()
+    db.close()
+
+
+def test_rows_from_before_a_key_existed_print_n_a_not_a_regime_of_their_own(tmp_path):
+    # v10 added the shape, v11 the fingerprint: an older row carries NULL
+    # there, which is "unknown", and the line must say so rather than print
+    # ``None`` — or worse, an empty string that reads as a real value.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_OK, _OK])
+    stamp_prompt_regimes(db, [("phase2-target-v3", None, None), ("phase2-target-v3", None, None)])
+    report = validate_run(db, run_id="r")
+    assert report.prompt_regimes == (repo.PromptRegime("phase2-target-v3", None, None, 2),)
+    assert (
+        "prompt_regime: prompt_version=phase2-target-v3 context_shape=n/a"
+        " format_fingerprint=n/a cycles=2"
+    ) in report.summary_lines()
+    db.close()
+
+
+def test_a_decided_attempt_without_an_input_row_makes_the_split_a_warning(tmp_path):
+    # The self-check behind "the buckets sum to cycle_count": no writer
+    # produces a decided attempt without an ai_inputs row, so one can only
+    # come from a repaired or pruned store — and the report must say the
+    # split is partial rather than print buckets that quietly disagree with
+    # the count printed above them.
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_OK, _OK, _OK])
+    stamp_prompt_regimes(db, [_V4, None, _V4])
+    report = validate_run(db, run_id="r")
+    assert report.cycle_count == 3
+    assert report.prompt_regimes == (repo.PromptRegime(*_V4, 2),)
+    assert report.phase3_ready is False  # short of 30, unrelated to the warning
+    assert any("cover 2 of 3 cycles" in line for line in report.warnings)
+    db.close()
+
+
+def test_a_run_with_no_decided_cycle_prints_no_regime_line(tmp_path):
+    db = _bare_run(tmp_path)
+    _insert_outcomes(db, [_BLIP, _BLIP])
+    stamp_prompt_regimes(db, [_V4, None])
+    report = validate_run(db, run_id="r")
+    assert report.prompt_regimes == ()
+    assert not any(line.startswith("prompt_regime: ") for line in report.summary_lines())
     db.close()
 
 

@@ -64,6 +64,26 @@ def test_v10_adds_a_nullable_context_shape_to_ai_inputs(tmp_path):
     db.close()
 
 
+def test_v11_adds_a_nullable_format_fingerprint_and_indexes_fills_by_run_and_time(tmp_path):
+    # Issue #129: the third segmentation key, nullable for the same reason as
+    # v10's (a pre-v11 row reads "written before the column", never as a
+    # digest). Issue #134: the per-cycle ``MAX(timestamp) WHERE run_id`` read
+    # was a full-table scan; the plan must now walk the index.
+    db = Database(tmp_path / "p.db")
+    cols = {row["name"]: row for row in db.conn.execute("PRAGMA table_info(ai_inputs)")}
+    assert cols["format_fingerprint"]["notnull"] == 0
+    assert cols["format_fingerprint"]["type"] == "TEXT"
+    indexes = {row["name"]: row for row in db.conn.execute("PRAGMA index_list(fills)")}
+    assert indexes["idx_fills_run_timestamp"]["unique"] == 0
+    indexed = [row["name"] for row in db.conn.execute("PRAGMA index_info(idx_fills_run_timestamp)")]
+    assert indexed == ["run_id", "timestamp"]
+    plan = db.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT MAX(timestamp) FROM fills WHERE run_id = ?", ("r",)
+    ).fetchall()
+    assert any("idx_fills_run_timestamp" in row[3] for row in plan), [row[3] for row in plan]
+    db.close()
+
+
 def test_defer_migration_opens_an_out_of_date_store_without_touching_it(tmp_path):
     # migrate=True necessarily runs at OPEN, which is before the lease can be
     # taken (the lease lives in the store being opened) — so an owning command

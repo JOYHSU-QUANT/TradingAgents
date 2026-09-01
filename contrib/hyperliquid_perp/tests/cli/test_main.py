@@ -628,10 +628,26 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "do not read it as live signal" not in captured.err
-    # The segmentation bucket this YAML lands in, printed after the render:
-    # the one keyless, store-free way to see it before deploying a config
-    # edit (issue #97 — RUNBOOK §4's "第三種情況").
+    # The segmentation buckets this YAML lands in, printed after the render:
+    # the one keyless, store-free way to see them before deploying a config
+    # edit (issue #97 — RUNBOOK §4's "第三種情況"; issue #129 for the format
+    # half, whose value is the digest of the block run_engine would feed the
+    # model under THIS config's effective ceiling).
+    from contrib.hyperliquid_perp.domains.perp import risk_gate
+    from contrib.hyperliquid_perp.domains.perp.target_decision import (
+        decision_format_instructions,
+        format_fingerprint,
+    )
+
     assert "context_shape: shape text" in captured.out
+    risk_cfg, decision_cfg = bridge_mod._load_risk_decision({})
+    expected = format_fingerprint(
+        decision_format_instructions(
+            decision_cfg,
+            max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
+        )
+    )
+    assert f"format_fingerprint: {expected}" in captured.out
 
 
 def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):

@@ -203,6 +203,7 @@ def _decision_input():
         input_payload_hash=None,
         prompt_version="v1",
         context_shape="price|market|funding|indicators()",
+        format_fingerprint="97aa0feaa4496d6f",
         model="m",
     )
 
@@ -268,19 +269,49 @@ def test_driver_runs_a_full_cycle(tmp_path):
     assert row["status"] == "completed"
     out = db.conn.execute("SELECT * FROM ai_outputs WHERE run_id='r'").fetchone()
     assert out is not None and out["order_created"] in (0, 1)
-    # The live writer carries both segmentation keys off the DecisionInput
-    # (issue #97) — the same audit_rows path the paper scheduler uses.
+    # The live writer carries all three segmentation keys off the DecisionInput
+    # (issues #97, #129) — the same audit_rows path the paper scheduler uses.
     ai_in = db.conn.execute(
-        "SELECT prompt_version, context_shape FROM ai_inputs WHERE run_id='r'"
+        "SELECT prompt_version, context_shape, format_fingerprint FROM ai_inputs WHERE run_id='r'"
     ).fetchone()
-    assert (ai_in["prompt_version"], ai_in["context_shape"]) == (
-        "v1",
-        "price|market|funding|indicators()",
-    )
+    assert tuple(ai_in) == ("v1", "price|market|funding|indicators()", "97aa0feaa4496d6f")
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["next_decision_at"] is not None
     # Not due again until the next 4h boundary.
     assert driver.pump() is None
+
+
+def test_driver_writes_the_audit_row_from_the_books_the_provider_carried(tmp_path):
+    # Issue #134 on the live lane: the same one-read contract the paper
+    # scheduler keeps — books carried on the input are written as-is, and the
+    # prologue makes none of the three reads; a bookless input still gets the
+    # lane's own read (and its own "no ledger" refusal, unchanged).
+    from contrib.hyperliquid_perp.paper.position_facts import read_books
+
+    # read_books' three statements (the prologue's SL/TP read is another fact).
+    reads = (
+        "SELECT * FROM current_account_state",
+        "SELECT * FROM current_positions",
+        "MAX(timestamp) FROM fills",
+    )
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    books = read_books(db, "r", "BTC")
+    provider._di = DecisionInput(context=_decision_input().context, books=books)
+    statements: list[str] = []
+    original = driver._persist_ai_input
+
+    def traced(*args, **kwargs):
+        db.conn.set_trace_callback(statements.append)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            db.conn.set_trace_callback(None)
+
+    driver._persist_ai_input = traced
+    assert driver.pump() == "cycle_started"
+    assert statements and not [s for s in statements if any(r in s for r in reads)]
+    row = db.conn.execute("SELECT wallet_balance FROM ai_inputs WHERE run_id='r'").fetchone()
+    assert row["wallet_balance"] == str(books.ledger.wallet_balance) == "4000"
 
 
 def test_driver_build_failure_is_api_failed(tmp_path):

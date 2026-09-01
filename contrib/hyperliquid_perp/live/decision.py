@@ -42,10 +42,10 @@ from ..domains.perp.target_decision import (
 from ..paper import accounting
 from ..paper.clock import Clock, WallClock
 from ..paper.engine import AssetSpec
+from ..paper.position_facts import read_books
 from ..paper.scheduler import DecisionInput, DecisionProvider, RetryableDecisionError
 from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
-from ..persistence.models import PositionState
 
 if TYPE_CHECKING:
     from .engine import PlanRegistration
@@ -702,10 +702,16 @@ class LiveDecisionDriver:
     ) -> None:
         ctx = decision_input.context
         conn = self._db.conn
-        ledger = repo.require_current_account_state(conn, self._run_id)
-        position = repo.get_current_position(conn, self._run_id, self._coin) or PositionState.flat(
-            self._coin
-        )
+        # The books the prompt was built from, carried on the input (issue
+        # #134) — one read per cycle, shared with the position section. A
+        # provider that carries none (a test double, a replay harness) gets the
+        # pre-#134 read here, and a missing ledger still fails the way this
+        # lane always did.
+        books = decision_input.books or read_books(self._db, self._run_id, self._coin)
+        if books is None:
+            repo.require_current_account_state(conn, self._run_id)  # raises
+            raise AssertionError("read_books answered None over a seeded ledger")
+        ledger, position = books.ledger, books.position
         valuations = (
             []
             if position.is_flat
@@ -734,6 +740,7 @@ class LiveDecisionDriver:
             leverage=self._risk.leverage,
             max_target_margin_pct=self._risk.max_target_margin_pct,
             liquidation_price=liq_price,
+            last_fill_time=books.last_fill_time,
             active_twap=bool(active_plans),
             # v1 does not yet attribute live fills to their plan, so a running
             # plan's remaining quantity is not truthfully known here; report it as

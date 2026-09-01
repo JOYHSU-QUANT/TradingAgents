@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.
@@ -670,4 +670,29 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # Nullable so every existing row stays valid — a NULL means "written
     # before v10", not "no shape".
     10: ("ALTER TABLE ai_inputs ADD COLUMN context_shape TEXT",),
+    # v11: the third segmentation key, and the index the per-cycle books read
+    # was missing (issues #129, #134).
+    #
+    # ``format_fingerprint`` — a CONTENT digest (not a shape) of the format
+    # block the model is shown beside the context: the legal margin grid, the
+    # effective ceiling, the confidence bars and the deadband are rendered
+    # into that text from the live ``decision:`` / ``risk:`` config, so a YAML
+    # edit changes the numbers the model reads with no deploy, no
+    # ``prompt_version`` bump and no change to ``context_shape``. Written by
+    # every ai_inputs writer from ``target_decision.format_fingerprint``;
+    # exported (schema-augmentation column). Nullable: a NULL means "written
+    # before v11", not "no format block" — the prompt-v5 (PR-B) format
+    # change will move this value again, by design.
+    #
+    # ``idx_fills_run_timestamp`` — ``fills.MAX(timestamp) WHERE run_id`` is
+    # read once per cycle (``ai_inputs.last_fill_time`` and the prompt's
+    # position section share the read) and was a full-table scan. The
+    # acceptance validator's "a fill at or before this order" orphan probe
+    # filters on ``(run_id, symbol, timestamp)``, so this index narrows it to
+    # the run's rows but does not cover it — a single-coin run makes the
+    # difference moot, and the per-cycle read is the one that matters.
+    11: (
+        "ALTER TABLE ai_inputs ADD COLUMN format_fingerprint TEXT",
+        "CREATE INDEX idx_fills_run_timestamp ON fills (run_id, timestamp)",
+    ),
 }

@@ -455,6 +455,20 @@ def test_build_input_carries_the_context_shape_beside_the_prompt_version(tmp_pat
         payload = json.load(fh)
     assert payload["context_shape"] == expected
     assert payload["prompt_version"] == decision_input.prompt_version
+    # The third key (issue #129): a digest of the format block AS RENDERED
+    # for this provider — its config and its effective ceiling — so the row,
+    # the payload and the text the model is shown all agree on one value.
+    from contrib.hyperliquid_perp.domains.perp.target_decision import (
+        decision_format_instructions,
+        format_fingerprint,
+    )
+
+    expected_fingerprint = format_fingerprint(
+        decision_format_instructions(DecisionConfig(), max_pct=60)
+    )
+    assert decision_input.format_fingerprint == expected_fingerprint
+    assert payload["format_fingerprint"] == expected_fingerprint
+    assert format_fingerprint(payload["format_instructions"]) == expected_fingerprint
     # The payload's own copy of the prompt text, which nothing else pins: the
     # stored artifact is what an audit reads months later, and the model is fed
     # a SEPARATE attribute (``self._context_text``), so a payload written empty
@@ -2946,6 +2960,67 @@ def test_paper_flat_restart_reconciliation_error_exits_1_and_stamps_breadcrumb(
     db.close()
 
 
+def test_paper_loop_names_an_untyped_failure_instead_of_counting_api_tries(
+    tmp_path, monkeypatch, capsys
+):
+    # Issue #134: a non-retryable bug fails the cycle closed with no §6.2
+    # class and no ladder — the AI was never asked, so "decision API failed 1
+    # times" would file a bug as an outage for anyone scraping the log.
+    from datetime import timedelta
+
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+
+    path, db = _seed_db(tmp_path)
+    monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
+    monkeypatch.setattr(
+        reconcile_mod, "backfill_pending_funding", lambda db_, *, run_id, now, funding_source: None
+    )
+    monkeypatch.setattr(cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, d: True)
+    untyped = PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="r#001",
+        scheduled_at=_T0,
+        attempt_count=1,
+        next_decision_at=_T0 + timedelta(hours=4),
+        error_type=None,
+    )
+
+    class _Engine:
+        def has_active_work(self):
+            return False
+
+    class _Scheduler:
+        def poll(self):
+            return untyped
+
+        def next_due_at(self):
+            return None
+
+    def stop_after_one(seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.paper.time, "sleep", stop_after_one)
+    with pytest.raises(KeyboardInterrupt):
+        cli_mod._paper_loop(
+            db,
+            "r",
+            _Engine(),
+            _Scheduler(),
+            ManualClock(_T0),
+            30,
+            tmp_path / "exports",
+            funding_source=None,
+            trading_halted=False,
+        )
+    err = capsys.readouterr().err
+    assert "non-retryable error" in err
+    assert "decision API failed" not in err
+    db.close()
+
+
 def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatch):
     # RuntimeError out of backfill_pending_funding is fail-loud by design:
     # nothing in the loop may contain it (main() maps it to exit 2, already
@@ -5155,7 +5230,7 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
 
 
 def test_the_live_loop_wires_the_books_as_the_provider_position_source(tmp_path, monkeypatch):
-    # Prompt v4 on the live lane: the same read_book_position binding the paper
+    # Prompt v4 on the live lane: the same read_books binding the paper
     # daemon makes, over THIS run's store — dropped, None, or bound to the
     # wrong run/coin would leave the live prompt silently position-blind.
     built = _drive_live_loop_construction(
@@ -5365,16 +5440,17 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     ``PROMPT_VERSION`` to a value that has never been used before (rollbacks
     included — see the RUNBOOK), then update the digest here.
     """
-    import hashlib
-
     from contrib.hyperliquid_perp import cli as _cli
     from contrib.hyperliquid_perp.domains.perp.target_decision import (
         DecisionConfig,
         decision_format_instructions,
+        format_fingerprint,
     )
 
+    # The same digest the daemon stamps on ai_inputs.format_fingerprint (issue
+    # #129), so "the block changed" means one thing in the test and the data.
     block = decision_format_instructions(DecisionConfig())
-    digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:16]
+    digest = format_fingerprint(block)
     # Compared as one tuple so a mismatch shows both halves at once — which one
     # drifted is the whole diagnosis.
     # v4 (2026-08-27) bumped the version for the CONTEXT's new Position:
@@ -5383,15 +5459,16 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
 
 
 def _book(**overrides):
-    from contrib.hyperliquid_perp.paper.position_facts import BookPosition
+    """The books as ``read_books`` returns them: an open long, one fill booked."""
+    from contrib.hyperliquid_perp.paper.position_facts import BookFacts
+    from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
 
     base = {
-        "size": D("0.005"),
-        "entry_price": D(50000),
-        "wallet_balance": D(1000),
-        "last_fill_at": datetime(2026, 3, 14, 20, 0, tzinfo=timezone.utc),
+        "ledger": AccountLedger(wallet_balance=D(1000)),
+        "position": PositionState(coin="BTC", size=D("0.005"), entry_price=D(50000)),
+        "last_fill_time": "2026-03-14T20:00:00+00:00",
     }
-    return BookPosition(**{**base, **overrides})
+    return BookFacts(**{**base, **overrides})
 
 
 def _provider_with_source(tmp_path, monkeypatch, ctx, source, handed=None):
@@ -5444,7 +5521,11 @@ def test_build_input_hands_the_books_and_the_effective_ceiling_to_the_builder(
     decision_input = provider.build_input(coin="BTC", as_of=as_of)
     position = handed["position"]
     assert isinstance(position, PositionInputs)
-    assert position.book is book
+    # The builder gets the prompt-side view of the ONE read; the driver's
+    # ai_inputs row gets the whole read, on the input (issue #134) — the same
+    # object, so the two cannot describe different books.
+    assert position.book == book.position_facts
+    assert decision_input.books is book
     assert position.pricing.grid_max == 60
     assert position.pricing.leverage == D(1)
     assert position.pricing.taker_fee_rate == PaperExecutionConfig().taker_fee_rate
@@ -5522,11 +5603,11 @@ def test_build_input_reads_the_books_once_before_the_fetch_even_if_the_cycle_is_
 
 
 def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
-    """``source`` is ``read_book_position`` bound over THIS run's store, in order."""
-    from contrib.hyperliquid_perp.paper.position_facts import read_book_position
+    """``source`` is ``read_books`` bound over THIS run's store, in order."""
+    from contrib.hyperliquid_perp.paper.position_facts import read_books
     from contrib.hyperliquid_perp.persistence.db import Database
 
-    assert source.func is read_book_position
+    assert source.func is read_books
     db, bound_run, bound_coin = source.args
     assert isinstance(db, Database)
     assert (bound_run, bound_coin) == (run_id, coin)
@@ -5535,7 +5616,7 @@ def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
 def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
     tmp_path, monkeypatch, paper_seams
 ):
-    # The paper lane: _build_provider binds read_book_position over the run's
+    # The paper lane: _build_provider binds read_books over the run's
     # store, so a fresh run's very first prompt already carries the section
     # (the books are seeded before the first cycle). The recorder stops the
     # command right at the provider pre-flight, before initialize_run.

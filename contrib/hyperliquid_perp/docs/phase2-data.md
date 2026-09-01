@@ -235,6 +235,7 @@ AI input
 | `input_payload_path` | 完整 AI input JSON 檔路徑 |
 | `prompt_version` | 使用的 prompt / strategy 版本 |
 | `model` | 使用的 LLM model |
+| `format_fingerprint`（schema v11 augmentation 欄，CSV 排在 `context_shape` 之後） | 當次 format 段——`decision_format_instructions` 渲染給模型的輸出格式契約文字——的**內容指紋**（`domains/perp/target_decision.format_fingerprint`：UTF-8 SHA-256 前 16 個 hex，例：`97aa0feaa4496d6f`）。第三個切段鍵：`prompt_version` 標 code 改版、`context_shape` 標段落結構，這欄標 format 段的**內容**——合法 margin 格線、有效上限（含被 `risk.max_target_margin_pct` 壓過的結果）、`min_confidence`／`resize_min_confidence`、deadband 都渲染進那段文字，改 `decision:`／`risk:` YAML 就換值，不需部署、不 bump、shape 不動。是指紋不是 shape：文字任何改動都換值——包括 prompt v5（marginal-cost PR-B）計畫中的門檻數字調整，屆時這欄會再變一次，屬預期。`validate` 依三鍵印每組的 cycle 數（`prompt_regime:` 行）。v11 之前的列為空（＝寫入時沒有這欄，不是另一個制度） |
 | `context_shape`（schema v10 augmentation 欄，CSV 排在 `input_payload_hash` 之後） | 當次 market context 的**段落結構**字串（`domains/perp/prompt_context.context_shape`，例：`price\|market\|funding\|indicators(rsi_14,ema_20)\|volume_profile`）。與 `prompt_version` 並列的切段鍵：`prompt_version` 標 code 改版，`context_shape` 標「多一段／少一段」（含 `indicators` 清單重新排序——段落數不變但 prompt 不同）——包括只改 YAML 就會發生的（`market_data.volume_profile_window_candles`、`indicators`）。prompt v4 起 daemon 的列多一段 `position`（倉位段有渲染即出現；open／flat 是帳戶狀態，不進 shape，用 `current_position_side` 切）。只取結構，不取標籤裡的數字與隨資料有無出現的行。v10 之前的列為空 |
 
 ---
@@ -264,7 +265,7 @@ AI input
 | `first_attempt_at` | 第一次嘗試時間 |
 | `last_attempt_at` | 最後一次嘗試時間 |
 | `status` | `in_progress` / `completed` / `api_failed` / `invalid_output` |
-| `error_type` | `timeout` / `rate_limit` / `connection` / `malformed_response` / `stale_market_data` / `server_error` 等；成功可留空。`stale_market_data`＝交易所回答了、context 結構也完好，但它的**年齡**不可用（K 線 feed 停止推進，或量測年齡的兩個時鐘無法比對）——同樣不會自癒，`validate` 的 no-decision streak **不分 class**（issue #50）——它數的是「最近連續幾個 cycle 出不了決策」，`stale_market_data` 只決定 shortfall 的措辭、並讓報告另印 `stale_feed_refusal_streak` 這個子集。記成 `server_error` 會讓它與暖機不足、指標引擎壞掉這類會自癒的環境失敗混為一談。`malformed_response`＝交易所有回答、但回答無法解讀（誤路由的讀取、wire schema 漂移）；與 `connection` 分開記是因為連線中斷會自癒、這個不會，混在一起會讓按 class 的判讀把系統性壞掉的 feed 記成一次連線抖動 |
+| `error_type` | `timeout` / `rate_limit` / `connection` / `malformed_response` / `stale_market_data` / `server_error` 等；成功留空。**`api_failed` 也可能留空**：非 Retryable 例外（通常是程式缺陷，live 自 Phase 3、paper 自 issue #134 起都記成 `api_failed` 續跑）沒有 §6.2 class，細節在 `error_message` 的 `non-retryable:` 前綴之後——不是壞掉的列。`stale_market_data`＝交易所回答了、context 結構也完好，但它的**年齡**不可用（K 線 feed 停止推進，或量測年齡的兩個時鐘無法比對）——同樣不會自癒，`validate` 的 no-decision streak **不分 class**（issue #50）——它數的是「最近連續幾個 cycle 出不了決策」，`stale_market_data` 只決定 shortfall 的措辭、並讓報告另印 `stale_feed_refusal_streak` 這個子集。記成 `server_error` 會讓它與暖機不足、指標引擎壞掉這類會自癒的環境失敗混為一談。`malformed_response`＝交易所有回答、但回答無法解讀（誤路由的讀取、wire schema 漂移）；與 `connection` 分開記是因為連線中斷會自癒、這個不會，混在一起會讓按 class 的判讀把系統性壞掉的 feed 記成一次連線抖動 |
 | `error_message` | 最後一次錯誤摘要；成功可留空 |
 | `next_decision_at` | 本 attempt 終結後排定的下一個 cycle 時間 |
 

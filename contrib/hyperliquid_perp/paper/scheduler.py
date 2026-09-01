@@ -28,8 +28,17 @@ cycle counts as done.
 
 The AI/market seam is the injected :class:`DecisionProvider` (production wires
 the TradingAgents engine; tests script outcomes), which signals a retryable
-failure by raising :class:`RetryableDecisionError` — anything else propagates
-as a bug.
+failure by raising :class:`RetryableDecisionError`. Anything else is a bug —
+and a bug raised BEFORE the AI answers (the books read, the market fetch,
+the ``ai_inputs`` row, the call itself) fails THAT CYCLE closed
+(``api_failed`` with no §6.2 class, the traceback logged at ERROR, the
+position and its SL/TP held, the next cycle on schedule) rather than the
+daemon: the live driver's rule for the same stretch, adopted here in issue
+#134 so the two lanes stop meaning different things by "failed". A bug
+AFTER the answer — the ``pending_raw_response`` store, ``_finalize``'s
+gate, plan start or audit commit — still propagates: by then a paid-for
+decision and possibly a committed plan exist, and swallowing that is a
+different, undecided trade-off.
 
 Restart safety of a half-finished cycle: the successful AI response is
 persisted onto the attempt row (``pending_raw_response``) *before* the gate
@@ -61,10 +70,11 @@ from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse
 from ..persistence import audit_rows, repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import decision_attempt_id as derive_attempt_id
-from ..persistence.models import DECIMAL_CONTEXT, PositionState
+from ..persistence.models import DECIMAL_CONTEXT
 from . import accounting
 from .clock import Clock
 from .engine import AssetSpec, PaperExecutionEngine, PlanStartResult
+from .position_facts import BookFacts, read_books
 
 __all__ = [
     "CYCLE_INTERVAL",
@@ -101,8 +111,8 @@ class RetryableDecisionError(Exception):
     posture as ``ContextRefusal`` — so a producer's typo fails on the raise
     instead of when the daemon tries to record its failure at the repository
     write boundary (which checks the same set; issue #122). Anything the
-    provider does not classify should propagate as a normal exception (a bug,
-    not a retry).
+    provider does not classify is a bug, not a retry: it fails the cycle
+    closed with no class at all (see ``PaperScheduler._fail_untyped``).
     """
 
     def __init__(self, error_type: str, message: str) -> None:
@@ -116,8 +126,10 @@ class RetryableDecisionError(Exception):
 class DecisionInput:
     """Everything one AI call sees, built by the provider before the call.
 
-    ``context`` is the market side of the ``ai_inputs`` row; the paper-account
-    side is read from the store by the scheduler at insert time. The payload
+    ``context`` is the market side of the ``ai_inputs`` row; the account side
+    rides along as ``books`` (the one read the position section was priced
+    from), and the driver reads it itself only for an input that carries
+    none. The payload
     path/hash point at the full JSON the provider persisted (phase2-data §5:
     SQLite keeps the summary + path + hash, never the whole prompt).
     """
@@ -131,7 +143,17 @@ class DecisionInput:
     # The prompt's section structure (prompt_context.context_shape), the
     # second segmentation key beside prompt_version (issue #97).
     context_shape: str | None = None
+    # The third: a content digest of the format block
+    # (target_decision.format_fingerprint) — the half of the prompt the other
+    # two keys do not cover, whose numbers move on a config edit (issue #129).
+    format_fingerprint: str | None = None
     model: str | None = None
+    # The books the position section was priced from — ledger, position, the
+    # newest fill's stamp — so the ``ai_inputs`` row is written from the SAME
+    # read rather than a second one (issue #134). ``None``: the provider
+    # carries no books (a test double, a replay harness) and the driver reads
+    # them itself.
+    books: BookFacts | None = None
 
     def __post_init__(self) -> None:
         # Path and hash are two halves of one artifact (phase2-data §5: the
@@ -149,13 +171,14 @@ class DecisionInput:
                 "DecisionInput.candle_start and candle_end must be provided "
                 "together (or both omitted)"
             )
-        # The two segmentation keys are one pair too: a row stamped with a
-        # version but no shape would be indistinguishable from pre-v10
-        # history, which the review reads as "shape unknown".
-        if (self.prompt_version is None) != (self.context_shape is None):
+        # The three segmentation keys are one set too: a row stamped with a
+        # version but no shape (or no fingerprint) would be indistinguishable
+        # from pre-v10 / pre-v11 history, which the review reads as "unknown".
+        keys = (self.prompt_version, self.context_shape, self.format_fingerprint)
+        if any(k is None for k in keys) and not all(k is None for k in keys):
             raise ValueError(
-                "DecisionInput.prompt_version and context_shape must be provided "
-                "together (or both omitted)"
+                "DecisionInput.prompt_version, context_shape and format_fingerprint "
+                "must be provided together (or all omitted)"
             )
         # An inverted window (start after end) is a malformed §5 row the same way
         # a half-present pair is; the spec pair is one candle's [start, end].
@@ -216,11 +239,11 @@ class PollResult:
     next_decision_at: datetime | None = None
     # The §6.2 class the terminal api_failed row was written with, carried so
     # the loop does not have to read back a row it just wrote to learn WHY the
-    # cycle failed (issue #50's escalation words its message from it). Present
-    # exactly on an api_failed result: ``_terminalize_api_failed`` is the only
-    # producer and its own ``error_type`` is non-optional. (The live driver's
-    # untyped fail — a non-retryable bug — writes its row directly and builds
-    # no PollResult, so that case never reaches this type.)
+    # cycle failed (issue #50's escalation words its message from it). Only an
+    # api_failed result may carry one — and an api_failed result may carry
+    # NONE: a non-retryable bug fails the cycle closed with no §6.2 class
+    # (``_fail_untyped``, issue #134), the same untyped row the live driver
+    # writes, which the streak counter names "unclassified".
     error_type: str | None = None
 
     def __post_init__(self) -> None:
@@ -228,8 +251,8 @@ class PollResult:
         # implies which follow-up fields exist, and a caller branches on them.
         if (self.retry_at is not None) != (self.event is CycleEvent.RETRY_SCHEDULED):
             raise ValueError("retry_at is present exactly on a retry_scheduled result")
-        if (self.error_type is None) == (self.event is CycleEvent.API_FAILED):
-            raise ValueError("error_type is present exactly on an api_failed result")
+        if self.error_type is not None and self.event is not CycleEvent.API_FAILED:
+            raise ValueError("error_type is present only on an api_failed result")
         if (self.next_decision_at is None) == self.event.is_cycle_terminal:
             raise ValueError("next_decision_at is present exactly on a cycle-terminal result")
         completed = self.event in (CycleEvent.COMPLETED, CycleEvent.INVALID_OUTPUT)
@@ -445,6 +468,8 @@ class PaperScheduler:
             parsed = self._provider.request_decision(decision_input)
         except RetryableDecisionError as exc:
             return self._record_failure(attempt_id, scheduled_at, count, exc)
+        except Exception as exc:  # noqa: BLE001 — a bug fails the cycle closed, not the daemon
+            return self._fail_untyped(attempt_id, scheduled_at, count, exc)
         # Persist the response BEFORE gating: from here on, a crash or a
         # market-data-blocked gate resumes from this stored text instead of
         # spending another AI call (spec §3.1 — no duplicate decision).
@@ -532,6 +557,51 @@ class PaperScheduler:
             retry_at=failed_at + timedelta(seconds=RETRY_DELAYS_SECONDS[count - 1]),
         )
 
+    def _fail_untyped(
+        self, attempt_id: str, scheduled_at: datetime, count: int, exc: Exception
+    ) -> PollResult:
+        """A non-retryable error in the try: fail THIS cycle closed, keep the daemon.
+
+        The live driver's rule (``LiveDecisionDriver._fail_closed`` with
+        ``error_type=None``), adopted for parity (issue #134): before this the
+        same bug let the exception climb out of ``_paper_loop`` and the daemon
+        exited for systemd to restart — into the same bug, 60s later, with the
+        position unwatched in between. Now the cycle is terminal at once — no
+        §3.1 ladder, because a bug does not heal in 10s the way an outage may
+        — with NO §6.2 class (none applies; the detail rides
+        ``error_message`` under a ``non-retryable:`` prefix, and the streak
+        counter names it "unclassified"), the traceback logged at ERROR, the
+        position and its SL/TP held, and the next cycle on schedule. A bug
+        that recurs every cycle therefore reads as the same no-decision streak
+        an outage does: ERROR from the third, ``validate`` exit 4 — the
+        signal that used to be systemd's restart count. Scope: the three
+        statements of the try in ``_execute`` — a failure of the fail record
+        itself still propagates (here that exits the daemon; the live lane
+        parks it in safe mode and retries the write), and so does anything
+        after the answer, from the ``pending_raw_response`` store through
+        ``_finalize`` — deliberately outside this guard (module docstring).
+
+        "Non-retryable" is not the same as "a bug": everything that is not a
+        :class:`RetryableDecisionError` lands here, and that includes host
+        trouble the provider does not classify — a ``sqlite3.OperationalError``
+        past ``busy_timeout`` on a books read, a ``MemoryError``. (The payload
+        write's ``OSError`` IS classified, as ``server_error``.) The repr in
+        ``error_message`` is what tells the two apart; the RUNBOOK's row says so.
+        """
+        logger.exception(
+            "decision attempt %s try %d hit a non-retryable error — failing the cycle closed",
+            attempt_id,
+            count,
+        )
+        return self._terminalize_api_failed(
+            self._clock.now(),
+            attempt_id=attempt_id,
+            scheduled_at=scheduled_at,
+            attempt_count=count,
+            error_type=None,
+            error_message=f"non-retryable: {exc!r}",
+        )
+
     def _terminalize_api_failed(
         self,
         now: datetime,
@@ -539,11 +609,13 @@ class PaperScheduler:
         attempt_id: str,
         scheduled_at: datetime,
         attempt_count: int,
-        error_type: str,
+        error_type: str | None,
         error_message: str,
     ) -> PollResult:
         """Spec §3.1 terminal failure: hold position, no target, next = scheduled+4h.
 
+        ``error_type`` is a §6.2 class, or ``None`` for a non-retryable bug
+        (``_fail_untyped``) — the row then carries only ``error_message``.
         The previous AI output is deliberately not reused; existing SL/TP and
         the market monitor keep running untouched (the engine owns them).
 
@@ -676,17 +748,22 @@ class PaperScheduler:
     def _insert_ai_input(
         self, now: datetime, input_id: str, attempt_id: str, decision_input: DecisionInput
     ) -> None:
-        """Record what the AI is about to see: market context + paper account state."""
+        """Record what the AI is about to see: market context + paper account state.
+
+        The account side comes from the books the provider read for the
+        prompt's position section and carried on the input (issue #134): one
+        read per cycle feeds both the prompt and this row, so the two cannot
+        describe different books. A provider that carries none (a test double,
+        a replay harness) gets the pre-#134 read here instead.
+        """
         ctx = decision_input.context
         conn = self._db.conn
-        ledger = repo.get_current_account_state(conn, self._run_id)
-        if ledger is None:
+        books = decision_input.books or read_books(self._db, self._run_id, self._coin)
+        if books is None:
             raise ValueError(
                 f"run {self._run_id!r} has no account state; call accounting.initialize_run first"
             )
-        position = repo.get_current_position(conn, self._run_id, self._coin) or PositionState.flat(
-            self._coin
-        )
+        ledger, position = books.ledger, books.position
         valuations = (
             []
             if position.is_flat
@@ -720,6 +797,7 @@ class PaperScheduler:
             leverage=self._risk.leverage,
             max_target_margin_pct=self._risk.max_target_margin_pct,
             liquidation_price=liq_price,
+            last_fill_time=books.last_fill_time,
             active_twap=bool(active_plans),
             remaining_twap_qty=remaining_twap if active_plans else None,
         )

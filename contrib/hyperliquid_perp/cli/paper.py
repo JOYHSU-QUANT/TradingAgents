@@ -204,7 +204,7 @@ def _cmd_paper(argv: list[str]) -> int:
             def _build_provider():
                 from functools import partial
 
-                from ..paper.position_facts import read_book_position
+                from ..paper.position_facts import read_books
 
                 return _provider._EngineDecisionProvider(
                     config,
@@ -214,7 +214,7 @@ def _cmd_paper(argv: list[str]) -> int:
                     # Bound now, read per cycle: the fresh-run provider is
                     # built before initialize_run seeds the books, and the
                     # read degrades to "no section" until they exist.
-                    position_source=partial(read_book_position, db, run_id, coin),
+                    position_source=partial(read_books, db, run_id, coin),
                 )
 
             if not is_restart:
@@ -648,7 +648,17 @@ def _paper_loop(
                         "protection-only mode until the books verify again.",
                         file=sys.stderr,
                     )
-            if result.event is CycleEvent.API_FAILED:
+            if result.event is CycleEvent.API_FAILED and result.error_type is None:
+                # A non-retryable error (issue #134): the AI was never asked
+                # and no ladder ran, so the "API failed N times" line below
+                # would file a bug as an outage. The traceback is already in
+                # the log at ERROR; this line only points at it.
+                print(
+                    "decision cycle failed closed on a non-retryable error — see the "
+                    "ERROR traceback above; holding position until the next cycle.",
+                    file=sys.stderr,
+                )
+            elif result.event is CycleEvent.API_FAILED:
                 logger.warning(
                     "decision API failed %s times for %s — holding position until the next cycle",
                     result.attempt_count,

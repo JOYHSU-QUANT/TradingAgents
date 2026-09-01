@@ -123,6 +123,7 @@ from ..common.no_decision import (
     trailing_failure_streaks,
 )
 from ..paper import accounting
+from ..paper.validation import prompt_regime_lines
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from .config import DEFAULT_SCHEDULE_CANCEL_SECONDS as _CONFIG_DEFAULT_DEADLINE_S, ExecutionMode
@@ -479,6 +480,10 @@ class LiveValidationReport:
     shortfalls: tuple[str, ...]
     # Non-gating completeness signals (human review), never affect the verdict.
     warnings: tuple[str, ...] = ()
+    # The run's cycles split by the three prompt segmentation keys, first seen
+    # first — the paper report's field, for the same reason (issue #129); the
+    # ``cycles`` sum to ``cycle_count`` (same statuses). Informational only.
+    prompt_regimes: tuple[repo.PromptRegime, ...] = ()
     # Refresh attempts written during live-smoke: excluded from
     # ``kill_switch_refresh_total`` above, and carried here ONLY so the summary
     # can say so. The three low-evidence shortfalls disclose the exclusion, but
@@ -693,8 +698,9 @@ class LiveValidationReport:
             f"daily_loss_breached: {_yn(self.daily_loss_breached)}",
             f"daily_loss_active: {_yn(self.daily_loss_active)}",
             f"emergency_close_event_count: {self.emergency_close_event_count}",
-            f"live_ready: {'yes' if self.live_ready else 'no'}",
         ]
+        lines.extend(prompt_regime_lines(self.prompt_regimes))
+        lines.append(f"live_ready: {'yes' if self.live_ready else 'no'}")
         lines.extend(f"failure: {reason}" for reason in self.failures)
         lines.extend(f"shortfall: {reason}" for reason in self.shortfalls)
         lines.extend(f"warning: {reason}" for reason in self.warnings)
@@ -1376,6 +1382,7 @@ def validate_live_run(
             (run_id,),
         )
         streaks = trailing_failure_streaks(conn, run_id)
+        prompt_regimes = repo.prompt_regime_counts(conn, run_id, statuses=_COMPLETED_CYCLE_STATUSES)
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         # Distinct acknowledged live orders: the exchange confirmed it holds
         # (or already held — a 'duplicate' ack) each cloid.
@@ -1667,6 +1674,15 @@ def validate_live_run(
             "not machine-verifiable from the store; confirm it before go-live"
         )
 
+    # Same self-check as the paper report: the buckets are counted through
+    # ``decision_attempts.input_id`` and must sum to ``cycle_count``.
+    regime_total = sum(r.cycles for r in prompt_regimes)
+    if regime_total != cycle_count:
+        warnings.append(
+            f"prompt_regime buckets cover {regime_total} of {cycle_count} cycles — "
+            "decided attempt(s) without an ai_inputs row; the split is partial"
+        )
+
     return LiveValidationReport(
         run_id=run_id,
         execution_mode=run_execution_mode,
@@ -1708,6 +1724,7 @@ def validate_live_run(
         failures=tuple(failures),
         shortfalls=tuple(shortfalls),
         warnings=tuple(warnings),
+        prompt_regimes=prompt_regimes,
     )
 
 

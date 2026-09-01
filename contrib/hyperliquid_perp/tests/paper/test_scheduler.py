@@ -524,16 +524,158 @@ def test_decision_input_rejects_half_candle_window():
     DecisionInput(context=ctx)
 
 
-def test_decision_input_rejects_a_half_segmentation_pair():
+# The three statements ``read_books`` issues. The prologue's SL/TP read off
+# ``current_positions`` (``SELECT stop_loss_price, take_profit_price ...``) is
+# a different fact and stays where it is.
+_BOOK_READS = (
+    "SELECT * FROM current_account_state",
+    "SELECT * FROM current_positions",
+    "MAX(timestamp) FROM fills",
+)
+
+
+def _trace_audit_prologue(db, scheduler):
+    """Record every SQL statement ``_insert_ai_input`` issues (and nothing else's)."""
+    statements: list[str] = []
+    original = scheduler._insert_ai_input
+
+    def traced(*args, **kwargs):
+        db.conn.set_trace_callback(statements.append)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            db.conn.set_trace_callback(None)
+
+    scheduler._insert_ai_input = traced
+    return statements
+
+
+def test_the_audit_row_is_written_from_the_books_the_provider_carried(tmp_path):
+    # Issue #134: the provider reads the books once for the prompt's position
+    # section and carries them on the DecisionInput; the ai_inputs prologue
+    # writes THOSE, making none of its own three reads. Measured on the SQL
+    # the prologue issues, so a re-read sneaking back in fails here rather
+    # than only showing up as a second scan in a profile.
+    from contrib.hyperliquid_perp.paper.position_facts import read_books
+
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    carried = {}
+
+    def build_input(*, coin, as_of):
+        carried["books"] = read_books(db, "r", coin)
+        return DecisionInput(context=_ctx(as_of), books=carried["books"])
+
+    provider.build_input = build_input
+    statements = _trace_audit_prologue(db, scheduler)
+    result = scheduler.poll()
+    assert result is not None and result.event is CycleEvent.COMPLETED
+    assert statements, "the prologue ran"
+    assert not [s for s in statements if any(read in s for read in _BOOK_READS)]
+    row = db.conn.execute("SELECT wallet_balance, last_fill_time FROM ai_inputs").fetchone()
+    assert (row["wallet_balance"], row["last_fill_time"]) == (
+        str(carried["books"].ledger.wallet_balance),
+        carried["books"].last_fill_time,
+    )
+    db.close()
+
+
+def test_the_audit_row_falls_back_to_its_own_read_for_a_provider_without_books(tmp_path):
+    # The retained path: a provider that carries no books (every scripted
+    # double here, a replay harness) still gets a correct row — from the one
+    # read the prologue makes itself, the way it did before #134.
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    statements = _trace_audit_prologue(db, scheduler)
+    result = scheduler.poll()
+    assert result is not None and result.event is CycleEvent.COMPLETED
+    for read in _BOOK_READS:
+        assert sum(read in s for s in statements) == 1, read
+    row = db.conn.execute("SELECT wallet_balance, last_fill_time FROM ai_inputs").fetchone()
+    assert (row["wallet_balance"], row["last_fill_time"]) == ("1000", None)
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# non-retryable errors fail the cycle closed, never the daemon (issue #134)
+# --------------------------------------------------------------------------
+
+
+def test_a_bug_in_build_input_fails_the_cycle_closed_without_a_ladder(tmp_path, caplog):
+    import logging
+
+    # Snapshots: the failed cycle's best-effort cycle-end snapshot, then the
+    # recovered cycle's gate and ITS cycle-end snapshot.
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [_decision("long", 1)], [_snap(), _snap(), _snap()]
+    )
+
+    def broken(*, coin, as_of):
+        raise RuntimeError("a DTO guard tripped")
+
+    provider.build_input = broken
+    with caplog.at_level(logging.ERROR):
+        result = scheduler.poll()
+    # Terminal at once — no 10s/30s ladder, the try counter at 1 — the row
+    # carrying no §6.2 class and the cause under the live lane's prefix.
+    assert result is not None and result.event is CycleEvent.API_FAILED
+    assert result.error_type is None and result.attempt_count == 1
+    row = _attempt_row(db, result.decision_attempt_id)
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    assert row["error_message"] == "non-retryable: RuntimeError('a DTO guard tripped')"
+    assert provider.decide_calls == 0
+    # The traceback reaches the log at ERROR — the daemon no longer exits, so
+    # this is where the bug is now found.
+    record = next(r for r in caplog.records if "non-retryable" in r.getMessage())
+    assert record.levelno == logging.ERROR and record.exc_info is not None
+    # The next cycle is on schedule (scheduled + 4h) and starts normally.
+    assert result.next_decision_at == _T0 + CYCLE_INTERVAL
+    assert scheduler.poll() is None
+    clock.set(_T0 + CYCLE_INTERVAL)
+    provider.build_input = _FakeProvider.build_input.__get__(provider)
+    fresh = scheduler.poll()
+    assert fresh is not None and fresh.event is CycleEvent.COMPLETED
+    db.close()
+
+
+def test_a_bug_in_the_engine_call_fails_the_cycle_closed_after_the_input_row(tmp_path):
+    # The same guard past the audit write: the ai_inputs row for the try
+    # stays (it describes what the AI was about to see), the attempt is
+    # api_failed with no class, and nothing is re-asked.
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [RuntimeError("engine bug")], [_snap()]
+    )
+    result = scheduler.poll()
+    assert result is not None and result.event is CycleEvent.API_FAILED
+    assert result.error_type is None
+    row = _attempt_row(db, result.decision_attempt_id)
+    assert (row["status"], row["error_type"]) == ("api_failed", None)
+    assert row["error_message"].startswith("non-retryable: RuntimeError(")
+    assert row["input_id"] == f"{result.decision_attempt_id}#in1"
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_inputs").fetchone()[0] == 1
+    assert provider.decide_calls == 1
+    db.close()
+
+
+def test_decision_input_rejects_a_partial_segmentation_key_set():
     ctx = _ctx(_T0)
-    # prompt_version and context_shape are the two segmentation keys of one
-    # ai_inputs row (issue #97): a version with no shape would be filed with
-    # pre-v10 history, which the review reads as "shape unknown".
-    with pytest.raises(ValueError, match="context_shape"):
-        DecisionInput(context=ctx, prompt_version="v1")
-    with pytest.raises(ValueError, match="context_shape"):
-        DecisionInput(context=ctx, context_shape="price|market|funding|indicators()")
-    DecisionInput(context=ctx, prompt_version="v1", context_shape="price|market")
+    # prompt_version, context_shape and format_fingerprint are the three
+    # segmentation keys of one ai_inputs row (issues #97, #129): a row carrying
+    # some but not all would be filed with pre-v10 / pre-v11 history, which the
+    # review reads as "unknown". Every proper subset is rejected, not just the
+    # historical version-without-shape pair.
+    keys = {
+        "prompt_version": "v1",
+        "context_shape": "price|market|funding|indicators()",
+        "format_fingerprint": "97aa0feaa4496d6f",
+    }
+    for missing in keys:
+        partial = {name: value for name, value in keys.items() if name != missing}
+        with pytest.raises(ValueError, match="format_fingerprint"):
+            DecisionInput(context=ctx, **partial)
+    for only in keys:
+        with pytest.raises(ValueError, match="format_fingerprint"):
+            DecisionInput(context=ctx, **{only: keys[only]})
+    DecisionInput(context=ctx, **keys)
 
 
 def test_decision_input_rejects_inverted_candle_window():
@@ -583,18 +725,19 @@ def test_poll_result_shape_guards():
             next_decision_at=_T0,
             error_type="server_error",
         )
-    # ``error_type`` is present exactly on an api_failed result — the loop
-    # escalates on it (issue #50), so a failed cycle that carried none would
-    # silently reset the streak, and a decided one that carried a class would
-    # advance it.
-    with pytest.raises(ValueError, match="error_type"):
-        PollResult(
-            event=CycleEvent.API_FAILED,
-            decision_attempt_id="a",
-            scheduled_at=_T0,
-            attempt_count=1,
-            next_decision_at=_T0,
-        )
+    # ``error_type`` is present only on an api_failed result — the loop's
+    # streak counter keys on the EVENT and reads the class for wording alone
+    # (issue #50), so a decided cycle carrying a class is the malformed one.
+    # An api_failed result MAY carry none: a non-retryable bug fails the cycle
+    # closed with no §6.2 class (issue #134), and the counter names that
+    # "unclassified" rather than resetting.
+    PollResult(
+        event=CycleEvent.API_FAILED,
+        decision_attempt_id="a",
+        scheduled_at=_T0,
+        attempt_count=1,
+        next_decision_at=_T0,
+    )
     with pytest.raises(ValueError, match="error_type"):
         PollResult(
             event=CycleEvent.COMPLETED,

@@ -41,6 +41,7 @@ from .domains.perp import context_guards, risk_gate
 from .domains.perp.prompt_context import context_shape, render_market_context
 from .domains.perp.target_decision import (
     decision_format_instructions,
+    format_fingerprint,
     parse_target_decision,
 )
 from .exchanges.hyperliquid.errors import ExchangeError
@@ -88,7 +89,8 @@ def run_context_only(config: dict, coin: str) -> int:
     # The parsed configs aren't consumed here — the validation runs purely for
     # its named exit-1 side effect, before any network fetch (see the docstring
     # for why the smoke run validates at all).
-    if engine_bridge._load_risk_decision(config) is None:
+    cfgs = engine_bridge._load_risk_decision(config)
+    if cfgs is None:
         return 1
     # No local books on this lane, said rather than omitted (issue #134): the
     # venue's own position is read below and printed UNDER the context, never
@@ -100,9 +102,22 @@ def run_context_only(config: dict, coin: str) -> int:
     print("=" * 64)
     print(render_market_context(ctx))
     print("=" * 64)
-    # The bucket this YAML lands in (ai_inputs.context_shape) — the one
-    # keyless, store-free way to see it BEFORE deploying a config edit.
+    # The buckets this YAML lands in (ai_inputs.context_shape and
+    # .format_fingerprint) — the one keyless, store-free way to see them
+    # BEFORE deploying a config edit. The fingerprint is over the same block
+    # run_engine feeds the model (effective ceiling included), so a
+    # ``decision:`` / ``risk:`` edit shows its new value here.
     print(f"context_shape: {context_shape(ctx)}")
+    risk_cfg, decision_cfg = cfgs
+    print(
+        "format_fingerprint: "
+        + format_fingerprint(
+            decision_format_instructions(
+                decision_cfg,
+                max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
+            )
+        )
+    )
 
     # Keyless diagnostic loop: render rather than abort, but warn with the same
     # shared guard the trading paths refuse on — a refused context *looks* like

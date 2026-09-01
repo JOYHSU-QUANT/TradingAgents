@@ -2006,12 +2006,14 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
 
 
 def test_run_engine_prompt_carries_no_gate_threshold_number(monkeypatch):
-    # Prompt v5's rule at the ASSEMBLY level: nothing the adapter injects —
-    # the market context, the format block, or any future section handed the
-    # config — may print a gate threshold. The two blocks are pinned on their
-    # own (by value in test_target_decision, by gate word in
-    # test_prompt_context); this is the one place the whole injected text is
-    # in hand, so a new section cannot reopen the leak unnoticed.
+    # Prompt v5's rule at the one-shot ASSEMBLY level: the format block, and
+    # anything run_engine itself concatenates around the context, may not
+    # print a gate threshold — through the real config path
+    # (engine_bridge._load_risk_decision), not a hand-built DecisionConfig.
+    # The context half is a stub here (``_stub_engine`` replaces
+    # render_market_context), so the context sections are NOT covered by
+    # this test: they are pinned by gate word in test_prompt_context, and the
+    # daemon lanes compose the same two functions (cli/_provider.py).
     written = {}
     _stub_engine(monkeypatch)
     monkeypatch.setattr(

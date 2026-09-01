@@ -696,7 +696,13 @@ def test_format_instructions_carry_no_gate_threshold_number():
     normalized = " ".join(text.split())
     assert "whose confidence is too low is rejected" in normalized
     assert "creates no order (a cost-free reaffirmation)" in normalized
-    assert "held to a higher confidence bar and is rejected below it" in normalized
+    # Subject bound to its clause: the higher bar is for a resize that WOULD
+    # TRADE, never for a within-deadband reaffirmation the sentence before
+    # just called cost-free.
+    assert (
+        "same-side resize that would actually trade is held to a higher confidence bar "
+        "and is rejected below it" in normalized
+    )
     assert "confidence is recorded but never scales the size" in normalized
     # The gate's exemption ranking stays out too (2026-07 review decision,
     # reaffirmed for v4 and v5): the resize clause says its bar is higher,

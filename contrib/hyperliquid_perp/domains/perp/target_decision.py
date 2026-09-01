@@ -563,12 +563,16 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     the model steered to, not information (see the CHANGELOG entry for
     ``phase2-target-v5`` for the paper-BTC-2 figures). The block states the
     three rules qualitatively — pinned number-free by
-    ``test_format_instructions_carry_no_gate_threshold_number`` and, over the
-    whole injected prompt, by
+    ``test_format_instructions_carry_no_gate_threshold_number`` and, through
+    the one-shot config path, by
     ``test_run_engine_prompt_carries_no_gate_threshold_number`` — and the
     gate enforces the numbers unchanged; a rejection still reaches the audit
-    row. The deadband sentence itself is a deliberately simplified contract
-    for the normal case, twice over. The model is not told how wide "only
+    row. Two deliberate simplifications follow from the wording being fixed.
+    The resize sentence says the bar is "higher" even when an operator sets
+    ``resize_min_confidence == min_confidence`` (the documented off-switch)
+    — accepted, since rendering it conditionally would put config back into
+    the text. And the deadband sentence is a simplified contract for the
+    normal case, twice over: the model is not told how wide "only
     marginally" is, so it cannot know whether a single grid step is a
     cost-free reaffirmation or a trade held to the resize bar — accepted,
     since telling it is exactly the anchor v5 removes. And the gate skips

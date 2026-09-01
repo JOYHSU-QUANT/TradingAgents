@@ -129,8 +129,8 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
 （prompt v5 起 `format_fingerprint` 也不再跟著門檻走，所以門檻的 code 預設值改動在
 `ai_inputs`、drift 戳、`prompt_regime:` 三處**都看不到**——只剩 run-id 這一道。）
-prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py` 的
-`PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
+prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措辭的改版），另要 bump
+`cli/_provider.py` 的 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，
@@ -147,7 +147,7 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py`
 部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的 `paper-BTC`。
 
 **這條例外附一個硬規則：量測窗內不得夾帶其他輸入面變更。** 切段鍵是
-`prompt_version`，而它只在 context／format **契約改形狀**時才 bump；輸入面的**內容**
+`prompt_version`，而它只在 context／format **契約改形狀或改措辭**時才 bump；輸入面的**內容**
 變了（例如把某個 ships-OFF 的 vendor 翻成啟用）不改形狀、不會 bump，`input_payload_hash`
 每個 cycle 本來就不同也切不了段——於是 after 段的前半後半是兩個不同的輸入制度，而資料
 裡完全看不出來。所以跨過 v3 邊界之後、量測窗結束之前，`deploy/paper` **只准**帶 prompt

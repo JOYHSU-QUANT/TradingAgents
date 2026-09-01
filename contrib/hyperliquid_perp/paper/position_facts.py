@@ -23,8 +23,8 @@ from ..common.instants import parse_instant
 
 # The prompt-side DTO lives in ``domains/`` — the context builder assembles the
 # position section and must not import ``paper/`` — and is re-exported here,
-# beside its only producer, so the import path callers already use keeps
-# working.
+# beside its only producer (:attr:`BookFacts.position_facts`), so a reader of
+# this module sees the whole shape the books are reduced to in one place.
 from ..domains.perp.marginal_cost import BookPosition
 from ..persistence import repository as repo
 from ..persistence.db import Database

@@ -20,8 +20,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 
-# Long-standing re-export point for the persistence layer's writers/consumers;
-# the canonical definition (and rationale) lives in common/decimal_context.py.
+# The persistence layer's import path for the ONE decimal context — the
+# canonical definition (and rationale) lives in common/decimal_context.py.
+# This re-export is kept, not slated for removal like the domains/perp compat
+# shims were (issue #78): the paper/live writers and the repository read it
+# from here, and tests/common/test_layering.py pins it to the common object.
 from ..common.decimal_context import DECIMAL_CONTEXT
 
 __all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]

@@ -2,11 +2,12 @@
 
 None of these invariants is exercised anywhere else:
 
-- ``domains/perp/margin`` and ``persistence/models`` keep re-exporting the
-  ONE ``DECIMAL_CONTEXT`` that lives in ``common`` — the margin path is
-  frozen by phase3-spec §2.1, the models path is the persistence layer's
-  long-standing entry point, and nothing else would notice either of them
-  forking a second context;
+- ``domains/perp/margin`` and ``persistence/models`` re-export the ONE
+  ``DECIMAL_CONTEXT`` that lives in ``common`` BY IDENTITY — deleting either
+  name would break its importers loudly, but forking a second, equal context
+  would not: the margin path is frozen by phase3-spec §2.1, the models path
+  is the persistence layer's long-standing entry point, and nothing else
+  would notice;
 - ``common/`` stays at the bottom of the import graph — the rule in
   ``common/__init__``'s docstring that nothing there imports from another
   ``hyperliquid_perp`` package would otherwise be enforced by review only;

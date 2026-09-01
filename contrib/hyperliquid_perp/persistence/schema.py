@@ -674,15 +674,17 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # was missing (issues #129, #134).
     #
     # ``format_fingerprint`` — a CONTENT digest (not a shape) of the format
-    # block the model is shown beside the context: the legal margin grid, the
-    # effective ceiling, the confidence bars and the deadband are rendered
-    # into that text from the live ``decision:`` / ``risk:`` config, so a YAML
-    # edit changes the numbers the model reads with no deploy, no
-    # ``prompt_version`` bump and no change to ``context_shape``. Written by
-    # every ai_inputs writer from ``target_decision.format_fingerprint``;
-    # exported (schema-augmentation column). Nullable: a NULL means "written
-    # before v11", not "no format block" — the prompt-v5 (PR-B) format
-    # change will move this value again, by design.
+    # block the model is shown beside the context: the legal margin grid and
+    # the effective ceiling are rendered into that text from the live
+    # ``decision:`` / ``risk:`` config, so a YAML edit of those changes the
+    # numbers the model reads with no deploy, no ``prompt_version`` bump and
+    # no change to ``context_shape``. (Through prompt v4 the confidence bars
+    # and the deadband were in the text too; prompt v5 keeps them out, so a
+    # threshold edit no longer moves this value — the run-id rule covers it.)
+    # Written by every ai_inputs writer from
+    # ``target_decision.format_fingerprint``; exported (schema-augmentation
+    # column). Nullable: a NULL means "written before v11", not "no format
+    # block".
     #
     # ``idx_fills_run_timestamp`` — ``fills.MAX(timestamp) WHERE run_id`` is
     # read once per cycle (``ai_inputs.last_fill_time`` and the prompt's

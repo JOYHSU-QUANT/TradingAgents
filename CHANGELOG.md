@@ -580,6 +580,26 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the output-format block no longer tells the model the
+  gate's threshold numbers (prompt `phase2-target-v5`).** The second half of
+  the marginal-cost plan (PR-B; PR-A was `phase2-target-v4`). The 2026-08-27
+  `/paper-review` of paper-BTC-2 put 27 of 48 confidences at exactly 0.72 —
+  `resize_min_confidence` plus 0.02 — and every approved rebalance exactly
+  one `rebalance_deadband_pct` from the last: rendered as numbers, the three
+  thresholds (`min_confidence` included) were anchors the model steered to,
+  and the gate rejected 1 of 48 while the churn it exists to stop went on.
+  `decision_format_instructions` now states the three rules qualitatively
+  ("too low is rejected", "only marginally away creates no order", "a resize
+  that would actually trade is held to a higher confidence bar") and renders
+  no threshold value; the legal grid and the effective ceiling still render,
+  and the RiskGate enforces the numbers unchanged. Consequences for the
+  segmentation keys: `format_fingerprint` follows what the model reads, so a
+  `decision:` threshold edit no longer moves it (the run-id rule for strategy
+  parameters still applies); `PROMPT_VERSION` moves to `phase2-target-v5`,
+  so the next `deploy/paper` push starts a new `prompt_version` segment —
+  time it after the v4 segment has its >= 8-episode review (phase2-spec §2.4
+  records why v5-segment confidences cannot be pooled with v2–v4).
+
 - **hyperliquid_perp: the context guards and the no-decision policy now live
   below the engines** (issue #122; pure relocation, no behaviour change). The
   decision cadence `CYCLE_INTERVAL` and the store's timestamp decoder

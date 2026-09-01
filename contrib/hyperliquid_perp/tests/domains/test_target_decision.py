@@ -622,19 +622,15 @@ def test_leftover_placeholder_in_a_typed_field_fails_closed(field, placeholder, 
 
 
 def test_format_instructions_reflect_config():
+    # The grid is the ONE thing the config still puts in the text (prompt v5;
+    # the gate rules are stated without numbers — see the test below).
     cfg = DecisionConfig(
         ai_target_margin_min_pct=0,
         ai_target_margin_max_pct=80,
         target_margin_step_pct=5,
-        min_confidence=Decimal("0.4"),
     )
     text = decision_format_instructions(cfg)
     assert "from 0 to 80 in steps of 5" in text
-    # Bind the value to its clause: a bare `"0.4" in text` would still pass if
-    # the min_confidence and resize_min_confidence substitutions were swapped.
-    normalized = " ".join(text.split())
-    assert "confidence below 0.4 is rejected" in normalized
-    assert "needs confidence >= 0.7" in normalized  # default resize bar, other clause
     # The schema block renders the same *bounds* it advertises in prose (the
     # step lives only in the prose bullet). Its unparseability is
     # config-independent — the other three typed placeholders are constant
@@ -654,16 +650,61 @@ def test_format_instructions_advertise_effective_cap():
 def test_format_fingerprint_follows_the_numbers_the_model_is_shown():
     # The third segmentation key (issue #129) is a digest of the RENDERED
     # block: the same config renders the same value, and any number the
-    # config puts in the text — a confidence bar from ``decision:``, or the
+    # config puts in the text — the grid step from ``decision:``, or the
     # effective ceiling ``risk.max_target_margin_pct`` caps the grid to —
     # moves it, with nothing to deploy or bump.
     base = format_fingerprint(decision_format_instructions(DecisionConfig(), max_pct=60))
     assert base == format_fingerprint(decision_format_instructions(DecisionConfig(), max_pct=60))
     assert len(base) == 16
     int(base, 16)  # hex, as the column and the RUNBOOK say
-    edited = DecisionConfig(min_confidence=Decimal("0.5"))
+    edited = DecisionConfig(target_margin_step_pct=5)
     assert format_fingerprint(decision_format_instructions(edited, max_pct=60)) != base
     assert format_fingerprint(decision_format_instructions(DecisionConfig(), max_pct=40)) != base
+    # Since prompt v5 the gate thresholds are not in the text, so editing them
+    # moves NOTHING here — the key follows what the model reads, and the model
+    # no longer reads them. (The gate change itself is still a run-id change
+    # under the RUNBOOK's rule; that is a different key.)
+    thresholds = DecisionConfig(
+        min_confidence=Decimal("0.5"),
+        resize_min_confidence=Decimal("0.9"),
+        rebalance_deadband_pct=Decimal("3"),
+    )
+    assert format_fingerprint(decision_format_instructions(thresholds, max_pct=60)) == base
+
+
+def test_format_instructions_carry_no_gate_threshold_number():
+    # Prompt v5 (the marginal-cost plan's PR-B; the CHANGELOG entry for
+    # ``phase2-target-v5`` carries the paper-BTC-2 evidence): the thresholds
+    # are the gate's, not the model's — rendered as numbers they were
+    # anchors — so the block states the three rules and keeps every number
+    # out. Distinctive non-default values that appear nowhere else in the
+    # block (the grid prints 0/60/5, ``_MAX_KEY_RISKS`` prints 3), derived
+    # from the config rather than retyped, so all three are really checked.
+    cfg = DecisionConfig(
+        min_confidence=Decimal("0.37"),
+        rebalance_deadband_pct=Decimal("2.5"),
+        resize_min_confidence=Decimal("0.83"),
+        target_margin_step_pct=5,
+    )
+    text = decision_format_instructions(cfg, max_pct=60)
+    assert "from 0 to 60 in steps of 5" in text  # the grid still renders
+    for value in (cfg.min_confidence, cfg.resize_min_confidence, cfg.rebalance_deadband_pct):
+        assert str(value) not in text, value
+    # The three rules, and the one sentence that stops the model from using
+    # size to compensate for a modest confidence (phase2-spec §2.4), are
+    # pinned by wording here — the only pin they have.
+    normalized = " ".join(text.split())
+    assert "whose confidence is too low is rejected" in normalized
+    assert "creates no order (a cost-free reaffirmation)" in normalized
+    assert "held to a higher confidence bar and is rejected below it" in normalized
+    assert "confidence is recorded but never scales the size" in normalized
+    # The gate's exemption ranking stays out too (2026-07 review decision,
+    # reaffirmed for v4 and v5): the resize clause says its bar is higher,
+    # never higher THAN which action's — comparing bars only teaches that a
+    # full close is the guaranteed way past the gate, and since v4 the model
+    # sees its own position, so it could act on that (see the docstring).
+    # Pinned as the literal comparison phrase; the concept itself is prose.
+    assert "higher bar than" not in normalized
 
 
 def test_decision_config_rejects_bad_grid():
@@ -697,35 +738,6 @@ def test_decision_config_equal_confidence_bars_accepted():
 def test_decision_config_from_dict_parses_resize_confidence():
     cfg = DecisionConfig.from_dict({"resize_min_confidence": 0.8})
     assert cfg.resize_min_confidence == Decimal("0.8")
-
-
-def test_format_instructions_advertise_resize_bar_and_deadband():
-    # The prompt renders the live resize threshold and the rebalance deadband
-    # so the model is told the same-side bar and the no-trade band the gate
-    # actually enforces — never hardcoded copies that could drift.
-    text = decision_format_instructions(
-        DecisionConfig(resize_min_confidence=Decimal("0.75"), rebalance_deadband_pct=Decimal("12"))
-    )
-    assert "0.75" in text
-    assert "12" in text
-    # Normalized: the phrase spans a template line wrap.
-    normalized = " ".join(text.split())
-    assert "same-side resize that would actually trade" in normalized
-    # Bind each threshold to its clause — bare value-presence checks would
-    # still pass if the two confidence substitutions were swapped, silently
-    # advertising the wrong bar for opens vs. resizes.
-    assert "needs confidence >= 0.75" in normalized
-    assert "confidence below 0.3 is rejected" in normalized  # default base bar
-    # The deadband is advertised with the gate's strict-< boundary (2026-07
-    # review decision): "within 12 points" reads as inclusive, telling the
-    # model an exactly-12 move is a cost-free reaffirmation when the gate
-    # actually orders it through the resize bar.
-    assert "less than 12 percentage points away" in normalized
-    # The gate's exemption ranking must stay out of the prompt (2026-07 review
-    # decision, reaffirmed for prompt v4): comparing bars only teaches that a
-    # full close is the guaranteed way past the gate — and since v4 the model
-    # sees its own position, so it COULD act on that (see the docstring).
-    assert "higher bar than" not in normalized
 
 
 def test_decision_config_rejects_grid_step_not_reaching_max():

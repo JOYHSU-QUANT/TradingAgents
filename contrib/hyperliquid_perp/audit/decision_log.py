@@ -51,10 +51,12 @@ def prompt_hash(prompt: str) -> str:
     """``sha256:<hex>`` of the prompt text the caller hands in.
 
     ``main.py`` passes the full adapter-injected text — the rendered market
-    context *and* the output-format contract (which embeds the live margin grid
-    and ``min_confidence``) — so records produced under different
-    ``decision:``/``risk:`` config never share a hash. The engine's own base
-    instrument context is engine-internal and not captured.
+    context *and* the output-format contract (which embeds the live margin
+    grid and effective ceiling) — so records produced under a different grid
+    or ceiling never share a hash. Since prompt v5 the gate thresholds are
+    NOT in that text, so a ``decision:`` threshold edit alone leaves the hash
+    unchanged (segment those by run-id, per the RUNBOOK). The engine's own
+    base instrument context is engine-internal and not captured.
     """
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"

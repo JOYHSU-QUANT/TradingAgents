@@ -1998,11 +1998,35 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
     assert written["mark_price"] == Decimal("60000")
     assert written["account_equity"] == Decimal("10000")
     # prompt_hash must cover everything the adapter injected: the market
-    # context AND the output-format contract (whose grid/min_confidence come
-    # from the live config), so config changes always change the hash.
+    # context AND the output-format contract (whose grid and effective ceiling
+    # come from the live config), so a grid change always changes the hash.
     assert "## Perpetual market context\nctx text" in written["prompt"]
     assert "## Required final decision output format" in written["prompt"]
     assert "decision log written to" in capsys.readouterr().err
+
+
+def test_run_engine_prompt_carries_no_gate_threshold_number(monkeypatch):
+    # Prompt v5's rule at the ASSEMBLY level: nothing the adapter injects —
+    # the market context, the format block, or any future section handed the
+    # config — may print a gate threshold. The two blocks are pinned on their
+    # own (by value in test_target_decision, by gate word in
+    # test_prompt_context); this is the one place the whole injected text is
+    # in hand, so a new section cannot reopen the leak unnoticed.
+    written = {}
+    _stub_engine(monkeypatch)
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    thresholds = {
+        "min_confidence": 0.37,
+        "resize_min_confidence": 0.83,
+        "rebalance_deadband_pct": 2.5,
+    }
+    assert main_mod.run_engine({"decision": thresholds}, "BTC") == 0
+    for leaked in ("0.37", "0.83", "2.5"):
+        assert leaked not in written["prompt"], leaked
 
 
 def test_run_engine_healthy_risk_rejection_exits_zero(monkeypatch, capsys):

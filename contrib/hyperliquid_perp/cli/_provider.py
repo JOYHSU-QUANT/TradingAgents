@@ -16,12 +16,16 @@ if TYPE_CHECKING:  # annotation-only: this module keeps its imports function-loc
 logger = logging.getLogger(__name__)
 
 
-# Version stamp for the ai_inputs.prompt_version column: bump when the injected
-# context/format contract changes shape (the payload hash tracks content).
-# v4 (2026-08-27): the context gains the ``Position:`` section — the account's
-# own position and the round-trip cost of every legal move
-# (``domains/perp/marginal_cost.py``). The format block is unchanged.
-PROMPT_VERSION = "phase2-target-v4"
+# Version stamp for the ai_inputs.prompt_version column: bump whenever the
+# injected context/format CONTRACT changes — its shape, or its wording — i.e.
+# whenever a deploy crosses a measurement boundary (RUNBOOK §4; retired values
+# are never reused, rollbacks included). The payload hash tracks content.
+# History: the CHANGELOG entries for ``phase2-target-v*``. In short —
+# v4 (2026-08-27): the context gains the ``Position:`` section; the format
+# block is unchanged (v4's digest is v3's).
+# v5 (2026-09-01): the FORMAT block no longer renders the three gate
+# thresholds as numbers (marginal-cost plan PR-B); the context is unchanged.
+PROMPT_VERSION = "phase2-target-v5"
 
 
 class _HistoryFundingSource:

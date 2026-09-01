@@ -170,7 +170,7 @@ set_target 且 target_side 與目前持倉方向相同        → 同方向 resi
   0.7，即使 YAML 未列出此 key），合回 `hyperliquid-adapter` 後 live 執行一體
   繼承——paper 段即其驗證段。
 
-理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。`min_confidence` 門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。**分析 caveat**：prompt v2 起已向模型廣告 `min_confidence` 與 `resize_min_confidence` 的具體數值，模型因此有動機在想改倉位時報出跨過門檻的值——v2 段資料裡的 confidence 是 threshold-aware 的策略性變數，不再是未受激勵的純評估；預測力分析必須以廣告門檻為條件（例如分開檢視門檻上下的分佈與聚集），並注意與 v1 段（未廣告門檻）不可直接混併。
+理由：LLM 的 confidence 未經校準，直接乘進 sizing 會把噪音放大成倉位；AI 的 conviction 應直接反映在 `requested_target_margin_pct`，prompt 必須明確要求兩者一致。`min_confidence` 門檻只負責擋下「高倉位、低信心」這類自相矛盾的輸出。是否引入 confidence-aware sizing，待 Phase 2 paper 累積的 confidence 與績效資料驗證其預測力後，於 Phase 3+ 再議。**分析 caveat**：prompt v2 起已向模型廣告 `min_confidence` 與 `resize_min_confidence` 的具體數值，模型因此有動機在想改倉位時報出跨過門檻的值——v2 段資料裡的 confidence 是 threshold-aware 的策略性變數，不再是未受激勵的純評估；預測力分析必須以廣告門檻為條件（例如分開檢視門檻上下的分佈與聚集），並注意與 v1 段（未廣告門檻）不可直接混併。**prompt v5 起（2026-09-01）格式段不再廣告任何門檻數值**——paper-BTC-2 v3 段 48 個決策有 27 個 confidence 恰為 `resize_min_confidence` ＋ 0.02，rebalance 每跳恰在 deadband 邊緣，數字本身成了錨點——三條規則改為定性描述（「太低被拒」「微幅同向不下單」「真會成交的同向 resize 門檻較高」），門檻仍由 RiskGate 以 config 數值照擋。v5 段的 confidence 因此又是「知道有門檻、不知道門檻在哪」的變數，與 v2–v4 段（廣告具體數值）不可直接混併。
 
 ---
 

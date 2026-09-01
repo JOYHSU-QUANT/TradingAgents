@@ -5454,8 +5454,10 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # Compared as one tuple so a mismatch shows both halves at once — which one
     # drifted is the whole diagnosis.
     # v4 (2026-08-27) bumped the version for the CONTEXT's new Position:
-    # section; the format block itself did not change, so the digest is v3's.
-    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v4", "97aa0feaa4496d6f")
+    # section; the format block itself did not change, so v4's digest was
+    # v3's. v5 (2026-09-01) changed the FORMAT block: the three gate
+    # thresholds are no longer rendered as numbers (marginal-cost plan PR-B).
+    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v5", "947e85a9b7b750f1")
 
 
 def _book(**overrides):

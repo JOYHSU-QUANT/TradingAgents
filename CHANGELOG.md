@@ -10,6 +10,23 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: the window an owning command opens a store in before
+  it may upgrade it is declared, floored and race-safe** (issue #147).
+  `paper`, `live` and a real `live-smoke` run open a populated store as-is
+  and consult the run lease before migrating (issue #129); what they may
+  touch in that window lived in three docstrings. `schema.LEASE_READABLE_SINCE`
+  now names the floor (v3, where the lease columns arrived), a test runs the
+  actual pre-lease readers and the lease write against a store built at
+  every version from that floor up, and `Database(defer_migration=True)`
+  refuses an older populated store by name instead of letting its first
+  lease read exit 2 as an `OperationalError`. `apply_migrations` re-checks
+  each version inside its own `BEGIN IMMEDIATE`: two owning commands started
+  against the same behind store in the same moment both saw "not applied"
+  outside the lock, and the loser re-ran the winner's `ADD COLUMN` and died
+  on `duplicate column name` — it now skips the version. RUNBOOK-live gains
+  the pid-recycling row: `live`'s pre-migration lease peek exempts no pid,
+  not even its own, so a hard-killed `live` restarted under a recycled pid is
+  refused until the lease goes stale.
 - **dataflows: a vendor being down is one router reaction whichever vendor
   it was, and a fallback's "no data" after it is not a verdict on the
   symbol** (issues #142, #137). `route_to_vendor` let a no-data verdict

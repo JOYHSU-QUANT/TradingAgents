@@ -26,9 +26,34 @@ treats NULLs as distinct in a UNIQUE column, so a ``paper_market`` / SL / TP fil
 
 from __future__ import annotations
 
-__all__ = ["MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
+__all__ = ["LEASE_READABLE_SINCE", "MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
 SCHEMA_VERSION = 11
+
+# The oldest schema an OWNING command (``paper``, ``live``, a real ``live-smoke``
+# run) can open AS-IS and consult the run lease in before it upgrades the store
+# (issue #129: the lease that proves the store is ours to migrate lives inside
+# the store being opened, so the migration has to wait for it). Between that
+# open and ``Database.apply_deferred_migration`` those commands touch only the
+# v1 ``runs`` row and the lease columns of ``scheduler_state`` — the reads
+# (``repository.get_run``, ``repository.iter_other_run_leases``,
+# ``paper.run_lock.peek_run_lock``, the CLI's ``_conflicting_run_lease``) and
+# the one write pair (``acquire_run_lock`` / ``release_run_lock``, since a
+# refusal after the lease is taken releases it against the still-old schema).
+# The lease columns arrived in v3, so v3 is the floor: ``Database`` refuses a
+# populated older store by name instead of letting the first lease read die
+# as an ``OperationalError`` (issue #147).
+#
+# The declaration is executable, not this comment: ``tests/persistence/
+# test_persistence.py::test_every_pre_lease_reader_works_on_a_store_at_or_
+# above_the_lease_floor`` opens a store built at EVERY version from this
+# floor up and runs those readers and that write against it. A later
+# migration that renames or drops a column they use, or a reader that starts
+# touching a column younger than the floor, fails there — before it can turn
+# an owning command's refusal into a traceback. A nullable ``ADD COLUMN`` on
+# either table is the additive change every migration since v3 has made and
+# stays green. A new pre-lease reader goes into that test, not into this list.
+LEASE_READABLE_SINCE = 3
 
 # --------------------------------------------------------------------------
 # Export logical tables (phase2-data §5–§12) — one-to-one with CSV exports.

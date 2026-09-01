@@ -42,8 +42,10 @@ from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 from ..conftest import (
     assert_paired_sweep_refreshes,
     assert_payload_dir,
+    build_store_at,
     identity_latch_rows,
     insert_decision_attempts,
+    migrations_up_to,
     misrouted_order_status,
     record_reconciliation_sweep_wiring,
 )
@@ -3132,22 +3134,15 @@ def test_paper_acquire_conflict_with_live_holder_exits_1(tmp_path, capsys, paper
     assert "already being driven" in capsys.readouterr().err
 
 
-def _build_one_behind(monkeypatch, build):
+def _build_one_behind(build):
     """Run ``build()`` with the newest migration hidden, so the store it makes
     is exactly one schema version behind this build — the deploy-box shape a
-    new binary meets when an older daemon still owns the store. Same staging
-    as ``tests/live/test_persistence.py``'s behind-store test; the real
-    ``MIGRATIONS`` is restored before the command under test opens the store."""
-    import contrib.hyperliquid_perp.persistence.db as db_module
+    new binary meets when an older daemon still owns the store."""
     from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
 
     behind = sorted(MIGRATIONS)[-2]
-    older = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= behind}
-    monkeypatch.setattr(db_module, "MIGRATIONS", older)
-    try:
+    with migrations_up_to(behind):
         result = build()
-    finally:
-        monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
     return behind, result
 
 
@@ -3175,7 +3170,7 @@ def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(
         db.close()
         return path
 
-    behind, path = _build_one_behind(monkeypatch, build)
+    behind, path = _build_one_behind(build)
     assert _stored_version(path) == behind
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
@@ -3199,13 +3194,35 @@ def test_paper_migrates_a_behind_store_once_it_holds_the_lease(
         db.close()
         return path
 
-    behind, path = _build_one_behind(monkeypatch, build)
+    behind, path = _build_one_behind(build)
     assert _stored_version(path) == behind
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     assert "OPENROUTER_API_KEY" in capsys.readouterr().err
     assert _stored_version(path) == SCHEMA_VERSION
+
+
+def test_paper_refuses_a_store_older_than_the_lease_floor_by_name(tmp_path, capsys, paper_seams):
+    # Issue #147 (item 5), at the surface it was filed against: an owning
+    # command reads the lease before it migrates, and a store from before the
+    # lease columns existed used to die on that read as an OperationalError
+    # — main()'s exit-2 traceback. Now a named exit 1 that says what to run,
+    # with the store left at the version it was.
+    from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE
+
+    below = LEASE_READABLE_SINCE - 1
+    path = tmp_path / "pre-lease.db"
+    build_store_at(path, below)
+    assert _stored_version(path) == below
+
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert f"error: store schema is v{below}" in err
+    assert "safe-mode --status" in err
+    assert "Traceback" not in err
+    assert _stored_version(path) == below
 
 
 def test_paper_will_not_migrate_under_a_sibling_runs_fresh_lease(
@@ -3230,7 +3247,7 @@ def test_paper_will_not_migrate_under_a_sibling_runs_fresh_lease(
         db.close()
         return path
 
-    behind, path = _build_one_behind(monkeypatch, build)
+    behind, path = _build_one_behind(build)
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     err = capsys.readouterr().err
@@ -4437,12 +4454,17 @@ def test_live_lease_conflict_leaves_a_behind_store_unmigrated(
         db.close()
         return dbp
 
-    behind, dbp = _build_one_behind(monkeypatch, build)
+    behind, dbp = _build_one_behind(build)
     assert _stored_version(dbp) == behind
 
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
     assert rc == 1
-    assert "already being driven" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "already being driven by pid 999999" in err
+    # The peek exempts no pid, so a recycled pid refuses itself; the message
+    # names this process's pid so the RUNBOOK's pid-recycling row can be
+    # matched after the process is gone (issue #147).
+    assert f"(this process is pid {os.getpid()})" in err
     assert _stored_version(dbp) == behind
 
 
@@ -4500,7 +4522,7 @@ def test_live_will_not_migrate_under_a_paper_siblings_fresh_lease(
         db.close()
         return dbp
 
-    behind, dbp = _build_one_behind(monkeypatch, build)
+    behind, dbp = _build_one_behind(build)
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
     assert rc == 1
     err = capsys.readouterr().err
@@ -4521,9 +4543,7 @@ def test_live_migrates_a_behind_store_once_nobody_owns_it(
         tmp_path,
         live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
     )
-    behind, dbp = _build_one_behind(
-        monkeypatch, lambda: _seed_live_run_with_genesis_subset(tmp_path, cfg)
-    )
+    behind, dbp = _build_one_behind(lambda: _seed_live_run_with_genesis_subset(tmp_path, cfg))
     assert _stored_version(dbp) == behind
 
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])

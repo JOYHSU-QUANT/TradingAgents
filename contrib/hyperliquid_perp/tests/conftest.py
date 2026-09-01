@@ -68,6 +68,20 @@ def config_text() -> str:
     return _EXAMPLE.read_text(encoding="utf-8")
 
 
+def package_sources(pkg) -> list[Path]:
+    """Every ``.py`` under the regular package ``pkg``, subpackages included, in path order.
+
+    The ONE enumeration behind the tests that read a package's source rather
+    than import it (the ``common/`` bottom-of-graph check, the machine-
+    disposition vocabulary scan). Each used to spell its own walk, so whether
+    a scan reached into subpackages, and in what order it reported, was
+    decided per test and could drift apart silently (issue #151). Regular
+    packages only: ``__path__[0]`` is the one directory a package with an
+    ``__init__.py`` has.
+    """
+    return sorted(Path(pkg.__path__[0]).rglob("*.py"))
+
+
 @pytest.fixture
 def meta_and_asset_ctxs():
     return _load("meta_and_asset_ctxs.json")

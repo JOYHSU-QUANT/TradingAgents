@@ -114,6 +114,10 @@ class PositionPricing:
     margin the gate would clamp — the caller hands that same value to the
     format block, which is what keeps the cost table and the advertised
     ceiling from disagreeing.
+
+    ``MAX_COST_ROWS`` is deliberately not a field: the row count is the
+    renderer's budget for the table, not a pricing rule or an operator knob,
+    so it stays a module constant (issue #161).
     """
 
     leverage: Decimal

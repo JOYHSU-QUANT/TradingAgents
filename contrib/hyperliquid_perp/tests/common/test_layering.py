@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,7 +29,19 @@ from contrib.hyperliquid_perp.common import decimal_context
 from contrib.hyperliquid_perp.domains.perp import margin
 from contrib.hyperliquid_perp.persistence import models
 
+from ..conftest import package_sources
+
 _PACKAGE = "contrib.hyperliquid_perp"
+
+
+def _within(name: str | None, pkg: str) -> bool:
+    """``name`` is the package ``pkg`` itself or a dotted name inside it.
+
+    The one spelling of "is `pkg` or lies under `pkg`" the three predicates
+    below share — a copy that baked the dot into a prefix test read the bare
+    package as outside (issue #155), so they are not spelled twice.
+    """
+    return name == pkg or (name or "").startswith(pkg + ".")
 
 
 def _package_tail(name: str | None) -> str | None:
@@ -39,11 +52,9 @@ def _package_tail(name: str | None) -> str | None:
     The bare package itself maps to ``""``, which no allowlist contains — a
     ``from contrib.hyperliquid_perp import <compute module>`` is an offender too.
     """
-    if not name:
+    if not _within(name, _PACKAGE):
         return None
-    if name == _PACKAGE:
-        return ""
-    return name[len(_PACKAGE) + 1 :] if name.startswith(_PACKAGE + ".") else None
+    return name[len(_PACKAGE) + 1 :]  # ``""`` for the bare package
 
 
 def test_the_decimal_context_reexports_are_the_common_object():
@@ -102,22 +113,46 @@ def _load_time_import_closure(source: Path, root: Path = _SOURCE_ROOT) -> set[st
     """Every in-package module ``source`` imports at top level, transitively.
 
     Walks :func:`_in_package_imports` from module to module, resolving each
-    dotted tail to its file under ``root`` (``x/__init__.py`` for a package).
-    A tail with no file — the bare package ``""`` from ``from . import x`` —
-    is kept in the result (it is an offender) but not walked. ``root`` is a
-    parameter only so the walk itself can be tested on a synthetic tree.
+    dotted tail to its file (:func:`_module_file`). A tail with no file — the
+    bare package root ``""``, or a name that is an attribute of a package's
+    ``__init__`` — is kept in the result (it may be an offender) but not
+    walked. ``root`` is a parameter only so the walk itself can be tested on
+    a synthetic tree.
     """
     seen: set[str] = set()
     queue = [source]
     while queue:
         for tail in _in_package_imports(queue.pop(), root) - seen:
             seen.add(tail)
-            module = root.joinpath(*tail.split(".")) if tail else root
-            if module.with_suffix(".py").is_file():
-                queue.append(module.with_suffix(".py"))
-            elif tail and (module / "__init__.py").is_file():
-                queue.append(module / "__init__.py")
+            module = _module_file(tail, root)
+            if module is not None:
+                queue.append(module)
     return seen
+
+
+def _module_file(tail: str, root: Path) -> Path | None:
+    """The file under ``root`` a dotted tail names: ``x.py``, or ``x/__init__.py`` for a package.
+
+    ``None`` for the root itself (``""``) and for a tail nothing on disk
+    answers to.
+    """
+    if not tail:
+        return None
+    module = root.joinpath(*tail.split("."))
+    if module.with_suffix(".py").is_file():
+        return module.with_suffix(".py")
+    if (module / "__init__.py").is_file():
+        return module / "__init__.py"
+    return None
+
+
+# The layers the guard family may sit on: a tail is below the floor when it IS
+# one of these packages or lies inside one (issue #155).
+_FLOOR = ("common", "domains.perp")
+
+
+def _above_the_floor(tail: str) -> bool:
+    return not any(_within(tail, pkg) for pkg in _FLOOR)
 
 
 @pytest.mark.parametrize(
@@ -141,9 +176,7 @@ def test_the_context_guard_family_and_the_no_decision_policy_stay_below_the_engi
     # tree-wide check below; it is listed so the policy's acceptance is stated
     # once, beside the guards it serves.)
     closure = _load_time_import_closure(_SOURCE_ROOT / module)
-    offenders = {
-        t for t in closure if not (t.startswith("common.") or t.startswith("domains.perp."))
-    }
+    offenders = {t for t in closure if _above_the_floor(t)}
     assert not offenders, f"{module} reaches above domains/common at load time: {sorted(offenders)}"
 
 
@@ -163,6 +196,62 @@ def test_the_closure_walk_reaches_an_import_two_hops_away(tmp_path):
     assert _load_time_import_closure(tmp_path / "a.py", root=tmp_path) == {"b", "c", "", "e"}
 
 
+def test_a_bare_package_tail_below_the_floor_is_not_an_offender(tmp_path):
+    # Issue #155. Two shapes the dotted-prefix test read as reaching above the
+    # floor: ``from . import schema`` inside ``domains/perp/`` and
+    # ``from ...common import a``. The first names a MODULE, so it resolves to
+    # ``domains.perp.schema`` and the walk goes through it — schema's own
+    # import surfaces below; drop the submodule resolution and the guard
+    # would accept a ``from . import x`` whose ``x`` reaches the SDK. The
+    # second names an attribute, so it resolves to the bare ``common``, below
+    # the floor. None of the three guarded modules is written either way
+    # today, so pin both on a synthetic tree — where the real offenders must
+    # stay red: the package root, a sibling package, and a package whose NAME
+    # merely starts with a floor package's (the trap a dotless prefix test
+    # would walk into).
+    for pkg in ("common", "domains", "domains/perp"):
+        (tmp_path / pkg).mkdir()
+        (tmp_path / pkg / "__init__.py").write_text("", encoding="utf-8")
+    perp = tmp_path / "domains" / "perp"
+    (perp / "schema.py").write_text("from ...persistence import db\n", encoding="utf-8")
+    (perp / "guard.py").write_text(
+        "from . import schema\n"
+        "from .. import perp\n"
+        "from ...common import a\n"
+        "from ... import audit\n"
+        "from ...commonplace import q\n",
+        encoding="utf-8",
+    )
+    closure = _load_time_import_closure(perp / "guard.py", root=tmp_path)
+    assert closure == {
+        "domains.perp.schema",
+        "persistence",  # reached THROUGH schema: the second hop
+        "domains.perp",
+        "common",
+        "",
+        "commonplace",
+    }
+    assert {t for t in closure if _above_the_floor(t)} == {"persistence", "", "commonplace"}
+
+
+def test_package_sources_reaches_subpackages_in_path_order(tmp_path):
+    # ``live/`` and ``common/`` have no subpackage today, so nothing but this
+    # would notice the shared walk reverting to a top-level ``glob`` — the
+    # drift issue #151 closed — or losing its ordering. Created out of order
+    # on purpose; the non-``.py`` file must not appear.
+    (tmp_path / "z.py").write_text("", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "deep.py").write_text("", encoding="utf-8")
+    (tmp_path / "a.py").write_text("", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("", encoding="utf-8")
+    pkg = SimpleNamespace(__path__=[str(tmp_path)])
+    assert package_sources(pkg) == [
+        tmp_path / "a.py",
+        tmp_path / "sub" / "deep.py",
+        tmp_path / "z.py",
+    ]
+
+
 def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
     """Dotted tails (``domains.perp.x``) of ``source``'s TOP-LEVEL in-package imports.
 
@@ -177,12 +266,16 @@ def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
     inside ``domains/perp/`` and ``from ...common.constants import y`` come
     back as ``domains.perp.schema`` / ``common.constants``.
 
-    ``from . import x`` (``name is None``) resolves to the package ITSELF —
-    ``""`` at the top level, in no allowlist, exactly as :func:`_package_tail`
-    maps the bare absolute package. Letting it fall through as ``None`` would
-    allow ``from . import domains`` — one keystroke from the already-flagged
-    ``from .domains import perp``, and the realistic route to the historical
-    offender the loader test's docstring cites.
+    ``from pkg import x`` resolves to the SUBMODULE ``pkg.x`` when one exists
+    on disk — its own imports are part of the closure, so the walk has to
+    reach it (issue #155) — and otherwise to ``pkg`` itself: ``x`` is then an
+    attribute, and what was imported is the package. ``from . import x``
+    (``name is None``) at the top level is therefore ``""`` for an attribute,
+    in no allowlist, exactly as :func:`_package_tail` maps the bare absolute
+    package, and ``"domains"`` for the package — one keystroke from the
+    already-flagged ``from .domains import perp``, and the realistic route to
+    the historical offender the loader test's docstring cites. Letting either
+    fall through as ``None`` would allow both.
     """
     own_package = source.resolve().relative_to(root).parent.parts
 
@@ -196,10 +289,17 @@ def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
         base = list(own_package[: max(0, len(own_package) - (level - 1))])
         return ".".join([*base, name] if name else base)
 
+    def imported(base: str | None, name: str) -> str | None:
+        if base is None:
+            return None
+        submodule = f"{base}.{name}" if base else name
+        return submodule if _module_file(submodule, root) is not None else base
+
     found: set[str] = set()
     for node in ast.parse(source.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.ImportFrom):
-            names = [tail(node.module, node.level)]
+            base = tail(node.module, node.level)
+            names = [imported(base, alias.name) for alias in node.names]
         elif isinstance(node, ast.Import):
             names = [_package_tail(alias.name) for alias in node.names]
         else:
@@ -220,10 +320,10 @@ def test_common_imports_nothing_from_the_rest_of_the_package():
     # an allowlisted few from THIS package. Sharing _PACKAGE keeps the root
     # spelled once without pretending the two rules are the same rule.
     def is_contrib(name: str | None) -> bool:
-        return name == "contrib" or (name or "").startswith("contrib.")
+        return _within(name, "contrib")
 
     offenders = []
-    for source in Path(common_pkg.__path__[0]).rglob("*.py"):
+    for source in package_sources(common_pkg):
         tree = ast.parse(source.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):

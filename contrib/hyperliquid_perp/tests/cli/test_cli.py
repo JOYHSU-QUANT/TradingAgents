@@ -43,6 +43,7 @@ from ..conftest import (
     assert_paired_sweep_refreshes,
     assert_payload_dir,
     build_store_at,
+    doc_text,
     identity_latch_rows,
     insert_decision_attempts,
     migrations_up_to,
@@ -3154,9 +3155,7 @@ def _stored_version(path) -> int:
         probe.close()
 
 
-def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(
-    tmp_path, capsys, monkeypatch, paper_seams
-):
+def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(tmp_path, capsys, paper_seams):
     # Issue #129: ``paper`` opened the store with the default migrate-on-open
     # and only THEN reached the lease check, so a new build started by hand on
     # the deploy box upgraded the schema underneath the still-running old
@@ -3221,13 +3220,27 @@ def test_paper_refuses_a_store_older_than_the_lease_floor_by_name(tmp_path, caps
     err = capsys.readouterr().err
     assert f"error: store schema is v{below}" in err
     assert "safe-mode --status" in err
-    assert "Traceback" not in err
+    assert "fatal:" not in err  # main()'s exit-2 last resort never ran
     assert _stored_version(path) == below
 
 
-def test_paper_will_not_migrate_under_a_sibling_runs_fresh_lease(
-    tmp_path, capsys, monkeypatch, paper_seams
-):
+def test_the_runbook_quotes_the_migration_window_literals():
+    # Issue #147: the §8 rows for the lease floor and pid recycling restate
+    # three code facts as bare literals — the floor version, the lease
+    # staleness window, and the suffix `live` appends to its lease refusal.
+    # Same criterion as test_smoke's RUNBOOK pins: a value the code enforces,
+    # restated by the doc as a literal, with nothing tying the two.
+    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS
+    from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE
+
+    runbook = doc_text("RUNBOOK-live.md")
+    assert f"`LOCK_STALE_SECONDS`＝{LOCK_STALE_SECONDS} 秒" in runbook
+    assert f"before upgrading a store arrived in v{LEASE_READABLE_SINCE}`" in runbook
+    # The suffix the pid-recycling row keys on, as the CLI test above prints it.
+    assert "`(this process is pid N)`" in runbook
+
+
+def test_paper_will_not_migrate_under_a_sibling_runs_fresh_lease(tmp_path, capsys, paper_seams):
     # The store-wide half of #129: the lease is per-run, the migration is
     # per-file. Two paper runs sharing one --db (the default layout for two
     # coins) — the OLD build drives "other", the new build starts "r": its

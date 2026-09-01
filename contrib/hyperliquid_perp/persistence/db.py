@@ -129,8 +129,8 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     versions silently would be exactly the write-through the refusal exists
     to stop. The loser's wait is bounded by :func:`connect`'s ``busy_timeout``;
     a winner whose single step outlasted it would leave the loser with
-    ``database is locked`` — every step here is a handful of DDL statements,
-    far inside that bound.
+    ``database is locked`` (an ``OperationalError``, so main()'s exit 2) —
+    every step here is a handful of DDL statements, far inside that bound.
 
     A store NEWER than this build is refused rather than used. Nothing else
     reads ``schema_migrations``, so without this an older binary opens a
@@ -213,10 +213,11 @@ class Database:
         on open. ``migrate=False`` — a reporting command: refuse either mismatch
         rather than touch a store a daemon may own. ``defer_migration=True`` —
         open a populated store as-is and leave the upgrade to the caller once
-        it HOLDS THE LEASE; only a store migrated by a NEWER build is refused
-        at open (nothing has been written yet, and it never becomes this
-        build's to upgrade), and an EMPTY store — no schema at all — is built
-        in full, since nothing can own it.
+        it HOLDS THE LEASE; refused at open only when the store was migrated
+        by a NEWER build (nothing has been written yet, and it never becomes
+        this build's to upgrade) or predates the lease columns entirely (see
+        below), and an EMPTY store — no schema at all — is built in full,
+        since nothing can own it.
 
         The third policy exists because ``migrate=True`` necessarily runs before
         the lease can be taken (the lease lives in the store being opened), so an
@@ -278,8 +279,8 @@ class Database:
                 raise SchemaVersionError(
                     f"store schema is v{found}; the run lease an owning command "
                     f"consults before upgrading a store arrived in "
-                    f"v{LEASE_READABLE_SINCE}, so no command that defers its upgrade "
-                    "can open this store as-is. Upgrade it with `safe-mode --status "
+                    f"v{LEASE_READABLE_SINCE}, so neither an owning nor a reporting "
+                    "command can open this store as-is. Upgrade it with `safe-mode --status "
                     "--run-id <id> --db <this db>`, which migrates on open, after "
                     "confirming no other process has this store open. For a paper "
                     "run it then reports that the run is not a live run — the "

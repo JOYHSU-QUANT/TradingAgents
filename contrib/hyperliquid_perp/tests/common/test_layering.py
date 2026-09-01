@@ -2,10 +2,11 @@
 
 None of these invariants is exercised anywhere else:
 
-- the compat shims at the old ``domains/perp`` paths keep re-exporting the
-  same objects — every in-tree importer was repointed to ``common``, so
-  without these assertions a rotted shim would first break an out-of-tree
-  consumer (deploy/paper cherry-picks), not the test suite;
+- ``domains/perp/margin`` and ``persistence/models`` keep re-exporting the
+  ONE ``DECIMAL_CONTEXT`` that lives in ``common`` — the margin path is
+  frozen by phase3-spec §2.1, the models path is the persistence layer's
+  long-standing entry point, and nothing else would notice either of them
+  forking a second context;
 - ``common/`` stays at the bottom of the import graph — the rule in
   ``common/__init__``'s docstring that nothing there imports from another
   ``hyperliquid_perp`` package would otherwise be enforced by review only;
@@ -22,12 +23,9 @@ from pathlib import Path
 import pytest
 
 from contrib.hyperliquid_perp import common as common_pkg
-from contrib.hyperliquid_perp.common import config_coercion, decimal_context, enum_guard
-from contrib.hyperliquid_perp.domains.perp import (
-    config_coercion as coercion_shim,
-    enum_guard as enum_shim,
-    margin,
-)
+from contrib.hyperliquid_perp.common import decimal_context
+from contrib.hyperliquid_perp.domains.perp import margin
+from contrib.hyperliquid_perp.persistence import models
 
 _PACKAGE = "contrib.hyperliquid_perp"
 
@@ -47,15 +45,12 @@ def _package_tail(name: str | None) -> str | None:
     return name[len(_PACKAGE) + 1 :] if name.startswith(_PACKAGE + ".") else None
 
 
-def test_the_old_domains_paths_still_reexport_the_common_objects():
-    # Identity, not equality: a shim that re-declared its own copy would keep
-    # equal behavior today but fork the definition the next time one side moves.
-    assert enum_shim.check_enum is enum_guard.check_enum
-    assert enum_shim.__all__ == enum_guard.__all__
-    assert coercion_shim.__all__ == config_coercion.__all__
-    for name in config_coercion.__all__:
-        assert getattr(coercion_shim, name) is getattr(config_coercion, name), name
+def test_the_decimal_context_reexports_are_the_common_object():
+    # Identity, not equality: a re-export that re-declared its own context
+    # would keep equal behavior today but fork the definition the next time
+    # one side moves.
     assert margin.DECIMAL_CONTEXT is decimal_context.DECIMAL_CONTEXT
+    assert models.DECIMAL_CONTEXT is decimal_context.DECIMAL_CONTEXT
 
 
 def test_the_config_loader_imports_no_compute_module():

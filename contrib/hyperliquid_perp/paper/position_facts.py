@@ -24,7 +24,7 @@ from ..common.instants import parse_instant
 # The prompt-side DTO lives in ``domains/`` — the context builder assembles the
 # position section and must not import ``paper/`` — and is re-exported here,
 # beside its only producer, so the import path callers already use keeps
-# working (the same thin-shim shape as ``domains/perp/config_coercion.py``).
+# working.
 from ..domains.perp.marginal_cost import BookPosition
 from ..persistence import repository as repo
 from ..persistence.db import Database

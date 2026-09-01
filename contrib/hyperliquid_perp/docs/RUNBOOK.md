@@ -88,8 +88,9 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 > AI——即 AI 回答之前）的**程式缺陷**（非 Retryable 例外）不再讓 daemon 退出——該
 > cycle 記成 `api_failed`（`error_type` 空、`error_message` 以 `non-retryable:` 開頭）、
 > log 印 ERROR traceback、倉位與 SL/TP 照舊看管、下個 cycle 照排，與 live 車道對
-> 這一段的語意一致（見 §7）。AI 回答**之後**的 gate／下單／`ai_outputs` 寫入
-> （`_finalize`）沒有這層守衛，那裡的缺陷仍會讓 daemon 退出、由監管拉回（刻意保留：
+> 這一段的語意一致（見 §7）。AI 回答**之後**——從回覆落地（`pending_raw_response`）
+> 到 gate／下單／`ai_outputs` 寫入（`_finalize`）——沒有這層守衛，那裡的缺陷仍會讓
+> daemon 退出、由監管拉回（刻意保留：
 > 那時已有付費的決策與可能已 commit 的 plan，不該被無聲吞掉）。
 > 注意：protection-only 自我了結與 keyless 停止走的也是 exit 1，監管會把它拉
 > 回來、再進 protection-only——反覆重啟不是修復，看到這個模式仍要照 §5 人工

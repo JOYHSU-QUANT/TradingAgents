@@ -35,9 +35,10 @@ the ``ai_inputs`` row, the call itself) fails THAT CYCLE closed
 position and its SL/TP held, the next cycle on schedule) rather than the
 daemon: the live driver's rule for the same stretch, adopted here in issue
 #134 so the two lanes stop meaning different things by "failed". A bug
-AFTER the answer — in ``_finalize``'s gate, plan start or audit commit —
-still propagates: by then a paid-for decision and possibly a committed plan
-exist, and swallowing that is a different, undecided trade-off.
+AFTER the answer — the ``pending_raw_response`` store, ``_finalize``'s
+gate, plan start or audit commit — still propagates: by then a paid-for
+decision and possibly a committed plan exist, and swallowing that is a
+different, undecided trade-off.
 
 Restart safety of a half-finished cycle: the successful AI response is
 persisted onto the attempt row (``pending_raw_response``) *before* the gate
@@ -575,9 +576,10 @@ class PaperScheduler:
         an outage does: ERROR from the third, ``validate`` exit 4 — the
         signal that used to be systemd's restart count. Scope: the three
         statements of the try in ``_execute`` — a failure of the fail record
-        itself still propagates (as on the live lane), and so does anything
-        in ``_finalize``, which is deliberately outside this guard (module
-        docstring).
+        itself still propagates (here that exits the daemon; the live lane
+        parks it in safe mode and retries the write), and so does anything
+        after the answer, from the ``pending_raw_response`` store through
+        ``_finalize`` — deliberately outside this guard (module docstring).
 
         "Non-retryable" is not the same as "a bug": everything that is not a
         :class:`RetryableDecisionError` lands here, and that includes host

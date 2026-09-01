@@ -557,10 +557,12 @@ class LiveReconciler:
         construction (both production sites) or was attached afterwards
         (tests). It refused at import while the window was a module constant.
         """
-        if backfiller is not None and not hasattr(backfiller, "lookback"):
+        if backfiller is not None and not (
+            hasattr(backfiller, "lookback") and callable(getattr(backfiller, "backfill", None))
+        ):
             raise TypeError(
                 "backfiller must be a FillBackfiller (its .lookback is the cross-check "
-                f"window), got {type(backfiller).__name__}"
+                f"window, its .backfill() the fill leg), got {type(backfiller).__name__}"
             )
         # Checked BEFORE the slot is written, so a refused binding does not land.
         candidate, owner = self._window_of(backfiller)

@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -970,6 +971,11 @@ def test_a_stand_in_backfiller_without_a_lookback_is_refused_by_name(env):
         _reconciler_over(db, seams, object())
     with pytest.raises(TypeError, match="backfiller must be a FillBackfiller"):
         reconciler._backfiller = object()
+    # ...and one that answers the window question but cannot run the leg is
+    # the same mis-wiring (the leg's call sits inside the guarded lane too).
+    with pytest.raises(TypeError, match="backfiller must be a FillBackfiller"):
+        reconciler._backfiller = SimpleNamespace(lookback=timedelta(hours=6))
+    assert reconciler._backfiller is None
 
 
 def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog):
@@ -1001,9 +1007,9 @@ def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog)
 
 
 def test_a_backfiller_attached_after_construction_moves_the_window_with_it(env):
-    # ``_backfiller`` is a plain attribute (the tests above attach stubs to it
-    # after the fact, and a wiring with a circular construction order could do
-    # the same), so the window is read off the backfiller held at SWEEP time
+    # ``_backfiller`` is settable after construction (the tests above attach
+    # stubs to it after the fact, and a wiring with a circular construction
+    # order could do the same), so the window is read off the one held at SWEEP time
     # — bound at construction, a later attachment would leave the cross-check
     # on the default while the backfill leg ran a narrower window: the #149
     # false premise, back through the side door.

@@ -187,21 +187,38 @@ def test_a_deferred_open_refuses_a_populated_store_older_than_the_lease_floor(tm
 
 
 class _RacedConnection:
-    """A real connection with one seam: the first time it goes for the write
-    lock, ``winner_lands`` runs first — deterministic single-thread staging of
-    "another process committed between my pre-read and my BEGIN IMMEDIATE".
+    """A real connection with seams: the first time it executes each SQL named
+    in ``before`` / ``after``, that callable runs just before / just after the
+    statement — deterministic single-thread staging of "another process
+    committed between my read and my next statement". ``winner_lands`` alone
+    is the common case (a ``before`` seam on ``BEGIN IMMEDIATE``, i.e. the
+    winner commits while the loser is still outside the lock). An ``after``
+    seam on ``ROLLBACK`` is the moment the loser has just released the lock.
     ``apply_migrations`` touches nothing but ``execute``."""
 
-    def __init__(self, real, winner_lands):
+    def __init__(self, real, winner_lands=None, *, before=None, after=None):
         self._real = real
-        self._winner_lands = winner_lands
-        self.raced = False
+        self._before = dict(before or {})
+        self._after = dict(after or {})
+        if winner_lands is not None:
+            self._before["BEGIN IMMEDIATE"] = winner_lands
+        self.fired: list[str] = []
+
+    @property
+    def raced(self) -> bool:
+        return "BEGIN IMMEDIATE" in self.fired
+
+    def _fire(self, table, sql) -> None:
+        seam = table.get(sql)
+        if seam is not None and sql not in self.fired:
+            self.fired.append(sql)
+            seam()
 
     def execute(self, sql, *params):
-        if sql == "BEGIN IMMEDIATE" and not self.raced:
-            self.raced = True
-            self._winner_lands()
-        return self._real.execute(sql, *params)
+        self._fire(self._before, sql)
+        cursor = self._real.execute(sql, *params)
+        self._fire(self._after, sql)
+        return cursor
 
 
 def test_two_processes_migrating_the_same_behind_store_leave_the_loser_a_no_op(tmp_path):
@@ -247,7 +264,7 @@ def test_a_loser_whose_winner_ran_a_newer_build_is_refused_not_skipped(tmp_path)
     # them silently would return "current" and let this build write through a
     # schema it does not know — the very corruption the NEWER refusal exists
     # for, and something the pre-fix ``duplicate column name`` crash at least
-    # prevented. The re-check under the write lock must raise that refusal.
+    # prevented. The read after the loop must raise that refusal.
     from contrib.hyperliquid_perp.persistence import db as db_module
     from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, apply_migrations
     from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
@@ -270,6 +287,47 @@ def test_a_loser_whose_winner_ran_a_newer_build_is_refused_not_skipped(tmp_path)
             apply_migrations(loser)
         assert loser.raced
         assert loser_conn.in_transaction is False  # the refusal rolled back its lock
+    finally:
+        winner.close()
+        loser_conn.close()
+
+
+def test_a_newer_build_landing_mid_loop_is_still_refused(tmp_path):
+    # The per-version re-check sees only what had landed when THAT step took
+    # the lock, and a winner commits one version per transaction. Stage the
+    # gap: the winner has landed v11 (the same version this build knows) when
+    # the loser takes its lock — so the loser skips it — and lands v12 while
+    # the loser is releasing that lock. Without the post-loop read the loser
+    # returns "current" over a store that is now newer than it knows.
+    from contrib.hyperliquid_perp.persistence import db as db_module
+    from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, apply_migrations
+    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+
+    path = tmp_path / "shared.db"
+    build_store_at(path, sorted(MIGRATIONS)[-2])
+    winner = connect(path)
+    loser_conn = connect(path)
+    ahead = SCHEMA_VERSION + 1
+    newer_build = {**MIGRATIONS, ahead: ("ALTER TABLE runs ADD COLUMN operator_note TEXT",)}
+
+    def winner_lands_the_shared_version():
+        assert apply_migrations(winner) == SCHEMA_VERSION
+
+    def winner_lands_its_newer_version():
+        with pytest.MonkeyPatch.context() as scoped:
+            scoped.setattr(db_module, "MIGRATIONS", newer_build)
+            assert apply_migrations(winner) == ahead
+
+    loser = _RacedConnection(
+        loser_conn,
+        before={"BEGIN IMMEDIATE": winner_lands_the_shared_version},
+        after={"ROLLBACK": winner_lands_its_newer_version},  # the skip just released
+    )
+    try:
+        with pytest.raises(SchemaVersionError, match=rf"v{ahead}.*NEWER build"):
+            apply_migrations(loser)
+        assert loser.fired == ["BEGIN IMMEDIATE", "ROLLBACK"]
+        assert loser_conn.in_transaction is False
     finally:
         winner.close()
         loser_conn.close()

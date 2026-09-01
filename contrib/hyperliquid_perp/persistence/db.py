@@ -123,11 +123,18 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     sees the version recorded and skips it. Without that re-read the loser
     re-ran the winner's ``ALTER TABLE ... ADD COLUMN`` and died on
     ``duplicate column name`` (issue #147), a traceback exit 2 from a race
-    that ``BEGIN IMMEDIATE`` had already serialized correctly. The re-check
-    carries the NEWER-build refusal below with it: a winner running a newer
-    build has carried the store past what this one knows, and skipping its
-    versions silently would be exactly the write-through the refusal exists
-    to stop. The loser's wait is bounded by :func:`connect`'s ``busy_timeout``;
+    that ``BEGIN IMMEDIATE`` had already serialized correctly. The skip does
+    not ask WHOSE version it skipped: a winner running a newer build has
+    carried the store past what this one knows, and skipping its versions
+    silently would be exactly the write-through the NEWER refusal below
+    exists to stop — so the recorded version is read once more after the
+    loop and that refusal raised there. After the loop rather than per step
+    because the winner commits one version per transaction: a verdict inside
+    a step could only see what had landed by then, while the final read sees
+    everything landed up to this call's return. A newer build that lands
+    after it is the at-open window the lease ordering already accepts (issue
+    #129: the sibling check is a read, not a lock). The loser's wait is
+    bounded by :func:`connect`'s ``busy_timeout``;
     a winner whose single step outlasted it would leave the loser with
     ``database is locked`` (an ``OperationalError``, so main()'s exit 2) —
     every step here is a handful of DDL statements, far inside that bound.
@@ -158,20 +165,14 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
         conn.execute("BEGIN IMMEDIATE")
         try:
             # Re-read under the write lock: the set above was taken outside
-            # it, and a concurrent process may have applied this version — or,
-            # running a NEWER build, carried the store past this one — in
-            # between. Nothing has been written yet, so the refusal's rollback
-            # (the except below) and the skip's ROLLBACK both release nothing.
-            landed = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT version FROM schema_migrations WHERE version >= ?", (version,)
-                )
-            }
-            newest = max(landed, default=0)
-            if newest > latest_known:
-                raise _newer_build_error(newest, latest_known)
-            if version in landed:
+            # it, and a concurrent process may have applied this version in
+            # between. Nothing has been written yet, so the skip's ROLLBACK
+            # undoes nothing — it only releases the lock. Whether that process
+            # was a NEWER build is judged once, after the loop (see below).
+            landed = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+            ).fetchone()
+            if landed is not None:
                 conn.execute("ROLLBACK")
                 continue
             for statement in MIGRATIONS[version]:
@@ -189,6 +190,14 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
             with suppress(Exception):
                 conn.execute("ROLLBACK")
             raise
+    # A concurrent NEWER build is judged here, not per step: it commits one
+    # version per transaction, so a verdict inside any one step could only see
+    # what had landed by then, while this read sees everything landed up to
+    # this call's return — including versions it skipped past as "already
+    # applied" without knowing whose they were.
+    newest = stored_schema_version(conn)
+    if newest > latest_known:
+        raise _newer_build_error(newest, latest_known)
     return latest
 
 

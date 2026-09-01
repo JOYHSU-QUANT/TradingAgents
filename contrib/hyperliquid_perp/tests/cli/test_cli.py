@@ -37,7 +37,11 @@ from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect, stored_schema_version
 from contrib.hyperliquid_perp.persistence.models import PositionState
-from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.persistence.schema import (
+    LEASE_READABLE_SINCE,
+    MIGRATIONS,
+    SCHEMA_VERSION,
+)
 
 from ..conftest import (
     assert_paired_sweep_refreshes,
@@ -3135,16 +3139,26 @@ def test_paper_acquire_conflict_with_live_holder_exits_1(tmp_path, capsys, paper
     assert "already being driven" in capsys.readouterr().err
 
 
-def _build_one_behind(build):
-    """Run ``build()`` with the newest migration hidden, so the store it makes
-    is exactly one schema version behind this build — the deploy-box shape a
-    new binary meets when an older daemon still owns the store."""
-    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
-
-    behind = sorted(MIGRATIONS)[-2]
+def _build_behind(build, behind: int):
+    """Run ``build()`` with every migration past ``behind`` hidden, so the
+    store it makes is that many schema versions behind this build."""
     with migrations_up_to(behind):
         result = build()
     return behind, result
+
+
+def _build_one_behind(build):
+    """The deploy-box shape a new binary meets when an older daemon still owns
+    the store: exactly one schema version behind."""
+    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+
+    return _build_behind(build, sorted(MIGRATIONS)[-2])
+
+
+# The two shapes an owning command's pre-lease refusal must survive: the lease
+# floor itself (the oldest store whose lease it can read, issue #147) and the
+# routine one-behind deploy-box store.
+_BEHIND_VERSIONS = [LEASE_READABLE_SINCE, sorted(MIGRATIONS)[-2]]
 
 
 def _stored_version(path) -> int:
@@ -3155,12 +3169,17 @@ def _stored_version(path) -> int:
         probe.close()
 
 
-def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(tmp_path, capsys, paper_seams):
+@pytest.mark.parametrize("behind_version", _BEHIND_VERSIONS)
+def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(
+    tmp_path, capsys, paper_seams, behind_version
+):
     # Issue #129: ``paper`` opened the store with the default migrate-on-open
     # and only THEN reached the lease check, so a new build started by hand on
     # the deploy box upgraded the schema underneath the still-running old
     # daemon on its way to being refused. Same policy live-smoke adopted: the
     # refusal must leave the store byte-for-byte the version the daemon owns.
+    # At the lease floor too (issue #147): the refusal's own reads must not
+    # need anything younger than the lease columns.
     from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
 
     def build():
@@ -3169,7 +3188,7 @@ def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(tmp_path, capsys,
         db.close()
         return path
 
-    behind, path = _build_one_behind(build)
+    behind, path = _build_behind(build, behind_version)
     assert _stored_version(path) == behind
 
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
@@ -3236,7 +3255,8 @@ def test_the_runbook_quotes_the_migration_window_literals():
     runbook = doc_text("RUNBOOK-live.md")
     assert f"`LOCK_STALE_SECONDS`＝{LOCK_STALE_SECONDS} 秒" in runbook
     assert f"before upgrading a store arrived in v{LEASE_READABLE_SINCE}`" in runbook
-    # The suffix the pid-recycling row keys on, as the CLI test above prints it.
+    # The suffix the pid-recycling row keys on, as the live lease-conflict test
+    # further down asserts the CLI prints it.
     assert "`(this process is pid N)`" in runbook
 
 
@@ -4445,13 +4465,15 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     assert "2026-07-20" in err  # names the oldest pass
 
 
+@pytest.mark.parametrize("behind_version", _BEHIND_VERSIONS)
 def test_live_lease_conflict_leaves_a_behind_store_unmigrated(
-    tmp_path, capsys, live_seams, monkeypatch
+    tmp_path, capsys, live_seams, monkeypatch, behind_version
 ):
     # Issue #129, the live sibling of the paper test: ``live`` also opened
     # with migrate-on-open ahead of its lease check. A one-shot recovery run
     # (no --loop, so no smoke gate) against a run another pid holds must be
-    # refused with the store still at the version that daemon owns.
+    # refused with the store still at the version that daemon owns — at the
+    # lease floor too (issue #147), where none of the live tables exist yet.
     from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
@@ -4467,7 +4489,7 @@ def test_live_lease_conflict_leaves_a_behind_store_unmigrated(
         db.close()
         return dbp
 
-    behind, dbp = _build_one_behind(build)
+    behind, dbp = _build_behind(build, behind_version)
     assert _stored_version(dbp) == behind
 
     rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])

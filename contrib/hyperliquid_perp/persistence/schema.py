@@ -50,9 +50,9 @@ SCHEMA_VERSION = 11
 # floor up and runs those readers and that write against it. A later
 # migration that renames or drops a column they use, or a reader that starts
 # touching a column younger than the floor, fails there — before it can turn
-# an owning command's refusal into a traceback. A nullable ``ADD COLUMN`` on
-# either table is the additive change every migration since v3 has made and
-# stays green. A new pre-lease reader goes into that test, not into this list.
+# an owning command's refusal into a traceback. A nullable ``ADD COLUMN`` is
+# the only change any migration since v3 has made to either table, and stays
+# green. A new pre-lease reader goes into that test, not into this list.
 LEASE_READABLE_SINCE = 3
 
 # --------------------------------------------------------------------------

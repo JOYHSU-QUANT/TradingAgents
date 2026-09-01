@@ -646,6 +646,15 @@ class OutageVerdictTests(unittest.TestCase):
         with _chain("get_stock_data", {"yfinance": _curl(404), "alpha_vantage": _no_data}):
             out = _stock()
         self.assertIn("may be invalid", out)
+        # curl_cffi attaches a Response to its transport failures too, with
+        # status 0 because nothing answered: that is "unreachable", not "a
+        # status that is not an outage" (measured on 0.15.0).
+        timed_out = _raises(
+            curl_exceptions.Timeout("Operation timed out", 28, types.SimpleNamespace(status_code=0))
+        )
+        with _chain("get_stock_data", {"yfinance": timed_out, "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("vendor 'yfinance' was unavailable (could not be reached: Timeout)", out)
 
     def test_a_requests_exception_that_is_a_value_error_is_not_an_outage(self):
         # MissingSchema / InvalidURL are code bugs dressed as requests

@@ -408,9 +408,13 @@ def http_status(exc: BaseException) -> int | None:
     ``raise_for_status`` builds ``HTTPError(msg, 0, response)`` and requests'
     sets ``.response`` the same way (measured, curl_cffi 0.15.0). The one
     library-neutral way to read a status off an exception — the two
-    ``HTTPError`` classes share no base below ``OSError``.
+    ``HTTPError`` classes share no base below ``OSError``. ``None`` too for
+    a status of 0: curl_cffi attaches a ``Response`` to its transport
+    failures as well (a ``Timeout``, a ``ConnectionError``), with
+    ``status_code == 0`` because nothing answered (measured), and a caller
+    asking "did the vendor answer a status?" must hear no.
     """
-    return getattr(getattr(exc, "response", None), "status_code", None)
+    return getattr(getattr(exc, "response", None), "status_code", None) or None
 
 
 def raise_for_http_status(response, vendor: str) -> None:

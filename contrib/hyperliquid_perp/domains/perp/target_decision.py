@@ -536,14 +536,15 @@ def format_fingerprint(format_text: str) -> str:
     ``prompt_version`` marks a code change by hand and ``context_shape`` marks
     the context's section structure; neither covers the FORMAT half of the
     prompt, which :func:`decision_format_instructions` renders from the live
-    config — the legal grid, the effective ceiling, both confidence bars and
-    the deadband are numbers in that text, and a ``decision:`` / ``risk:``
-    YAML edit changes what the model reads with no deploy and nothing to bump
-    (issue #129). So this key is a digest of the RENDERED text, not a shape:
-    any change to those numbers, or to the block's wording, moves it. The
-    same digest the version-pin test computes (the first 16 hex characters
-    of SHA-256 over UTF-8), so the two agree on what "the block changed"
-    means. Stored on ``ai_inputs.format_fingerprint`` (schema v11) and in the
+    config — the legal grid and the effective ceiling are numbers in that
+    text, and a ``decision:`` / ``risk:`` YAML edit of those changes what the
+    model reads with no deploy and nothing to bump (issue #129). So this key
+    is a digest of the RENDERED text, not a shape: any change to those
+    numbers, or to the block's wording, moves it. Since prompt v5 the gate
+    thresholds are not in the text, so editing them does not move it. It is
+    the same digest the version-pin test computes (the first 16 hex
+    characters of SHA-256 over UTF-8), so the two agree on what "the block
+    changed" means. Stored on ``ai_inputs.format_fingerprint`` (schema v11) and in the
     payload JSON; ``GROUP BY prompt_version, context_shape,
     format_fingerprint`` is the full segmentation.
     """
@@ -553,19 +554,35 @@ def format_fingerprint(format_text: str) -> str:
 def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None = None) -> str:
     """The output-format contract text injected at the tail of the engine context.
 
-    Rendered from the live :class:`DecisionConfig` so the *numeric values* in
-    the prompt — the legal margin grid, the confidence thresholds
-    (``min_confidence`` and the same-side ``resize_min_confidence`` bar) and
-    the rebalance deadband — can never drift from what the parser and RiskGate
-    actually enforce. The deadband sentence itself is a deliberately
-    simplified contract for the normal case: the gate skips the deadband
-    entirely on an unreadable ``margin_pct`` or a leverage mismatch (the
-    target then trades, or hits the resize bar). Those degraded states are
-    rare in Phase 2 and non-actionable for the model: the daemon lanes' v4
-    ``Position:`` section is built from the local books, which never carry
-    an unreadable margin or a foreign leverage, and the one-shot CLI (which
-    CAN hit both, off an exchange-reported position) stays position-blind —
-    so the prompt does not carry the conditional.
+    Rendered from the live :class:`DecisionConfig` so the legal margin grid
+    and the effective ceiling in the prompt can never drift from what the
+    parser and RiskGate actually enforce. The three gate thresholds the same
+    config carries — ``min_confidence``, the same-side
+    ``resize_min_confidence`` bar and the rebalance deadband — are
+    deliberately NOT rendered since prompt v5: as numbers they were anchors
+    the model steered to, not information (see the CHANGELOG entry for
+    ``phase2-target-v5`` for the paper-BTC-2 figures). The block states the
+    three rules qualitatively — pinned number-free by
+    ``test_format_instructions_carry_no_gate_threshold_number`` and, through
+    the one-shot config path, by
+    ``test_run_engine_prompt_carries_no_gate_threshold_number`` — and the
+    gate enforces the numbers unchanged; a rejection still reaches the audit
+    row. Two deliberate simplifications follow from the wording being fixed.
+    The resize sentence says the bar is "higher" even when an operator sets
+    ``resize_min_confidence == min_confidence`` (the documented off-switch)
+    — accepted, since rendering it conditionally would put config back into
+    the text. And the deadband sentence is a simplified contract for the
+    normal case, twice over: the model is not told how wide "only
+    marginally" is, so it cannot know whether a single grid step is a
+    cost-free reaffirmation or a trade held to the resize bar — accepted,
+    since telling it is exactly the anchor v5 removes. And the gate skips
+    the deadband entirely on an unreadable ``margin_pct`` or a leverage
+    mismatch (the target then trades, or hits the resize bar); those
+    degraded states are rare in Phase 2 and non-actionable for the model:
+    the daemon lanes' v4 ``Position:`` section is built from the local
+    books, which never carry an unreadable margin or a foreign leverage, and
+    the one-shot CLI (which CAN hit both, off an exchange-reported position)
+    stays position-blind — so the prompt does not carry the conditional.
     ``max_pct`` (when given) advertises the *effective* ceiling —
     ``risk_gate.effective_max_target_margin_pct``, the
     grid ceiling capped by ``risk.max_target_margin_pct`` — so the model is
@@ -574,9 +591,9 @@ def decision_format_instructions(config: DecisionConfig, *, max_pct: int | None 
     business as usual. Requests above ``max_pct`` but on the grid stay
     schema-valid (they clamp rather than fail closed).
 
-    The resize bar is advertised as a per-action fact only; the gate's
-    exemption ranking (open/flip/flat need just ``min_confidence``) is
-    deliberately not spelled out. Through prompt v3 the reason was that a
+    The resize clause says only that its bar is higher, never higher THAN
+    which action's: the gate's exemption ranking (open/flip/flat need just
+    ``min_confidence``) is deliberately not spelled out. Through prompt v3 the reason was that a
     position-blind model could not tell which of its targets was a resize,
     so the comparison was non-actionable. Since v4 the context carries the
     model's own position (``prompt_context``'s ``Position:`` section, with
@@ -726,14 +743,13 @@ are never repaired or rounded):
 - "requested_target_margin_pct": integer percent of account equity to commit
   as margin, from {lo} to {hi} in steps of {step}. Use a value > 0 with
   long/short, exactly 0 with flat, and null with maintain_current.
-- "confidence": a number between 0 and 1. A set_target with confidence below
-  {config.min_confidence} is rejected. A same-side target less than
-  {config.rebalance_deadband_pct} percentage points away from the current
-  margin creates no order (a cost-free reaffirmation); a same-side resize that would
-  actually trade needs confidence >= {config.resize_min_confidence} or it is
-  rejected — every executed rebalance pays fees. Make your conviction
-  consistent with the margin you request — confidence is recorded but never
-  scales the size.
+- "confidence": a number between 0 and 1. A set_target whose confidence is
+  too low is rejected. A same-side target only marginally away from the
+  current margin creates no order (a cost-free reaffirmation); a same-side
+  resize that would actually trade is held to a higher confidence bar and is
+  rejected below it — every executed rebalance pays fees. Make your
+  conviction consistent with the margin you request — confidence is recorded
+  but never scales the size.
 - "rationale": non-empty. "key_risks": 1 to {_MAX_KEY_RISKS} short strings (at least one).
 
 Legal combinations — anything else is invalid:

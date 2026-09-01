@@ -801,8 +801,8 @@ def test_streak_clears_once_a_cycle_decides_again(tmp_path):
 # --------------------------------------------------------------------------
 
 _V4 = ("phase2-target-v4", "price|market|funding|indicators(rsi_14)|position", "aaaa0000aaaa0000")
-# The same prompt after a ``decision.min_confidence`` edit: nothing to bump,
-# the shape unchanged — only the format block's digest moves.
+# The same prompt after a ``decision.target_margin_step_pct`` edit: nothing to
+# bump, the shape unchanged — only the format block's digest moves.
 _V4_EDITED = (_V4[0], _V4[1], "bbbb0000bbbb0000")
 
 

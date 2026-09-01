@@ -105,8 +105,10 @@ def run_context_only(config: dict, coin: str) -> int:
     # The buckets this YAML lands in (ai_inputs.context_shape and
     # .format_fingerprint) — the one keyless, store-free way to see them
     # BEFORE deploying a config edit. The fingerprint is over the same block
-    # run_engine feeds the model (effective ceiling included), so a
-    # ``decision:`` / ``risk:`` edit shows its new value here.
+    # run_engine feeds the model (effective ceiling included), so a grid or
+    # ceiling edit shows its new value here. A gate-threshold edit does NOT
+    # (prompt v5 keeps those out of the text): that one needs a new run-id,
+    # and an unchanged fingerprint here is not evidence it can skip one.
     print(f"context_shape: {context_shape(ctx)}")
     risk_cfg, decision_cfg = cfgs
     print(
@@ -361,9 +363,11 @@ def run_engine(config: dict, coin: str) -> int:
     try:
         # ``prompt_hash`` covers everything this adapter injected — the market
         # context AND the output-format contract (which embeds the live margin
-        # grid / min_confidence), assembled exactly as resolve_instrument_context
-        # appends it — so two records with different decision:/risk: config can
-        # never carry the same hash. The engine's own base instrument context is
+        # grid and effective ceiling), assembled exactly as
+        # resolve_instrument_context appends it — so two records with a
+        # different grid or ceiling can never carry the same hash. (Since
+        # prompt v5 the gate thresholds are not in the text; a threshold-only
+        # edit shares the hash.) The engine's own base instrument context is
         # engine-internal and not captured.
         _record, path = log_target_decision(
             coin=coin,

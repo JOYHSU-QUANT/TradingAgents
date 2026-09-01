@@ -127,12 +127,15 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 警告只比對 YAML——**code 內建預設值的變更**（例如新增的
 `resize_min_confidence` 預設 0.7、prompt 文字改版）不會觸發警告，但一樣改變
 行為，所以調參 code 的部署必須與新 run-id 同批上線，不要讓舊段跨過部署點。
-prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py` 的
-`PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
+（prompt v5 起 `format_fingerprint` 也不再跟著門檻走，所以門檻的 code 預設值改動在
+`ai_inputs`、drift 戳、`prompt_regime:` 三處**都看不到**——只剩 run-id 這一道。）
+prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措辭的改版），另要 bump
+`cli/_provider.py` 的 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，
-內容等不等於舊版無所謂；`v4` 已被 2026-08-27 的 `Position:` 段用掉，不是回滾備用值）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
+內容等不等於舊版無所謂；`v4` 已被 2026-08-27 的 `Position:` 段用掉、`v5` 已被 2026-09-01
+的「格式段不印門檻數字」用掉，都不是回滾備用值）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
 模組——`cli/_provider.py` 確實 import 了它，但 import 不會讓常數跟著文字動——所以有一個測試把
 版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
 
@@ -144,7 +147,7 @@ prompt 的 context／format 契約改 shape 時，另要 bump `cli/_provider.py`
 部署點的會是最後成交停在 2026-07-16、此後零成交、策略價值歸零的 `paper-BTC`。
 
 **這條例外附一個硬規則：量測窗內不得夾帶其他輸入面變更。** 切段鍵是
-`prompt_version`，而它只在 context／format **契約改形狀**時才 bump；輸入面的**內容**
+`prompt_version`，而它只在 context／format **契約改形狀或改措辭**時才 bump；輸入面的**內容**
 變了（例如把某個 ships-OFF 的 vendor 翻成啟用）不改形狀、不會 bump，`input_payload_hash`
 每個 cycle 本來就不同也切不了段——於是 after 段的前半後半是兩個不同的輸入制度，而資料
 裡完全看不出來。所以跨過 v3 邊界之後、量測窗結束之前，`deploy/paper` **只准**帶 prompt
@@ -172,12 +175,16 @@ context 那一半的切段鍵因此是兩個（**`prompt_version, context_shape`
 prompt 不同）不管來自 code 還是 YAML 都自動落進資料裡。翻動這些 key 仍然是跨越量測邊界（A/B 量測窗內**禁止翻動**，
 與夾帶 vendor 變更同罪）——差別是現在資料會自己標出來，不靠人記得。標籤裡的數字變了
 （`candle_interval`、`funding_zscore_window_days`）屬於**內容**變更，`context_shape` 不動，
-由下面的 config drift 警告承接。**format 那一半由第三個鍵承接**：`decision:` 的格線／門檻
+由下面的 config drift 警告承接。**format 那一半由第三個鍵承接**：`decision:` 的格線
 （與 `risk.max_target_margin_pct` 壓出的有效上限）會渲染進 `decision_format_instructions` 的文字，
 改 YAML 就換數字、不 bump 也不改 shape——schema v11 起 `ai_inputs` 多一欄 **`format_fingerprint`**
 （`domains/perp/target_decision.format_fingerprint`：渲染文字的 SHA-256 前 16 個 hex，同時寫進
 payload JSON），`--context-only` 也印一行 `format_fingerprint: …`。它是**內容指紋不是 shape**：
-那段文字任何改動都換值，prompt v5 調門檻數字時也會再變一次。所以完整切段鍵是三個：
+那段文字任何改動都換值。**prompt v5 起三個 gate 門檻（`min_confidence`／`resize_min_confidence`／
+`rebalance_deadband_pct`）不再渲染成數字**（只剩定性描述），所以改門檻 YAML **不會**換指紋——它
+跟著模型讀到的文字走，模型讀不到門檻了；門檻改動仍是策略調參、照上面的規則開新 run-id——
+resume 時的 `config_drift` 只是「最新一次比對」的戳（下次乾淨 resume 就蓋回 `ok`），不是逐列的鍵，
+`prompt_regime:` 因此**不會**自動為門檻改動切段。所以完整切段鍵是三個：
 **`GROUP BY prompt_version, context_shape, format_fingerprint`**；`validate` 會依三鍵印每組的
 cycle 數（`prompt_regime:` 行，見 §6），一眼看出 run 有沒有跨段。翻動這些 key 仍是跨越量測
 邊界、量測窗內禁止翻動——差別只是資料現在會自己標出來。另一條紀律：**改 `context_shape` 的字串文法**（排序、

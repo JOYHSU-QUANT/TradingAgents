@@ -1998,11 +1998,37 @@ def test_run_engine_success_writes_log_and_returns_zero(monkeypatch, capsys):
     assert written["mark_price"] == Decimal("60000")
     assert written["account_equity"] == Decimal("10000")
     # prompt_hash must cover everything the adapter injected: the market
-    # context AND the output-format contract (whose grid/min_confidence come
-    # from the live config), so config changes always change the hash.
+    # context AND the output-format contract (whose grid and effective ceiling
+    # come from the live config), so a grid change always changes the hash.
     assert "## Perpetual market context\nctx text" in written["prompt"]
     assert "## Required final decision output format" in written["prompt"]
     assert "decision log written to" in capsys.readouterr().err
+
+
+def test_run_engine_prompt_carries_no_gate_threshold_number(monkeypatch):
+    # Prompt v5's rule at the one-shot ASSEMBLY level: the format block, and
+    # anything run_engine itself concatenates around the context, may not
+    # print a gate threshold — through the real config path
+    # (engine_bridge._load_risk_decision), not a hand-built DecisionConfig.
+    # The context half is a stub here (``_stub_engine`` replaces
+    # render_market_context), so the context sections are NOT covered by
+    # this test: they are pinned by gate word in test_prompt_context, and the
+    # daemon lanes compose the same two functions (cli/_provider.py).
+    written = {}
+    _stub_engine(monkeypatch)
+    monkeypatch.setattr(
+        main_mod,
+        "log_target_decision",
+        lambda **k: written.update(k) or ({}, "/tmp/perp_decisions/BTC.json"),
+    )
+    thresholds = {
+        "min_confidence": 0.37,
+        "resize_min_confidence": 0.83,
+        "rebalance_deadband_pct": 2.5,
+    }
+    assert main_mod.run_engine({"decision": thresholds}, "BTC") == 0
+    for leaked in ("0.37", "0.83", "2.5"):
+        assert leaked not in written["prompt"], leaked
 
 
 def test_run_engine_healthy_risk_rejection_exits_zero(monkeypatch, capsys):

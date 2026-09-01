@@ -313,6 +313,10 @@ def test_parse_interval_accepts_a_string_or_a_member_and_names_a_bad_one():
     assert parse_interval(CandleInterval.D1) is CandleInterval.D1
     with pytest.raises(ValueError, match="unsupported candle interval '4H'"):
         parse_interval("4H")
+    # ...and the sentence is the enum's own (``_missing_``), so a caller that
+    # resolves the member directly is told the same thing (issue #155).
+    with pytest.raises(ValueError, match=r"unsupported candle interval '4H'; choose from \["):
+        CandleInterval("4H")
 
 
 def test_perp_market_context_host_reading_must_be_aware_and_paired():
@@ -347,8 +351,8 @@ def test_perp_market_context_coerces_enum_interval_to_value():
 
 
 def test_perp_market_context_rejects_unknown_interval():
-    # The message is interval_to_ms's — one check, one wording — and names the
-    # offending value.
+    # The message is the enum's own (``CandleInterval._missing_``) — one check,
+    # one wording — and names the offending value.
     with pytest.raises(ValueError, match="unsupported candle interval '7m'"):
         PerpMarketContext(**_context(candle_interval="7m"))
 

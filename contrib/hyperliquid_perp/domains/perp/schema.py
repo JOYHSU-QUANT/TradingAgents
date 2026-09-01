@@ -99,6 +99,18 @@ class CandleInterval(str, Enum):
     H4 = "4h"
     D1 = "1d"
 
+    @classmethod
+    def _missing_(cls, value: object):
+        # The lookup's own failure, worded for the operator: ``Enum`` would say
+        # "'4H' is not a valid CandleInterval", naming neither the vocabulary
+        # nor the fix. Raised HERE rather than translated by ``parse_interval``
+        # so a caller that resolves the enum directly gets the same sentence
+        # (issue #155). ``Enum.__new__`` re-raises a ``ValueError`` from
+        # ``_missing_`` with its message intact.
+        raise ValueError(
+            f"unsupported candle interval {value!r}; choose from {[i.value for i in cls]}"
+        )
+
 
 # How many milliseconds each supported candle interval spans. Lives beside the
 # enum it is keyed by, not in the exchange adapter that first needed it: the
@@ -118,19 +130,12 @@ _INTERVAL_MS = {
 def parse_interval(interval: str | CandleInterval) -> CandleInterval:
     """``interval`` as its :class:`CandleInterval` member; ``ValueError`` naming it if unsupported.
 
-    The one place the string is resolved: :func:`interval_to_ms` and
-    :class:`PerpMarketContext`'s constructor both go through it, so the check
-    and its message live once (issue #122). A member passes through unchanged.
+    The typed seam :func:`interval_to_ms` and :class:`PerpMarketContext`'s
+    constructor share (issue #122). The resolution and its message are the
+    enum's own (``_missing_``), so a caller that writes ``CandleInterval(x)``
+    instead is told the same thing. A member passes through unchanged.
     """
-    # ``CandleInterval(interval)`` raises ValueError on an unknown value (e.g. a
-    # mis-cased "4H"); translate it into the same clear message the caller expects.
-    try:
-        return CandleInterval(interval)
-    except ValueError:
-        raise ValueError(
-            f"unsupported candle interval {interval!r}; "
-            f"choose from {[i.value for i in CandleInterval]}"
-        ) from None
+    return CandleInterval(interval)
 
 
 def interval_to_ms(interval: str) -> int:

@@ -774,6 +774,27 @@ def test_an_unregistered_escalation_holder_is_refused_even_with_nothing_latched(
     assert safe_mode.current() is None
 
 
+def test_a_string_spelled_exactly_as_a_member_is_accepted_by_value(db):
+    # What the two refusals above do NOT close: the VOCABULARY is closed, the
+    # Python type is not. ``ProbeSite(site)`` / ``EscalationHolder(holder)`` is
+    # ``Enum``'s value lookup, so a plain string equal to a member's value IS
+    # that member — deliberately (issue #159): the RUNBOOK table pins the
+    # values, and a consumer carrying one as text is still inside the
+    # vocabulary. Pinned so that tightening either entry to ``isinstance`` is
+    # a visible change here rather than a silent one at some call site.
+    venue = _Venue()
+    monitor = _monitor(db, venue)
+    assert monitor.probe(_OURS, site="reconcile absent-order settle") is None  # unknownOid, read
+    assert venue.asked == [_OURS]  # the round-trip happened: not refused at the call
+    assert monitor.unreadable_streak == 0
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    assert (
+        escalate_identity_fault(monitor, safe_mode, holder="§18.2 shutdown disarm cross-check")
+        is False
+    )
+    assert safe_mode.current() is None
+
+
 def test_the_runbook_site_table_is_the_vocabulary():
     # The RUNBOOK's ``venue_identity_fault`` table and the two enums are ONE
     # list: a member added without its row, or a row without its member, is red.

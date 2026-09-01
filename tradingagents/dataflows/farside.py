@@ -47,10 +47,10 @@ import requests
 from parsel import Selector
 
 from .config import get_config
-from .errors import VendorError
+from .errors import VendorError, VendorUnavailableError
 from .sosovalue_common import _cache_rejecter, _read_cache_preamble, _stale_caveat
 from .symbol_utils import classify_crypto_asset
-from .utils import date_refusal
+from .utils import date_refusal, raise_for_http_status
 
 logger = logging.getLogger(__name__)
 
@@ -182,15 +182,19 @@ class _FlowSnapshot(NamedTuple):
 def _request_html(asset: str) -> str:
     """GET a Farside asset page with a browser User-Agent.
 
-    ``raise_for_status`` turns a Cloudflare 403 (or any non-2xx) into a
-    ``requests.HTTPError`` so the caller treats a WAF block like a network error.
+    A 5xx raises ``VendorUnavailableError`` (the shared boundary helper): the
+    caller serves its stale cache from that exactly as from a network error,
+    and when it cannot, the outage keeps its type so the router logs it
+    without a traceback (#142). Any other non-2xx — a Cloudflare 403 — is
+    the ``requests.HTTPError`` it always was, so the caller treats a WAF
+    block like a network error.
     """
     response = requests.get(
         f"{FARSIDE_BASE}{ASSET_PATHS[asset]}",
         headers={"User-Agent": BROWSER_UA},
         timeout=REQUEST_TIMEOUT,
     )
-    response.raise_for_status()
+    raise_for_http_status(response, "Farside")
     return response.text
 
 
@@ -621,8 +625,9 @@ def _load_flows(asset: str) -> _FlowSnapshot:
     A cache younger than ``CACHE_TTL_HOURS`` is served as-is (throttling repeat
     calls). Otherwise fetch + parse + overwrite the rolling cache file. On a fetch
     or parse failure, fall back to the cached snapshot (``stale=True``); if there
-    is none, or it is beyond the staleness cap, raise FarsideError so the router
-    degrades. A failed fetch is never written to cache.
+    is none, or it is beyond the staleness cap, raise so the router degrades —
+    as FarsideError, except that a 5xx keeps the boundary's outage type. A
+    failed fetch is never written to cache.
     """
     path = _cache_path(asset)
     cached = _read_cache(path, asset)
@@ -640,7 +645,13 @@ def _load_flows(asset: str) -> _FlowSnapshot:
 
     try:
         parsed = _parse_flow_table(_request_html(asset), asset)
-    except (requests.RequestException, FarsideError) as e:
+    except (requests.RequestException, VendorUnavailableError, FarsideError) as e:
+        # What the context-adding raises below wrap the failure as: the
+        # boundary's outage verdict keeps its type (the router logs a Farside
+        # 5xx without a traceback, like any vendor's); a transport failure or
+        # a structural break is this module's own error — the policy
+        # ``sosovalue_common.load_rolling_snapshot`` applies to its family.
+        wrap_cls = type(e) if isinstance(e, VendorError) else FarsideError
         if cached:
             fetched_at = cached["fetched_at"]
             age = _days_stale(fetched_at)
@@ -656,7 +667,7 @@ def _load_flows(asset: str) -> _FlowSnapshot:
                     if age is None
                     else f"is {age} days stale"
                 )
-                raise FarsideError(
+                raise wrap_cls(
                     f"Farside {asset} fetch failed and the newest cache {stale_desc} "
                     f"(> {MAX_STALE_DAYS}-day cap): {e}"
                 ) from e
@@ -689,7 +700,7 @@ def _load_flows(asset: str) -> _FlowSnapshot:
                 stale=True,
                 issuers_named=cached["issuers_named"],
             )
-        raise FarsideError(f"Farside {asset} unavailable and no cache exists: {e}") from e
+        raise wrap_cls(f"Farside {asset} unavailable and no cache exists: {e}") from e
 
     # Stamp the fetch instant from _iso_now() (the same clock _cache_age_hours and
     # _days_stale read) so the TTL, cache freshness, and the staleness cap all key

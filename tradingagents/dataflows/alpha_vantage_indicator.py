@@ -351,17 +351,20 @@ def get_indicator(
         raise
     except requests.RequestException:
         # A transport-layer failure propagates for the same reason, one lane
-        # over: #72 classified only HTTP 429, so every other status code — and
-        # every connection reset or timeout — arrives here as a plain requests
-        # exception. Swallowed, an Alpha Vantage 503 came back as "Error
-        # retrieving {indicator} data: 503 Server Error", which route_to_vendor
-        # reads as a successful answer: the chain stopped at the vendor that
-        # had just failed and the agent analysed the error prose as an
-        # indicator report. Every other Alpha Vantage getter (fundamentals,
-        # news, stock) carries no broad except at all, so a requests exception
-        # already reaches the router's generic error lane from those — this
-        # getter was the only one converting it into a success (#87). What the
-        # router does with it from there is described one block up.
+        # over. #72 classified only HTTP 429 and #142 the 5xx (the outage
+        # type, which the VendorError clause above lets out), so this clause
+        # is what still keeps every other requests exception — a 4xx the
+        # boundary leaves as HTTPError, a connection reset, a timeout — from
+        # the broad handler below. Swallowed, an Alpha Vantage 404 would come
+        # back as "Error retrieving {indicator} data: 404 Client Error",
+        # which route_to_vendor reads as a successful answer: the chain
+        # stopped at the vendor that had just failed and the agent analysed
+        # the error prose as an indicator report (#87, then a 503). Every
+        # other Alpha Vantage getter (fundamentals, news, stock) carries no
+        # broad except at all, so a requests exception already reaches the
+        # router's generic error lane from those — this getter was the only
+        # one converting it into a success. What the router does with it from
+        # there is described one block up.
         raise
     except Exception as e:
         print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")

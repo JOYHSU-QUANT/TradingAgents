@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from .utils import date_refusal, live_snapshot_note
+from .utils import date_refusal, json_body_or_outage, live_snapshot_note, raise_for_http_status
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +30,18 @@ DEFAULT_LIMIT = 6
 
 
 def _request(path: str, params: dict) -> dict:
+    """GET a Gamma endpoint and return its JSON body.
+
+    A 5xx, or a 2xx whose body is not JSON, raises ``VendorUnavailableError``
+    (the shared boundary helpers) rather than the ``requests.HTTPError`` /
+    ``ValueError`` it used to: Gamma answered without data, and that verdict
+    belongs to the router — the caller's transport handler below is not it
+    (a 5xx read there as a "network error" and a non-JSON body reached the
+    router's generic lane as a bug, #142). A 4xx keeps raising as before.
+    """
     response = requests.get(f"{GAMMA_BASE}/{path}", params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
+    raise_for_http_status(response, "Polymarket")
+    return json_body_or_outage(response, "Polymarket")
 
 
 def _parse_json_list(value) -> list:
@@ -103,6 +112,10 @@ def get_prediction_markets(
     ) is not None:
         return refusal
 
+    # Transport failures (a reset, a timeout, a 4xx) degrade here, in prose;
+    # an outage verdict (a 5xx, a non-JSON body) is a ``VendorUnavailableError``
+    # from ``_request`` and is deliberately NOT caught: it propagates to the
+    # router, which degrades the optional category to its own sentinel (#142).
     try:
         data = _request("public-search", {"q": topic, "limit_per_type": 20})
     except requests.RequestException as e:

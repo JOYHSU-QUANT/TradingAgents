@@ -6,7 +6,7 @@ import pandas as pd
 import requests
 
 from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimitError
-from .utils import _parse_day, normalize_iso_date
+from .utils import _parse_day, normalize_iso_date, raise_for_http_status
 
 API_BASE_URL = "https://www.alphavantage.co/query"
 
@@ -186,6 +186,8 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
             invalid or missing (#991), or that the endpoint is premium-only
             for this key — an entitlement the key lacks, not a throttle it
             will outlive (#114)
+        VendorUnavailableError: When the answer is a 5xx — Alpha Vantage is
+            down, which the router degrades from without a traceback (#142)
         NoMarketDataError: When the body is an ``Error Message`` rejection
             envelope — Alpha Vantage's "Invalid API call" answer for a symbol
             or parameter it cannot serve — or a JSON body that is not an
@@ -223,12 +225,13 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     # requests.HTTPError outside the taxonomy: the notice check below reads
     # only HTTP 200 bodies, so a status-code throttle would otherwise fall
     # into each caller's broad except and never reach the router's rate-limit
-    # lane (#72). Other 4xx/5xx keep their HTTPError behaviour.
+    # lane (#72). A 5xx is then an outage verdict (#142); every other 4xx keeps
+    # its HTTPError behaviour.
     if response.status_code == 429:
         retry_after = response.headers.get("Retry-After")
         after = f" (Retry-After: {retry_after})" if retry_after else ""
         raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: HTTP 429{after}")
-    response.raise_for_status()
+    raise_for_http_status(response, "Alpha Vantage")
 
     response_text = response.text
 

@@ -16,14 +16,26 @@ import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
-from tradingagents.dataflows.errors import NoMarketDataError
+from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
 
 
 class _FakeResponse:
+    """The strict shape a request boundary reads: status, text, headers, ``.json()``.
+
+    Not a ``mock.Mock`` — an auto-created attribute would let a new read in a
+    boundary pass silently instead of failing the fake. Shared with the FRED,
+    Polymarket and Farside boundary tests (via ``_patched_get``), so the five
+    boundaries are driven by one double rather than five that drift.
+    """
+
     def __init__(self, text, status_code=200, headers=None):
         self.text = text
         self.status_code = status_code
         self.headers = headers or {}
+
+    def json(self):
+        # As the real thing: a body that is not JSON raises a ValueError subclass.
+        return json.loads(self.text)
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -135,13 +147,25 @@ def test_http_429_reports_retry_after_when_present(monkeypatch):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("status", [404, 500])
-def test_other_http_errors_keep_their_requests_behaviour(monkeypatch, status):
-    # #72 deliberately narrows to 429: any other 4xx/5xx keeps raising the
+def test_other_4xx_keeps_its_requests_behaviour(monkeypatch):
+    # #72 deliberately narrows to 429: any other 4xx keeps raising the
     # requests.HTTPError callers already handle.
-    monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=status))
+    monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=404))
     with pytest.raises(requests.HTTPError):
         av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", [500, 503])
+def test_a_5xx_is_an_outage_verdict_carrying_the_status_only(monkeypatch, status):
+    # #142: a 5xx is Alpha Vantage being down — the router's outage lane (no
+    # traceback, on to the next vendor), not the requests.HTTPError its
+    # generic lane logs as a bug. The message names the status, never the
+    # body: an error page must not travel into a sentinel the model reads.
+    monkeypatch.setattr(av.requests, "get", _patched_get("<html>down</html>", status_code=status))
+    with pytest.raises(VendorUnavailableError) as exc:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert str(exc.value) == f"Alpha Vantage answered HTTP {status} without data"
 
 
 @pytest.mark.unit
@@ -813,8 +837,13 @@ def test_indicator_untyped_failure_still_degrades_to_an_error_string(monkeypatch
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("status", [404, 500, 503])
-def test_indicator_http_failure_propagates_instead_of_reading_as_success(monkeypatch, status):
+@pytest.mark.parametrize(
+    "status, propagated",
+    [(404, requests.HTTPError), (500, VendorUnavailableError), (503, VendorUnavailableError)],
+)
+def test_indicator_http_failure_propagates_instead_of_reading_as_success(
+    monkeypatch, status, propagated
+):
     # #87: #72 classified only HTTP 429, so every other status reached this
     # getter's broad except and came back as "Error retrieving rsi data: 503
     # Server Error" — a string route_to_vendor reads as a successful answer, so
@@ -822,10 +851,11 @@ def test_indicator_http_failure_propagates_instead_of_reading_as_success(monkeyp
     # analysed the error prose as an indicator report. Driven through the real
     # request boundary rather than a patched _make_api_request: the swallowing
     # happened to an exception that boundary raises, so the test has to make it
-    # raise for real.
+    # raise for real. A 5xx now leaves that boundary as the outage type (#142)
+    # and propagates through the getter's VendorError clause instead.
     monkeypatch.setattr(av, "get_api_key", lambda: "k")
     monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=status))
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(propagated):
         avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
 
 

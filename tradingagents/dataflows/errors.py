@@ -84,7 +84,16 @@ class VendorUnavailableError(VendorError):
     transport failure — the chain goes on and this surfaces when nothing else
     serves — but logs it without the traceback that lane reserves for a bug,
     and the getters' ``except VendorError: raise`` lets it out without a
-    clause of their own.
+    clause of their own. Not yfinance's alone: the vendors whose boundary
+    is a bare ``requests.get`` — FRED, Polymarket, Farside, Alpha Vantage —
+    map a 5xx (and, where every data answer is JSON, a non-JSON body) to
+    this type through the shared ``utils.raise_for_http_status`` /
+    ``utils.json_body_or_outage``, so one real event — a vendor down — is
+    one router reaction across those (#142). SoSoValue, Deribit and Fear &
+    Greed classify their statuses into types of their own and still reach
+    the router's generic lane. The router remembers this type past the
+    chain: a fallback's "no data" after it is reported as unconfirmed by the
+    vendor that was down, not as the symbol being invalid.
     """
 
 

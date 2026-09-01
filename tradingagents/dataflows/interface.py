@@ -1,5 +1,7 @@
 import logging
 
+import requests
+
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
     get_cashflow as get_alpha_vantage_cashflow,
@@ -28,6 +30,7 @@ from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
 from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
 from .throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
+from .utils import sanitize_untrusted
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -309,6 +312,15 @@ def route_to_vendor(method: str, *args, **kwargs):
 
     last_no_data: NoMarketDataError | None = None
     first_error: Exception | None = None
+    # A caller's mistake (an indicator name no vendor computes) is kept apart
+    # from the vendors' failures so it outranks them at the verdict (#137).
+    first_caller_error: UnsupportedIndicatorError | None = None
+    # The first vendor that was DOWN — answered with an outage page or could
+    # not be reached — and a short, flattened account of it: a fallback's "no
+    # data" is then unconfirmed by the source that would normally serve the
+    # symbol, and the sentinel has to say so (#142). Text only, never the
+    # exception: it travels into a sentinel the model reads.
+    first_outage: tuple[str, str] | None = None
     first_rate_limit: VendorRateLimitError | None = None
     first_skip: VendorRateLimitError | None = None
     for vendor in vendor_chain:
@@ -376,17 +388,24 @@ def route_to_vendor(method: str, *args, **kwargs):
             logger.warning("Vendor %r answered without data for %s: %s", vendor, method, e)
             if first_error is None:
                 first_error = e
+            if first_outage is None:
+                # Flattened: the boundary helpers carry a status code only,
+                # but yfinance's mapping quotes the library's exception, and
+                # the sentinel is an LLM prompt (see ``sanitize_untrusted``).
+                first_outage = (vendor, sanitize_untrusted(e))
             continue
         except UnsupportedIndicatorError as e:
             # A caller typo, not a vendor failure: logged without a traceback,
             # which the clause below reserves for a bug. The chain still goes
             # on — another vendor may compute the name (yfinance serves mfi;
             # Alpha Vantage has no endpoint for it) — and it surfaces at the
-            # end like any other first error, for the tool wrapper to render
-            # as report text (#117).
+            # end ahead of any vendor failure, for the tool wrapper to render
+            # as report text (#117): the name is the caller's to fix, and a
+            # missing key surfacing instead would send them to the wrong
+            # remedy (#137).
             logger.warning("Vendor %r does not support the indicator for %s: %s", vendor, method, e)
-            if first_error is None:
-                first_error = e
+            if first_caller_error is None:
+                first_caller_error = e
             continue
         except Exception as e:
             # Don't let one vendor's failure crash the call when another can
@@ -397,6 +416,20 @@ def route_to_vendor(method: str, *args, **kwargs):
             logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
             if first_error is None:
                 first_error = e
+            # A transport failure — a reset, a timeout (requests' exceptions
+            # are all OSError) — is the vendor being unreachable, the same
+            # fact as the outage lane above for the verdict below. NOT a
+            # ``requests.HTTPError``: the vendor answered, and its boundary
+            # left the status alone on purpose (a 4xx is its answer about
+            # this request, not an outage — ``raise_for_http_status``). The
+            # exception's class only, never its text: a requests message
+            # quotes the request URL, query string (an API key) included.
+            if (
+                first_outage is None
+                and isinstance(e, OSError)
+                and not isinstance(e, requests.HTTPError)
+            ):
+                first_outage = (vendor, f"could not be reached: {type(e).__name__}")
             continue
         # The vendor returned, so a result just received outranks any deadline
         # a sibling thread recorded while this call was in flight ("returned",
@@ -411,7 +444,15 @@ def route_to_vendor(method: str, *args, **kwargs):
     # If any vendor reported "no data", the symbol is genuinely unavailable.
     # Return one explicit, instructive sentinel rather than a vendor-specific
     # empty string, so the agent reports "unavailable" instead of inventing a
-    # value. This takes precedence over incidental fallback errors.
+    # value. This takes precedence over incidental fallback errors — but not
+    # over what they say about the verdict: when a vendor in the chain was
+    # DOWN, the rest's "no data" was never confirmed by the source that would
+    # normally serve the symbol, and "may be invalid" is a statement the
+    # agent reasons from (#142). The outage variant swaps the middle clause
+    # only — the prefix every reader keys on and the do-not-fabricate tail
+    # are one literal — and does not assert the symbol valid either: a
+    # fallback that DID answer (a stale frame, an "Invalid API call") is
+    # still quoted in ``reason``, so the wording is "unconfirmed", not "fine".
     if last_no_data is not None:
         if first_error is not None:
             # A vendor also hit a real error; surface it in logs so the no-data
@@ -428,22 +469,56 @@ def route_to_vendor(method: str, *args, **kwargs):
         # stale") so the agent sees the specific reason — invalid symbol, no
         # coverage, or stale data — not just a generic "unavailable".
         reason = f" ({last_no_data.detail})" if last_no_data.detail else ""
+        if first_outage is not None:
+            down_vendor, outage = first_outage
+            verdict = (
+                f": vendor '{down_vendor}' was unavailable ({outage}) and the remaining "
+                f"configured vendor(s) had no usable data{reason}. Treat the symbol as "
+                f"unconfirmed rather than invalid: the source that would normally "
+                f"serve it could not be reached, and the fallback's answer alone does "
+                f"not settle whether it is valid, delisted, or not covered."
+            )
+        else:
+            verdict = (
+                f" from any configured vendor{reason}. The symbol may be invalid, "
+                f"delisted, not covered, or the vendor returned stale data."
+            )
         return (
-            f"NO_DATA_AVAILABLE: No usable market data for '{sym}'{resolved} from "
-            f"any configured vendor{reason}. The symbol may be invalid, delisted, "
-            f"not covered, or the vendor returned stale data. Do not estimate or "
-            f"fabricate values — report that data is unavailable for this symbol."
+            f"NO_DATA_AVAILABLE: No usable market data for '{sym}'{resolved}{verdict} "
+            f"Do not estimate or fabricate values — report that data is unavailable "
+            f"for this symbol."
         )
 
-    # A chain exhausted by nothing but rate limits (e.g. a single-vendor chain
-    # hitting a 429 with no cache) must degrade like any other failure, not
-    # fall through to the bare no-vendor RuntimeError below. Recorded only as
-    # a fallback so a real error (network/auth/bug) stays the one surfaced;
-    # and a throttle actually met outranks a latch skip whatever the chain
-    # order, since it carries the vendor's own detail (a Retry-After) where
-    # the skip describes a request that was never sent.
-    if first_error is None:
-        first_error = first_rate_limit or first_skip
+    # The failure that surfaces, decided in one expression. A caller's
+    # mistake — the indicator name, which the tool wrapper renders as one
+    # line of report text — outranks a vendor's failure: a missing key
+    # surfacing instead would abort the call and point at the wrong remedy
+    # (#137). Unless a vendor was DOWN: then the name may be one that vendor
+    # computes, and the outage is the fact to surface — the typo stays in the
+    # logs, as the vendor failure does in the other case. A chain exhausted by
+    # nothing but rate limits (e.g. a single-vendor chain hitting a 429 with
+    # no cache) must degrade like any other failure, not fall through to the
+    # bare no-vendor RuntimeError below: a throttle is the fallback verdict so
+    # a real error (network/auth/bug) stays the one surfaced, and a throttle
+    # actually met outranks a latch skip whatever the chain order, since it
+    # carries the vendor's own detail (a Retry-After) where the skip describes
+    # a request that was never sent.
+    if first_caller_error is not None and first_outage is not None:
+        logger.warning(
+            "Not surfacing the caller's indicator error for %s (%s): vendor %r was "
+            "down, so the name may be one it computes",
+            method,
+            first_caller_error,
+            first_outage[0],
+        )
+        first_caller_error = None
+    elif first_caller_error is not None and first_error is not None:
+        logger.warning(
+            "Surfacing the caller's indicator error for %s; a vendor also failed: %s",
+            method,
+            first_error,
+        )
+    first_error = first_caller_error or first_error or first_rate_limit or first_skip
 
     # No vendor returned data and none reported clean "no data" — surface the
     # first real error (e.g. the primary vendor's network failure). Optional

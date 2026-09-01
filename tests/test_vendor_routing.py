@@ -8,17 +8,24 @@ were swallowed without a trace).
 
 import copy
 import json
+import types
 import unittest
 from unittest import mock
 
 import pytest
+import requests
 
 import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.errors import VendorRateLimitError
+from tradingagents.dataflows.errors import (
+    UnsupportedIndicatorError,
+    VendorNotConfiguredError,
+    VendorRateLimitError,
+    VendorUnavailableError,
+)
 from tradingagents.dataflows.symbol_utils import NoMarketDataError
 from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
 
@@ -182,9 +189,9 @@ class VendorRoutingTests(unittest.TestCase):
     def test_alpha_vantage_indicator_http_failure_alone_fails_loudly(self):
         # technical_indicators is a core category: with no other vendor to try,
         # the outage surfaces instead of degrading into prose an agent would
-        # analyse as a report (the decided outcome in #60).
-        import requests
-
+        # analyse as a report (the decided outcome in #60) — as the outage
+        # type the request boundary now maps a 5xx to (#142), so the router
+        # logged it without a traceback on the way out.
         import tradingagents.dataflows.alpha_vantage_indicator as avi
 
         set_config({"data_vendors": {"technical_indicators": "alpha_vantage"}})
@@ -193,9 +200,11 @@ class VendorRoutingTests(unittest.TestCase):
             patch_key,
             patch_get,
             self._route_method("get_indicators", {"alpha_vantage": avi.get_indicator}),
-            self.assertRaises(requests.HTTPError),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+            self.assertRaises(VendorUnavailableError),
         ):
             interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
+        self.assertTrue(all(r.exc_info is None for r in cm.records))
 
     def _av_answers(self, body_dict=None, status_code=200):
         # The strict fake from the hardening tests, not a mock.Mock: Mock
@@ -528,3 +537,214 @@ def test_a_throttle_actually_met_outranks_a_latch_skip():
         pytest.raises(VendorRateLimitError, match="Retry-After: 42"),
     ):
         _stock()
+
+
+_down = _raises(VendorUnavailableError("Yahoo Finance answered without data: HTTP 503"))
+
+
+@pytest.mark.unit
+class OutageVerdictTests(unittest.TestCase):
+    """A vendor that was DOWN changes what a fallback's "no data" means.
+
+    The no-data sentinel used to say "the symbol may be invalid, delisted, not
+    covered" whenever any vendor said no data — including when the primary
+    had answered an outage page or could not be reached, and only the
+    fallback had been asked about the symbol at all. The agent reasons from
+    that sentence (#142). Now the router remembers the outage past the chain
+    and the sentinel says which vendor was down instead, under the same
+    prefix every reader keys on.
+    """
+
+    def setUp(self):
+        _reset_config()
+
+    def tearDown(self):
+        _reset_config()
+
+    def test_a_down_primary_makes_a_fallbacks_no_data_unconfirmed(self):
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        with (
+            _chain("get_stock_data", {"yfinance": _down, "alpha_vantage": _no_data}),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+        ):
+            out = _stock()
+        self.assertTrue(out.startswith("NO_DATA_AVAILABLE:"))
+        self.assertIn("vendor 'yfinance' was unavailable", out)
+        self.assertIn("HTTP 503", out)  # what the down vendor said rides along
+        self.assertIn("no rows", out)  # and so does the fallback's own detail
+        self.assertIn("unconfirmed rather than invalid", out)
+        self.assertIn("the other configured vendor(s) had no usable data (no rows)", out)
+        self.assertNotIn("may be invalid", out)
+        # The shared tail every reader keys on is the same literal as the
+        # symbol-wording variant's.
+        self.assertTrue(out.endswith("report that data is unavailable for this symbol."))
+        # The outage lane logs without a traceback: a vendor down is not a bug.
+        self.assertTrue(all(r.exc_info is None for r in cm.records))
+
+    def test_an_unreachable_primary_counts_as_down_but_only_by_name(self):
+        # The transport lane is the same fact for the verdict: a reset or a
+        # timeout (every requests exception is an OSError) never asked the
+        # vendor about the symbol either. Its text stays out of the sentinel:
+        # a requests message quotes the request URL, API key and all.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        reset = _raises(
+            requests.ConnectionError(
+                "HTTPSConnectionPool(host='x'): Max retries exceeded with url: "
+                "/query?symbol=AAPL&apikey=SECRET-KEY"
+            )
+        )
+        with _chain("get_stock_data", {"yfinance": reset, "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn(
+            "vendor 'yfinance' was unavailable (could not be reached: ConnectionError)", out
+        )
+        self.assertNotIn("SECRET-KEY", out)
+        self.assertNotIn("may be invalid", out)
+
+    def test_a_4xx_the_boundary_left_alone_is_the_vendor_answering_not_down(self):
+        # A requests.HTTPError is an OSError too, but a 404 means the vendor
+        # answered about this request — its boundary left the status alone on
+        # purpose — so the no-data verdict stands as one on the symbol.
+        set_config({"data_vendors": {"core_stock_apis": "alpha_vantage,yfinance"}})
+        not_found = _raises(
+            requests.HTTPError(
+                "404 Client Error: Not Found for url: /query",
+                response=types.SimpleNamespace(status_code=404),
+            )
+        )
+        with _chain("get_stock_data", {"alpha_vantage": not_found, "yfinance": _no_data}):
+            out = _stock()
+        self.assertIn("may be invalid", out)
+        self.assertNotIn("was unavailable", out)
+
+    def test_the_status_is_read_off_the_exception_not_its_library(self):
+        # yfinance fetches through curl_cffi, whose HTTPError is an OSError
+        # but not requests' — and its un-hidden window lets a 401/403 (Yahoo
+        # refusing this client) and a 5xx out raw. Both are the vendor being
+        # unavailable, said by status; a class check would have called them
+        # "could not be reached" (false: Yahoo answered) or, worse, pinned
+        # the rule to one library.
+        from curl_cffi.requests import exceptions as curl_exceptions
+
+        def _curl(status):
+            return _raises(
+                curl_exceptions.HTTPError(
+                    f"HTTP Error {status}", 0, types.SimpleNamespace(status_code=status)
+                )
+            )
+
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        with _chain("get_stock_data", {"yfinance": _curl(503), "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("vendor 'yfinance' was unavailable (answered HTTP 503)", out)
+        with _chain("get_stock_data", {"yfinance": _curl(403), "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("was unavailable (answered HTTP 403, refusing this client)", out)
+        self.assertNotIn("could not be reached", out)
+        # And a status that is an answer about the request is not an outage,
+        # whichever library raised it.
+        with _chain("get_stock_data", {"yfinance": _curl(404), "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("may be invalid", out)
+        # curl_cffi attaches a Response to its transport failures too, with
+        # status 0 because nothing answered: that is "unreachable", not "a
+        # status that is not an outage" (measured on 0.15.0).
+        timed_out = _raises(
+            curl_exceptions.Timeout("Operation timed out", 28, types.SimpleNamespace(status_code=0))
+        )
+        with _chain("get_stock_data", {"yfinance": timed_out, "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("vendor 'yfinance' was unavailable (could not be reached: Timeout)", out)
+
+    def test_a_requests_exception_that_is_a_value_error_is_not_an_outage(self):
+        # MissingSchema / InvalidURL are code bugs dressed as requests
+        # exceptions (they are ValueError too): the traceback lane keeps them,
+        # and the sentinel must not say the vendor was unreachable.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        bug = _raises(requests.exceptions.MissingSchema("Invalid URL 'query': No scheme"))
+        with _chain("get_stock_data", {"yfinance": bug, "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("may be invalid", out)
+        self.assertNotIn("was unavailable", out)
+
+    def test_what_the_down_vendor_said_is_flattened_before_the_model_reads_it(self):
+        # yfinance's mapping quotes the library's exception, and the sentinel
+        # is an LLM prompt: a fragment cannot open a heading or a table row.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        forged = _raises(
+            VendorUnavailableError("Yahoo Finance answered without data:\n## forged heading | cell")
+        )
+        with _chain("get_stock_data", {"yfinance": forged, "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertIn("forged heading", out)
+        self.assertNotIn("##", out)
+        self.assertNotIn("|", out)
+        self.assertNotIn("\n", out)
+
+    def test_the_outage_wording_does_not_depend_on_chain_order(self):
+        # "Any vendor in the chain", not "the primary": the fallback being the
+        # one that was down leaves the primary's no-data just as unconfirmed.
+        set_config({"data_vendors": {"core_stock_apis": "alpha_vantage,yfinance"}})
+        with _chain("get_stock_data", {"alpha_vantage": _no_data, "yfinance": _down}):
+            out = _stock()
+        self.assertIn("vendor 'yfinance' was unavailable", out)
+        self.assertNotIn("may be invalid", out)
+
+    def test_a_bug_beside_a_no_data_verdict_keeps_the_symbol_wording(self):
+        # The counterpart: only an outage or a transport failure earns the
+        # new wording. A vendor that raised a plain error DID answer, so the
+        # no-data verdict stands as one on the symbol — and the error stays
+        # visible in the logs as before (#989).
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        with (
+            _chain(
+                "get_stock_data",
+                {"yfinance": _raises(ValueError("boom")), "alpha_vantage": _no_data},
+            ),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+        ):
+            out = _stock()
+        self.assertIn("may be invalid", out)
+        self.assertNotIn("was unavailable", out)
+        self.assertIn("boom", "\n".join(cm.output))
+
+
+@pytest.mark.unit
+class CallerErrorPrecedenceTests(unittest.TestCase):
+    def setUp(self):
+        _reset_config()
+
+    def tearDown(self):
+        _reset_config()
+
+    def test_a_callers_indicator_typo_outranks_a_vendors_missing_key(self):
+        # Chain alpha_vantage,yfinance with no Alpha Vantage key and an
+        # indicator name yfinance does not compute: the first error the chain
+        # met used to win, so the run aborted on a missing key where the
+        # caller's typo — the thing the tool wrapper renders as one line of
+        # report text — was the root cause (#137). The missing key is not
+        # lost: it is still in the logs.
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage,yfinance"}})
+        no_key = _raises(VendorNotConfiguredError("ALPHA_VANTAGE_API_KEY is not set"))
+        typo = _raises(UnsupportedIndicatorError("no indicator named 'rsii'"))
+        with (
+            _chain("get_indicators", {"alpha_vantage": no_key, "yfinance": typo}),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+            pytest.raises(UnsupportedIndicatorError, match="rsii"),
+        ):
+            interface.route_to_vendor("get_indicators", "AAPL", "rsii", "2026-06-01", 30)
+        self.assertIn("ALPHA_VANTAGE_API_KEY is not set", "\n".join(cm.output))
+
+    def test_a_down_vendor_outranks_the_callers_indicator_error(self):
+        # The exception to the rule above: when the vendor that failed was
+        # DOWN, the name may be one it computes, so the outage is the fact to
+        # surface — and the typo stays in the logs instead.
+        set_config({"data_vendors": {"technical_indicators": "alpha_vantage,yfinance"}})
+        typo = _raises(UnsupportedIndicatorError("no indicator named 'x'"))
+        with (
+            _chain("get_indicators", {"alpha_vantage": _down, "yfinance": typo}),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+            pytest.raises(VendorUnavailableError, match="HTTP 503"),
+        ):
+            interface.route_to_vendor("get_indicators", "AAPL", "x", "2026-06-01", 30)
+        self.assertIn("no indicator named 'x'", "\n".join(cm.output))

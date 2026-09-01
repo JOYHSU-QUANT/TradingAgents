@@ -5,6 +5,8 @@ import re
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Literal
 
+from .errors import VendorUnavailableError
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -397,6 +399,76 @@ def live_snapshot_note(
         f"snapshot as of {str(curr_date)[:10]} ({behind_days} {_plural_days(behind_days)} "
         f"earlier); do not read them as that date's state._"
     )
+
+
+def http_status(exc: BaseException) -> int | None:
+    """The HTTP status an ``HTTPError`` carries, or ``None`` for any other error.
+
+    Both transport libraries attach the response: curl_cffi's
+    ``raise_for_status`` builds ``HTTPError(msg, 0, response)`` and requests'
+    sets ``.response`` the same way (measured, curl_cffi 0.15.0). The one
+    library-neutral way to read a status off an exception — the two
+    ``HTTPError`` classes share no base below ``OSError``. ``None`` too for
+    a status of 0: curl_cffi attaches a ``Response`` to its transport
+    failures as well (a ``Timeout``, a ``ConnectionError``), with
+    ``status_code == 0`` because nothing answered (measured), and a caller
+    asking "did the vendor answer a status?" must hear no.
+    """
+    return getattr(getattr(exc, "response", None), "status_code", None) or None
+
+
+def raise_for_http_status(response, vendor: str) -> None:
+    """Raise ``VendorUnavailableError`` for a 5xx; otherwise ``response.raise_for_status()``.
+
+    The one status decision at a vendor's request boundary — the 5xx check
+    and the library's own raise in one call, in a fixed order, so a boundary
+    has nothing of its own to sequence (a bare ``raise_for_status()`` ahead
+    of the 5xx check would silently restore what this exists for).
+    A 5xx is the vendor being down, and ``route_to_vendor`` reacts to that
+    by behaviour — the chain goes on, logged without the traceback its
+    generic lane reserves for a bug, and a fallback's "no data" is then
+    reported as unconfirmed rather than as a verdict on the symbol — only
+    when the type says so. Left to ``raise_for_status()`` the same event is
+    a ``requests.HTTPError``, which that generic lane logs as a bug and the
+    no-data verdict then hides (#142). Every other status keeps the vendor's
+    own handling: a 4xx is the vendor's answer about this client or this
+    request (a 401/403 refusal, a 404), which is the vendor's boundary to
+    judge, not this helper's, so it leaves as the ``requests.HTTPError`` it
+    always did; a status the vendor classifies itself (FRED's 400 with the
+    reason in its body, Alpha Vantage's 429) is checked before this is
+    called. (The router reads the status off an exception that carries one
+    and counts a 401/403 — the vendor refusing this client — as an outage
+    for its verdict; see ``route_to_vendor``.)
+
+    The message carries the status code only, never the body: a 5xx body is
+    the vendor's error page, and this message travels into a sentinel the
+    model reads.
+    """
+    status = response.status_code
+    if status >= 500:
+        raise VendorUnavailableError(f"{vendor} answered HTTP {status} without data")
+    response.raise_for_status()
+
+
+def json_body_or_outage(response, vendor: str):
+    """Decode ``response`` as JSON, or raise ``VendorUnavailableError`` when it is not.
+
+    For a vendor whose every data answer is JSON: a body that does not decode
+    is an error page served with a 2xx (a CDN or WAF interstitial), so the
+    vendor answered without data — the same reaction as a 5xx above, where a
+    bare ``.json()`` raised a ``ValueError`` into the router's generic lane.
+    Not for a vendor that serves data in another shape (Alpha Vantage's CSV,
+    Farside's HTML), where a non-JSON body is the data. A body that fails
+    below the decoder — ``requests``' ``ContentDecodingError`` on a broken
+    gzip stream — is a transport failure by the library's own taxonomy and
+    is left to the caller's transport handling.
+    """
+    try:
+        return response.json()
+    except ValueError as e:  # json.JSONDecodeError is a ValueError
+        raise VendorUnavailableError(
+            f"{vendor} answered HTTP {response.status_code} with a body that is not JSON"
+        ) from e
 
 
 def save_output(data: pd.DataFrame, tag: str, save_path: SavePathType = None) -> None:

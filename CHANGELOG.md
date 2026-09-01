@@ -10,6 +10,42 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: a vendor being down is one router reaction whichever vendor
+  it was, and a fallback's "no data" after it is not a verdict on the
+  symbol** (issues #142, #137). `route_to_vendor` let a no-data verdict
+  outrank every recorded failure, so a chain whose primary answered a 5xx
+  (or could not be reached) and whose fallback had no rows told the agent
+  `NO_DATA_AVAILABLE ... The symbol may be invalid, delisted, not covered` —
+  a false statement the agent reasons from — with the outage reduced to one
+  log line. The router now remembers the first vendor that was down — the
+  `VendorUnavailableError` lane, or in the generic lane an `OSError` that
+  either carries no HTTP status (unreachable) or carries a 5xx or a 401/403
+  (down, or refusing this client; judged by the status the exception
+  carries, since yfinance's `HTTPError` is curl_cffi's, not `requests`') —
+  and the sentinel, under the same prefix and whichever position the down
+  vendor held in the chain, names that vendor and says to treat the symbol
+  as unconfirmed rather than invalid; a no-data verdict beside a plain error,
+  or beside a vendor that answered any other status, keeps the old wording.
+  What the sentinel quotes of the outage is flattened (`sanitize_untrusted`)
+  for the typed lane and the status or exception class alone for the generic
+  lane — a requests message carries the request URL, API key included. The
+  outage type was yfinance's alone: FRED, Polymarket, Farside and Alpha
+  Vantage all left a 5xx to `raise_for_status()` as a `requests.HTTPError` —
+  the generic lane, logged as a bug with a traceback; Polymarket's transport
+  handler caught it (and a non-JSON body, which `requests` raises as a
+  `RequestException` too) and returned a "network error" paragraph the
+  router read as an answer. Each now maps a 5xx — and, for the JSON vendors
+  FRED and Polymarket, a 2xx body that is not JSON — to
+  `VendorUnavailableError` at its request boundary through the
+  shared `utils.raise_for_http_status` / `utils.json_body_or_outage`; every
+  4xx keeps its vendor's handling, and Farside still serves its stale cache
+  from a 5xx exactly as from a network error. Separately, an
+  `UnsupportedIndicatorError` — the caller's indicator name, which the tool
+  wrapper renders as one line of report text — now outranks a vendor's
+  failure at the verdict unless a vendor was down: on the chain
+  `alpha_vantage,yfinance` with no Alpha Vantage key, a typo used to abort
+  the run on the missing key.
+
 - **hyperliquid_perp: the reconciler's fill cross-check window follows the
   backfiller it holds** (issues #149, #159, #151). The invalid-local-fill
   cross-check window was a module constant derived from

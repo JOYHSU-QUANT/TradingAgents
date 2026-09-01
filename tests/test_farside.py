@@ -15,8 +15,10 @@ from unittest import mock
 import pytest
 import requests
 
+from tests.test_alpha_vantage_hardening import _patched_get
 from tradingagents.dataflows import farside, interface
 from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.errors import VendorUnavailableError
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -915,6 +917,50 @@ class TestCache:
         assert not any(
             r.levelno >= logging.ERROR for r in caplog.records if r.name == FARSIDE_LOGGER
         )
+
+    # A 5xx at the request boundary is an outage verdict (#142): served from
+    # cache exactly like a network error, and when it cannot be, it keeps its
+    # type so the router logs it without a traceback. Driven through the real
+    # ``_request_html`` (the shared strict fake). The stale-serve case pins
+    # only that the 5xx still takes the cache path (it would under the old
+    # HTTPError too); the two raise cases are what discriminate the mapping.
+    def test_a_5xx_serves_the_stale_cache_like_a_network_error(self, tmp_path, monkeypatch, caplog):
+        self._use_tmp_cache(tmp_path)
+        self._write_cache(tmp_path, fetched_at="2026-07-20")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-22"))
+        monkeypatch.setattr(
+            farside.requests, "get", _patched_get("<html>down</html>", status_code=503)
+        )
+        with caplog.at_level(logging.DEBUG, logger=FARSIDE_LOGGER):
+            out = farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert "STALE by 2 days" in out
+        assert "+1214.9" in out
+        assert not any(
+            r.levelno >= logging.ERROR for r in caplog.records if r.name == FARSIDE_LOGGER
+        )
+
+    def test_a_5xx_with_no_cache_keeps_its_outage_type(self, tmp_path, monkeypatch):
+        self._use_tmp_cache(tmp_path)
+        monkeypatch.setattr(farside.requests, "get", _patched_get("", status_code=503))
+        with pytest.raises(VendorUnavailableError, match="no cache exists"):
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+
+    def test_a_5xx_past_the_cap_keeps_its_outage_type(self, tmp_path, monkeypatch):
+        self._use_tmp_cache(tmp_path)
+        self._write_cache(tmp_path, fetched_at="2026-07-01")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-16"))  # 15 days
+        monkeypatch.setattr(farside.requests, "get", _patched_get("", status_code=502))
+        with pytest.raises(VendorUnavailableError, match="cap"):
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+
+    def test_a_4xx_keeps_the_network_error_path(self, tmp_path, monkeypatch):
+        # A Cloudflare 403 is Farside refusing this client, not an outage: it
+        # stays a requests.HTTPError at the boundary and a FarsideError here.
+        self._use_tmp_cache(tmp_path)
+        monkeypatch.setattr(farside.requests, "get", _patched_get("", status_code=403))
+        with pytest.raises(farside.FarsideError, match="no cache exists") as exc:
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert not isinstance(exc.value, VendorUnavailableError)
 
 
 # --------------------------------------------------------------------------- #

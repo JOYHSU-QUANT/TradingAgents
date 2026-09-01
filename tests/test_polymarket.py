@@ -13,8 +13,10 @@ import requests
 
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
+from tests.test_alpha_vantage_hardening import _patched_get
 from tradingagents.dataflows import interface, polymarket
 from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.errors import VendorUnavailableError
 
 
 def _market(question, prob, *, volume, end_date, closed=False, wk=None):
@@ -145,6 +147,58 @@ class PolymarketResilienceTests(unittest.TestCase):
             out = polymarket.get_prediction_markets("Fed rate cut")
         self.assertIn("unavailable", out.lower())
         self.assertIn("Fed rate cut", out)
+
+
+@pytest.mark.unit
+class PolymarketOutageTests(unittest.TestCase):
+    """A Gamma answer that is not data is the router's verdict, not prose (#142).
+
+    A 5xx used to be a ``requests.HTTPError`` the transport handler above
+    turned into a "network error" paragraph the router read as a successful
+    answer; a non-JSON body reached the router's generic lane as a bug. Both
+    now leave the getter as ``VendorUnavailableError`` and the optional
+    category degrades to the router's sentinel. A 4xx keeps the old path.
+    Driven through the real request boundary with the shared strict fake.
+    """
+
+    def setUp(self):
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+    def tearDown(self):
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+    def test_a_5xx_leaves_the_getter_as_an_outage_verdict(self):
+        with (
+            mock.patch.object(polymarket.requests, "get", _patched_get("<html>", status_code=503)),
+            self.assertRaises(VendorUnavailableError) as ctx,
+        ):
+            polymarket.get_prediction_markets("Fed rate cut")
+        self.assertEqual(str(ctx.exception), "Polymarket answered HTTP 503 without data")
+
+    def test_a_non_json_body_leaves_the_getter_as_an_outage_verdict(self):
+        with (
+            mock.patch.object(polymarket.requests, "get", _patched_get("<html>", status_code=200)),
+            self.assertRaises(VendorUnavailableError) as ctx,
+        ):
+            polymarket.get_prediction_markets("Fed rate cut")
+        self.assertIn("not JSON", str(ctx.exception))
+
+    def test_a_4xx_keeps_the_transport_prose(self):
+        with mock.patch.object(polymarket.requests, "get", _patched_get("", status_code=404)):
+            out = polymarket.get_prediction_markets("Fed rate cut")
+        self.assertIn("unavailable", out.lower())
+        self.assertIn("404", out)
+
+    def test_a_5xx_degrades_through_the_router_without_a_traceback(self):
+        set_config({"data_vendors": {"prediction_markets": "polymarket"}})
+        with (
+            mock.patch.object(polymarket.requests, "get", _patched_get("<html>", status_code=502)),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+        ):
+            out = interface.route_to_vendor("get_prediction_markets", "Fed rate cut", 5)
+        self.assertIn("DATA_UNAVAILABLE", out)
+        self.assertIn("Polymarket answered HTTP 502 without data", out)
+        self.assertTrue(all(r.exc_info is None for r in cm.records))
 
 
 @pytest.mark.unit

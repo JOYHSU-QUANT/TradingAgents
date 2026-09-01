@@ -5,16 +5,19 @@ All API access is mocked, so these run without a network connection or a key.
 """
 
 import copy
+import json
 import unittest
 from unittest import mock
 
 import pytest
+import requests
 
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
+from tests.test_alpha_vantage_hardening import _patched_get
 from tradingagents.dataflows import fred, interface
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.errors import VendorError
+from tradingagents.dataflows.errors import VendorError, VendorUnavailableError
 
 # A small, stable set of observations to format against.
 _META = {
@@ -273,6 +276,76 @@ class FredIdentityEchoTests(unittest.TestCase):
         with mock.patch.object(fred, "_request", side_effect=_request_stub()):
             out = fred.get_macro_data("unemployment", "2025-09-30", 365)
         self.assertIn("**Latest:**", out)
+
+
+@pytest.mark.unit
+class FredRequestBoundaryTests(unittest.TestCase):
+    """What ``_request`` makes of the answers that are not data (#142).
+
+    A 5xx and a non-JSON body used to leave as a ``requests.HTTPError`` /
+    ``ValueError`` — the router's generic lane, logged as a bug with a
+    traceback. They are the vendor being down, and now say so by type; the
+    statuses FRED uses to answer about the request keep their handling.
+    Driven through the real request boundary with the shared strict fake.
+    """
+
+    def setUp(self):
+        self._key = mock.patch.object(fred, "get_api_key", return_value="k")
+        self._key.start()
+
+    def tearDown(self):
+        self._key.stop()
+
+    def test_a_5xx_is_an_outage_verdict_carrying_the_status_only(self):
+        with (
+            mock.patch.object(fred.requests, "get", _patched_get("<html>", status_code=503)),
+            self.assertRaises(VendorUnavailableError) as ctx,
+        ):
+            fred._request("series", {"series_id": "UNRATE"})
+        self.assertEqual(str(ctx.exception), "FRED answered HTTP 503 without data")
+
+    def test_a_non_json_body_is_an_outage_verdict(self):
+        with (
+            mock.patch.object(fred.requests, "get", _patched_get("<html>", status_code=200)),
+            self.assertRaises(VendorUnavailableError) as ctx,
+        ):
+            fred._request("series", {"series_id": "UNRATE"})
+        self.assertIn("not JSON", str(ctx.exception))
+
+    def test_a_400_keeps_freds_own_reason(self):
+        bad = json.dumps({"error_message": "Bad value for variable series_id"})
+        with (
+            mock.patch.object(fred.requests, "get", _patched_get(bad, status_code=400)),
+            self.assertRaises(ValueError) as ctx,
+        ):
+            fred._request("series", {"series_id": "NOPE"})
+        self.assertIn("Bad value for variable series_id", str(ctx.exception))
+        self.assertNotIsInstance(ctx.exception, VendorUnavailableError)
+
+    def test_another_4xx_keeps_its_requests_behaviour(self):
+        with (
+            mock.patch.object(fred.requests, "get", _patched_get("", status_code=404)),
+            self.assertRaises(requests.HTTPError),
+        ):
+            fred._request("series", {"series_id": "UNRATE"})
+
+    def test_a_5xx_degrades_through_the_router_without_a_traceback(self):
+        # End-to-end through the REAL getter and request boundary: the
+        # optional macro category degrades to its sentinel, and the outage
+        # lane logs without the traceback the generic lane reserves for a bug.
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        self.addCleanup(
+            setattr, config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG)
+        )
+        set_config({"data_vendors": {"macro_data": "fred"}})
+        with (
+            mock.patch.object(fred.requests, "get", _patched_get("<html>", status_code=502)),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+        ):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", 365)
+        self.assertIn("DATA_UNAVAILABLE", out)
+        self.assertIn("FRED answered HTTP 502 without data", out)
+        self.assertTrue(all(r.exc_info is None for r in cm.records))
 
 
 @pytest.mark.unit

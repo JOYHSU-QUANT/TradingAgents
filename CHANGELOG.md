@@ -23,7 +23,43 @@ Breaking changes within the 0.x line are called out explicitly.
   the dated segmentation point; switching either category back off is a code
   change (``"none"``), not a YAML edit.
 
+### Removed
+
+- **dataflows: ``y_finance.get_stockstats_indicator`` and
+  ``stockstats_utils.StockstatsUtils``** (issue #137). The per-date getter
+  existed only to serve the windowed getter's per-day fallback loop (removed
+  under Fixed below), and the class existed only to serve that getter; no
+  other caller remained in the repo. ``get_stock_stats_indicators_window``
+  is unchanged as the one yfinance indicator entry point.
+
 ### Fixed
+
+- **dataflows: one indicator description table, and the windowed indicator
+  getter's per-day fallback loop is gone** (issue #137). The sentence each
+  indicator report ends with — agent-facing prompt text — lived in two
+  verbatim copies in the vendor report lanes, a function-local dict in the
+  yfinance getter and a module-level one in the Alpha Vantage vendor,
+  editable apart with nothing comparing them. Both vendors now read
+  ``utils.INDICATOR_DESCRIPTIONS`` (byte-identical to the old copies, so
+  the agent's input is unchanged), the Alpha Vantage registry is a derived
+  slice that fails at import on a gap, and identity/marker tests catch a
+  re-forked copy in either lane the day it appears. A third verbatim copy —
+  the market analyst prompt's indicator menu — is out of these lanes and
+  deliberately untouched (prompt text is deployment-segmented); it is
+  tracked in issue #187. The
+  windowed getter's broad handler used to fall back to a per-day loop that
+  re-ran the identical fetch and calculation once per day of the window:
+  after the taxonomy (#67) and transport (#116) re-raises, nothing that
+  reaches it is transient, so a stockstats/pandas failure rendered a 30-row
+  column of blanks under a successful-looking header. The loop — and the
+  per-date getter that existed only to serve it — is deleted; an untyped
+  failure now renders the same one-line prose every sibling leaf answers
+  with. The un-hidden window's handling of yfinance's partial-service
+  ``history`` failure (the auto/back-adjust step — the only flag-gated
+  ``history`` swallow reachable at this codebase's ``repair=False`` that
+  serves the data frame rather than the empty one) is pinned as deliberate:
+  rows the library would have served on the wrong price basis become this
+  vendor's no-data verdict instead (#38).
 
 - **llm_clients: every LLM call can carry a completion-token cap, and perp
   runs always send one** (issue #177). The OpenAI-compatible family (including

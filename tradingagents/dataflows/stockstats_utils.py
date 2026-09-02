@@ -3,11 +3,9 @@ import logging
 import os
 import threading
 import time
-from typing import Annotated
 
 import pandas as pd
 import yfinance as yf
-from stockstats import wrap
 from yfinance.exceptions import YFDataException, YFException, YFRateLimitError
 
 from .config import get_config
@@ -193,7 +191,19 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     library would have answered with, so a delisted symbol's
     ``YFTzMissingError`` reaches the no-data lane as the empty frame it always
     was — and logged here, since the library's own error line is skipped once
-    its swallow no longer runs. ``hidden_answer`` is required so every call
+    its swallow no longer runs. At one live ``history`` site that restore is
+    deliberately MORE conservative than the library's swallow: the
+    auto/back-adjust step (yfinance 1.4.1 ``scrapers/history.py``, the only
+    flag-gated ``history`` swallow reachable at this codebase's
+    ``repair=False`` that serves the DATA frame rather than the empty one —
+    the repair block's own probes never run here). Hidden,
+    the library logs and serves the frame WITHOUT the adjustment; un-hidden
+    it raises, and the restore here hands back the empty frame — so rows
+    that would arrive on the wrong price basis reach the no-data lane and
+    the fallback vendor gets its turn instead. Serving no data over
+    possibly-wrong prices is the same judgement the integrity cleaner makes
+    about fabricated values (#38); a caller that wants the library's partial
+    answer back must widen this deliberately (#137). ``hidden_answer`` is required so every call
     site names the library's empty form for its property. A restored value
     (the 404 included) travels to :func:`yf_retry` as :class:`_HiddenAnswer`,
     so it comes back to the caller unchanged but is never mistaken for an
@@ -588,30 +598,3 @@ def filter_financials_by_date(
     if dropped_a_zone:
         kept = kept.set_axis([p for p, keep in zip(periods, mask, strict=True) if keep], axis=1)
     return kept
-
-
-class StockstatsUtils:
-    @staticmethod
-    def get_stock_stats(
-        symbol: Annotated[str, "ticker symbol for the company"],
-        indicator: Annotated[
-            str, "quantitative indicators based off of the stock data for the company"
-        ],
-        curr_date: Annotated[str, "curr date for retrieving stock price data, YYYY-mm-dd"],
-    ):
-        data = load_ohlcv(symbol, curr_date)
-        df = wrap(data)
-        df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
-        curr_date_str = pd.to_datetime(curr_date).strftime("%Y-%m-%d")
-
-        df[indicator]  # trigger stockstats to calculate the indicator
-        matching_rows = df[df["Date"].str.startswith(curr_date_str)]
-
-        if not matching_rows.empty:
-            indicator_value = matching_rows[indicator].values[0]
-            return indicator_value
-        else:
-            # Honest wording: the date may be a weekend/holiday, but it may
-            # also be a trading day whose row failed integrity cleaning —
-            # don't assert "not a trading day" as fact (#38).
-            return "N/A: no usable OHLCV row for this date (non-trading day, or the vendor row failed integrity checks)"

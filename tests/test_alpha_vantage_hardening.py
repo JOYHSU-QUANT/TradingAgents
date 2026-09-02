@@ -446,6 +446,41 @@ def test_the_supported_indicators_and_each_wiring_registry_cover_the_same_set(re
 
 
 @pytest.mark.unit
+def test_the_indicator_descriptions_are_the_one_cross_vendor_table(monkeypatch):
+    # The sentence each indicator report ends with is agent-facing prompt
+    # text: it must not depend on which vendor ``data_vendors`` selected.
+    # Both vendors read utils.INDICATOR_DESCRIPTIONS — this vendor a derived
+    # slice, the yfinance vendor the whole table (its supported set IS the
+    # table). Identity, not equality, so a re-forked copy that starts
+    # byte-identical is caught the day it appears, not the day it drifts
+    # (#137). Every AV-supported indicator must be described by the shared
+    # table — the no-endpoint members too: they raise before rendering, but
+    # the vendor that computes them from OHLCV serves the same sentence.
+    from tradingagents.dataflows.utils import INDICATOR_DESCRIPTIONS
+
+    assert set(avi._INDICATOR_DESCRIPTIONS) == set(avi._SUPPORTED_INDICATORS) - (
+        avi._NO_ENDPOINT_INDICATORS
+    )
+    for indicator, text in avi._INDICATOR_DESCRIPTIONS.items():
+        assert text is INDICATOR_DESCRIPTIONS[indicator]
+    assert set(avi._SUPPORTED_INDICATORS) <= set(INDICATOR_DESCRIPTIONS)
+
+    # And the yfinance getter actually reads the shared binding: alter one
+    # sentence through its module-level name and the rendered window report
+    # must carry the alteration. A re-inlined function-local copy — the exact
+    # pre-#137 shape — would keep rendering its own sentence and go red here,
+    # which is what makes the "one table" claim above true of BOTH vendors.
+    import tradingagents.dataflows.y_finance as yfin
+
+    marked = dict(INDICATOR_DESCRIPTIONS)
+    marked["rsi"] = "MARKER: the shared table was read for this sentence"
+    monkeypatch.setattr(yfin, "INDICATOR_DESCRIPTIONS", marked)
+    monkeypatch.setattr(yfin, "_get_stock_stats_bulk", lambda *a, **k: {})
+    out = yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 1)
+    assert out.rstrip().endswith("MARKER: the shared table was read for this sentence")
+
+
+@pytest.mark.unit
 def test_an_unsupported_indicator_is_the_caller_mistake_type(monkeypatch):
     # The wrapper renders exactly this type as report text (#117); a plain
     # ValueError would now reach the ToolNode as a failure instead. Raised

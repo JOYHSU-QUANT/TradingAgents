@@ -609,6 +609,36 @@ def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
     assert YfConfig.debug.hide_exceptions is True
 
 
+@pytest.mark.unit
+def test_a_partial_service_history_failure_takes_the_no_data_lane(monkeypatch, tmp_path):
+    # Pins a deliberate choice (#137): yfinance 1.4.1's history swallows an
+    # auto/back-adjust failure by logging and serving the frame WITHOUT the
+    # adjustment (the only flag-gated history swallow reachable at this
+    # codebase's repair=False that serves the data frame rather than the
+    # empty one); un-hidden, that site raises instead, and
+    # yf_fetch_unhidden restores the raise to the empty frame — so rows the
+    # library would have served on the wrong price basis become this vendor's
+    # no-data verdict and the chain moves on. No data over possibly-wrong
+    # prices, the same judgement the integrity cleaner makes about fabricated
+    # values (#38).
+    import yfinance as yf
+    from yfinance.config import YfConfig
+
+    from tradingagents.dataflows.errors import NoMarketDataError
+
+    set_config({"data_cache_dir": str(tmp_path)})
+
+    def adjust_failure_site(self, *a, **k):
+        # The raise this simulates exists only when the swallow is off — the
+        # assert keeps this double honest about which library branch it plays.
+        assert YfConfig.debug.hide_exceptions is False
+        raise ValueError("auto_adjust failed with missing Adj Close")
+
+    monkeypatch.setattr(yf.Ticker, "history", adjust_failure_site)
+    with pytest.raises(NoMarketDataError):
+        su.load_ohlcv("AAPL", "2026-06-01")
+
+
 # --- the leaves: a taxonomy error propagates instead of degrading to prose ---
 
 
@@ -639,6 +669,17 @@ _YFINANCE_LEAF_CALLS = {
     "get_balance_sheet": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_cashflow": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_income_statement": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
+    # The news row pins SEAM IDENTITY only: base.get_news's post propagates
+    # throttle and transport failures regardless of the flag, so the window
+    # is not what makes the propagation PROPERTY hold for news (these rows
+    # patch the seam itself, so they still go red on a rewrite — for the
+    # mechanical reason, not the behavioral one). What the window buys news
+    # is the outage mapping — Yahoo's "Will be right back" page raising
+    # VendorUnavailableError instead of being restored to the [] that reads
+    # as "No news found" — and THAT is pinned by
+    # test_an_outage_page_is_not_no_data_on_the_parse_first_paths, which
+    # drives the real scrapers and goes red if the window is removed from
+    # the getter (#137).
     "get_news": ((ynews, "yf_fetch_unhidden"), ("AAPL", "2026-06-01", "2026-06-05")),
     "get_global_news": ((ynews, "yf_fetch_unhidden"), ("2026-06-01",)),
     "get_insider_transactions": ((yfin, "yf_fetch_unhidden"), ("AAPL",)),
@@ -713,26 +754,28 @@ def test_the_propagation_check_catches_a_leaf_that_degrades_the_throttle(monkeyp
 
 
 @pytest.mark.unit
-def test_stockstats_indicator_lets_the_rate_limit_propagate(monkeypatch):
-    # This leaf reaches Yahoo through StockstatsUtils, which resolves
-    # load_ohlcv in the stockstats_utils namespace — patch it there.
-    monkeypatch.setattr(su, "load_ohlcv", _throttled)
+def test_bulk_rate_limit_escapes_the_windowed_getter(monkeypatch):
+    # The typed error must escape the broad handler rather than degrade to
+    # prose — pinned at the load_ohlcv seam, the fetch the bulk path actually
+    # makes (the parametrized table pins the yf_fetch_unhidden seam).
+    monkeypatch.setattr(yfin, "load_ohlcv", _throttled)
     with pytest.raises(VendorRateLimitError):
-        yfin.get_stockstats_indicator("AAPL", "rsi", "2026-06-01")
+        yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 5)
 
 
 @pytest.mark.unit
-def test_bulk_rate_limit_skips_the_per_day_fallback_loop(monkeypatch):
-    # The windowed getter's broad handler falls back to a per-day loop; on a
-    # rate limit that loop would re-run the same throttled fetch once per day
-    # of the window and then render prose. The typed error must escape before
-    # the loop starts.
-    monkeypatch.setattr(yfin, "load_ohlcv", _throttled)
-    fallback = mock.Mock(return_value="N/A")
-    monkeypatch.setattr(yfin, "get_stockstats_indicator", fallback)
-    with pytest.raises(VendorRateLimitError):
-        yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 5)
-    fallback.assert_not_called()
+def test_an_untyped_bulk_failure_renders_one_line_and_fetches_once(monkeypatch):
+    # #137: after the taxonomy (#67) and transport (#116) re-raises, nothing
+    # that reaches the windowed getter's broad handler is transient — the
+    # per-day fallback loop it used to run performed the identical fetch and
+    # calculation once per day of the window and rendered a column of blanks
+    # under a successful-looking header. Now: one fetch, one line of prose.
+    fetch = mock.Mock(side_effect=KeyError("volume"))
+    monkeypatch.setattr(yfin, "load_ohlcv", fetch)
+    out = yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 30)
+    assert out.startswith("Error retrieving rsi values for AAPL")
+    assert "\n" not in out  # one line, not a 30-day column of blanks
+    assert fetch.call_count == 1  # a deterministic failure is not re-run per day
 
 
 @pytest.mark.unit
@@ -826,18 +869,16 @@ def test_the_transport_check_catches_a_leaf_that_degrades_it(monkeypatch, tmp_pa
 
 
 @pytest.mark.unit
-def test_bulk_transport_failure_skips_the_per_day_fallback_loop(monkeypatch):
-    # Worse than prose on this leaf: the broad handler's per-day fallback
-    # re-ran the failed fetch once per day of the window and then rendered a
-    # column of blank values under a successful-looking header (#116).
+def test_bulk_transport_failure_escapes_the_windowed_getter(monkeypatch):
+    # A transport failure must escape the broad handler on this leaf too —
+    # its old per-day fallback re-ran the failed fetch once per day of the
+    # window and rendered a column of blanks under a successful-looking
+    # header (#116); the loop is gone (#137), and the raise is the pin.
     monkeypatch.setattr(
         yfin, "load_ohlcv", mock.Mock(side_effect=_PROPAGATED_OSERRORS["curl_cffi"])
     )
-    fallback = mock.Mock(return_value="N/A")
-    monkeypatch.setattr(yfin, "get_stockstats_indicator", fallback)
     with pytest.raises(curl_exceptions.ConnectionError):
         yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 5)
-    fallback.assert_not_called()
 
 
 # --- end to end: through the real boundary into the router's lanes ---

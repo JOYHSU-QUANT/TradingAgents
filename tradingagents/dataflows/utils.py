@@ -112,11 +112,17 @@ _DATE_ARGUMENT_TAGS = {
     "end_date": "INVALID_END_DATE",
 }
 
-# What a usable date would have bounded: a single point in time (the analysis
-# date), or one end of a window. Stated by the caller, not inferred from the
-# argument's name — a future point-in-time tool whose argument is called
-# ``as_of_date`` must not silently be told it asked for a window.
-DateKind = Literal["point", "window"]
+# What a usable date would have done: bounded a single point in time (the
+# analysis date), bounded one end of a window, or — for the live-only sources
+# whose ``curr_date`` never bounds the data at all — gated the as-of
+# DISCLOSURE the report carries (#89: the date decides whether the report may
+# claim its live values are that date's). Stated by the caller, not inferred
+# from the argument's name — a future point-in-time tool whose argument is
+# called ``as_of_date`` must not silently be told it asked for a window, and a
+# disclosure-only tool must not claim its data could have been bounded (#144:
+# that claim invited the model to retry historical dates against a live
+# snapshot).
+DateKind = Literal["point", "window", "disclosure"]
 
 # Everything the vendor modules render — and every error they raise, since
 # ``route_to_vendor`` hands an optional category's failure to the model as
@@ -126,6 +132,12 @@ DateKind = Literal["point", "window"]
 # flattening (it used to be copied into deribit and sosovalue_common, whose
 # ``_sanitize`` now delegate here); the vendor modules keep the reasoning for
 # WHICH fragments they flatten.
+#
+# ``sanitize_untrusted`` and the three names it reads (``MARKDOWN_CONTROL``,
+# ``EMPHASIS_UNDERSCORE``, ``MAX_UNTRUSTED_CHARS``) are SUPPORTED API for
+# vendor modules (#140): a new vendor module calls them directly rather than
+# minting its own flattening or aliasing the cap under a private name — the
+# alias is one more site a cap change has to find (deribit's was the last).
 #
 # Collapsing whitespace is the load-bearing half: the reports are block-level
 # (sections joined by blank lines, headings and labels at the start of a line),
@@ -152,6 +164,11 @@ MAX_UNTRUSTED_CHARS = 200
 
 
 _WHITESPACE_RUN = re.compile(r"\s+")
+
+# The omission clause both the sentinel tail and the tool-description note
+# append for the disclosure-only tools — one literal, so a description cannot
+# promise a remedy the sentinel stopped offering, or vice versa (#140 review).
+_OMIT_CLAUSE = " or omit it"
 
 
 def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bool = False) -> str:
@@ -184,13 +201,29 @@ def _echo_untrusted(value) -> str:
     """The refused date argument, quoted, flattened and capped, for the sentinel.
 
     The value is the model's own text echoed back into a sentence it reads, so
-    it gets the vendor flattening with ``keep_edges`` (see there). A string is
-    capped BEFORE it is quoted, so the quotes stay balanced and an escape
-    sequence is never cut in half; a clean value such as ``'abc'`` comes
-    through byte for byte.
+    it gets the vendor flattening with ``keep_edges`` (see there). The cap is
+    enforced on the ESCAPED form: the character cap runs first (bounding the
+    re-cap loop's work), ``repr`` then escapes control and astral characters —
+    4-10x growth that used to carry a "capped" hostile value far past the
+    promise (#140) — and the re-cap below drops whole characters until the
+    quoted form fits, so an escape sequence stays whole or vanishes and the
+    quotes stay balanced. A clean value such as ``'abc'`` comes through byte
+    for byte.
     """
     if isinstance(value, str):
-        return repr(sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True))
+        flat = sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+        quoted = repr(flat)
+        if len(quoted) > MAX_UNTRUSTED_CHARS + 2:
+            # Whole characters, not repr bytes, and repr is recomputed each
+            # step because dropping a character can flip repr's quote choice.
+            # O(cap^2) in the worst case, bounded by the character pre-cap
+            # above — rework this loop before ever growing
+            # MAX_UNTRUSTED_CHARS by orders of magnitude.
+            while len(repr(flat)) > MAX_UNTRUSTED_CHARS + 2:
+                flat = flat[:-1]
+            requoted = repr(flat)
+            quoted = requoted[:-1] + "..." + requoted[-1]
+        return quoted
     try:
         raw = repr(value)
     except Exception:  # noqa: BLE001 — a refusal must not become an untyped raise
@@ -198,10 +231,29 @@ def _echo_untrusted(value) -> str:
         # tool schemas send JSON values. Still, the refusal is what stands
         # between that caller and the router's "vendor down" lane.
         raw = f"<{type(value).__name__} value>"
-    return sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+    # A non-string can only come from a direct caller (tool schemas send JSON
+    # strings), so this lane is best-effort by design: bound the work up front
+    # (a buggy caller can hand over a million-element repr), keep the
+    # truncation boundary in the shared helper, and re-close the OUTERMOST
+    # delimiter when the echo was cut so it reads as a cut value rather than a
+    # broken one (#140). No whole-escape promise here — that promise above is
+    # for model input, which is always a string.
+    closer = raw[-1] if raw[-1] in "'\")]}" else ""
+    raw = raw[: MAX_UNTRUSTED_CHARS * 4]
+    flat = sanitize_untrusted(raw, keep_edges=True)
+    if len(flat) > MAX_UNTRUSTED_CHARS:
+        return sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True) + closer
+    return flat
 
 
-def invalid_date_sentinel(value, *, what: str, kind: DateKind, param: str = "curr_date") -> str:
+def invalid_date_sentinel(
+    value,
+    *,
+    what: str,
+    kind: DateKind,
+    param: str = "curr_date",
+    _echo: str | None = None,
+) -> str:
     """The sentinel served when a supplied date argument is not a usable date.
 
     Loud to the LLM (it can retry with a valid date), leaks no data, and is
@@ -220,8 +272,19 @@ def invalid_date_sentinel(value, *, what: str, kind: DateKind, param: str = "cur
     caller that forgot either cannot emit a confident sentence about the wrong
     thing. ``param`` names the argument being refused (#111) — the OHLCV and
     ticker-news tools take ``start_date``/``end_date`` — and must be one of
-    :data:`_DATE_ARGUMENT_TAGS`. The fundamentals sentence this began as is
-    reproduced byte for byte by ``what="fundamentals", kind="point"``.
+    :data:`_DATE_ARGUMENT_TAGS`.
+
+    The retry tail offers omission exactly for ``kind="disclosure"`` (#144 —
+    the model failing RIGHT NOW reads this sentence, not the tool
+    description, so a legal exit stated only there kept it resubmitting
+    reformatted dates). Derived from ``kind`` rather than carried as a second
+    flag, so "these values are live" and "or omit it" cannot ship separately:
+    a BOUNDED tool must never invite the omission that would switch its
+    look-ahead filtering off, even where omission is technically legal (the
+    statement getters' #73 lane — their ``date_refusal`` gate stays
+    ``omitted_ok=True``, their sentence stays a bounding one). ``_echo`` lets
+    :func:`date_refusal` pass the echo it already computed for its log line;
+    anyone else leaves it to be computed here.
 
     The echoed value is flattened and capped (see :func:`_echo_untrusted`):
     the optional-category getters used to carry that guard in their own
@@ -229,15 +292,27 @@ def invalid_date_sentinel(value, *, what: str, kind: DateKind, param: str = "cur
     tools never had it.
     """
     tag = _DATE_ARGUMENT_TAGS[param]
-    consequence = (
-        f"{what} cannot be bounded to a point in time"
-        if kind == "point"
-        else f"the {what} window cannot be resolved"
-    )
+    retry = "retry with a valid yyyy-mm-dd date"
+    if kind == "point":
+        consequence = f"{what} cannot be bounded to a point in time"
+    elif kind == "window":
+        consequence = f"the {what} window cannot be resolved"
+    elif kind == "disclosure":
+        # Disclosure-only tools serve LIVE values whatever the date; the date
+        # only gates the as-of disclosure. "Cannot be bounded" here claimed
+        # the opposite and invited a historical-date retry (#144).
+        consequence = f"the report cannot say whether the live {what} are as of that date"
+        retry += _OMIT_CLAUSE
+    else:
+        # Mirror _DATE_ARGUMENT_TAGS: an unknown kind fails at the call
+        # rather than falling into whichever branch is last — which would
+        # hand a typo the strongest wrong claim (#140 review).
+        raise ValueError(f"unknown DateKind {kind!r}")
+    echo = _echo if _echo is not None else _echo_untrusted(value)
     return (
-        f"{tag}: {param} {_echo_untrusted(value)} is not a valid yyyy-mm-dd date, "
+        f"{tag}: {param} {echo} is not a valid yyyy-mm-dd date, "
         f"so {consequence}. "
-        f"No data returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
+        f"No data returned; {retry}. Do not fabricate values."
     )
 
 
@@ -275,9 +350,44 @@ def date_refusal(
     # The refusal is RETURNED, so it never reaches the router's warning lane;
     # without this line an operator's log shows nothing for a model that keeps
     # sending a date no tool can use (#119). Info, not warning: the model is
-    # told to retry, and the echo is the flattened one the sentence carries.
-    logger.info("Refusing unusable %s %s for %s", param, _echo_untrusted(value), what)
-    return invalid_date_sentinel(value, what=what, kind=kind, param=param)
+    # told to retry, and the echo is the flattened one the sentence carries —
+    # computed once here and handed to the sentinel (#140).
+    echo = _echo_untrusted(value)
+    logger.info("Refusing unusable %s %s for %s", param, echo, what)
+    return invalid_date_sentinel(value, what=what, kind=kind, param=param, _echo=echo)
+
+
+def date_sentinel_note(*params: str, omitted_ok: bool = False, disclosure: bool = False) -> str:
+    """The tool-description sentence for a tool that answers with the date sentinel.
+
+    Appended to ``tool.description`` by
+    ``agents.utils.tool_notes.notes_date_sentinel`` — one wording, owned here
+    beside the sentinel it describes, so a wrapper cannot hand-write a variant
+    or describe itself as returning only "a formatted report" while its getter
+    answers a bad date with :func:`invalid_date_sentinel` (#140: eleven
+    wrappers did exactly that, and the model reads the description when
+    CHOOSING arguments). ``params`` are the tool's date arguments (a typo
+    raises through :data:`_DATE_ARGUMENT_TAGS`, same as the sentinel).
+
+    Two knobs because they answer different questions: ``omitted_ok`` matches
+    the getter's None-gate and shapes the trigger ("is supplied but ..."),
+    while ``disclosure`` matches the getter's ``kind="disclosure"`` and adds
+    the omission remedy. The statement tools legally accept omission (#73)
+    yet must not ADVERTISE it — their date bounds the data, and inviting
+    omission invites switching look-ahead filtering off (#140 review).
+    """
+    if not params:
+        raise ValueError("date_sentinel_note needs at least one date parameter")
+    if disclosure and not omitted_ok:
+        raise ValueError("a disclosure-only date is omittable by construction")
+    tags = " or ".join(_DATE_ARGUMENT_TAGS[p] for p in params)
+    names = " or ".join(params)
+    supplied = "is supplied but " if omitted_ok else "is "
+    remedy = "retry with a valid date" + (_OMIT_CLAUSE if disclosure else "")
+    return (
+        f" Returns an {tags} sentinel instead of data when {names} {supplied}"
+        f"not a usable yyyy-mm-dd date ({remedy}; do not fabricate values)."
+    )
 
 
 def date_range_refusal(start_date, end_date, *, what: str) -> str | None:

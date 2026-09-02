@@ -109,7 +109,7 @@ def get_prediction_markets(
     # than after it: nothing Gamma answers outranks the date here (#139).
     if (
         refusal := date_refusal(
-            curr_date, what="prediction-market probabilities", kind="point", omitted_ok=True
+            curr_date, what="prediction-market probabilities", kind="disclosure", omitted_ok=True
         )
     ) is not None:
         return refusal

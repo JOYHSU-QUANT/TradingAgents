@@ -7,7 +7,10 @@ from tradingagents.dataflows.errors import VendorError, VendorRateLimitError
 from tradingagents.dataflows.market_data_validator import build_verified_market_snapshot
 from tradingagents.dataflows.utils import invalid_date_sentinel
 
+from .tool_notes import notes_date_sentinel
 
+
+@notes_date_sentinel("curr_date")
 @tool
 def get_verified_market_snapshot(
     symbol: Annotated[str, "ticker symbol of the company"],

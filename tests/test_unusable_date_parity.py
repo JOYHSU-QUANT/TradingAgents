@@ -112,9 +112,11 @@ _POINT_TOOLS = [
 @pytest.mark.unit
 class TestTheSharedSentence:
     def test_the_fundamentals_sentence_is_unchanged_byte_for_byte(self):
-        # The four fundamentals getters now pass what="fundamentals"; PR #109's
-        # cross-vendor tests pin their answers by equality against this, so
-        # the parameterisation must not have moved a character of it.
+        # The STATEMENT getters (balance/cashflow/income, both vendors) pass
+        # what="fundamentals", kind="point"; the cross-vendor tests in
+        # test_yfinance_freshness pin their answers by equality against this
+        # template. The overview/prediction lanes moved to kind="disclosure"
+        # (#144), whose byte-pin lives in test_optional_date_refusal.
         assert invalid_date_sentinel("abc", what="fundamentals", kind="point") == (
             "INVALID_CURR_DATE: curr_date 'abc' is not a valid yyyy-mm-dd date, so "
             "fundamentals cannot be bounded to a point in time. No data returned; "

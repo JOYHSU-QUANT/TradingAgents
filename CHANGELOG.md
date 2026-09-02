@@ -10,6 +10,35 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: the date sentinel and the tool descriptions tell the model
+  the truth about disclosure-only dates, legal omission, and refusals**
+  (issues #144, #140). The shared refusal sentence told the three
+  disclosure-only getters' callers their data "cannot be bounded to a point
+  in time" — but Polymarket odds and the live fundamentals are never bounded
+  by ``curr_date``; it only gates the as-of disclosure, and the wording
+  invited retrying historical dates against a live snapshot. ``DateKind``
+  gains ``"disclosure"`` ("the report cannot say whether the live {what} are
+  as of that date") and that kind's retry sentence offers omission ("or omit
+  it") — the model failing right now reads the sentinel, not the description.
+  Derived from the kind, never a free flag: the statement lanes' date
+  genuinely bounds (look-ahead filtering), so they keep the bounding sentence
+  and never advertise the omission that would switch that filter off, even
+  though their date-less #73 lane stays legal.
+  ``get_fundamentals``'s wrapper makes ``curr_date`` optional like its three
+  statement siblings, so the omission lane it advertises is one its schema
+  accepts. Every date-taking tool description now names the sentinel it can
+  return, attached structurally (``tool_notes.notes_date_sentinel`` appends
+  ``utils.date_sentinel_note``) instead of hand-written per wrapper — eleven
+  wrappers said only "a formatted report" — and a test iterates the runtime
+  tools so a dropped note turns red. The echoed value is re-capped AFTER
+  ``repr`` (escape expansion grew a "capped" hostile value 4-10x, control
+  characters to ~800 chars), by whole characters with balanced quotes; a
+  truncated non-string echo re-closes its outermost delimiter; the refusal
+  computes its echo once for the log line and the sentinel.
+  ``sanitize_untrusted`` / ``MARKDOWN_CONTROL`` / ``EMPHASIS_UNDERSCORE`` /
+  ``MAX_UNTRUSTED_CHARS`` are declared supported API for vendor modules, and
+  deribit's private ``_MAX_UNTRUSTED_CHARS`` alias is gone.
+
 - **hyperliquid_perp: the window an owning command opens a store in before
   it may upgrade it is declared, floored and race-safe** (issue #147).
   `paper`, `live` and a real `live-smoke` run open a populated store as-is

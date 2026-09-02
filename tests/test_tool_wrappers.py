@@ -89,6 +89,59 @@ def _recorder():
     return calls, fake
 
 
+_DATE_PARAMS = ("curr_date", "start_date", "end_date")
+
+
+def _date_taking_tools():
+    for module, name in ALL_WRAPPERS:
+        tool_obj = getattr(module, name)
+        date_params = [p for p in _DATE_PARAMS if p in tool_obj.args]
+        if date_params:
+            yield tool_obj, date_params
+
+
+@pytest.mark.unit
+class TestDateSentinelDescriptions:
+    """#140: every date-taking tool's description names the sentinel it can
+    return. The model reads the description when CHOOSING arguments, and the
+    tools this repo taught to refuse were exactly the ones describing only "a
+    formatted report". The sentence is attached structurally
+    (``tool_notes.notes_date_sentinel`` appends ``utils.date_sentinel_note``),
+    so this iterates the runtime tool objects rather than trusting each file —
+    dropping the decorator from any one wrapper turns this red."""
+
+    def test_every_date_taking_tool_describes_its_sentinel(self):
+        from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS
+
+        seen = set()
+        for tool_obj, date_params in _date_taking_tools():
+            for param in date_params:
+                assert _DATE_ARGUMENT_TAGS[param] in tool_obj.description, tool_obj.name
+            assert "do not fabricate values" in tool_obj.description, tool_obj.name
+            seen.add(tool_obj.name)
+        # Every wrapper in the registry except the one tool with no date
+        # argument. Pinned as a set so a new date-taking wrapper that skips
+        # the decorator cannot shrink the sweep silently.
+        assert seen == {name for _, name in ALL_WRAPPERS} - {"get_insider_transactions"}
+
+    def test_the_remedies_match_each_tools_date_contract(self):
+        # Omission is ADVERTISED only by the disclosure-only tools (their
+        # getters' kind="disclosure"): the statement tools legally accept
+        # omission (the "is supplied but" trigger) but their date bounds the
+        # data, so inviting omission would invite switching look-ahead
+        # filtering off (#144/#140 review). No required-date tool claims
+        # either.
+        disclosure = {"get_fundamentals", "get_prediction_markets"}
+        omitted_ok = disclosure | {"get_balance_sheet", "get_cashflow", "get_income_statement"}
+        for tool_obj, _ in _date_taking_tools():
+            assert ("or omit it" in tool_obj.description) == (tool_obj.name in disclosure), (
+                tool_obj.name
+            )
+            assert ("is supplied but" in tool_obj.description) == (tool_obj.name in omitted_ok), (
+                tool_obj.name
+            )
+
+
 def _forwarded(module, tool, payload, attr="route_to_vendor"):
     """Invoke ``tool`` with ``payload`` and return what the patched router saw."""
     calls, fake = _recorder()

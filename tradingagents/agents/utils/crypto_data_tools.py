@@ -22,7 +22,10 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .tool_notes import notes_date_sentinel
 
+
+@notes_date_sentinel("curr_date")
 @tool
 def get_etf_flows(
     asset: Annotated[
@@ -59,6 +62,7 @@ def get_etf_flows(
     return route_to_vendor("get_etf_flows", asset, curr_date, look_back_days)
 
 
+@notes_date_sentinel("curr_date")
 @tool
 def get_fear_greed(
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the end of the window"],
@@ -83,6 +87,7 @@ def get_fear_greed(
     return route_to_vendor("get_fear_greed", curr_date, look_back_days)
 
 
+@notes_date_sentinel("curr_date")
 @tool
 def get_options_market(
     asset: Annotated[
@@ -137,6 +142,7 @@ def get_options_market(
     return route_to_vendor("get_options_market", asset, curr_date)
 
 
+@notes_date_sentinel("curr_date")
 @tool
 def get_economic_calendar(
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format; the anchor of the window"],
@@ -168,6 +174,7 @@ def get_economic_calendar(
     return route_to_vendor("get_economic_calendar", curr_date, look_back_days)
 
 
+@notes_date_sentinel("curr_date")
 @tool
 def get_btc_treasuries(
     asset: Annotated[

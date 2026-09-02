@@ -4,7 +4,10 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .tool_notes import notes_date_sentinel
 
+
+@notes_date_sentinel("curr_date", omitted_ok=True, disclosure=True)
 @tool
 def get_prediction_markets(
     topic: Annotated[
@@ -36,9 +39,6 @@ def get_prediction_markets(
             send any other format.
 
     Returns:
-        str: A formatted markdown report of matching prediction markets, or
-        an INVALID_CURR_DATE sentinel if curr_date is supplied but is not a
-        usable yyyy-mm-dd date (retry with a valid date or without it; do not
-        fabricate values)
+        str: A formatted markdown report of matching prediction markets
     """
     return route_to_vendor("get_prediction_markets", topic, limit, curr_date)

@@ -4,7 +4,10 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .tool_notes import notes_date_sentinel
 
+
+@notes_date_sentinel("start_date", "end_date")
 @tool
 def get_news(
     ticker: Annotated[str, "Ticker symbol"],
@@ -25,6 +28,7 @@ def get_news(
     return route_to_vendor("get_news", ticker, start_date, end_date)
 
 
+@notes_date_sentinel("curr_date")
 @tool
 def get_global_news(
     curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],

@@ -581,7 +581,8 @@ def _utc_now() -> datetime:
 # fragments go through it. The deletion-fuses-tokens hazard was found here:
 # "BTC|USD" collapsed to "BTCUSD", which normalize_symbol resolves to BTC, so a
 # symbol this vendor had always refused started producing a confident BTC report.
-_MAX_UNTRUSTED_CHARS = MAX_UNTRUSTED_CHARS
+# The cap is ``utils.MAX_UNTRUSTED_CHARS`` directly (#140): this module aliased
+# it under a private name, which was one more site a cap change had to find.
 
 
 def _sanitize(text: object, *, limit: int | None = None) -> str:
@@ -655,7 +656,7 @@ def _request(endpoint: str, params: dict) -> object:
                 # the message rather than at each of those two sites.
                 raise DeribitError(
                     f"Deribit rejected the {endpoint} request: "
-                    f"{_sanitize(detail, limit=_MAX_UNTRUSTED_CHARS)}"
+                    f"{_sanitize(detail, limit=MAX_UNTRUSTED_CHARS)}"
                 )
             if response.status_code >= 500:
                 raise _TransientDeribitFault(f"HTTP {response.status_code}")
@@ -1354,8 +1355,8 @@ def _fetch_dvol(currency: str, curr_dt: datetime, today: str) -> DvolSeries:
                 # unbounded vendor bytes. A response carrying a megabyte-long cell
                 # would otherwise reach the report twice — once in the body line and
                 # once in the Reading clause — burying the report's own sentences,
-                # which is exactly what _MAX_UNTRUSTED_CHARS exists to prevent.
-                f"Malformed DVOL candle {_sanitize(repr(row), limit=_MAX_UNTRUSTED_CHARS)} "
+                # which is exactly what MAX_UNTRUSTED_CHARS exists to prevent.
+                f"Malformed DVOL candle {_sanitize(repr(row), limit=MAX_UNTRUSTED_CHARS)} "
                 f"(the endpoint's candle shape may have changed)"
             )
         try:
@@ -2604,7 +2605,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     #
     # After the isinstance guard, so a non-string is still rejected as a caller's
     # bug rather than silently stringified into a symbol.
-    asset = _sanitize(asset, limit=_MAX_UNTRUSTED_CHARS)
+    asset = _sanitize(asset, limit=MAX_UNTRUSTED_CHARS)
     currency, market_proxy = _classify_asset(asset)
     if currency is None:
         # Not a recognized crypto risk asset. Like farside's equivalent path this

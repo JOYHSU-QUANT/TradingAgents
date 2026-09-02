@@ -4,11 +4,14 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .tool_notes import notes_date_sentinel
 
+
+@notes_date_sentinel("curr_date", omitted_ok=True, disclosure=True)
 @tool
 def get_fundamentals(
     ticker: Annotated[str, "ticker symbol"],
-    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"],
+    curr_date: Annotated[str | None, "current date you are trading at, yyyy-mm-dd"] = None,
 ) -> str:
     """
     Retrieve comprehensive fundamental data for a given ticker symbol.
@@ -17,18 +20,17 @@ def get_fundamentals(
         ticker (str): Ticker symbol of the company
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing comprehensive fundamental data, or
-        an INVALID_CURR_DATE sentinel if curr_date is not a usable yyyy-mm-dd
-        date (retry with a valid date; do not fabricate values)
+        str: A formatted report containing comprehensive fundamental data
     """
     return route_to_vendor("get_fundamentals", ticker, curr_date)
 
 
+@notes_date_sentinel("curr_date", omitted_ok=True)
 @tool
 def get_balance_sheet(
     ticker: Annotated[str, "ticker symbol"],
     freq: Annotated[str, "reporting frequency: annual/quarterly"] = "quarterly",
-    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+    curr_date: Annotated[str | None, "current date you are trading at, yyyy-mm-dd"] = None,
 ) -> str:
     """
     Retrieve balance sheet data for a given ticker symbol.
@@ -38,18 +40,17 @@ def get_balance_sheet(
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing balance sheet data, or an
-        INVALID_CURR_DATE sentinel if curr_date is supplied but is not a usable
-        yyyy-mm-dd date (retry with a valid date; do not fabricate values)
+        str: A formatted report containing balance sheet data
     """
     return route_to_vendor("get_balance_sheet", ticker, freq, curr_date)
 
 
+@notes_date_sentinel("curr_date", omitted_ok=True)
 @tool
 def get_cashflow(
     ticker: Annotated[str, "ticker symbol"],
     freq: Annotated[str, "reporting frequency: annual/quarterly"] = "quarterly",
-    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+    curr_date: Annotated[str | None, "current date you are trading at, yyyy-mm-dd"] = None,
 ) -> str:
     """
     Retrieve cash flow statement data for a given ticker symbol.
@@ -59,18 +60,17 @@ def get_cashflow(
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing cash flow statement data, or an
-        INVALID_CURR_DATE sentinel if curr_date is supplied but is not a usable
-        yyyy-mm-dd date (retry with a valid date; do not fabricate values)
+        str: A formatted report containing cash flow statement data
     """
     return route_to_vendor("get_cashflow", ticker, freq, curr_date)
 
 
+@notes_date_sentinel("curr_date", omitted_ok=True)
 @tool
 def get_income_statement(
     ticker: Annotated[str, "ticker symbol"],
     freq: Annotated[str, "reporting frequency: annual/quarterly"] = "quarterly",
-    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+    curr_date: Annotated[str | None, "current date you are trading at, yyyy-mm-dd"] = None,
 ) -> str:
     """
     Retrieve income statement data for a given ticker symbol.
@@ -80,8 +80,6 @@ def get_income_statement(
         freq (str): Reporting frequency: annual/quarterly (default quarterly)
         curr_date (str): Current date you are trading at, yyyy-mm-dd
     Returns:
-        str: A formatted report containing income statement data, or an
-        INVALID_CURR_DATE sentinel if curr_date is supplied but is not a usable
-        yyyy-mm-dd date (retry with a valid date; do not fabricate values)
+        str: A formatted report containing income statement data
     """
     return route_to_vendor("get_income_statement", ticker, freq, curr_date)

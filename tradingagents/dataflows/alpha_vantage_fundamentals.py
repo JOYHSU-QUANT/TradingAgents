@@ -219,6 +219,11 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
             else ""
         )
         return _with_freshness_note(parsed, note) if note else _served_body(result, parsed)
+    # kind="point", NOT "disclosure": this statement lane's curr_date
+    # genuinely BOUNDS the data (reports past it are filtered out), so its
+    # refusal must keep claiming a bound — only _annotate_live_snapshot's
+    # OVERVIEW lane is disclosure-only (#144/#140 review). omitted_ok stays:
+    # the date-less #73 lane is legal, just not advertised as a remedy.
     if (
         refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
     ) is not None:
@@ -334,7 +339,7 @@ def _annotate_live_snapshot(result, curr_date, symbol):
         # is vacuous when the reference date IS today.
         return _served_body(result, parsed)
     if (
-        refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
+        refusal := date_refusal(curr_date, what="fundamentals", kind="disclosure", omitted_ok=True)
     ) is not None:
         return refusal
     note = live_snapshot_note(curr_date, "these fundamentals are")

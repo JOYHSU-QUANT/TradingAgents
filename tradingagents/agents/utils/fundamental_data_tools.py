@@ -18,7 +18,7 @@ def get_fundamentals(
     Uses the configured fundamental_data vendor.
     Args:
         ticker (str): Ticker symbol of the company
-        curr_date (str): Current date you are trading at, yyyy-mm-dd
+        curr_date (str, optional): Current date you are trading at, yyyy-mm-dd
     Returns:
         str: A formatted report containing comprehensive fundamental data
     """

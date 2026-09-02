@@ -315,8 +315,9 @@ def _annotate_live_snapshot(result, curr_date, symbol):
     raise on. Annotating one of those would assert that fundamentals were
     fetched when none were.
 
-    An unparseable curr_date takes the same ``INVALID_CURR_DATE`` route as the
-    statement tools, and at the same depth: with no usable analysis date this
+    An unparseable curr_date is refused with the same ``INVALID_CURR_DATE`` tag
+    as the statement tools and at the same depth — though with the disclosure
+    sentence, not their bounding one (#144): with no usable analysis date this
     path cannot tell a backtest from live trading, and staying silent would serve
     today's ratios undisclosed — the exact failure the disclosure exists to
     prevent. A body the vendor refused to fill still outranks it, so a prose or

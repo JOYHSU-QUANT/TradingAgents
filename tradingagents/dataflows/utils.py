@@ -206,10 +206,9 @@ def _echo_untrusted(value) -> str:
     re-cap loop's work), ``repr`` then escapes control and non-printable
     astral characters — 4-10x growth that used to carry a "capped" hostile
     value far past the promise (#140) — and the re-cap below drops whole
-    characters until the
-    quoted form fits, so an escape sequence stays whole or vanishes and the
-    quotes stay balanced. A clean value such as ``'abc'`` comes through byte
-    for byte.
+    characters until the quoted form fits, so an escape sequence stays whole
+    or vanishes and the quotes stay balanced. A clean value such as ``'abc'``
+    comes through byte for byte.
     """
     if isinstance(value, str):
         flat = sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)

@@ -30,8 +30,9 @@ Breaking changes within the 0.x line are called out explicitly.
   advertises is one its schema accepts, via explicit JSON ``null`` too
   (all four are ``str | None`` now). The fundamentals analyst's prompt
   scopes that exit: fix the format first, omission is the last resort and
-  comes back live and undated. Every date-taking tool description now names the sentinel it can
-  return, attached structurally (``tool_notes.notes_date_sentinel`` appends
+  comes back live and undated. Every date-taking tool description now names
+  the sentinel it can return, as its own paragraph, attached structurally
+  (``tool_notes.notes_date_sentinel`` appends
   ``utils.date_sentinel_note``) instead of hand-written per wrapper — eleven
   wrappers said only "a formatted report" — and a test iterates the runtime
   tools so a dropped note turns red. The echoed value is re-capped AFTER

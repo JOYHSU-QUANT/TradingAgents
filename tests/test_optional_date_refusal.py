@@ -20,9 +20,11 @@ The eighth optional getter, Polymarket's, is the one #119 left out: its
 ``curr_date`` is a disclosure input rather than a bound, and was read only by
 ``live_snapshot_note``, which degrades to ``""`` on a date it cannot parse — so
 the string every getter above refuses drew a full, undisclosed live report
-(#139). It refuses in the same voice now, with one difference the fundamentals
-getters share (#73): ``None`` means the argument was omitted and stays the
-no-disclosure lane, so it has its own class below rather than a row in the table.
+(#139). It refuses in the same voice now, with two differences the disclosure
+lane carries: ``None`` means the argument was omitted and stays the
+no-disclosure lane (#73), and the sentence is the disclosure one with the
+omission remedy (#144) — so it has its own class below rather than a row in
+the table.
 """
 
 import contextlib
@@ -184,8 +186,10 @@ _PM_WHAT = "prediction-market probabilities"
 
 @pytest.mark.unit
 class TestPredictionMarketsRefuseInTheSameVoice:
-    """See the module docstring: the same sentence as the table above for a
-    supplied-but-unusable date, with ``None`` kept as the omitted lane."""
+    """See the module docstring: the same refusal template and tag as the
+    table above, but with the DISCLOSURE sentence and its omission remedy
+    (#144 — this curr_date never bounds the data), and ``None`` kept as the
+    omitted lane."""
 
     @pytest.mark.parametrize("value", [v for v in _UNUSABLE if v is not None])
     def test_a_supplied_unusable_date_is_refused_before_the_fetch(self, monkeypatch, value):

@@ -34,18 +34,37 @@ the ``ai_inputs`` row, the call itself) fails THAT CYCLE closed
 (``api_failed`` with no §6.2 class, the traceback logged at ERROR, the
 position and its SL/TP held, the next cycle on schedule) rather than the
 daemon: the live driver's rule for the same stretch, adopted here in issue
-#134 so the two lanes stop meaning different things by "failed". A bug
-AFTER the answer — the ``pending_raw_response`` store, ``_finalize``'s
-gate, plan start or audit commit — still propagates: by then a paid-for
-decision and possibly a committed plan exist, and swallowing that is a
-different, undecided trade-off.
+#134 so the two lanes stop meaning different things by "failed". AFTER the
+answer the policy follows what already durably exists (issue #163, aligned
+with the live lane's persist-retry split): the two scheduler-owned persists
+— the ``pending_raw_response`` store and ``_finalize``'s audit commit —
+retry in-process on failure (a paid-for decision, or a committed plan the
+audit trail must not contradict, exists; the daemon stays up and logs
+ERROR each retry) until one lands or ``_MAX_PERSIST_FAILURES`` polls in a
+row have failed, at which point the exception propagates after all — a
+fault that outlives the bound is not the transient lock the lane exists
+for, and unbounded containment would wedge the run invisibly. A bug
+re-parsing the stored response on resume fails that cycle closed like any
+other non-retryable error (a restart would only crash-loop into the same
+parse). What still exits the daemon: an exception escaping the engine's
+``start_plan`` — the ONE post-answer step given no containment at all,
+because the engine fail-stops (a partially committed plan may exist and it
+refuses every later call), so the position would sit unwatched inside a
+live-looking process and only the supervisor's restart rebuilds it — plus
+the persist escalation above, a failure of the terminal ``api_failed``
+record itself, the cycle-boundary scheduling writes outside every guard
+(``_execute``'s pre-call counter, ``poll``'s new-cycle insert), and a
+non-DB error out of the best-effort cycle-end snapshot.
 
 Restart safety of a half-finished cycle: the successful AI response is
 persisted onto the attempt row (``pending_raw_response``) *before* the gate
-runs, so a crash anywhere between the AI answering and the audit commit — the
+runs, so ONCE THAT STORE LANDS a crash anywhere up to the audit commit — the
 market-data-blocked gate phase, or the window between ``start_plan``'s
 plan/order commit and the ``ai_outputs`` commit — resumes by re-parsing the
-stored response (deterministic), never by re-asking the AI (spec §3.1). The
+stored response (deterministic), never by re-asking the AI (spec §3.1). A
+crash in the store-retry window itself (answered, nothing durable) fails
+closed on restart and re-enters the §3.1 ladder — a never-stored decision is
+never resumed, so that lane CAN spend a second AI call within budget. The
 per-try ``output_id`` (``#out<n>``) means orders committed by a crashed try's
 ``start_plan`` reference the ai_outputs row the resumed gate eventually writes
 for that same decision; restart reconciliation cancels the crashed plan either
@@ -100,6 +119,19 @@ logger = logging.getLogger(__name__)
 # wait 10s, after the second 30s, after the third → api_failed.
 MAX_DECISION_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (10, 30)
+
+# The persist-retry lanes' escalation bound (issue #163): a post-answer persist
+# (the §3.1 response store, or the audit commit) is contained for this many
+# consecutive failed polls — the LAST of them propagates instead, so the run
+# gets N-1 in-process retries — as a daemon exit, the supervisor's restart
+# signal. Counted per unbroken streak: one persist that lands resets it. The
+# motivating transient (an operator's export/validate holding the SQLite write
+# lock) heals within a poll or two; a fault that survives ten polls (a monitor
+# interval apart, each already behind the connection's 5s busy_timeout —
+# so the escape window is ten intervals, not ten seconds) is a fault that
+# in-process retries cannot fix — unbounded containment would wedge the run
+# invisibly (no terminal row, no §3.1 streak, a fresh lease heartbeat).
+_MAX_PERSIST_FAILURES = 10
 
 
 class RetryableDecisionError(Exception):
@@ -273,10 +305,13 @@ class PollResult:
 class _PendingDecision:
     """A parsed AI decision waiting for the engine to gate it (market data due).
 
-    The raw response is already persisted on the attempt row
-    (``pending_raw_response``), so this in-memory shape is just the working
+    Once ``raw_stored`` is set, the raw response is persisted on the attempt
+    row (``pending_raw_response``) and this in-memory shape is just the working
     copy: a restart re-parses the stored text and rebuilds it — never re-asks
-    the AI (spec §3.1).
+    the AI (spec §3.1). Until then the paid-for decision lives ONLY here, so a
+    store failure must keep this object and retry the store (issue #163) —
+    while a crash in that window still fails closed on restart, because a
+    decision that was never durable is never resumed.
     """
 
     attempt_id: str
@@ -285,6 +320,23 @@ class _PendingDecision:
     input_id: str
     output_id: str
     parsed: ParsedDecision
+    # Whether ``pending_raw_response`` landed durably. Defaults to the
+    # conservative state — gating is forbidden until the store lands, mirroring
+    # the live driver's ``_InFlight.raw_stored``.
+    raw_stored: bool = False
+    # The engine's start_plan outcome, cached the moment it exists: a persist
+    # failure after the gate ran must retry the PERSIST against THIS
+    # registration — never re-gate (a second start_plan would supersede the
+    # committed plan and register another; the live driver caches it the same
+    # way on ``_InFlight.registration``).
+    registration: PlanStartResult | None = None
+    # Consecutive failed persist polls: incremented by
+    # ``_persist_budget_spent``, cleared by ``_persist_reached`` the moment
+    # one lands. At ``_MAX_PERSIST_FAILURES`` the retry lane stops containing
+    # and lets the exception propagate (supervised-restart escalation). Both
+    # post-answer persists share the counter — they never interleave, since
+    # the store completes before the gate may run.
+    persist_failures: int = 0
 
     def __post_init__(self) -> None:
         # Mutable-state guard, same convention as the engine's _Leg/_FlipState:
@@ -344,7 +396,11 @@ class PaperScheduler:
         Order matters: a decision already parsed but not yet gated (market-data
         outage at plan start) is finished first; then a persisted in-progress
         attempt continues (restart-safe retry, spec §3.1); only then may a new
-        cycle become due (spec §3).
+        cycle become due (spec §3). ``None`` with a pending decision standing
+        means a scheduler persist failed and will be retried next poll
+        (issue #163; the ERROR log carries the traceback) — ``next_due_at``
+        answers "poll now" for that state, so the loop's cadence is the retry
+        cadence.
         """
         now = self._clock.now()
         if self._pending is not None:
@@ -441,7 +497,7 @@ class PaperScheduler:
 
     # -- attempt execution (spec §3.1) ---------------------------------------
 
-    def _execute(self, now: datetime, attempt) -> PollResult:
+    def _execute(self, now: datetime, attempt) -> PollResult | None:
         attempt_id = attempt["decision_attempt_id"]
         scheduled_at = parse_instant(attempt["scheduled_at"])
         count = attempt["attempt_count"] + 1
@@ -470,26 +526,11 @@ class PaperScheduler:
             return self._record_failure(attempt_id, scheduled_at, count, exc)
         except Exception as exc:  # noqa: BLE001 — a bug fails the cycle closed, not the daemon
             return self._fail_untyped(attempt_id, scheduled_at, count, exc)
-        # Persist the response BEFORE gating: from here on, a crash or a
-        # market-data-blocked gate resumes from this stored text instead of
-        # spending another AI call (spec §3.1 — no duplicate decision).
-        with self._db.transaction() as conn:
-            repo.update_decision_attempt(
-                conn, attempt_id, pending_raw_response=parsed.raw_response, timestamp=now
-            )
-        self._pending = _PendingDecision(
-            attempt_id=attempt_id,
-            scheduled_at=scheduled_at,
-            attempt_count=count,
-            input_id=input_id,
-            # Per-try id: a crashed try's committed orders must reference the
-            # ai_outputs row of *its own* decision, never a later try's.
-            output_id=f"{attempt_id}#out{count}",
-            parsed=parsed,
-        )
+        # raw_stored=False: _finalize lands the §3.1 store before any gate.
+        self._pending = self._pending_for(attempt_id, scheduled_at, count, parsed, raw_stored=False)
         return self._finalize(now)
 
-    def _resume_pending(self, now: datetime, attempt) -> PollResult:
+    def _resume_pending(self, now: datetime, attempt) -> PollResult | None:
         """Rebuild the pending decision from the persisted response and gate it.
 
         ``parse_target_decision`` is deterministic, so this yields exactly the
@@ -499,15 +540,54 @@ class PaperScheduler:
         """
         count = attempt["attempt_count"]
         attempt_id = attempt["decision_attempt_id"]
-        self._pending = _PendingDecision(
+        scheduled_at = parse_instant(attempt["scheduled_at"])
+        raw = attempt["pending_raw_response"]
+        try:
+            parsed = parse_target_decision(raw, self._decision_cfg)
+        except Exception as exc:  # noqa: BLE001 — a bug fails the cycle closed, not the daemon
+            # parse_target_decision's contract is fail-closed (malformed
+            # content returns an invalid ParsedDecision), so a raise here is a
+            # bug or a corrupted store — and it is DETERMINISTIC: propagating
+            # would crash the daemon and every supervised restart would resume
+            # into the same parse (issue #163). _terminalize_api_failed clears
+            # the poisoned response, so log the full text FIRST — the row was
+            # its only durable copy and the post-mortem needs it.
+            logger.error(
+                "decision attempt %s: stored response failed to parse and is being "
+                "cleared; preserving it here for diagnosis: %r",
+                attempt_id,
+                raw,
+            )
+            return self._fail_untyped(attempt_id, scheduled_at, count, exc)
+        # raw_stored=True: resuming FROM the stored response — already durable.
+        self._pending = self._pending_for(attempt_id, scheduled_at, count, parsed, raw_stored=True)
+        return self._finalize(now)
+
+    def _pending_for(
+        self,
+        attempt_id: str,
+        scheduled_at: datetime,
+        count: int,
+        parsed: ParsedDecision,
+        *,
+        raw_stored: bool,
+    ) -> _PendingDecision:
+        """Build the in-memory pending decision, owning the per-try id scheme.
+
+        The per-try ids (``#in<n>``/``#out<n>``) exist so a crashed try's
+        committed orders reference the ai_outputs row of *its own* decision,
+        never a later try's — derived HERE for both the fresh and the resumed
+        lane, so the two can never drift apart.
+        """
+        return _PendingDecision(
             attempt_id=attempt_id,
-            scheduled_at=parse_instant(attempt["scheduled_at"]),
+            scheduled_at=scheduled_at,
             attempt_count=count,
             input_id=f"{attempt_id}#in{count}",
             output_id=f"{attempt_id}#out{count}",
-            parsed=parse_target_decision(attempt["pending_raw_response"], self._decision_cfg),
+            parsed=parsed,
+            raw_stored=raw_stored,
         )
-        return self._finalize(now)
 
     def _record_failure(
         self,
@@ -575,11 +655,15 @@ class PaperScheduler:
         that recurs every cycle therefore reads as the same no-decision streak
         an outage does: ERROR from the third, ``validate`` exit 4 — the
         signal that used to be systemd's restart count. Scope: the three
-        statements of the try in ``_execute`` — a failure of the fail record
-        itself still propagates (here that exits the daemon; the live lane
-        parks it in safe mode and retries the write), and so does anything
-        after the answer, from the ``pending_raw_response`` store through
-        ``_finalize`` — deliberately outside this guard (module docstring).
+        statements of the try in ``_execute``, plus ``_resume_pending``'s
+        re-parse of the stored response (issue #163 — a deterministic parse
+        bug would otherwise crash-loop every restart). A failure of the fail
+        record itself still propagates (here that exits the daemon; the live
+        lane parks it in safe mode and retries the write), and so does a
+        ``start_plan`` raise inside ``_finalize`` — the engine has fail-stopped
+        by then and only a restart rebuilds it (module docstring). The two
+        scheduler-owned persists after the answer retry in-process instead
+        (``_store_pending_response`` / ``_finalize``'s audit commit).
 
         "Non-retryable" is not the same as "a bug": everything that is not a
         :class:`RetryableDecisionError` lands here, and that includes host
@@ -637,6 +721,9 @@ class PaperScheduler:
                 error_type=error_type,
                 error_message=error_message,
                 next_decision_at=next_at,
+                # A terminal row carries no resumable response (issue #163 —
+                # the parse-failure lane logs the text before landing here).
+                pending_raw_response=None,
                 timestamp=now,
             )
             repo.upsert_scheduler_state(
@@ -664,7 +751,85 @@ class PaperScheduler:
 
     # -- decision finalization (gate + audit rows) ---------------------------
 
-    def _finalize(self, now: datetime) -> PollResult:
+    def _persist_budget_spent(self, pending: _PendingDecision, what: str) -> bool:
+        """Count one persist failure; ``True`` on the ``_MAX_PERSIST_FAILURES``th.
+
+        The caller then re-raises instead of containing: a fault that survives
+        that many polls in a row is not the transient lock the retry lane
+        exists for, and unbounded containment would wedge the run invisibly
+        (the attempt row stays ``in_progress``, so the §3.1 no-decision streak
+        and ``validate``'s exit 4 never fire, while the lease heartbeat keeps
+        reporting a healthy daemon). The pre-#163 daemon exit — the
+        supervisor's restart count — returns as the deliberate escalation
+        signal.
+
+        The count is CONSECUTIVE: any persist that lands clears it
+        (:meth:`_persist_reached`), so the bound measures one unbroken streak
+        rather than a cycle's lifetime total. Both post-answer persists share
+        the counter, which is exact because they never interleave — the store
+        completes before the gate is allowed to run — and a store that lands
+        after failures hands the audit commit a fresh budget instead of the
+        remainder of its own.
+        """
+        pending.persist_failures += 1
+        if pending.persist_failures < _MAX_PERSIST_FAILURES:
+            return False
+        logger.error(
+            "cycle %s: %s failed %d polls in a row — escalating to the supervisor (daemon exit)",
+            pending.attempt_id,
+            what,
+            pending.persist_failures,
+        )
+        return True
+
+    @staticmethod
+    def _persist_reached(pending: _PendingDecision) -> None:
+        """A persist landed: the failure streak is over (see the counter above)."""
+        pending.persist_failures = 0
+
+    def _store_pending_response(self, now: datetime, pending: _PendingDecision) -> bool:
+        """Land the §3.1 store for the collected decision; ``False`` = retry.
+
+        Persisting the response BEFORE gating is what makes the cycle
+        resumable: a crash or a market-data-blocked gate resumes from the
+        stored text instead of spending another AI call (spec §3.1). When the
+        store itself fails — an operator's export/validate holding the SQLite
+        lock is the motivating case — the paid-for decision lives only on
+        ``pending``, so failing the cycle closed would discard it and the
+        pre-#163 propagation exited the daemon over a transient miss. Instead
+        the pending decision is kept and the NEXT poll retries only this store
+        (never the AI call, never an unstored gate) — the live driver's
+        ``_PendingResponsePersistError`` lane, expressed as a return value
+        because paper's synchronous poll loop has no safe mode; its
+        escalation is ``_persist_budget_spent``'s bounded re-raise. The ERROR
+        log below is the operator's visibility; a crash while this retries
+        fails closed on restart (the response was never durable).
+        """
+        if pending.raw_stored:
+            return True
+        try:
+            with self._db.transaction() as conn:
+                repo.update_decision_attempt(
+                    conn,
+                    pending.attempt_id,
+                    pending_raw_response=pending.parsed.raw_response,
+                    timestamp=now,
+                )
+        except Exception:  # noqa: BLE001 — the decision only exists in memory; keep it
+            if self._persist_budget_spent(pending, "the §3.1 response store"):
+                raise
+            logger.exception(
+                "decision attempt %s: the AI answered but the §3.1 response store "
+                "failed — holding the decision in memory and retrying the store "
+                "next poll (never re-asking the AI)",
+                pending.attempt_id,
+            )
+            return False
+        pending.raw_stored = True
+        self._persist_reached(pending)
+        return True
+
+    def _finalize(self, now: datetime) -> PollResult | None:
         """Gate the parsed decision and persist the cycle's terminal records.
 
         ``start_plan`` fetches its own fresh snapshot; with none available the
@@ -672,17 +837,43 @@ class PaperScheduler:
         poll (and every later one) retries until data returns. §3.1's counter
         does not apply here: the AI already answered, so re-polling the gate
         must never burn a retry or re-ask the AI.
+
+        ``None`` means one of the two scheduler-owned persists failed (the
+        §3.1 response store, or the audit commit below): the pending decision
+        — and, past the gate, its cached registration — is kept and the next
+        poll retries only that persist; the ``_MAX_PERSIST_FAILURES``th
+        failure in a row propagates instead (issue #163 — any persist that
+        lands resets the streak). A ``start_plan`` raise is the one thing
+        past the answer that gets no containment at all:
+        the engine fail-stops on any escaped exception (a partially committed
+        plan may exist), so every later tick would refuse and the position
+        would sit unwatched inside a live-looking process — exiting for the
+        supervisor to restart-and-rebuild is the recovery. That is the
+        deliberate difference from the live lane, whose recoverable safe mode
+        has no paper counterpart.
+
+        A delayed audit retry still writes the GATE's mark/equity (the prices
+        the plan was actually gated at — reusing the cached registration) under
+        the retry instant's timestamp; the drift is bounded by the retry cap.
         """
         pending = self._pending
         assert pending is not None
-        result = self._engine.start_plan(pending.parsed, output_id=pending.output_id)
-        if result.gate is None:
-            return PollResult(
-                event=CycleEvent.PENDING_MARKET_DATA,
-                decision_attempt_id=pending.attempt_id,
-                scheduled_at=pending.scheduled_at,
-                attempt_count=pending.attempt_count,
-            )
+        if not self._store_pending_response(now, pending):
+            return None
+        result = pending.registration
+        if result is None:
+            result = self._engine.start_plan(pending.parsed, output_id=pending.output_id)
+            if result.gate is None:
+                return PollResult(
+                    event=CycleEvent.PENDING_MARKET_DATA,
+                    decision_attempt_id=pending.attempt_id,
+                    scheduled_at=pending.scheduled_at,
+                    attempt_count=pending.attempt_count,
+                )
+            # Cache the outcome the moment it exists: the engine may have
+            # COMMITTED (and armed) a plan, so a persist failure below must
+            # retry the persist against THIS registration — never re-gate.
+            pending.registration = result
         # Rolling boundary (spec §3): the next cycle keys off the instant the
         # cycle actually completed — the gate run, not the (possibly hours
         # earlier, market-data-delayed) AI answer — so two consecutive AI calls
@@ -690,32 +881,49 @@ class PaperScheduler:
         decision_at = now
         next_at = decision_at + CYCLE_INTERVAL
         status = "completed" if pending.parsed.is_valid else "invalid_output"
-        with self._db.transaction() as conn:
-            self._insert_ai_output(conn, now, pending, result)
-            repo.update_decision_attempt(
-                conn,
+        try:
+            with self._db.transaction() as conn:
+                self._insert_ai_output(conn, now, pending, result)
+                repo.update_decision_attempt(
+                    conn,
+                    pending.attempt_id,
+                    status=status,
+                    output_id=pending.output_id,
+                    next_decision_at=next_at,
+                    # A completed cycle carries no live error state: clear any
+                    # earlier retry's breadcrumbs (a "completed + timeout" row
+                    # would misread as a failed cycle) and the consumed response.
+                    error_type=None,
+                    error_message=None,
+                    pending_raw_response=None,
+                    timestamp=now,
+                )
+                repo.upsert_scheduler_state(
+                    conn,
+                    self._run_id,
+                    last_decision_at=decision_at,
+                    next_decision_at=next_at,
+                    last_input_id=pending.input_id,
+                    last_output_id=pending.output_id,
+                    current_attempt_id=None,
+                    updated_at=now,
+                )
+        except Exception:  # noqa: BLE001 — a committed plan exists; api_failed would falsify it
+            # Failing the cycle closed here would write "no action" into the
+            # audit trail while the engine's just-committed plan fills real
+            # (simulated) orders — the exact falsification the live lane's
+            # _PlanRegisteredPersistError exists to prevent. Keep the pending
+            # decision with its registration and retry ONLY this commit.
+            if self._persist_budget_spent(pending, "the audit persist"):
+                raise
+            logger.exception(
+                "cycle %s decided and gated, but the audit persist failed — "
+                "retrying the persist next poll (the registered plan, if any, "
+                "stands and keeps executing)",
                 pending.attempt_id,
-                status=status,
-                output_id=pending.output_id,
-                next_decision_at=next_at,
-                # A completed cycle carries no live error state: clear any
-                # earlier retry's breadcrumbs (a "completed + timeout" row
-                # would misread as a failed cycle) and the consumed response.
-                error_type=None,
-                error_message=None,
-                pending_raw_response=None,
-                timestamp=now,
             )
-            repo.upsert_scheduler_state(
-                conn,
-                self._run_id,
-                last_decision_at=decision_at,
-                next_decision_at=next_at,
-                last_input_id=pending.input_id,
-                last_output_id=pending.output_id,
-                current_attempt_id=None,
-                updated_at=now,
-            )
+            return None
+        self._persist_reached(pending)
         # The cycle is now durably committed; drop the in-memory pending decision
         # BEFORE the best-effort snapshot. write_cycle_snapshot only swallows
         # (sqlite3.Error, OSError); a non-DB error (mark<=0 ValueError, a halted
@@ -728,6 +936,7 @@ class PaperScheduler:
         # and best-effort so a snapshot write error can't tear down the live
         # SL/TP monitor (symmetric with the api_failed path; re-snapshots next
         # tick).
+        assert result.mark_price is not None  # a gate ran (PlanStartResult invariant)
         if not self._engine.write_cycle_snapshot(result.mark_price):
             logger.warning(
                 "completed cycle %s: cycle-end snapshot skipped; will re-snapshot next tick",

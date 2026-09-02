@@ -8,6 +8,8 @@ network. ``start_plan`` consumes one scripted snapshot per gated decision;
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -139,6 +141,25 @@ def _setup(tmp_path, outcomes, script):
         decision_config=DecisionConfig(),
     )
     return db, clock, engine, scheduler, provider
+
+
+def _restart(db, clock, engine, provider):
+    """A fresh scheduler over the same store — the "supervisor restarted us" shape.
+
+    Same construction ``_setup`` performs; only the AI seam is re-scripted, so
+    a new constructor kwarg lands in one place rather than in every restart
+    test.
+    """
+    return PaperScheduler(
+        db=db,
+        run_id="r",
+        engine=engine,
+        clock=clock,
+        provider=provider,
+        asset=engine._asset,
+        risk_config=engine._risk,
+        decision_config=DecisionConfig(),
+    )
 
 
 def _snap(mark=_MARK, mid=_MARK):
@@ -368,16 +389,7 @@ def test_retry_backoff_counts_from_failure_instant(tmp_path):
     # 45s in-flight timeout must still be followed by a full 10s wait.
     db, clock, engine, _scheduler, _ = _setup(tmp_path, [], [_snap()])
     provider = _SlowFailingProvider([_err("timeout"), _decision("long", 1)], clock, 45)
-    scheduler = PaperScheduler(
-        db=db,
-        run_id="r",
-        engine=engine,
-        clock=clock,
-        provider=provider,
-        asset=engine._asset,
-        risk_config=engine._risk,
-        decision_config=DecisionConfig(),
-    )
+    scheduler = _restart(db, clock, engine, provider)
     r1 = scheduler.poll()
     assert r1.event is CycleEvent.RETRY_SCHEDULED
     assert clock.now() == _T0 + timedelta(seconds=45)  # the call burned 45s
@@ -406,16 +418,7 @@ def test_retry_counter_survives_restart(tmp_path):
     # with the counter intact (spec §3.1 — never reset, never double-decide).
     provider2 = _FakeProvider([_decision("long", 1)])
     engine._provider = ScriptedSnapshotProvider("BTC", [_snap()])
-    scheduler2 = PaperScheduler(
-        db=db,
-        run_id="r",
-        engine=engine,
-        clock=clock,
-        provider=provider2,
-        asset=engine._asset,
-        risk_config=engine._risk,
-        decision_config=DecisionConfig(),
-    )
+    scheduler2 = _restart(db, clock, engine, provider2)
     assert scheduler2.poll() is None  # 10s backoff still pending across restart
     clock.advance(10)
     r2 = scheduler2.poll()
@@ -777,16 +780,7 @@ def test_restart_resumes_persisted_decision_without_reask(tmp_path):
 
     # "Restart": a fresh scheduler with a provider that would blow up if asked.
     provider2 = _FakeProvider([])
-    scheduler2 = PaperScheduler(
-        db=db,
-        run_id="r",
-        engine=engine,
-        clock=clock,
-        provider=provider2,
-        asset=engine._asset,
-        risk_config=engine._risk,
-        decision_config=DecisionConfig(),
-    )
+    scheduler2 = _restart(db, clock, engine, provider2)
     clock.advance(30)
     r2 = scheduler2.poll()
     assert r2.event is CycleEvent.COMPLETED
@@ -814,6 +808,191 @@ def test_completed_cycle_clears_stale_error_fields(tmp_path):
     assert row["status"] == "completed"
     assert row["error_type"] is None
     assert row["error_message"] is None
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# post-answer persist failures: retry the persist, never the AI (issue #163)
+# --------------------------------------------------------------------------
+
+
+def _arm_lock_fault(monkeypatch, target, name, *, shots=1, when=lambda *a, **k: True):
+    """Make ``target.name`` raise "database is locked" for its first ``shots`` hits.
+
+    ``when`` filters which calls count (the store lane patches the shared
+    ``repository`` module object, so the filter is what keeps the fault on the
+    raw-response update rather than every attempt write in the poll). Returns
+    the mutable state so a test can assert how many faults actually fired.
+    """
+    real = getattr(target, name)
+    state = {"fired": 0}
+
+    def flaky(*args, **kwargs):
+        if state["fired"] < shots and when(*args, **kwargs):
+            state["fired"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, flaky)
+    return state
+
+
+def _arm_flaky_response_store(monkeypatch, *, shots=1):
+    """Fail the §3.1 response store for its first ``shots`` attempts.
+
+    ``sched_mod.repo`` is the shared ``persistence.repository`` module object,
+    so the ``pending_raw_response`` filter — not the patch site — is what keeps
+    the pre-call counter update and ``_finalize``'s clearing pass (``None``)
+    going through untouched.
+    """
+    from contrib.hyperliquid_perp.paper import scheduler as sched_mod
+
+    return _arm_lock_fault(
+        monkeypatch,
+        sched_mod.repo,
+        "update_decision_attempt",
+        shots=shots,
+        when=lambda conn, attempt_id, **kwargs: kwargs.get("pending_raw_response") is not None,
+    )
+
+
+def test_response_store_failure_retries_the_store_never_the_ai(tmp_path, monkeypatch):
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    _arm_flaky_response_store(monkeypatch)
+    # The paid-for decision lives only in memory: the poll reports "nothing
+    # terminal yet" instead of letting the exception exit the daemon.
+    assert scheduler.poll() is None
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["pending_raw_response"] is None  # the store never landed
+    assert scheduler.next_due_at() is None  # the store retry is due immediately
+    r2 = scheduler.poll()  # the one-shot fault has cleared: store → gate → done
+    assert r2.event is CycleEvent.COMPLETED
+    assert provider.decide_calls == 1  # the held decision was reused, never re-asked
+    assert repo.get_decision_attempt(db.conn, r2.decision_attempt_id)["status"] == "completed"
+    db.close()
+
+
+def test_crash_during_store_retry_never_resumes_the_unstored_decision(tmp_path, monkeypatch):
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    _arm_flaky_response_store(monkeypatch)
+    assert scheduler.poll() is None  # decision held in memory, store pending
+    # "Crash + restart": the in-memory decision is gone and was never durable,
+    # so §3.1 fails closed — the new process re-enters the retry ladder (a
+    # fresh AI call within budget); it must NOT gate a decision whose raw
+    # response never landed.
+    provider2 = _FakeProvider([_decision("long", 1)])
+    scheduler2 = _restart(db, clock, engine, provider2)
+    assert scheduler2.poll() is None  # 10s backoff from the spent try-1 counter
+    clock.advance(10)
+    r2 = scheduler2.poll()
+    assert r2.event is CycleEvent.COMPLETED
+    assert provider2.decide_calls == 1  # a NEW call — the unstored decision is dead
+    assert repo.get_decision_attempt(db.conn, r2.decision_attempt_id)["attempt_count"] == 2
+    db.close()
+
+
+def test_a_persist_fault_that_outlives_the_budget_escalates_to_the_supervisor(
+    tmp_path, monkeypatch
+):
+    from contrib.hyperliquid_perp.paper.scheduler import _MAX_PERSIST_FAILURES
+
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    # A fault that never heals is not the transient lock the retry lane exists
+    # for: containing it forever would leave the attempt row in_progress —
+    # invisible to the §3.1 streak and to validate's exit 4 — while the lease
+    # heartbeat keeps reporting a healthy daemon.
+    faults = _arm_flaky_response_store(monkeypatch, shots=_MAX_PERSIST_FAILURES + 5)
+    for _ in range(_MAX_PERSIST_FAILURES - 1):
+        assert scheduler.poll() is None  # contained: decision held, store retried
+    with pytest.raises(sqlite3.OperationalError):
+        scheduler.poll()  # the budget is spent — propagate to the supervisor
+    assert faults["fired"] == _MAX_PERSIST_FAILURES
+    assert provider.decide_calls == 1  # never re-asked across the whole streak
+    db.close()
+
+
+def test_resume_with_a_poisoned_stored_response_fails_the_cycle_closed(
+    tmp_path, monkeypatch, caplog
+):
+    from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
+
+    parsed = parse_target_decision(_RAW_LONG_1, DecisionConfig())
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [parsed], [SnapshotOutcome.TIMEOUT, _snap()]
+    )
+    r1 = scheduler.poll()
+    assert r1.event is CycleEvent.PENDING_MARKET_DATA  # response persisted, gate blocked
+
+    # "Restart" into a deterministic parse bug: propagating it would exit the
+    # daemon, and every supervised restart would resume into the same parse —
+    # an unbounded crash-loop. The cycle fails closed instead, like any other
+    # non-retryable error, and the poisoned response is cleared.
+    from contrib.hyperliquid_perp.paper import scheduler as sched_mod
+
+    def boom(raw, cfg):
+        raise ValueError("corrupt stored response")
+
+    monkeypatch.setattr(sched_mod, "parse_target_decision", boom)
+    scheduler2 = _restart(db, clock, engine, _FakeProvider([]))
+    with caplog.at_level(logging.ERROR, logger=sched_mod.__name__):
+        r2 = scheduler2.poll()
+    assert r2.event is CycleEvent.API_FAILED
+    assert r2.error_type is None
+    row = repo.get_decision_attempt(db.conn, r2.decision_attempt_id)
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    assert row["error_message"].startswith("non-retryable:")
+    assert row["pending_raw_response"] is None  # never again presented as resumable
+    # The row was the only durable copy (ai_outputs never stores raw text), so
+    # clearing it without preserving the text would destroy the evidence the
+    # post-mortem needs to tell a parser bug from a corrupted store.
+    assert _RAW_LONG_1 in caplog.text
+    db.close()
+
+
+def test_a_start_plan_bug_still_exits_the_daemon(tmp_path, monkeypatch):
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+
+    def blown(parsed, *, output_id):
+        raise RuntimeError("engine bug")
+
+    monkeypatch.setattr(engine, "start_plan", blown)
+    # Deliberately NOT contained (the issue #163 split's one remaining exit):
+    # the engine fail-stops on any escaped exception, so keeping the daemon up
+    # would leave the position inside a live-looking process no engine watches.
+    # The supervisor's restart rebuilds the engine from the DB.
+    with pytest.raises(RuntimeError, match="engine bug"):
+        scheduler.poll()
+    # The stored response survives, so that restart resumes the gate — the
+    # AI is still never re-asked (spec §3.1).
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["pending_raw_response"] is not None
+    db.close()
+
+
+def test_audit_persist_failure_retries_the_persist_never_the_gate(tmp_path, monkeypatch):
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    real_start = engine.start_plan
+    calls = {"n": 0}
+
+    def counting(parsed, *, output_id):
+        calls["n"] += 1
+        return real_start(parsed, output_id=output_id)
+
+    monkeypatch.setattr(engine, "start_plan", counting)
+    _arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")
+    # The engine committed a plan before the audit txn; failing the cycle
+    # closed now would write "no action" into the audit trail while that plan
+    # keeps filling — so the poll holds the decision AND its registration.
+    assert scheduler.poll() is None
+    assert calls["n"] == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM execution_plans").fetchone()[0] == 1
+    r2 = scheduler.poll()
+    assert r2.event is CycleEvent.COMPLETED
+    assert calls["n"] == 1  # retried ONLY the persist — the gate never re-ran
+    assert provider.decide_calls == 1
+    assert repo.get_decision_attempt(db.conn, r2.decision_attempt_id)["status"] == "completed"
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 1
     db.close()
 
 

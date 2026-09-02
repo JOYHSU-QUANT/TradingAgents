@@ -88,10 +88,20 @@ python -m contrib.hyperliquid_perp paper --coin BTC --db paper_trading.db --crea
 > AI——即 AI 回答之前）的**程式缺陷**（非 Retryable 例外）不再讓 daemon 退出——該
 > cycle 記成 `api_failed`（`error_type` 空、`error_message` 以 `non-retryable:` 開頭）、
 > log 印 ERROR traceback、倉位與 SL/TP 照舊看管、下個 cycle 照排，與 live 車道對
-> 這一段的語意一致（見 §7）。AI 回答**之後**——從回覆落地（`pending_raw_response`）
-> 到 gate／下單／`ai_outputs` 寫入（`_finalize`）——沒有這層守衛，那裡的缺陷仍會讓
-> daemon 退出、由監管拉回（刻意保留：
-> 那時已有付費的決策與可能已 commit 的 plan，不該被無聲吞掉）。
+> 這一段的語意一致（見 §7）。AI 回答**之後**依「當下已有哪些持久事實」分流
+> （與 live 的 persist-retry 分流對齊）：**兩個 scheduler 自己的寫入**——回覆落地
+> （`pending_raw_response`）與 `ai_outputs` 稽核寫入——失敗時**不退出**，決策（與已
+> gate 的 plan 登記）留在記憶體，下一次 poll 只重試那筆寫入（絕不重問 AI、絕不重跑
+> gate；每次重試失敗都印 ERROR traceback——operator 的 export／validate 短暫持有
+> SQLite 鎖就是設想情境）；同一 cycle **連續 10 次** persist 失敗後改讓例外傳播
+> （daemon 退出交監管——撐過十輪 poll 的故障不是暫時性鎖，無上限重試會讓 run
+> 靜默僵住）；重啟時 resume 到**存壞的回覆**（re-parse 丟例外）則把該 cycle 記成
+> `api_failed` 並清掉該回覆（否則重啟會無限 crash-loop 進同一個 parse；清除前
+> 會先把回覆全文印進 ERROR log 供事後診斷）。
+> 仍會讓 daemon 退出、由監管拉回的只剩：引擎 `start_plan` 內逃出的例外——引擎
+> fail-stop 後拒絕所有後續呼叫（可能存在部分 commit 的 plan），留在 process 裡
+> 等於倉位無人看管，退出重啟、由重啟 reconciliation 重建引擎才是復原路徑（這是
+> 與 live 車道的刻意差異：live 有 recoverable safe mode，paper 沒有對應機制）。
 > 注意：protection-only 自我了結與 keyless 停止走的也是 exit 1，監管會把它拉
 > 回來、再進 protection-only——反覆重啟不是修復，看到這個模式仍要照 §5 人工
 > 調查。手動掛 tmux／screen 也可以，但要接受上述無人看管的空窗。無論哪種方式，

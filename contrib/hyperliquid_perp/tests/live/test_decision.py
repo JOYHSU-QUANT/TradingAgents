@@ -589,6 +589,26 @@ def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
     assert driver._inflight is None
 
 
+def test_a_cycle_failing_closed_after_its_store_clears_the_stored_response(tmp_path):
+    """A terminal row carries no resumable response (issue #163 lane parity).
+
+    A cycle whose §3.1 store landed and then failed closed — here the gate
+    blows up, so pump's in-flight guard records api_failed — would otherwise
+    leave that row still holding the consumed text; terminal rows are
+    immutable, so nothing could ever clean it, and a reader trusting "a stored
+    response means resumable" would find one on a cycle that is over.
+    """
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, start_error=RuntimeError("gate blew up")
+    )
+    _strand_attempt(db, raw=_RAW_LONG)
+    assert driver.resume_startup() == "resumed"
+    assert driver.pump() == "api_failed"
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["pending_raw_response"] is None
+
+
 # -- S2: post-registration persist failure retries the persist only ----------
 
 

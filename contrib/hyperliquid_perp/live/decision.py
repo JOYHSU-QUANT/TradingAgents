@@ -680,6 +680,12 @@ class LiveDecisionDriver:
                 error_type=error_type,
                 error_message=error_message,
                 next_decision_at=next_at,
+                # A terminal row carries no resumable response (issue #163
+                # parity with the paper lane): a cycle failing closed AFTER its
+                # §3.1 store landed would otherwise leave an api_failed row
+                # presenting the consumed response as resumable state — and
+                # terminal rows are immutable, so nothing could clean it later.
+                pending_raw_response=None,
                 timestamp=now,
             )
             repo.upsert_scheduler_state(

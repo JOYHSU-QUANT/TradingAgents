@@ -192,9 +192,13 @@ class _RacedConnection:
     statement — deterministic single-thread staging of "another process
     committed between my read and my next statement". ``winner_lands`` alone
     is the common case (a ``before`` seam on ``BEGIN IMMEDIATE``, i.e. the
-    winner commits while the loser is still outside the lock). An ``after``
-    seam on ``ROLLBACK`` is the moment the loser has just released the lock.
-    ``apply_migrations`` touches nothing but ``execute``."""
+    winner commits while the loser is still outside the lock; it takes that
+    slot, so don't also pass it in ``before``). An ``after`` seam on
+    ``ROLLBACK`` is the moment the loser has just released the lock. Each SQL
+    fires at most ONE seam, once (``fired`` dedupes on the SQL alone, so name
+    a statement in ``before`` or ``after``, not both). ``raced`` means the
+    ``BEGIN IMMEDIATE`` seam fired. ``apply_migrations`` touches nothing but
+    ``execute``."""
 
     def __init__(self, real, winner_lands=None, *, before=None, after=None):
         self._real = real
@@ -286,7 +290,8 @@ def test_a_loser_whose_winner_ran_a_newer_build_is_refused_not_skipped(tmp_path)
         with pytest.raises(SchemaVersionError, match=rf"v{ahead}.*NEWER build"):
             apply_migrations(loser)
         assert loser.raced
-        assert loser_conn.in_transaction is False  # the refusal rolled back its lock
+        # The skip's ROLLBACK released the lock; the post-loop refusal holds none.
+        assert loser_conn.in_transaction is False
     finally:
         winner.close()
         loser_conn.close()
@@ -295,10 +300,10 @@ def test_a_loser_whose_winner_ran_a_newer_build_is_refused_not_skipped(tmp_path)
 def test_a_newer_build_landing_mid_loop_is_still_refused(tmp_path):
     # The per-version re-check sees only what had landed when THAT step took
     # the lock, and a winner commits one version per transaction. Stage the
-    # gap: the winner has landed v11 (the same version this build knows) when
-    # the loser takes its lock — so the loser skips it — and lands v12 while
-    # the loser is releasing that lock. Without the post-loop read the loser
-    # returns "current" over a store that is now newer than it knows.
+    # gap: the winner has landed the newest version this build knows when the
+    # loser takes its lock — so the loser skips it — and lands one past it
+    # while the loser is releasing that lock. Without the post-loop read the
+    # loser returns "current" over a store that is now newer than it knows.
     from contrib.hyperliquid_perp.persistence import db as db_module
     from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, apply_migrations
     from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS

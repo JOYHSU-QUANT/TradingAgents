@@ -131,9 +131,10 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     loop and that refusal raised there. After the loop rather than per step
     because the winner commits one version per transaction: a verdict inside
     a step could only see what had landed by then, while the final read sees
-    everything landed up to this call's return. A newer build that lands
-    after it is the at-open window the lease ordering already accepts (issue
-    #129: the sibling check is a read, not a lock). The loser's wait is
+    everything landed up to the moment it runs. A newer build that lands
+    after it is the same check-then-act window the lease ordering already
+    accepts (issue #129: the sibling check is a read, not a lock). The
+    loser's wait is
     bounded by :func:`connect`'s ``busy_timeout``;
     a winner whose single step outlasted it would leave the loser with
     ``database is locked`` (an ``OperationalError``, so main()'s exit 2) —
@@ -193,8 +194,8 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     # A concurrent NEWER build is judged here, not per step: it commits one
     # version per transaction, so a verdict inside any one step could only see
     # what had landed by then, while this read sees everything landed up to
-    # this call's return — including versions it skipped past as "already
-    # applied" without knowing whose they were.
+    # the moment it runs — including versions the loop skipped past as
+    # "already applied" without knowing whose they were.
     newest = stored_schema_version(conn)
     if newest > latest_known:
         raise _newer_build_error(newest, latest_known)

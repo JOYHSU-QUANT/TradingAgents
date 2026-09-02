@@ -10,6 +10,53 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **llm_clients: every LLM call can carry a completion-token cap, and perp
+  runs always send one** (issue #177). The OpenAI-compatible family (including
+  OpenRouter) never forwarded ``max_tokens``, and no config key could express
+  it — the completion budget was left to each upstream provider's discretion.
+  One OpenRouter upstream (GMICloud) substitutes the model's full context
+  length for a missing cap and then rejects every request as
+  input + completion > context: a deterministic HTTP 400 that stalled
+  paper-BTC-3 for six consecutive cycles (~24h) with the open position riding
+  SL/TP alone. ``max_tokens`` now rides the ``temperature`` pattern:
+  ``DEFAULT_CONFIG["max_tokens"]`` (default ``None`` = provider default),
+  ``TRADINGAGENTS_MAX_TOKENS`` env override (documented in ``.env.example``
+  and the README), validated forwarding in ``_get_provider_kwargs`` (positive
+  int only — forwarding 0/negative is the same deterministic-400 stall shape,
+  and a typo fails naming the key instead of as a bare ``int()`` error), and
+  passthrough in the OpenAI-compatible, Azure, and Google clients (Google's
+  field aliases it to ``max_output_tokens``; Anthropic and Bedrock already
+  forwarded it). Langchain renames the kwarg on the way out — twice — so the
+  tests pin the outgoing payload, not just the constructor field:
+  ``max_completion_tokens`` on Chat Completions (OpenRouter honoring it was
+  verified live: ``finish_reason: length`` at exactly the cap) and
+  ``max_output_tokens`` on native OpenAI's Responses branch. The perp bridge
+  adds ``engine.max_completion_tokens`` (validated through the shared YAML
+  coercion seam and normalised to int at load, so the value's type does not
+  follow its quoting: bools, non-integral floats, junk and non-positive
+  values fail closed) — and resolves the cap at daemon startup, not per
+  cycle: an env value reaches the bridge unchecked, and left to
+  ``build_graph`` a junk one raises outside the retry classification, so the
+  scheduler would log an unclassified ``api_failed`` every cycle and hold the
+  position on SL/TP alone — #177's own stall shape, reached from a typo. The
+  effective cap and its source are logged once at startup (YAML can shadow an
+  env var set on the host, and a cap that binds is invisible downstream). An
+  unknown ``engine:`` key now warns rather than being silently ignored: for
+  most keys a typo lands on a working default, for this one it reverts a
+  deliberate raise. The startup refusal is an ``EngineConfigError`` (the new
+  base of ``EngineImportError``), so a rejected cap takes the lane a failed
+  import already had: over a live position the run degrades to
+  protection-only rather than exiting — killing the process would leave the
+  position with nobody watching SL/TP, worse than the stall being fixed —
+  and flat it is the named exit 1. An engine whose config has no
+  ``max_tokens`` key at all (a stale ``tradingagents`` shadowing the
+  checkout) is refused by name rather than quietly running uncapped behind a
+  log line claiming a cap. Precedence is
+  YAML > ``TRADINGAGENTS_MAX_TOKENS`` > perp default 8192 — absent and null
+  both fall through to a cap, so the uncapped path is unreachable from a
+  perp config. The cap includes reasoning/thinking tokens; switching
+  deep-think to a thinking model needs an explicit raise.
+
 - **hyperliquid_perp: the paper lane's post-answer failures follow what is
   already durable, instead of always exiting the daemon** (issue #163).
   Issue #134 gave the stretch BEFORE the AI answers a fail-closed guard; past

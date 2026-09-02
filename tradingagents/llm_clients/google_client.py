@@ -31,7 +31,9 @@ class GoogleClient(BaseLLMClient):
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        for key in ("timeout", "max_retries", "temperature", "callbacks", "http_client", "http_async_client"):
+        # ``max_tokens`` is ChatGoogleGenerativeAI's declared alias for its
+        # ``max_output_tokens`` field, so the unified spelling works here too.
+        for key in ("timeout", "max_retries", "temperature", "max_tokens", "callbacks", "http_client", "http_async_client"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 

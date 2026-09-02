@@ -479,6 +479,8 @@ Live data moves. News, StockTwits, and Reddit return different content as time p
 
 To reduce variation you can lower the sampling temperature. Set `temperature` in your config (or `TRADINGAGENTS_TEMPERATURE` in `.env`); lower values make models that honor it more repeatable. The current curated models are reasoning-first and largely ignore temperature, so for tighter reproducibility use a non-reasoning model, which you can set explicitly via the Custom model ID option.
 
+A completion-token cap works the same way: set `max_tokens` in your config (or `TRADINGAGENTS_MAX_TOKENS` in `.env`, positive integer). Unset leaves each provider at its own default, which is risky through gateway providers such as OpenRouter — some upstreams treat a missing cap as "the model's full context" and deterministically reject every call (issue #177). The cap includes reasoning/thinking tokens.
+
 ```python
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "openai"

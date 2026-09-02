@@ -3,7 +3,8 @@
 Extracted verbatim from ``main.py`` (2026-08-18): the symbols ``cli.py`` had
 been lazy-importing from the legacy entry point — market-context assembly
 (:func:`_build_context`), the engine-config overlay
-(:func:`_build_engine_config` with :class:`EngineImportError`), risk/decision
+(:func:`_build_engine_config` with :class:`EngineConfigError` and its
+:class:`EngineImportError` subclass), risk/decision
 config parsing (:func:`_load_risk_decision`) and coin resolution
 (:func:`_resolve_coin`) — plus what the call graph drags along: their private
 helpers, and the position reads (:func:`_load_position`) both of ``main.py``'s
@@ -41,6 +42,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from .common.config_coercion import int_from_yaml
 from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
@@ -58,6 +60,50 @@ from .paper.config import PaperTradingConfig
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ANALYSTS = ("market", "social", "news")
+
+# Perp default completion cap. Perp runs are never uncapped — a missing cap
+# through a gateway is a deterministic 400 on some upstreams (#177). Chosen
+# against the non-thinking deep-think model this ships with, and nothing
+# measures it: the cap counts reasoning tokens too, so a thinking model needs
+# an explicit raise, and a cap that binds truncates the visible tail (where
+# the target JSON lives) into a plain invalid_output with no HTTP error to
+# point at. The effective value is logged at build time so the number that
+# actually applied is recoverable from the log.
+_DEFAULT_MAX_COMPLETION_TOKENS = 8192
+
+
+def _resolve_completion_cap(yaml_value: object, env_value: object) -> tuple[int, str]:
+    """Resolve the effective completion cap, and name where it came from.
+
+    ``load_config`` validates the YAML key, but ``TRADINGAGENTS_MAX_TOKENS``
+    reaches here unchecked — env overrides are coerced against the type of the
+    engine default, which is ``None``, so any string rides through. Left to
+    the graph, a junk value raises inside ``build_graph`` on every cycle:
+    outside the retry classification, so the daemon logs an unclassified
+    ``api_failed``, keeps running, and holds the position on SL/TP alone —
+    the #177 stall shape, relocated from the vendor to the config. Checking
+    here fails the daemon at startup instead, in the same operator-fixable
+    lane as a bad YAML value.
+    """
+    # ``is None``/blank, not falsiness: an explicit 0 must reach the rejection
+    # below (this cap deliberately has no "off" sentinel — off IS the bug),
+    # not fall silently through to the next source.
+    for value, source in (
+        (yaml_value, "engine.max_completion_tokens"),
+        (env_value, "TRADINGAGENTS_MAX_TOKENS"),
+    ):
+        if value is None or value == "":
+            continue
+        try:
+            cap = int_from_yaml(value)
+        except ValueError as exc:
+            raise EngineConfigError(f"config key '{source}': {exc}") from None
+        if cap <= 0:
+            raise EngineConfigError(
+                f"config key '{source}': expected a positive integer, got {value!r}"
+            )
+        return cap, source
+    return _DEFAULT_MAX_COMPLETION_TOKENS, "perp default"
 
 
 def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
@@ -288,12 +334,27 @@ def _load_position(
     return account.position_for(coin), account.account_value, True
 
 
-class EngineImportError(RuntimeError):
+class EngineConfigError(RuntimeError):
+    """Named, operator-fixable failure building the engine's config.
+
+    The base of the setup errors the CLI lanes treat as "the operator can fix
+    this and restart": every one of them means the engine could not be brought
+    up from the environment as it stands, and none of them is an adapter bug.
+    Catching the base (rather than each subclass) is what keeps a new cause
+    from silently falling through to main's exit-2 "unexpected error" bucket —
+    over a live position that bucket kills the process, taking SL/TP
+    protection with it.
+    """
+
+
+class EngineImportError(EngineConfigError):
     """Named, operator-fixable failure importing the tradingagents engine.
 
-    Raised only by :func:`_build_engine_config`; callers map exactly this type
-    to a named exit 1, so any other ``RuntimeError`` still surfaces as an
-    unexpected-error exit 2 instead of hiding behind a reassuring message.
+    Raised only by :func:`_build_engine_config`. Callers catch the
+    :class:`EngineConfigError` base, not this type — a new sibling cause needs
+    no new handler — and any ``RuntimeError`` outside that base still surfaces
+    as an unexpected-error exit 2 instead of hiding behind a reassuring
+    message.
     """
 
 
@@ -342,6 +403,35 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         eng_cfg.get("quick_think_llm") or engine_config["quick_think_llm"]
     )
     engine_config["backend_url"] = None
+    # Cap precedence: YAML > TRADINGAGENTS_MAX_TOKENS (already overlaid onto
+    # DEFAULT_CONFIG, like every sibling env knob) > perp default. ``or``
+    # matches the string keys above: present-but-null falls through, never to
+    # an uncapped request.
+    # The key's ABSENCE means the engine predates the cap (a stale
+    # site-packages ``tradingagents`` shadowing the checkout — PR #109), and
+    # that engine's _get_provider_kwargs would forward nothing: the request
+    # goes out uncapped and 400s, which is #177 verbatim. Refusing by name
+    # beats both a bare KeyError (exit 2 "unexpected error") and, worse,
+    # logging a cap that was never sent.
+    if "max_tokens" not in engine_config:
+        raise EngineConfigError(
+            "the imported tradingagents engine has no 'max_tokens' config key, "
+            "so no completion cap can be applied — a run would go out uncapped "
+            "(issue #177). Is a stale tradingagents shadowing this checkout?"
+        )
+    engine_config["max_tokens"], cap_source = _resolve_completion_cap(
+        eng_cfg.get("max_completion_tokens"), engine_config["max_tokens"]
+    )
+    # The effective cap is not derivable from any one file (YAML can shadow an
+    # env var set on the host, and both can be absent), and a cap that binds
+    # is invisible downstream — it presents as invalid_output, not an error.
+    # One line at startup so "which number actually applied, and from where"
+    # is answerable from the log.
+    logger.info(
+        "engine completion cap: %d tokens (from %s)",
+        engine_config["max_tokens"],
+        cap_source,
+    )
     # Perp runs default structured output OFF (the engine default is on): the
     # Phase 2 target JSON contract is injected as prompt text and can only
     # survive in the gated agents' free-text answers — a *successful*

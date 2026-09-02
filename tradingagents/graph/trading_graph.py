@@ -161,6 +161,28 @@ class TradingAgentsGraph:
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
 
+        # Completion cap is cross-provider too (every client forwards the
+        # ``max_tokens`` spelling; Google aliases it to ``max_output_tokens``).
+        # Validated here, not just coerced: env-sourced values bypass every
+        # YAML-side check, and forwarding 0 or a negative cap is a
+        # deterministic provider 400 on every call — the #177 stall shape.
+        max_tokens = self.config.get("max_tokens")
+        if max_tokens is not None and max_tokens != "":
+            try:
+                # bool is an int subclass: True would pass as a 1-token cap,
+                # truncating every completion with nothing raised anywhere.
+                if isinstance(max_tokens, bool):
+                    raise ValueError
+                parsed = int(max_tokens)
+                if parsed <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) must "
+                    f"be a positive integer, got {max_tokens!r}"
+                ) from None
+            kwargs["max_tokens"] = parsed
+
         return kwargs
 
     def _create_tool_nodes(self) -> dict[str, ToolNode]:

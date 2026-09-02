@@ -288,11 +288,13 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
 - **健康 resume 缺 API key**：帳本是健康的，只是少了憑證——照 §1.3 設好
   `OPENROUTER_API_KEY` 後重啟即可恢復交易（CLI 的 stderr 訊息也是這麼指示），
   不需要先跑 `validate`。
-- **健康 resume 但引擎 import 失敗**（常見成因：`.env` 被存成 UTF-16 等壞編
-  碼）：帳本健康、倉位仍活著，只是引擎載不起來——照 stderr 印出的錯誤修好
-  環境（例如把 `.env` 重存為 UTF-8）後重啟即可恢復交易，不需要先跑
-  `validate`。同樣的失敗發生在**空倉** restart 或 fresh `--create` 時則直接
-  具名 exit 1（沒有倉位需要看護）。
+- **健康 resume 但引擎建不起來**（`EngineConfigError`；成因有二：引擎 import
+  失敗，常見是 `.env` 被存成 UTF-16 等壞編碼；或某個 config 值被拒絕，例如
+  `TRADINGAGENTS_MAX_TOKENS=8k` 這種壞的 completion 上限）：帳本健康、倉位仍
+  活著，只是引擎起不來——照 stderr 印出的錯誤修好環境（重存 `.env` 為 UTF-8、
+  或改掉那個被指名的 config key）後重啟即可恢復交易，不需要先跑 `validate`。
+  同樣的失敗發生在**空倉** restart 或 fresh `--create` 時則直接具名 exit 1
+  （沒有倉位需要看護）。
 
 `api_failed` cycle（網路／API 問題）是預期會偶發的，計入
 `api_failed_count`、不進 30 輪門檻；連續大量出現才需要查網路——**先看

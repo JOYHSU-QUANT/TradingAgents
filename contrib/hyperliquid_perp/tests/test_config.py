@@ -387,6 +387,93 @@ def test_load_config_accepts_list_selected_analysts(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
+        "engine:\n  max_completion_tokens: 0\n",
+        "engine:\n  max_completion_tokens: -1\n",
+        "engine:\n  max_completion_tokens: true\n",  # bool is an int subclass
+        "engine:\n  max_completion_tokens: 8192.5\n",
+        'engine:\n  max_completion_tokens: "8k"\n',
+    ],
+)
+def test_load_config_rejects_bad_max_completion_tokens(tmp_path, text):
+    # Anything that is not a positive integer is rejected at load: junk would
+    # ride the ``or`` fallback into the LLM client as an illegal cap, and
+    # 0/negative would re-open the uncapped path the key exists to close
+    # (issue #177).
+    bad = tmp_path / "cap.yaml"
+    bad.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="engine.max_completion_tokens"):
+        load_config(bad)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "engine:\n  max_completion_tokens: 8192\n",
+        # A quoted integer is a legal spelling through the shared coercion
+        # seam (unlike a quoted bool there is no inversion hazard); it int()s
+        # cleanly at consumption.
+        'engine:\n  max_completion_tokens: "8192"\n',
+    ],
+)
+def test_load_config_accepts_positive_max_completion_tokens(tmp_path, text):
+    # Both spellings normalise to int at load, so the value's type does not
+    # follow its quoting all the way down to the LLM client.
+    good = tmp_path / "cap-ok.yaml"
+    good.write_text(text, encoding="utf-8")
+    assert load_config(good)["engine"]["max_completion_tokens"] == 8192
+
+
+def test_load_config_warns_on_an_unknown_engine_key(tmp_path, capsys):
+    """A typo'd engine key is ignored — say so instead of applying a default.
+
+    The block is deliberately lenient (its sibling blocks reject unknown keys
+    via config_overrides), so this warns rather than raises: raising would
+    break a local.yaml that loads today. For most engine keys a typo lands on
+    a working default; for the completion cap it silently reverts a raise the
+    operator made on purpose, and a cap that binds truncates the target JSON
+    into a plain invalid_output.
+    """
+    bad = tmp_path / "typo.yaml"
+    bad.write_text("engine:\n  max_completion_token: 64000\n", encoding="utf-8")
+    load_config(bad)
+    err = capsys.readouterr().err
+    # Quoted: the offending key must be NAMED, not merely implied by the
+    # unquoted Supported: list (which always contains it as a substring).
+    assert "'max_completion_token'" in err
+    assert "max_completion_tokens" in err  # the supported spelling, for the fix
+
+
+def test_load_config_stays_quiet_for_known_engine_keys(tmp_path, capsys):
+    good = tmp_path / "known.yaml"
+    good.write_text(
+        "engine:\n  llm_provider: openrouter\n  deep_think_llm: m\n"
+        "  quick_think_llm: m\n  selected_analysts: [market]\n"
+        "  structured_output: false\n  max_completion_tokens: 4096\n",
+        encoding="utf-8",
+    )
+    load_config(good)
+    assert capsys.readouterr().err == ""
+
+
+def test_the_example_config_and_setup_doc_quote_the_completion_cap_default():
+    """The ``8192`` in the example YAML and SETUP.md, derived not retyped.
+
+    ``_DEFAULT_MAX_COMPLETION_TOKENS`` is the single declaration (the example
+    ships the key commented out so a copied local.yaml cannot pin yesterday's
+    number). Raising it would otherwise leave both prose sites telling the
+    operator a cap the code no longer applies, with the suite green — the
+    drift shape issue #102 installed these pins for.
+    """
+    from contrib.hyperliquid_perp.engine_bridge import _DEFAULT_MAX_COMPLETION_TOKENS
+
+    cap = _DEFAULT_MAX_COMPLETION_TOKENS
+    assert f"# max_completion_tokens: {cap}" in config_text()
+    assert f"perp 預設 {cap}" in doc_text("SETUP.md")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "indicators: [rsi14]\n",  # typo'd name — the classic
         "indicators: [rsi_14, atr14]\n",  # one good, one typo'd
         "indicators: [5]\n",  # non-string junk

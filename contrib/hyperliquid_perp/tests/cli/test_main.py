@@ -116,6 +116,76 @@ def test_build_engine_config_defaults():
     assert engine_config["structured_output"] is False
 
 
+def test_build_engine_config_completion_cap_never_uncapped():
+    # Absent and present-but-null both fall back to the perp default cap: the
+    # uncapped path is what let a gateway upstream substitute the full context
+    # length and 400 every cycle (issue #177) — it must not be reachable.
+    engine_config, _ = bridge_mod._build_engine_config({})
+    assert engine_config["max_tokens"] == bridge_mod._DEFAULT_MAX_COMPLETION_TOKENS
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": None}})
+    assert engine_config["max_tokens"] == bridge_mod._DEFAULT_MAX_COMPLETION_TOKENS
+    # An explicit operator value is honoured verbatim.
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 4096}})
+    assert engine_config["max_tokens"] == 4096
+
+
+def test_build_engine_config_completion_cap_env_precedence(monkeypatch):
+    # TRADINGAGENTS_MAX_TOKENS rides DEFAULT_CONFIG like every sibling env
+    # knob and must not be silently clobbered by the perp default — but an
+    # explicit YAML value still wins over it. The env string is normalised
+    # here, not left for the graph: an int is what reaches the client.
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", "16000")
+    engine_config, _ = bridge_mod._build_engine_config({})
+    assert engine_config["max_tokens"] == 16000
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 4096}})
+    assert engine_config["max_tokens"] == 4096
+
+
+def test_build_engine_config_rejects_an_explicit_zero_cap():
+    # 0 has no "off" meaning for this key — off is the bug it closes — so it
+    # must be rejected by name, never fall through to the next source.
+    with pytest.raises(bridge_mod.EngineConfigError, match="engine.max_completion_tokens"):
+        bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 0}})
+
+
+@pytest.mark.parametrize("bad", ["8k", "0", "-1", "4096.5", "true"])
+def test_build_engine_config_rejects_a_bad_env_cap_at_startup(monkeypatch, bad):
+    """A junk env cap must fail the daemon at startup, not once per cycle.
+
+    ``load_config`` validates the YAML key, but the env override reaches the
+    bridge unchecked. Left to ``build_graph`` the ValueError lands per cycle
+    OUTSIDE the retry classification: the scheduler writes an unclassified
+    api_failed, keeps running, and holds the position on SL/TP alone — the
+    #177 stall shape, reached from a one-character typo.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", bad)
+    # EngineConfigError, not a bare ValueError: over a live position the CLI
+    # lane must degrade to protection-only, and only the named type gets it
+    # there (a bare ValueError would kill the process — see the CLI test).
+    with pytest.raises(bridge_mod.EngineConfigError, match="TRADINGAGENTS_MAX_TOKENS"):
+        bridge_mod._build_engine_config({})
+
+
+def test_build_engine_config_refuses_an_engine_that_cannot_carry_the_cap(monkeypatch):
+    """A missing engine ``max_tokens`` key must refuse by name, not default.
+
+    Its absence means the imported engine predates the cap (a stale
+    site-packages tradingagents shadowing the checkout, PR #109) and forwards
+    nothing — so substituting the perp default would log a cap that never
+    reaches the request and let the run go out uncapped: issue #177 verbatim,
+    with the startup log asserting the opposite.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.delitem(DEFAULT_CONFIG, "max_tokens", raising=False)
+    with pytest.raises(bridge_mod.EngineConfigError, match="no 'max_tokens' config key"):
+        bridge_mod._build_engine_config({})
+
+
 def test_build_engine_config_structured_output_escape_hatch(capsys):
     # Arming the escape hatch must be loud (dual-channel warning): with the
     # prompt-injected contract it fail-closes every cycle as invalid_output.

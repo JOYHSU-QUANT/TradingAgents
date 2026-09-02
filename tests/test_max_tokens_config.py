@@ -54,6 +54,17 @@ class TestMaxTokensForwarding:
         payload = llm._get_request_payload([("human", "hi")])
         assert payload[wire_key] == 1234
 
+    def test_max_tokens_reaches_the_azure_client(self, monkeypatch):
+        # Azure's allowlist is edited by the same change; without this its
+        # entry could be misspelled and the suite would stay green. It needs
+        # its endpoint/version env before the client will construct at all.
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/")
+        monkeypatch.setenv("OPENAI_API_VERSION", "2025-03-01-preview")
+        llm = create_llm_client(
+            provider="azure", model="gpt-4.1", max_tokens=1234, api_key="placeholder"
+        ).get_llm()
+        assert llm.max_tokens == 1234
+
     def test_max_tokens_omitted_leaves_provider_default(self):
         # Not passing max_tokens must not force it to a value.
         llm = create_llm_client(
@@ -107,7 +118,7 @@ class TestProviderKwargsMaxTokens:
     def test_empty_string_omitted(self):
         assert "max_tokens" not in self._kwargs_for("")
 
-    @pytest.mark.parametrize("bad", [0, -1, "0", "-1", "8k", "4096.5"])
+    @pytest.mark.parametrize("bad", [0, -1, "0", "-1", "8k", "4096.5", True])
     def test_non_positive_and_junk_rejected_naming_the_key(self, bad):
         # Forwarding 0 or a negative cap is a deterministic provider 400 on
         # every call — the #177 stall shape — and a typo must not surface as

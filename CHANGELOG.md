@@ -34,7 +34,16 @@ Breaking changes within the 0.x line are called out explicitly.
   adds ``engine.max_completion_tokens`` (validated through the shared YAML
   coercion seam and normalised to int at load, so the value's type does not
   follow its quoting: bools, non-integral floats, junk and non-positive
-  values fail closed) with precedence
+  values fail closed) — and resolves the cap at daemon startup, not per
+  cycle: an env value reaches the bridge unchecked, and left to
+  ``build_graph`` a junk one raises outside the retry classification, so the
+  scheduler would log an unclassified ``api_failed`` every cycle and hold the
+  position on SL/TP alone — #177's own stall shape, reached from a typo. The
+  effective cap and its source are logged once at startup (YAML can shadow an
+  env var set on the host, and a cap that binds is invisible downstream). An
+  unknown ``engine:`` key now warns rather than being silently ignored: for
+  most keys a typo lands on a working default, for this one it reverts a
+  deliberate raise. Precedence is
   YAML > ``TRADINGAGENTS_MAX_TOKENS`` > perp default 8192 — absent and null
   both fall through to a cap, so the uncapped path is unreachable from a
   perp config. The cap includes reasoning/thinking tokens; switching

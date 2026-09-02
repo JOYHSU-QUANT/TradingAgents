@@ -25,6 +25,21 @@ _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
 # Sentinel placeholder in the example file — treated as "no wallet configured".
 _WALLET_PLACEHOLDER = "0xYOUR..."
 
+# Every key ``engine_bridge._build_engine_config`` reads. Unknown keys in that
+# block are warned about, not rejected: it is deliberately lenient (see the
+# note beside its validation), and raising would break a local.yaml that loads
+# today.
+_ENGINE_KEYS = frozenset(
+    {
+        "llm_provider",
+        "deep_think_llm",
+        "quick_think_llm",
+        "selected_analysts",
+        "structured_output",
+        "max_completion_tokens",
+    }
+)
+
 # Everything load_config can raise for an operator config mistake — a missing or
 # unreadable path (OSError), a YAML syntax error, or a failed validation below.
 # Callers turn any of these into a named exit, never a raw traceback; the list
@@ -291,6 +306,20 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # engine_bridge._build_engine_config); these are its three deliberate exceptions.
     eng = config.get("engine")
     if eng is not None:
+        # Unlike its sibling blocks (which go through config_overrides and
+        # reject unknown keys outright), this one is lenient — so warn rather
+        # than raise, which cannot break an existing local.yaml. A typo on
+        # most engine keys lands on a working default; on the completion cap
+        # it silently reverts an operator's deliberate raise, and a cap that
+        # binds truncates the target JSON into a plain invalid_output.
+        unknown_engine_keys = set(eng) - _ENGINE_KEYS
+        if unknown_engine_keys:
+            print(
+                f"warning: unknown engine: config key(s): "
+                f"{', '.join(map(repr, sorted(unknown_engine_keys)))} — ignored. "
+                f"Supported: {', '.join(sorted(_ENGINE_KEYS))}.",
+                file=sys.stderr,
+            )
         # Its one *bool* key: a quoted "false" would read truthy and silently
         # re-enable structured output (RUNBOOK §7). Validates only — no
         # write-back needed.

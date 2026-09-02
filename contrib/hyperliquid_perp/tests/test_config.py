@@ -423,6 +423,36 @@ def test_load_config_accepts_positive_max_completion_tokens(tmp_path, text):
     assert load_config(good)["engine"]["max_completion_tokens"] == 8192
 
 
+def test_load_config_warns_on_an_unknown_engine_key(tmp_path, capsys):
+    """A typo'd engine key is ignored — say so instead of applying a default.
+
+    The block is deliberately lenient (its sibling blocks reject unknown keys
+    via config_overrides), so this warns rather than raises: raising would
+    break a local.yaml that loads today. For most engine keys a typo lands on
+    a working default; for the completion cap it silently reverts a raise the
+    operator made on purpose, and a cap that binds truncates the target JSON
+    into a plain invalid_output.
+    """
+    bad = tmp_path / "typo.yaml"
+    bad.write_text("engine:\n  max_completion_token: 64000\n", encoding="utf-8")
+    load_config(bad)
+    err = capsys.readouterr().err
+    assert "max_completion_token" in err
+    assert "max_completion_tokens" in err  # the supported spelling, for the fix
+
+
+def test_load_config_stays_quiet_for_known_engine_keys(tmp_path, capsys):
+    good = tmp_path / "known.yaml"
+    good.write_text(
+        "engine:\n  llm_provider: openrouter\n  deep_think_llm: m\n"
+        "  quick_think_llm: m\n  selected_analysts: [market]\n"
+        "  structured_output: false\n  max_completion_tokens: 4096\n",
+        encoding="utf-8",
+    )
+    load_config(good)
+    assert capsys.readouterr().err == ""
+
+
 def test_the_example_config_and_setup_doc_quote_the_completion_cap_default():
     """The ``8192`` in the example YAML and SETUP.md, derived not retyped.
 

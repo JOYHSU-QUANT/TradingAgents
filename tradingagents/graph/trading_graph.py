@@ -169,6 +169,10 @@ class TradingAgentsGraph:
         max_tokens = self.config.get("max_tokens")
         if max_tokens is not None and max_tokens != "":
             try:
+                # bool is an int subclass: True would pass as a 1-token cap,
+                # truncating every completion with nothing raised anywhere.
+                if isinstance(max_tokens, bool):
+                    raise ValueError
                 parsed = int(max_tokens)
                 if parsed <= 0:
                     raise ValueError

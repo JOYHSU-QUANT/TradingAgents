@@ -132,14 +132,50 @@ def test_build_engine_config_completion_cap_never_uncapped():
 def test_build_engine_config_completion_cap_env_precedence(monkeypatch):
     # TRADINGAGENTS_MAX_TOKENS rides DEFAULT_CONFIG like every sibling env
     # knob and must not be silently clobbered by the perp default — but an
-    # explicit YAML value still wins over it.
+    # explicit YAML value still wins over it. The env string is normalised
+    # here, not left for the graph: an int is what reaches the client.
     from tradingagents.default_config import DEFAULT_CONFIG
 
     monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", "16000")
     engine_config, _ = bridge_mod._build_engine_config({})
-    assert engine_config["max_tokens"] == "16000"
+    assert engine_config["max_tokens"] == 16000
     engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 4096}})
     assert engine_config["max_tokens"] == 4096
+
+
+def test_build_engine_config_rejects_an_explicit_zero_cap():
+    # 0 has no "off" meaning for this key — off is the bug it closes — so it
+    # must be rejected by name, never fall through to the next source.
+    with pytest.raises(ValueError, match="engine.max_completion_tokens"):
+        bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 0}})
+
+
+@pytest.mark.parametrize("bad", ["8k", "0", "-1", "4096.5", "true"])
+def test_build_engine_config_rejects_a_bad_env_cap_at_startup(monkeypatch, bad):
+    """A junk env cap must fail the daemon at startup, not once per cycle.
+
+    ``load_config`` validates the YAML key, but the env override reaches the
+    bridge unchecked. Left to ``build_graph`` the ValueError lands per cycle
+    OUTSIDE the retry classification: the scheduler writes an unclassified
+    api_failed, keeps running, and holds the position on SL/TP alone — the
+    #177 stall shape, reached from a one-character typo.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", bad)
+    with pytest.raises(ValueError, match="TRADINGAGENTS_MAX_TOKENS"):
+        bridge_mod._build_engine_config({})
+
+
+def test_build_engine_config_survives_an_engine_default_without_the_cap_key(monkeypatch):
+    # ``max_tokens`` is a new DEFAULT_CONFIG key: a stale site-packages
+    # tradingagents shadowing the checkout (PR #109) would otherwise raise a
+    # bare KeyError — exit 2 "unexpected error" instead of the named lane.
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.delitem(DEFAULT_CONFIG, "max_tokens", raising=False)
+    engine_config, _ = bridge_mod._build_engine_config({})
+    assert engine_config["max_tokens"] == bridge_mod._DEFAULT_MAX_COMPLETION_TOKENS
 
 
 def test_build_engine_config_structured_output_escape_hatch(capsys):

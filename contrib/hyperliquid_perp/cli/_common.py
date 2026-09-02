@@ -70,11 +70,14 @@ def _open_owned_store(path: str | Path) -> Database | None:
     refusing (issue #129). So a populated store is opened AS-IS and the
     upgrade is owed to :func:`_migrate_owned_store`, which the caller runs at
     the point it owns the store. :class:`Database`'s deferred policy settles
-    the two edge cases at open: an EMPTY store (no file, or a file with no
-    schema yet) has no owner and is built in full, and a store migrated by a
-    NEWER build is refused before anything is written — the same refusal the
-    real ``live-smoke`` run gets through :func:`_open_existing_db`. Returns
-    ``None`` after printing that refusal.
+    the edge cases at open: an EMPTY store (no file, or a file with no
+    schema yet) has no owner and is built in full; a store migrated by a
+    NEWER build is refused before anything is written; and a populated store
+    OLDER than ``schema.LEASE_READABLE_SINCE`` — the floor below which the
+    lease columns the caller reads next do not exist — is refused by name
+    rather than left to die on that read (issue #147). The latter two are the
+    same refusals the real ``live-smoke`` run gets through
+    :func:`_open_existing_db`. Returns ``None`` after printing one.
     """
     try:
         return Database(path, migrate=False, defer_migration=True)

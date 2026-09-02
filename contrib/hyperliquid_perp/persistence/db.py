@@ -26,7 +26,7 @@ from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .schema import MIGRATIONS, SCHEMA_MIGRATIONS_DDL
+from .schema import LEASE_READABLE_SINCE, MIGRATIONS, SCHEMA_MIGRATIONS_DDL
 
 __all__ = [
     "Database",
@@ -86,6 +86,17 @@ class SchemaVersionError(RuntimeError):
     """The store's schema does not match what this build can safely operate on."""
 
 
+def _newer_build_error(found: int, latest_known: int) -> SchemaVersionError:
+    """The one wording of "a NEWER build migrated this store" (see :func:`apply_migrations`)."""
+    return SchemaVersionError(
+        f"store schema is v{found} but this build only knows v{latest_known} — "
+        "it was migrated by a NEWER build. Refusing to open it: this build's SQL "
+        "does not know the newer columns and would write through them, corrupting "
+        "state the newer build relies on. Run the newer build, or restore a backup "
+        "taken before the upgrade."
+    )
+
+
 def stored_schema_version(conn: sqlite3.Connection) -> int:
     """The highest migration recorded in the store (0 for a fresh/empty one).
 
@@ -104,6 +115,31 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     transaction, and is recorded in ``schema_migrations``. Re-opening an
     up-to-date DB applies nothing.
 
+    Idempotent across PROCESSES too: two owning commands started against the
+    same behind store in the same moment (two ``live`` on the shared
+    ``live_trading.db`` of RUNBOOK-live §7.3) both read the same "not yet
+    applied" set up front, and each version is re-checked inside its own
+    ``BEGIN IMMEDIATE`` — the loser waits on the winner's write lock, then
+    sees the version recorded and skips it. Without that re-read the loser
+    re-ran the winner's ``ALTER TABLE ... ADD COLUMN`` and died on
+    ``duplicate column name`` (issue #147), a traceback exit 2 from a race
+    that ``BEGIN IMMEDIATE`` had already serialized correctly. The skip does
+    not ask WHOSE version it skipped: a winner running a newer build has
+    carried the store past what this one knows, and skipping its versions
+    silently would be exactly the write-through the NEWER refusal below
+    exists to stop — so the recorded version is read once more after the
+    loop and that refusal raised there. After the loop rather than per step
+    because the winner commits one version per transaction: a verdict inside
+    a step could only see what had landed by then, while the final read sees
+    everything landed up to the moment it runs. A newer build that lands
+    after it is the same check-then-act window the lease ordering already
+    accepts (issue #129: the sibling check is a read, not a lock). The
+    loser's wait is
+    bounded by :func:`connect`'s ``busy_timeout``;
+    a winner whose single step outlasted it would leave the loser with
+    ``database is locked`` (an ``OperationalError``, so main()'s exit 2) —
+    every step here is a handful of DDL statements, far inside that bound.
+
     A store NEWER than this build is refused rather than used. Nothing else
     reads ``schema_migrations``, so without this an older binary opens a
     migrated store silently and writes through it with the newer columns
@@ -116,13 +152,7 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     latest_known = max(MIGRATIONS)
     found = stored_schema_version(conn)
     if found > latest_known:
-        raise SchemaVersionError(
-            f"store schema is v{found} but this build only knows v{latest_known} — "
-            "it was migrated by a NEWER build. Refusing to open it: this build's SQL "
-            "does not know the newer columns and would write through them, corrupting "
-            "state the newer build relies on. Run the newer build, or restore a backup "
-            "taken before the upgrade."
-        )
+        raise _newer_build_error(found, latest_known)
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
     latest = 0
     for version in sorted(MIGRATIONS):
@@ -135,6 +165,17 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
         # take the write lock up front and let busy_timeout bound the wait.
         conn.execute("BEGIN IMMEDIATE")
         try:
+            # Re-read under the write lock: the set above was taken outside
+            # it, and a concurrent process may have applied this version in
+            # between. Nothing has been written yet, so the skip's ROLLBACK
+            # undoes nothing — it only releases the lock. Whether that process
+            # was a NEWER build is judged once, after the loop (see below).
+            landed = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+            ).fetchone()
+            if landed is not None:
+                conn.execute("ROLLBACK")
+                continue
             for statement in MIGRATIONS[version]:
                 conn.execute(statement)
             conn.execute(
@@ -150,6 +191,14 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
             with suppress(Exception):
                 conn.execute("ROLLBACK")
             raise
+    # A concurrent NEWER build is judged here, not per step: it commits one
+    # version per transaction, so a verdict inside any one step could only see
+    # what had landed by then, while this read sees everything landed up to
+    # the moment it runs — including versions the loop skipped past as
+    # "already applied" without knowing whose they were.
+    newest = stored_schema_version(conn)
+    if newest > latest_known:
+        raise _newer_build_error(newest, latest_known)
     return latest
 
 
@@ -174,20 +223,27 @@ class Database:
         on open. ``migrate=False`` — a reporting command: refuse either mismatch
         rather than touch a store a daemon may own. ``defer_migration=True`` —
         open a populated store as-is and leave the upgrade to the caller once
-        it HOLDS THE LEASE; only a store migrated by a NEWER build is refused
-        at open (nothing has been written yet, and it never becomes this
-        build's to upgrade), and an EMPTY store — no schema at all — is built
-        in full, since nothing can own it.
+        it HOLDS THE LEASE; refused at open only when the store was migrated
+        by a NEWER build (nothing has been written yet, and it never becomes
+        this build's to upgrade) or predates the lease columns entirely (see
+        below), and an EMPTY store — no schema at all — is built in full,
+        since nothing can own it.
 
         The third policy exists because ``migrate=True`` necessarily runs before
         the lease can be taken (the lease lives in the store being opened), so an
         owning command upgraded the schema underneath a running sibling daemon
         and only THEN discovered it had to refuse — doing the damage on the way
-        to declining to do it. The lease columns arrived in migration v3 and
-        every later migration only ADDS columns and tables, so the lease reads
-        and writes (``SELECT *`` plus a patch-style upsert of the v3 columns)
-        are safe against any store from v3 up — which is every store a current
-        build can meet outside a test.
+        to declining to do it. What the deferring caller may touch before it
+        pays the upgrade is declared once, beside the schema: the lease reads
+        and writes (``SELECT *`` plus a patch-style upsert of the lease
+        columns) are safe against any store from
+        :data:`~.schema.LEASE_READABLE_SINCE` up — which is every store a
+        current build can meet outside a test — and a populated store OLDER
+        than that floor is refused here by name (issue #147), since its first
+        lease read would otherwise die as an ``OperationalError`` on a column
+        it does not have. That refusal covers ``migrate=False`` too, so the
+        reporting commands name the same remedy for such a store instead of
+        sending the operator to an owning command that would refuse it again.
 
         A caller that defers MUST call :meth:`apply_deferred_migration` once it
         owns the run; that is the point of deferring, so the timing is
@@ -214,11 +270,31 @@ class Database:
                 # the caller has written anything: a deferring command would
                 # otherwise stamp its lease into columns it does not know and
                 # only then discover the store is not its to upgrade.
+                raise _newer_build_error(found, latest_known)
+            if 0 < found < LEASE_READABLE_SINCE:
+                # Populated, but from before the lease columns existed: a
+                # deferring caller's very next read (the lease) would raise
+                # sqlite3.OperationalError, which reaches main() as a traceback
+                # exit 2 instead of a named exit 1. No current build writes
+                # such a store; refusing keeps the deferral's "nothing touched
+                # before the lease" promise honest. Like the NEWER refusal
+                # above it sits ahead of the policy split because it is a fact
+                # about the STORE, not about the policy: the read-only branch
+                # below would refuse this store too, but with a remedy
+                # (`paper`/`live`) that defers and so lands right back here —
+                # one store state, one instruction. The remedy is the one
+                # command that migrates on open and takes no lease; it goes on
+                # to refuse a paper run (safe mode is live-run state), which
+                # is why the message says so.
                 raise SchemaVersionError(
-                    f"store schema is v{found} but this build only knows "
-                    f"v{latest_known} — it was migrated by a NEWER build. "
-                    "Run the newer build, or restore a backup taken before "
-                    "the upgrade."
+                    f"store schema is v{found}; the run lease an owning command "
+                    f"consults before upgrading a store arrived in "
+                    f"v{LEASE_READABLE_SINCE}, so neither an owning nor a reporting "
+                    "command can open this store as-is. Upgrade it with `safe-mode --status "
+                    "--run-id <id> --db <this db>`, which migrates on open, after "
+                    "confirming no other process has this store open. For a paper "
+                    "run it then reports that the run is not a live run — the "
+                    "upgrade has already happened at that point; retry this command."
                 )
             if defer_migration:
                 if found == 0:

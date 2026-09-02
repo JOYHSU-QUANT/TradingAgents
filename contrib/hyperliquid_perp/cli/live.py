@@ -500,7 +500,8 @@ def _live_startup_recovery(
     # command cannot take its lease before the upgrade: the drift and
     # off-coin checks between here and the lock read tables later migrations
     # have altered, and --create writes the run row before the lock. So the
-    # refusals that need only the v1 ``runs`` row and the v3 lease columns run
+    # refusals that need only what ``schema.LEASE_READABLE_SINCE`` declares
+    # readable before the upgrade (the ``runs`` row and the lease columns) run
     # first — run existence, wallet-sibling lease, run mode, this run's own
     # lease (read-only) — and the store is migrated once they all pass. The
     # definitive lease is still taken below; a process starting concurrently
@@ -579,7 +580,10 @@ def _live_startup_recovery(
         try:
             peek_run_lock(db, run_id, now=now)
         except RunLockError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            # Own pid appended so the RUNBOOK's pid-recycling row can be
+            # matched from the message alone: the process that printed it
+            # has exited by the time anyone reads it.
+            print(f"error: {exc} (this process is pid {os.getpid()})", file=sys.stderr)
             return 1
         if _migrate_owned_store(db, run_id=run_id, now=now):
             return 1

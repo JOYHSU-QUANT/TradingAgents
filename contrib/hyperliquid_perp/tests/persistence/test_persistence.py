@@ -17,7 +17,9 @@ from contrib.hyperliquid_perp.persistence.ids import (
     slice_id,
 )
 from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
-from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE, SCHEMA_VERSION
+
+from ..conftest import build_store_at
 
 _TS = datetime(2026, 7, 1, tzinfo=timezone.utc)
 
@@ -84,52 +86,256 @@ def test_v11_adds_a_nullable_format_fingerprint_and_indexes_fills_by_run_and_tim
     db.close()
 
 
-def test_defer_migration_opens_an_out_of_date_store_without_touching_it(tmp_path):
-    # migrate=True necessarily runs at OPEN, which is before the lease can be
-    # taken (the lease lives in the store being opened) — so an owning command
-    # upgraded the schema underneath a running sibling daemon and only then
-    # reached the conflict check that refuses: it did the damage on its way to
-    # declining to do it. Deferring lets the caller migrate once it owns the run.
-    from contrib.hyperliquid_perp.persistence.db import (
-        MIGRATIONS,
-        SchemaVersionError,
-        apply_migrations,
-        connect,
-        stored_schema_version,
+_LEASE_READABLE_VERSIONS = list(range(LEASE_READABLE_SINCE, SCHEMA_VERSION + 1))
+
+
+@pytest.mark.parametrize("version", _LEASE_READABLE_VERSIONS)
+def test_every_pre_lease_reader_works_on_a_store_at_or_above_the_lease_floor(tmp_path, version):
+    # Issue #147: the executable half of what ``schema.LEASE_READABLE_SINCE``
+    # promises — see its comment for the floor and the reader list. Built at
+    # EVERY version from the floor up so a later migration, or a new
+    # pre-lease reader, fails HERE and not as an OperationalError inside an
+    # owning command's refusal. Every pre-v6 version has no ``live`` tables at
+    # all, which is the point: the readers must not need them.
+    import json
+
+    from contrib.hyperliquid_perp.cli.live_shared import _conflicting_run_lease
+    from contrib.hyperliquid_perp.paper.run_lock import (
+        acquire_run_lock,
+        peek_run_lock,
+        release_run_lock,
     )
+    from contrib.hyperliquid_perp.persistence.db import stored_schema_version
 
-    # A GENUINELY old store: every migration up to the last one, and its
-    # bookkeeping row. (Deleting the top version row from a current store is not
-    # the same thing — the DDL has already run, so re-applying it collides.)
-    from contrib.hyperliquid_perp.persistence.schema import SCHEMA_MIGRATIONS_DDL
+    genesis = json.dumps({"live": {"network": "testnet"}})
+    now = datetime.now(timezone.utc)
 
-    dbp = tmp_path / "old.db"
-    conn = connect(dbp)
-    try:
-        conn.execute(SCHEMA_MIGRATIONS_DDL)
-        for version in sorted(MIGRATIONS)[:-1]:
-            for statement in MIGRATIONS[version]:
-                conn.execute(statement)
-            conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (version, "2026-07-31T00:00:00+00:00"),
-            )
-        conn.commit()
-    finally:
-        conn.close()
+    def populate(db):
+        with db.transaction() as conn:
+            for run_id in ("own", "sibling"):
+                repo.insert_run(
+                    conn,
+                    run_id=run_id,
+                    mode="live",
+                    initial_balance_usdc=Decimal("100"),
+                    schema_version=version,
+                    config_json=genesis,
+                )
+        acquire_run_lock(db, "sibling", pid=4321, now=now)
 
-    # migrate=False refuses it outright (the reporting-command policy)...
-    with pytest.raises(SchemaVersionError):
-        Database(dbp, migrate=False)
+    path = tmp_path / f"v{version}.db"
+    build_store_at(path, version, populate)
 
-    # ...while deferring opens it as-is and leaves the upgrade to the caller.
-    db = Database(dbp, migrate=False, defer_migration=True)
-    try:
-        assert stored_schema_version(db.conn) < SCHEMA_VERSION  # untouched on open
-        apply_migrations(db.conn)
+    with Database(path, migrate=False, defer_migration=True) as db:
+        assert db.migration_pending is (version < SCHEMA_VERSION)
+        # The readers, in the order the CLI runs them, against the old schema.
+        assert repo.get_run(db.conn, "own")["mode"] == "live"
+        leases = repo.iter_other_run_leases(db.conn, "own")
+        assert [(r["run_id"], r["lock_pid"]) for r in leases] == [("sibling", 4321)]
+        assert _conflicting_run_lease(db, "own") == ("sibling", 4321)
+        peek_run_lock(db, "own", now=now)  # free: no raise
+        # ...and the one WRITE paper / smoke make before migrating: the lease.
+        acquire_run_lock(db, "own", pid=111, now=now)
+        release_run_lock(db, "own", pid=111, now=now)
+        assert stored_schema_version(db.conn) == version  # nothing upgraded yet
+        db.apply_deferred_migration()
         assert stored_schema_version(db.conn) == SCHEMA_VERSION
+        assert db.migration_pending is False
+
+
+def test_a_deferred_open_refuses_a_populated_store_older_than_the_lease_floor(tmp_path):
+    # Issue #147 (item 5): below the floor the lease columns do not exist, so
+    # the deferring caller's first read would raise sqlite3.OperationalError —
+    # main()'s exit-2 traceback, not a named exit 1. Refused at open instead,
+    # with the store untouched, and with ONE remedy across both non-migrating
+    # policies (the reporting refusal's "run paper/live" would only bounce
+    # back here); the migrating open the message names still upgrades it.
+    from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, stored_schema_version
+
+    below = LEASE_READABLE_SINCE - 1
+
+    def populate(db):
+        with db.transaction() as conn:
+            repo.insert_run(
+                conn,
+                run_id="r",
+                mode="paper",
+                initial_balance_usdc=Decimal("1"),
+                schema_version=below,
+            )
+
+    path = tmp_path / "pre-lease.db"
+    build_store_at(path, below, populate)
+    probe = connect(path)
+    try:
+        assert "lock_pid" not in {
+            row["name"] for row in probe.execute("PRAGMA table_info(scheduler_state)")
+        }
+        floor_refusal = rf"v{below}.*v{LEASE_READABLE_SINCE}.*safe-mode --status"
+        with pytest.raises(SchemaVersionError, match=floor_refusal):
+            Database(path, migrate=False, defer_migration=True)
+        with pytest.raises(SchemaVersionError, match=floor_refusal):
+            Database(path, migrate=False)  # the read-only policy: same words
+        assert stored_schema_version(probe) == below  # refused, not upgraded
     finally:
-        db.close()
+        probe.close()
+
+    with Database(path) as upgraded:  # the named remedy: a migrating open
+        assert stored_schema_version(upgraded.conn) == SCHEMA_VERSION
+    with Database(path, migrate=False, defer_migration=True) as current:
+        assert current.migration_pending is False
+
+
+class _RacedConnection:
+    """A real connection with seams: the first time it executes each SQL named
+    in ``before`` / ``after``, that callable runs just before / just after the
+    statement — deterministic single-thread staging of "another process
+    committed between my read and my next statement". ``winner_lands`` alone
+    is the common case (a ``before`` seam on ``BEGIN IMMEDIATE``, i.e. the
+    winner commits while the loser is still outside the lock; it takes that
+    slot, so don't also pass it in ``before``). An ``after`` seam on
+    ``ROLLBACK`` is the moment the loser has just released the lock. Each SQL
+    fires at most ONE seam, once (``fired`` dedupes on the SQL alone, so name
+    a statement in ``before`` or ``after``, not both). ``raced`` means the
+    ``BEGIN IMMEDIATE`` seam fired. ``apply_migrations`` touches nothing but
+    ``execute``."""
+
+    def __init__(self, real, winner_lands=None, *, before=None, after=None):
+        self._real = real
+        self._before = dict(before or {})
+        self._after = dict(after or {})
+        if winner_lands is not None:
+            self._before["BEGIN IMMEDIATE"] = winner_lands
+        self.fired: list[str] = []
+
+    @property
+    def raced(self) -> bool:
+        return "BEGIN IMMEDIATE" in self.fired
+
+    def _fire(self, table, sql) -> None:
+        seam = table.get(sql)
+        if seam is not None and sql not in self.fired:
+            self.fired.append(sql)
+            seam()
+
+    def execute(self, sql, *params):
+        self._fire(self._before, sql)
+        cursor = self._real.execute(sql, *params)
+        self._fire(self._after, sql)
+        return cursor
+
+
+def test_two_processes_migrating_the_same_behind_store_leave_the_loser_a_no_op(tmp_path):
+    # Issue #147 (item 2): two owning commands started against the same behind
+    # store in the same moment (two ``live`` on the shared live_trading.db)
+    # both read "not yet applied" OUTSIDE the write lock. ``BEGIN IMMEDIATE``
+    # serialises them correctly, but the loser then re-ran the winner's
+    # ``ALTER TABLE ... ADD COLUMN`` and died on ``duplicate column name``.
+    # The loser must skip the version, return the current one, and leave no
+    # transaction open.
+    from contrib.hyperliquid_perp.persistence.db import apply_migrations
+    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+
+    path = tmp_path / "shared.db"
+    build_store_at(path, sorted(MIGRATIONS)[-2])
+    winner = connect(path)
+    loser_conn = connect(path)
+
+    def winner_lands():
+        assert apply_migrations(winner) == SCHEMA_VERSION
+
+    loser = _RacedConnection(loser_conn, winner_lands)
+    try:
+        assert apply_migrations(loser) == SCHEMA_VERSION  # no duplicate-column raise
+        assert loser.raced
+        assert loser_conn.in_transaction is False  # the skipped version released its lock
+        recorded = [
+            row[0]
+            for row in loser_conn.execute("SELECT version FROM schema_migrations ORDER BY version")
+        ]
+        assert recorded == list(range(1, SCHEMA_VERSION + 1))  # one row per version, once
+        # And the loser is a working connection afterwards: a write goes through.
+        loser_conn.execute("BEGIN IMMEDIATE")
+        loser_conn.execute("ROLLBACK")
+    finally:
+        winner.close()
+        loser_conn.close()
+
+
+def test_a_loser_whose_winner_ran_a_newer_build_is_refused_not_skipped(tmp_path):
+    # The other half of the race fix: if the winner was a NEWER build, the
+    # versions it landed carry the store past what this build knows. Skipping
+    # them silently would return "current" and let this build write through a
+    # schema it does not know — the very corruption the NEWER refusal exists
+    # for, and something the pre-fix ``duplicate column name`` crash at least
+    # prevented. The read after the loop must raise that refusal.
+    from contrib.hyperliquid_perp.persistence import db as db_module
+    from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, apply_migrations
+    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+
+    path = tmp_path / "shared.db"
+    build_store_at(path, sorted(MIGRATIONS)[-2])
+    winner = connect(path)
+    loser_conn = connect(path)
+    ahead = SCHEMA_VERSION + 1
+    newer_build = {**MIGRATIONS, ahead: ("ALTER TABLE runs ADD COLUMN operator_note TEXT",)}
+
+    def newer_winner_lands():
+        with pytest.MonkeyPatch.context() as scoped:
+            scoped.setattr(db_module, "MIGRATIONS", newer_build)
+            assert apply_migrations(winner) == ahead
+
+    loser = _RacedConnection(loser_conn, newer_winner_lands)
+    try:
+        with pytest.raises(SchemaVersionError, match=rf"v{ahead}.*NEWER build"):
+            apply_migrations(loser)
+        assert loser.raced
+        # The skip's ROLLBACK released the lock; the post-loop refusal holds none.
+        assert loser_conn.in_transaction is False
+    finally:
+        winner.close()
+        loser_conn.close()
+
+
+def test_a_newer_build_landing_mid_loop_is_still_refused(tmp_path):
+    # The per-version re-check sees only what had landed when THAT step took
+    # the lock, and a winner commits one version per transaction. Stage the
+    # gap: the winner has landed the newest version this build knows when the
+    # loser takes its lock — so the loser skips it — and lands one past it
+    # while the loser is releasing that lock. Without the post-loop read the
+    # loser returns "current" over a store that is now newer than it knows.
+    from contrib.hyperliquid_perp.persistence import db as db_module
+    from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, apply_migrations
+    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+
+    path = tmp_path / "shared.db"
+    build_store_at(path, sorted(MIGRATIONS)[-2])
+    winner = connect(path)
+    loser_conn = connect(path)
+    ahead = SCHEMA_VERSION + 1
+    newer_build = {**MIGRATIONS, ahead: ("ALTER TABLE runs ADD COLUMN operator_note TEXT",)}
+
+    def winner_lands_the_shared_version():
+        assert apply_migrations(winner) == SCHEMA_VERSION
+
+    def winner_lands_its_newer_version():
+        with pytest.MonkeyPatch.context() as scoped:
+            scoped.setattr(db_module, "MIGRATIONS", newer_build)
+            assert apply_migrations(winner) == ahead
+
+    loser = _RacedConnection(
+        loser_conn,
+        before={"BEGIN IMMEDIATE": winner_lands_the_shared_version},
+        after={"ROLLBACK": winner_lands_its_newer_version},  # the skip just released
+    )
+    try:
+        with pytest.raises(SchemaVersionError, match=rf"v{ahead}.*NEWER build"):
+            apply_migrations(loser)
+        assert loser.fired == ["BEGIN IMMEDIATE", "ROLLBACK"]
+        assert loser_conn.in_transaction is False
+    finally:
+        winner.close()
+        loser_conn.close()
 
 
 def test_defer_migration_with_migrate_true_is_rejected_by_name(tmp_path):

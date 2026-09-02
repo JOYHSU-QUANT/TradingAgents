@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +81,42 @@ def package_sources(pkg) -> list[Path]:
     ``__init__.py`` has.
     """
     return sorted(Path(pkg.__path__[0]).rglob("*.py"))
+
+
+@contextmanager
+def migrations_up_to(version: int):
+    """Inside the block, ``persistence.db`` knows only the migrations up to ``version``.
+
+    The one staging behind every "an OLDER build made this store" test: a
+    store built inside the block is a GENUINELY old one, made by the
+    migrations that existed then (deleting a bookkeeping row from a current
+    store is not the same thing — its DDL has already run, so re-applying it
+    collides). Scoped, so the real ``MIGRATIONS`` is back the moment the
+    block ends — the caller reopens the same store under the current build
+    in the same test. Each behind-store test used to spell this dance itself
+    (issue #147 review). ``MonkeyPatch.context()`` is self-contained, so no
+    fixture needs threading through.
+    """
+    import contrib.hyperliquid_perp.persistence.db as db_module
+    from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
+
+    older = {v: MIGRATIONS[v] for v in sorted(MIGRATIONS) if v <= version}
+    with pytest.MonkeyPatch.context() as scoped:
+        scoped.setattr(db_module, "MIGRATIONS", older)
+        yield
+
+
+def build_store_at(path, version: int, populate=None) -> None:
+    """Build ``path`` at exactly schema ``version`` and close it.
+
+    ``populate`` gets the open ``Database`` to seed rows with, under that old
+    schema. See :func:`migrations_up_to` for what "at version N" means.
+    """
+    from contrib.hyperliquid_perp.persistence.db import Database
+
+    with migrations_up_to(version), Database(path) as db:
+        if populate is not None:
+            populate(db)
 
 
 @pytest.fixture

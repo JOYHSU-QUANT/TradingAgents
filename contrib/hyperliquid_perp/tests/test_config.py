@@ -437,7 +437,9 @@ def test_load_config_warns_on_an_unknown_engine_key(tmp_path, capsys):
     bad.write_text("engine:\n  max_completion_token: 64000\n", encoding="utf-8")
     load_config(bad)
     err = capsys.readouterr().err
-    assert "max_completion_token" in err
+    # Quoted: the offending key must be NAMED, not merely implied by the
+    # unquoted Supported: list (which always contains it as a substring).
+    assert "'max_completion_token'" in err
     assert "max_completion_tokens" in err  # the supported spelling, for the fix
 
 

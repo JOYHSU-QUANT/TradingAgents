@@ -222,7 +222,7 @@ def run_engine(config: dict, coin: str) -> int:
     )
     try:
         engine_config, selected_analysts = engine_bridge._build_engine_config(config)
-    except engine_bridge.EngineImportError as exc:
+    except engine_bridge.EngineConfigError as exc:
         # Operator-fixable environment error — named exit 1, not main's exit-2
         # "unexpected error" bucket; see _build_engine_config for the causes.
         print(f"error: {exc}", file=sys.stderr)

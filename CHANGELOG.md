@@ -43,7 +43,15 @@ Breaking changes within the 0.x line are called out explicitly.
   env var set on the host, and a cap that binds is invisible downstream). An
   unknown ``engine:`` key now warns rather than being silently ignored: for
   most keys a typo lands on a working default, for this one it reverts a
-  deliberate raise. Precedence is
+  deliberate raise. The startup refusal is an ``EngineConfigError`` (the new
+  base of ``EngineImportError``), so a rejected cap takes the lane a failed
+  import already had: over a live position the run degrades to
+  protection-only rather than exiting — killing the process would leave the
+  position with nobody watching SL/TP, worse than the stall being fixed —
+  and flat it is the named exit 1. An engine whose config has no
+  ``max_tokens`` key at all (a stale ``tradingagents`` shadowing the
+  checkout) is refused by name rather than quietly running uncapped behind a
+  log line claiming a cap. Precedence is
   YAML > ``TRADINGAGENTS_MAX_TOKENS`` > perp default 8192 — absent and null
   both fall through to a cap, so the uncapped path is unreachable from a
   perp config. The cap includes reasoning/thinking tokens; switching

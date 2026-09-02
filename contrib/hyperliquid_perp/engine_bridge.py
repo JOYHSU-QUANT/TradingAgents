@@ -96,9 +96,9 @@ def _resolve_completion_cap(yaml_value: object, env_value: object) -> tuple[int,
         try:
             cap = int_from_yaml(value)
         except ValueError as exc:
-            raise ValueError(f"config key '{source}': {exc}") from None
+            raise EngineConfigError(f"config key '{source}': {exc}") from None
         if cap <= 0:
-            raise ValueError(
+            raise EngineConfigError(
                 f"config key '{source}': expected a positive integer, got {value!r}"
             )
         return cap, source
@@ -333,7 +333,20 @@ def _load_position(
     return account.position_for(coin), account.account_value, True
 
 
-class EngineImportError(RuntimeError):
+class EngineConfigError(RuntimeError):
+    """Named, operator-fixable failure building the engine's config.
+
+    The base of the setup errors the CLI lanes treat as "the operator can fix
+    this and restart": every one of them means the engine could not be brought
+    up from the environment as it stands, and none of them is an adapter bug.
+    Catching the base (rather than each subclass) is what keeps a new cause
+    from silently falling through to main's exit-2 "unexpected error" bucket —
+    over a live position that bucket kills the process, taking SL/TP
+    protection with it.
+    """
+
+
+class EngineImportError(EngineConfigError):
     """Named, operator-fixable failure importing the tradingagents engine.
 
     Raised only by :func:`_build_engine_config`; callers map exactly this type
@@ -391,12 +404,20 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # DEFAULT_CONFIG, like every sibling env knob) > perp default. ``or``
     # matches the string keys above: present-but-null falls through, never to
     # an uncapped request.
-    # ``.get``, not ``[...]``: ``max_tokens`` is a new DEFAULT_CONFIG key, and a
-    # stale site-packages ``tradingagents`` shadowing the checkout (PR #109)
-    # would turn a missing key into a bare KeyError — exit 2 "unexpected
-    # error" instead of this module's named lane.
+    # The key's ABSENCE means the engine predates the cap (a stale
+    # site-packages ``tradingagents`` shadowing the checkout — PR #109), and
+    # that engine's _get_provider_kwargs would forward nothing: the request
+    # goes out uncapped and 400s, which is #177 verbatim. Refusing by name
+    # beats both a bare KeyError (exit 2 "unexpected error") and, worse,
+    # logging a cap that was never sent.
+    if "max_tokens" not in engine_config:
+        raise EngineConfigError(
+            "the imported tradingagents engine has no 'max_tokens' config key, "
+            "so no completion cap can be applied — a run would go out uncapped "
+            "(issue #177). Is a stale tradingagents shadowing this checkout?"
+        )
     engine_config["max_tokens"], cap_source = _resolve_completion_cap(
-        eng_cfg.get("max_completion_tokens"), engine_config.get("max_tokens")
+        eng_cfg.get("max_completion_tokens"), engine_config["max_tokens"]
     )
     # The effective cap is not derivable from any one file (YAML can shadow an
     # env var set on the host, and both can be absent), and a cap that binds

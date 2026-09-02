@@ -146,7 +146,7 @@ def test_build_engine_config_completion_cap_env_precedence(monkeypatch):
 def test_build_engine_config_rejects_an_explicit_zero_cap():
     # 0 has no "off" meaning for this key — off is the bug it closes — so it
     # must be rejected by name, never fall through to the next source.
-    with pytest.raises(ValueError, match="engine.max_completion_tokens"):
+    with pytest.raises(bridge_mod.EngineConfigError, match="engine.max_completion_tokens"):
         bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 0}})
 
 
@@ -163,19 +163,27 @@ def test_build_engine_config_rejects_a_bad_env_cap_at_startup(monkeypatch, bad):
     from tradingagents.default_config import DEFAULT_CONFIG
 
     monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", bad)
-    with pytest.raises(ValueError, match="TRADINGAGENTS_MAX_TOKENS"):
+    # EngineConfigError, not a bare ValueError: over a live position the CLI
+    # lane must degrade to protection-only, and only the named type gets it
+    # there (a bare ValueError would kill the process — see the CLI test).
+    with pytest.raises(bridge_mod.EngineConfigError, match="TRADINGAGENTS_MAX_TOKENS"):
         bridge_mod._build_engine_config({})
 
 
-def test_build_engine_config_survives_an_engine_default_without_the_cap_key(monkeypatch):
-    # ``max_tokens`` is a new DEFAULT_CONFIG key: a stale site-packages
-    # tradingagents shadowing the checkout (PR #109) would otherwise raise a
-    # bare KeyError — exit 2 "unexpected error" instead of the named lane.
+def test_build_engine_config_refuses_an_engine_that_cannot_carry_the_cap(monkeypatch):
+    """A missing engine ``max_tokens`` key must refuse by name, not default.
+
+    Its absence means the imported engine predates the cap (a stale
+    site-packages tradingagents shadowing the checkout, PR #109) and forwards
+    nothing — so substituting the perp default would log a cap that never
+    reaches the request and let the run go out uncapped: issue #177 verbatim,
+    with the startup log asserting the opposite.
+    """
     from tradingagents.default_config import DEFAULT_CONFIG
 
     monkeypatch.delitem(DEFAULT_CONFIG, "max_tokens", raising=False)
-    engine_config, _ = bridge_mod._build_engine_config({})
-    assert engine_config["max_tokens"] == bridge_mod._DEFAULT_MAX_COMPLETION_TOKENS
+    with pytest.raises(bridge_mod.EngineConfigError, match="no 'max_tokens' config key"):
+        bridge_mod._build_engine_config({})
 
 
 def test_build_engine_config_structured_output_escape_hatch(capsys):

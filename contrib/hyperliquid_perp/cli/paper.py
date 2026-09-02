@@ -186,7 +186,7 @@ def _cmd_paper(argv: list[str]) -> int:
             # lease. Inside the lease-releasing try (see _migrate_owned_store).
             if _migrate_owned_store(db, run_id=run_id, now=clock.now()):
                 return 1
-            from ..engine_bridge import EngineImportError
+            from ..engine_bridge import EngineConfigError
             from ..paper import accounting
             from ..paper.engine import PaperExecutionEngine
             from ..paper.market_feed import PortSnapshotProvider
@@ -248,7 +248,7 @@ def _cmd_paper(argv: list[str]) -> int:
                 # after fixing the file is rejected as "already exists".
                 try:
                     provider = _build_provider()
-                except EngineImportError as exc:
+                except EngineConfigError as exc:
                     print(f"error: {exc}", file=sys.stderr)
                     return 1
                 seeds = [
@@ -399,18 +399,21 @@ def _cmd_paper(argv: list[str]) -> int:
             if not trading_halted and provider is None:
                 # Only the healthy restart lane reaches here without a provider
                 # — the fresh lane built it pre-flight. Same protection-only
-                # rule as the keyless restart above: an EngineImportError is
+                # rule as the keyless restart above: an EngineConfigError is
                 # operator-fixable (see _build_engine_config for the causes),
                 # so over live work exiting would leave the position with
-                # nobody watching SL/TP; flat, the named exit 1 stands.
+                # nobody watching SL/TP; flat, the named exit 1 stands. Catch
+                # the base, not EngineImportError: a bad completion cap is the
+                # same class of operator mistake, and letting it through here
+                # would kill the process over a live position.
                 try:
                     provider = _build_provider()
-                except EngineImportError as exc:
+                except EngineConfigError as exc:
                     if engine.has_active_work():
                         trading_halted = True
-                        halt_reason = "import-error"
+                        halt_reason = "engine-config-error"
                         logger.error(
-                            "tradingagents import failed on restart of %s with "
+                            "the engine could not be built on restart of %s with "
                             "a live position — entering protection-only mode: %s",
                             run_id,
                             exc,
@@ -692,13 +695,14 @@ def _paper_loop(
                     "and exiting. Set the key to resume this run.",
                     file=sys.stderr,
                 )
-            elif halt_reason == "import-error":
+            elif halt_reason == "engine-config-error":
                 print(
                     "protection-only mode has nothing left to protect (the "
                     "position is closed and new cycles stayed halted because "
-                    "the tradingagents engine failed to import) — exporting "
-                    "the final state and exiting. Fix the environment (see "
-                    "the startup error) to resume this run.",
+                    "the engine could not be built — a failed tradingagents "
+                    "import, or a rejected config value) — exporting the "
+                    "final state and exiting. Fix the environment (see the "
+                    "startup error) to resume this run.",
                     file=sys.stderr,
                 )
             else:

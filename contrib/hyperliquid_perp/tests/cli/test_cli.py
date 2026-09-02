@@ -1063,7 +1063,8 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
     §3) exit 1 would loop forever with the position unwatched. Flat, the named
     exit 1 stands (companion test above). Same construction contract as the
     other halted forks: no scheduler, and the loop messaging carries the
-    import-error reason."""
+    engine-config-error reason (shared with every other operator-fixable
+    engine build failure, e.g. a rejected completion cap)."""
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.engine_bridge import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
@@ -1116,9 +1117,73 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
     assert seen["scheduler"] is None
     assert seen["engine_active"] is True  # the seeded live position
     assert seen["trading_halted"] is True
-    assert seen["halt_reason"] == "import-error"
+    assert seen["halt_reason"] == "engine-config-error"
     err = capsys.readouterr().err
     assert "importing tradingagents failed" in err  # the fixable cause is shown
+    assert "protection-only" in err
+
+
+def test_paper_restart_bad_completion_cap_with_live_work_enters_protection_only(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    """A rejected completion cap must degrade like a failed import, not exit.
+
+    The cap is validated at startup so a typo cannot stall every cycle
+    unclassified (issue #177). But raising over a live position must NOT kill
+    the process: that would leave the position with nobody watching SL/TP —
+    strictly worse than the stall it replaces, and under systemd Restart= a
+    crash-loop with no protection at all. This pins the lane, not just the
+    validator: it is what the raise's error TYPE buys.
+    """
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    db.close()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+    # The operator's typo, exactly as it would arrive from the host .env.
+    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", "8k")
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["scheduler"] = scheduler
+        seen["engine_active"] = engine.has_active_work()
+        seen["trading_halted"] = kwargs["trading_halted"]
+        seen["halt_reason"] = kwargs["halt_reason"]
+        return 0
+
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["scheduler"] is None
+    assert seen["engine_active"] is True  # the seeded live position
+    assert seen["trading_halted"] is True
+    assert seen["halt_reason"] == "engine-config-error"
+    err = capsys.readouterr().err
+    assert "TRADINGAGENTS_MAX_TOKENS" in err  # the fixable cause is named
     assert "protection-only" in err
 
 
@@ -2484,11 +2549,11 @@ def test_paper_loop_import_error_settle_exit_names_the_cause(tmp_path, monkeypat
         tmp_path / "exports",
         funding_source=None,
         trading_halted=True,
-        halt_reason="import-error",
+        halt_reason="engine-config-error",
     )
     assert rc == 1
     err = capsys.readouterr().err
-    assert "failed to import" in err
+    assert "the engine could not be built" in err
     assert "books never re-verified" not in err
     assert "OPENROUTER_API_KEY" not in err
     db.close()

@@ -8,6 +8,21 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+
+- **data_vendors: the SoSoValue economic-calendar and BTC-treasuries
+  categories are cut over to enabled** — ``economic_calendar`` and
+  ``btc_treasuries`` default to ``"sosovalue"`` instead of ``"none"``
+  (cutover dated 2026-09-02; both shipped OFF pending exactly this deliberate
+  flip, mirroring ``options_data``'s 2026-08-12 cutover). A default-config
+  run now binds ``get_economic_calendar`` on both asset paths and
+  ``get_btc_treasuries`` behind the crypto gate; with ``SOSOVALUE_API_KEY``
+  unset both degrade to the ``DATA_UNAVAILABLE`` sentinel. The perp engine's
+  config overlay does not pipe ``data_vendors`` through, so the first
+  deployment carrying this commit changes the analyst input surface and is
+  the dated segmentation point; switching either category back off is a code
+  change (``"none"``), not a YAML edit.
+
 ### Fixed
 
 - **llm_clients: every LLM call can carry a completion-token cap, and perp

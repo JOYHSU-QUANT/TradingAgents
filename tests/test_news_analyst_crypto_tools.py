@@ -3,7 +3,7 @@ get_fear_greed, get_btc_treasuries) only when the asset is crypto, and never
 for a stock — and the news ToolNode must be able to execute them when bound.
 get_economic_calendar is the exception: it takes no asset argument and is
 bound on both paths. Each is also gated on its own category being enabled,
-so a shipped-off category binds nothing.
+so a category disabled with "none" binds nothing.
 
 A fake LLM captures the tools passed to bind_tools so the wiring is asserted
 without any network or real model.
@@ -15,13 +15,15 @@ from langchain_core.runnables import RunnableLambda
 
 from tradingagents.agents.analysts.news_analyst import create_news_analyst
 from tradingagents.dataflows.config import set_config
+from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 _CRYPTO_TOOLS = {"get_etf_flows", "get_fear_greed"}
 
-# The SoSoValue calendar/treasuries categories ship disabled ("none"), so
-# these two are bound only after the deliberate cutover enables them.
-_SHIPPED_OFF_TOOLS = {"get_economic_calendar", "get_btc_treasuries"}
+# The SoSoValue calendar/treasuries categories shipped disabled ("none") and
+# were cut over to "sosovalue" on 2026-09-02, so a default-config run binds
+# them.
+_CUTOVER_TOOLS = {"get_economic_calendar", "get_btc_treasuries"}
 
 
 class _CapturingLLM:
@@ -91,31 +93,28 @@ def test_disabled_category_is_not_bound():
 
 
 @pytest.mark.unit
-def test_shipped_off_categories_are_not_bound_by_default():
-    # economic_calendar and btc_treasuries ship as "none": a default-config
-    # crypto run must not bind them (the call could only return the disabled
-    # sentinel); enabling them is a deliberate cutover.
-    assert not (_SHIPPED_OFF_TOOLS & _run("crypto", "BTC-USD"))
-    # The stock path too, now that the calendar's binding no longer sits behind
-    # the crypto gate: the category flag is all that keeps it off there.
-    assert not (_SHIPPED_OFF_TOOLS & _run("stock", "AAPL"))
+def test_disabling_the_cutover_categories_unbinds_them():
+    # The 2026-09-02 cutover is a default flip, not a hard-wire: switching the
+    # two categories back to "none" must drop the bindings again on both
+    # paths, same as any other disabled category. No restore needed: the
+    # autouse ``_isolate_config`` fixture resets the config after every test.
+    set_config({"data_vendors": {"economic_calendar": "none", "btc_treasuries": "none"}})
+    assert not (_CUTOVER_TOOLS & _run("crypto", "BTC-USD"))
+    assert not (_CUTOVER_TOOLS & _run("stock", "AAPL"))
 
 
 @pytest.mark.unit
 def test_the_calendar_binds_on_both_paths_but_treasuries_stays_crypto():
+    # Default config since the 2026-09-02 cutover — no YAML edit involved.
     # The macro calendar takes no asset argument and CPI/NFP/PCE releases are
     # event risk for equities too, so it is the one category here bound outside
     # the crypto block. Treasuries is a BTC-holdings feed and stays crypto-only:
     # asserting both in one test is what stops the split being widened by
     # accident in either direction.
-    set_config({"data_vendors": {"economic_calendar": "sosovalue", "btc_treasuries": "sosovalue"}})
-    try:
-        assert _run("crypto", "BTC-USD") >= _SHIPPED_OFF_TOOLS
-        stock = _run("stock", "AAPL")
-        assert "get_economic_calendar" in stock
-        assert "get_btc_treasuries" not in stock
-    finally:
-        set_config({"data_vendors": {"economic_calendar": "none", "btc_treasuries": "none"}})
+    assert _run("crypto", "BTC-USD") >= _CUTOVER_TOOLS
+    stock = _run("stock", "AAPL")
+    assert "get_economic_calendar" in stock
+    assert "get_btc_treasuries" not in stock
 
 
 @pytest.mark.unit
@@ -123,18 +122,14 @@ def test_the_stock_path_is_told_about_the_calendar_it_now_carries():
     # The hint moved out of the crypto-only block along with the binding, and
     # both halves have to land: a bound-but-unadvertised tool is one the model
     # never calls, which would read exactly like the category still being off.
-    set_config({"data_vendors": {"economic_calendar": "sosovalue"}})
-    try:
-        llm = _bind("stock", "AAPL")
-        assert "get_economic_calendar" in {t.name for t in llm.bound_tools}
-        assert "get_economic_calendar(curr_date, look_back_days)" in llm.prompt
-        # The stock path must not pick up the crypto preamble along with it —
-        # with a positive counterpart on the same needle, or rewording the
-        # preamble would make the negative assertion vacuously true.
-        assert "Since this is a crypto asset" not in llm.prompt
-        assert "Since this is a crypto asset" in _bind("crypto", "BTC-USD").prompt
-    finally:
-        set_config({"data_vendors": {"economic_calendar": "none"}})
+    llm = _bind("stock", "AAPL")
+    assert "get_economic_calendar" in {t.name for t in llm.bound_tools}
+    assert "get_economic_calendar(curr_date, look_back_days)" in llm.prompt
+    # The stock path must not pick up the crypto preamble along with it —
+    # with a positive counterpart on the same needle, or rewording the
+    # preamble would make the negative assertion vacuously true.
+    assert "Since this is a crypto asset" not in llm.prompt
+    assert "Since this is a crypto asset" in _bind("crypto", "BTC-USD").prompt
 
 
 @pytest.mark.unit
@@ -196,9 +191,9 @@ def test_news_toolnode_can_execute_crypto_tools():
     # _create_tool_nodes does not use self -> call unbound (avoids building LLMs).
     nodes = TradingAgentsGraph._create_tool_nodes(None)
     news_tools = set(nodes["news"].tools_by_name)
-    # The shipped-off tools stay registered here too: once the cutover enables
-    # them, the bound call must be executable without a code change.
-    assert news_tools >= _CRYPTO_TOOLS | _SHIPPED_OFF_TOOLS, (
+    # The cutover tools are registered here too: the default-config binding
+    # must be executable, and re-disabling a category never unregisters it.
+    assert news_tools >= _CRYPTO_TOOLS | _CUTOVER_TOOLS, (
         "crypto flows/sentiment/calendar/treasury tools are bound to the news "
         "analyst for crypto assets but not registered in the news ToolNode, so "
         "the model's call fails."
@@ -206,21 +201,23 @@ def test_news_toolnode_can_execute_crypto_tools():
 
 
 @pytest.mark.unit
-def test_each_shipped_off_category_binds_only_its_own_tool():
-    # The cutover flips one category at a time, so each flag must gate its own
-    # tool alone. Enabling both at once (the test above) cannot see a guard
-    # that reads the sibling category's key: that mutation binds both tools
-    # from one flip, or neither.
+def test_each_cutover_category_gates_only_its_own_tool():
+    # Each flag must gate its own tool alone. Disabling one category at a time
+    # is what exposes a guard that reads the sibling category's key: that
+    # mutation drops both tools from one flip, or neither.
     for category, tool in (
         ("economic_calendar", "get_economic_calendar"),
         ("btc_treasuries", "get_btc_treasuries"),
     ):
-        set_config({"data_vendors": {category: "sosovalue"}})
+        set_config({"data_vendors": {category: "none"}})
         try:
             bound = _run("crypto", "BTC-USD")
-            assert tool in bound, f"{category} enabled but {tool} was not bound"
-            assert not (_SHIPPED_OFF_TOOLS - {tool}) & bound, (
-                f"only {category} was enabled, but a sibling shipped-off tool bound too"
+            assert tool not in bound, f"{category} disabled but {tool} was still bound"
+            assert (_CUTOVER_TOOLS - {tool}) <= bound, (
+                f"only {category} was disabled, but the sibling cutover tool dropped too"
             )
         finally:
-            set_config({"data_vendors": {category: "none"}})
+            # Intra-test restore: the autouse config-reset fixture only runs
+            # between tests, and the next iteration needs this category back
+            # at its default for the sibling assertion to hold.
+            set_config({"data_vendors": {category: DEFAULT_CONFIG["data_vendors"][category]}})

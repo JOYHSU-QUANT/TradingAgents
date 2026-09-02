@@ -225,9 +225,10 @@ class TestThroughTheRouter:
     def _every_optional_vendor_on(self, monkeypatch):
         _no_network(monkeypatch)
         cfg = copy.deepcopy(default_config.DEFAULT_CONFIG)
-        # The two SoSoValue-only categories ship disabled; a disabled category
-        # answers its own sentinel before any getter runs, which is not the
-        # lane under test.
+        # Pin the two SoSoValue-only categories on explicitly (their default
+        # since the 2026-09-02 cutover): a disabled category answers its own
+        # sentinel before any getter runs, which is not the lane under test,
+        # and the pin keeps this fixture independent of the shipping default.
         cfg["data_vendors"]["economic_calendar"] = "sosovalue"
         cfg["data_vendors"]["btc_treasuries"] = "sosovalue"
         monkeypatch.setattr(config_module, "_config", cfg)

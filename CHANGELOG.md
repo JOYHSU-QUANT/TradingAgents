@@ -23,6 +23,15 @@ Breaking changes within the 0.x line are called out explicitly.
   the dated segmentation point; switching either category back off is a code
   change (``"none"``), not a YAML edit.
 
+### Removed
+
+- **dataflows: ``y_finance.get_stockstats_indicator`` and
+  ``stockstats_utils.StockstatsUtils``** (issue #137). The per-date getter
+  existed only to serve the windowed getter's per-day fallback loop (removed
+  under Fixed below), and the class existed only to serve that getter; no
+  other caller remained in the repo. ``get_stock_stats_indicators_window``
+  is unchanged as the one yfinance indicator entry point.
+
 ### Fixed
 
 - **dataflows: one indicator description table, and the windowed indicator
@@ -42,7 +51,8 @@ Breaking changes within the 0.x line are called out explicitly.
   per-date getter that existed only to serve it — is deleted; an untyped
   failure now renders the same one-line prose every sibling leaf answers
   with. The un-hidden window's handling of yfinance's partial-service
-  ``history`` sites (an auto/back-adjust failure, the unit-mixup probe) is
+  ``history`` failure (the auto/back-adjust step — the only flag-gated
+  ``history`` swallow reachable at this codebase's ``repair=False``) is
   pinned as deliberate: rows the library would have served on the wrong
   price basis become this vendor's no-data verdict instead (#38).
 

@@ -191,17 +191,18 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     library would have answered with, so a delisted symbol's
     ``YFTzMissingError`` reaches the no-data lane as the empty frame it always
     was — and logged here, since the library's own error line is skipped once
-    its swallow no longer runs. At two ``history`` sites that restore is
-    deliberately MORE conservative than the library's swallow (yfinance
-    1.4.1 ``scrapers/history.py``: an auto/back-adjust failure, and the
-    unit-mixup repair's metadata probe): hidden, the library logs and serves
-    the frame WITHOUT that repair; un-hidden it raises, and the restore here
-    hands back the empty frame — so rows the library would have served on the
-    wrong price basis reach the no-data lane and the fallback vendor gets its
-    turn instead. Serving no data over possibly-wrong prices is the same
-    judgement the integrity cleaner makes about fabricated values (#38); a
-    caller that wants the library's partial answer back must widen this
-    deliberately (#137). ``hidden_answer`` is required so every call
+    its swallow no longer runs. At one live ``history`` site that restore is
+    deliberately MORE conservative than the library's swallow: the
+    auto/back-adjust step (yfinance 1.4.1 ``scrapers/history.py``, the only
+    flag-gated ``history`` swallow reachable at this codebase's
+    ``repair=False`` — the repair block's own probes never run here). Hidden,
+    the library logs and serves the frame WITHOUT the adjustment; un-hidden
+    it raises, and the restore here hands back the empty frame — so rows
+    that would arrive on the wrong price basis reach the no-data lane and
+    the fallback vendor gets its turn instead. Serving no data over
+    possibly-wrong prices is the same judgement the integrity cleaner makes
+    about fabricated values (#38); a caller that wants the library's partial
+    answer back must widen this deliberately (#137). ``hidden_answer`` is required so every call
     site names the library's empty form for its property. A restored value
     (the 404 included) travels to :func:`yf_retry` as :class:`_HiddenAnswer`,
     so it comes back to the caller unchanged but is never mistaken for an

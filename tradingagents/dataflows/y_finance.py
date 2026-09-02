@@ -320,7 +320,7 @@ def get_stock_stats_indicators_window(
         # cached frame, so the loop could only fail the same way 30 more
         # times and render a column of blanks under a successful-looking
         # header (#137).
-        logger.error("Error getting bulk stockstats data: %s", e)
+        logger.exception("Error getting bulk stockstats data: %s", e)
         return f"Error retrieving {indicator} values for {symbol}: {str(e)}"
 
     result_str = (

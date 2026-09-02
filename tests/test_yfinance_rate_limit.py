@@ -612,13 +612,14 @@ def test_yf_fetch_unhidden_sorts_failures_into_their_lanes():
 @pytest.mark.unit
 def test_a_partial_service_history_failure_takes_the_no_data_lane(monkeypatch, tmp_path):
     # Pins a deliberate choice (#137): yfinance 1.4.1's history swallows an
-    # auto/back-adjust failure (and the unit-mixup repair's metadata probe) by
-    # logging and serving the frame WITHOUT that repair; un-hidden, those
-    # sites raise instead, and yf_fetch_unhidden restores the raise to the
-    # empty frame — so rows the library would have served on the wrong price
-    # basis become this vendor's no-data verdict and the chain moves on. No
-    # data over possibly-wrong prices, the same judgement the integrity
-    # cleaner makes about fabricated values (#38).
+    # auto/back-adjust failure by logging and serving the frame WITHOUT the
+    # adjustment (the only flag-gated history swallow reachable at this
+    # codebase's repair=False); un-hidden, that site raises instead, and
+    # yf_fetch_unhidden restores the raise to the empty frame — so rows the
+    # library would have served on the wrong price basis become this vendor's
+    # no-data verdict and the chain moves on. No data over possibly-wrong
+    # prices, the same judgement the integrity cleaner makes about fabricated
+    # values (#38).
     import yfinance as yf
     from yfinance.config import YfConfig
 
@@ -667,14 +668,17 @@ _YFINANCE_LEAF_CALLS = {
     "get_balance_sheet": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_cashflow": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_income_statement": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
-    # The news row pins SEAM IDENTITY only: base.get_news's post does not
-    # swallow transport failures, so these propagation rows would stay green
-    # without the window. What the window buys news is the outage mapping —
-    # Yahoo's "Will be right back" page raising VendorUnavailableError instead
-    # of being restored to the [] that reads as "No news found" — and THAT is
-    # pinned by test_an_outage_page_is_not_no_data_on_the_parse_first_paths,
-    # which drives the real scrapers and goes red if the window is removed
-    # from the getter (#137).
+    # The news row pins SEAM IDENTITY only: base.get_news's post propagates
+    # throttle and transport failures regardless of the flag, so the window
+    # is not what makes the propagation PROPERTY hold for news (these rows
+    # patch the seam itself, so they still go red on a rewrite — for the
+    # mechanical reason, not the behavioral one). What the window buys news
+    # is the outage mapping — Yahoo's "Will be right back" page raising
+    # VendorUnavailableError instead of being restored to the [] that reads
+    # as "No news found" — and THAT is pinned by
+    # test_an_outage_page_is_not_no_data_on_the_parse_first_paths, which
+    # drives the real scrapers and goes red if the window is removed from
+    # the getter (#137).
     "get_news": ((ynews, "yf_fetch_unhidden"), ("AAPL", "2026-06-01", "2026-06-05")),
     "get_global_news": ((ynews, "yf_fetch_unhidden"), ("2026-06-01",)),
     "get_insider_transactions": ((yfin, "yf_fetch_unhidden"), ("AAPL",)),

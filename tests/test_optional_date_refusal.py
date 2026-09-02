@@ -20,9 +20,11 @@ The eighth optional getter, Polymarket's, is the one #119 left out: its
 ``curr_date`` is a disclosure input rather than a bound, and was read only by
 ``live_snapshot_note``, which degrades to ``""`` on a date it cannot parse — so
 the string every getter above refuses drew a full, undisclosed live report
-(#139). It refuses in the same voice now, with one difference the fundamentals
-getters share (#73): ``None`` means the argument was omitted and stays the
-no-disclosure lane, so it has its own class below rather than a row in the table.
+(#139). It refuses in the same voice now, with two differences the disclosure
+lane carries: ``None`` means the argument was omitted and stays the
+no-disclosure lane (#73), and the sentence is the disclosure one with the
+omission remedy (#144) — so it has its own class below rather than a row in
+the table.
 """
 
 import contextlib
@@ -184,14 +186,16 @@ _PM_WHAT = "prediction-market probabilities"
 
 @pytest.mark.unit
 class TestPredictionMarketsRefuseInTheSameVoice:
-    """See the module docstring: the same sentence as the table above for a
-    supplied-but-unusable date, with ``None`` kept as the omitted lane."""
+    """See the module docstring: the same refusal template and tag as the
+    table above, but with the DISCLOSURE sentence and its omission remedy
+    (#144 — this curr_date never bounds the data), and ``None`` kept as the
+    omitted lane."""
 
     @pytest.mark.parametrize("value", [v for v in _UNUSABLE if v is not None])
     def test_a_supplied_unusable_date_is_refused_before_the_fetch(self, monkeypatch, value):
         reached = _no_network(monkeypatch)
         assert _prediction_markets(value) == invalid_date_sentinel(
-            value, what=_PM_WHAT, kind="point"
+            value, what=_PM_WHAT, kind="disclosure"
         )
         assert not reached
 
@@ -206,7 +210,7 @@ class TestPredictionMarketsRefuseInTheSameVoice:
         _no_network(monkeypatch)
         monkeypatch.setattr(config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG))
         out = interface.route_to_vendor("get_prediction_markets", "Fed", None, "abc")
-        assert out == invalid_date_sentinel("abc", what=_PM_WHAT, kind="point")
+        assert out == invalid_date_sentinel("abc", what=_PM_WHAT, kind="disclosure")
 
 
 @pytest.mark.unit
@@ -324,12 +328,80 @@ class TestTheEchoIsFlattenedAndCapped:
         assert out.startswith("INVALID_CURR_DATE: curr_date <Evil value> is not")
 
     def test_a_capped_string_never_splits_an_escape(self):
-        # Capped before quoting: the old vendor path capped the raw text and
-        # re-quoted it, and so does this, so a "\\x01" at the cut is whole or
-        # absent, never a bare backslash.
+        # Re-capped AFTER quoting by whole characters (#140), so a "\\x01" at
+        # the cut is whole or absent, never a bare backslash.
         out = date_refusal("a" * (MAX_UNTRUSTED_CHARS - 1) + "\x01" * 5, what="x", kind="point")
-        assert "\\x01..." in out
         assert "\\..." not in out
+        assert out.count("'") == 2  # the quotes stayed balanced
+
+    def test_the_disclosure_sentence_reads_as_disclosure_not_bounding(self):
+        # #144: the disclosure-only getters' curr_date never bounds the data —
+        # "cannot be bounded" claimed it did, contradicting the tool
+        # descriptions ("Prices are always live") and inviting the model to
+        # retry historical dates against a live snapshot. Byte-for-byte, tail
+        # included: omission is the legal exit the model reads about HERE,
+        # and it is derived from the kind — a bounded tool cannot offer it.
+        assert invalid_date_sentinel("abc", what="fundamentals", kind="disclosure") == (
+            "INVALID_CURR_DATE: curr_date 'abc' is not a valid yyyy-mm-dd date, "
+            "so the report cannot say whether the live fundamentals are as of that date. "
+            "No data returned; retry with a valid yyyy-mm-dd date or omit it. "
+            "Do not fabricate values."
+        )
+        # The point sentence is byte-identical to before: #144 changed nothing
+        # for the tools whose date really bounds.
+        assert invalid_date_sentinel("abc", what="x", kind="point") == (
+            "INVALID_CURR_DATE: curr_date 'abc' is not a valid yyyy-mm-dd date, "
+            "so x cannot be bounded to a point in time. "
+            "No data returned; retry with a valid yyyy-mm-dd date. Do not fabricate values."
+        )
+
+    def test_an_unknown_kind_fails_at_the_call(self):
+        # DateKind is a closed vocabulary; a typo must not fall into whichever
+        # branch is last and ship the strongest wrong claim (#140 review).
+        with pytest.raises(ValueError, match="unknown DateKind"):
+            invalid_date_sentinel("abc", what="x", kind="pont")
+
+    def test_a_truncated_non_string_echo_recloses_its_outer_delimiter(self):
+        # #140: `b'xxx...` read as a broken value; the cut echo re-closes the
+        # outermost delimiter. Direct callers only — tool schemas send strings.
+        out = date_refusal(b"x" * 300, what="x", kind="point")
+        echoed = out.split(" is not a valid", 1)[0].removeprefix("INVALID_CURR_DATE: curr_date ")
+        assert echoed.startswith("b'x")
+        assert echoed.endswith("...'")
+        assert len(echoed) <= MAX_UNTRUSTED_CHARS + 5
+
+    def test_the_echo_is_computed_once_per_refusal(self, monkeypatch):
+        # #140: the refusal's log line and its sentinel each flattened the
+        # value; one echo, two consumers.
+        from tradingagents.dataflows import utils as utils_module
+
+        calls = []
+        real = utils_module._echo_untrusted
+
+        def counting(value):
+            calls.append(value)
+            return real(value)
+
+        monkeypatch.setattr(utils_module, "_echo_untrusted", counting)
+        out = utils_module.date_refusal("abc", what="x", kind="point")
+        assert out is not None
+        assert len(calls) == 1
+
+    def test_escape_expansion_cannot_blow_past_the_cap(self):
+        # The character cap ran before ``repr``; escapes then grew each
+        # control character 4x and each NON-PRINTABLE astral one ~10x (a
+        # printable emoji is not escaped at all, so it would not discriminate
+        # here), burying the sentence under up to ~2000 chars while "capped"
+        # (#140). The promise is about what the MODEL reads, so it must hold
+        # on the escaped form.
+        for hostile in ("\x01" * (MAX_UNTRUSTED_CHARS * 2), "\U000e0001" * MAX_UNTRUSTED_CHARS):
+            out = invalid_date_sentinel(hostile, what="x", kind="point")
+            echoed = out.split(" is not a valid", 1)[0].removeprefix(
+                "INVALID_CURR_DATE: curr_date "
+            )
+            assert len(echoed) <= MAX_UNTRUSTED_CHARS + 5, len(echoed)
+            assert "\\..." not in echoed  # whole escapes only, even at the cut
+            assert echoed[0] == echoed[-1] == out.split()[2][0]  # quotes balanced
 
 
 @pytest.mark.unit

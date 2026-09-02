@@ -265,6 +265,9 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # startswith passed, since the sentence interpolates only curr_date.
         from tradingagents.dataflows.utils import invalid_date_sentinel
 
+        # kind="point": the statement lanes' curr_date genuinely bounds (the
+        # future row above is what the bound removes), so their refusal keeps
+        # claiming a bound and never offers omission (#144/#140 review).
         assert (
             yf_out == av_out == invalid_date_sentinel(curr_date, what="fundamentals", kind="point")
         )
@@ -290,8 +293,12 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # "Apple Inc. not in output" check would have no power here).
         from tradingagents.dataflows.utils import invalid_date_sentinel
 
+        # kind="disclosure": the OVERVIEW lane serves a live snapshot the
+        # date never bounds — only the as-of disclosure is at stake (#144).
         assert (
-            yf_out == av_out == invalid_date_sentinel(curr_date, what="fundamentals", kind="point")
+            yf_out
+            == av_out
+            == invalid_date_sentinel(curr_date, what="fundamentals", kind="disclosure")
         )
 
     def test_an_omitted_curr_date_still_takes_the_date_less_lane(self, monkeypatch):

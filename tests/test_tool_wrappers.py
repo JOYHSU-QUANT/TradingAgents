@@ -89,6 +89,80 @@ def _recorder():
     return calls, fake
 
 
+_DATE_PARAMS = ("curr_date", "start_date", "end_date")
+
+
+def _date_taking_tools():
+    for module, name in ALL_WRAPPERS:
+        tool_obj = getattr(module, name)
+        date_params = [p for p in _DATE_PARAMS if p in tool_obj.args]
+        if date_params:
+            yield tool_obj, date_params
+
+
+@pytest.mark.unit
+class TestDateSentinelDescriptions:
+    """#140: every date-taking tool's description names the sentinel it can
+    return. The model reads the description when CHOOSING arguments, and the
+    tools this repo taught to refuse were exactly the ones describing only "a
+    formatted report". The sentence is attached structurally
+    (``tool_notes.notes_date_sentinel`` appends ``utils.date_sentinel_note``),
+    so this iterates the runtime tool objects rather than trusting each file —
+    dropping the decorator from any one wrapper turns this red."""
+
+    _DISCLOSURE = {"get_fundamentals", "get_prediction_markets"}
+    _OMITTED_OK = _DISCLOSURE | {"get_balance_sheet", "get_cashflow", "get_income_statement"}
+
+    def test_every_date_taking_tool_describes_its_sentinel(self):
+        from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS
+
+        seen = set()
+        for tool_obj, date_params in _date_taking_tools():
+            # Each tag appears exactly when the tool has that parameter: a
+            # missing note fails the positive half, a decorator over-claiming
+            # a date argument the tool does not take fails the negative half.
+            for param, tag in _DATE_ARGUMENT_TAGS.items():
+                assert (tag in tool_obj.description) == (param in date_params), (
+                    tool_obj.name,
+                    tag,
+                )
+            seen.add(tool_obj.name)
+        # Every wrapper in the registry except the one tool with no date
+        # argument. Pinned as a set so a new date-taking wrapper that skips
+        # the decorator cannot shrink the sweep silently.
+        assert seen == {name for _, name in ALL_WRAPPERS} - {"get_insider_transactions"}
+
+    def test_the_note_is_the_shared_sentence_verbatim(self):
+        # Not substrings: the whole rendered note, at the end of the
+        # description, so a wrapper hand-writing a drifting variant (the
+        # pre-#140 docstrings contained the same substrings) cannot stay
+        # green by keeping the keywords.
+        from tradingagents.dataflows.utils import date_sentinel_note
+
+        for tool_obj, date_params in _date_taking_tools():
+            note = date_sentinel_note(
+                *date_params,
+                omitted_ok=tool_obj.name in self._OMITTED_OK,
+                disclosure=tool_obj.name in self._DISCLOSURE,
+            )
+            assert tool_obj.description.endswith(note), tool_obj.name
+
+    def test_the_remedies_match_each_tools_date_contract(self):
+        # Omission is ADVERTISED only by the disclosure-only tools (their
+        # getters' kind="disclosure"): the statement tools legally accept
+        # omission (the "is supplied but" trigger) but their date bounds the
+        # data, so inviting omission would invite switching look-ahead
+        # filtering off (#144/#140 review). No required-date tool claims
+        # either.
+        for tool_obj, _ in _date_taking_tools():
+            assert ("or omit it" in tool_obj.description) == (tool_obj.name in self._DISCLOSURE), (
+                tool_obj.name
+            )
+            assert ("is supplied but" in tool_obj.description) == (
+                tool_obj.name in self._OMITTED_OK
+            ), tool_obj.name
+
+
 def _forwarded(module, tool, payload, attr="route_to_vendor"):
     """Invoke ``tool`` with ``payload`` and return what the patched router saw."""
     calls, fake = _recorder()

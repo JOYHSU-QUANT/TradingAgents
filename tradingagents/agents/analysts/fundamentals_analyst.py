@@ -28,8 +28,12 @@ def create_fundamentals_analyst(llm):
             + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements."
             # Passing curr_date is what anchors the statement tools to a point
             # in time: omitting it disables look-ahead filtering and degrades
-            # the freshness disclosure to a wall-clock reference (#73).
+            # the freshness disclosure to a wall-clock reference (#73). The
+            # second sentence scopes the sentinel's "or omit it" exit (#144):
+            # without it, a model that garbles the date once reads that exit
+            # and serves live, undated values into a dated report.
             + " Always pass the `curr_date` argument to every one of these tools, set to today's date given above."
+            + " If a tool refuses your date as unusable, fix the format rather than omitting the argument — omit it only as a last resort, since the values then come back live and undated."
             # No trailing comma: it would make this a 1-tuple, and the prompt
             # template would render the tuple repr — parens and quotes — into
             # the system message instead of the concatenated string.

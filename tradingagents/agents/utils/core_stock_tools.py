@@ -4,7 +4,10 @@ from langchain_core.tools import tool
 
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .tool_notes import notes_date_sentinel
 
+
+@notes_date_sentinel("start_date", "end_date")
 @tool
 def get_stock_data(
     symbol: Annotated[str, "ticker symbol of the company"],

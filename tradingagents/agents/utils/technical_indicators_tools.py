@@ -5,7 +5,10 @@ from langchain_core.tools import tool
 from tradingagents.dataflows.errors import UnsupportedIndicatorError
 from tradingagents.dataflows.interface import route_to_vendor
 
+from .tool_notes import notes_date_sentinel
 
+
+@notes_date_sentinel("curr_date")
 @tool
 def get_indicators(
     symbol: Annotated[str, "ticker symbol of the company"],

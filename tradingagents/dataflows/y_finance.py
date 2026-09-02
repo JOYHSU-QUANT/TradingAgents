@@ -49,6 +49,11 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
     """
     if data.empty:
         raise NoMarketDataError(ticker, canonical, f"no {noun} data")
+    # kind="point", NOT "disclosure": this lane's curr_date genuinely BOUNDS
+    # the data (filter_financials_by_date drops periods after it), so its
+    # refusal must keep claiming a bound — only the live OVERVIEW lane below
+    # is disclosure-only (#144/#140 review). omitted_ok stays: the date-less
+    # #73 lane is legal, it just must not be advertised as a remedy.
     if (
         refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
     ) is not None:
@@ -527,7 +532,9 @@ def get_fundamentals(
         # docstring gives the reasoning: with no usable analysis date neither
         # vendor can tell a backtest from live trading (#89).
         if (
-            refusal := date_refusal(curr_date, what="fundamentals", kind="point", omitted_ok=True)
+            refusal := date_refusal(
+                curr_date, what="fundamentals", kind="disclosure", omitted_ok=True
+            )
         ) is not None:
             return refusal
 

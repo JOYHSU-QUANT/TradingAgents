@@ -121,12 +121,14 @@ MAX_DECISION_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (10, 30)
 
 # The persist-retry lanes' escalation bound (issue #163): a post-answer persist
-# (the §3.1 response store, or the audit commit) is retried in-process this
-# many consecutive times, then the exception PROPAGATES — daemon exit, the
-# supervisor's restart signal. The motivating transient (an operator's
-# export/validate holding the SQLite write lock) heals within a poll or two;
-# a fault that survives ten polls (a full monitor interval apart, each already
-# behind the connection's 5s busy_timeout) is a disk/schema/bug fault that
+# (the §3.1 response store, or the audit commit) is contained for this many
+# consecutive failed polls — the LAST of them propagates instead, so the run
+# gets N-1 in-process retries — as a daemon exit, the supervisor's restart
+# signal. Counted per unbroken streak: one persist that lands resets it. The
+# motivating transient (an operator's export/validate holding the SQLite write
+# lock) heals within a poll or two; a fault that survives ten polls (a monitor
+# interval apart, each already behind the connection's 5s busy_timeout —
+# so the escape window is ten intervals, not ten seconds) is a fault that
 # in-process retries cannot fix — unbounded containment would wedge the run
 # invisibly (no terminal row, no §3.1 streak, a fresh lease heartbeat).
 _MAX_PERSIST_FAILURES = 10

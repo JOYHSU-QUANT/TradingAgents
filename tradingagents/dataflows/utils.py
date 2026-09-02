@@ -85,9 +85,11 @@ MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
 # ``data_vendors`` selected. One table for every vendor serving the indicator
 # tools (#137): the yfinance getter serves it whole, and the Alpha Vantage
 # vendor derives its registry from the slice it supports, so editing a
-# description edits it for both. Lives here (stdlib-only) rather than beside
-# either vendor so the pure-requests Alpha Vantage module does not import the
-# yfinance stack for a dict of strings (#70).
+# description edits BOTH REPORT LANES — but not (yet) the market analyst's
+# prompt menu, which still hard-codes its own verbatim copy (#187); edit
+# that too until it is derived from here. Lives here (stdlib-only) rather
+# than beside either vendor so the pure-requests Alpha Vantage module does
+# not import the yfinance stack for a dict of strings (#70).
 INDICATOR_DESCRIPTIONS = {
     # Moving Averages
     "close_50_sma": (

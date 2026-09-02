@@ -37,12 +37,16 @@ Breaking changes within the 0.x line are called out explicitly.
 - **dataflows: one indicator description table, and the windowed indicator
   getter's per-day fallback loop is gone** (issue #137). The sentence each
   indicator report ends with — agent-facing prompt text — lived in two
-  verbatim copies, a function-local dict in the yfinance getter and a
-  module-level one in the Alpha Vantage vendor, editable apart with nothing
-  comparing them. Both vendors now read ``utils.INDICATOR_DESCRIPTIONS``
-  (byte-identical to the old copies, so the agent's input is unchanged), the
-  Alpha Vantage registry is a derived slice that fails at import on a gap,
-  and an identity test catches a re-forked copy the day it appears. The
+  verbatim copies in the vendor report lanes, a function-local dict in the
+  yfinance getter and a module-level one in the Alpha Vantage vendor,
+  editable apart with nothing comparing them. Both vendors now read
+  ``utils.INDICATOR_DESCRIPTIONS`` (byte-identical to the old copies, so
+  the agent's input is unchanged), the Alpha Vantage registry is a derived
+  slice that fails at import on a gap, and identity/marker tests catch a
+  re-forked copy in either lane the day it appears. A third verbatim copy —
+  the market analyst prompt's indicator menu — is out of these lanes and
+  deliberately untouched (prompt text is deployment-segmented); it is
+  tracked in issue #187. The
   windowed getter's broad handler used to fall back to a per-day loop that
   re-ran the identical fetch and calculation once per day of the window:
   after the taxonomy (#67) and transport (#116) re-raises, nothing that

@@ -25,8 +25,12 @@ Breaking changes within the 0.x line are called out explicitly.
   and never advertise the omission that would switch that filter off, even
   though their date-less #73 lane stays legal.
   ``get_fundamentals``'s wrapper makes ``curr_date`` optional like its three
-  statement siblings, so the omission lane it advertises is one its schema
-  accepts. Every date-taking tool description now names the sentinel it can
+  statement siblings — a tool-schema change the model sees (required →
+  nullable-with-default), not just wording — so the omission lane it
+  advertises is one its schema accepts, via explicit JSON ``null`` too
+  (all four are ``str | None`` now). The fundamentals analyst's prompt
+  scopes that exit: fix the format first, omission is the last resort and
+  comes back live and undated. Every date-taking tool description now names the sentinel it can
   return, attached structurally (``tool_notes.notes_date_sentinel`` appends
   ``utils.date_sentinel_note``) instead of hand-written per wrapper — eleven
   wrappers said only "a formatted report" — and a test iterates the runtime

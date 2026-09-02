@@ -110,19 +110,42 @@ class TestDateSentinelDescriptions:
     so this iterates the runtime tool objects rather than trusting each file —
     dropping the decorator from any one wrapper turns this red."""
 
+    _DISCLOSURE = {"get_fundamentals", "get_prediction_markets"}
+    _OMITTED_OK = _DISCLOSURE | {"get_balance_sheet", "get_cashflow", "get_income_statement"}
+
     def test_every_date_taking_tool_describes_its_sentinel(self):
         from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS
 
         seen = set()
         for tool_obj, date_params in _date_taking_tools():
-            for param in date_params:
-                assert _DATE_ARGUMENT_TAGS[param] in tool_obj.description, tool_obj.name
-            assert "do not fabricate values" in tool_obj.description, tool_obj.name
+            # Each tag appears exactly when the tool has that parameter: a
+            # missing note fails the positive half, a decorator over-claiming
+            # a date argument the tool does not take fails the negative half.
+            for param, tag in _DATE_ARGUMENT_TAGS.items():
+                assert (tag in tool_obj.description) == (param in date_params), (
+                    tool_obj.name,
+                    tag,
+                )
             seen.add(tool_obj.name)
         # Every wrapper in the registry except the one tool with no date
         # argument. Pinned as a set so a new date-taking wrapper that skips
         # the decorator cannot shrink the sweep silently.
         assert seen == {name for _, name in ALL_WRAPPERS} - {"get_insider_transactions"}
+
+    def test_the_note_is_the_shared_sentence_verbatim(self):
+        # Not substrings: the whole rendered note, at the end of the
+        # description, so a wrapper hand-writing a drifting variant (the
+        # pre-#140 docstrings contained the same substrings) cannot stay
+        # green by keeping the keywords.
+        from tradingagents.dataflows.utils import date_sentinel_note
+
+        for tool_obj, date_params in _date_taking_tools():
+            note = date_sentinel_note(
+                *date_params,
+                omitted_ok=tool_obj.name in self._OMITTED_OK,
+                disclosure=tool_obj.name in self._DISCLOSURE,
+            )
+            assert tool_obj.description.endswith(note), tool_obj.name
 
     def test_the_remedies_match_each_tools_date_contract(self):
         # Omission is ADVERTISED only by the disclosure-only tools (their
@@ -131,15 +154,13 @@ class TestDateSentinelDescriptions:
         # data, so inviting omission would invite switching look-ahead
         # filtering off (#144/#140 review). No required-date tool claims
         # either.
-        disclosure = {"get_fundamentals", "get_prediction_markets"}
-        omitted_ok = disclosure | {"get_balance_sheet", "get_cashflow", "get_income_statement"}
         for tool_obj, _ in _date_taking_tools():
-            assert ("or omit it" in tool_obj.description) == (tool_obj.name in disclosure), (
+            assert ("or omit it" in tool_obj.description) == (tool_obj.name in self._DISCLOSURE), (
                 tool_obj.name
             )
-            assert ("is supplied but" in tool_obj.description) == (tool_obj.name in omitted_ok), (
-                tool_obj.name
-            )
+            assert ("is supplied but" in tool_obj.description) == (
+                tool_obj.name in self._OMITTED_OK
+            ), tool_obj.name
 
 
 def _forwarded(module, tool, payload, attr="route_to_vendor"):

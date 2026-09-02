@@ -384,11 +384,13 @@ class TestTheEchoIsFlattenedAndCapped:
         assert len(calls) == 1
 
     def test_escape_expansion_cannot_blow_past_the_cap(self):
-        # The character cap ran before ``repr``; escapes then grew each control
-        # character 4x and each astral one ~10x, so a hostile value buried the
-        # sentence under up to ~2000 chars while "capped" (#140). The promise
-        # is about what the MODEL reads, so it must hold on the escaped form.
-        for hostile in ("\x01" * (MAX_UNTRUSTED_CHARS * 2), "\U0001f600" * MAX_UNTRUSTED_CHARS):
+        # The character cap ran before ``repr``; escapes then grew each
+        # control character 4x and each NON-PRINTABLE astral one ~10x (a
+        # printable emoji is not escaped at all, so it would not discriminate
+        # here), burying the sentence under up to ~2000 chars while "capped"
+        # (#140). The promise is about what the MODEL reads, so it must hold
+        # on the escaped form.
+        for hostile in ("\x01" * (MAX_UNTRUSTED_CHARS * 2), "\U000e0001" * MAX_UNTRUSTED_CHARS):
             out = invalid_date_sentinel(hostile, what="x", kind="point")
             echoed = out.split(" is not a valid", 1)[0].removeprefix(
                 "INVALID_CURR_DATE: curr_date "

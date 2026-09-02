@@ -203,9 +203,10 @@ def _echo_untrusted(value) -> str:
     The value is the model's own text echoed back into a sentence it reads, so
     it gets the vendor flattening with ``keep_edges`` (see there). The cap is
     enforced on the ESCAPED form: the character cap runs first (bounding the
-    re-cap loop's work), ``repr`` then escapes control and astral characters —
-    4-10x growth that used to carry a "capped" hostile value far past the
-    promise (#140) — and the re-cap below drops whole characters until the
+    re-cap loop's work), ``repr`` then escapes control and non-printable
+    astral characters — 4-10x growth that used to carry a "capped" hostile
+    value far past the promise (#140) — and the re-cap below drops whole
+    characters until the
     quoted form fits, so an escape sequence stays whole or vanishes and the
     quotes stay balanced. A clean value such as ``'abc'`` comes through byte
     for byte.
@@ -238,11 +239,18 @@ def _echo_untrusted(value) -> str:
     # delimiter when the echo was cut so it reads as a cut value rather than a
     # broken one (#140). No whole-escape promise here — that promise above is
     # for model input, which is always a string.
-    closer = raw[-1] if raw[-1] in "'\")]}" else ""
+    closer = raw[-1] if raw and raw[-1] in "'\")]}" else ""
+    sliced = len(raw) > MAX_UNTRUSTED_CHARS * 4
     raw = raw[: MAX_UNTRUSTED_CHARS * 4]
     flat = sanitize_untrusted(raw, keep_edges=True)
-    if len(flat) > MAX_UNTRUSTED_CHARS:
-        return sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True) + closer
+    if sliced or len(flat) > MAX_UNTRUSTED_CHARS:
+        # ``sliced`` forces the cut MARKING even when whitespace collapse
+        # brought the prefix under the cap — a cut without an ellipsis reads
+        # as the whole value.
+        capped = sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+        if not capped.endswith("..."):
+            capped += "..."
+        return capped + closer
     return flat
 
 
@@ -300,7 +308,9 @@ def invalid_date_sentinel(
     elif kind == "disclosure":
         # Disclosure-only tools serve LIVE values whatever the date; the date
         # only gates the as-of disclosure. "Cannot be bounded" here claimed
-        # the opposite and invited a historical-date retry (#144).
+        # the opposite and invited a historical-date retry (#144). The
+        # template conjugates for a PLURAL ``what`` ("are") — both current
+        # disclosure whats are plural; a singular one needs a decision here.
         consequence = f"the report cannot say whether the live {what} are as of that date"
         retry += _OMIT_CLAUSE
     else:
@@ -384,8 +394,11 @@ def date_sentinel_note(*params: str, omitted_ok: bool = False, disclosure: bool 
     names = " or ".join(params)
     supplied = "is supplied but " if omitted_ok else "is "
     remedy = "retry with a valid date" + (_OMIT_CLAUSE if disclosure else "")
+    # Own paragraph ("\n\n"): appended to docstrings whose last line rarely
+    # ends with a period, a same-line note read as a run-on sentence in 14 of
+    # the 16 rendered descriptions.
     return (
-        f" Returns an {tags} sentinel instead of data when {names} {supplied}"
+        f"\n\nReturns an {tags} sentinel instead of data when {names} {supplied}"
         f"not a usable yyyy-mm-dd date ({remedy}; do not fabricate values)."
     )
 

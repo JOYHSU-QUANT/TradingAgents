@@ -911,6 +911,25 @@ def test_a_persist_fault_that_outlives_the_budget_escalates_to_the_supervisor(
     db.close()
 
 
+def test_a_persist_that_lands_clears_the_failure_streak(tmp_path, monkeypatch):
+    from contrib.hyperliquid_perp.paper.scheduler import _MAX_PERSIST_FAILURES
+
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    # The bound measures an unbroken streak, not the cycle's lifetime total:
+    # a store that lands after near-fatal contention must hand the audit
+    # commit a full budget, and the escalation log must not claim a run of
+    # failures that never happened.
+    _arm_flaky_response_store(monkeypatch, shots=_MAX_PERSIST_FAILURES - 1)
+    for _ in range(_MAX_PERSIST_FAILURES - 1):
+        assert scheduler.poll() is None
+    _arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")  # one audit miss
+    assert scheduler.poll() is None  # store lands, gate runs, audit misses once
+    r = scheduler.poll()
+    assert r.event is CycleEvent.COMPLETED  # no escalation: the streak was reset
+    assert provider.decide_calls == 1
+    db.close()
+
+
 def test_resume_with_a_poisoned_stored_response_fails_the_cycle_closed(
     tmp_path, monkeypatch, caplog
 ):
@@ -963,10 +982,6 @@ def test_a_start_plan_bug_still_exits_the_daemon(tmp_path, monkeypatch):
     # The supervisor's restart rebuilds the engine from the DB.
     with pytest.raises(RuntimeError, match="engine bug"):
         scheduler.poll()
-    # The stored response survives, so that restart resumes the gate — the
-    # AI is still never re-asked (spec §3.1).
-    row = repo.find_in_progress_attempt(db.conn, "r")
-    assert row["pending_raw_response"] is not None
     db.close()
 
 

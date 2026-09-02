@@ -22,23 +22,33 @@ Breaking changes within the 0.x line are called out explicitly.
   ``start_plan`` registration — never re-asking the AI, never re-gating — the
   live driver's ``_PendingResponsePersistError`` /
   ``_PlanRegisteredPersistError`` split, expressed as return values because
-  paper's synchronous poll loop has no safe mode. Bounded at ten consecutive
-  failures per cycle, then the exception propagates after all: a fault that
-  outlives the bound is not the transient lock the lane exists for, and
-  containing it forever would wedge the run invisibly (the attempt row stays
-  ``in_progress``, so the issue #50 streak and ``validate``'s exit 4 never
-  fire while the lease heartbeat keeps reporting a healthy daemon).
+  paper's synchronous poll loop has no safe mode. Bounded at ten failed polls
+  in a row (any persist that lands clears the streak), after which the
+  exception propagates after all: a fault that outlives the bound is not the
+  transient lock the lane exists for, and containing it forever would wedge
+  the run invisibly (the attempt row stays ``in_progress``, so the issue #50
+  streak and ``validate``'s exit 4 never fire while the lease heartbeat keeps
+  reporting a healthy daemon). Escalating restores the pre-#163 exit as a
+  deliberate signal, and the RUNBOOK now says what a restart does with each
+  lane (the store lane re-asks within its §3.1 budget; the audit lane cancels
+  the committed plan and re-gates), since neither guarantee outlives the
+  in-process retry.
   Re-parsing a stored response on resume now fails that cycle closed like any
   other non-retryable error — a raise there is deterministic, so propagating
   it crash-looped every supervised restart — and the response text is logged
   in full before the terminal row clears it, because ``ai_outputs`` never
   stores raw text and that row was its only durable copy. Terminal rows on
   both lanes now clear ``pending_raw_response``, so no ``api_failed`` row
-  presents a consumed response as resumable state. The one deliberate exit
-  left is an exception escaping the engine's ``start_plan``: the engine
-  fail-stops (a partially committed plan may exist) and refuses every later
-  call, so the position would sit unwatched inside a live-looking process —
-  the supervisor's restart rebuilds it from the store.
+  presents a consumed response as resumable state. The one post-answer step
+  given no containment at all is an exception escaping the engine's
+  ``start_plan``: the engine fail-stops (a partially committed plan may
+  exist) and refuses every later call, so the position would sit unwatched
+  inside a live-looking process — the supervisor's restart rebuilds it from
+  the store. Other exits remain and are now named in the RUNBOOK rather than
+  implied away: the escalation above, a failure of the terminal ``api_failed``
+  write itself (no retry lane — live's ``pending_fail`` has no paper
+  counterpart yet), and the cycle-boundary scheduling writes outside every
+  guard.
 
 - **dataflows: the date sentinel and the tool descriptions tell the model
   the truth about disclosure-only dates, legal omission, and refusals**

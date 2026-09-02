@@ -40,16 +40,21 @@ with the live lane's persist-retry split): the two scheduler-owned persists
 — the ``pending_raw_response`` store and ``_finalize``'s audit commit —
 retry in-process on failure (a paid-for decision, or a committed plan the
 audit trail must not contradict, exists; the daemon stays up and logs
-ERROR each retry) up to ``_MAX_PERSIST_FAILURES`` consecutive failures,
-then propagate after all — a fault that outlives the bound is not the
-transient lock the lane exists for, and unbounded containment would wedge
-the run invisibly. A bug re-parsing the stored response on resume
-fails that cycle closed like any other non-retryable error (a restart
-would only crash-loop into the same parse). The one deliberate exit left:
-an exception escaping the engine's ``start_plan`` — the engine fail-stops
-(a partially committed plan may exist and it refuses every later call), so
-the position would sit unwatched inside a live-looking process; the daemon
-propagates and the supervisor's restart rebuilds the engine from the DB.
+ERROR each retry) until one lands or ``_MAX_PERSIST_FAILURES`` polls in a
+row have failed, at which point the exception propagates after all — a
+fault that outlives the bound is not the transient lock the lane exists
+for, and unbounded containment would wedge the run invisibly. A bug
+re-parsing the stored response on resume fails that cycle closed like any
+other non-retryable error (a restart would only crash-loop into the same
+parse). What still exits the daemon: an exception escaping the engine's
+``start_plan`` — the ONE post-answer step given no containment at all,
+because the engine fail-stops (a partially committed plan may exist and it
+refuses every later call), so the position would sit unwatched inside a
+live-looking process and only the supervisor's restart rebuilds it — plus
+the persist escalation above, a failure of the terminal ``api_failed``
+record itself, the cycle-boundary scheduling writes outside every guard
+(``_execute``'s pre-call counter, ``poll``'s new-cycle insert), and a
+non-DB error out of the best-effort cycle-end snapshot.
 
 Restart safety of a half-finished cycle: the successful AI response is
 persisted onto the attempt row (``pending_raw_response``) *before* the gate
@@ -323,10 +328,12 @@ class _PendingDecision:
     # committed plan and register another; the live driver caches it the same
     # way on ``_InFlight.registration``).
     registration: PlanStartResult | None = None
-    # Consecutive persist failures for this cycle (both lanes share the
-    # budget — the store completes before the gate, so they never interleave).
-    # At ``_MAX_PERSIST_FAILURES`` the retry lane stops containing and lets
-    # the exception propagate (supervised-restart escalation).
+    # Consecutive failed persist polls: incremented by
+    # ``_persist_budget_spent``, cleared by ``_persist_reached`` the moment
+    # one lands. At ``_MAX_PERSIST_FAILURES`` the retry lane stops containing
+    # and lets the exception propagate (supervised-restart escalation). Both
+    # post-answer persists share the counter — they never interleave, since
+    # the store completes before the gate may run.
     persist_failures: int = 0
 
     def __post_init__(self) -> None:
@@ -743,27 +750,40 @@ class PaperScheduler:
     # -- decision finalization (gate + audit rows) ---------------------------
 
     def _persist_budget_spent(self, pending: _PendingDecision, what: str) -> bool:
-        """Count one persist failure; ``True`` once the escalation bound is hit.
+        """Count one persist failure; ``True`` on the ``_MAX_PERSIST_FAILURES``th.
 
-        The caller then re-raises instead of containing: past
-        ``_MAX_PERSIST_FAILURES`` consecutive failures the fault is not the
-        transient lock the retry lane exists for, and unbounded containment
-        would wedge the run invisibly (the attempt row stays ``in_progress``,
-        so the §3.1 no-decision streak and ``validate``'s exit 4 never fire,
-        while the lease heartbeat keeps reporting a healthy daemon). The
-        pre-#163 daemon exit — the supervisor's restart count — returns as the
-        deliberate escalation signal.
+        The caller then re-raises instead of containing: a fault that survives
+        that many polls in a row is not the transient lock the retry lane
+        exists for, and unbounded containment would wedge the run invisibly
+        (the attempt row stays ``in_progress``, so the §3.1 no-decision streak
+        and ``validate``'s exit 4 never fire, while the lease heartbeat keeps
+        reporting a healthy daemon). The pre-#163 daemon exit — the
+        supervisor's restart count — returns as the deliberate escalation
+        signal.
+
+        The count is CONSECUTIVE: any persist that lands clears it
+        (:meth:`_persist_reached`), so the bound measures one unbroken streak
+        rather than a cycle's lifetime total. Both post-answer persists share
+        the counter, which is exact because they never interleave — the store
+        completes before the gate is allowed to run — and a store that lands
+        after failures hands the audit commit a fresh budget instead of the
+        remainder of its own.
         """
         pending.persist_failures += 1
         if pending.persist_failures < _MAX_PERSIST_FAILURES:
             return False
         logger.error(
-            "cycle %s: %s failed %d consecutive polls — escalating to the supervisor (daemon exit)",
+            "cycle %s: %s failed %d polls in a row — escalating to the supervisor (daemon exit)",
             pending.attempt_id,
             what,
             pending.persist_failures,
         )
         return True
+
+    @staticmethod
+    def _persist_reached(pending: _PendingDecision) -> None:
+        """A persist landed: the failure streak is over (see the counter above)."""
+        pending.persist_failures = 0
 
     def _store_pending_response(self, now: datetime, pending: _PendingDecision) -> bool:
         """Land the §3.1 store for the collected decision; ``False`` = retry.
@@ -804,6 +824,7 @@ class PaperScheduler:
             )
             return False
         pending.raw_stored = True
+        self._persist_reached(pending)
         return True
 
     def _finalize(self, now: datetime) -> PollResult | None:
@@ -818,9 +839,10 @@ class PaperScheduler:
         ``None`` means one of the two scheduler-owned persists failed (the
         §3.1 response store, or the audit commit below): the pending decision
         — and, past the gate, its cached registration — is kept and the next
-        poll retries only that persist, up to ``_MAX_PERSIST_FAILURES``
-        consecutive failures, after which the exception propagates (issue
-        #163). A ``start_plan`` raise is deliberately NOT contained at all:
+        poll retries only that persist; the ``_MAX_PERSIST_FAILURES``th
+        failure in a row propagates instead (issue #163 — any persist that
+        lands resets the streak). A ``start_plan`` raise is the one thing
+        past the answer that gets no containment at all:
         the engine fail-stops on any escaped exception (a partially committed
         plan may exist), so every later tick would refuse and the position
         would sit unwatched inside a live-looking process — exiting for the
@@ -899,6 +921,7 @@ class PaperScheduler:
                 pending.attempt_id,
             )
             return None
+        self._persist_reached(pending)
         # The cycle is now durably committed; drop the in-memory pending decision
         # BEFORE the best-effort snapshot. write_cycle_snapshot only swallows
         # (sqlite3.Error, OSError); a non-DB error (mark<=0 ValueError, a halted

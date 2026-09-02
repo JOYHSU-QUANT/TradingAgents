@@ -10,6 +10,36 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **llm_clients: every LLM call can carry a completion-token cap, and perp
+  runs always send one** (issue #177). The OpenAI-compatible family (including
+  OpenRouter) never forwarded ``max_tokens``, and no config key could express
+  it — the completion budget was left to each upstream provider's discretion.
+  One OpenRouter upstream (GMICloud) substitutes the model's full context
+  length for a missing cap and then rejects every request as
+  input + completion > context: a deterministic HTTP 400 that stalled
+  paper-BTC-3 for six consecutive cycles (~24h) with the open position riding
+  SL/TP alone. ``max_tokens`` now rides the ``temperature`` pattern:
+  ``DEFAULT_CONFIG["max_tokens"]`` (default ``None`` = provider default),
+  ``TRADINGAGENTS_MAX_TOKENS`` env override (documented in ``.env.example``
+  and the README), validated forwarding in ``_get_provider_kwargs`` (positive
+  int only — forwarding 0/negative is the same deterministic-400 stall shape,
+  and a typo fails naming the key instead of as a bare ``int()`` error), and
+  passthrough in the OpenAI-compatible, Azure, and Google clients (Google's
+  field aliases it to ``max_output_tokens``; Anthropic and Bedrock already
+  forwarded it). Langchain renames the kwarg on the way out — twice — so the
+  tests pin the outgoing payload, not just the constructor field:
+  ``max_completion_tokens`` on Chat Completions (OpenRouter honoring it was
+  verified live: ``finish_reason: length`` at exactly the cap) and
+  ``max_output_tokens`` on native OpenAI's Responses branch. The perp bridge
+  adds ``engine.max_completion_tokens`` (validated through the shared YAML
+  coercion seam and normalised to int at load, so the value's type does not
+  follow its quoting: bools, non-integral floats, junk and non-positive
+  values fail closed) with precedence
+  YAML > ``TRADINGAGENTS_MAX_TOKENS`` > perp default 8192 — absent and null
+  both fall through to a cap, so the uncapped path is unreachable from a
+  perp config. The cap includes reasoning/thinking tokens; switching
+  deep-think to a thinking model needs an explicit raise.
+
 - **dataflows: the date sentinel and the tool descriptions tell the model
   the truth about disclosure-only dates, legal omission, and refusals**
   (issues #144, #140). The shared refusal sentence told the three

@@ -59,6 +59,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_ANALYSTS = ("market", "social", "news")
 
+# Perp default completion cap. Perp runs are never uncapped — a missing cap
+# through a gateway is a deterministic 400 on some upstreams (#177). Sized
+# well above the longest observed analyst report / decision output; the cap
+# includes reasoning tokens, so a thinking model needs an explicit raise.
+_DEFAULT_MAX_COMPLETION_TOKENS = 8192
+
 
 def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
     """One warning, both channels: the structured log and stderr.
@@ -342,6 +348,15 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         eng_cfg.get("quick_think_llm") or engine_config["quick_think_llm"]
     )
     engine_config["backend_url"] = None
+    # Cap precedence: YAML > TRADINGAGENTS_MAX_TOKENS (already overlaid onto
+    # DEFAULT_CONFIG, like every sibling env knob) > perp default. ``or``
+    # matches the string keys above: present-but-null falls through, never to
+    # an uncapped request.
+    engine_config["max_tokens"] = (
+        eng_cfg.get("max_completion_tokens")
+        or engine_config["max_tokens"]
+        or _DEFAULT_MAX_COMPLETION_TOKENS
+    )
     # Perp runs default structured output OFF (the engine default is on): the
     # Phase 2 target JSON contract is injected as prompt text and can only
     # survive in the gated agents' free-text answers — a *successful*

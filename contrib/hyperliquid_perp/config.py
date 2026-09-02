@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from .common.config_coercion import bool_from_yaml
+from .common.config_coercion import bool_from_yaml, int_from_yaml
 from .common.constants import LEGAL_NETWORKS
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 from .domains.perp.market_data_config import MarketDataConfig
@@ -288,7 +288,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     if addr is not None and not isinstance(addr, str):
         raise ValueError(f"'wallet_address' must be a string, got {addr!r}")
     # The engine: block's string keys stay lenient (``or`` fallbacks in
-    # engine_bridge._build_engine_config); these are its two deliberate exceptions.
+    # engine_bridge._build_engine_config); these are its three deliberate exceptions.
     eng = config.get("engine")
     if eng is not None:
         # Its one *bool* key: a quoted "false" would read truthy and silently
@@ -308,6 +308,25 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         analysts = eng.get("selected_analysts")
         if analysts is not None and not isinstance(analysts, list):
             raise ValueError(f"'engine.selected_analysts' must be a list, got {analysts!r}")
+        # Its one *int* key: goes through the shared coercion seam so YAML
+        # bools, non-integral floats, and junk strings fail with the same
+        # error shape as its siblings; only the positivity check is local
+        # (0 would re-open the uncapped path the key exists to close, #177).
+        # Unlike its siblings this one writes back: without it the value's type
+        # would follow its quoting ("8192" would stay a str all the way to the
+        # LLM client), so normalise once, here, where it is parsed.
+        raw_mct = eng.get("max_completion_tokens")
+        if raw_mct is not None:
+            try:
+                mct = int_from_yaml(raw_mct)
+            except ValueError as exc:
+                raise ValueError(f"config key 'engine.max_completion_tokens': {exc}") from None
+            if mct <= 0:
+                raise ValueError(
+                    f"config key 'engine.max_completion_tokens': expected a "
+                    f"positive integer, got {raw_mct!r}"
+                )
+            eng["max_completion_tokens"] = mct
     # A present live: block is deep-validated on EVERY load, not just by the
     # live subcommand: a staged-but-broken block (deploy workflow: edit config,
     # restart under systemd) would otherwise ride along with paper for days and

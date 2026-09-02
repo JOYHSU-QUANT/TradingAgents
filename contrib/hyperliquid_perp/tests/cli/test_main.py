@@ -116,6 +116,32 @@ def test_build_engine_config_defaults():
     assert engine_config["structured_output"] is False
 
 
+def test_build_engine_config_completion_cap_never_uncapped():
+    # Absent and present-but-null both fall back to the perp default cap: the
+    # uncapped path is what let a gateway upstream substitute the full context
+    # length and 400 every cycle (issue #177) — it must not be reachable.
+    engine_config, _ = bridge_mod._build_engine_config({})
+    assert engine_config["max_tokens"] == bridge_mod._DEFAULT_MAX_COMPLETION_TOKENS
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": None}})
+    assert engine_config["max_tokens"] == bridge_mod._DEFAULT_MAX_COMPLETION_TOKENS
+    # An explicit operator value is honoured verbatim.
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 4096}})
+    assert engine_config["max_tokens"] == 4096
+
+
+def test_build_engine_config_completion_cap_env_precedence(monkeypatch):
+    # TRADINGAGENTS_MAX_TOKENS rides DEFAULT_CONFIG like every sibling env
+    # knob and must not be silently clobbered by the perp default — but an
+    # explicit YAML value still wins over it.
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", "16000")
+    engine_config, _ = bridge_mod._build_engine_config({})
+    assert engine_config["max_tokens"] == "16000"
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 4096}})
+    assert engine_config["max_tokens"] == 4096
+
+
 def test_build_engine_config_structured_output_escape_hatch(capsys):
     # Arming the escape hatch must be loud (dual-channel warning): with the
     # prompt-injected contract it fail-closes every cycle as invalid_output.

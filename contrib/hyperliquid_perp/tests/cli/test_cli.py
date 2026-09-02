@@ -2510,8 +2510,9 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
     db.close()
 
 
-def test_paper_loop_import_error_settle_exit_names_the_cause(tmp_path, monkeypatch, capsys):
-    # Third settle-exit wording: an import-error halt has healthy books, so the
+def test_paper_loop_engine_config_error_settle_exit_names_the_cause(tmp_path, monkeypatch, capsys):
+    # Third settle-exit wording: an engine-config-error halt (a failed import
+    # or a rejected config value) has healthy books, so the
     # exit message must point at the environment fix — not at investigating a
     # store that verified fine, and not at the API key.
     import contrib.hyperliquid_perp.cli as cli_mod

@@ -3,7 +3,8 @@
 Extracted verbatim from ``main.py`` (2026-08-18): the symbols ``cli.py`` had
 been lazy-importing from the legacy entry point — market-context assembly
 (:func:`_build_context`), the engine-config overlay
-(:func:`_build_engine_config` with :class:`EngineImportError`), risk/decision
+(:func:`_build_engine_config` with :class:`EngineConfigError` and its
+:class:`EngineImportError` subclass), risk/decision
 config parsing (:func:`_load_risk_decision`) and coin resolution
 (:func:`_resolve_coin`) — plus what the call graph drags along: their private
 helpers, and the position reads (:func:`_load_position`) both of ``main.py``'s
@@ -349,9 +350,11 @@ class EngineConfigError(RuntimeError):
 class EngineImportError(EngineConfigError):
     """Named, operator-fixable failure importing the tradingagents engine.
 
-    Raised only by :func:`_build_engine_config`; callers map exactly this type
-    to a named exit 1, so any other ``RuntimeError`` still surfaces as an
-    unexpected-error exit 2 instead of hiding behind a reassuring message.
+    Raised only by :func:`_build_engine_config`. Callers catch the
+    :class:`EngineConfigError` base, not this type — a new sibling cause needs
+    no new handler — and any ``RuntimeError`` outside that base still surfaces
+    as an unexpected-error exit 2 instead of hiding behind a reassuring
+    message.
     """
 
 

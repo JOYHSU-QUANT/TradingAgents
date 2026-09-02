@@ -217,13 +217,15 @@ funding 改由 loop 每小時自行重試（healthy 模式在每個 cycle 邊界
 books 從未重新驗證、重啟前先調查 store；缺 key／import 失敗版本只需照訊息修好
 環境即可。protection-only restart 不呼叫 AI，可無 `OPENROUTER_API_KEY` 啟動；
 新 run 在建立 run row 前即檢查 key，也在同一位置預先建構 decision provider——
-引擎 import 失敗（如 corrupt `.env`）同樣擋在 run row 之前，操作者修好環境後
+引擎建構失敗（`EngineConfigError`：import 失敗如 corrupt `.env`，或某個 config
+值被拒絕如壞的 `TRADINGAGENTS_MAX_TOKENS`）同樣擋在 run row 之前，操作者修好環境後
 重跑同一個 `--create` 不會撞上 already-exists。健康（replay OK）的 resume 若缺 key：持倉
 （或有活的 SL/TP）時**不會**退出——reconcile 已取消舊 plan，退出等於棄守倉位——
 改以同一個 protection-only 模式跑（SL/TP 與監控活著、不開新 cycle，訊息明講是缺
 key；倉位了結後同樣最後 export + exit 1）；空倉才直接具名 exit 1。健康 resume 的
-引擎 import 失敗（如 corrupt `.env`）走同一條規則：持倉進 protection-only（訊息
-明講 import 失敗與修法），空倉才具名 exit 1。
+引擎建構失敗（import 失敗如 corrupt `.env`，或 config 值被拒絕如壞的
+`TRADINGAGENTS_MAX_TOKENS`）走同一條規則：持倉進 protection-only（訊息明講是哪
+一種成因與修法），空倉才具名 exit 1。
 完整 AI payload JSON 存於 `<db 目錄>/payloads/<run_id>/`，`ai_inputs` 記其路徑與
 sha256。
 `paper` 啟動時會配置 logging（INFO、stderr、含時間戳與 logger 名——多日 run 的

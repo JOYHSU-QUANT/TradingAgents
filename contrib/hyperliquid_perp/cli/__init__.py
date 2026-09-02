@@ -34,8 +34,9 @@ the legacy CLI takes no positionals, so it can only be a subcommand typo.
 Exit codes: ``0`` success (for ``validate``: Phase-3 ready), ``1`` named
 operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
-books never re-verified, the API key was never supplied, or the engine
-failed to import — stderr says which), ``2`` unexpected error, ``4``
+books never re-verified, the API key was never supplied, or the engine could
+not be built — a failed import or a rejected config value; stderr says
+which), ``2`` unexpected error, ``4``
 not-yet-at-the-gate outcomes (``validate``: short of the 30-cycle gate or a
 red/missing smoke test — curable by a ``live-smoke`` re-run;
 ``live-smoke``: the §20.2 gate is not satisfied, incl. a pre-flight abort;

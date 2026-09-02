@@ -52,9 +52,10 @@ Breaking changes within the 0.x line are called out explicitly.
   failure now renders the same one-line prose every sibling leaf answers
   with. The un-hidden window's handling of yfinance's partial-service
   ``history`` failure (the auto/back-adjust step — the only flag-gated
-  ``history`` swallow reachable at this codebase's ``repair=False``) is
-  pinned as deliberate: rows the library would have served on the wrong
-  price basis become this vendor's no-data verdict instead (#38).
+  ``history`` swallow reachable at this codebase's ``repair=False`` that
+  serves the data frame rather than the empty one) is pinned as deliberate:
+  rows the library would have served on the wrong price basis become this
+  vendor's no-data verdict instead (#38).
 
 - **llm_clients: every LLM call can carry a completion-token cap, and perp
   runs always send one** (issue #177). The OpenAI-compatible family (including

@@ -614,7 +614,8 @@ def test_a_partial_service_history_failure_takes_the_no_data_lane(monkeypatch, t
     # Pins a deliberate choice (#137): yfinance 1.4.1's history swallows an
     # auto/back-adjust failure by logging and serving the frame WITHOUT the
     # adjustment (the only flag-gated history swallow reachable at this
-    # codebase's repair=False); un-hidden, that site raises instead, and
+    # codebase's repair=False that serves the data frame rather than the
+    # empty one); un-hidden, that site raises instead, and
     # yf_fetch_unhidden restores the raise to the empty frame — so rows the
     # library would have served on the wrong price basis become this vendor's
     # no-data verdict and the chain moves on. No data over possibly-wrong

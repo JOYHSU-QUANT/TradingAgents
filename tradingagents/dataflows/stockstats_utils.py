@@ -195,7 +195,8 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     deliberately MORE conservative than the library's swallow: the
     auto/back-adjust step (yfinance 1.4.1 ``scrapers/history.py``, the only
     flag-gated ``history`` swallow reachable at this codebase's
-    ``repair=False`` — the repair block's own probes never run here). Hidden,
+    ``repair=False`` that serves the DATA frame rather than the empty one —
+    the repair block's own probes never run here). Hidden,
     the library logs and serves the frame WITHOUT the adjustment; un-hidden
     it raises, and the restore here hands back the empty frame — so rows
     that would arrive on the wrong price basis reach the no-data lane and

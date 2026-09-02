@@ -26,6 +26,7 @@ from tradingagents.dataflows import (
     sosovalue_treasuries,
 )
 from tradingagents.dataflows.config import set_config
+from tradingagents.default_config import DEFAULT_CONFIG
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -1037,8 +1038,10 @@ class TestRouterIntegration:
     def _with_vendor(self, vendor):
         set_config({"data_vendors": {"btc_treasuries": vendor}})
 
-    def teardown_method(self):
-        set_config({"data_vendors": {"btc_treasuries": "none"}})
+    def test_the_default_vendor_is_pinned_to_the_cutover(self):
+        # The 2026-09-02 cutover: silently reverting the shipping default is a
+        # deployment-visible input-surface change and must fail a test.
+        assert DEFAULT_CONFIG["data_vendors"]["btc_treasuries"] == "sosovalue"
 
     def test_routes_to_the_sosovalue_report(self):
         self._with_vendor("sosovalue")

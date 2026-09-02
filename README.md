@@ -413,17 +413,16 @@ and stays crypto-only. Both are still gated on their own category being enabled:
   other recognized risk assets get the BTC data as a labelled market-wide
   demand proxy**; stablecoins and unrecognized symbols get a no-signal note.
 
-Both **ship disabled** (`"economic_calendar": "none"`, `"btc_treasuries":
-"none"`): the SoSoValue key already sits on a deployed box for ETF flows, so
-landing these enabled would change a running deployment's analyst input surface
-the moment the code deploys, with no server-side action to date the change from.
-Flip them together, as one deliberate cutover, and record when — `options_data`
-already had its own dated cutover (2026-08-12), so a separate date here keeps
-the two input-surface changes attributable apart:
+Both shipped disabled and were **cut over to `"sosovalue"` on 2026-09-02** as
+one deliberate, dated flip — `options_data` already had its own dated cutover
+(2026-08-12), so the separate date keeps the two input-surface changes
+attributable apart. The first deployment carrying the flip is the dated
+segmentation point for a running deployment's analyst input surface. To switch
+either back off:
 
 ```python
-config["data_vendors"]["economic_calendar"] = "sosovalue"
-config["data_vendors"]["btc_treasuries"] = "sosovalue"
+config["data_vendors"]["economic_calendar"] = "none"
+config["data_vendors"]["btc_treasuries"] = "none"
 ```
 
 Any data category can be switched off by setting its vendor to `"none"`:

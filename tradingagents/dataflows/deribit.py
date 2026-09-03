@@ -595,7 +595,9 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     this module's own carefully-worded diagnostic: capping there truncated
     "...points at a response-shape change rather than an empty market" one
     clause from the end, cutting off the very distinction the sentence exists to
-    draw.
+    draw. (The router caps a whole raised message where it enters a sentinel
+    the model reads — see ``utils.sanitize_untrusted``; that is its slot to
+    bound, and the log keeps the whole message.)
 
     Several inputs reach the report without this module choosing their contents:
     Deribit's JSON-RPC ``error.message``, a raw candle row, and the caller-supplied

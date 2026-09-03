@@ -148,6 +148,28 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: an optional category's failure no longer writes the raw
+  transport message — request URL and API key included — into the prompt**
+  (issue #171; the #172 and #187 tails). ``route_to_vendor``'s
+  ``DATA_UNAVAILABLE: optional <category> could not be retrieved (...)``
+  sentinel held ``str(first_error)`` whatever the error was, and a
+  ``requests`` message quotes the request URL — FRED's ``api_key`` is a
+  query parameter on it — so one connection failure wrote the key into the
+  LLM context and the persisted report artifacts. The parenthesis now holds
+  the exception's class only for the generic lane (plus the HTTP status it
+  carries, e.g. ``HTTPError: HTTP 400``), and a typed vendor error's message
+  flattened and capped at ``MAX_UNTRUSTED_CHARS``; the full message stays in
+  the warning log. The no-data sentinel's outage clause is capped the same
+  way (yfinance quotes the library's exception, decoded error body
+  included, with no bound of its own). And the nine leaf getters that
+  degrade an untyped failure to one line of prose (the yfinance windowed
+  indicator getter, fundamentals, the three statements, insider
+  transactions, both news getters, and Alpha Vantage's indicator getter) now
+  flatten and cap the message on its way in, so "one line" holds for a
+  pandas message that quotes a frame — newlines and pipes included — and
+  not only for ``KeyError('volume')``. The prefix and the do-not-fabricate
+  tail every reader keys on are byte-identical.
+
 - **dataflows: a daemon's global news no longer freezes after its first
   cycle** (issue #198). ``get_global_news_yfinance`` builds each
   ``yf.Search`` from the configured queries alone — no date in the request —

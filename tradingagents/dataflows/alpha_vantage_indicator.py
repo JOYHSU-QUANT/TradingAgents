@@ -2,7 +2,13 @@ import requests
 
 from .alpha_vantage_common import _make_api_request
 from .errors import NoMarketDataError, UnsupportedIndicatorError, VendorError
-from .utils import INDICATOR_DESCRIPTIONS, data_lag_note, date_refusal
+from .utils import (
+    INDICATOR_DESCRIPTIONS,
+    MAX_UNTRUSTED_CHARS,
+    data_lag_note,
+    date_refusal,
+    sanitize_untrusted,
+)
 
 # Maximum age (calendar days) of the newest indicator row relative to
 # curr_date before the report carries a data-lag note, keyed by the requested
@@ -366,4 +372,6 @@ def get_indicator(
         raise
     except Exception as e:
         print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")
-        return f"Error retrieving {indicator} data: {str(e)}"
+        return (
+            f"Error retrieving {indicator} data: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )

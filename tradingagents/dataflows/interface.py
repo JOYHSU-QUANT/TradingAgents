@@ -19,6 +19,7 @@ from .deribit import get_options_market_data as get_deribit_options_market
 from .errors import (
     NoMarketDataError,
     UnsupportedIndicatorError,
+    VendorError,
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
@@ -31,7 +32,7 @@ from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
 from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
 from .throttle import VENDOR_THROTTLE_LATCH
-from .utils import http_status, sanitize_untrusted
+from .utils import MAX_UNTRUSTED_CHARS, http_status, sanitize_untrusted
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -258,6 +259,28 @@ def is_category_disabled(category: str, method: str = None) -> bool:
     )
 
 
+def _failure_account(e: BaseException) -> str:
+    """The words a failed vendor call contributes to a sentinel the model reads.
+
+    Written into two slots of ``route_to_vendor``: the optional category's
+    ``DATA_UNAVAILABLE`` parenthesis and the no-data sentinel's outage clause.
+    A typed vendor error's message was authored at the boundary, so it rides
+    along — flattened and capped, because not every boundary caps what it
+    quotes (yfinance quotes the library's exception, decoded error body
+    included, #172); a remedy a boundary appends after the vendor's text is
+    the operator's, in the log. Anything else contributes its class only,
+    plus the HTTP status it carries: a ``requests`` message quotes the
+    request URL, API key included (#171). The router's warning log has the
+    full message either way.
+    """
+    if isinstance(e, VendorError):
+        return sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)
+    status = http_status(e)
+    if status is not None:
+        return f"{type(e).__name__}: HTTP {status}"
+    return type(e).__name__
+
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -400,10 +423,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             if first_error is None:
                 first_error = e
             if first_outage is None:
-                # Flattened: the boundary helpers carry a status code only,
-                # but yfinance's mapping quotes the library's exception, and
-                # the sentinel is an LLM prompt (see ``sanitize_untrusted``).
-                first_outage = (vendor, sanitize_untrusted(e))
+                first_outage = (vendor, _failure_account(e))
             continue
         except UnsupportedIndicatorError as e:
             # A caller typo, not a vendor failure: logged without a traceback,
@@ -557,7 +577,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             logger.warning("Optional %s unavailable for %s: %s", category, method, first_error)
             return (
                 f"DATA_UNAVAILABLE: optional {category} could not be retrieved "
-                f"({first_error}). Proceed without it; do not fabricate values."
+                f"({_failure_account(first_error)}). Proceed without it; do not fabricate values."
             )
         raise first_error
 

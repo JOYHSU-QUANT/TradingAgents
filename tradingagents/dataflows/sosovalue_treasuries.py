@@ -43,9 +43,9 @@ would be no signal at all. Individual history failures below that threshold
 are disclosed and retried on the short incomplete-TTL, with the family's
 consecutive-network-failure breaker — and an immediate drain on the first
 429: the plan limit is per-key and per-minute, so once it trips every
-remaining request this sweep would 429 too (a deliberate divergence from the
-ETF module's decided keep-trying-after-429 behaviour, which predates the key
-being shared by three fan-outs). The holdings-order assumption is verified
+remaining request this sweep would 429 too (the ETF fund loop drains the same
+way since #189, when a 429 started parking the shared request budget for a
+window). The holdings-order assumption is verified
 after each fetch — the fetched companies' latest holdings must be
 non-increasing in listing order — and a violation downgrades the report's
 "largest holders" claim to "ordering unverified" instead of asserting a

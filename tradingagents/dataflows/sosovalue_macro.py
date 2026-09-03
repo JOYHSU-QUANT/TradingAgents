@@ -49,9 +49,9 @@ non-fatally, with the ETF module's consecutive-network-failure breaker so a
 hanging network cannot burn a full timeout per event. A 429 goes further
 than the breaker: the plan limit is per-key and per-minute, so the first one
 proves every remaining request in this sweep would also 429 — the rest are
-drained into ``events_failed`` unattempted (this deliberately diverges from
-the ETF module's decided keep-trying-after-429 behaviour, which predates the
-key being shared by three fan-outs). A tracked name whose history comes back
+drained into ``events_failed`` unattempted (the ETF fund loop drains the same
+way since #189: a 429 parks the shared request budget for a window, so any
+further request would first pay it). A tracked name whose history comes back
 *empty* is a different failure from either: the API answers an unknown name
 with 200 + an empty list, so emptiness means the name was renamed or dropped
 upstream and will not heal by retrying — those land in ``events_unknown``,

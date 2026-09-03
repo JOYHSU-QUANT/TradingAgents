@@ -27,9 +27,11 @@ the Farside vendor does with its live table.
 
 One refresh is 2 + N requests (aggregate summary, fund list, then one history
 per fund — N is 13 for BTC today) against a 20 req/min plan limit. A single
-asset refresh fits; two assets refreshing in the same minute can trip the
-limit for the trailing fund histories, which is why per-fund failures are
-non-fatal: the aggregate summary alone decides vendor success, and a partial
+asset refresh fits; two assets (or two modules) refreshing in the same minute
+would overrun it, which the shared request budget in ``sosovalue_common``
+(#189) now turns into a wait rather than a 429 — the per-fund failures stay
+non-fatal for the 429s that reach us anyway (another process on the key):
+the aggregate summary alone decides vendor success, and a partial
 (or absent) issuer breakdown is disclosed in the report rather than failing
 the call. Only an aggregate failure (or a rejected key on any request) raises,
 letting the router fall through to the next vendor. Two exceptions to trying

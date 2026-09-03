@@ -384,10 +384,14 @@ class _EngineDecisionProvider:
         # three surfaces: ``common.prompt_regime``): once, the first time this
         # instance builds one through, and again only when the triple flips
         # mid-run (a section appearing or disappearing) — silent in between.
-        # AFTER the payload write, the last thing here that can fail: a cycle
+        # AFTER the payload write, the last thing HERE that can fail: a cycle
         # that dies on the write leaves no ai_inputs row, and a line logged
         # for it would claim a bucket ``validate`` never counts while the
-        # first cycle that does reach the store stayed silent.
+        # first cycle that does reach the store stayed silent. The driver's
+        # own ai_inputs insert comes after this method returns and is not
+        # covered (accepted 2026-09-03): a failure there is the non-retryable
+        # bug lane — an ERROR traceback beside this line, api_failed with an
+        # empty error_type — not a quiet cycle the line could be mistaken for.
         regime = (PROMPT_VERSION, shape, fingerprint)
         if regime != self._logged_regime:
             from ..common.prompt_regime import prompt_regime_line

@@ -50,6 +50,7 @@ from .account import (
 from .cloid_registry import get_cloid_by_hex, get_cloid_by_logical, insert_cloid_mapping
 from .decisions import (
     PromptRegime,
+    UnstampedInput,
     ai_inputs_without_format_fingerprint,
     find_in_progress_attempt,
     get_decision_attempt,
@@ -155,6 +156,7 @@ __all__ = [
     "ROLE_TO_ORDER_TYPE",
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
+    "UnstampedInput",
     "active_protection_order",
     "ai_inputs_without_format_fingerprint",
     "count_orders_by_role",

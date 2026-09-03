@@ -164,7 +164,9 @@ def test_a_payload_that_no_longer_hashes_to_its_row_is_not_trusted(tmp_path):
     db.close()
 
 
-def test_a_payload_without_a_format_block_is_unreadable_not_guessed(tmp_path):
+def test_a_payload_without_a_format_block_is_unreadable_not_guessed(tmp_path, caplog):
+    import logging
+
     no_key, h1 = _payload(tmp_path, "no-key", body={"coin": "BTC", "context_text": "ctx"})
     wrong_type, h2 = _payload(tmp_path, "wrong-type", body={"format_instructions": ["x"]})
     not_json, h3 = _payload(tmp_path, "not-json", body=b"not json at all")
@@ -176,11 +178,17 @@ def test_a_payload_without_a_format_block_is_unreadable_not_guessed(tmp_path):
             (_V4, _SHAPE, None, not_json, h3),
         ],
     )
-    report = backfill_format_fingerprints(db, run_id="r")
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.persistence.backfill"):
+        report = backfill_format_fingerprints(db, run_id="r")
     assert report == FingerprintBackfill(
         stamped=0, pre_v10=0, missing_payload=0, unreadable=3, unverified=0
     )
     assert _fingerprints(db) == [None] * 3
+    # Each sub-case names its cause: the summary's one counter is not the
+    # operator's only clue to which file is wrong and how.
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("carries no format block" in m for m in messages) == 2  # no key / not JSON
+    assert sum("non-text format block" in m for m in messages) == 1
     db.close()
 
 

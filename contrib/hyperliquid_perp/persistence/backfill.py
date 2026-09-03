@@ -14,16 +14,19 @@ by hand through ``export --backfill-format-fingerprint`` (RUNBOOK §6),
 against a store already at v11 — the command refuses an older one.
 
 Trust rules, per row — a row that fails one stays ``NULL`` and is counted
-under that reason, never guessed:
+under that reason (:data:`Reason`), never guessed:
 
 - ``pre_v10``: the row has no ``context_shape`` (or no ``prompt_version``)
   either. The three keys are one set (``DecisionInput``); a row carrying a
   fingerprint but no shape would be a half-stamped triple the daemon never
   writes, and ``validate`` would print it as a NEW bucket instead of folding
-  one. The writer refuses it too.
+  one. The writer refuses it too. ACCEPTED STATE (decided 2026-09-03): such
+  rows stay in the ``n/a`` bucket for good — no companion tool rebuilds the
+  shape from the payload's text. The running run (``paper-BTC-3``) started
+  on v10, so only archived runs carry them.
 - ``missing_payload``: no path on the row, or no file at it.
 - ``unreadable``: the file cannot be read (permissions), is not JSON, or
-  carries no string ``format_instructions``.
+  carries no string ``format_instructions`` — each logged with its cause.
 - ``unverified``: the file's bytes do not hash to the row's own
   ``input_payload_hash`` (``common.digest.payload_digest``) — edited,
   truncated, restored from elsewhere — or the row recorded no hash. The row
@@ -45,12 +48,19 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast, get_args
 
 from ..common.digest import payload_digest
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["FingerprintBackfill", "backfill_format_fingerprints"]
+__all__ = ["FingerprintBackfill", "Reason", "backfill_format_fingerprints"]
+
+# Why a row was left NULL. ONE vocabulary: the classifier returns it, the
+# counts are seeded from it, and ``FingerprintBackfill`` carries one field
+# per member — so a reason added in one place and not the others is a type
+# error, not a KeyError on an untested branch.
+Reason = Literal["pre_v10", "missing_payload", "unreadable", "unverified"]
 
 
 @dataclass(frozen=True)
@@ -72,37 +82,54 @@ class FingerprintBackfill:
         )
 
 
-def _recorded_format_text(row) -> tuple[str | None, str]:
-    """The payload's ``format_instructions``, or ``(None, <reason left NULL>)``."""
-    if row["context_shape"] is None or row["prompt_version"] is None:
-        return None, "pre_v10"
-    path = row["input_payload_path"]
+def _recorded_format_text(row) -> str | Reason:
+    """The payload's ``format_instructions`` text, or the :data:`Reason` it stays NULL.
+
+    ``row`` is a ``repository.UnstampedInput``. The two outcomes cannot
+    collide: a format block is never one of the four reason words.
+    """
+    if row.context_shape is None or row.prompt_version is None:
+        return "pre_v10"
+    path = row.input_payload_path
     if path is None:
-        return None, "missing_payload"
+        return "missing_payload"
     try:
         raw = Path(path).read_bytes()
     except FileNotFoundError:
-        return None, "missing_payload"
+        return "missing_payload"
     except OSError as exc:
-        logger.warning("payload %s for %s could not be read: %s", path, row["input_id"], exc)
-        return None, "unreadable"
+        logger.warning("payload %s for %s could not be read: %s", path, row.input_id, exc)
+        return "unreadable"
     digest = payload_digest(raw)
-    if row["input_payload_hash"] != digest:
+    if row.input_payload_hash != digest:
         logger.warning(
             "payload %s does not hash to the digest recorded on %s (%s vs %s) — left NULL",
             path,
-            row["input_id"],
+            row.input_id,
             digest,
-            row["input_payload_hash"],
+            row.input_payload_hash,
         )
-        return None, "unverified"
+        return "unverified"
     try:
         text = json.loads(raw)["format_instructions"]
-    except (ValueError, KeyError, TypeError):
-        return None, "unreadable"
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "payload %s for %s carries no format block (%s: %s) — left NULL",
+            path,
+            row.input_id,
+            type(exc).__name__,
+            exc,
+        )
+        return "unreadable"
     if not isinstance(text, str):
-        return None, "unreadable"
-    return text, ""
+        logger.warning(
+            "payload %s for %s has a non-text format block (%s) — left NULL",
+            path,
+            row.input_id,
+            type(text).__name__,
+        )
+        return "unreadable"
+    return text
 
 
 def backfill_format_fingerprints(db, *, run_id: str) -> FingerprintBackfill:
@@ -110,14 +137,15 @@ def backfill_format_fingerprints(db, *, run_id: str) -> FingerprintBackfill:
     from ..domains.perp.target_decision import format_fingerprint
     from . import repository as repo
 
-    counts = {"pre_v10": 0, "missing_payload": 0, "unreadable": 0, "unverified": 0}
+    reasons: tuple[Reason, ...] = get_args(Reason)
+    counts: dict[Reason, int] = dict.fromkeys(reasons, 0)
     stamps: list[tuple[str, str]] = []
     for row in repo.ai_inputs_without_format_fingerprint(db.conn, run_id):
-        text, why_not = _recorded_format_text(row)
-        if text is None:
-            counts[why_not] += 1
+        outcome = _recorded_format_text(row)
+        if outcome in reasons:
+            counts[cast(Reason, outcome)] += 1
             continue
-        stamps.append((row["input_id"], format_fingerprint(text)))
+        stamps.append((row.input_id, format_fingerprint(outcome)))
     stamped = 0
     if stamps:
         with db.transaction() as conn:

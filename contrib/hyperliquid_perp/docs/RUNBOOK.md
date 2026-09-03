@@ -183,10 +183,12 @@ payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的
 `common/prompt_regime.py` 一個渲染函式，同一個字串可以 grep），改 YAML 後部署前就能看到會落在哪個
 桶——但注意它印的 `context_shape` **少一段**：prompt v4 起 paper／live daemon 的列一律多帶 `|position`
 （倉位段從本地帳本來，一次性 CLI 沒有帳本、維持 position-blind），比對時把這一段補上再比。
-**daemon 自己也會說**（issue #163）：paper／live 第一個成功組出 prompt 的 cycle 會在 log 印同一行
-`prompt_regime: …`（INFO，`cli._provider`），之後**只在三鍵翻桶時再印一次**——volume profile 段因
-歷史不夠被跳過、倉位段因權益 ≤ 0 被省略（見 §7）都算翻桶；一整段 run 沒翻過就只有啟動那一行。
-改 YAML 重啟後看 journald 這一行就知道落在哪個桶，不用跑 `validate`。
+**daemon 自己也會說**（issue #163）：paper／live 第一個組出 prompt 並寫下 payload 的 cycle 會在 log 印
+同一行 `prompt_regime: …`（INFO，`cli._provider`），之後**只在三鍵翻桶時再印一次、仍是 INFO**——volume
+profile 段因歷史不夠被跳過、倉位段因權益 ≤ 0 被省略（見 §7）都算翻桶，多半是資料驅動、不是告警；一整段
+run 沒翻過就只有啟動那一行。改 YAML 重啟後看 journald 這一行就知道落在哪個桶，不用跑 `validate`。
+（這行印在 payload 寫入成功後、`ai_inputs` 列寫入前；後者失敗是 §7 那種非 Retryable bug，同時間會有
+ERROR traceback，該 cycle 記 `api_failed`——所以看到這行但 `validate` 桶數少一個，先找那個 traceback。）
 它只取結構——段落標題、指標列名、volume profile 段有沒有——**不取**標籤裡的數字
 （`Candles: 200 x 4h`、`30d z-score`）也不取每 cycle 隨資料有無變動的 `Mid:`／`Premium:`
 行，否則每個 cycle 自成一段。
@@ -284,7 +286,7 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
 | 最新 CSV | `<db 目錄>/exports/paper-BTC/` + `manifest.json` | 每 cycle 更新 | `export_failed` 只記錄不影響交易 state；連續失敗查磁碟/權限 |
 | `REPLAY_UNVERIFIED.json` | 同上 export 目錄 | **不存在** | 存在 = 該批 CSV 未經 replay 驗證，先調查 store 再相信數字 |
 | 中途健檢 | `python -m contrib.hyperliquid_perp validate --run-id paper-BTC` | exit 4（一致、cycles 未滿） | exit 5 = integrity failure，停下來調查 |
-| 落在哪個 prompt 桶 | stderr log 的 `prompt_regime: prompt_version=… context_shape=… format_fingerprint=…`（INFO） | 啟動後第一個成功的 cycle 印一行；之後整段 run 不再出現 | 中途又印一行 = 三鍵翻桶了（段落出現／消失，見 §4 與 §7 的 position 列）；對照 `validate` 的 `prompt_regime:` 行，判讀時分段讀 |
+| 落在哪個 prompt 桶 | stderr log 的 `prompt_regime: prompt_version=… context_shape=… format_fingerprint=…`（INFO） | 啟動後第一個寫下 payload 的 cycle 印一行；之後整段 run 不再出現 | 中途又印一行 = 三鍵翻桶了（段落出現／消失，見 §4 與 §7 的 position 列）；對照 `validate` 的 `prompt_regime:` 行，判讀時分段讀 |
 
 **Protection-only 模式**（log 會明講）：不開新 decision cycle，但 SL/TP 與監控
 持續；倉位被 SL/TP 了結後程序會做最後 export 並以 exit 1 自動結束。三種成因、
@@ -360,7 +362,9 @@ python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir expo
 回填在 export 之前跑，CSV 直接帶新值；stderr 印一行
 `format_fingerprint backfill for 'paper-BTC-3': stamped=N pre_v10=N missing_payload=N unreadable=N unverified=N`。
 規則：只寫 NULL 格（daemon 寫過的值永遠不會被重算蓋掉，第二次跑 `stamped=0`）；`pre_v10`＝連
-`context_shape` 都沒有的列，**不填**（三鍵是一組，半組會變成 `validate` 上多出來的新桶）；payload 檔必須
+`context_shape` 都沒有的列，**不填**（三鍵是一組，半組會變成 `validate` 上多出來的新桶）——**這些列永久留在
+`n/a` 桶是接受的現況**（2026-09-03 拍板：不另做 shape 回填工具；paper-BTC-3 自 v10 起跑，只有已封存的
+舊 run 有這種列）；payload 檔必須
 存在、讀得到、**且** bytes 仍 hash 到該列的 `input_payload_hash`（被改過、截斷、從別處復原的檔不算證據）、
 JSON 裡要有字串 `format_instructions`——不符的列保持 NULL 並計數，不猜。回填後 `validate` 對 format 段
 沒變過的 run 只剩一行 `prompt_regime:`。它不是 migration（schema 步驟不做檔案 I/O、缺檔要容忍），對象是

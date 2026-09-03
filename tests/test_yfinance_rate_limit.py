@@ -293,6 +293,26 @@ def test_a_call_that_queued_behind_the_refusal_is_dated_when_the_lock_is_held(fr
 
 
 @pytest.mark.unit
+def test_an_exhausted_ladder_arms_before_it_releases_the_lock(frozen_clock):
+    # The other half of the same race: the refused attempt must arm while it
+    # still holds the lock, or the call queued behind it can take its send
+    # instant first and then keep a latch it had in fact outlived.
+    armed_at_release = []
+
+    class _Lock:
+        def __enter__(self):
+            pass
+
+        def __exit__(self, *exc):
+            armed_at_release.append(su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY))
+            return False
+
+    with pytest.raises(VendorRateLimitError):
+        su.yf_retry(mock.Mock(side_effect=YFRateLimitError()), max_retries=0, lock=_Lock())
+    assert armed_at_release == [True]
+
+
+@pytest.mark.unit
 def test_a_retry_sent_after_the_arm_is_the_later_evidence(frozen_clock, monkeypatch):
     # Per attempt, not per call: the first attempt is throttled and a sibling
     # arms during it; the retry goes out after that arm and is served — Yahoo

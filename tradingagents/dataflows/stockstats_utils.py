@@ -121,7 +121,18 @@ def yf_retry(func, max_retries=3, base_delay=2.0, *, lock=None):
         try:
             with held:
                 sent_at = time.monotonic()
-                result = func()
+                try:
+                    result = func()
+                except YFRateLimitError:
+                    if attempt == max_retries:
+                        # Armed before the lock is released: the call queued
+                        # behind this refused attempt then dates its send
+                        # after the arm, and its answer is the later
+                        # evidence — armed after the release, that call
+                        # could take its instant first and keep a latch it
+                        # had outlived.
+                        _YF_THROTTLE_LATCH.arm(_YF_LATCH_KEY)
+                    raise
         except YFRateLimitError as e:
             if attempt < max_retries:
                 delay = base_delay * (2**attempt)
@@ -130,7 +141,6 @@ def yf_retry(func, max_retries=3, base_delay=2.0, *, lock=None):
                 )
                 time.sleep(delay)
             else:
-                _YF_THROTTLE_LATCH.arm(_YF_LATCH_KEY)
                 raise YFinanceRateLimitError(
                     f"Yahoo Finance rate limited the request and {max_retries} "
                     f"retries did not clear it: {e}"

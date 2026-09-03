@@ -357,8 +357,9 @@ def route_to_vendor(method: str, *args, **kwargs):
 
         # The send instant the latch compares against (#153). Taken here, so
         # an impl that waits before sending would date its request early —
-        # the one that does (SoSoValue's request budget) is a type the
-        # router never latches, so nothing is misdated today.
+        # the ones that do (SoSoValue's request budget; yfinance's un-hide
+        # lock and backoff ladder) raise types the router never latches, so
+        # nothing is misdated today.
         sent_at = time.monotonic()
         try:
             result = impl_func(*args, **kwargs)

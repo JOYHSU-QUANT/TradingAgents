@@ -155,13 +155,17 @@ Breaking changes within the 0.x line are called out explicitly.
   sentinel held ``str(first_error)`` whatever the error was, and a
   ``requests`` message quotes the request URL — FRED's ``api_key`` is a
   query parameter on it — so one connection failure wrote the key into the
-  LLM context and the persisted report artifacts. The parenthesis now holds
-  the exception's class only for the generic lane (plus the HTTP status it
-  carries, e.g. ``HTTPError: HTTP 400``), and a typed vendor error's message
-  flattened and capped at ``MAX_UNTRUSTED_CHARS``; the full message stays in
-  the warning log. The no-data sentinel's outage clause is capped the same
-  way (yfinance quotes the library's exception, decoded error body
-  included, with no bound of its own). And the nine leaf getters that
+  LLM context and the persisted report artifacts. The parenthesis now holds,
+  for the generic lane, the words the no-data outage clause already used for
+  the same fact — ``could not be reached: ConnectionError``, ``answered HTTP
+  400`` — read off the status and the class, never the text; and for a
+  typed vendor error its message flattened and capped at
+  ``MAX_UNTRUSTED_CHARS``; the full message stays in the warning log. FRED's
+  400 is now a typed ``FredRequestError`` so its reason ("Bad value for
+  variable series_id") keeps riding the sentinel. The no-data sentinel's
+  outage clause and its detail clause are capped the same way (yfinance
+  quotes the library's exception, decoded error body included, with no
+  bound of its own). And the nine leaf getters that
   degrade an untyped failure to one line of prose (the yfinance windowed
   indicator getter, fundamentals, the three statements, insider
   transactions, both news getters, and Alpha Vantage's indicator getter) now

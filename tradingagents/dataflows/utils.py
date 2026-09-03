@@ -261,7 +261,8 @@ def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bo
     spaces the translation introduces nor the ones already in the fragment can
     survive as a run or rebuild a line break inside a table cell. ``limit``
     caps the result. Pass it where the fragment is ISOLATED (an echoed raw
-    row or argument in a raised message), and where a whole message is about
+    row or argument in a raised message — not a vendor's whole reason, which
+    the router caps at its slot), and where a whole message is about
     to enter text the MODEL reads (a sentinel slot, a leaf's degrade line):
     there the vendor's share of the prompt has to be bounded, and what the
     cap drops is the operator's to read in a log (#171, #172). Not when

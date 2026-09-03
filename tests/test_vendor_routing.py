@@ -33,6 +33,7 @@ from tradingagents.dataflows.errors import (
 )
 from tradingagents.dataflows.symbol_utils import NoMarketDataError
 from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
+from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS
 
 
 def _reset_config():
@@ -861,7 +862,8 @@ class OptionalSentinelTests(unittest.TestCase):
         self.assertEqual(
             out,
             "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
-            "(ConnectionError). Proceed without it; do not fabricate values.",
+            "(could not be reached: ConnectionError). Proceed without it; do not "
+            "fabricate values.",
         )
         # The operator still gets the whole message, where it always was.
         self.assertIn("api_key=SECRET-KEY", logged)
@@ -878,8 +880,13 @@ class OptionalSentinelTests(unittest.TestCase):
             )
         )
         out, _ = self._macro(refused)
-        self.assertIn("could not be retrieved (HTTPError: HTTP 400).", out)
+        # The same words the no-data outage clause uses for the same fact.
+        self.assertIn("could not be retrieved (answered HTTP 400).", out)
         self.assertNotIn("SECRET-KEY", out)
+
+    def test_a_typed_error_with_no_message_contributes_its_class(self):
+        out, _ = self._macro(_raises(VendorUnavailableError()))
+        self.assertIn("could not be retrieved (VendorUnavailableError).", out)
 
     def test_a_vendor_errors_message_is_flattened_and_capped(self):
         # A typed error's message was authored at the boundary, so it stays —
@@ -912,4 +919,19 @@ class OptionalSentinelTests(unittest.TestCase):
         clause = out[out.index(head) + len(head) : out.index(tail)]
         self.assertTrue(clause.startswith("Yahoo Finance answered without data: Failed to parse"))
         self.assertTrue(clause.endswith("..."))
-        self.assertLessEqual(len(clause), interface.MAX_UNTRUSTED_CHARS + len("..."))
+        self.assertLessEqual(len(clause), MAX_UNTRUSTED_CHARS + len("..."))
+
+    def test_the_no_data_detail_slot_is_flattened_and_capped_too(self):
+        # The third slot a vendor writes into: the detail quotes what the
+        # vendor answered (a column list, a date), so the same treatment.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance"}})
+
+        def _no_rows(symbol, *a, **k):
+            raise NoMarketDataError(symbol, symbol, _FORGED_MESSAGE)
+
+        with _chain("get_stock_data", {"yfinance": _no_rows}):
+            out = _stock()
+        head = "NO_DATA_AVAILABLE: No usable market data for 'AAPL' from any configured vendor ("
+        tail = "). The symbol may be invalid, delisted, not covered, or the vendor returned stale data."
+        self.assertIn(head, out)
+        _assert_one_capped_line(out[out.index(head) + len(head) : out.index(tail)], "")

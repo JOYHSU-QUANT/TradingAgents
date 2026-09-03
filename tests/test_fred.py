@@ -324,13 +324,23 @@ class FredRequestBoundaryTests(unittest.TestCase):
         self.assertIn("Bad value for variable series_id", str(ctx.exception))
         self.assertIsInstance(ctx.exception, ValueError)  # what this raise used to be
 
-    def _route_macro_through_real_fred(self):
+    def test_a_400_whose_json_body_is_not_an_object_keeps_the_text(self):
+        # A WAF in front of FRED can answer 400 with JSON that is not an
+        # object; the reason is then the body text, still typed.
+        with (
+            mock.patch.object(fred.requests, "get", _patched_get("[]", status_code=400)),
+            self.assertRaises(fred.FredRequestError) as ctx,
+        ):
+            fred._request("series", {"series_id": "NOPE"})
+        self.assertEqual(str(ctx.exception), "FRED request failed: []")
+
+    def _route_macro_through_real_fred(self, indicator="cpi"):
         config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
         self.addCleanup(
             setattr, config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG)
         )
         set_config({"data_vendors": {"macro_data": "fred"}})
-        return interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", 365)
+        return interface.route_to_vendor("get_macro_indicators", indicator, "2026-06-01", 365)
 
     def test_a_400s_reason_reaches_the_optional_sentinel(self):
         # End-to-end through the REAL getter and request boundary: the reason
@@ -339,7 +349,7 @@ class FredRequestBoundaryTests(unittest.TestCase):
         # the model with the bare word "ValueError" (#171 review).
         bad = json.dumps({"error_message": "Bad value for variable series_id\n## x"})
         with mock.patch.object(fred.requests, "get", _patched_get(bad, status_code=400)):
-            out = self._route_macro_through_real_fred()
+            out = self._route_macro_through_real_fred("NOPE")
         self.assertTrue(out.startswith("DATA_UNAVAILABLE: optional macro_data"))
         self.assertIn("FRED request failed: Bad value for variable series_id x", out)
 

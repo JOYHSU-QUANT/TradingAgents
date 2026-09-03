@@ -268,16 +268,39 @@ def _failure_account(e: BaseException) -> str:
     along — flattened and capped, because not every boundary caps what it
     quotes (yfinance quotes the library's exception, decoded error body
     included, #172); a remedy a boundary appends after the vendor's text is
-    the operator's, in the log. Anything else contributes its class only,
-    plus the HTTP status it carries: a ``requests`` message quotes the
-    request URL, API key included (#171). The router's warning log has the
-    full message either way.
+    the operator's, in the log. So does the caller's own indicator mistake,
+    whose message is the remedy. Anything else is the generic lane's and
+    contributes ``_generic_failure_words`` — never its text: a ``requests``
+    message quotes the request URL, API key included (#171). The router's
+    warning log has the full message either way.
     """
-    if isinstance(e, VendorError):
-        return sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)
+    if isinstance(e, (VendorError, UnsupportedIndicatorError)):
+        # A typed error raised with no message would render as "()".
+        return sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS) or type(e).__name__
+    return _generic_failure_words(e)
+
+
+def _generic_failure_words(e: BaseException) -> str:
+    """The words for an exception the generic lane caught, by status and class.
+
+    One vocabulary for both sentinels — the no-data outage clause and the
+    optional parenthesis read the same 503 as "answered HTTP 503" rather
+    than one of them saying ``HTTPError: HTTP 503``. The status first, read
+    off the exception the library-neutral way (``http_status``): a 401/403
+    is the vendor refusing this client, any other status is its answer. No
+    status and a transport exception (every ``requests`` and curl_cffi
+    failure is an ``OSError``; the ``ValueError``-flavoured ones and a
+    ``requests.HTTPError`` with no response are not the wire) is the vendor
+    not reached. Anything else — a library bug — is its class name. Which of
+    these count as an OUTAGE for the no-data verdict is the lane's decision,
+    not this function's.
+    """
     status = http_status(e)
     if status is not None:
-        return f"{type(e).__name__}: HTTP {status}"
+        refused = ", refusing this client" if status in (401, 403) else ""
+        return f"answered HTTP {status}{refused}"
+    if isinstance(e, OSError) and not isinstance(e, (ValueError, requests.HTTPError)):
+        return f"could not be reached: {type(e).__name__}"
     return type(e).__name__
 
 
@@ -459,17 +482,14 @@ def route_to_vendor(method: str, *args, **kwargs):
             # boundary leaves alone), as is a requests HTTPError with no
             # status to read; a ValueError-flavoured requests exception
             # (MissingSchema, InvalidURL, JSONDecodeError) is a bug or an
-            # answer, not the wire. The status or the class only, never the text: a
-            # requests message quotes the request URL, API key included.
+            # answer, not the wire. The words are ``_generic_failure_words``'
+            # — the status or the class only, never the text: a requests
+            # message quotes the request URL, API key included.
             if first_outage is None and isinstance(e, OSError) and not isinstance(e, ValueError):
                 status = http_status(e)
-                if status is None:
-                    if not isinstance(e, requests.HTTPError):
-                        first_outage = (vendor, f"could not be reached: {type(e).__name__}")
-                elif status >= 500:
-                    first_outage = (vendor, f"answered HTTP {status}")
-                elif status in (401, 403):
-                    first_outage = (vendor, f"answered HTTP {status}, refusing this client")
+                unreached = status is None and not isinstance(e, requests.HTTPError)
+                if unreached or (status is not None and (status >= 500 or status in (401, 403))):
+                    first_outage = (vendor, _generic_failure_words(e))
             continue
         # The vendor returned: drop a deadline that predates this request (a
         # lapsed one), keep the one a sibling thread armed while it was in
@@ -508,8 +528,11 @@ def route_to_vendor(method: str, *args, **kwargs):
         resolved = "" if canonical == sym else f" (resolved to '{canonical}')"
         # Surface the typed error's detail (e.g. "latest row is 2025-06-11 ...
         # stale") so the agent sees the specific reason — invalid symbol, no
-        # coverage, or stale data — not just a generic "unavailable".
-        reason = f" ({last_no_data.detail})" if last_no_data.detail else ""
+        # coverage, or stale data — not just a generic "unavailable". The
+        # detail quotes what the vendor answered (a column list, a date), so
+        # it takes the same flatten-and-cap as the other two slots.
+        detail = sanitize_untrusted(last_no_data.detail, limit=MAX_UNTRUSTED_CHARS)
+        reason = f" ({detail})" if detail else ""
         if first_outage is not None:
             down_vendor, outage = first_outage
             # Chain-order neutral on purpose: the vendor that was down may be

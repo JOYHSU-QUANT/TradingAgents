@@ -953,8 +953,8 @@ def test_an_untyped_bulk_failure_renders_one_line_and_fetches_once(monkeypatch):
 # Every yfinance leaf with a broad handler and the prose line it degrades to,
 # checked against the taxonomy table above minus the one leaf without a broad
 # handler (get_stock_data propagates everything), so a newly registered leaf
-# with a handler of its own cannot ship without a row here. The seam is the
-# taxonomy table's, except where the broad handler sits below a different one.
+# cannot ship without either a row here or a place in that exclusion (if it,
+# too, propagates everything). The seam is the taxonomy table's.
 _PROSE_LEAF_PREFIXES = {
     "get_indicators": "Error retrieving rsi values for AAPL: ",
     "get_fundamentals": "Error retrieving fundamentals for AAPL: ",
@@ -965,7 +965,6 @@ _PROSE_LEAF_PREFIXES = {
     "get_global_news": "Error fetching global news: ",
     "get_insider_transactions": "Error retrieving insider transactions for AAPL: ",
 }
-_PROSE_SEAM_OVERRIDES = {"get_indicators": (yfin, "load_ohlcv")}
 
 
 @pytest.mark.unit
@@ -975,13 +974,17 @@ def test_the_prose_table_covers_every_leaf_but_the_one_without_a_handler():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("method", sorted(_PROSE_LEAF_PREFIXES))
-def test_every_prose_leaf_renders_an_untyped_failure_as_one_capped_line(monkeypatch, method):
+def test_every_prose_leaf_renders_an_untyped_failure_as_one_capped_line(
+    monkeypatch, tmp_path, method
+):
     # The siblings' broad handlers rendered str(e) raw: a multi-line message
     # came back as several lines, a hostile one with its markdown intact, a
     # long one whole. Same flatten-and-cap as the windowed getter (#187).
     prefix = _PROSE_LEAF_PREFIXES[method]
     seam, args = _YFINANCE_LEAF_CALLS[method]
-    seam = _PROSE_SEAM_OVERRIDES.get(method, seam)
+    # An empty cache dir, so the OHLCV leaf reaches the seam rather than a
+    # frame another test cached (see _check_impl_propagates).
+    set_config({"data_cache_dir": str(tmp_path)})
     monkeypatch.setattr(*seam, mock.Mock(side_effect=RuntimeError(_FORGED_MESSAGE)))
     out = interface.VENDOR_METHODS[method]["yfinance"](*args)
     _assert_one_capped_line(out, prefix)

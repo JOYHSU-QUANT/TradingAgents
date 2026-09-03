@@ -116,7 +116,8 @@ class FredRequestError(VendorError, ValueError):
     one thing that lets the analyst pick a better series — rides into the
     optional category's sentinel as vendor text, where an untyped exception
     contributes its class name only (#171). Also a ``ValueError``, like
-    ``FredNotConfiguredError``, which is what this raise used to be.
+    ``FredNotConfiguredError``, which is what ``_request``'s 400 raise used
+    to be.
     """
 
 
@@ -167,13 +168,15 @@ def _request(path: str, params: dict) -> dict:
     response = requests.get(f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT)
     # FRED returns 400 with a JSON {"error_message": ...} for unknown series IDs
     # or malformed params; turn that into a clear, actionable error. The
-    # reason is FRED's text, flattened where it enters the message like every
-    # boundary's (the router caps it in the sentinel; the log keeps it whole).
+    # reason is FRED's text, flattened (uncapped) where it enters the message
+    # like every boundary's; the router caps it at the sentinel. A 400 whose
+    # body is JSON but not an object (a WAF's) keeps the text as the reason.
     if response.status_code == 400:
         try:
-            message = response.json().get("error_message", response.text)
+            body = response.json()
         except ValueError:
-            message = response.text
+            body = None
+        message = body.get("error_message", response.text) if isinstance(body, dict) else response.text
         raise FredRequestError(f"FRED request failed: {sanitize_untrusted(message)}")
     raise_for_http_status(response, "FRED")
     return json_body_or_outage(response, "FRED")

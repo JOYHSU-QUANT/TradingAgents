@@ -125,9 +125,11 @@ COUNTRY_CODE = "US"
 # hangs instead of failing fast turns one BTC refresh into up to 13 sequential
 # 30-second timeouts (~7 minutes) inside a single analyst tool call — and the
 # post-breaker outcome (disclosed-incomplete breakdown on the short TTL) is
-# identical to riding the brownout out. API-level failures (429s, structural
-# breaks) neither trip nor survive the counter: the server answered, so the
-# next history is still worth its own try.
+# identical to riding the brownout out. A structural break neither trips nor
+# survives the counter: the server answered, so the next history is still
+# worth its own try. A 429 ends the loop outright instead (see the fund loop
+# in ``_fetch_all``): it parks the shared request budget for a window, so
+# the next try would cost a minute, not an instant.
 MAX_CONSECUTIVE_NETWORK_FAILURES = 3
 
 # The documented per-request row cap. The Demo plan's ~30-day window holds at
@@ -626,9 +628,10 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
     type and propagates, so a mid-batch 401 can never be absorbed as a fund
     failure. A structural break is logged at ERROR with a traceback — the
     breakdown would otherwise stay silently incomplete refresh after refresh
-    — while a transient failure stays a warning. A transport-level failure is
-    logged here like any other transient, then re-raised so the caller's
-    consecutive-failure breaker can count the streak.
+    — while a transient failure stays a warning. A transport-level failure
+    and a 429 are logged here like any other transient, then re-raised: the
+    caller's consecutive-failure breaker counts the transport streak, and
+    the caller drains the sweep on the 429 (see ``_fetch_all``).
     """
     try:
         rows = _parse_fund_rows(
@@ -637,7 +640,7 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
         )
         return {"name": name, "rows": rows}
     except (requests.RequestException, SoSoValueRateLimitError, SoSoValueError) as e:
-        if isinstance(e, SoSoValueError):
+        if isinstance(e, SoSoValueError) and not isinstance(e, SoSoValueRateLimitError):
             logger.error(
                 "SoSoValue %s fund %s history failed structurally "
                 "(breakdown disclosed as incomplete) — the client "
@@ -647,17 +650,15 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
                 e,
                 exc_info=True,
             )
-        else:
-            logger.warning(
-                "SoSoValue %s fund %s history failed (breakdown will be "
-                "disclosed as incomplete): %s",
-                asset,
-                ticker,
-                e,
-            )
-        if isinstance(e, requests.RequestException):
-            raise
-        return None
+            return None
+        logger.warning(
+            "SoSoValue %s fund %s history failed (breakdown will be "
+            "disclosed as incomplete): %s",
+            asset,
+            ticker,
+            e,
+        )
+        raise
 
 
 def _fetch_all(asset: str, cached: dict | None) -> dict:
@@ -729,6 +730,26 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
         for ticker, name in remaining:
             try:
                 fund = _fetch_one_fund(asset, ticker, name)
+            except SoSoValueRateLimitError:
+                # A 429 parks the shared request budget for a full window
+                # (#189), so every remaining history would first sleep that
+                # window and then, on a persistently throttled key, 429
+                # again: N funds, N minutes inside one analyst tool call.
+                # Drain instead, like the family's fetch_each — the rest is
+                # disclosed as incomplete and retried on the short TTL. This
+                # replaces the PR #19 per-fund retry, which predates both
+                # the drain and the budget.
+                skipped = [ticker, *(t for t, _ in remaining)]
+                funds_failed.extend(skipped)
+                logger.warning(
+                    "SoSoValue %s: rate limit hit on fund %s; that history and "
+                    "the %d not yet attempted all go to funds_failed "
+                    "(disclosed as incomplete, retried on the short TTL)",
+                    asset,
+                    ticker,
+                    len(skipped) - 1,
+                )
+                break
             except requests.RequestException:
                 # Already logged by _fetch_one_fund, which re-raises so this
                 # loop — the only layer that can see a failure streak — can
@@ -754,10 +775,10 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
                         )
                     break
                 continue
-            # Any completed request resets the breaker — including a mid-burst
-            # 429 or a structural break (fund is None): the server answered,
-            # so each remaining history is still tried and a transient blip
-            # loses one fund, not the tail of the list.
+            # Any completed request resets the breaker — including a
+            # structural break (fund is None): the server answered, so each
+            # remaining history is still tried and a transient blip loses one
+            # fund, not the tail of the list.
             consecutive_network = 0
             if fund is None:
                 funds_failed.append(ticker)

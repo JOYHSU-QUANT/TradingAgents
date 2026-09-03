@@ -22,8 +22,16 @@ Breaking changes within the 0.x line are called out explicitly.
   call, at most one window plus 2s of slack, logged at INFO); a 429 parks
   the budget for a full window so the next module's sweep in the same
   analyst turn waits instead of burning its own quota. The key check still
-  runs first, so the unset-key emergency switch is never delayed. Tests get
-  a fresh budget per test and a sleep that fails loudly.
+  runs first, so the unset-key emergency switch is never delayed. The ETF
+  fund loop now drains on a 429 like the family's ``fetch_each`` (the rest
+  of the listing goes to ``funds_failed``, retried on the short TTL): its
+  PR #19 per-fund retry predates both the drain and the budget, and with a
+  park in place it would have cost a full window per remaining fund on a
+  persistently throttled key — minutes inside one analyst tool call. The
+  budget is per process and spends the whole plan limit, so a second
+  process on the same key (a CLI run on the box while the daemon is up)
+  will 429 and park both. Tests get a fresh budget per test and a sleep
+  that fails loudly.
 
 - **data_vendors: the SoSoValue economic-calendar and BTC-treasuries
   categories are cut over to enabled** — ``economic_calendar`` and

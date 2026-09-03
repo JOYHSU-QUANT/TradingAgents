@@ -1846,34 +1846,36 @@ class TestCacheAndLoad:
         assert sosovalue._read_cache(str(tmp_path / "sosovalue_btc.json"), "BTC") is not None
 
     def test_a_completed_answer_resets_the_breaker(self, tmp_path, monkeypatch):
-        # AAA transport-fails, BBB 429s (the server answered -> counter
-        # resets), CCC/DDD/EEE transport-fail: the trip lands on EEE, the
-        # third *consecutive* transport failure, and only FFF is skipped. An
-        # API-level failure can neither trip nor feed the breaker.
+        # AAA transport-fails, BBB breaks structurally (the server answered
+        # -> counter resets), CCC/DDD/EEE transport-fail: the trip lands on
+        # EEE, the third *consecutive* transport failure, and only FFF is
+        # skipped. A structural break can neither trip nor feed the breaker.
         _, history_calls, payload = self._run_fund_breaker(
             tmp_path,
             monkeypatch,
             ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF"),
             fail={f"/etfs/{t}/history" for t in ("AAA", "CCC", "DDD", "EEE")},
-            errors={"/etfs/BBB/history": sosovalue.SoSoValueRateLimitError("throttled")},
+            errors={"/etfs/BBB/history": sosovalue.SoSoValueError("contract break")},
         )
         assert history_calls == [f"/etfs/{t}/history" for t in ("AAA", "BBB", "CCC", "DDD", "EEE")]
         assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
 
-    def test_a_pure_429_burst_still_tries_every_fund(self, tmp_path, monkeypatch):
-        # The decided mid-burst-429 semantics survive the breaker: rate limits
-        # are API-level answers, so every history still gets its own try.
+    def test_a_429_drains_the_rest_of_the_fund_loop(self, tmp_path, monkeypatch):
+        # Since #189 a 429 parks the shared request budget for a full window,
+        # so the PR #19 per-fund retry would cost a window per remaining fund
+        # on a throttled key. The loop drains like the family's fetch_each:
+        # one request after the 429 is one request too many.
+        # AAA transport-fails (one strike, no trip), BBB 429s: CCC/DDD/EEE
+        # are never requested and join funds_failed unattempted.
         tickers = ("AAA", "BBB", "CCC", "DDD", "EEE")
         _, history_calls, payload = self._run_fund_breaker(
             tmp_path,
             monkeypatch,
             tickers,
-            errors={
-                f"/etfs/{t}/history": sosovalue.SoSoValueRateLimitError("throttled")
-                for t in tickers
-            },
+            fail={"/etfs/AAA/history"},
+            errors={"/etfs/BBB/history": sosovalue.SoSoValueRateLimitError("throttled")},
         )
-        assert history_calls == [f"/etfs/{t}/history" for t in tickers]
+        assert history_calls == ["/etfs/AAA/history", "/etfs/BBB/history"]
         assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
 
     def test_fund_list_failure_omits_breakdown_not_the_vendor(self, tmp_path, monkeypatch):

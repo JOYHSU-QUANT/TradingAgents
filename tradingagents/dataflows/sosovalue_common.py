@@ -62,6 +62,10 @@ REQUEST_TIMEOUT = 30
 # and whichever runs second takes a 429 for the rest of it (#189). Each
 # module's TTL only knows its own traffic; the budget below is the one thing
 # that sees all of it, and it spaces requests so the overrun never happens.
+# The budget is per PROCESS and spends the whole plan limit: do not run a
+# second process against the same key while the daemon is up (a CLI run on
+# the box, say) — both would count to 20, the server would 429 them, and
+# each 429 parks the process that took it for a window.
 RATE_LIMIT_REQUESTS = 20
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 # Added to every wait: the server's window edge is not observable from here,
@@ -102,9 +106,13 @@ class _RequestBudget:
     fast fail would forfeit.
 
     The wait happens inside the caller's tool call, holding the lock, so
-    concurrent callers queue in order rather than racing the count. The
-    worst case is bounded by construction: one window plus slack per wait,
-    and a wait only ever follows a full window of real requests.
+    concurrent callers queue in order rather than racing the count. One wait
+    is at most a window plus slack. How many waits one tool call can pay is
+    the sweeps' business, not the budget's: every module's per-item loop
+    drains the rest of its sweep on a 429 (``fetch_each``, and the ETF fund
+    loop since #189), so a park is paid at most once per sweep — without
+    that, a persistently rate-limited key would cost a full window per
+    remaining item.
     """
 
     def __init__(self):
@@ -125,13 +133,14 @@ class _RequestBudget:
         with self._lock:
             now = _monotonic()
             if (wait := self._wait_needed(now)) > 0:
+                reason = (
+                    "the server answered 429, so the window is full whatever this process counted"
+                    if self._blocked_until > now
+                    else f"{len(self._sent)} requests already sent in the last "
+                    f"{RATE_LIMIT_WINDOW_SECONDS:.0f}s on the shared key"
+                )
                 logger.info(
-                    "SoSoValue request budget: %d requests already sent in the last %.0fs on "
-                    "the shared key; waiting %.1fs before %s",
-                    len(self._sent),
-                    RATE_LIMIT_WINDOW_SECONDS,
-                    wait,
-                    path,
+                    "SoSoValue request budget: %s; waiting %.1fs before %s", reason, wait, path
                 )
                 _sleep(wait)
                 now = _monotonic()
@@ -742,9 +751,11 @@ def fetch_each(
     ``log`` is the calling module's logger: log attribution stays per-module
     so operators (and the tests) can keep filtering by the vendor's name.
 
-    The ETF module's fund loop deliberately does NOT use this: it predates
-    the 429 drain and keeps its per-item-retry rate-limit semantics (a PR #19
-    decision), so folding it in would be a behaviour change, not a refactor.
+    The ETF module's fund loop does NOT use this helper — it predates it and
+    keeps its own breaker loop — but since #189 it drains on a 429 the same
+    way (the PR #19 per-fund retry would cost a budget window per remaining
+    fund on a throttled key); folding it in is now a refactor, not a
+    behaviour change.
     """
     if isinstance(items, str):
         # A bare string is iterable too — it would silently sweep one HTTP

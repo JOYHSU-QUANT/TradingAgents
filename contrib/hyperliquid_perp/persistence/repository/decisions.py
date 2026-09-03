@@ -13,6 +13,8 @@ from ._vocab import _ATTEMPT_STATUSES, _MODES, ERROR_TYPES
 
 __all__ = [
     "PromptRegime",
+    "UnstampedInput",
+    "ai_inputs_without_format_fingerprint",
     "find_in_progress_attempt",
     "get_decision_attempt",
     "insert_account_snapshot",
@@ -21,6 +23,7 @@ __all__ = [
     "insert_decision_attempt",
     "insert_position_snapshot",
     "prompt_regime_counts",
+    "stamp_ai_input_format_fingerprint",
     "update_decision_attempt",
 ]
 
@@ -131,6 +134,63 @@ def prompt_regime_counts(
         )
         for row in rows
     )
+
+
+class UnstampedInput(NamedTuple):
+    """An ``ai_inputs`` row with no ``format_fingerprint`` — what the backfill reads.
+
+    The payload path and digest prove the file it reads is the artifact the
+    row describes; the other two segmentation keys tell a pre-v10 row (no
+    shape either) from a pre-v11 one. Typed like ``PromptRegime`` so the
+    SELECT below and the reader in ``persistence.backfill`` cannot drift on
+    a column name.
+    """
+
+    input_id: str
+    input_payload_path: str | None
+    input_payload_hash: str | None
+    prompt_version: str | None
+    context_shape: str | None
+
+
+def ai_inputs_without_format_fingerprint(
+    conn: sqlite3.Connection, run_id: str
+) -> list[UnstampedInput]:
+    """The run's ``ai_inputs`` rows written before the v11 column existed, oldest first.
+
+    A list, not a cursor: the caller (``persistence.backfill``) reads files
+    between this and its write transaction on the same connection.
+    """
+    rows = conn.execute(
+        "SELECT input_id, input_payload_path, input_payload_hash, prompt_version, context_shape"
+        " FROM ai_inputs WHERE run_id = ? AND format_fingerprint IS NULL"
+        " ORDER BY timestamp, rowid",
+        (run_id,),
+    ).fetchall()
+    return [UnstampedInput(*row) for row in rows]
+
+
+def stamp_ai_input_format_fingerprint(
+    conn: sqlite3.Connection, input_id: str, fingerprint: str
+) -> int:
+    """Fill ONE row's ``NULL`` ``format_fingerprint``; returns rows written (0 or 1).
+
+    The predicate is the contract: only a ``NULL`` cell (a value the daemon
+    stamped is never replaced by a recomputation), and only on a row that
+    already carries the other two keys — the triple is one set
+    (``DecisionInput``), and a fingerprint on a shapeless pre-v10 row would
+    be a half-stamped bucket the daemon never writes. Rules and counts:
+    ``persistence.backfill``.
+    """
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError(f"format_fingerprint must be a non-empty string, got {fingerprint!r}")
+    cursor = conn.execute(
+        "UPDATE ai_inputs SET format_fingerprint = ?"
+        " WHERE input_id = ? AND format_fingerprint IS NULL"
+        " AND prompt_version IS NOT NULL AND context_shape IS NOT NULL",
+        (fingerprint, input_id),
+    )
+    return cursor.rowcount
 
 
 def find_in_progress_attempt(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:

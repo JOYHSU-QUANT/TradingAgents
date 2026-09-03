@@ -49,6 +49,7 @@ from ..common.no_decision import (
     no_decision_shortfall,
     trailing_failure_streaks,
 )
+from ..common.prompt_regime import prompt_regime_line
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import DECIMAL_CONTEXT
@@ -254,18 +255,16 @@ def prompt_regime_lines(regimes: tuple[repo.PromptRegime, ...]) -> list[str]:
     """One ``prompt_regime:`` line per segmentation bucket, first seen first.
 
     Shared with the live report (``live.validation``) so the two print the
-    same shape. A ``None`` key prints ``n/a`` — a row from before the column
-    existed, which the reader must not mistake for a distinct regime.
+    same shape — and rendered by ``common.prompt_regime.prompt_regime_line``,
+    the same function the running daemons and ``--context-only`` print the
+    keys through, so the three surfaces grep alike (issue #163). A ``None``
+    key prints ``n/a`` — a row from before the column existed, which the
+    reader must not mistake for a distinct regime.
     """
-
-    def _key(value: str | None) -> str:
-        return "n/a" if value is None else value
-
     return [
-        f"prompt_regime: prompt_version={_key(r.prompt_version)}"
-        f" context_shape={_key(r.context_shape)}"
-        f" format_fingerprint={_key(r.format_fingerprint)}"
-        f" cycles={r.cycles}"
+        prompt_regime_line(
+            r.prompt_version, r.context_shape, r.format_fingerprint, cycles=r.cycles
+        )
         for r in regimes
     ]
 

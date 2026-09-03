@@ -364,13 +364,34 @@ def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode=
             )
 
 
+def write_payload(path: Path, body) -> tuple[str, str]:
+    """Write a payload file the way the daemon does; ``(path, digest)`` for its row.
+
+    Bytes, through the daemon's own ``payload_digest``: a test that hashed
+    with its own formula, or wrote in text mode, would pin a reader against
+    rows the daemon never writes.
+    """
+    from contrib.hyperliquid_perp.common.digest import payload_digest
+
+    raw = (
+        body
+        if isinstance(body, bytes)
+        else json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return str(path), payload_digest(raw)
+
+
 def stamp_prompt_regimes(db, regimes, *, run_id="r", mode="paper", symbol="BTC"):
     """Give the run's attempts (in scheduled order) an ``ai_inputs`` row each.
 
     ``regimes`` holds one ``(prompt_version, context_shape,
-    format_fingerprint)`` per attempt, or ``None`` for a cycle that failed
-    before ``build_input`` and so never wrote an input row. ``input_id`` is
-    stamped straight onto the attempt row: ``update_decision_attempt`` refuses
+    format_fingerprint)`` per attempt — or, for a test about the payload
+    artifact, ``(…, input_payload_path, input_payload_hash)`` (see
+    :func:`write_payload`) — or ``None`` for a cycle that failed before
+    ``build_input`` and so never wrote an input row. ``input_id`` is stamped
+    straight onto the attempt row: ``update_decision_attempt`` refuses
     terminal rows by design, and these are seeded terminal.
     """
     rows = db.conn.execute(
@@ -383,7 +404,8 @@ def stamp_prompt_regimes(db, regimes, *, run_id="r", mode="paper", symbol="BTC")
         for row, regime in zip(rows, regimes, strict=True):
             if regime is None:
                 continue
-            version, shape, fingerprint = regime
+            version, shape, fingerprint, *artifact = regime
+            path, digest = artifact if artifact else (None, None)
             input_id = f"{row['decision_attempt_id']}#in1"
             repo.insert_ai_input(
                 conn,
@@ -395,6 +417,8 @@ def stamp_prompt_regimes(db, regimes, *, run_id="r", mode="paper", symbol="BTC")
                 prompt_version=version,
                 context_shape=shape,
                 format_fingerprint=fingerprint,
+                input_payload_path=path,
+                input_payload_hash=digest,
             )
             conn.execute(
                 "UPDATE decision_attempts SET input_id = ? WHERE decision_attempt_id = ?",

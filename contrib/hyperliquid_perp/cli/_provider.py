@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import time
@@ -142,6 +141,9 @@ class _EngineDecisionProvider:
     # would relabel as an API failure.
     _on_blocking_read = None
     _position_source = None
+    # The last ``(prompt_version, context_shape, format_fingerprint)`` this
+    # instance logged (issue #163); ``None`` until the first prompt is built.
+    _logged_regime = None
 
     def __init__(
         self,
@@ -233,6 +235,10 @@ class _EngineDecisionProvider:
             # Unreachable on the production wirings (initialize_run precedes
             # the first cycle); said in the log anyway, and the driver's audit
             # prologue will refuse the cycle on the same missing ledger.
+            # Wording pinned by test (issue #161): "no books yet" must read
+            # apart from ``marginal_cost.build_position_context``'s "is not
+            # positive" — same prompt, same context_shape, no store column;
+            # rationale in RUNBOOK §7.
             logger.warning(
                 "position section omitted: the run has no books yet "
                 "(the audit row will refuse this cycle on the same missing ledger)"
@@ -350,8 +356,14 @@ class _EngineDecisionProvider:
             "context_text": context_text,
             "format_instructions": format_text,
         }
-        raw = json.dumps(payload, ensure_ascii=False, indent=2)
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        from ..common.digest import payload_digest
+
+        # Bytes end to end: the digest is over exactly the bytes the file
+        # holds, so a verifier that rehashes the file (the fingerprint
+        # backfill, issue #163) agrees with the row on every platform — a
+        # text-mode write would let the OS rewrite the newlines in between.
+        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        digest = payload_digest(raw)
         # Microsecond-stamped: each retry try builds its own payload, and two
         # tries landing in the same wall-clock second must not overwrite each
         # other (the earlier try's stored hash would falsely alias the later
@@ -359,7 +371,7 @@ class _EngineDecisionProvider:
         path = self._payload_dir / f"{coin}-{as_of.strftime('%Y%m%dT%H%M%S_%fZ')}.json"
         try:
             self._payload_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(raw, encoding="utf-8")
+            path.write_bytes(raw)
         except OSError as exc:
             # An audit-artifact filesystem failure (disk full, permissions)
             # must not tear down the daemon and strand the live SL/TP monitor:
@@ -368,6 +380,24 @@ class _EngineDecisionProvider:
             # worst case a recurring api_failed cycle whose error_message
             # names the cause, with the position held and protection alive.
             raise RetryableDecisionError("server_error", f"payload write failed: {exc}") from exc
+        # Say which bucket this prompt lands in (issue #163; the line and its
+        # three surfaces: ``common.prompt_regime``): once, the first time this
+        # instance builds one through, and again only when the triple flips
+        # mid-run (a section appearing or disappearing) — silent in between.
+        # AFTER the payload write, the last thing HERE that can fail: a cycle
+        # that dies on the write leaves no ai_inputs row, and a line logged
+        # for it would claim a bucket ``validate`` never counts while the
+        # first cycle that does reach the store stayed silent. The driver's
+        # own ai_inputs insert comes after this method returns and is not
+        # covered (accepted 2026-09-03): a failure there is the non-retryable
+        # bug lane — an ERROR traceback beside this line, api_failed with an
+        # empty error_type — not a quiet cycle the line could be mistaken for.
+        regime = (PROMPT_VERSION, shape, fingerprint)
+        if regime != self._logged_regime:
+            from ..common.prompt_regime import prompt_regime_line
+
+            logger.info(prompt_regime_line(*regime))
+            self._logged_regime = regime
         candle_end = ctx.as_of
         candle_start = candle_end - timedelta(milliseconds=interval_to_ms(ctx.candle_interval))
         self._context_text = context_text
@@ -377,7 +407,7 @@ class _EngineDecisionProvider:
             candle_start=candle_start,
             candle_end=candle_end,
             input_payload_path=str(path),
-            input_payload_hash=f"sha256:{digest}",
+            input_payload_hash=digest,
             prompt_version=PROMPT_VERSION,
             context_shape=shape,
             format_fingerprint=fingerprint,

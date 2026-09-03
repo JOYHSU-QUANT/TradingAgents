@@ -102,22 +102,31 @@ def run_context_only(config: dict, coin: str) -> int:
     print("=" * 64)
     print(render_market_context(ctx))
     print("=" * 64)
-    # The buckets this YAML lands in (ai_inputs.context_shape and
-    # .format_fingerprint) — the one keyless, store-free way to see them
-    # BEFORE deploying a config edit. The fingerprint is over the same block
-    # run_engine feeds the model (effective ceiling included), so a grid or
-    # ceiling edit shows its new value here. A gate-threshold edit does NOT
-    # (prompt v5 keeps those out of the text): that one needs a new run-id,
-    # and an unchanged fingerprint here is not evidence it can skip one.
-    print(f"context_shape: {context_shape(ctx)}")
+    # The bucket this YAML lands in (ai_inputs.prompt_version, .context_shape
+    # and .format_fingerprint) — the one keyless, store-free way to see it
+    # BEFORE deploying a config edit, printed as the same ``prompt_regime:``
+    # line the daemon logs at its first cycle and ``validate`` prints per
+    # bucket (issue #163), minus the ``|position`` token this lane never
+    # carries (no local books — RUNBOOK §4). The fingerprint is over the
+    # same block run_engine feeds the model (effective ceiling included), so
+    # a grid or ceiling edit shows its new value here. A gate-threshold edit
+    # does NOT (prompt v5 keeps those out of the text): that one needs a new
+    # run-id, and an unchanged fingerprint here is not evidence it can skip
+    # one.
+    from .cli import PROMPT_VERSION
+    from .common.prompt_regime import prompt_regime_line
+
     risk_cfg, decision_cfg = cfgs
     print(
-        "format_fingerprint: "
-        + format_fingerprint(
-            decision_format_instructions(
-                decision_cfg,
-                max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
-            )
+        prompt_regime_line(
+            PROMPT_VERSION,
+            context_shape(ctx),
+            format_fingerprint(
+                decision_format_instructions(
+                    decision_cfg,
+                    max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
+                )
+            ),
         )
     )
 

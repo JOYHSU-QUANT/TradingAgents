@@ -407,8 +407,11 @@ live run 會自動走 §20.3／§21.4 報告（依 `live.mode`）。指標與 ex
 報告在 `live_ready:` 之前另印 `prompt_regime:` 行——每組 `(prompt_version, context_shape,
 format_fingerprint)` 的 cycle 數（只數 `completed`，與 `cycle_count` 同口徑；依首見順序）。
 不影響 exit code：**三鍵齊全的行多於一行**＝run 跨過 prompt 制度邊界；`n/a` 是該欄寫入時
-還不存在（跨過 v11 部署點的 run 會多一行 `n/a` 桶），不是另一個制度；行是桶不是段。各桶
-總和應等於 `cycle_count`，不等時印 `warning:`。三個鍵的定義見 [RUNBOOK §4](./RUNBOOK.md)。
+還不存在（跨過 v11 部署點的 run 會多一行 `n/a` 桶——可用 `export --run-id <id> --db live_trading.db
+--output-dir … --backfill-format-fingerprint` 從 payload 回填，規則見 RUNBOOK §6），不是另一個制度；
+行是桶不是段。各桶總和應等於 `cycle_count`，不等時印 `warning:`。live loop 第一個組出 prompt 並寫下
+payload 的 cycle 也會在 log 印同一格式的 `prompt_regime: …`（INFO），之後只在三鍵翻桶時再印（仍 INFO）。
+三個鍵的定義與這行的判讀見 [RUNBOOK §4](./RUNBOOK.md)。
 
 另：live 車道的 `api_failed` 列若 `error_type` **空**、`error_message` 以 `non-retryable:`
 開頭，是非 Retryable 例外（通常是程式缺陷，主機問題看 repr 分辨）——driver 把該 cycle

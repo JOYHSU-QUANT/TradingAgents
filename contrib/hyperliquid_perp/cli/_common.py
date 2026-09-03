@@ -38,7 +38,11 @@ def _open_existing_db(
       ``export``, ``live-smoke --gate-status``. They take no run lease, so
       migrating would silently upgrade a store a running daemon owns, leaving
       that daemon writing through a schema it does not know. They refuse with
-      instructions instead (2026-07-30 migration review).
+      instructions instead (2026-07-30 migration review). One exception to
+      "report-only", still lease-free: ``export --backfill-format-fingerprint``
+      fills ``NULL`` cells the daemon never touches again
+      (``persistence.backfill``, issue #163) — a write, but not one that
+      needs the schema moved or the run owned.
     * ``True`` for ``safe-mode``, which legitimately CHANGES the run
       (``--release`` / ``--stamp-case`` write, and ``--status`` is how an
       operator diagnoses a latched run). Refusing it would disable exactly the

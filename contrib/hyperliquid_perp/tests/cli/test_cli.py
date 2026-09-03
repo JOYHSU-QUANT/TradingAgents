@@ -53,6 +53,8 @@ from ..conftest import (
     migrations_up_to,
     misrouted_order_status,
     record_reconciliation_sweep_wiring,
+    stamp_prompt_regimes,
+    write_payload,
 )
 from ..live.test_startup import _clearinghouse
 
@@ -484,6 +486,116 @@ def test_build_input_carries_the_context_shape_beside_the_prompt_version(tmp_pat
     assert payload["context_text"] == render_market_context(ctx)
 
 
+def _regime_log_lines(caplog) -> list[str]:
+    """The ``prompt_regime:`` lines the provider logged, in order."""
+    from contrib.hyperliquid_perp.common.prompt_regime import PROMPT_REGIME_PREFIX
+
+    return [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith(PROMPT_REGIME_PREFIX)
+    ]
+
+
+def test_build_input_logs_the_prompt_regime_once_and_again_only_when_it_flips(
+    tmp_path, monkeypatch, caplog
+):
+    # Issue #163: the daemon says which bucket its prompt lands in — at the
+    # first cycle (the startup line a YAML edit + restart used to need
+    # ``validate`` for) and then only when the triple flips. One site serves
+    # both lanes: paper and live each build this provider. Rendered by the
+    # function ``validate`` and ``--context-only`` print through, so the
+    # three surfaces grep alike.
+    import dataclasses
+    import logging
+
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.common.prompt_regime import (
+        prompt_regime_line,
+    )
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=1))
+    contexts = [ctx]
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (contexts[-1], None))
+    provider = _stub_provider(
+        _payload_dir=tmp_path / "payloads", _engine_config={"deep_think_llm": "model-x"}
+    )
+
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli._provider"):
+        first = provider.build_input(coin="BTC", as_of=as_of)
+        provider.build_input(coin="BTC", as_of=as_of + timedelta(hours=4))
+    expected = prompt_regime_line(first.prompt_version, first.context_shape, first.format_fingerprint)
+    assert _regime_log_lines(caplog) == [expected]  # once, not per cycle
+
+    # A section appears mid-run (here: an indicator joins the set) — the
+    # bucket flips, and the log says so exactly once more.
+    contexts.append(dataclasses.replace(ctx, indicators={**ctx.indicators, "macd": 1.0}))
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli._provider"):
+        flipped = provider.build_input(coin="BTC", as_of=as_of + timedelta(hours=8))
+    assert flipped.context_shape != first.context_shape
+    assert _regime_log_lines(caplog) == [
+        expected,
+        prompt_regime_line(flipped.prompt_version, flipped.context_shape, flipped.format_fingerprint),
+    ]
+
+
+def test_build_input_logs_the_regime_only_for_a_cycle_that_reached_its_payload(
+    tmp_path, monkeypatch, caplog
+):
+    # The line is the LAST thing build_input does that can fail: a cycle that
+    # dies writing its payload (disk full) leaves no ai_inputs row, so a line
+    # logged for it would claim a bucket ``validate`` never counts — and,
+    # having been "logged", would silence the first cycle that does reach
+    # the store. RUNBOOK §5 promises the line on the first SUCCESSFUL cycle.
+    import logging
+    from pathlib import Path
+
+    import contrib.hyperliquid_perp.engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
+    ctx = _perp_ctx(as_of - timedelta(hours=1))
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **kw: (ctx, None))
+    provider = _stub_provider(
+        _payload_dir=tmp_path / "payloads", _engine_config={"deep_think_llm": "model-x"}
+    )
+    real_write = Path.write_bytes
+    writes: list[Path] = []
+
+    def disk_full_once(self, data):
+        writes.append(self)
+        if len(writes) == 1:
+            raise OSError(28, "No space left on device")
+        return real_write(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", disk_full_once)
+
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli._provider"):
+        with pytest.raises(RetryableDecisionError, match="payload write failed"):
+            provider.build_input(coin="BTC", as_of=as_of)
+        assert _regime_log_lines(caplog) == []  # nothing reached the store; nothing claimed
+        provider.build_input(coin="BTC", as_of=as_of + timedelta(hours=4))
+    assert len(_regime_log_lines(caplog)) == 1  # the first cycle that got through says so
+
+
+def test_the_bookless_omission_is_worded_apart_from_the_pricers(caplog):
+    # Issue #161: ``ctx.position is None`` has two live causes — the books do
+    # not exist yet (this provider) and the pricer refusing non-positive
+    # equity (``marginal_cost``) — that render the same prompt and the same
+    # ``context_shape``. No store column tells them apart (a recorded
+    # decision); the two WARNING lines are the only record, so their wording
+    # must stay distinct. The pricer's half is pinned in test_marginal_cost.
+    import logging
+
+    provider = _stub_provider(_position_source=lambda: None)
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli._provider"):
+        assert provider._read_books() is None
+    [message] = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("position section omitted")
+    ]
+    assert "no books yet" in message
+    assert "not positive" not in message
+
+
 def test_validate_exit_codes(tmp_path, capsys):
     path, db = _seed_db(tmp_path)
     db.close()
@@ -617,6 +729,100 @@ def test_export_unknown_run_exits_1(tmp_path, capsys):
     )
     assert rc == 1
     assert "export_failed" in capsys.readouterr().err
+
+
+def test_export_backfill_flag_stamps_null_fingerprints_before_writing_the_csvs(tmp_path, capsys):
+    # Issue #163: the one write ``export`` can make. A pre-v11 row (NULL
+    # fingerprint, payload on disk) is stamped from the payload's own format
+    # text BEFORE the CSVs are written, so the exported set carries the value;
+    # the pass reports its counts on stderr. The trust rules and counters are
+    # pinned in tests/persistence/test_backfill.py — this is the wiring.
+    from contrib.hyperliquid_perp.domains.perp.target_decision import format_fingerprint
+
+    path, db = _seed_db(tmp_path)
+    insert_decision_attempts(db, ["completed"], start=_T0)
+    payload, digest = write_payload(
+        tmp_path / "payload.json", {"format_instructions": "the block as the model saw it"}
+    )
+    stamp_prompt_regimes(db, [("phase2-target-v4", "price|market", None, payload, digest)])
+    db.close()
+
+    out = tmp_path / "exp"
+    rc = cli_main(
+        [
+            "export",
+            "--run-id",
+            "r",
+            "--output-dir",
+            str(out),
+            "--db",
+            str(path),
+            "--backfill-format-fingerprint",
+        ]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert (
+        "format_fingerprint backfill for 'r': stamped=1 pre_v10=0 missing_payload=0"
+        " unreadable=0 unverified=0" in err
+    )
+    with (out / "ai_inputs.csv").open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [row["format_fingerprint"] for row in rows] == [
+        format_fingerprint("the block as the model saw it")
+    ]
+
+    # An unknown run with the flag: the standard refusal, and no backfill
+    # line claiming zeros about a run that does not exist.
+    rc = cli_main(
+        [
+            "export",
+            "--run-id",
+            "ghost",
+            "--output-dir",
+            str(out),
+            "--db",
+            str(path),
+            "--backfill-format-fingerprint",
+        ]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "export_failed" in err  # the same refusal as without the flag
+    assert "format_fingerprint backfill" not in err
+
+
+def test_export_backfill_names_a_locked_store_instead_of_a_traceback(tmp_path, capsys, monkeypatch):
+    # The pass takes the store's write lock and RUNBOOK §6 says a running
+    # daemon is fine — so a lock held past busy_timeout must be the named
+    # exit 1 every other refusal here is, not a traceback exit 2; and the
+    # export does not run over a pass that did not finish.
+    import contrib.hyperliquid_perp.persistence.backfill as backfill_mod
+
+    path, db = _seed_db(tmp_path)
+    db.close()
+
+    def locked(db, *, run_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", locked)
+    out = tmp_path / "exp"
+    rc = cli_main(
+        [
+            "export",
+            "--run-id",
+            "r",
+            "--output-dir",
+            str(out),
+            "--db",
+            str(path),
+            "--backfill-format-fingerprint",
+        ]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error: format_fingerprint backfill failed — database is locked" in err
+    assert not out.exists()
 
 
 def test_paper_refuses_missing_db_without_create(tmp_path, capsys):

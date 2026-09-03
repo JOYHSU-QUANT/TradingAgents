@@ -33,13 +33,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils.types import Cloid
 
+from ...common.instants import epoch_ms, from_epoch_ms
 from ...ports import OrderGate
 from .errors import ExchangeError, ExchangeRequestError, MalformedResponseError
 from .mapper import hex_identity_matches, require_decimal
@@ -651,7 +652,7 @@ class HyperliquidSignedClient:
         if stamp is None:
             return None
         try:
-            return datetime.fromtimestamp(int(stamp) / 1000, tz=timezone.utc)
+            return from_epoch_ms(int(stamp))
         except (TypeError, ValueError, OSError, OverflowError):
             # Same discipline as mapper._opt_dec: a PRESENT-but-unparseable
             # value is a data-quality signal, not an omitted field. Still
@@ -687,9 +688,9 @@ class HyperliquidSignedClient:
         an unarmed switch behind a return code.
         """
         self._gate.require_exchange_action(None)  # arms the whole wallet
-        if cancel_at.tzinfo is None:
-            raise ValueError("cancel_at must be timezone-aware (UTC)")
-        response = call_sdk(self._exchange.schedule_cancel, int(cancel_at.timestamp() * 1000))
+        # ``epoch_ms`` refuses a naive ``cancel_at`` by name — after the gate,
+        # so an ungated caller is refused as ungated, not as naive.
+        response = call_sdk(self._exchange.schedule_cancel, epoch_ms(cancel_at, what="cancel_at"))
         # scheduleCancel is statusless: the envelope IS the whole verdict, and
         # _response_payload raises on a top-level err.
         _response_payload(response, action="scheduleCancel")

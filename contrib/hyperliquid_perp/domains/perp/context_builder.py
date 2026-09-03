@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from ...common.instants import epoch_ms, from_epoch_ms
 from .indicators import compute_indicators
 from .marginal_cost import PositionInputs, build_position_context
 from .market_data_config import MarketDataConfig
@@ -160,15 +161,17 @@ def build_market_context(
     the same reading by construction, not by a later cross-check.
     """
     if candles:
-        # Anchor the funding window on the raw epoch-ms integer, not a float
-        # round-trip: ``int(datetime.fromtimestamp(close_time/1000).timestamp()*1000)``
-        # can drift by 1ms and shift the strict ``p.time < as_of_ms`` boundary,
-        # spuriously including/excluding a funding point landing on the candle close.
+        # Anchor the funding window on the raw epoch-ms integer the exchange
+        # sent: the strict ``p.time < as_of_ms`` boundary below is a comparison
+        # of two exchange stamps, and must not depend on a conversion in
+        # between. ``from_epoch_ms`` is integer arithmetic, so ``as_of`` is
+        # exactly that millisecond by construction — not by a float route
+        # happening to round-trip at this magnitude (issue #157).
         as_of_ms = candles[-1].close_time
-        as_of = datetime.fromtimestamp(as_of_ms / 1000, tz=timezone.utc)
+        as_of = from_epoch_ms(as_of_ms)
     else:
         as_of = datetime.now(tz=timezone.utc)
-        as_of_ms = int(as_of.timestamp() * 1000)
+        as_of_ms = epoch_ms(as_of, what="context as_of")
 
     indicators = compute_indicators(candles, indicator_names)
     zscore, sample_count = funding_zscore(

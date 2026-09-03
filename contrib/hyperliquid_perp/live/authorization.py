@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from ..common.instants import from_epoch_ms
 from ..exchanges.hyperliquid.sdk_client import account_from_agent_key, call_sdk
 
 if TYPE_CHECKING:
@@ -116,12 +117,20 @@ def verify_agent_authorization(
         )
     entry = matches[0]
     valid_until_ms = entry.get("validUntil")
-    if not isinstance(valid_until_ms, (int, float)) or isinstance(valid_until_ms, bool):
+    # The venue sends an integer; ``float`` is tolerated for a JSON decoder's
+    # number type, not for fractional milliseconds, hence the ``int()``. The
+    # decoder's ``NaN`` / ``Infinity`` pass the type check and fail that
+    # ``int()``; a value past ``datetime``'s range fails ``from_epoch_ms`` —
+    # all unreadable, all the same refusal, none a bare exception.
+    try:
+        if isinstance(valid_until_ms, bool) or not isinstance(valid_until_ms, (int, float)):
+            raise TypeError("not a number")
+        valid_until = from_epoch_ms(int(valid_until_ms))
+    except (TypeError, ValueError, OverflowError) as exc:
         raise AgentAuthorizationError(
             f"agent {agent_address} is listed for wallet {wallet_address} but its "
             f"validUntil is unreadable ({valid_until_ms!r}) — cannot verify expiry"
-        )
-    valid_until = datetime.fromtimestamp(valid_until_ms / 1000, tz=timezone.utc)
+        ) from exc
     if valid_until <= now:
         raise AgentAuthorizationError(
             f"agent {agent_address}'s authorization for wallet {wallet_address} "

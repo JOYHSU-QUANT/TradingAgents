@@ -23,6 +23,33 @@ Breaking changes within the 0.x line are called out explicitly.
   the dated segmentation point; switching either category back off is a code
   change (``"none"``), not a YAML edit.
 
+- **hyperliquid_perp: one implementation of the venue's epoch-millisecond
+  time form** (issue #157). ``common.instants`` gains ``epoch_ms`` /
+  ``from_epoch_ms`` / ``delta_ms`` — integer arithmetic on ``timedelta``,
+  exact by construction, round-trip pinned across every magnitude
+  ``datetime`` holds — and the eleven call sites that each converted on their
+  own (the market-data window ends, the l2Book and ``clearinghouseState``
+  clocks, the kill switch's ``scheduleCancel`` deadline, the fill parser,
+  the fill backfiller's and the reconciler's ``userFillsByTime`` windows, the
+  agent-authorization expiry, the audit record's ``timestamp_ms``, the
+  context's ``as_of``, the funding-history hour bucket) now call them; most
+  had gone through a float (``int(dt.timestamp() * 1000)`` /
+  ``fromtimestamp(ms / 1000)``), whose exactness at 2026 magnitudes was an
+  accident of float formatting, not a property of the code. Values are
+  byte-identical on every path a test pins. One behaviour change, decided
+  under the same issue: the CLI's funding-rate lookup records only
+  ``ExchangeError`` failures as "pending" — a ``TypeError`` from a drifted
+  call signature or a ``ValueError`` from a naive clock now propagates out
+  of the lookup instead of logging three WARNINGs and an ERROR that read as
+  a venue outage while every settlement stayed pending (the engine tick lets
+  it end the run; the cycle-boundary backfill's corrupt-row lane still
+  catches a ``ValueError`` — a follow-up). Also recorded, not changed:
+  the ``ExchangeMarketData`` port documents the whole read surface rather
+  than one consumer's needs, and the live lane's ``Position:`` costs reuse
+  the paper fill model's assumptions by the 2026-08-31 decision (issue #161;
+  ``PositionPricing`` is the seam a future ``live.assumed_costs`` goes
+  through).
+
 ### Removed
 
 - **dataflows: ``y_finance.get_stockstats_indicator`` and

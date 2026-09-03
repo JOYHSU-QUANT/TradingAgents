@@ -54,6 +54,9 @@ class _HistoryFundingSource:
         self._consecutive_failures: dict[str, int] = {}
 
     def rate_at(self, coin: str, funding_timestamp: datetime):
+        from ..common.instants import from_epoch_ms
+        from ..exchanges.hyperliquid.errors import ExchangeError
+
         hour = funding_timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
         now = datetime.now(timezone.utc)
         age = now - hour
@@ -74,7 +77,18 @@ class _HistoryFundingSource:
                 # wrong rate. Reading the exchange's clock here would add a
                 # REST call per refresh to buy nothing the caller can use.
                 points = self._market.get_funding_history(coin, needed_days, end=now)
-            except Exception as exc:  # noqa: BLE001 — a rate fetch failure means "pending"
+            except ExchangeError as exc:
+                # A VENUE failure means "pending" — the endpoint refused,
+                # throttled, or answered malformed; the event waits for a
+                # later poll. Only that family is caught: a ``TypeError``
+                # from a call site that drifted from the reader's signature,
+                # or a ``ValueError`` from a naive ``end``, is a programmer
+                # error and propagates out of this lookup — counted as a
+                # fetch failure it would log three WARNINGs and an ERROR that
+                # read as an outage, while every settlement stayed pending
+                # forever (issue #157). What the callers make of it is theirs:
+                # the engine tick lets it end the run; the cycle-boundary
+                # backfill's corrupt-row lane still catches a ``ValueError``.
                 failures = self._consecutive_failures.get(coin, 0) + 1
                 self._consecutive_failures[coin] = failures
                 log = (
@@ -92,7 +106,7 @@ class _HistoryFundingSource:
             self._consecutive_failures.pop(coin, None)
             by_hour = {}
             for point in points:
-                stamp = datetime.fromtimestamp(point.time / 1000, tz=timezone.utc)
+                stamp = from_epoch_ms(point.time)
                 by_hour[stamp.replace(minute=0, second=0, microsecond=0)] = point.rate
             cached = (time.monotonic(), needed_days, by_hour)
             self._cache[coin] = cached
@@ -168,6 +182,13 @@ class _EngineDecisionProvider:
         # malformed one). Parsed for every mode, live included — the live run
         # advertises the paper fill model's costs, the only fee model the
         # config carries, and the prompt says "assumptions" for that reason.
+        # That the live lane reuses the PAPER assumptions is a decision, not
+        # an oversight: made 2026-08-31 (PR #160), recorded 2026-09-03 (issue
+        # #161) while paper is the only lane running. On live, slippage is a
+        # measured quantity (the ``fills`` table), so a ``live:`` block should
+        # eventually carry its own ``assumed_costs`` — and ``PositionPricing``
+        # is the seam that change goes through: build it from that block
+        # here, and nothing downstream needs to know which lane priced it.
         from ..paper.config import PaperTradingConfig
 
         execution = PaperTradingConfig.from_dict(config.get("paper_trading")).execution

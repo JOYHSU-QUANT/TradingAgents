@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from ..common.instants import epoch_ms
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..paper.clock import Clock, WallClock
 from .fills import IngestOutcome, LiveFillProcessor
@@ -208,13 +209,14 @@ class FillBackfiller:
         jumps to now, the window snaps back to the lookback, and every fill in the
         outage is fetched by no path at all while the pass reports success.
         """
-        # Both instants are checked, not just ``since``. A naive ``now`` is the more
-        # dangerous of the two and the quieter: it does not raise, it makes
-        # ``.timestamp()`` read the wall clock as LOCAL time, so the window silently
-        # shifts by the UTC offset and the fetch asks the exchange for the wrong hours.
-        # A naive ``since`` merely blows up inside min() with an opaque "can't compare
-        # offset-naive and offset-aware", far from the caller that got it wrong. Every
-        # instant in this system is aware UTC; neither is accepted.
+        # Both instants are checked, not just ``since``, and by NAME. A naive
+        # ``now`` used to be the quieter of the two — the float route read it
+        # as LOCAL time and the window silently shifted by the UTC offset;
+        # ``epoch_ms`` now refuses it, but with a message that names no clock.
+        # A naive ``since`` merely blows up inside min() with an opaque "can't
+        # compare offset-naive and offset-aware", far from the caller that got
+        # it wrong. Every instant in this system is aware UTC; neither is
+        # accepted, and the refusal says which one the caller handed in.
         _require_aware(stamp, name="now")
         floor = stamp - self._lookback
         if since is None:
@@ -240,8 +242,11 @@ class FillBackfiller:
         ``complete=False`` rather than pretending the gap is closed.
         """
         stamp = now or self._clock.now()
-        end_ms = int(stamp.timestamp() * 1000)
-        start_ms = int(self._window_start(stamp, since).timestamp() * 1000)
+        # ``_window_start`` first: it refuses a naive ``now`` / ``since`` by
+        # name (see there), so that refusal — not ``epoch_ms``'s generic one —
+        # is what a caller holding a bare clock sees.
+        window_start = self._window_start(stamp, since)
+        start_ms, end_ms = epoch_ms(window_start), epoch_ms(stamp)
 
         fetched = applied = duplicate = unmapped = malformed = 0
         complete = True

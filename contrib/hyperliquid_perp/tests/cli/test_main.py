@@ -1680,21 +1680,6 @@ def test_freshness_guard_names_no_host_cause_for_a_lead_without_a_paired_reading
     assert "host's clock ran ahead" not in msg
 
 
-def test_delta_ms_is_exact_where_the_float_route_reads_a_millisecond_short():
-    # The reason ``_delta_ms`` exists, pinned on a value where the float
-    # route actually fails: 65788957ms (a shade over 18h) comes out of
-    # ``int(delta.total_seconds() * 1000)`` as 65788956. The guard compares
-    # ages against ms limits, so a boundary case would otherwise pass or
-    # refuse by rounding. Both sides of the pin are asserted so the test
-    # cannot go quietly vacuous if Python's float formatting ever changes.
-    later = _NOW + timedelta(milliseconds=65_788_957)
-    delta = later - _NOW
-    assert int(delta.total_seconds() * 1000) == 65_788_956  # the float route's error
-    assert freshness_mod._delta_ms(later, _NOW) == 65_788_957
-    # ...and the floor semantics the docstring states for a sub-ms negative.
-    assert freshness_mod._delta_ms(_NOW, _NOW + timedelta(microseconds=500)) == -1
-
-
 def test_freshness_module_carries_no_candle_lead_tolerance():
     # The constant, its 40-line justification and the "not below the warn
     # floor" ordering pin all belonged to the host-cut window. A tolerance

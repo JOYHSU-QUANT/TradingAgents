@@ -119,10 +119,22 @@ def test_expiry_boundary_exactly_now_is_expired():
         verify_agent_authorization(info, wallet_address=_WALLET, agent_key=_KEY, now=_NOW)
 
 
-def test_unreadable_valid_until_is_named_failure():
+@pytest.mark.parametrize(
+    "valid_until",
+    [
+        "soon",  # not a number
+        True,  # a bool is an int to isinstance, never a stamp
+        float("nan"),  # the JSON decoder's NaN passes the number check
+        float("inf"),  # ...and so does Infinity
+        10**20,  # an integer past datetime's range
+    ],
+)
+def test_unreadable_valid_until_is_named_failure(valid_until):
+    # Every unreadable shape is the SAME named refusal — never a bare
+    # ValueError / OverflowError out of the int() or the epoch decode.
     agent = derive_agent_address(_KEY)
-    info = _FakeInfo([{"name": "agent", "address": agent, "validUntil": "soon"}])
-    with pytest.raises(AgentAuthorizationError, match="validUntil"):
+    info = _FakeInfo([{"name": "agent", "address": agent, "validUntil": valid_until}])
+    with pytest.raises(AgentAuthorizationError, match="validUntil is unreadable"):
         verify_agent_authorization(info, wallet_address=_WALLET, agent_key=_KEY, now=_NOW)
 
 

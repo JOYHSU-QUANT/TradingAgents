@@ -32,6 +32,16 @@ class ExchangeMarketData(Protocol):
     exchange's own, read before the fetch — and the reader's job is only to
     honour it. A default here would let a host-clock offset back into the
     indicators unseen.
+
+    The port records the WHOLE public read surface, not the needs of any one
+    consumer. ``PortSnapshotProvider`` calls only ``get_market_snapshot``;
+    the windowed reads' consumers are ``engine_bridge._build_context`` and
+    ``cli._provider``, which hold the concrete reader. Splitting a narrower
+    snapshot-only protocol out for the provider was considered and declined
+    (issue #157): a scripted or backtest feed dropped in for the provider
+    carries two methods it is never asked for — a type-hint obligation only,
+    since nothing ``isinstance``-checks the port — and that cost is smaller
+    than two protocols whose ``end`` contract has to be kept in step.
     """
 
     def get_market_snapshot(self, coin: str) -> MarketSnapshot:

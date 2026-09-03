@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from ...common.constants import CYCLE_INTERVAL, ERROR_TYPES, STALE_MARKET_DATA_ERROR
 from ...common.enum_guard import check_enum
-from ...common.instants import whole_hours_label
+from ...common.instants import delta_ms, whole_hours_label
 from .schema import PerpMarketContext, interval_to_ms
 
 __all__ = [
@@ -69,25 +69,9 @@ def _utc_stamp(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# For the ``timedelta`` span below (the decision cycle) in ms; instant
+# subtraction goes through ``common.instants.delta_ms``.
 _ONE_MS = timedelta(milliseconds=1)
-
-
-def _delta_ms(later: datetime, earlier: datetime) -> int:
-    """``later - earlier`` in whole milliseconds, by integer arithmetic.
-
-    Every bound in this module is compared in milliseconds against stamps the
-    exchange sent as integer ms, so the subtraction must be exact:
-    ``int(delta.total_seconds() * 1000)`` goes through a float and reads
-    some deltas 1ms short (e.g. 65788957ms → 65788956.99999999 → 65788956;
-    0.43% of 3M random deltas under three days, measured 2026-08-31 and
-    pinned by a test), which would let a context sitting exactly on
-    ``limit_ms`` pass or refuse by rounding rather than by the limit.
-    Floors (``//``) rather than truncates, so a sub-millisecond negative reads
-    as ``-1``, not ``0`` — the inputs that can carry sub-ms fractions (the
-    host readings) only ever feed the skew note and the fallback path's
-    minutes-wide bounds, where that millisecond changes nothing.
-    """
-    return (later - earlier) // _ONE_MS
 
 
 # How old the newest candle may be, counted in candle intervals.
@@ -293,14 +277,14 @@ def freshness_refusal(
     exchange_now = ctx.exchange_time
     if exchange_now is None:
         return _host_clock_freshness_refusal(ctx, coin, host_now, limit_ms, limit_basis)
-    age_ms = _delta_ms(exchange_now, ctx.as_of)
+    age_ms = delta_ms(exchange_now, ctx.as_of)
     # Skew is measured between the two readings ``_build_context`` took
     # ADJACENTLY, never against ``now``: the daemon's ``now`` is its own clock
     # reading from before the fetch, so subtracting it would report the fetch's
     # elapsed time as clock error. A context that carries an exchange clock but
     # no paired host reading (hand-built) simply has no skew to report.
     host_at_read = ctx.host_time_at_exchange_read
-    skew_ms = None if host_at_read is None else _delta_ms(host_at_read, exchange_now)
+    skew_ms = None if host_at_read is None else delta_ms(host_at_read, exchange_now)
     skew_note = _host_clock_skew_note(skew_ms, host_at_read)
     if skew_ms is not None and abs(skew_ms) >= _CLOCK_SKEW_WARN_MS:
         # Log-only, never a gate — and since issue #124 not a factor in the
@@ -445,7 +429,7 @@ def _host_clock_freshness_refusal(
     validates network_timeout_s as a number but sets no upper bound, so a
     deployment choosing minutes-long timeouts would need this revisited.)
     """
-    age_ms = _delta_ms(moment, ctx.as_of)
+    age_ms = delta_ms(moment, ctx.as_of)
     if age_ms < -limit_ms:
         return ContextRefusal(
             STALE_CONTEXT_ERROR,

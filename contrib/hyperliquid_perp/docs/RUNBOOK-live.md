@@ -94,6 +94,8 @@ live:
   # kill_switch / protection / websocket 子區塊照 §4 預設即可
 ```
 
+prompt 的 `Position:` 段在 live 印的往返成本（bps）仍讀 `paper_trading.execution`（`taker_fee_rate`／`fill_model.slippage_bps`）——live 沿用 paper 的成本假設是 2026-08-31（PR #160）的決定；`live:` 目前沒有自己的 `assumed_costs`，slippage 在 live 是 `fills` 表可量的量而非假設（issue #161 留檔）。
+
 先跑一次 config-only gate 檢查（不下單）——授權、caps、signed client 健檢一次跑完：
 
 ```bash

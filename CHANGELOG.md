@@ -148,6 +148,22 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: a daemon's global news no longer freezes after its first
+  cycle** (issue #198). ``get_global_news_yfinance`` builds each
+  ``yf.Search`` from the configured queries alone — no date in the request —
+  and yfinance serves ``Search`` through ``YfData.cache_get``, a
+  process-wide ``lru_cache`` on its singleton with no TTL and no
+  invalidation. A long-lived paper or live daemon therefore contacted Yahoo
+  for global news exactly once per process, and every later cycle re-read
+  its first cycle's headlines until a restart (paper-BTC-3 on every boot
+  segment since 2026-08-28). The getter now forgets that memo before each
+  call, so every call is a fresh set of requests. The forget is
+  process-wide: it also drops the day's memoized fundamentals-timeseries
+  pages behind ``info`` and the statements (their keys carry today's date,
+  so those were held a day at most, never for the process) and the timezone
+  entries, which yfinance's persistent tz cache serves first. ``get_news``
+  (``Ticker.get_news``, an uncached POST) was never affected.
+
 - **hyperliquid_perp: the CLI's funding-rate lookup no longer reads a
   programmer error as a venue outage** (issue #157). ``rate_at`` recorded
   every exception from the funding-history read as a fetch failure — three

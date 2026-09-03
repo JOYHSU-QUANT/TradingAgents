@@ -260,11 +260,14 @@ def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bo
     The strip runs FIRST and whitespace is collapsed after it, so neither the
     spaces the translation introduces nor the ones already in the fragment can
     survive as a run or rebuild a line break inside a table cell. ``limit``
-    caps the result and is passed only where the fragment is ISOLATED (an
-    echoed raw row or argument in a raised message), never when flattening a
-    whole exception message — most of that string is the module's own
-    diagnostic, and capping there would truncate the sentence that carries the
-    meaning.
+    caps the result. Pass it where the fragment is ISOLATED (an echoed raw
+    row or argument in a raised message — not a vendor's whole reason, which
+    the router caps at its slot), and where a whole message is about
+    to enter text the MODEL reads (a sentinel slot, a leaf's degrade line):
+    there the vendor's share of the prompt has to be bounded, and what the
+    cap drops is the operator's to read in a log (#171, #172). Not when
+    flattening a whole message for its own raise or a log line, where the
+    module's own diagnostic carries the meaning.
 
     ``keep_edges`` is for echoing a REFUSED value back to its author: markers
     become a space rather than vanishing, and nothing is trimmed off the ends,

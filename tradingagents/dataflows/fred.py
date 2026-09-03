@@ -16,7 +16,13 @@ from datetime import datetime, timedelta
 import requests
 
 from .errors import VendorError, VendorNotConfiguredError
-from .utils import data_lag_note, date_refusal, json_body_or_outage, raise_for_http_status
+from .utils import (
+    data_lag_note,
+    date_refusal,
+    json_body_or_outage,
+    raise_for_http_status,
+    sanitize_untrusted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +109,18 @@ class FredNotConfiguredError(VendorNotConfiguredError):
     """
 
 
+class FredRequestError(VendorError, ValueError):
+    """FRED answered 400 about this request, with its own reason in the body.
+
+    A ``VendorError`` so the reason — "Bad value for variable series_id", the
+    one thing that lets the analyst pick a better series — rides into the
+    optional category's sentinel as vendor text, where an untyped exception
+    contributes its class name only (#171). Also a ``ValueError``, like
+    ``FredNotConfiguredError``, which is what ``_request``'s 400 raise used
+    to be.
+    """
+
+
 def get_api_key() -> str:
     """Retrieve the FRED API key from the environment."""
     api_key = os.getenv("FRED_API_KEY")
@@ -149,13 +167,18 @@ def _request(path: str, params: dict) -> dict:
     api_params = {**params, "api_key": get_api_key(), "file_type": "json"}
     response = requests.get(f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT)
     # FRED returns 400 with a JSON {"error_message": ...} for unknown series IDs
-    # or malformed params; turn that into a clear, actionable error.
+    # or malformed params; turn that into a clear, actionable error. The
+    # reason is FRED's text, flattened (uncapped) where it enters the message
+    # like every boundary's; the router caps it at the sentinel. A 400 whose
+    # body is not that object — not JSON, JSON that is not an object (a
+    # WAF's), or one without the key — keeps the body text as the reason.
     if response.status_code == 400:
         try:
-            message = response.json().get("error_message", response.text)
+            body = response.json()
         except ValueError:
-            message = response.text
-        raise ValueError(f"FRED request failed: {message}")
+            body = None
+        message = (body.get("error_message") if isinstance(body, dict) else None) or response.text
+        raise FredRequestError(f"FRED request failed: {sanitize_untrusted(message)}")
     raise_for_http_status(response, "FRED")
     return json_body_or_outage(response, "FRED")
 

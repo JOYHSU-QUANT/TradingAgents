@@ -22,10 +22,12 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import (
     INDICATOR_DESCRIPTIONS,
     MAX_INSIDER_LAG_DAYS,
+    MAX_UNTRUSTED_CHARS,
     data_lag_note,
     date_range_refusal,
     date_refusal,
     live_snapshot_note,
+    sanitize_untrusted,
     statement_lag_bound,
 )
 
@@ -321,7 +323,14 @@ def get_stock_stats_indicators_window(
         # times and render a column of blanks under a successful-looking
         # header (#137).
         logger.exception("Error getting bulk stockstats data: %s", e)
-        return f"Error retrieving {indicator} values for {symbol}: {str(e)}"
+        # One line means one line: the library's message is flattened and
+        # capped on its way into the report (a pandas message can carry a
+        # frame repr, newlines and pipes included), and the log line above
+        # keeps the whole of it (#187).
+        return (
+            f"Error retrieving {indicator} values for {symbol}: "
+            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )
 
     result_str = (
         f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
@@ -482,7 +491,10 @@ def get_fundamentals(
         # could still serve.
         raise
     except Exception as e:
-        return f"Error retrieving fundamentals for {ticker}: {str(e)}"
+        return (
+            f"Error retrieving fundamentals for {ticker}: "
+            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )
 
 
 def get_balance_sheet(
@@ -512,7 +524,10 @@ def get_balance_sheet(
     except OSError:
         raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
-        return f"Error retrieving balance sheet for {ticker}: {str(e)}"
+        return (
+            f"Error retrieving balance sheet for {ticker}: "
+            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )
 
 
 def get_cashflow(
@@ -538,7 +553,10 @@ def get_cashflow(
     except OSError:
         raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
-        return f"Error retrieving cash flow for {ticker}: {str(e)}"
+        return (
+            f"Error retrieving cash flow for {ticker}: "
+            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )
 
 
 def get_income_statement(
@@ -566,7 +584,10 @@ def get_income_statement(
     except OSError:
         raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
-        return f"Error retrieving income statement for {ticker}: {str(e)}"
+        return (
+            f"Error retrieving income statement for {ticker}: "
+            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )
 
 
 def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the company"]):
@@ -621,4 +642,7 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
     except OSError:
         raise  # Transport failures are not reports; see get_fundamentals (#116)
     except Exception as e:
-        return f"Error retrieving insider transactions for {ticker}: {str(e)}"
+        return (
+            f"Error retrieving insider transactions for {ticker}: "
+            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )

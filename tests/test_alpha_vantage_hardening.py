@@ -15,6 +15,11 @@ import tradingagents.dataflows.alpha_vantage_common as av
 import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
+
+# The forged message and the one-capped-line assertions are the yfinance
+# siblings' — one definition of the hostile shape, so tightening it reaches
+# both vendors serving the routed indicator tool.
+from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_line
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
 from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
 
@@ -899,6 +904,20 @@ def test_indicator_untyped_failure_still_degrades_to_an_error_string(monkeypatch
     monkeypatch.setattr(avi, "_make_api_request", _boom)
     out = avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
     assert out.startswith("Error retrieving rsi data")
+
+
+@pytest.mark.unit
+def test_indicator_untyped_failure_renders_one_capped_line(monkeypatch):
+    # The degrade line is a report the model reads, so the message is
+    # flattened and capped on its way in — the same treatment as the yfinance
+    # sibling serving the same routed tool (#187). A multi-line message used
+    # to come back as several lines, a hostile one with its markdown intact.
+    def _boom(*a, **k):
+        raise RuntimeError(_FORGED_MESSAGE)
+
+    monkeypatch.setattr(avi, "_make_api_request", _boom)
+    out = avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
+    _assert_one_capped_line(out, "Error retrieving rsi data: ")
 
 
 @pytest.mark.unit

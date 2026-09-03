@@ -316,11 +316,42 @@ class FredRequestBoundaryTests(unittest.TestCase):
         bad = json.dumps({"error_message": "Bad value for variable series_id"})
         with (
             mock.patch.object(fred.requests, "get", _patched_get(bad, status_code=400)),
-            self.assertRaises(ValueError) as ctx,
+            # Typed, so the reason rides the sentinel as vendor text (#171):
+            # an untyped raise contributes its class name only.
+            self.assertRaises(fred.FredRequestError) as ctx,
         ):
             fred._request("series", {"series_id": "NOPE"})
         self.assertIn("Bad value for variable series_id", str(ctx.exception))
-        self.assertNotIsInstance(ctx.exception, VendorUnavailableError)
+        self.assertIsInstance(ctx.exception, ValueError)  # what this raise used to be
+
+    def test_a_400_whose_json_body_is_not_an_object_keeps_the_text(self):
+        # A WAF in front of FRED can answer 400 with JSON that is not an
+        # object; the reason is then the body text, still typed.
+        with (
+            mock.patch.object(fred.requests, "get", _patched_get("[]", status_code=400)),
+            self.assertRaises(fred.FredRequestError) as ctx,
+        ):
+            fred._request("series", {"series_id": "NOPE"})
+        self.assertEqual(str(ctx.exception), "FRED request failed: []")
+
+    def _route_macro_through_real_fred(self, indicator="cpi"):
+        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+        self.addCleanup(
+            setattr, config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG)
+        )
+        set_config({"data_vendors": {"macro_data": "fred"}})
+        return interface.route_to_vendor("get_macro_indicators", indicator, "2026-06-01", 365)
+
+    def test_a_400s_reason_reaches_the_optional_sentinel(self):
+        # End-to-end through the REAL getter and request boundary: the reason
+        # FRED gives — the one fact that lets the analyst pick a better series
+        # — is in the sentinel, flattened; a plain ValueError would have left
+        # the model with the bare word "ValueError" (#171 review).
+        bad = json.dumps({"error_message": "Bad value for variable series_id\n## x"})
+        with mock.patch.object(fred.requests, "get", _patched_get(bad, status_code=400)):
+            out = self._route_macro_through_real_fred("NOPE")
+        self.assertTrue(out.startswith("DATA_UNAVAILABLE: optional macro_data"))
+        self.assertIn("FRED request failed: Bad value for variable series_id x", out)
 
     def test_another_4xx_keeps_its_requests_behaviour(self):
         with (
@@ -333,16 +364,11 @@ class FredRequestBoundaryTests(unittest.TestCase):
         # End-to-end through the REAL getter and request boundary: the
         # optional macro category degrades to its sentinel, and the outage
         # lane logs without the traceback the generic lane reserves for a bug.
-        config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
-        self.addCleanup(
-            setattr, config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG)
-        )
-        set_config({"data_vendors": {"macro_data": "fred"}})
         with (
             mock.patch.object(fred.requests, "get", _patched_get("<html>", status_code=502)),
             self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
         ):
-            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-06-01", 365)
+            out = self._route_macro_through_real_fred()
         self.assertIn("DATA_UNAVAILABLE", out)
         self.assertIn("FRED answered HTTP 502 without data", out)
         self.assertTrue(all(r.exc_info is None for r in cm.records))

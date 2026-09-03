@@ -14,7 +14,7 @@ from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
 # routed tools shares the single judgement and the single sentence (#111).
-from .utils import date_range_refusal, date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_range_refusal, date_refusal, sanitize_untrusted
 
 # Clamp the untrusted article count before it sizes an external yf.Search
 # call (#33): an LLM-supplied or misconfigured value must stay bounded.
@@ -154,7 +154,9 @@ def get_news_yfinance(
         # y_finance.get_fundamentals (#116).
         raise
     except Exception as e:
-        return f"Error fetching news for {ticker}: {str(e)}"
+        return (
+            f"Error fetching news for {ticker}: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
+        )
 
 
 def get_global_news_yfinance(
@@ -290,4 +292,4 @@ def get_global_news_yfinance(
     except OSError:
         raise  # Transport failures are not reports; see y_finance.get_fundamentals (#116)
     except Exception as e:
-        return f"Error fetching global news: {str(e)}"
+        return f"Error fetching global news: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"

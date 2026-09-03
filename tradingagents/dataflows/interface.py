@@ -19,6 +19,7 @@ from .deribit import get_options_market_data as get_deribit_options_market
 from .errors import (
     NoMarketDataError,
     UnsupportedIndicatorError,
+    VendorError,
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
@@ -31,7 +32,7 @@ from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
 from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
 from .throttle import VENDOR_THROTTLE_LATCH
-from .utils import http_status, sanitize_untrusted
+from .utils import MAX_UNTRUSTED_CHARS, http_status, sanitize_untrusted
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -258,6 +259,52 @@ def is_category_disabled(category: str, method: str = None) -> bool:
     )
 
 
+def _failure_account(e: BaseException) -> str:
+    """The words a failed vendor call contributes to a sentinel the model reads.
+
+    Written into two slots of ``route_to_vendor``: the optional category's
+    ``DATA_UNAVAILABLE`` parenthesis and the no-data sentinel's outage clause.
+    A typed vendor error's message was authored at the boundary, so it rides
+    along — flattened and capped, because not every boundary caps what it
+    quotes (yfinance quotes the library's exception, decoded error body
+    included, #172); a remedy a boundary appends after the vendor's text is
+    the operator's, in the log. So would the caller's own indicator mistake,
+    whose message is the remedy, should an optional category ever compute
+    one. Anything else is the generic lane's and
+    contributes ``_generic_failure_words`` — never its text: a ``requests``
+    message quotes the request URL, API key included (#171). The router's
+    warning log has the full message either way.
+    """
+    if isinstance(e, (VendorError, UnsupportedIndicatorError)):
+        # A typed error raised with no message would render as "()".
+        return sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS) or type(e).__name__
+    return _generic_failure_words(e)
+
+
+def _generic_failure_words(e: BaseException) -> str:
+    """The words for an exception the generic lane caught, by status and class.
+
+    One vocabulary for both sentinels — the no-data outage clause and the
+    optional parenthesis read the same 503 as "answered HTTP 503" rather
+    than one of them saying ``HTTPError: HTTP 503``. The status first, read
+    off the exception the library-neutral way (``http_status``): a 401/403
+    is the vendor refusing this client, any other status is its answer. No
+    status and a transport exception (every ``requests`` and curl_cffi
+    failure is an ``OSError``; the ``ValueError``-flavoured ones and a
+    ``requests.HTTPError`` with no response are not the wire) is the vendor
+    not reached. Anything else — a library bug — is its class name. Which of
+    these count as an OUTAGE for the no-data verdict is the lane's decision,
+    not this function's.
+    """
+    status = http_status(e)
+    if status is not None:
+        refused = ", refusing this client" if status in (401, 403) else ""
+        return f"answered HTTP {status}{refused}"
+    if isinstance(e, OSError) and not isinstance(e, (ValueError, requests.HTTPError)):
+        return f"could not be reached: {type(e).__name__}"
+    return type(e).__name__
+
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -389,7 +436,11 @@ def route_to_vendor(method: str, *args, **kwargs):
                 first_error = e  # Surface it if no other vendor can serve the call.
             continue
         except NoMarketDataError as e:
-            last_no_data = e  # No data here; another configured vendor may have it
+            # No data here; another configured vendor may have it. INFO, not
+            # WARNING — a routine verdict — but logged whole: the detail is
+            # capped in the sentinel and this line is its only other copy.
+            logger.info("Vendor %r had no usable data for %s: %s", vendor, method, e)
+            last_no_data = e
             continue
         except VendorUnavailableError as e:
             # The vendor answered with an outage page or an unparsable body
@@ -400,10 +451,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             if first_error is None:
                 first_error = e
             if first_outage is None:
-                # Flattened: the boundary helpers carry a status code only,
-                # but yfinance's mapping quotes the library's exception, and
-                # the sentinel is an LLM prompt (see ``sanitize_untrusted``).
-                first_outage = (vendor, sanitize_untrusted(e))
+                first_outage = (vendor, _failure_account(e))
             continue
         except UnsupportedIndicatorError as e:
             # A caller typo, not a vendor failure: logged without a traceback,
@@ -439,17 +487,14 @@ def route_to_vendor(method: str, *args, **kwargs):
             # boundary leaves alone), as is a requests HTTPError with no
             # status to read; a ValueError-flavoured requests exception
             # (MissingSchema, InvalidURL, JSONDecodeError) is a bug or an
-            # answer, not the wire. The status or the class only, never the text: a
-            # requests message quotes the request URL, API key included.
+            # answer, not the wire. The words are ``_generic_failure_words``'
+            # — the status or the class only, never the text: a requests
+            # message quotes the request URL, API key included.
             if first_outage is None and isinstance(e, OSError) and not isinstance(e, ValueError):
                 status = http_status(e)
-                if status is None:
-                    if not isinstance(e, requests.HTTPError):
-                        first_outage = (vendor, f"could not be reached: {type(e).__name__}")
-                elif status >= 500:
-                    first_outage = (vendor, f"answered HTTP {status}")
-                elif status in (401, 403):
-                    first_outage = (vendor, f"answered HTTP {status}, refusing this client")
+                unreached = status is None and not isinstance(e, requests.HTTPError)
+                if unreached or (status is not None and (status >= 500 or status in (401, 403))):
+                    first_outage = (vendor, _generic_failure_words(e))
             continue
         # The vendor returned: drop a deadline that predates this request (a
         # lapsed one), keep the one a sibling thread armed while it was in
@@ -488,8 +533,11 @@ def route_to_vendor(method: str, *args, **kwargs):
         resolved = "" if canonical == sym else f" (resolved to '{canonical}')"
         # Surface the typed error's detail (e.g. "latest row is 2025-06-11 ...
         # stale") so the agent sees the specific reason — invalid symbol, no
-        # coverage, or stale data — not just a generic "unavailable".
-        reason = f" ({last_no_data.detail})" if last_no_data.detail else ""
+        # coverage, or stale data — not just a generic "unavailable". The
+        # detail quotes what the vendor answered (a column list, a date), so
+        # it takes the same flatten-and-cap as the other two slots.
+        detail = sanitize_untrusted(last_no_data.detail or "", limit=MAX_UNTRUSTED_CHARS)
+        reason = f" ({detail})" if detail else ""
         if first_outage is not None:
             down_vendor, outage = first_outage
             # Chain-order neutral on purpose: the vendor that was down may be
@@ -557,7 +605,7 @@ def route_to_vendor(method: str, *args, **kwargs):
             logger.warning("Optional %s unavailable for %s: %s", category, method, first_error)
             return (
                 f"DATA_UNAVAILABLE: optional {category} could not be retrieved "
-                f"({first_error}). Proceed without it; do not fabricate values."
+                f"({_failure_account(first_error)}). Proceed without it; do not fabricate values."
             )
         raise first_error
 

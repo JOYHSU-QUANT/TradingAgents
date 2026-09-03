@@ -19,6 +19,10 @@ import requests
 import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
+
+# The hostile message shape the leaves' prose tests use: one definition, so the
+# forgery the router's slots have to neutralise is the one the leaves do.
+from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_line
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import (
@@ -29,6 +33,7 @@ from tradingagents.dataflows.errors import (
 )
 from tradingagents.dataflows.symbol_utils import NoMarketDataError
 from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
+from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS
 
 
 def _reset_config():
@@ -812,3 +817,127 @@ class CallerErrorPrecedenceTests(unittest.TestCase):
         ):
             interface.route_to_vendor("get_indicators", "AAPL", "x", "2026-06-01", 30)
         self.assertIn("no indicator named 'x'", "\n".join(cm.output))
+
+
+@pytest.mark.unit
+class OptionalSentinelTests(unittest.TestCase):
+    """What an optional category's failure may write into its sentinel.
+
+    The parenthesis in ``DATA_UNAVAILABLE: optional <category> could not be
+    retrieved (...)`` used to hold ``str(first_error)`` whatever the error was.
+    A requests message quotes the request URL, and FRED's API key is a query
+    parameter on it, so one connection failure wrote the key into the LLM
+    context and the persisted report artifacts (#171). Now the generic lane's
+    exception contributes ``_generic_failure_words`` — the status it carries,
+    or its class — and a typed vendor error its message flattened and
+    capped; the message itself goes to the warning log only.
+    """
+
+    def setUp(self):
+        _reset_config()
+        set_config({"data_vendors": {"macro_data": "fred"}})
+
+    def tearDown(self):
+        _reset_config()
+
+    def _macro(self, impl):
+        with (
+            _chain("get_macro_indicators", {"fred": impl}),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+        ):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-01-01")
+        return out, "\n".join(cm.output)
+
+    def test_a_transport_failure_contributes_its_class_only(self):
+        reset = _raises(
+            requests.ConnectionError(
+                "HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries "
+                "exceeded with url: /fred/series?series_id=UNRATE&api_key=SECRET-KEY"
+                "&file_type=json"
+            )
+        )
+        out, logged = self._macro(reset)
+        # The whole sentence, so the prefix and the do-not-fabricate tail every
+        # reader keys on are pinned along with the slot.
+        self.assertEqual(
+            out,
+            "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+            "(could not be reached: ConnectionError). Proceed without it; do not "
+            "fabricate values.",
+        )
+        # The operator still gets the whole message, where it always was.
+        self.assertIn("api_key=SECRET-KEY", logged)
+
+    def test_a_status_the_failure_carries_rides_along_without_its_text(self):
+        # A 4xx the boundary left alone is the vendor answering about this
+        # request, and the status is the one fact worth the model's while —
+        # read off the exception the way the outage lane reads it, never the
+        # text, which quotes the same URL.
+        refused = _raises(
+            requests.HTTPError(
+                "400 Client Error: Bad Request for url: /fred/series?api_key=SECRET-KEY",
+                response=types.SimpleNamespace(status_code=400),
+            )
+        )
+        out, _ = self._macro(refused)
+        # The outage clause's vocabulary, by the same rule, though a 400 is
+        # never an outage and that clause never quotes one itself.
+        self.assertIn("could not be retrieved (answered HTTP 400).", out)
+        self.assertNotIn("SECRET-KEY", out)
+
+    def test_a_typed_error_with_no_message_contributes_its_class(self):
+        out, _ = self._macro(_raises(VendorUnavailableError()))
+        self.assertIn("could not be retrieved (VendorUnavailableError).", out)
+
+    def test_a_vendor_errors_message_is_flattened_and_capped(self):
+        # A typed error's message was authored at the boundary, so it stays —
+        # flattened, since what the boundary quoted may be the vendor's, and
+        # capped, since not every boundary caps what it quotes. What the cap
+        # drops (a remedy a boundary appends after the vendor's text) is the
+        # operator's, in the warning log.
+        out, _ = self._macro(_raises(VendorNotConfiguredError(_FORGED_MESSAGE)))
+        head = "DATA_UNAVAILABLE: optional macro_data could not be retrieved ("
+        tail = "). Proceed without it; do not fabricate values."
+        self.assertTrue(out.startswith(head) and out.endswith(tail))
+        _assert_one_capped_line(out[len(head) : -len(tail)], "")
+
+    def test_the_outage_clause_of_the_no_data_sentinel_is_capped_too(self):
+        # #172: the outage slot was flattened but not capped, and yfinance's
+        # mapping quotes the library's exception — "Failed to parse json
+        # response ... {the decoded error dict}" — whose length nothing bounds.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        unparsable = _raises(
+            VendorUnavailableError(
+                "Yahoo Finance answered without data: Failed to parse json response "
+                + "{'code': 'Unauthorized', 'description': 'x'} " * 40
+            )
+        )
+        with _chain("get_stock_data", {"yfinance": unparsable, "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertTrue(out.startswith("NO_DATA_AVAILABLE:"))
+        head = "vendor 'yfinance' was unavailable ("
+        tail = ") and the other configured vendor(s) had no usable data (no rows)."
+        clause = out[out.index(head) + len(head) : out.index(tail)]
+        self.assertTrue(clause.startswith("Yahoo Finance answered without data: Failed to parse"))
+        self.assertTrue(clause.endswith("..."))
+        self.assertLessEqual(len(clause), MAX_UNTRUSTED_CHARS + len("..."))
+
+    def test_the_no_data_detail_slot_is_flattened_and_capped_too(self):
+        # The third slot a vendor writes into: the detail quotes what the
+        # vendor answered (a column list, a date), so the same treatment.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance"}})
+
+        def _no_rows(symbol, *a, **k):
+            raise NoMarketDataError(symbol, symbol, _FORGED_MESSAGE)
+
+        with (
+            _chain("get_stock_data", {"yfinance": _no_rows}),
+            self.assertLogs("tradingagents.dataflows.interface", level="INFO") as cm,
+        ):
+            out = _stock()
+        head = "NO_DATA_AVAILABLE: No usable market data for 'AAPL' from any configured vendor ("
+        tail = "). The symbol may be invalid, delisted, not covered, or the vendor returned stale data."
+        self.assertIn(head, out)
+        _assert_one_capped_line(out[out.index(head) + len(head) : out.index(tail)], "")
+        # This lane used to log nothing, so the capped tail had no other copy.
+        self.assertIn(_FORGED_MESSAGE, "\n".join(cm.output))

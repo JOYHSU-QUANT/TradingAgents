@@ -48,7 +48,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast, get_args
+from typing import Literal, NamedTuple, get_args
 
 from ..common.digest import payload_digest
 
@@ -82,24 +82,30 @@ class FingerprintBackfill:
         )
 
 
-def _recorded_format_text(row) -> str | Reason:
-    """The payload's ``format_instructions`` text, or the :data:`Reason` it stays NULL.
+class _LeftNull(NamedTuple):
+    """The classifier's other outcome: no text, and the :data:`Reason` why."""
 
-    ``row`` is a ``repository.UnstampedInput``. The two outcomes cannot
-    collide: a format block is never one of the four reason words.
+    reason: Reason
+
+
+def _recorded_format_text(row) -> str | _LeftNull:
+    """The payload's ``format_instructions`` text, or why the row stays NULL.
+
+    ``row`` is a ``repository.UnstampedInput``. A tagged outcome rather than
+    a bare string, so a format block can never be mistaken for a reason word.
     """
     if row.context_shape is None or row.prompt_version is None:
-        return "pre_v10"
+        return _LeftNull("pre_v10")
     path = row.input_payload_path
     if path is None:
-        return "missing_payload"
+        return _LeftNull("missing_payload")
     try:
         raw = Path(path).read_bytes()
     except FileNotFoundError:
-        return "missing_payload"
+        return _LeftNull("missing_payload")
     except OSError as exc:
         logger.warning("payload %s for %s could not be read: %s", path, row.input_id, exc)
-        return "unreadable"
+        return _LeftNull("unreadable")
     digest = payload_digest(raw)
     if row.input_payload_hash != digest:
         logger.warning(
@@ -109,7 +115,7 @@ def _recorded_format_text(row) -> str | Reason:
             digest,
             row.input_payload_hash,
         )
-        return "unverified"
+        return _LeftNull("unverified")
     try:
         text = json.loads(raw)["format_instructions"]
     except (ValueError, KeyError, TypeError) as exc:
@@ -120,7 +126,7 @@ def _recorded_format_text(row) -> str | Reason:
             type(exc).__name__,
             exc,
         )
-        return "unreadable"
+        return _LeftNull("unreadable")
     if not isinstance(text, str):
         logger.warning(
             "payload %s for %s has a non-text format block (%s) — left NULL",
@@ -128,7 +134,7 @@ def _recorded_format_text(row) -> str | Reason:
             row.input_id,
             type(text).__name__,
         )
-        return "unreadable"
+        return _LeftNull("unreadable")
     return text
 
 
@@ -137,13 +143,12 @@ def backfill_format_fingerprints(db, *, run_id: str) -> FingerprintBackfill:
     from ..domains.perp.target_decision import format_fingerprint
     from . import repository as repo
 
-    reasons: tuple[Reason, ...] = get_args(Reason)
-    counts: dict[Reason, int] = dict.fromkeys(reasons, 0)
+    counts: dict[Reason, int] = dict.fromkeys(get_args(Reason), 0)
     stamps: list[tuple[str, str]] = []
     for row in repo.ai_inputs_without_format_fingerprint(db.conn, run_id):
         outcome = _recorded_format_text(row)
-        if outcome in reasons:
-            counts[cast(Reason, outcome)] += 1
+        if isinstance(outcome, _LeftNull):
+            counts[outcome.reason] += 1
             continue
         stamps.append((row.input_id, format_fingerprint(outcome)))
     stamped = 0

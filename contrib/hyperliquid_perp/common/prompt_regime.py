@@ -24,8 +24,9 @@ from __future__ import annotations
 
 __all__ = ["PROMPT_REGIME_PREFIX", "prompt_regime_line"]
 
-# The grep handle. ``validate`` has printed it since schema v10; the daemon
-# log and ``--context-only`` now carry the same one.
+# The grep handle. ``validate`` has printed it since schema v11 (issue #129,
+# when the third key landed); the daemon log and ``--context-only`` now carry
+# the same one.
 PROMPT_REGIME_PREFIX = "prompt_regime:"
 
 

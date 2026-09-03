@@ -54,15 +54,18 @@ def _cmd_export(argv: list[str]) -> int:
             # it in the one ``export_failed`` wording this command has always
             # used, and a "stamped=0" line about a typo would only compete
             # with it.
-            if repo.get_run(db.conn, args.run_id) is not None:
-                try:
-                    report = backfill_format_fingerprints(db, run_id=args.run_id)
-                except sqlite3.Error as exc:
-                    # The pass takes the store's write lock (RUNBOOK §6 says
-                    # a running daemon is fine): a lock held past busy_timeout
-                    # is a named refusal here, not a traceback exit 2.
-                    print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
-                    return 1
+            try:
+                known = repo.get_run(db.conn, args.run_id) is not None
+                report = (
+                    backfill_format_fingerprints(db, run_id=args.run_id) if known else None
+                )
+            except sqlite3.Error as exc:
+                # The pass takes the store's write lock (RUNBOOK §6 says a
+                # running daemon is fine): a lock held past busy_timeout is a
+                # named refusal here, not a traceback exit 2.
+                print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
+                return 1
+            if report is not None:
                 print(report.summary(args.run_id), file=sys.stderr)
         try:
             paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)

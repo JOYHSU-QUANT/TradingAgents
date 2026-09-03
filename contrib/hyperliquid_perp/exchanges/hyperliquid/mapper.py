@@ -58,10 +58,11 @@ freshness guard uses is the ``l2Book`` stamp, mapped here by
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from ...common.instants import from_epoch_ms
 from ...domains.perp.margin import MarginSchedule, MarginTier
 from ...domains.perp.schema import (
     AccountSnapshot,
@@ -624,7 +625,7 @@ def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime
     stamp = raw.get("time")
     try:
         millis = int(_dec(stamp, field="time"))
-        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc)
+        return from_epoch_ms(millis)
     except (MalformedResponseError, ValueError, OverflowError, OSError) as exc:
         raise MalformedResponseError(
             f"l2Book 'time' is unusable as epoch ms ({stamp!r}): {exc}"

@@ -121,7 +121,7 @@ TradingAgents/
     └── hyperliquid_perp/
         ├── exchanges/
         ├── domains/
-        ├── common/                      # 跨層共用（enum guard · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label · no_decision.py no-decision 升級政策）
+        ├── common/                      # 跨層共用（enum guard · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label／epoch-ms 換算唯一實作 · no_decision.py no-decision 升級政策）
         ├── integration/                 # bridge to the unmodified engine
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── persistence/                 # Phase 2 SQLite source of truth

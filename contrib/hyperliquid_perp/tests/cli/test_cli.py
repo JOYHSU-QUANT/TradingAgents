@@ -1673,10 +1673,11 @@ def test_history_funding_source_escalates_after_consecutive_failures(caplog):
     import logging
 
     from contrib.hyperliquid_perp.cli import _HistoryFundingSource
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 
     class _BrokenMarket:
         def get_funding_history(self, coin, days, *, end):
-            raise RuntimeError("endpoint gone")
+            raise ExchangeRequestError("endpoint gone")
 
     source = _HistoryFundingSource(_BrokenMarket())
     threshold = source._FAILURE_ESCALATION_THRESHOLD
@@ -1689,22 +1690,81 @@ def test_history_funding_source_escalates_after_consecutive_failures(caplog):
     assert len(levels) == threshold
     assert all(lv == logging.WARNING for lv in levels[:-1])
     assert levels[-1] == logging.ERROR
-    # The failure counted must be the fake's, not a TypeError from a call
-    # site that drifted from the fake's signature: ``rate_at`` swallows
-    # every exception alike, so without this the test would count three
-    # "failures" and stay green with the ``end=`` wiring gone.
+    # The failure counted must be the fake's — a venue error, the one family
+    # ``rate_at`` records as "pending". Anything else propagates (next test).
     assert all("endpoint gone" in r.getMessage() for r in failures)
+
+
+class _DriftedMarket:
+    def get_funding_history(self, coin, days):  # no ``end`` keyword
+        return []
+
+
+class _RefusingMarket:
+    def get_funding_history(self, coin, days, *, end):
+        raise ValueError("market data window end must be timezone-aware (UTC)")
+
+
+@pytest.mark.parametrize(
+    ("market", "error"), [(_DriftedMarket(), TypeError), (_RefusingMarket(), ValueError)]
+)
+def test_history_funding_source_lets_a_programmer_error_through(market, error):
+    """Only the venue's failures are "pending"; a caller bug propagates (issue #157).
+
+    A ``TypeError`` from a call site that drifted from the reader's signature
+    (here: a reader without the ``end`` keyword) and a ``ValueError`` from
+    the reader's own naive-clock refusal are not fetch failures. Swallowed,
+    each would log three WARNINGs and an ERROR that read as an endpoint
+    outage while every settlement stayed pending forever — and the failure
+    counter must not have moved, so the bug is not mistaken for an outage
+    once it is fixed and the next fetch succeeds.
+    """
+    from contrib.hyperliquid_perp.cli import _HistoryFundingSource
+
+    source = _HistoryFundingSource(market)
+    with pytest.raises(error):
+        source.rate_at("BTC", datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc))
+    assert source._consecutive_failures == {}
+
+
+def test_history_funding_source_buckets_points_by_the_hour_of_their_stamp():
+    """The happy path: a returned point is found under the hour its stamp falls in.
+
+    The venue stamps a settlement as epoch ms; the lookup key is that stamp's
+    whole hour (a settlement is published on the hour, but the bucket must
+    not depend on it), and an hour with no point is ``None`` (pending), not a
+    neighbour's rate. Pinned on stamps built by the same integer arithmetic
+    the lookup decodes with — one at the hour, one at its last millisecond.
+    """
+    from contrib.hyperliquid_perp.cli import _HistoryFundingSource
+    from contrib.hyperliquid_perp.common.instants import epoch_ms
+
+    noon = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    one_pm = noon + timedelta(hours=1)
+    last_ms_of_one_pm = one_pm + timedelta(minutes=59, seconds=59, milliseconds=999)
+    points = [
+        SimpleNamespace(time=epoch_ms(noon, what="x"), rate=Decimal("0.0001")),
+        SimpleNamespace(time=epoch_ms(last_ms_of_one_pm, what="x"), rate=Decimal("-0.0002")),
+    ]
+
+    class _Market:
+        def get_funding_history(self, coin, days, *, end):
+            return points
+
+    source = _HistoryFundingSource(_Market())
+    assert source.rate_at("BTC", noon) == Decimal("0.0001")
+    assert source.rate_at("BTC", one_pm) == Decimal("-0.0002")
+    assert source.rate_at("BTC", noon - timedelta(hours=1)) is None
+    assert source._consecutive_failures == {}
 
 
 def test_history_funding_source_hands_its_own_clock_to_the_window_end():
     """The ``end=`` wiring of the one deliberately host-clocked windowed read.
 
-    Pinned on the HAPPY path with a recording fake — the escalation test
-    above cannot see a dropped ``end=`` (the resulting TypeError is swallowed
-    like any other failure). Issue #124: this read looks up a PAST hour, so
-    it passes the host's clock rather than fetching the exchange's; that
-    clock must be tz-aware and current, and a miss must be a quiet
-    ``None`` (pending), not a counted failure.
+    Pinned on the HAPPY path with a recording fake. Issue #124: this read
+    looks up a PAST hour, so it passes the host's clock rather than fetching
+    the exchange's; that clock must be tz-aware and current, and a miss must
+    be a quiet ``None`` (pending), not a counted failure.
     """
     from contrib.hyperliquid_perp.cli import _HistoryFundingSource
 

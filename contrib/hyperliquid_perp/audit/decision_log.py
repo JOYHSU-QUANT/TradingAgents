@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..common.atomic_io import atomic_write_text
+from ..common.instants import epoch_ms
 
 if TYPE_CHECKING:
     # Type-only imports (annotations are strings under ``from __future__``) so the
@@ -72,19 +73,18 @@ def _record_header(
 ) -> dict[str, Any]:
     """The fields every audit record format shares (pure — no clock, no I/O).
 
-    Guards against a naive timestamp here, once for both formats: a naive
-    datetime makes ``timestamp.timestamp()`` interpret the value in the host's
+    A naive timestamp is refused here, once for both formats, by ``epoch_ms``
+    naming the record. The defect that refusal exists for: read through a
+    float ``.timestamp()``, a naive datetime is interpreted in the host's
     local zone, so ``timestamp_ms`` would be silently off by the UTC offset
     (e.g. 8h on a UTC+8 box) while the ISO ``timestamp`` string looks fine — a
     corrupt audit record that no test on a UTC machine would catch.
     """
-    if timestamp.tzinfo is None:
-        raise ValueError("audit records require a timezone-aware timestamp")
     return {
         "schema_version": schema_version,
         "coin": coin,
         "timestamp": timestamp.isoformat(),
-        "timestamp_ms": int(timestamp.timestamp() * 1000),
+        "timestamp_ms": epoch_ms(timestamp, what="audit record timestamp"),
         "prompt_hash": prompt_hash(prompt),
         "models": models,
     }

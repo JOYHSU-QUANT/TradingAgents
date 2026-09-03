@@ -52,6 +52,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from ..common.instants import from_epoch_ms
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,
@@ -198,7 +199,7 @@ def _require_scalar_id(raw: Any, key: str) -> str | int:
 def _parse_epoch_ms(value: Any) -> datetime:
     """A fill's ``time`` (epoch ms) as an aware UTC datetime, or fail loud."""
     try:
-        return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc)
+        return from_epoch_ms(int(value))
     except (TypeError, ValueError, OSError, OverflowError) as exc:
         raise MalformedResponseError(f"fill 'time' is not a valid epoch-ms int: {value!r}") from exc
 

@@ -14,8 +14,9 @@ closed (issue #124).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
+from ...common.instants import epoch_ms
 from ...domains.perp.margin import MarginSchedule
 from ...domains.perp.schema import Candle, FundingPoint, MarketSnapshot, interval_to_ms
 from . import mapper
@@ -24,26 +25,10 @@ from .sdk_client import HyperliquidClient, call_sdk
 logger = logging.getLogger(__name__)
 
 _MS_PER_DAY = 24 * 60 * 60_000
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _epoch_ms(moment: datetime) -> int:
-    """``moment`` as epoch milliseconds, by integer arithmetic.
-
-    The window ends below are compared against the exchange's own
-    ``close_time`` stamps, so the millisecond the exchange sent
-    (``mapper.map_exchange_time``) must come back out exactly — 1ms short of
-    a bar's close would drop a bar the exchange has closed. ``timedelta``
-    floor division is integer arithmetic on microseconds, so the result is
-    exact by construction and rests on no float behaviour at all (the
-    ``int(ts * 1000)`` route goes through a float; whether it happens to
-    round-trip at a given magnitude is beside the point here). A naive
-    ``moment`` is refused by name — the subtraction would raise anyway, but
-    about mixing offsets, not about the clock the caller handed in.
-    """
-    if moment.tzinfo is None:
-        raise ValueError("market data window end must be timezone-aware (UTC)")
-    return (moment - _EPOCH) // timedelta(milliseconds=1)
+# ``what`` for the naive-``end`` refusal both windowed reads share. The window
+# ends are compared against the exchange's own ``close_time`` stamps, so the
+# conversion must be exact — that argument lives on ``common.instants.epoch_ms``.
+_WINDOW_END = "market data window end"
 
 
 class HyperliquidMarketData:
@@ -87,7 +72,7 @@ class HyperliquidMarketData:
         the ``close_time <= end`` filter below while the response carried its
         OHLCV as captured before that close — the very defect this closes.
         """
-        end_ms = _epoch_ms(end)
+        end_ms = epoch_ms(end, what=_WINDOW_END)
         # Pad the window so we comfortably clear `lookback` closed candles (the +1
         # absorbs the still-forming bar dropped just below).
         start = end_ms - (lookback + 1) * interval_to_ms(interval)
@@ -144,7 +129,7 @@ class HyperliquidMarketData:
         where a miss is "pending", never a wrong rate) may pass its own
         clock, and says so at the call site.
         """
-        end_ms = _epoch_ms(end)
+        end_ms = epoch_ms(end, what=_WINDOW_END)
         start = end_ms - window_days * _MS_PER_DAY
         raw = call_sdk(self._info.funding_history, coin, start, end_ms)
         # Identity echo: same discipline as get_candles above.

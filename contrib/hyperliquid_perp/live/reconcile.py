@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.enum_guard import check_enum
-from ..common.instants import whole_hours_label
+from ..common.instants import epoch_ms, whole_hours_label
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,
@@ -1088,8 +1088,8 @@ class LiveReconciler:
         covered (page budget out, unadvanceable page) returns None — the leg
         reports inconclusive (fail-safe) instead of issuing manual verdicts.
         """
-        start_ms = int(window_start.timestamp() * 1000)
-        end_ms = int(now.timestamp() * 1000)
+        start_ms = epoch_ms(window_start, what="fill cross-check window start")
+        end_ms = epoch_ms(now, what="fill cross-check 'now'")
         keys: set[str] = set()
         for _ in range(DEFAULT_MAX_PAGES):
             try:

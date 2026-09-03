@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -78,7 +79,7 @@ class _HiddenAnswer(Exception):
         self.value = value
 
 
-def yf_retry(func, max_retries=3, base_delay=2.0):
+def yf_retry(func, max_retries=3, base_delay=2.0, *, lock=None):
     """Execute a yfinance call with exponential backoff on rate limits.
 
     yfinance raises YFRateLimitError on HTTP 429 responses but does not
@@ -100,6 +101,13 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
     flight (#153); a value handed back as :class:`_HiddenAnswer` drops
     nothing. Nothing but an exhausted throttle arms it, so the un-throttled
     path is unchanged.
+
+    ``lock``, when given, is held around each attempt of ``func`` — not the
+    backoff sleeps — and the send instant the latch compares against is
+    taken once it is held: a call that queued behind a sibling's last,
+    refused attempt was sent after that refusal, and its answer is the
+    later evidence. Taken before the wait, that instant predated the
+    sibling's arm and the served answer left a stale latch in place.
     """
     remaining = _YF_THROTTLE_LATCH.remaining_s(_YF_LATCH_KEY)
     if remaining is not None:
@@ -107,11 +115,13 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
             f"Yahoo Finance rate limited a recent request; skipping this one "
             f"without contacting the vendor for another {remaining:.0f}s"
         )
+    held = contextlib.nullcontext() if lock is None else lock
 
     for attempt in range(max_retries + 1):
-        sent_at = time.monotonic()
         try:
-            result = func()
+            with held:
+                sent_at = time.monotonic()
+                result = func()
         except YFRateLimitError as e:
             if attempt < max_retries:
                 delay = base_delay * (2**attempt)
@@ -129,8 +139,8 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
             return hidden.value  # not an answer: latch left alone (#114)
         else:
             # The call returned: drop a deadline that predates THIS attempt
-            # (a lapsed one), keep one a sibling thread armed while it was in
-            # flight — why is ``ThrottleLatch.clear``'s (#153). Per attempt,
+            # (a lapsed one), keep the one a sibling thread armed while it was
+            # in flight — why is ``ThrottleLatch.clear``'s (#153). Per attempt,
             # not per call: a retry sent after the sibling's arm and served
             # IS the later evidence. "Returned", not "answered": a no-data
             # verdict raised by the callable leaves the latch alone, by
@@ -144,9 +154,10 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
 # a thread pool, and the fundamentals analyst binds the three statement tools
 # together — unsynchronized, an interleaved backup capture could restore the
 # flag mid-fetch (re-swallowing the very throttle this exists to surface) or
-# leave it stuck False process-wide. The retry sleeps in yf_retry sit outside
-# the locked window, so a throttled call does not hold the lock while backing
-# off.
+# leave it stuck False process-wide. yf_retry holds it around each attempt
+# and takes the throttle latch's send instant once it is held (#153); the
+# retry sleeps sit outside the locked window, so a throttled call does not
+# hold the lock while backing off.
 #
 # The lock is held for the whole fetch, so every yfinance network call in the
 # process is serialized through it — since #135 that is prices, indicators,
@@ -227,45 +238,45 @@ def yf_fetch_unhidden(func, *, hidden_answer):
     from yfinance.config import YfConfig
 
     def _call():
-        with _UNHIDE_LOCK:
-            backup = YfConfig.debug.hide_exceptions
-            YfConfig.debug.hide_exceptions = False
-            try:
-                return func()
-            except YFRateLimitError:
-                raise
-            except (YFDataException, json.JSONDecodeError) as e:
-                # Yahoo answered, but not with data — see the docstring. Mapped
-                # here rather than let out: the getters re-raise VendorError
-                # and nothing else non-OSError, so raw these reached their
-                # broad handler and came back as prose (#136).
-                raise VendorUnavailableError(f"Yahoo Finance answered without data: {e}") from e
-            except OSError as e:
-                if http_status(e) == 404:
-                    # 404 alone: a 401/403 is Yahoo refusing this client (a
-                    # crumb or an IP block, the case _make_request's cookie
-                    # switch exists for), which must reach the fallback chain
-                    # like a 5xx rather than read as "symbol not covered".
-                    logger.info("yfinance answered HTTP 404: %s", e)
-                    raise _HiddenAnswer(hidden_answer()) from e
-                # Under the swallow this became the empty answer, which the
-                # statement lane turned into NoMarketDataError and the router's
-                # no-data sentinel then ranked above the recorded failure — so
-                # the agent read "symbol not covered" and the fallback vendor
-                # was never tried (#116).
-                raise
-            except Exception as e:
-                # A traceback for a library bug; one line for the library's own
-                # expected conditions (a symbol with no rows in range, no
-                # timezone), which yfinance itself logs without one.
-                logger.warning(
-                    "yfinance fetch failed: %s", e, exc_info=not isinstance(e, YFException)
-                )
+        # Runs under _UNHIDE_LOCK, held by yf_retry around each attempt.
+        backup = YfConfig.debug.hide_exceptions
+        YfConfig.debug.hide_exceptions = False
+        try:
+            return func()
+        except YFRateLimitError:
+            raise
+        except (YFDataException, json.JSONDecodeError) as e:
+            # Yahoo answered, but not with data — see the docstring. Mapped
+            # here rather than let out: the getters re-raise VendorError
+            # and nothing else non-OSError, so raw these reached their
+            # broad handler and came back as prose (#136).
+            raise VendorUnavailableError(f"Yahoo Finance answered without data: {e}") from e
+        except OSError as e:
+            if http_status(e) == 404:
+                # 404 alone: a 401/403 is Yahoo refusing this client (a
+                # crumb or an IP block, the case _make_request's cookie
+                # switch exists for), which must reach the fallback chain
+                # like a 5xx rather than read as "symbol not covered".
+                logger.info("yfinance answered HTTP 404: %s", e)
                 raise _HiddenAnswer(hidden_answer()) from e
-            finally:
-                YfConfig.debug.hide_exceptions = backup
+            # Under the swallow this became the empty answer, which the
+            # statement lane turned into NoMarketDataError and the router's
+            # no-data sentinel then ranked above the recorded failure — so
+            # the agent read "symbol not covered" and the fallback vendor
+            # was never tried (#116).
+            raise
+        except Exception as e:
+            # A traceback for a library bug; one line for the library's own
+            # expected conditions (a symbol with no rows in range, no
+            # timezone), which yfinance itself logs without one.
+            logger.warning(
+                "yfinance fetch failed: %s", e, exc_info=not isinstance(e, YFException)
+            )
+            raise _HiddenAnswer(hidden_answer()) from e
+        finally:
+            YfConfig.debug.hide_exceptions = backup
 
-    return yf_retry(_call)
+    return yf_retry(_call, lock=_UNHIDE_LOCK)
 
 
 def yf_fetch_statement(func):

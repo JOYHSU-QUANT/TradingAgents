@@ -355,6 +355,10 @@ def route_to_vendor(method: str, *args, **kwargs):
                 )
             continue
 
+        # The send instant the latch compares against (#153). Taken here, so
+        # an impl that waits before sending would date its request early —
+        # the one that does (SoSoValue's request budget) is a type the
+        # router never latches, so nothing is misdated today.
         sent_at = time.monotonic()
         try:
             result = impl_func(*args, **kwargs)
@@ -447,8 +451,8 @@ def route_to_vendor(method: str, *args, **kwargs):
                     first_outage = (vendor, f"answered HTTP {status}, refusing this client")
             continue
         # The vendor returned: drop a deadline that predates this request (a
-        # lapsed one), keep one a sibling thread armed while it was in flight
-        # — why is ``ThrottleLatch.clear``'s (#153). "Returned", not
+        # lapsed one), keep the one a sibling thread armed while it was in
+        # flight — why is ``ThrottleLatch.clear``'s (#153). "Returned", not
         # "answered": a no-data or outage verdict raised above leaves the
         # latch alone, by choice. Only a raised throttle arms the latch, so a
         # vendor that renders a partial throttle into its report (Deribit,

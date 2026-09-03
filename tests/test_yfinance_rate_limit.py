@@ -174,7 +174,9 @@ def _lapsed_deadline(frozen_clock):
 
     The only deadline a call can meet and still be sent (a live one is
     refused first), and the one a served call drops rather than leaves
-    behind — so it is what tells "served" from "restored" below (#114).
+    behind — so it is what tells "served" from "restored" below (#114):
+    these pin the ``_HiddenAnswer`` branch, which never reaches ``clear``,
+    not ``clear``'s own in-flight rule (that is pinned further down).
     """
     su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
     frozen_clock["t"] += THROTTLE_LATCH_TTL_S
@@ -224,20 +226,30 @@ def test_yf_retry_keeps_no_opinion_about_return_values(frozen_clock):
     assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
 
 
-def _arm_then(outcome):
+def _arm_then(outcome, frozen_clock, later_by=1.0):
     """A fetch during which a sibling thread arms the latch (#153).
 
     ``yf_retry`` raises before calling when the latch is live, so the only way
     a call can meet a live latch is to have one armed while it is in flight.
     Modelled inline rather than with a real thread: what is under test is what
-    the answered-branch does with the deadline it finds, not the race.
+    the answered-branch does with the deadline it finds, not the race. The
+    clock steps ``later_by`` before the arm so it is provably after the send;
+    zero models the same-tick case.
     """
 
     def fetch():
+        frozen_clock["t"] += later_by
         su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
         return outcome
 
     return fetch
+
+
+def _assert_the_next_call_is_spared():
+    spared = mock.Mock(return_value="ok")
+    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
+        su.yf_retry(spared)
+    spared.assert_not_called()
 
 
 @pytest.mark.unit
@@ -248,11 +260,36 @@ def test_a_throttle_armed_while_the_call_was_in_flight_outlives_its_answer(froze
     # 429. Yahoo decided A's request no later than it was sent, so B's later
     # refusal is the later verdict: A is served, the latch stays, the next
     # call is spared.
-    assert su.yf_retry(_arm_then("data")) == "data"
-    spared = mock.Mock(return_value="ok")
-    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
-        su.yf_retry(spared)
-    spared.assert_not_called()
+    assert su.yf_retry(_arm_then("data", frozen_clock)) == "data"
+    _assert_the_next_call_is_spared()
+
+
+@pytest.mark.unit
+def test_an_arm_in_the_same_tick_as_the_send_is_kept(frozen_clock):
+    # Two events in one clock tick cannot be ordered; keeping the latch costs
+    # one stand-off, dropping a real one costs a ladder — "at" counts as after.
+    assert su.yf_retry(_arm_then("data", frozen_clock, later_by=0.0)) == "data"
+    _assert_the_next_call_is_spared()
+
+
+@pytest.mark.unit
+def test_a_call_that_queued_behind_the_refusal_is_dated_when_the_lock_is_held(frozen_clock):
+    # Every fetch waits for the un-hide lock before it is sent. A call that
+    # queued behind a sibling's last, refused attempt is sent AFTER the
+    # sibling's arm, and its answer is the later evidence — so the send
+    # instant is taken once the lock is held, not when the call entered
+    # yf_retry. The "lock" here is the wait itself: acquiring it is where the
+    # sibling's refusal lands and the clock moves on.
+    class _WaitBehindTheSibling:
+        def __enter__(self):
+            su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
+            frozen_clock["t"] += 1.0
+
+        def __exit__(self, *exc):
+            return False
+
+    assert su.yf_retry(lambda: "data", lock=_WaitBehindTheSibling()) == "data"
+    assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
 
 
 @pytest.mark.unit

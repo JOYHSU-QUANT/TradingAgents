@@ -64,17 +64,24 @@ class ThrottleLatch:
         return remaining if remaining > 0 else None
 
     def arm(self, key: str, ttl_s: float | None = None) -> float:
-        """Stand ``key`` off for ``ttl_s`` seconds from now; returns the window applied.
+        """Stand ``key`` off for ``ttl_s`` seconds from now; returns the window in force.
 
         ``None`` is the shared window above; a raise that says how long its
         refusal lasts (``VendorRateLimitError.latch_ttl_s``) passes its own.
         The default is resolved here only — a caller that wants to log the
-        window reads the return value.
+        window reads the return value. A stand-off already recorded is never
+        cut short: a burst throttle met while a daily quota is spent keeps
+        the quota's deadline (and the return value is what remains of it),
+        while the arm instant is the newer refusal's either way.
         """
-        now = time.monotonic()
         ttl_s = THROTTLE_LATCH_TTL_S if ttl_s is None else ttl_s
         with self._lock:
-            self._deadlines[key] = _Latched(now + ttl_s, now)
+            now = time.monotonic()
+            deadline = now + ttl_s
+            existing = self._deadlines.get(key)
+            if existing is not None and existing.deadline > deadline:
+                deadline, ttl_s = existing.deadline, existing.deadline - now
+            self._deadlines[key] = _Latched(deadline, now)
         return ttl_s
 
     def clear(self, key: str, *, before: float) -> None:
@@ -88,10 +95,10 @@ class ThrottleLatch:
         the vendor decided this request no later than it was sent, so a
         refusal it issued after that instant is the later verdict, and
         dropping it would have the next tool call re-pay the discovery of
-        the same throttle (#153). "At" counts as after — on a coarse
-        monotonic clock two events in one tick cannot be ordered, and
-        keeping a latch costs one stand-off where dropping a real one costs
-        a backoff ladder.
+        the same throttle (#153). "At" counts as after — two events in one
+        clock tick cannot be ordered (``time.monotonic`` ticks every 15.6ms
+        on Windows before Python 3.13), and keeping a latch costs one
+        stand-off where dropping a real one costs a backoff ladder.
         """
         with self._lock:
             entry = self._deadlines.get(key)

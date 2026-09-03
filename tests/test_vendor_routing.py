@@ -434,6 +434,7 @@ def test_a_throttle_armed_while_the_vendor_was_answering_outlives_the_answer(fro
     set_config({"data_vendors": {"core_stock_apis": "yfinance"}})
 
     def arm_then_answer(symbol, *a, **k):
+        frozen_clock["t"] += 1  # provably after the send, not the same tick
         VENDOR_THROTTLE_LATCH.arm("yfinance")
         return "YF_DATA"
 
@@ -443,6 +444,21 @@ def test_a_throttle_armed_while_the_vendor_was_answering_outlives_the_answer(fro
         with pytest.raises(VendorRateLimitError, match="skipped without contacting"):
             _stock()
     assert yf.call_count == 1
+
+
+@pytest.mark.unit
+def test_a_burst_throttle_does_not_cut_a_daily_quota_window_short(frozen_clock):
+    # Two sibling tool calls: one gets the daily-quota notice, the other an
+    # HTTP 429 moments later. The second arm, on the shared window, must not
+    # rewrite the hour the first recorded to five minutes — that would resume
+    # the very re-probing the longer window exists to end (#153). The arm
+    # reports the window in force, so the WARNING says the hour too.
+    from tradingagents.dataflows.alpha_vantage_common import AV_DAILY_QUOTA_LATCH_TTL_S
+
+    VENDOR_THROTTLE_LATCH.arm("alpha_vantage", AV_DAILY_QUOTA_LATCH_TTL_S)
+    frozen_clock["t"] += 10
+    assert VENDOR_THROTTLE_LATCH.arm("alpha_vantage") == AV_DAILY_QUOTA_LATCH_TTL_S - 10
+    assert VENDOR_THROTTLE_LATCH.remaining_s("alpha_vantage") == AV_DAILY_QUOTA_LATCH_TTL_S - 10
 
 
 @pytest.mark.unit

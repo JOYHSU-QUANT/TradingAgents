@@ -251,7 +251,9 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     # only HTTP 200 bodies, so a status-code throttle would otherwise fall
     # into each caller's broad except and never reach the router's rate-limit
     # lane (#72). A 5xx is then an outage verdict (#142); every other 4xx keeps
-    # its HTTPError behaviour.
+    # its HTTPError behaviour. A 429 carries no notice text to tell a spent
+    # daily quota from a burst, so it takes the shared window; whether Alpha
+    # Vantage ever reports the quota that way is unmeasured (#153).
     if response.status_code == 429:
         retry_after = response.headers.get("Retry-After")
         after = f" (Retry-After: {retry_after})" if retry_after else ""

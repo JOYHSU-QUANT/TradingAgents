@@ -72,6 +72,9 @@ class VendorRateLimitError(VendorError):
     longer period — Alpha Vantage's daily quota
     (``AlphaVantageDailyQuotaError``) is not over in five minutes, and
     re-probing it on the shared window only adds refused requests (#153).
+    Read by the router's arm only, so it has no effect on a type whose
+    ``latches_vendor`` is False — those stand off elsewhere, on their own
+    terms.
     """
 
     latches_vendor = True

@@ -39,13 +39,17 @@ Breaking changes within the 0.x line are called out explicitly.
   longer forgotten, and a spent Alpha Vantage daily quota is remembered for
   an hour** (issue #153; the #137 tail). ``ThrottleLatch`` now records when
   each key was armed, and a call that returns drops only a deadline older
-  than the request it sent (a lapsed one), keeping one a sibling thread
+  than the request it sent (a lapsed one), keeping the one a sibling thread
   armed while the request was in flight: the vendor decided the request no
   later than it was sent, so the refusal issued after that is the later
   verdict. Before, the served result cleared it and the next tool call
   re-discovered the same throttle (on yfinance, at the price of a full
-  backoff ladder). At the yfinance boundary this is per attempt, so a retry
-  sent after the arm and served does clear it. ``VendorRateLimitError``
+  backoff ladder). At the yfinance boundary this is per attempt and dated
+  once the un-hide lock is held (``yf_retry`` now holds it around each
+  attempt), so a retry sent after the arm and served does clear it, and a
+  call that queued behind the refused attempt is not misdated as earlier.
+  A re-arm never cuts a recorded stand-off short (a burst 429 met while a
+  daily quota is spent keeps the quota's deadline). ``VendorRateLimitError``
   gains ``latch_ttl_s`` (default ``None`` = the shared 300s window) so a
   raise can carry its own window: Alpha Vantage's "requests per day"
   notice now raises ``AlphaVantageDailyQuotaError`` with

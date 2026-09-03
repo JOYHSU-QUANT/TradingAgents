@@ -22,7 +22,10 @@ Live-verified API facts this module is built on (2026-08-11):
   ``data`` list, not a 404, so a renamed event surfaces as an empty history.
 - ``actual``/``forecast``/``previous`` are strings with embedded units:
   percent forms ("3.5%") and plain numbers (Nonfarm Payrolls' thousands,
-  where a contraction month arrives as a negative string like "-23").
+  where a contraction month arrives as a negative string like "-23"). The
+  oldest print of a series carries no ``previous`` key at all (GDP (QoQ)'s
+  2008-03-27 row, observed live on 2026-09-02); the parser stores it as the
+  empty string, the same "no figure" meaning a pending ``actual`` has.
 - The provider carries no Fed rate-decision event under any probed name (it
   exposes a separate FOMC-probabilities endpoint instead, out of scope here),
   so the report labels that hole explicitly — an analyst must not read "no
@@ -449,6 +452,12 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
     prints dated 2025-12-16 (a delayed release and its catch-up on one day),
     and a last-wins collapse would silently drop a real release plus its
     surprise. Ascending sort, stable within a date.
+
+    One tolerance, and it is scoped: the series' OLDEST print may arrive
+    without a ``previous`` (stored as the empty string). Any other row
+    lacking it still raises, so a provider that renames or drops the field
+    mid-series fails loudly into ``events_failed`` instead of rendering an
+    empty Previous column for a full TTL with nothing disclosing it.
     """
     if not data:
         raise SoSoValueError(
@@ -462,25 +471,55 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
             f"the API contract may have changed"
         )
     rows = []
+    lacking_previous = []
     for raw in data:
-        if not (
-            isinstance(raw, dict)
-            and _is_iso_date(raw.get("date"))
-            and all(_is_valid_value(raw.get(k)) for k in ("actual", "forecast", "previous"))
-        ):
+        fields = raw if isinstance(raw, dict) else {}
+        previous = fields.get("previous")
+        row = {
+            "date": fields.get("date"),
+            "actual": fields.get("actual"),
+            "forecast": fields.get("forecast"),
+            # The oldest print of a series has no prior print to carry — the
+            # live GDP (QoQ) history opens on 2008-03-27 with no ``previous``
+            # key at all — so missing or null is the "no figure" the empty
+            # string already means here (a pending ``actual`` is ""). Only
+            # ``previous``: ``actual`` and ``forecast`` are keyed on every
+            # live row, so a missing one stays a contract break (#188).
+            "previous": "" if previous is None else previous,
+        }
+        # One predicate for both trust boundaries: the cache read applies
+        # the same ``_history_row_fields_ok``, so the two cannot drift apart.
+        if not (_is_iso_date(row["date"]) and _history_row_fields_ok(row)):
             raise SoSoValueError(
                 f"Malformed {name!r} history row {_sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS)}"
             )
-        rows.append(
-            {
-                "date": raw["date"],
-                "actual": raw["actual"],
-                "forecast": raw["forecast"],
-                "previous": raw["previous"],
-            }
-        )
+        if previous is None:
+            lacking_previous.append(row["date"])
+        rows.append(row)
     rows.sort(key=lambda r: r["date"])
+    oldest = rows[0]["date"]
+    newer_lacking = sorted(set(lacking_previous) - {oldest})
+    if newer_lacking:
+        n = len(newer_lacking)
+        raise SoSoValueError(
+            f"{name!r} history {_plural(n, 'row', 'rows')} dated {_listed_dates(newer_lacking)} "
+            f"{_plural(n, 'carries', 'carry')} no previous figure, and only the series' "
+            f"oldest print may; the field may have been renamed or dropped upstream"
+        )
     return rows
+
+
+def _listed_dates(dates: list[str]) -> str:
+    """Comma-join validated ISO dates, capped at ``MAX_NAMED_MALFORMED_DATES``.
+
+    Past the cap the remainder is a count — a whole history's worth of dates
+    would be kilobytes in a raised message or a report header, and the count
+    is the actionable part.
+    """
+    listed = ", ".join(dates[:MAX_NAMED_MALFORMED_DATES])
+    if len(dates) > MAX_NAMED_MALFORMED_DATES:
+        listed += f" and {len(dates) - MAX_NAMED_MALFORMED_DATES} more"
+    return listed
 
 
 class _MacroSnapshot(NamedTuple):
@@ -1600,10 +1639,7 @@ def get_economic_calendar_data(curr_date: str, look_back_days: int | None = None
         # Capped for the same reason the per-row log is: MAX_CALENDAR_ROWS_HARD
         # malformed rows would otherwise push kilobytes of comma-separated ISO
         # dates into the prompt. The count above already carries the magnitude.
-        shown_dates = dates[:MAX_NAMED_MALFORMED_DATES]
-        listed = ", ".join(shown_dates)
-        if len(dates) > MAX_NAMED_MALFORMED_DATES:
-            listed += f" and {len(dates) - MAX_NAMED_MALFORMED_DATES} more"
+        listed = _listed_dates(dates)
         named = ""
         if dates:
             exhaustive = len(dates) == n and len(dates) <= MAX_NAMED_MALFORMED_DATES

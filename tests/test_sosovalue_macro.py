@@ -48,6 +48,13 @@ def _row(date: str, actual: str, forecast: str, previous: str) -> dict:
     return {"date": date, "actual": actual, "forecast": forecast, "previous": previous}
 
 
+# Live-verified on the paper server (2026-09-02, #188): the GDP (QoQ) history
+# opens on this row — actual and forecast, and no `previous` key at all,
+# because the first print of a series has no prior print to carry.
+FIRST_PRINT = {"date": "2008-03-27", "actual": "0.6%", "forecast": "0.6%"}
+SECOND_PRINT = _row("2008-06-26", "0.9%", "0.7%", "0.6%")
+
+
 def _histories(overrides=None, failed=(), unknown=()):
     """A full TRACKED_EVENTS partition: overrides win, failed/unknown are
     omitted, every other tracked event gets one old released row."""
@@ -545,9 +552,37 @@ class TestParseEventRows:
         with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
             sosovalue_macro._parse_event_rows([{"date": "2026-08-07", "actual": "1%"}], "X")
         with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
-            sosovalue_macro._parse_event_rows([_row("2026-08-07", "1%", "2%", None)], "X")
+            sosovalue_macro._parse_event_rows([_row("2026-08-07", "1%", "2%", 3)], "X")
         with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
             sosovalue_macro._parse_event_rows([_row("2026-08-07", "1%\x00", "2%", "3%")], "X")
+        with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
+            sosovalue_macro._parse_event_rows(["2026-08-07"], "X")
+
+    def test_the_oldest_print_of_a_series_may_carry_no_previous(self):
+        rows = sosovalue_macro._parse_event_rows([SECOND_PRINT, FIRST_PRINT], "GDP (QoQ)")
+        assert rows[0] == {**FIRST_PRINT, "previous": ""}
+        assert rows[1]["previous"] == "0.6%"
+        # An explicit null reads the same way: no figure, not a broken row.
+        rows = sosovalue_macro._parse_event_rows([_row("2008-03-27", "0.6%", "0.6%", None)], "X")
+        assert rows[0]["previous"] == ""
+        # The normalised row is what the cache stores, and the read-side
+        # validator must accept it back or every serve would cost a refetch.
+        assert sosovalue_macro._valid_history_rows(rows)
+
+    def test_the_tolerance_is_previous_only_and_oldest_print_only(self):
+        # A missing actual or forecast is still a contract break...
+        for missing in ("actual", "forecast"):
+            broken = {k: v for k, v in FIRST_PRINT.items() if k != missing}
+            with pytest.raises(sosovalue_common.SoSoValueError, match="Malformed"):
+                sosovalue_macro._parse_event_rows([broken], "GDP (QoQ)")
+        # ...and so is a NEWER row without previous: a provider that renames
+        # or drops the field mid-series must fail the event loudly, not
+        # render an empty Previous column for a full TTL with no disclosure.
+        newer = {"date": "2026-07-30", "actual": "3.0%", "forecast": "2.5%"}
+        with pytest.raises(sosovalue_common.SoSoValueError, match="oldest print") as excinfo:
+            sosovalue_macro._parse_event_rows([FIRST_PRINT, newer], "GDP (QoQ)")
+        assert "2026-07-30" in str(excinfo.value)
+        assert "2008-03-27" not in str(excinfo.value)
 
     def test_duplicate_dates_are_both_kept(self):
         # Live-verified on the NFP fixture: 2025-12-16 carries TWO prints (a
@@ -638,6 +673,20 @@ class TestFetchAll:
         assert payload["events_unknown"] == ["GDP (QoQ)"]
         assert payload["events_failed"] == []
         assert set(payload["histories"]) == set(TRACKED) - {"GDP (QoQ)"}
+
+    def test_a_first_print_lands_in_histories_on_the_full_ttl(self, monkeypatch):
+        # The consequence #188 was opened for: the oldest print must not route
+        # the event into events_failed, whose short TTL re-runs the whole
+        # 10-request sweep on every call against the shared 20 req/min key.
+        monkeypatch.setattr(
+            sosovalue_macro,
+            "_request",
+            _request_impl(history_by_name={"GDP (QoQ)": [SECOND_PRINT, FIRST_PRINT]}),
+        )
+        payload = sosovalue_macro._fetch_all()
+        assert payload["events_failed"] == []
+        assert payload["histories"]["GDP (QoQ)"][0] == {**FIRST_PRINT, "previous": ""}
+        assert sosovalue_macro._cache_ttl_hours(payload) == sosovalue_macro.CACHE_TTL_HOURS
 
     def test_a_rate_limit_drains_the_rest_of_the_sweep(self, monkeypatch):
         # The plan limit is per-key and per-minute: the first 429 proves every

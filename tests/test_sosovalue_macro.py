@@ -579,10 +579,43 @@ class TestParseEventRows:
         # or drops the field mid-series must fail the event loudly, not
         # render an empty Previous column for a full TTL with no disclosure.
         newer = {"date": "2026-07-30", "actual": "3.0%", "forecast": "2.5%"}
-        with pytest.raises(sosovalue_common.SoSoValueError, match="oldest print") as excinfo:
+        with pytest.raises(sosovalue_common.SoSoValueError, match="first print") as excinfo:
             sosovalue_macro._parse_event_rows([FIRST_PRINT, newer], "GDP (QoQ)")
-        assert "2026-07-30" in str(excinfo.value)
-        assert "2008-03-27" not in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "1 row dated 2026-07-30 carries" in message
+        assert "2008-03-27" not in message
+        # The offending row itself is in the message: a renamed key is what
+        # an operator needs to see, and the dates alone would not show it.
+        assert "'forecast': '2.5%'" in message
+
+    def test_the_exemption_is_one_row_by_identity(self):
+        # Duplicate dates are legal (NFP's 2025-12-16 pair), so a second
+        # print on the oldest date is a real print with a prior figure — it
+        # is not the first print just because it shares the date.
+        twin = {"date": "2008-03-27", "actual": "0.9%", "forecast": "0.7%"}
+        with pytest.raises(sosovalue_common.SoSoValueError, match="first print") as excinfo:
+            sosovalue_macro._parse_event_rows([FIRST_PRINT, twin, SECOND_PRINT], "GDP (QoQ)")
+        assert "1 row dated 2008-03-27 carries" in str(excinfo.value)
+        # And the count is rows, not distinct dates.
+        with pytest.raises(sosovalue_common.SoSoValueError, match="2 rows dated 2008-03-27 carry"):
+            sosovalue_macro._parse_event_rows([FIRST_PRINT, twin, dict(twin), SECOND_PRINT], "X")
+
+    def test_a_truncated_history_earns_no_exemption(self):
+        # At HISTORY_LIMIT rows the page dropped the series' oldest prints,
+        # so the first served row is mid-series and does have a prior print:
+        # a missing previous there is the mid-series drop, not a first print.
+        limit = sosovalue_macro.HISTORY_LIMIT
+        newer = [
+            _row(f"2025-{1 + i // 28:02d}-{1 + i % 28:02d}", "1%", "1%", "1%")
+            for i in range(limit - 1)
+        ]
+        oldest = {"date": "2024-12-31", "actual": "1%", "forecast": "1%"}
+        # One short of the cap: the page is complete, the oldest row is exempt.
+        parsed = sosovalue_macro._parse_event_rows([*newer[1:], oldest], "X")
+        assert parsed[0] == {**oldest, "previous": ""}
+        # At the cap: the same row is no longer the series' first print.
+        with pytest.raises(sosovalue_common.SoSoValueError, match="first print"):
+            sosovalue_macro._parse_event_rows([*newer, oldest], "X")
 
     def test_duplicate_dates_are_both_kept(self):
         # Live-verified on the NFP fixture: 2025-12-16 carries TWO prints (a

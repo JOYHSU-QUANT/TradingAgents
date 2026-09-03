@@ -453,11 +453,14 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
     and a last-wins collapse would silently drop a real release plus its
     surprise. Ascending sort, stable within a date.
 
-    One tolerance, and it is scoped: the series' OLDEST print may arrive
-    without a ``previous`` (stored as the empty string). Any other row
-    lacking it still raises, so a provider that renames or drops the field
-    mid-series fails loudly into ``events_failed`` instead of rendering an
-    empty Previous column for a full TTL with nothing disclosing it.
+    One tolerance, and it is scoped: the series' FIRST print may arrive
+    without a ``previous`` (stored as the empty string) — one row, and only
+    when the served history is complete (fewer than ``HISTORY_LIMIT`` rows:
+    a page at the cap drops the oldest rows, so its first row is mid-series
+    and does have a prior print upstream). Any other row lacking it still
+    raises, so a provider that renames or drops the field mid-series fails
+    loudly into ``events_failed`` instead of rendering an empty Previous
+    column for a full TTL with nothing disclosing it.
     """
     if not data:
         raise SoSoValueError(
@@ -494,17 +497,23 @@ def _parse_event_rows(data: list, name: str) -> list[dict]:
                 f"Malformed {name!r} history row {_sanitize(repr(raw), limit=MAX_UNTRUSTED_CHARS)}"
             )
         if previous is None:
-            lacking_previous.append(row["date"])
+            lacking_previous.append((row, raw))
         rows.append(row)
     rows.sort(key=lambda r: r["date"])
-    oldest = rows[0]["date"]
-    newer_lacking = sorted(set(lacking_previous) - {oldest})
-    if newer_lacking:
-        n = len(newer_lacking)
+    # The exemption is one row, by identity — a duplicated oldest date is
+    # two prints, and the second has a prior — and only when the page is
+    # complete: at the cap the provider dropped the OLDEST rows, so the
+    # first served row is mid-series and does have a prior print upstream.
+    first_print = rows[0] if len(rows) < HISTORY_LIMIT else None
+    offending = [(row, raw) for row, raw in lacking_previous if row is not first_print]
+    if offending:
+        n = len(offending)
+        dates = _listed_dates(sorted({row["date"] for row, _ in offending}))
+        sample = _sanitize(repr(offending[0][1]), limit=MAX_UNTRUSTED_CHARS)
         raise SoSoValueError(
-            f"{name!r} history {_plural(n, 'row', 'rows')} dated {_listed_dates(newer_lacking)} "
+            f"{name!r} history: {n} {_plural(n, 'row', 'rows')} dated {dates} "
             f"{_plural(n, 'carries', 'carry')} no previous figure, and only the series' "
-            f"oldest print may; the field may have been renamed or dropped upstream"
+            f"first print may; the field may have been renamed or dropped upstream: {sample}"
         )
     return rows
 

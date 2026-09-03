@@ -212,8 +212,9 @@ class FillBackfiller:
         # Both instants are checked, not just ``since``, and by NAME. A naive
         # ``now`` used to be the quieter of the two — the float route read it
         # as LOCAL time and the window silently shifted by the UTC offset;
-        # ``epoch_ms`` now refuses it, but with a message that names no clock.
-        # A naive ``since`` merely blows up inside min() with an opaque "can't
+        # ``epoch_ms`` would refuse it now, but only after ``since`` had been
+        # folded in, naming the derived window rather than the argument. A
+        # naive ``since`` merely blows up inside min() with an opaque "can't
         # compare offset-naive and offset-aware", far from the caller that got
         # it wrong. Every instant in this system is aware UTC; neither is
         # accepted, and the refusal says which one the caller handed in.

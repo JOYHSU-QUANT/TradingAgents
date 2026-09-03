@@ -268,8 +268,9 @@ def _failure_account(e: BaseException) -> str:
     along — flattened and capped, because not every boundary caps what it
     quotes (yfinance quotes the library's exception, decoded error body
     included, #172); a remedy a boundary appends after the vendor's text is
-    the operator's, in the log. So does the caller's own indicator mistake,
-    whose message is the remedy. Anything else is the generic lane's and
+    the operator's, in the log. So would the caller's own indicator mistake,
+    whose message is the remedy, should an optional category ever compute
+    one. Anything else is the generic lane's and
     contributes ``_generic_failure_words`` — never its text: a ``requests``
     message quotes the request URL, API key included (#171). The router's
     warning log has the full message either way.
@@ -435,7 +436,11 @@ def route_to_vendor(method: str, *args, **kwargs):
                 first_error = e  # Surface it if no other vendor can serve the call.
             continue
         except NoMarketDataError as e:
-            last_no_data = e  # No data here; another configured vendor may have it
+            # No data here; another configured vendor may have it. INFO, not
+            # WARNING — a routine verdict — but logged whole: the detail is
+            # capped in the sentinel and this line is its only other copy.
+            logger.info("Vendor %r had no usable data for %s: %s", vendor, method, e)
+            last_no_data = e
             continue
         except VendorUnavailableError as e:
             # The vendor answered with an outage page or an unparsable body
@@ -531,7 +536,7 @@ def route_to_vendor(method: str, *args, **kwargs):
         # coverage, or stale data — not just a generic "unavailable". The
         # detail quotes what the vendor answered (a column list, a date), so
         # it takes the same flatten-and-cap as the other two slots.
-        detail = sanitize_untrusted(last_no_data.detail, limit=MAX_UNTRUSTED_CHARS)
+        detail = sanitize_untrusted(last_no_data.detail or "", limit=MAX_UNTRUSTED_CHARS)
         reason = f" ({detail})" if detail else ""
         if first_outage is not None:
             down_vendor, outage = first_outage

@@ -170,13 +170,14 @@ def _request(path: str, params: dict) -> dict:
     # or malformed params; turn that into a clear, actionable error. The
     # reason is FRED's text, flattened (uncapped) where it enters the message
     # like every boundary's; the router caps it at the sentinel. A 400 whose
-    # body is JSON but not an object (a WAF's) keeps the text as the reason.
+    # body is not that object — not JSON, JSON that is not an object (a
+    # WAF's), or one without the key — keeps the body text as the reason.
     if response.status_code == 400:
         try:
             body = response.json()
         except ValueError:
             body = None
-        message = body.get("error_message", response.text) if isinstance(body, dict) else response.text
+        message = (body.get("error_message") if isinstance(body, dict) else None) or response.text
         raise FredRequestError(f"FRED request failed: {sanitize_untrusted(message)}")
     raise_for_http_status(response, "FRED")
     return json_body_or_outage(response, "FRED")

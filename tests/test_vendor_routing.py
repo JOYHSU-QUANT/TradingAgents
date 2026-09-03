@@ -828,9 +828,9 @@ class OptionalSentinelTests(unittest.TestCase):
     A requests message quotes the request URL, and FRED's API key is a query
     parameter on it, so one connection failure wrote the key into the LLM
     context and the persisted report artifacts (#171). Now the generic lane's
-    exception contributes its class (and the status it carries), and a typed
-    vendor error its message flattened and capped; the message itself goes
-    to the warning log only.
+    exception contributes ``_generic_failure_words`` — the status it carries,
+    or its class — and a typed vendor error its message flattened and
+    capped; the message itself goes to the warning log only.
     """
 
     def setUp(self):
@@ -880,7 +880,8 @@ class OptionalSentinelTests(unittest.TestCase):
             )
         )
         out, _ = self._macro(refused)
-        # The same words the no-data outage clause uses for the same fact.
+        # The outage clause's vocabulary, by the same rule, though a 400 is
+        # never an outage and that clause never quotes one itself.
         self.assertIn("could not be retrieved (answered HTTP 400).", out)
         self.assertNotIn("SECRET-KEY", out)
 
@@ -929,9 +930,14 @@ class OptionalSentinelTests(unittest.TestCase):
         def _no_rows(symbol, *a, **k):
             raise NoMarketDataError(symbol, symbol, _FORGED_MESSAGE)
 
-        with _chain("get_stock_data", {"yfinance": _no_rows}):
+        with (
+            _chain("get_stock_data", {"yfinance": _no_rows}),
+            self.assertLogs("tradingagents.dataflows.interface", level="INFO") as cm,
+        ):
             out = _stock()
         head = "NO_DATA_AVAILABLE: No usable market data for 'AAPL' from any configured vendor ("
         tail = "). The symbol may be invalid, delisted, not covered, or the vendor returned stale data."
         self.assertIn(head, out)
         _assert_one_capped_line(out[out.index(head) + len(head) : out.index(tail)], "")
+        # This lane used to log nothing, so the capped tail had no other copy.
+        self.assertIn(_FORGED_MESSAGE, "\n".join(cm.output))

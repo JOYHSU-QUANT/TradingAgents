@@ -32,11 +32,13 @@ limit for the trailing fund histories, which is why per-fund failures are
 non-fatal: the aggregate summary alone decides vendor success, and a partial
 (or absent) issuer breakdown is disclosed in the report rather than failing
 the call. Only an aggregate failure (or a rejected key on any request) raises,
-letting the router fall through to the next vendor. A hanging network gets the
-one exception to trying every fund: after ``MAX_CONSECUTIVE_NETWORK_FAILURES``
-back-to-back transport failures the remaining histories are skipped straight
-into the same disclosed-incomplete path — the outcome is identical, and the
-call stops burning a full ``sosovalue_common.REQUEST_TIMEOUT`` per dead fund. A
+letting the router fall through to the next vendor. Two exceptions to trying
+every fund: after ``MAX_CONSECUTIVE_NETWORK_FAILURES`` back-to-back transport
+failures the remaining histories are skipped straight into the same
+disclosed-incomplete path — the outcome is identical, and the call stops
+burning a full ``sosovalue_common.REQUEST_TIMEOUT`` per dead fund — and a 429
+ends the sweep outright, because it parks the shared request budget for a
+window and every remaining history would first pay that window (#189). A
 snapshot whose breakdown
 came back incomplete is cached under the shorter ``INCOMPLETE_CACHE_TTL_HOURS``
 so the missing funds are re-tried on the next call past that window instead of
@@ -640,7 +642,9 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
         )
         return {"name": name, "rows": rows}
     except (requests.RequestException, SoSoValueRateLimitError, SoSoValueError) as e:
-        if isinstance(e, SoSoValueError) and not isinstance(e, SoSoValueRateLimitError):
+        # SoSoValueRateLimitError is a VendorRateLimitError, not a
+        # SoSoValueError, so this branch is the structural break only.
+        if isinstance(e, SoSoValueError):
             logger.error(
                 "SoSoValue %s fund %s history failed structurally "
                 "(breakdown disclosed as incomplete) — the client "

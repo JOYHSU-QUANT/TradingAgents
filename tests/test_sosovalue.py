@@ -1889,8 +1889,10 @@ class TestCacheAndLoad:
     def test_list_429_is_absorbed_as_breakdown_failure_not_vendor_failure(
         self, tmp_path, monkeypatch
     ):
-        # The listing twin of the pure-429-burst rule: a throttled /etfs is
-        # non-fatal by design — the aggregate alone decides vendor success —
+        # The listing is a single request, so unlike the fund loop (which
+        # drains on a 429 since #189) there is nothing to drain: a throttled
+        # /etfs is non-fatal by design — the aggregate alone decides vendor
+        # success —
         # so it degrades to the disclosed "breakdown unavailable" shape
         # instead of forcing a stale-or-fail outcome.
         self._setup(tmp_path, monkeypatch)

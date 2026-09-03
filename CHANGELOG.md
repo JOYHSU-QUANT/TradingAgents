@@ -46,8 +46,13 @@ Breaking changes within the 0.x line are called out explicitly.
   re-discovered the same throttle (on yfinance, at the price of a full
   backoff ladder). At the yfinance boundary this is per attempt and dated
   once the un-hide lock is held (``yf_retry`` now holds it around each
-  attempt), so a retry sent after the arm and served does clear it, and a
-  call that queued behind the refused attempt is not misdated as earlier.
+  attempt), and the latch is consulted again once the lock is held and
+  before each retry — a call that queued behind a sibling's refused attempt,
+  or slept through its backoff while a sibling exhausted its ladder, is now
+  refused without a request instead of paying the ladder again; the
+  exhausted attempt arms before it releases the lock so the queued call
+  sees it. A retry that goes out once such a stand-off has lapsed and is
+  served drops that lapsed deadline rather than keeping it as in-flight.
   A re-arm never cuts a recorded stand-off short (a burst 429 met while a
   daily quota is spent keeps the quota's deadline). ``VendorRateLimitError``
   gains ``latch_ttl_s`` (default ``None`` = the shared 300s window) so a

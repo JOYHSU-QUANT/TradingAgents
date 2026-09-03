@@ -103,23 +103,31 @@ def yf_retry(func, max_retries=3, base_delay=2.0, *, lock=None):
     path is unchanged.
 
     ``lock``, when given, is held around each attempt of ``func`` — not the
-    backoff sleeps — and the send instant the latch compares against is
-    taken once it is held: a call that queued behind a sibling's last,
-    refused attempt was sent after that refusal, and its answer is the
-    later evidence. Taken before the wait, that instant predated the
-    sibling's arm and the served answer left a stale latch in place.
+    backoff sleeps. The latch is consulted again once it is held, and again
+    before each retry: a sibling can arm it while this call waits for the
+    lock or sleeps through its backoff, and sending then would pay the
+    ladder the latch exists to spare (#86). The send instant the latch
+    compares against is taken once the lock is held, for the same reason
+    from the other side: a call that queued behind a sibling's refused
+    attempt was sent after that refusal, and dated before the wait it would
+    keep a latch it had outlived.
     """
-    remaining = _YF_THROTTLE_LATCH.remaining_s(_YF_LATCH_KEY)
-    if remaining is not None:
-        raise YFinanceRateLimitError(
-            f"Yahoo Finance rate limited a recent request; skipping this one "
-            f"without contacting the vendor for another {remaining:.0f}s"
-        )
+
+    def refuse_if_latched():
+        remaining = _YF_THROTTLE_LATCH.remaining_s(_YF_LATCH_KEY)
+        if remaining is not None:
+            raise YFinanceRateLimitError(
+                f"Yahoo Finance rate limited a recent request; skipping this one "
+                f"without contacting the vendor for another {remaining:.0f}s"
+            )
+
+    refuse_if_latched()  # before queueing for the lock: nothing to wait for
     held = contextlib.nullcontext() if lock is None else lock
 
     for attempt in range(max_retries + 1):
         try:
             with held:
+                refuse_if_latched()  # armed while this call waited, or slept
                 sent_at = time.monotonic()
                 try:
                     result = func()
@@ -151,8 +159,9 @@ def yf_retry(func, max_retries=3, base_delay=2.0, *, lock=None):
             # The call returned: drop a deadline that predates THIS attempt
             # (a lapsed one), keep the one a sibling thread armed while it was
             # in flight — why is ``ThrottleLatch.clear``'s (#153). Per attempt,
-            # not per call: a retry sent after the sibling's arm and served
-            # IS the later evidence. "Returned", not "answered": a no-data
+            # not per call: a retry that goes out after a sibling's arm (once
+            # it has lapsed — a live one refuses the retry above) and is
+            # served IS the later evidence. "Returned", not "answered": a no-data
             # verdict raised by the callable leaves the latch alone, by
             # choice — only a value proves the call was served.
             _YF_THROTTLE_LATCH.clear(_YF_LATCH_KEY, before=sent_at)

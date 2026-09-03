@@ -272,23 +272,65 @@ def test_an_arm_in_the_same_tick_as_the_send_is_kept(frozen_clock):
     _assert_the_next_call_is_spared()
 
 
+class _WaitBehindTheSibling:
+    """A ``lock`` whose wait is where a sibling's last, refused attempt lands.
+
+    Every fetch waits for the un-hide lock before it is sent; acquiring this
+    one arms the latch (the sibling's exhausted ladder) and moves the clock
+    on, so what the call does once it holds the lock is what is under test.
+    """
+
+    def __init__(self, frozen_clock):
+        self._clock = frozen_clock
+
+    def __enter__(self):
+        su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
+        self._clock["t"] += 1.0
+
+    def __exit__(self, *exc):
+        return False
+
+
 @pytest.mark.unit
-def test_a_call_that_queued_behind_the_refusal_is_dated_when_the_lock_is_held(frozen_clock):
-    # Every fetch waits for the un-hide lock before it is sent. A call that
-    # queued behind a sibling's last, refused attempt is sent AFTER the
-    # sibling's arm, and its answer is the later evidence — so the send
-    # instant is taken once the lock is held, not when the call entered
-    # yf_retry. The "lock" here is the wait itself: acquiring it is where the
-    # sibling's refusal lands and the clock moves on.
-    class _WaitBehindTheSibling:
+def test_a_call_that_queued_behind_the_refusal_is_refused_without_sending(frozen_clock):
+    # The latch passed before the wait says nothing about what landed during
+    # it: consulted again once the lock is held, the sibling's refusal spares
+    # this call the request and the ladder (#86) — and the latch stands.
+    queued = mock.Mock(return_value="data")
+    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
+        su.yf_retry(queued, lock=_WaitBehindTheSibling(frozen_clock))
+    queued.assert_not_called()
+    assert su._YF_THROTTLE_LATCH.remaining_s(su._YF_LATCH_KEY) is not None
+
+
+@pytest.mark.unit
+def test_a_sibling_arm_during_the_backoff_refuses_the_retry(frozen_clock, monkeypatch):
+    # The same for the sleeps between attempts: a retry is a send too.
+    def sibling_exhausts_meanwhile(seconds):
+        frozen_clock["t"] += seconds
+        su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
+
+    monkeypatch.setattr(su.time, "sleep", sibling_exhausts_meanwhile)
+    attempts = mock.Mock(side_effect=YFRateLimitError())
+    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
+        su.yf_retry(attempts)
+    assert attempts.call_count == 1  # the retry was never sent
+
+
+@pytest.mark.unit
+def test_a_call_that_queued_behind_a_lapsed_refusal_is_dated_when_the_lock_is_held(
+    frozen_clock,
+):
+    # When the sibling's stand-off has already lapsed by the time the lock is
+    # held, the call is sent, and it is dated once the lock is held — after
+    # the sibling's arm — so its answer drops that lapsed deadline rather
+    # than keeping it as an in-flight one (dated before the wait, it would).
+    class _WaitPastTheSibling(_WaitBehindTheSibling):
         def __enter__(self):
-            su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
-            frozen_clock["t"] += 1.0
+            super().__enter__()
+            self._clock["t"] += THROTTLE_LATCH_TTL_S
 
-        def __exit__(self, *exc):
-            return False
-
-    assert su.yf_retry(lambda: "data", lock=_WaitBehindTheSibling()) == "data"
+    assert su.yf_retry(lambda: "data", lock=_WaitPastTheSibling(frozen_clock)) == "data"
     assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
 
 
@@ -315,11 +357,15 @@ def test_an_exhausted_ladder_arms_before_it_releases_the_lock(frozen_clock):
 @pytest.mark.unit
 def test_a_retry_sent_after_the_arm_is_the_later_evidence(frozen_clock, monkeypatch):
     # Per attempt, not per call: the first attempt is throttled and a sibling
-    # arms during it; the retry goes out after that arm and is served — Yahoo
-    # answered this client after the refusal, so the deadline goes. The backoff
-    # sleep advances the stepped clock so the retry is provably later.
+    # arms during it; by the time the retry goes out that stand-off has
+    # lapsed (a retry is only sent when the latch no longer holds), and the
+    # retry is served — Yahoo answered this client after the refusal, so the
+    # lapsed deadline goes. Dated per call, the arm would read as in flight
+    # and the deadline would be kept. The sleep stands in for the lapse.
     monkeypatch.setattr(
-        su.time, "sleep", lambda s: frozen_clock.__setitem__("t", frozen_clock["t"] + s)
+        su.time,
+        "sleep",
+        lambda s: frozen_clock.__setitem__("t", frozen_clock["t"] + THROTTLE_LATCH_TTL_S),
     )
     outcomes = [YFRateLimitError(), "ok"]
 

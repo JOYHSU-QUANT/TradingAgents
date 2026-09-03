@@ -76,6 +76,29 @@ def _clear_throttle_latch():
     VENDOR_THROTTLE_LATCH.reset()
 
 
+def _budget_must_not_sleep(seconds):
+    raise AssertionError(
+        f"the SoSoValue request budget tried to sleep {seconds:.1f}s inside a test; "
+        "drive the budget with a stepped clock instead of wall time"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_sosovalue_budget(monkeypatch):
+    """Give every test a fresh SoSoValue request budget that cannot sleep.
+
+    The budget is process-global and remembers the last minute of sends and
+    any 429 (#189). Without this, twenty tests that each push one request
+    through ``_request`` would put the twenty-first to sleep for real, and a
+    single 429 test would park every later one for a minute. The sleep guard
+    turns any such leak into a failure at the point it happens.
+    """
+    from tradingagents.dataflows import sosovalue_common
+
+    monkeypatch.setattr(sosovalue_common, "_BUDGET", sosovalue_common._RequestBudget())
+    monkeypatch.setattr(sosovalue_common, "_sleep", _budget_must_not_sleep)
+
+
 @pytest.fixture()
 def frozen_clock(monkeypatch):
     """A settable monotonic clock, so latch windows are stepped, not slept.

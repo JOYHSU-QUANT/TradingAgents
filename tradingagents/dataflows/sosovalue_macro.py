@@ -49,9 +49,9 @@ non-fatally, with the ETF module's consecutive-network-failure breaker so a
 hanging network cannot burn a full timeout per event. A 429 goes further
 than the breaker: the plan limit is per-key and per-minute, so the first one
 proves every remaining request in this sweep would also 429 — the rest are
-drained into ``events_failed`` unattempted (this deliberately diverges from
-the ETF module's decided keep-trying-after-429 behaviour, which predates the
-key being shared by three fan-outs). A tracked name whose history comes back
+drained into ``events_failed`` unattempted (the ETF fund loop drains the same
+way since #189: a 429 parks the shared request budget for a window, so any
+further request would first pay it). A tracked name whose history comes back
 *empty* is a different failure from either: the API answers an unknown name
 with 200 + an empty list, so emptiness means the name was renamed or dropped
 upstream and will not heal by retrying — those land in ``events_unknown``,
@@ -242,8 +242,11 @@ MAX_ROWS = 40
 # expire together, so a single analyst turn that touches both fires ~25
 # requests inside one minute and whichever runs second takes a 429 — the
 # category that ends up degraded rotating with tool-call order. An offset TTL
-# de-phases the two refreshes for the price of one constant. Do not "tidy"
-# this back to 6 to match the family.
+# de-phases the two refreshes for the price of one constant. The shared
+# request budget in ``sosovalue_common`` (#189) is the backstop that turns a
+# collision into a wait instead of a 429 — but a wait is still a stalled
+# analyst turn, and de-phasing is what keeps it rare. Do not "tidy" this
+# back to 6 to match the family.
 CACHE_TTL_HOURS = 5
 INCOMPLETE_CACHE_TTL_HOURS = 1
 

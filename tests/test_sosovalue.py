@@ -131,6 +131,106 @@ class _FakeResponse:
 
 
 # --------------------------------------------------------------------------- #
+# _request: the shared per-minute request budget (#189)
+# --------------------------------------------------------------------------- #
+class _SteppedClock:
+    """A monotonic clock the budget reads, whose sleeps advance it instead of waiting."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture()
+def budget_clock(monkeypatch):
+    clock = _SteppedClock()
+    monkeypatch.setattr(sosovalue_common, "_monotonic", clock.monotonic)
+    monkeypatch.setattr(sosovalue_common, "_sleep", clock.sleep)
+    return clock
+
+
+@pytest.mark.unit
+class TestRequestBudget:
+    LIMIT = sosovalue_common.RATE_LIMIT_REQUESTS
+    WINDOW = sosovalue_common.RATE_LIMIT_WINDOW_SECONDS
+    SLACK = sosovalue_common.RATE_LIMIT_SLACK_SECONDS
+
+    def _send(self, path="/etfs", response=None):
+        response = response or _FakeResponse(200, {"code": 0, "message": "ok", "data": []})
+        with (
+            mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": "test-key"}),
+            mock.patch.object(sosovalue_common.requests, "get", return_value=response),
+        ):
+            return sosovalue_common._request(path, {})
+
+    def test_a_full_window_of_requests_never_waits(self, budget_clock):
+        for _ in range(self.LIMIT):
+            self._send()
+        assert budget_clock.sleeps == []
+
+    def test_the_request_past_the_limit_waits_for_the_oldest_to_age_out(
+        self, budget_clock, caplog
+    ):
+        # One request a second: when the 21st arrives the oldest is 20s old,
+        # so it has 40s left in the window, plus the slack.
+        for _ in range(self.LIMIT):
+            self._send()
+            budget_clock.now += 1.0
+        with caplog.at_level(logging.INFO, logger="tradingagents.dataflows.sosovalue_common"):
+            self._send("/macro/events")
+        assert budget_clock.sleeps == [self.WINDOW - self.LIMIT + self.SLACK]
+        assert "waiting 42.0s before /macro/events" in caplog.text
+
+    def test_an_aged_out_window_needs_no_wait(self, budget_clock):
+        for _ in range(self.LIMIT):
+            self._send()
+        budget_clock.now += self.WINDOW + 1.0
+        self._send()
+        assert budget_clock.sleeps == []
+
+    def test_a_429_parks_the_budget_for_a_full_window(self, budget_clock):
+        # The server's verdict outranks the local count: one request, one
+        # 429, and the next request 10s later still waits out the window.
+        with pytest.raises(sosovalue.SoSoValueRateLimitError):
+            self._send(response=_FakeResponse(429, {"code": 429, "message": "slow down"}))
+        budget_clock.now += 10.0
+        self._send()
+        assert budget_clock.sleeps == [self.WINDOW - 10.0 + self.SLACK]
+
+    def test_the_key_check_comes_before_the_wait(self, budget_clock):
+        # Unsetting the key is the emergency-disable switch; it must not be
+        # delayed by a full window's wait.
+        for _ in range(self.LIMIT):
+            self._send()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            pytest.raises(sosovalue.SoSoValueNotConfiguredError),
+        ):
+            sosovalue_common._request("/etfs", {})
+        assert budget_clock.sleeps == []
+
+    def test_the_budget_is_shared_by_every_vendor_module(self, budget_clock):
+        # The plan limit is per key, and all three modules send through the
+        # one helper, so the 21st request waits whichever module sends it.
+        from tradingagents.dataflows import sosovalue_macro, sosovalue_treasuries
+
+        assert sosovalue._request is sosovalue_common._request
+        assert sosovalue_macro._request is sosovalue_common._request
+        assert sosovalue_treasuries._request is sosovalue_common._request
+        for _ in range(self.LIMIT):
+            self._send("/etfs/summary-history")
+        self._send("/btc-treasuries")
+        assert budget_clock.sleeps == [self.WINDOW + self.SLACK]
+
+
+# --------------------------------------------------------------------------- #
 # _request: auth, rate limit, and the two live-verified error body shapes
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
@@ -1746,34 +1846,36 @@ class TestCacheAndLoad:
         assert sosovalue._read_cache(str(tmp_path / "sosovalue_btc.json"), "BTC") is not None
 
     def test_a_completed_answer_resets_the_breaker(self, tmp_path, monkeypatch):
-        # AAA transport-fails, BBB 429s (the server answered -> counter
-        # resets), CCC/DDD/EEE transport-fail: the trip lands on EEE, the
-        # third *consecutive* transport failure, and only FFF is skipped. An
-        # API-level failure can neither trip nor feed the breaker.
+        # AAA transport-fails, BBB breaks structurally (the server answered
+        # -> counter resets), CCC/DDD/EEE transport-fail: the trip lands on
+        # EEE, the third *consecutive* transport failure, and only FFF is
+        # skipped. A structural break can neither trip nor feed the breaker.
         _, history_calls, payload = self._run_fund_breaker(
             tmp_path,
             monkeypatch,
             ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF"),
             fail={f"/etfs/{t}/history" for t in ("AAA", "CCC", "DDD", "EEE")},
-            errors={"/etfs/BBB/history": sosovalue.SoSoValueRateLimitError("throttled")},
+            errors={"/etfs/BBB/history": sosovalue.SoSoValueError("contract break")},
         )
         assert history_calls == [f"/etfs/{t}/history" for t in ("AAA", "BBB", "CCC", "DDD", "EEE")]
         assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
 
-    def test_a_pure_429_burst_still_tries_every_fund(self, tmp_path, monkeypatch):
-        # The decided mid-burst-429 semantics survive the breaker: rate limits
-        # are API-level answers, so every history still gets its own try.
+    def test_a_429_drains_the_rest_of_the_fund_loop(self, tmp_path, monkeypatch):
+        # Since #189 a 429 parks the shared request budget for a full window,
+        # so the PR #19 per-fund retry would cost a window per remaining fund
+        # on a throttled key. The loop drains like the family's fetch_each:
+        # one request after the 429 is one request too many.
+        # AAA transport-fails (one strike, no trip), BBB 429s: CCC/DDD/EEE
+        # are never requested and join funds_failed unattempted.
         tickers = ("AAA", "BBB", "CCC", "DDD", "EEE")
         _, history_calls, payload = self._run_fund_breaker(
             tmp_path,
             monkeypatch,
             tickers,
-            errors={
-                f"/etfs/{t}/history": sosovalue.SoSoValueRateLimitError("throttled")
-                for t in tickers
-            },
+            fail={"/etfs/AAA/history"},
+            errors={"/etfs/BBB/history": sosovalue.SoSoValueRateLimitError("throttled")},
         )
-        assert history_calls == [f"/etfs/{t}/history" for t in tickers]
+        assert history_calls == ["/etfs/AAA/history", "/etfs/BBB/history"]
         assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
 
     def test_fund_list_failure_omits_breakdown_not_the_vendor(self, tmp_path, monkeypatch):
@@ -1787,8 +1889,10 @@ class TestCacheAndLoad:
     def test_list_429_is_absorbed_as_breakdown_failure_not_vendor_failure(
         self, tmp_path, monkeypatch
     ):
-        # The listing twin of the pure-429-burst rule: a throttled /etfs is
-        # non-fatal by design — the aggregate alone decides vendor success —
+        # The listing is a single request, so unlike the fund loop (which
+        # drains on a 429 since #189) there is nothing to drain: a throttled
+        # /etfs is non-fatal by design — the aggregate alone decides vendor
+        # success —
         # so it degrades to the disclosed "breakdown unavailable" shape
         # instead of forcing a stale-or-fail outcome.
         self._setup(tmp_path, monkeypatch)

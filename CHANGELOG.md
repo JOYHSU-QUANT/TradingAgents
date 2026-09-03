@@ -10,6 +10,21 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **sosovalue_common: a process-wide per-minute request budget on the
+  shared key** (issue #189). The three SoSoValue modules refresh 10
+  (macro), ~15 (ETF) and 16 (treasuries) requests at a time against one
+  20 req/min key, and only their cache TTLs kept them apart; under the paper
+  daemon's 4h cycle the 5h and 6h TTLs expire on the same cycle, and since
+  the 2026-09-02 cutover every cycle ended with treasuries never building a
+  cache and ETF flows stale-served behind a 429. ``_request`` now records
+  every send in a sliding 60s window and, when the next send would be the
+  twenty-first inside it, sleeps until the oldest ages out (inside the tool
+  call, at most one window plus 2s of slack, logged at INFO); a 429 parks
+  the budget for a full window so the next module's sweep in the same
+  analyst turn waits instead of burning its own quota. The key check still
+  runs first, so the unset-key emergency switch is never delayed. Tests get
+  a fresh budget per test and a sleep that fails loudly.
+
 - **data_vendors: the SoSoValue economic-calendar and BTC-treasuries
   categories are cut over to enabled** — ``economic_calendar`` and
   ``btc_treasuries`` default to ``"sosovalue"`` instead of ``"none"``

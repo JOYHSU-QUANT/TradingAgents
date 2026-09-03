@@ -34,6 +34,9 @@ import logging
 import math
 import os
 import re
+import threading
+import time
+from collections import deque
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from typing import NamedTuple, NoReturn
@@ -50,6 +53,101 @@ SOSOVALUE_API_BASE = "https://openapi.sosovalue.com/openapi/v1"
 
 # Network timeout (seconds), consistent with the other vendors.
 REQUEST_TIMEOUT = 30
+
+# The plan limit every request on the shared key counts against: 20 per
+# minute, per key. (The 100k-per-month tier is not budgeted here — a day of
+# every module refreshing on every 4h paper cycle stays under 300.) The three
+# vendor modules refresh 10 (macro), ~15 (ETF) and 16 (treasuries) requests
+# at a time, so any two expiring inside one analyst turn overrun the minute
+# and whichever runs second takes a 429 for the rest of it (#189). Each
+# module's TTL only knows its own traffic; the budget below is the one thing
+# that sees all of it, and it spaces requests so the overrun never happens.
+RATE_LIMIT_REQUESTS = 20
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+# Added to every wait: the server's window edge is not observable from here,
+# and a request that leaves this process at second 60.0 by our clock can
+# still land inside the server's previous window. Two seconds covers
+# request-latency jitter without making a full wait feel like a timeout.
+RATE_LIMIT_SLACK_SECONDS = 2.0
+
+# Module attributes rather than bare ``time`` calls so the tests can step a
+# fake clock instead of sleeping: the budget's whole behaviour is "wait
+# until", which is untestable against wall time.
+_monotonic = time.monotonic
+_sleep = time.sleep
+
+
+class _RequestBudget:
+    """A process-wide sliding-window budget over the shared per-minute limit.
+
+    Every request records its send instant; when ``RATE_LIMIT_REQUESTS``
+    instants sit inside the trailing window the next request waits until
+    the oldest of them ages out. A 429 is the server's proof that the window
+    is full regardless of what this process counted (another process on the
+    same key, a server window that does not match ours), so
+    ``note_rate_limited`` parks the budget for one full window: the sweep
+    the 429 landed in still drains (``fetch_each`` keeps that decision), but
+    the NEXT module's sweep in the same analyst turn waits instead of
+    burning its own quota on a second round of 429s. That park is
+    ``throttle.ThrottleLatch`` in miniature rather than a reuse of it: the
+    latch's TTL is fixed at five minutes, this one is exactly the window.
+
+    Same altitude as the yfinance latch in ``stockstats_utils`` — the
+    network boundary BEHIND the caches, so a cache-served call never touches
+    the budget and a park cannot turn a sibling's stale-cache report into
+    DATA_UNAVAILABLE (#114) — but the opposite verdict for an in-window
+    call: yfinance fast-fails so the router can fall through, this WAITS,
+    because a SoSoValue chain has no next vendor to fall through to
+    (treasuries has none at all) and a minute of wall time buys the data a
+    fast fail would forfeit.
+
+    The wait happens inside the caller's tool call, holding the lock, so
+    concurrent callers queue in order rather than racing the count. The
+    worst case is bounded by construction: one window plus slack per wait,
+    and a wait only ever follows a full window of real requests.
+    """
+
+    def __init__(self):
+        self._sent: deque[float] = deque()
+        self._blocked_until = 0.0
+        self._lock = threading.Lock()
+
+    def _wait_needed(self, now: float) -> float:
+        while self._sent and self._sent[0] <= now - RATE_LIMIT_WINDOW_SECONDS:
+            self._sent.popleft()
+        wait = self._blocked_until - now
+        if len(self._sent) >= RATE_LIMIT_REQUESTS:
+            wait = max(wait, self._sent[0] + RATE_LIMIT_WINDOW_SECONDS - now)
+        return wait + RATE_LIMIT_SLACK_SECONDS if wait > 0 else 0.0
+
+    def acquire(self, path: str) -> None:
+        """Block until a request may be sent."""
+        with self._lock:
+            now = _monotonic()
+            if (wait := self._wait_needed(now)) > 0:
+                logger.info(
+                    "SoSoValue request budget: %d requests already sent in the last %.0fs on "
+                    "the shared key; waiting %.1fs before %s",
+                    len(self._sent),
+                    RATE_LIMIT_WINDOW_SECONDS,
+                    wait,
+                    path,
+                )
+                _sleep(wait)
+                now = _monotonic()
+            self._sent.append(now)
+
+    def note_rate_limited(self) -> None:
+        """Park the budget for a full window: the server said it is full.
+
+        A ``Retry-After`` header is not consulted: whether the vendor sends
+        one is not live-verified, so the window is the only number there is.
+        """
+        with self._lock:
+            self._blocked_until = _monotonic() + RATE_LIMIT_WINDOW_SECONDS
+
+
+_BUDGET = _RequestBudget()
 
 # A plausible exchange ticker from a SoSoValue listing endpoint (US ETF
 # tickers like "IBIT", but also the treasuries listing's international forms
@@ -185,8 +283,13 @@ def _request(path: str, params: dict) -> list:
     clean ``{"code": 0, "data": [...]}`` -> ``SoSoValueError``. Network errors
     propagate as ``requests.RequestException`` for the caller's stale-cache
     handling, mirroring the Farside vendor.
+
+    Every call passes through the shared ``_BUDGET`` first — after the key
+    check, so an unset key still fails instantly rather than after a wait —
+    and a 429 parks that budget for a window before it is raised.
     """
     api_key = get_api_key()
+    _BUDGET.acquire(path)
     response = requests.get(
         f"{SOSOVALUE_API_BASE}{path}",
         params=params,
@@ -203,6 +306,7 @@ def _request(path: str, params: dict) -> list:
             f"Verify SOSOVALUE_API_KEY; until then the chain falls to the next vendor."
         )
     if response.status_code == 429:
+        _BUDGET.note_rate_limited()
         raise SoSoValueRateLimitError(
             f"SoSoValue rate limit hit (HTTP 429) on {path}: {_error_message(body, api_key)}"
         )

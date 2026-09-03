@@ -242,8 +242,11 @@ MAX_ROWS = 40
 # expire together, so a single analyst turn that touches both fires ~25
 # requests inside one minute and whichever runs second takes a 429 — the
 # category that ends up degraded rotating with tool-call order. An offset TTL
-# de-phases the two refreshes for the price of one constant. Do not "tidy"
-# this back to 6 to match the family.
+# de-phases the two refreshes for the price of one constant. The shared
+# request budget in ``sosovalue_common`` (#189) is the backstop that turns a
+# collision into a wait instead of a 429 — but a wait is still a stalled
+# analyst turn, and de-phasing is what keeps it rare. Do not "tidy" this
+# back to 6 to match the family.
 CACHE_TTL_HOURS = 5
 INCOMPLETE_CACHE_TTL_HOURS = 1
 

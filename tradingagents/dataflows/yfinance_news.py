@@ -5,6 +5,7 @@ from datetime import datetime
 
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
+from yfinance.data import YfData
 
 from .config import get_config
 from .errors import VendorError
@@ -189,6 +190,26 @@ def get_global_news_yfinance(
         limit = config["global_news_article_limit"]
     limit = max(1, min(int(limit), MAX_SEARCH_NEWS_COUNT))
     search_queries = config["global_news_queries"]
+
+    # yfinance memoizes every Search fetch for the life of the process:
+    # ``Search.search`` reads through ``YfData.cache_get``, an ``lru_cache``
+    # on the library's singleton with no TTL and no invalidation, keyed on
+    # the request parameters — and the parameters built below carry no date.
+    # A long-lived daemon therefore contacted Yahoo for global news once per
+    # process and served every later cycle its first cycle's headlines, until
+    # a restart (#198; verified on yfinance 1.4.1, the pinned floor). Forgotten
+    # here, once per call, so each call is a fresh set of requests. The forget
+    # is process-wide by construction: it also drops the day's memoized
+    # fundamentals-timeseries pages (behind ``info`` and the statements —
+    # their keys carry today's date, so they were held a day at most) and
+    # the timezone entries (served first from yfinance's persistent tz cache,
+    # so rarely a request); ``get_news`` is an uncached POST. Outside the
+    # boundary's lock: ``cache_clear`` is atomic, and the lock serializes the
+    # hide-exceptions flag and the wire, not an in-memory forget (#137
+    # measured its cost per cycle). Above the broad handler: a library that
+    # drops the attribute fails loudly here rather than freezing again as
+    # prose.
+    YfData.cache_get.cache_clear()
 
     all_news = []
     seen_titles = set()

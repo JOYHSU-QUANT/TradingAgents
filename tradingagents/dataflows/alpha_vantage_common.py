@@ -59,6 +59,29 @@ class AlphaVantageRateLimitError(VendorRateLimitError):
     pass
 
 
+# How long the router stands Alpha Vantage off once it reports the DAY's
+# request quota spent (25 requests per day on the free tier). The shared
+# window (``throttle.THROTTLE_LATCH_TTL_S``, five minutes) is sized for a
+# burst throttle; against a spent daily quota it had the router re-probing
+# every five minutes — a dozen refused requests and WARNING lines an hour,
+# each re-arming the same latch. An hour is a judgement value in the same
+# spirit as the shared one, not a model of the vendor's reset clock (never
+# measured here): enough to end the re-probe noise, short enough that a
+# quota which has reset is found within the hour (#153).
+AV_DAILY_QUOTA_LATCH_TTL_S = 3600.0
+
+
+class AlphaVantageDailyQuotaError(AlphaVantageRateLimitError):
+    """Alpha Vantage reported the day's request quota spent, not a burst throttle.
+
+    The same rate-limit lane to the router (skip to the next vendor, latch
+    this one), with the longer window above: the notice names a period the
+    shared window is a fraction of.
+    """
+
+    latch_ttl_s = AV_DAILY_QUOTA_LATCH_TTL_S
+
+
 # Keys Alpha Vantage answers with when it is reporting a problem rather than
 # serving data. A body made only of these is a failure envelope, not a payload.
 # The single definition of that key list (#68). ``_make_api_request`` handles
@@ -181,7 +204,9 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
 
     Raises:
         AlphaVantageRateLimitError: When API rate limit is exceeded — whether
-            reported as an HTTP 429 or as a notice in an HTTP 200 body (#72)
+            reported as an HTTP 429 or as a notice in an HTTP 200 body (#72).
+            The daily-quota notice raises the ``AlphaVantageDailyQuotaError``
+            subclass, which the router stands off for longer (#153)
         AlphaVantageNotConfiguredError: When the notice says the key is
             invalid or missing (#991), or that the endpoint is premium-only
             for this key — an entitlement the key lacks, not a throttle it
@@ -267,7 +292,10 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     # rate-limit phrasing is checked first because those notices also mention
     # "API key" ("your API key ... 25 requests per day") and the premium plans
     # ("subscribe to any of the premium plans ... to remove all daily rate
-    # limits"). A premium-only endpoint is then its own verdict: the key lacks
+    # limits"). The daily-quota notice is told apart first: it names a period
+    # the router's shared stand-off window is a fraction of, so it carries a
+    # longer one (#153) — and it also says "rate limit", so the order matters.
+    # A premium-only endpoint is then its own verdict: the key lacks
     # an entitlement it will not gain by waiting, so it is not a throttle —
     # and the router now remembers a throttle vendor-wide for a while (#114),
     # which would have kept every free endpoint unasked for the window over
@@ -276,7 +304,11 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     notice = response_json.get("Information") or response_json.get("Note")
     if isinstance(notice, str) and notice:
         low = notice.lower()
-        if any(m in low for m in ("rate limit", "requests per day", "call frequency")):
+        if "requests per day" in low:
+            raise AlphaVantageDailyQuotaError(
+                f"Alpha Vantage daily request quota spent: {notice}"
+            )
+        if any(m in low for m in ("rate limit", "call frequency")):
             raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: {notice}")
         if "premium endpoint" in low:
             raise AlphaVantageNotConfiguredError(

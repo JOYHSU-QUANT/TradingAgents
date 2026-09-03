@@ -65,9 +65,17 @@ class VendorRateLimitError(VendorError):
     network boundary (``YFinanceRateLimitError``: the latch lives in
     ``yf_retry``, which the indicator path reaches only after its OHLCV cache
     read).
+
+    ``latch_ttl_s`` is how long that stand-off lasts, in seconds; ``None``
+    is the shared window (``throttle.THROTTLE_LATCH_TTL_S``, sized for a
+    burst throttle). A subclass sets it when the refusal itself names a
+    longer period — Alpha Vantage's daily quota
+    (``AlphaVantageDailyQuotaError``) is not over in five minutes, and
+    re-probing it on the shared window only adds refused requests (#153).
     """
 
     latches_vendor = True
+    latch_ttl_s: float | None = None
 
 
 class VendorUnavailableError(VendorError):

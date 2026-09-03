@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import NamedTuple
 
 # How long a vendor that has just refused this client with a rate limit is
 # kept away from. The design treats a 429 as a fact about this client's
@@ -25,6 +26,13 @@ import time
 THROTTLE_LATCH_TTL_S = 300.0
 
 
+class _Latched(NamedTuple):
+    """One key's stand-off: when it ends, and when it was recorded (monotonic)."""
+
+    deadline: float
+    armed_at: float
+
+
 class ThrottleLatch:
     """Per-key record of "this vendor refused us recently; stay away for now".
 
@@ -35,29 +43,60 @@ class ThrottleLatch:
     model message on a thread pool, so arming and reading race without it.
     The deadline is exclusive, like the other windows in this codebase: at
     the deadline itself the vendor is contacted again.
+
+    Alongside the deadline each key remembers WHEN it was armed, so that a
+    call which returns can tell a deadline that predates it (lapsed, since a
+    live one is refused before the call) from one a sibling thread recorded
+    while the call was in flight — see :meth:`clear` (#153).
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._deadlines: dict[str, float] = {}
+        self._deadlines: dict[str, _Latched] = {}
 
     def remaining_s(self, key: str) -> float | None:
         """Seconds left on ``key``'s latch, or None when it may be contacted."""
         with self._lock:
-            deadline = self._deadlines.get(key)
-        if deadline is None:
+            entry = self._deadlines.get(key)
+        if entry is None:
             return None
-        remaining = deadline - time.monotonic()
+        remaining = entry.deadline - time.monotonic()
         return remaining if remaining > 0 else None
 
-    def arm(self, key: str) -> None:
-        with self._lock:
-            self._deadlines[key] = time.monotonic() + THROTTLE_LATCH_TTL_S
+    def arm(self, key: str, ttl_s: float | None = None) -> float:
+        """Stand ``key`` off for ``ttl_s`` seconds from now; returns the window applied.
 
-    def clear(self, key: str) -> None:
-        """Drop ``key``'s deadline rather than leaving an expired one behind."""
+        ``None`` is the shared window above; a raise that says how long its
+        refusal lasts (``VendorRateLimitError.latch_ttl_s``) passes its own.
+        The default is resolved here only — a caller that wants to log the
+        window reads the return value.
+        """
+        now = time.monotonic()
+        ttl_s = THROTTLE_LATCH_TTL_S if ttl_s is None else ttl_s
         with self._lock:
-            self._deadlines.pop(key, None)
+            self._deadlines[key] = _Latched(now + ttl_s, now)
+        return ttl_s
+
+    def clear(self, key: str, *, before: float) -> None:
+        """Drop ``key``'s deadline if it was armed before the instant ``before``.
+
+        ``before`` is the monotonic instant the caller's request was SENT. A
+        deadline armed before it is a lapsed one (a live one would have been
+        read as a refusal without sending), and is dropped rather than left
+        behind to reason about later. One armed at or after it was recorded
+        by a sibling thread while this request was in flight, and is kept:
+        the vendor decided this request no later than it was sent, so a
+        refusal it issued after that instant is the later verdict, and
+        dropping it would have the next tool call re-pay the discovery of
+        the same throttle (#153). "At" counts as after — on a coarse
+        monotonic clock two events in one tick cannot be ordered, and
+        keeping a latch costs one stand-off where dropping a real one costs
+        a backoff ladder.
+        """
+        with self._lock:
+            entry = self._deadlines.get(key)
+            if entry is not None and entry.armed_at < before:
+                del self._deadlines[key]
 
     def has_deadline(self, key: str) -> bool:
         """Whether a deadline is recorded at all — lapsed or not.

@@ -8,6 +8,7 @@ were swallowed without a trace).
 
 import copy
 import json
+import logging
 import types
 import unittest
 from unittest import mock
@@ -411,18 +412,65 @@ def test_the_vendor_latch_holds_for_its_window_and_lets_go_on_the_deadline(froze
 
 
 @pytest.mark.unit
-def test_an_answer_clears_the_vendor_latch():
-    # A deadline recorded by a sibling thread while this call was in flight is
-    # gone once the vendor answers.
+def test_an_answer_drops_a_lapsed_vendor_deadline(frozen_clock):
+    # A deadline that predates the call — lapsed, or the vendor would have
+    # been skipped — is dropped once the vendor answers, not left behind.
+    set_config({"data_vendors": {"core_stock_apis": "yfinance"}})
+    VENDOR_THROTTLE_LATCH.arm("yfinance")
+    frozen_clock["t"] += THROTTLE_LATCH_TTL_S
+    with _chain("get_stock_data", {"yfinance": _returns("YF_DATA")}):
+        assert _stock() == "YF_DATA"
+    assert not VENDOR_THROTTLE_LATCH.has_deadline("yfinance")
+
+
+@pytest.mark.unit
+def test_a_throttle_armed_while_the_vendor_was_answering_outlives_the_answer(frozen_clock):
+    # #153: a sibling tool call on the thread pool met the vendor's 429 and
+    # armed the latch while this call was in flight. The answered-branch used
+    # to drop it as "the fresher evidence" and the next routing re-discovered
+    # the throttle. The vendor decided this request no later than it was
+    # sent, so the refusal is the later verdict: the answer is served, the
+    # latch stays, and the next routing skips the vendor without a request.
     set_config({"data_vendors": {"core_stock_apis": "yfinance"}})
 
     def arm_then_answer(symbol, *a, **k):
         VENDOR_THROTTLE_LATCH.arm("yfinance")
         return "YF_DATA"
 
-    with _chain("get_stock_data", {"yfinance": arm_then_answer}):
+    yf = mock.Mock(side_effect=arm_then_answer)
+    with _chain("get_stock_data", {"yfinance": yf}):
         assert _stock() == "YF_DATA"
-    assert VENDOR_THROTTLE_LATCH.remaining_s("yfinance") is None
+        with pytest.raises(VendorRateLimitError, match="skipped without contacting"):
+            _stock()
+    assert yf.call_count == 1
+
+
+@pytest.mark.unit
+def test_a_spent_daily_quota_stands_the_vendor_off_for_its_own_window(frozen_clock, caplog):
+    # The shared window is sized for a burst throttle; Alpha Vantage's daily
+    # quota notice names a period that window is a fraction of, and its raise
+    # carries its own (#153): the vendor is still skipped once the shared
+    # window has passed, contacted again once its own has, and the WARNING
+    # names the window actually applied.
+    from tradingagents.dataflows.alpha_vantage_common import (
+        AV_DAILY_QUOTA_LATCH_TTL_S,
+        AlphaVantageDailyQuotaError,
+    )
+
+    assert AV_DAILY_QUOTA_LATCH_TTL_S > THROTTLE_LATCH_TTL_S
+    set_config({"data_vendors": {"core_stock_apis": "alpha_vantage,yfinance"}})
+    av = mock.Mock(side_effect=[AlphaVantageDailyQuotaError("25 requests per day"), "AV_DATA"])
+    with (
+        _chain("get_stock_data", {"alpha_vantage": av, "yfinance": _returns("YF_DATA")}),
+        caplog.at_level(logging.WARNING, logger=interface.__name__),
+    ):
+        assert _stock() == "YF_DATA"
+        assert f"for the next {AV_DAILY_QUOTA_LATCH_TTL_S:.0f}s" in caplog.text
+        frozen_clock["t"] += THROTTLE_LATCH_TTL_S
+        assert _stock() == "YF_DATA"
+        assert av.call_count == 1  # past the shared window, still stood off
+        frozen_clock["t"] += AV_DAILY_QUOTA_LATCH_TTL_S - THROTTLE_LATCH_TTL_S
+        assert _stock() == "AV_DATA"
 
 
 @pytest.mark.unit

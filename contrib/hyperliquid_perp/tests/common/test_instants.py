@@ -79,29 +79,30 @@ def test_epoch_ms_round_trips_every_millisecond_exactly():
     for ms in stamps:
         moment = from_epoch_ms(ms)
         assert moment.tzinfo is timezone.utc
-        assert epoch_ms(moment) == ms, ms
+        assert epoch_ms(moment, what="x") == ms, ms
     # ...and the other direction, from a millisecond-aligned instant.
-    assert from_epoch_ms(epoch_ms(_NOW)) == _NOW
-    assert epoch_ms(_NOW) == 1_788_163_200_000
+    assert from_epoch_ms(epoch_ms(_NOW, what="x")) == _NOW
+    assert epoch_ms(_NOW, what="x") == 1_788_163_200_000
 
 
 def test_epoch_ms_floors_a_sub_millisecond_instant():
     # ``delta_ms`` semantics: the microsecond part floors, so an instant half
     # a millisecond before a boundary is the earlier millisecond, not the
     # later one — the window end is never ahead of the clock it was cut at.
-    assert epoch_ms(_NOW + timedelta(microseconds=500)) == 1_788_163_200_000
-    assert epoch_ms(_NOW - timedelta(microseconds=500)) == 1_788_163_199_999
+    assert epoch_ms(_NOW + timedelta(microseconds=500), what="x") == 1_788_163_200_000
+    assert epoch_ms(_NOW - timedelta(microseconds=500), what="x") == 1_788_163_199_999
 
 
 def test_epoch_ms_refuses_a_naive_instant_naming_what_was_handed_in():
     # A naive instant would be read in the host's local zone — silently off
     # by the UTC offset — so it is refused by name, and the name is the
-    # caller's: the market-data reader pins its own wording through ``what``.
+    # caller's, REQUIRED (no anonymous refusal): the market-data reader pins
+    # its own wording through ``what``.
     naive = datetime(2026, 8, 31, 8, 0)
-    with pytest.raises(ValueError, match="^instant must be timezone-aware"):
-        epoch_ms(naive)
     with pytest.raises(ValueError, match="^market data window end must be timezone-aware"):
         epoch_ms(naive, what="market data window end")
+    with pytest.raises(TypeError):
+        epoch_ms(naive)  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize("bad", [1_788_163_200_000.0, True, "1788163200000", None])

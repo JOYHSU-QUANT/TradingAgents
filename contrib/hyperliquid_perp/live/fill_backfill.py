@@ -242,11 +242,14 @@ class FillBackfiller:
         ``complete=False`` rather than pretending the gap is closed.
         """
         stamp = now or self._clock.now()
-        # ``_window_start`` first: it refuses a naive ``now`` / ``since`` by
-        # name (see there), so that refusal — not ``epoch_ms``'s generic one —
-        # is what a caller holding a bare clock sees.
+        # ``_window_start`` first, and its ``_require_aware`` stays even though
+        # ``epoch_ms`` refuses a naive instant too: ``since`` never reaches
+        # ``epoch_ms`` (it dies inside ``min()`` with an opaque offset-mix
+        # error), so that guard is the only thing naming it — and running it
+        # first keeps the two refusals below unreachable for a naive ``now``.
         window_start = self._window_start(stamp, since)
-        start_ms, end_ms = epoch_ms(window_start), epoch_ms(stamp)
+        start_ms = epoch_ms(window_start, what="backfill window start")
+        end_ms = epoch_ms(stamp, what="backfill 'now'")
 
         fetched = applied = duplicate = unmapped = malformed = 0
         complete = True

@@ -1743,8 +1743,8 @@ def test_history_funding_source_buckets_points_by_the_hour_of_their_stamp():
     one_pm = noon + timedelta(hours=1)
     last_ms_of_one_pm = one_pm + timedelta(minutes=59, seconds=59, milliseconds=999)
     points = [
-        SimpleNamespace(time=epoch_ms(noon), rate=Decimal("0.0001")),
-        SimpleNamespace(time=epoch_ms(last_ms_of_one_pm), rate=Decimal("-0.0002")),
+        SimpleNamespace(time=epoch_ms(noon, what="x"), rate=Decimal("0.0001")),
+        SimpleNamespace(time=epoch_ms(last_ms_of_one_pm, what="x"), rate=Decimal("-0.0002")),
     ]
 
     class _Market:

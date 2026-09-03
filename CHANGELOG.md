@@ -36,19 +36,17 @@ Breaking changes within the 0.x line are called out explicitly.
   had gone through a float (``int(dt.timestamp() * 1000)`` /
   ``fromtimestamp(ms / 1000)``), whose exactness at 2026 magnitudes was an
   accident of float formatting, not a property of the code. Values are
-  byte-identical on every path a test pins. One behaviour change, decided
-  under the same issue: the CLI's funding-rate lookup records only
-  ``ExchangeError`` failures as "pending" — a ``TypeError`` from a drifted
-  call signature or a ``ValueError`` from a naive clock now propagates out
-  of the lookup instead of logging three WARNINGs and an ERROR that read as
-  a venue outage while every settlement stayed pending (the engine tick lets
-  it end the run; the cycle-boundary backfill's corrupt-row lane still
-  catches a ``ValueError`` — a follow-up). Also recorded, not changed:
-  the ``ExchangeMarketData`` port documents the whole read surface rather
-  than one consumer's needs, and the live lane's ``Position:`` costs reuse
-  the paper fill model's assumptions by the 2026-08-31 decision (issue #161;
-  ``PositionPricing`` is the seam a future ``live.assumed_costs`` goes
-  through).
+  byte-identical on every path a test pins. ``epoch_ms`` refuses a naive
+  instant by a REQUIRED caller name (``what=``); at the two sites that had
+  no guard of their own (the reconciler's cross-check window, the context's
+  no-candle ``as_of``) a naive clock now raises where the float route read
+  it as host-local time — unreachable in production, where every clock is
+  aware UTC, but a refusal rather than a wrong window if that ever changes.
+  Also recorded, not changed: the ``ExchangeMarketData`` port documents the
+  whole read surface rather than one consumer's needs, and the live lane's
+  ``Position:`` costs reuse the paper fill model's assumptions by the
+  2026-08-31 decision (issue #161; ``PositionPricing`` is the seam a future
+  ``live.assumed_costs`` goes through).
 
 ### Removed
 
@@ -60,6 +58,21 @@ Breaking changes within the 0.x line are called out explicitly.
   is unchanged as the one yfinance indicator entry point.
 
 ### Fixed
+
+- **hyperliquid_perp: the CLI's funding-rate lookup no longer reads a
+  programmer error as a venue outage** (issue #157). ``rate_at`` recorded
+  every exception from the funding-history read as a fetch failure — three
+  WARNINGs, then an ERROR that read as an endpoint outage while every
+  settlement stayed pending forever. It now records only the
+  ``ExchangeError`` family as "pending"; a ``TypeError`` from a drifted call
+  signature or a ``ValueError`` from a naive clock propagates out of the
+  lookup with the failure counter untouched (the engine tick lets it end the
+  run; the cycle-boundary backfill's corrupt-row lane still catches a
+  ``ValueError`` — a follow-up). Alongside: the agent-authorization check
+  refuses a ``NaN`` / ``Infinity`` / out-of-range ``validUntil`` by the same
+  named ``AgentAuthorizationError`` as any other unreadable value, where
+  those shapes previously escaped as a bare ``ValueError`` / ``OverflowError``
+  at live start-up.
 
 - **dataflows: one indicator description table, and the windowed indicator
   getter's per-day fallback loop is gone** (issue #137). The sentence each

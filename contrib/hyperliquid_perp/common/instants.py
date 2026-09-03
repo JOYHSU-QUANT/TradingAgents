@@ -10,8 +10,10 @@ keyless CLI lease checks, for one function. Here, at the bottom of the import
 graph, it costs nothing to reach (issue #122); ``paper.scheduler`` re-exports
 it for the callers that always found it there.
 
-:func:`whole_hours_label` renders a span the way an operator-facing message
-states a window ("6h", "4h"). Two modules derive such a label from a constant
+:func:`whole_hours_label` renders a span (not an instant — it lives here
+because it is the same dependency-free bottom layer) the way an
+operator-facing message states a window ("6h", "4h"). Two modules derive
+such a label from a constant
 (the reconciler's fill-backfill window, the freshness guard's decision cycle)
 and each had grown its own copy of the same guard: a span that is not whole
 hours must refuse at import rather than render truncated, because "5h" over a
@@ -81,11 +83,17 @@ def delta_ms(later: datetime, earlier: datetime) -> int:
     as ``-1``, not ``0`` — the inputs that can carry sub-ms fractions (host
     clock readings) only ever feed a skew note and minutes-wide fallback
     bounds, where that millisecond changes nothing.
+
+    No awareness guard of its own, unlike :func:`epoch_ms`: both operands
+    are instants the caller already holds as aware UTC (the context's
+    ``as_of`` and the clock readings the freshness guard compares, the epoch
+    here), and a naive/aware mix fails on the subtraction itself. The guard
+    that names a caller-supplied instant belongs where one is supplied.
     """
     return (later - earlier) // _ONE_MS
 
 
-def epoch_ms(moment: datetime, *, what: str = "instant") -> int:
+def epoch_ms(moment: datetime, *, what: str) -> int:
     """``moment`` as epoch milliseconds — the venue's time form — exactly.
 
     :func:`delta_ms` against the epoch, so a millisecond the exchange sent
@@ -93,10 +101,12 @@ def epoch_ms(moment: datetime, *, what: str = "instant") -> int:
     that was decoded by :func:`from_epoch_ms` comes back out as the same
     integer, and a window end computed from it neither drops a bar the
     exchange has closed (1ms short) nor admits one it has not. A naive
-    ``moment`` is refused, naming ``what`` the caller handed in — the
-    subtraction would raise anyway, but about mixing offsets, not about the
-    clock; and a naive value would otherwise be read in the host's local
-    zone, silently off by the UTC offset (the audit log's rationale).
+    ``moment`` is refused, naming ``what`` the caller handed in — required,
+    as on :func:`whole_hours_label`, so no refusal is anonymous: the
+    subtraction would raise anyway, but about mixing offsets, not about
+    which clock; and through the float route a naive value was not refused
+    at all but read in the host's local zone, silently off by the UTC
+    offset (the audit log's rationale).
     """
     if moment.tzinfo is None:
         raise ValueError(f"{what} must be timezone-aware (UTC)")

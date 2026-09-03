@@ -117,20 +117,23 @@ def verify_agent_authorization(
         )
     entry = matches[0]
     valid_until_ms = entry.get("validUntil")
+    unreadable = (
+        f"agent {agent_address} is listed for wallet {wallet_address} but its "
+        f"validUntil is unreadable ({valid_until_ms!r}) — cannot verify expiry"
+    )
     # The venue sends an integer; ``float`` is tolerated for a JSON decoder's
-    # number type, not for fractional milliseconds, hence the ``int()``. The
+    # number type, not for fractional milliseconds, hence the ``int()`` (a
+    # numeric STRING is not tolerated — this is live start-up, and a field
+    # that changed shape is refused by name, not parsed on a guess). The
     # decoder's ``NaN`` / ``Infinity`` pass the type check and fail that
     # ``int()``; a value past ``datetime``'s range fails ``from_epoch_ms`` —
     # all unreadable, all the same refusal, none a bare exception.
+    if isinstance(valid_until_ms, bool) or not isinstance(valid_until_ms, (int, float)):
+        raise AgentAuthorizationError(unreadable)
     try:
-        if isinstance(valid_until_ms, bool) or not isinstance(valid_until_ms, (int, float)):
-            raise TypeError("not a number")
         valid_until = from_epoch_ms(int(valid_until_ms))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise AgentAuthorizationError(
-            f"agent {agent_address} is listed for wallet {wallet_address} but its "
-            f"validUntil is unreadable ({valid_until_ms!r}) — cannot verify expiry"
-        ) from exc
+    except (ValueError, OverflowError) as exc:
+        raise AgentAuthorizationError(unreadable) from exc
     if valid_until <= now:
         raise AgentAuthorizationError(
             f"agent {agent_address}'s authorization for wallet {wallet_address} "

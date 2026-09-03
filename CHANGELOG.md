@@ -74,6 +74,25 @@ Breaking changes within the 0.x line are called out explicitly.
   those shapes previously escaped as a bare ``ValueError`` / ``OverflowError``
   at live start-up.
 
+- **sosovalue_macro: the oldest print of a series no longer drops the whole
+  event history** (issue #188). The live GDP (QoQ) history opens on
+  2008-03-27 with ``actual`` and ``forecast`` and no ``previous`` key at all
+  — the first print of a series has no prior print to carry — and the
+  history parser treated that as a malformed row, failing the entire event
+  on every refresh since the 2026-09-02 cutover: GDP (QoQ) vanished from
+  the economic-calendar report, and the failure routed the event into
+  ``events_failed``, whose 1h retry TTL re-ran the module's full 10-request
+  sweep on every call against the shared 20 req/min key (the direct trigger
+  for the 429s in #189). A missing or null ``previous`` on the series'
+  first print now parses as the empty string, the "no figure" meaning a
+  pending ``actual`` already holds. The tolerance is scoped to exactly that
+  row — one row by identity, and only when the served history is complete
+  (a page at ``HISTORY_LIMIT`` dropped the oldest prints, so its first row
+  is mid-series): ``actual`` and ``forecast`` are still required
+  everywhere, and any other row without ``previous`` still fails the event
+  — a provider that renames or drops the field mid-series must surface as
+  a disclosed gap, not as an empty Previous column served for a full TTL.
+
 - **dataflows: one indicator description table, and the windowed indicator
   getter's per-day fallback loop is gone** (issue #137). The sentence each
   indicator report ends with — agent-facing prompt text — lived in two

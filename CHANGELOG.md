@@ -35,6 +35,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **dataflows: a throttle met while a sibling tool call was in flight is no
+  longer forgotten, and a spent Alpha Vantage daily quota is remembered for
+  an hour** (issue #153; the #137 tail). ``ThrottleLatch`` now records when
+  each key was armed, and a call that returns drops only a deadline older
+  than the request it sent (a lapsed one), keeping the one a sibling thread
+  armed while the request was in flight: the vendor decided the request no
+  later than it was sent, so the refusal issued after that is the later
+  verdict. Before, the served result cleared it and the next tool call
+  re-discovered the same throttle (on yfinance, at the price of a full
+  backoff ladder). At the yfinance boundary this is per attempt and dated
+  once the un-hide lock is held (``yf_retry`` now holds it around each
+  attempt), and the latch is consulted again once the lock is held and
+  before each retry — a call that queued behind a sibling's refused attempt,
+  or slept through its backoff while a sibling exhausted its ladder, is now
+  refused without a request instead of paying the ladder again; the
+  exhausted attempt arms before it releases the lock so the queued call
+  sees it. A retry that goes out once such a stand-off has lapsed and is
+  served drops that lapsed deadline rather than keeping it as in-flight.
+  A re-arm never cuts a recorded stand-off short (a burst 429 met while a
+  daily quota is spent keeps the quota's deadline). ``VendorRateLimitError``
+  gains ``latch_ttl_s`` (default ``None`` = the shared 300s window) so a
+  raise can carry its own window: Alpha Vantage's "requests per day"
+  notice now raises ``AlphaVantageDailyQuotaError`` with
+  ``AV_DAILY_QUOTA_LATCH_TTL_S`` (3600s), where the shared window had the
+  router re-probing the spent quota — one refused request and one WARNING
+  — every five minutes. The shared window itself is unchanged, and the
+  router's WARNING names the window actually applied.
+  ``stockstats_utils._UNHIDE_LOCK`` stays a whole-fetch lock; the
+  measurement that decided it (about a second per decision cycle, #137) is
+  in its comment.
+
 - **sosovalue_common: a process-wide per-minute request budget on the
   shared key** (issue #189). The three SoSoValue modules refresh 10
   (macro), ~15 (ETF) and 16 (treasuries) requests at a time against one

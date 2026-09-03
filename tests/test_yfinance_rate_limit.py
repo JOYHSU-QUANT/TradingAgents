@@ -169,64 +169,215 @@ def test_being_served_clears_the_latch(frozen_clock):
     assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
 
 
-def _arm_then(outcome):
-    """A fetch during which a sibling thread arms the latch (#114).
+def _lapsed_deadline(frozen_clock):
+    """A deadline armed before the call and already past.
+
+    The only deadline a call can meet and still be sent (a live one is
+    refused first), and the one a served call drops rather than leaves
+    behind — so it is what tells "served" from "restored" below (#114):
+    these pin the ``_HiddenAnswer`` branch, which never reaches ``clear``,
+    not ``clear``'s own in-flight rule (that is pinned further down).
+    """
+    su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
+    frozen_clock["t"] += THROTTLE_LATCH_TTL_S
+
+
+@pytest.mark.unit
+def test_a_restored_failure_is_not_an_answer(frozen_clock):
+    # yf_fetch_unhidden restores a swallowed failure to the caller's hidden
+    # answer, and that value used to reach yf_retry looking exactly like data
+    # (#114). Not a verdict bug: the caller still gets the empty frame — but
+    # nothing was served, so not even a lapsed deadline is tidied away.
+    _lapsed_deadline(frozen_clock)
+    out = su.yf_fetch_statement(mock.Mock(side_effect=ValueError("boom")))
+    assert out.empty
+    assert su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
+
+
+@pytest.mark.unit
+def test_a_restored_404_is_not_an_answer(frozen_clock):
+    # The other restore path: Yahoo's verdict on the symbol comes back as the
+    # hidden answer too, and is likewise not this client's standing with Yahoo.
+    _lapsed_deadline(frozen_clock)
+    assert su.yf_fetch_unhidden(mock.Mock(side_effect=_http_error(404)), hidden_answer=list) == []
+    assert su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
+
+
+@pytest.mark.unit
+def test_a_served_fetch_drops_the_lapsed_deadline(frozen_clock):
+    # The discrimination for the two above: the same lapsed deadline, but the
+    # fetch actually answers, and the deadline goes.
+    _lapsed_deadline(frozen_clock)
+    assert su.yf_fetch_unhidden(mock.Mock(return_value="data"), hidden_answer=list) == "data"
+    assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
+
+
+@pytest.mark.unit
+def test_yf_retry_keeps_no_opinion_about_return_values(frozen_clock):
+    # The signal is a type yf_retry defines, not a shape it recognises: a bare
+    # callable that returns the very value the restore paths hand back — an
+    # empty frame — is an answer, and drops the deadline. The pd knowledge
+    # stays in yf_fetch_unhidden.
+    import pandas as pd
+
+    _lapsed_deadline(frozen_clock)
+    out = su.yf_retry(lambda: pd.DataFrame())
+    assert out.empty
+    assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
+
+
+def _arm_then(outcome, frozen_clock, later_by=1.0):
+    """A fetch during which a sibling thread arms the latch (#153).
 
     ``yf_retry`` raises before calling when the latch is live, so the only way
     a call can meet a live latch is to have one armed while it is in flight.
     Modelled inline rather than with a real thread: what is under test is what
-    the answered-branch does with the deadline it finds, not the race.
+    the answered-branch does with the deadline it finds, not the race. The
+    clock steps ``later_by`` before the arm so it is provably after the send;
+    zero models the same-tick case.
     """
 
     def fetch():
+        frozen_clock["t"] += later_by
         su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
-        if isinstance(outcome, BaseException):
-            raise outcome
         return outcome
 
     return fetch
 
 
+def _assert_the_next_call_is_spared():
+    spared = mock.Mock(return_value="ok")
+    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
+        su.yf_retry(spared)
+    spared.assert_not_called()
+
+
 @pytest.mark.unit
-def test_a_restored_failure_does_not_clear_a_live_latch():
-    # yf_fetch_unhidden restores a swallowed failure to the caller's hidden
-    # answer, and that value used to reach yf_retry looking exactly like data
-    # — so the answered-branch dropped a deadline a sibling had just armed and
-    # the next tool re-discovered the throttle at the price of a ladder
-    # (#114). Not a verdict bug: the caller still gets the empty frame.
-    out = su.yf_fetch_statement(_arm_then(ValueError("boom")))
-    assert out.empty
+def test_a_throttle_armed_while_the_call_was_in_flight_outlives_its_answer(frozen_clock):
+    # #153: thread A is served while thread B exhausts its ladder and arms the
+    # latch. A's answered-branch used to drop B's deadline as "the fresher
+    # evidence", and the next tool call re-paid the ladder to find the same
+    # 429. Yahoo decided A's request no later than it was sent, so B's later
+    # refusal is the later verdict: A is served, the latch stays, the next
+    # call is spared.
+    assert su.yf_retry(_arm_then("data", frozen_clock)) == "data"
+    _assert_the_next_call_is_spared()
+
+
+@pytest.mark.unit
+def test_an_arm_in_the_same_tick_as_the_send_is_kept(frozen_clock):
+    # Two events in one clock tick cannot be ordered; keeping the latch costs
+    # one stand-off, dropping a real one costs a ladder — "at" counts as after.
+    assert su.yf_retry(_arm_then("data", frozen_clock, later_by=0.0)) == "data"
+    _assert_the_next_call_is_spared()
+
+
+class _WaitBehindTheSibling:
+    """A ``lock`` whose wait is where a sibling's last, refused attempt lands.
+
+    Every fetch waits for the un-hide lock before it is sent; acquiring this
+    one arms the latch (the sibling's exhausted ladder) and moves the clock
+    on, so what the call does once it holds the lock is what is under test.
+    """
+
+    def __init__(self, frozen_clock):
+        self._clock = frozen_clock
+
+    def __enter__(self):
+        su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
+        self._clock["t"] += 1.0
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.unit
+def test_a_call_that_queued_behind_the_refusal_is_refused_without_sending(frozen_clock):
+    # The latch passed before the wait says nothing about what landed during
+    # it: consulted again once the lock is held, the sibling's refusal spares
+    # this call the request and the ladder (#86) — and the latch stands.
+    queued = mock.Mock(return_value="data")
+    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
+        su.yf_retry(queued, lock=_WaitBehindTheSibling(frozen_clock))
+    queued.assert_not_called()
     assert su._YF_THROTTLE_LATCH.remaining_s(su._YF_LATCH_KEY) is not None
 
 
 @pytest.mark.unit
-def test_a_restored_404_does_not_clear_a_live_latch():
-    # The other restore path: Yahoo's verdict on the symbol comes back as the
-    # hidden answer too, and is likewise not this client's standing with Yahoo.
-    assert su.yf_fetch_unhidden(_arm_then(_http_error(404)), hidden_answer=list) == []
-    assert su._YF_THROTTLE_LATCH.remaining_s(su._YF_LATCH_KEY) is not None
+def test_a_sibling_arm_during_the_backoff_refuses_the_retry(frozen_clock, monkeypatch):
+    # The same for the sleeps between attempts: a retry is a send too.
+    def sibling_exhausts_meanwhile(seconds):
+        frozen_clock["t"] += seconds
+        su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)
+
+    monkeypatch.setattr(su.time, "sleep", sibling_exhausts_meanwhile)
+    attempts = mock.Mock(side_effect=YFRateLimitError())
+    with pytest.raises(VendorRateLimitError, match="without contacting the vendor"):
+        su.yf_retry(attempts)
+    assert attempts.call_count == 1  # the retry was never sent
 
 
 @pytest.mark.unit
-def test_a_served_fetch_still_clears_a_live_latch():
-    # The discrimination for the two above: the same in-flight arm, but the
-    # fetch actually answers — that is the fresher evidence, and the deadline
-    # goes.
-    assert su.yf_fetch_unhidden(_arm_then("data"), hidden_answer=list) == "data"
-    assert su._YF_THROTTLE_LATCH.remaining_s(su._YF_LATCH_KEY) is None
+def test_a_call_that_queued_behind_a_lapsed_refusal_is_dated_when_the_lock_is_held(
+    frozen_clock,
+):
+    # When the sibling's stand-off has already lapsed by the time the lock is
+    # held, the call is sent, and it is dated once the lock is held — after
+    # the sibling's arm — so its answer drops that lapsed deadline rather
+    # than keeping it as an in-flight one (dated before the wait, it would).
+    class _WaitPastTheSibling(_WaitBehindTheSibling):
+        def __enter__(self):
+            super().__enter__()
+            self._clock["t"] += THROTTLE_LATCH_TTL_S
+
+    assert su.yf_retry(lambda: "data", lock=_WaitPastTheSibling(frozen_clock)) == "data"
+    assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
 
 
 @pytest.mark.unit
-def test_yf_retry_keeps_no_opinion_about_return_values():
-    # The signal is a type yf_retry defines, not a shape it recognises: a bare
-    # callable that returns the very value the restore paths hand back — an
-    # empty frame — is an answer, and clears the latch. The pd knowledge stays
-    # in yf_fetch_unhidden.
-    import pandas as pd
+def test_an_exhausted_ladder_arms_before_it_releases_the_lock(frozen_clock):
+    # The other half of the same race: the refused attempt must arm while it
+    # still holds the lock, or the call queued behind it can take its send
+    # instant first and then keep a latch it had in fact outlived.
+    armed_at_release = []
 
-    out = su.yf_retry(_arm_then(pd.DataFrame()))
-    assert out.empty
-    assert su._YF_THROTTLE_LATCH.remaining_s(su._YF_LATCH_KEY) is None
+    class _Lock:
+        def __enter__(self):
+            pass
+
+        def __exit__(self, *exc):
+            armed_at_release.append(su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY))
+            return False
+
+    with pytest.raises(VendorRateLimitError):
+        su.yf_retry(mock.Mock(side_effect=YFRateLimitError()), max_retries=0, lock=_Lock())
+    assert armed_at_release == [True]
+
+
+@pytest.mark.unit
+def test_a_retry_sent_after_the_arm_is_the_later_evidence(frozen_clock, monkeypatch):
+    # Per attempt, not per call: the first attempt is throttled and a sibling
+    # arms during it; by the time the retry goes out that stand-off has
+    # lapsed (a retry is only sent when the latch no longer holds), and the
+    # retry is served — Yahoo answered this client after the refusal, so the
+    # lapsed deadline goes. Dated per call, the arm would read as in flight
+    # and the deadline would be kept. The sleep stands in for the lapse.
+    monkeypatch.setattr(
+        su.time,
+        "sleep",
+        lambda s: frozen_clock.__setitem__("t", frozen_clock["t"] + THROTTLE_LATCH_TTL_S),
+    )
+    outcomes = [YFRateLimitError(), "ok"]
+
+    def flaky():
+        out = outcomes.pop(0)
+        if isinstance(out, Exception):
+            su._YF_THROTTLE_LATCH.arm(su._YF_LATCH_KEY)  # a sibling, mid-attempt
+            raise out
+        return out
+
+    assert su.yf_retry(flaky) == "ok"
+    assert not su._YF_THROTTLE_LATCH.has_deadline(su._YF_LATCH_KEY)
 
 
 @pytest.mark.unit

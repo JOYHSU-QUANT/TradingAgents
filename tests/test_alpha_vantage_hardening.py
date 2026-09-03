@@ -68,6 +68,36 @@ def test_rate_limit_detected(monkeypatch):
 
 
 @pytest.mark.unit
+def test_a_daily_quota_notice_carries_a_longer_latch_window(monkeypatch):
+    # The per-minute notice and an HTTP 429 are burst throttles the router's
+    # shared stand-off window fits; the 25-requests-per-day notice names a
+    # period that window is a fraction of, so its raise carries its own
+    # (#153). Still the rate-limit type — the same router lane — and told
+    # apart before the generic phrasing, since the daily notice says "rate
+    # limit" too.
+    from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S
+
+    quota = '{"Information": "Our standard API rate limit is 25 requests per day. ... your API key ..."}'
+    monkeypatch.setattr(av.requests, "get", _patched_get(quota))
+    with pytest.raises(av.AlphaVantageRateLimitError) as exc:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert isinstance(exc.value, av.AlphaVantageDailyQuotaError)
+    assert exc.value.latch_ttl_s == av.AV_DAILY_QUOTA_LATCH_TTL_S > THROTTLE_LATCH_TTL_S
+
+    per_minute = '{"Note": "API call frequency is 5 calls per minute."}'
+    monkeypatch.setattr(av.requests, "get", _patched_get(per_minute))
+    with pytest.raises(av.AlphaVantageRateLimitError) as exc:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert not isinstance(exc.value, av.AlphaVantageDailyQuotaError)
+    assert exc.value.latch_ttl_s is None
+
+    monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=429))
+    with pytest.raises(av.AlphaVantageRateLimitError) as exc:
+        av._make_api_request("TIME_SERIES_DAILY", {"symbol": "AAPL"})
+    assert exc.value.latch_ttl_s is None
+
+
+@pytest.mark.unit
 def test_invalid_key_not_mislabeled_as_rate_limit(monkeypatch):
     # AV's invalid-key notice mentions "API key"; it must NOT be treated as a
     # (transient) rate limit, but surface as a real configuration error (#991).

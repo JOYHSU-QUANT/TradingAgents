@@ -1,4 +1,5 @@
 import logging
+import time
 
 import requests
 
@@ -29,7 +30,7 @@ from .polymarket import get_prediction_markets as get_polymarket_prediction_mark
 from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
 from .sosovalue_treasuries import get_btc_treasury_data as get_sosovalue_btc_treasuries
-from .throttle import THROTTLE_LATCH_TTL_S, VENDOR_THROTTLE_LATCH
+from .throttle import VENDOR_THROTTLE_LATCH
 from .utils import http_status, sanitize_untrusted
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
@@ -354,18 +355,28 @@ def route_to_vendor(method: str, *args, **kwargs):
                 )
             continue
 
+        # The send instant the latch compares against (#153). Taken here, so
+        # an impl that waits before sending would date its request early —
+        # the ones that do (SoSoValue's request budget; yfinance's un-hide
+        # lock and backoff ladder) raise types the router never latches, so
+        # nothing is misdated today.
+        sent_at = time.monotonic()
         try:
             result = impl_func(*args, **kwargs)
         except VendorRateLimitError as e:
             if e.latches_vendor:
-                VENDOR_THROTTLE_LATCH.arm(vendor)
+                # For as long as the raise says its refusal lasts, else the
+                # shared window: a spent daily quota is not over in five
+                # minutes, and re-probing it on that window only adds
+                # refused requests and log lines (#153).
+                ttl_s = VENDOR_THROTTLE_LATCH.arm(vendor, e.latch_ttl_s)
                 logger.warning(
                     "Vendor %r rate-limited for %s; trying next vendor, and skipping %r "
                     "without contacting it for the next %.0fs.",
                     vendor,
                     method,
                     vendor,
-                    THROTTLE_LATCH_TTL_S,
+                    ttl_s,
                 )
             else:
                 logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
@@ -440,14 +451,15 @@ def route_to_vendor(method: str, *args, **kwargs):
                 elif status in (401, 403):
                     first_outage = (vendor, f"answered HTTP {status}, refusing this client")
             continue
-        # The vendor returned, so a result just received outranks any deadline
-        # a sibling thread recorded while this call was in flight ("returned",
-        # not "answered": a no-data or outage verdict raised above leaves the
-        # latch alone, by choice). Only a raised throttle arms the latch, so a
+        # The vendor returned: drop a deadline that predates this request (a
+        # lapsed one), keep the one a sibling thread armed while it was in
+        # flight — why is ``ThrottleLatch.clear``'s (#153). "Returned", not
+        # "answered": a no-data or outage verdict raised above leaves the
+        # latch alone, by choice. Only a raised throttle arms the latch, so a
         # vendor that renders a partial throttle into its report (Deribit,
         # when not every request was refused) is never skipped on the
         # strength of it.
-        VENDOR_THROTTLE_LATCH.clear(vendor)
+        VENDOR_THROTTLE_LATCH.clear(vendor, before=sent_at)
         return result
 
     # If any vendor reported "no data", the symbol is genuinely unavailable.

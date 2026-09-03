@@ -12,6 +12,7 @@ import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.alpha_vantage_common import (
+    AlphaVantageDailyQuotaError,
     AlphaVantageNotConfiguredError,
     AlphaVantageRateLimitError,
 )
@@ -37,6 +38,10 @@ class HierarchyTests(unittest.TestCase):
 
     def test_vendor_named_errors_subclass_the_generic_bases(self):
         self.assertTrue(issubclass(AlphaVantageRateLimitError, VendorRateLimitError))
+        # The daily-quota verdict is the rate-limit type with a longer stand-off
+        # window; the base carries the shared window as its default (#153).
+        self.assertTrue(issubclass(AlphaVantageDailyQuotaError, AlphaVantageRateLimitError))
+        self.assertIsNone(VendorRateLimitError.latch_ttl_s)
         self.assertTrue(issubclass(AlphaVantageNotConfiguredError, VendorNotConfiguredError))
         self.assertTrue(issubclass(FredNotConfiguredError, VendorNotConfiguredError))
         # ... and therefore still ValueErrors

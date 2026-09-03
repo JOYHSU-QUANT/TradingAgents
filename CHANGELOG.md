@@ -8,6 +8,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- **hyperliquid_perp: the running daemons say which prompt regime they are
+  in, and the rows a run wrote before schema v11 can be told** (issue
+  #163). The paper and live lanes log one INFO line ``prompt_regime:
+  prompt_version=… context_shape=… format_fingerprint=…`` the first time a
+  cycle's prompt is built through (after its payload is written), and again
+  only when that triple flips mid-run (a section appearing or disappearing)
+  — so a YAML edit + restart shows its bucket in journald without a
+  ``validate`` run. ``export --backfill-format-fingerprint`` fills, in a
+  store already at v11, the ``NULL`` ``ai_inputs.format_fingerprint`` cells
+  written before the column existed, by re-digesting the
+  ``format_instructions`` text each row's payload JSON recorded; only
+  ``NULL`` cells on rows that carry the other two keys are written, only
+  from a payload whose bytes still hash to the row's ``input_payload_hash``,
+  and rows that are pre-v10 (no shape either), missing their file, unreadable
+  or altered stay ``NULL`` and are counted on stderr. Deliberately not a
+  migration (file I/O, tolerated absence). ``common/prompt_regime.py`` is
+  the one renderer all three surfaces (``validate``, the daemon log,
+  ``--context-only``) print the line through, and ``common/digest.py`` the
+  one spelling of the payload digest the daemon records and the backfill
+  verifies — the daemon now writes the payload as the bytes it hashed
+  (``write_bytes``), where a text-mode write let Windows rewrite the
+  newlines between the two.
+
 ### Changed
 
 - **sosovalue_common: a process-wide per-minute request budget on the
@@ -32,6 +57,16 @@ Breaking changes within the 0.x line are called out explicitly.
   process on the same key (a CLI run on the box while the daemon is up)
   will 429 and park both. Tests get a fresh budget per test and a sleep
   that fails loudly.
+
+- **hyperliquid_perp: ``--context-only`` prints its segmentation bucket as
+  one ``prompt_regime:`` line** (issue #163) — ``prompt_version``,
+  ``context_shape`` and ``format_fingerprint`` together, in the grammar the
+  daemon logs and ``validate`` prints — instead of the separate
+  ``context_shape: …`` / ``format_fingerprint: …`` lines. Same values, one
+  grep handle; the lane still carries no ``|position`` token (RUNBOOK §4).
+  The two causes of a missing ``Position:`` section (no books yet vs
+  non-positive equity) remain distinguishable only by their WARNING wording,
+  now pinned by test and documented as the accepted state (issue #161).
 
 - **data_vendors: the SoSoValue economic-calendar and BTC-treasuries
   categories are cut over to enabled** — ``economic_calendar`` and

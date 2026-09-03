@@ -50,6 +50,7 @@ from .account import (
 from .cloid_registry import get_cloid_by_hex, get_cloid_by_logical, insert_cloid_mapping
 from .decisions import (
     PromptRegime,
+    ai_inputs_without_format_fingerprint,
     find_in_progress_attempt,
     get_decision_attempt,
     insert_account_snapshot,
@@ -58,6 +59,7 @@ from .decisions import (
     insert_decision_attempt,
     insert_position_snapshot,
     prompt_regime_counts,
+    stamp_ai_input_format_fingerprint,
     update_decision_attempt,
 )
 from .events import (
@@ -154,6 +156,7 @@ __all__ = [
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
     "active_protection_order",
+    "ai_inputs_without_format_fingerprint",
     "count_orders_by_role",
     "find_in_progress_attempt",
     "get_accounting_adjustment_event",
@@ -227,6 +230,7 @@ __all__ = [
     "set_reconciliation_action",
     "set_position_liquidation_price",
     "set_position_protection",
+    "stamp_ai_input_format_fingerprint",
     "update_decision_attempt",
     "update_execution_plan",
     "update_live_order_attempt",

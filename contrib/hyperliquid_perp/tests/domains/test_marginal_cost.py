@@ -203,6 +203,11 @@ def test_non_positive_equity_omits_the_section_with_a_warning(caplog):
     assert pos is None
     assert "position section omitted" in caplog.text
     assert "-25" in caplog.text
+    # Issue #161: this omission and the provider's book-less one render the
+    # same prompt and the same ``context_shape``; the two WARNING lines are
+    # the only record of which happened, so their wording must stay apart.
+    assert "is not positive" in caplog.text
+    assert "no books yet" not in caplog.text
 
 
 def test_zero_equity_is_also_omitted():

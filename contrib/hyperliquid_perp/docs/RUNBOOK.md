@@ -178,9 +178,15 @@ vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BT
 指紋上的那個測試也看不到。所以 schema v10 起 `ai_inputs` 多一欄 **`context_shape`**（同時寫進
 payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的**段落結構**寫成一個
 字串，例如 `price|market|funding|indicators(rsi_14,ema_20,ema_50,atr_14,macd)|volume_profile`。
-`--context-only` 會在渲染結果後印一行 `context_shape: …`，改 YAML 後部署前就能看到會落在哪個
-桶——但注意它印的**少一段**：prompt v4 起 paper／live daemon 的列一律多帶 `|position`
+`--context-only` 會在渲染結果後印一行 `prompt_regime: prompt_version=… context_shape=… format_fingerprint=…`
+（三鍵同一行，文法與 daemon 啟動 log、`validate` 的 `prompt_regime:` 行完全相同——三處共用
+`common/prompt_regime.py` 一個渲染函式，同一個字串可以 grep），改 YAML 後部署前就能看到會落在哪個
+桶——但注意它印的 `context_shape` **少一段**：prompt v4 起 paper／live daemon 的列一律多帶 `|position`
 （倉位段從本地帳本來，一次性 CLI 沒有帳本、維持 position-blind），比對時把這一段補上再比。
+**daemon 自己也會說**（issue #163）：paper／live 第一個成功組出 prompt 的 cycle 會在 log 印同一行
+`prompt_regime: …`（INFO，`cli._provider`），之後**只在三鍵翻桶時再印一次**——volume profile 段因
+歷史不夠被跳過、倉位段因權益 ≤ 0 被省略（見 §7）都算翻桶；一整段 run 沒翻過就只有啟動那一行。
+改 YAML 重啟後看 journald 這一行就知道落在哪個桶，不用跑 `validate`。
 它只取結構——段落標題、指標列名、volume profile 段有沒有——**不取**標籤裡的數字
 （`Candles: 200 x 4h`、`30d z-score`）也不取每 cycle 隨資料有無變動的 `Mid:`／`Premium:`
 行，否則每個 cycle 自成一段。
@@ -194,7 +200,7 @@ prompt 不同）不管來自 code 還是 YAML 都自動落進資料裡。翻動�
 （與 `risk.max_target_margin_pct` 壓出的有效上限）會渲染進 `decision_format_instructions` 的文字，
 改 YAML 就換數字、不 bump 也不改 shape——schema v11 起 `ai_inputs` 多一欄 **`format_fingerprint`**
 （`domains/perp/target_decision.format_fingerprint`：渲染文字的 SHA-256 前 16 個 hex，同時寫進
-payload JSON），`--context-only` 也印一行 `format_fingerprint: …`。它是**內容指紋不是 shape**：
+payload JSON），`--context-only` 那一行 `prompt_regime:` 也帶著它。它是**內容指紋不是 shape**：
 那段文字任何改動都換值。**prompt v5 起三個 gate 門檻（`min_confidence`／`resize_min_confidence`／
 `rebalance_deadband_pct`）不再渲染成數字**（只剩定性描述），所以改門檻 YAML **不會**換指紋——它
 跟著模型讀到的文字走，模型讀不到門檻了；門檻改動仍是策略調參、照上面的規則開新 run-id——
@@ -278,6 +284,7 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
 | 最新 CSV | `<db 目錄>/exports/paper-BTC/` + `manifest.json` | 每 cycle 更新 | `export_failed` 只記錄不影響交易 state；連續失敗查磁碟/權限 |
 | `REPLAY_UNVERIFIED.json` | 同上 export 目錄 | **不存在** | 存在 = 該批 CSV 未經 replay 驗證，先調查 store 再相信數字 |
 | 中途健檢 | `python -m contrib.hyperliquid_perp validate --run-id paper-BTC` | exit 4（一致、cycles 未滿） | exit 5 = integrity failure，停下來調查 |
+| 落在哪個 prompt 桶 | stderr log 的 `prompt_regime: prompt_version=… context_shape=… format_fingerprint=…`（INFO） | 啟動後第一個成功的 cycle 印一行；之後整段 run 不再出現 | 中途又印一行 = 三鍵翻桶了（段落出現／消失，見 §4 與 §7 的 position 列）；對照 `validate` 的 `prompt_regime:` 行，判讀時分段讀 |
 
 **Protection-only 模式**（log 會明講）：不開新 decision cycle，但 SL/TP 與監控
 持續；倉位被 SL/TP 了結後程序會做最後 export 並以 exit 1 自動結束。三種成因、
@@ -341,6 +348,24 @@ exit code：**三鍵齊全的行多於一行**＝這個 run 跨過 prompt 制度
 A→B→A 翻回去仍只印兩行。另有一條自我檢查：各桶總和應等於 `cycle_count`，不等時印
 `warning:`（有已決策的 attempt 沒有 `ai_inputs` 列——手工修過的 store），這時分佈是部分的。
 
+**把 v11 前的 `n/a` 桶補回去（issue #163）**：那些列的 payload JSON 存有當次的 `format_instructions`
+全文，指紋可以離線重算——
+
+```bash
+# 先備份 DB；在寫 payload 的那台主機上跑（列上記的是絕對路徑）；daemon 在跑也可以
+# （只寫 v11 前那些列的 NULL 格、單一短交易，daemon 不再碰它們；鎖等超過 5 秒會具名 exit 1，重跑即可）
+python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir exports/ --backfill-format-fingerprint
+```
+
+回填在 export 之前跑，CSV 直接帶新值；stderr 印一行
+`format_fingerprint backfill for 'paper-BTC-3': stamped=N pre_v10=N missing_payload=N unreadable=N unverified=N`。
+規則：只寫 NULL 格（daemon 寫過的值永遠不會被重算蓋掉，第二次跑 `stamped=0`）；`pre_v10`＝連
+`context_shape` 都沒有的列，**不填**（三鍵是一組，半組會變成 `validate` 上多出來的新桶）；payload 檔必須
+存在、讀得到、**且** bytes 仍 hash 到該列的 `input_payload_hash`（被改過、截斷、從別處復原的檔不算證據）、
+JSON 裡要有字串 `format_instructions`——不符的列保持 NULL 並計數，不猜。回填後 `validate` 對 format 段
+沒變過的 run 只剩一行 `prompt_regime:`。它不是 migration（schema 步驟不做檔案 I/O、缺檔要容忍），對象是
+**已升到 v11 的 store 裡 v11 前寫的列**——落後的 store 一樣被 `export` 拒開。
+
 ## 7. 快速故障排除
 
 | 症狀 | 解法 |
@@ -350,6 +375,7 @@ A→B→A 翻回去仍只印兩行。另有一條自我檢查：各桶總和應�
 | `config not found` / `invalid config` | 對照 example 修 `hyperliquid.local.yaml`；strict 解析會擋未知 key。 |
 | `--context-only` 不印倉位行／完整輪報 no usable account equity（exit 1） | `wallet_address` 還是佔位符；填真實唯讀地址。 |
 | 太年輕的標的每 4h 一筆 `api_failed` | 市場資料 warmup 不足，暖機完成前屬預期行為。 |
+| `context_shape` 少了結尾的 `position` token（prompt 沒有 `Position:` 段），log 有 `position section omitted` | 兩個成因渲染出**完全相同**的 prompt 與 `context_shape`，store 裡沒有欄位分得出（issue #161 拍板：接受現況、不加欄），**只能靠 journald 這行 WARNING 的措辭分辨**——`… the run has no books yet`（`cli._provider`：帳本還沒 seed，生產接線上到不了，出現代表接線或 store 有問題）vs `… account equity … is not positive at mark …`（`domains/perp/marginal_cost`：權益 ≤ 0，該 cycle 省略倉位段是對的，gate 反正也會拒絕方向性目標）。兩句措辭各有測試釘住。 |
 | 每 4h 一筆 `api_failed`，`error_type` **空**、`error_message` 以 `non-retryable:` 開頭 | 非 Retryable 例外——**通常是程式缺陷**（store 讀出來的狀態踩到 DTO 守衛、engine 回傳形狀壞掉……），但主機問題也會落到這一列，看 `error_message` 裡的 repr 分辨：`sqlite3.OperationalError`（store 被鎖超過 busy_timeout、檔案系統壞）、`MemoryError` 是主機不是 code（payload 寫檔的 `OSError` 例外——它已被歸類成 `server_error`，走 ladder）。log 同一時間有 ERROR traceback，那才是要修的東西。不會自癒、也**不會讓 daemon 退出**（systemd 的 `NRestarts` 不會動，別拿它當健康訊號）；不走 3 次 ladder，直接 terminal；連續 3 筆起 log 升級 ERROR、`validate` 印 `shortfall:`（exit 4）。修 code（或主機）後部署。live 車道自 Phase 3 起就是這個語意，paper 於 issue #134 對齊。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `every technical indicator failed` 或 `… is/are unavailable`（點名 `atr_14`／`ema_20`／`ema_50` 中死掉的那些） | indicator 引擎（stockstats）壞掉或 regime 指標算不出來——三者任一缺席 regime 都會被捏造成 RANGING，daemon 與 one-shot 同樣拒跑（不燒 LLM）。（非空的 `indicators:` 清單漏配三者任一現在直接在 config load 擋下；會走到這裡的 config 成因只剩刻意的 `indicators: []`。）修 stockstats 相容性後，`--context-only` 走同一套 guard：照樣渲染但印同一句 refusal 警告並 exit 4（健康 context 是 exit 0），可拿來免 key 驗證修好了沒。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `… freshness limit` | K 線 feed 停止推進。context 的 `as_of` 取自最後一根**收盤** K 線，健康 feed 不足一個 interval 舊；超過 `3 × candle_interval`（夾在下限與上限之間——下限＝`domains/perp/freshness.py` 的 `_MAX_CANDLE_AGE_FLOOR_MS`，目前 30 分鐘；上限＝三個決策 cycle，目前 12 小時；**但上限不會壓到一根健康 K 線以下**：`candle_interval: 1d` 的最新收盤 bar 在一天內會從 0 老化到 24h，所以 1d 的界限是「一根 bar ＋ 一個決策 cycle」＝28 小時——日線 feed 漏掉一根，最新收盤 bar 超過 28h 舊就拒跑（漏掉的 boundary 之後第一或第二個 cycle——相鄰 cycle 間隔超過 4h，寬限窗內最多只落得下一個）。目前出貨的 interval 沒有一個真的被 12 小時上限夾到（會被夾的是「大於一個 cycle、不超過三個」的 bar；4h 剛好是一個 cycle、走 `3 x 4h`，1d 走上面的加寬），所以 `… capped at` 這個由來標籤目前不會印出來。這些數字以程式碼的常數為準，訊息本身也會印出生效上限）就拒跑，不燒 LLM。訊息會印出該根 K 線的收盤時戳、實際年齡、生效上限與上限的由來（`3 x 4h`／`… raised to the 30m floor`／`one 1d bar plus one 4h decision cycle`）。**倉位不會被動到**：拒的只有 4h 一次的新決策，30 秒節奏的 monitor tick（清算／`gap_stop_fill`／SL・TP）照常跑——它讀的是 snapshot 的 mark price，與 K 線 endpoint 是不同資料路徑，K 線停了不代表保護瞎了。**成因只有一個＝feed 沒推進**：K 線視窗本身就是用**交易所自己的時鐘**截的（同一次抓取先讀 public `l2Book` 的 `time`，再以它當 K 線與 funding 視窗的上界，issue #124），年齡也是拿同一個讀數量的，所以主機時鐘偏移既推不動視窗、也進不了年齡——訊息會明寫 feed 沒推進，並附上本機與交易所時鐘的差距供參考（偏移 ≥1 分鐘另有 WARNING 提醒修 NTP，因為排程格線與所有紀錄時戳仍走主機時鐘；但那不是這個拒跑的成因）。查交易所 K 線 API 狀態。**這條拒跑信任交易所自己的 `l2Book` `time`**（2026-08-26 實測是伺服器時鐘、冷門幣也每次前進）：若那個時戳本身壞掉（倒退或停住），視窗會被它截短、症狀與 feed 停滯完全同形——守衛刻意沒有第二個參考時鐘，這是接受的殘餘風險。**不再是完全無聲的無限期狀態**：這類 cycle 的 `error_type` 記成 `stale_market_data`（不再與會自癒的環境失敗共用 `server_error`），連續第 3 筆起 log 從 WARNING 升成 ERROR，`validate` 也會把 `no_decision_streak ≥ 3` 列成 exit 4 的 `shortfall:`（該判準**不分 error class**——feed 停滯、l2Book 掛掉、連線問題一律計入，因為對操作員來說都是「連續 N 個 cycle 出不了決策」；報告另印 `stale_feed_refusal_streak` 供分辨。feed 恢復、下一個 cycle 出得了決策就自動歸零；run 停掉超過 2 個 cycle 後也不再套用，已封存的驗收 run 不會被永久判死）。`--context-only` 走同一套 guard：照樣渲染但印同一句警告並 exit 4。live run 的對應行為見 [RUNBOOK-live.md](./RUNBOOK-live.md)（tick 節奏不同，~10s）。 |

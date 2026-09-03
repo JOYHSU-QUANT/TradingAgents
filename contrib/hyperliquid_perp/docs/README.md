@@ -187,6 +187,8 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `persistence/` | ✅ | SQLite source of truth · transaction · migrations · dedup 去重鍵 · typed repository（phase2-data §1／§5–§12）。 |
 | `persistence/audit_rows.py` | ✅ | §5／§7 audit-row 組裝的單一定義（`ai_inputs` 37 欄／`ai_outputs` 26 欄），paper scheduler 與 live decision driver 共用；刻意的 paper/live 差異（ledger 取得、`remaining_twap_qty`、輸出列 mark/equity 來源）由呼叫端傳參保留。 |
 | `persistence/export.py` | ✅ | 每 cycle／shutdown／手動的 per-run 全量 CSV export · 欄位依 phase2-data §5–§12 · `.tmp` → atomic replace · 末尾 `manifest.json` 整組一致性標記 · `export_failed` 不回滾交易 state（phase2-data §1.1）。 |
+| `persistence/backfill.py` | ✅ | `ai_inputs.format_fingerprint` 的離線回填（issue #163）：v11 前的 NULL 列從各自 payload JSON 的 `format_instructions` 重算指紋；只寫 NULL 格、只寫已有另外兩鍵的列（pre-v10 列不填，半組三鍵會變新桶）、檔案 bytes 要 hash 到列上的 `input_payload_hash`（`common/digest.py`，與 daemon 寫入端同一個函式）、缺檔／讀不到／改過的列保持 NULL 並計數。刻意不是 migration。入口 `export --backfill-format-fingerprint`。 |
+| `common/prompt_regime.py` | ✅ | `prompt_regime:` 行的唯一渲染函式（三個切段鍵、`n/a`、可選 `cycles=`）：`validate` 每桶一行、paper／live daemon 第一個 prompt 與每次翻桶各一行（`cli._provider`）、`--context-only` 一行，三處同一文法可 grep（issue #163）。 |
 | `paper/accounting.py` | ✅ | fills · fees（taker 0.045%）· funding exactly-once · account 公式 · accounting replay（**依 run mode 分流**：paper 用模型 fee/realized；live 用交易所 closedPnl/fee、依交易所時間排序、並折算 accounting adjustments）· live fill effect（`compute_live_fill_effect` / `adjustment_ledger_delta`）（phase2-execution §6、phase3-spec §15）。 |
 | `paper/liquidation.py` | ✅ | paper estimated liquidation price · margin tier bisection（phase2-execution §6.6.1）。 |
 | `paper/config.py` | ✅ | typed `paper_trading:` block（phase2-execution §5.4）。 |

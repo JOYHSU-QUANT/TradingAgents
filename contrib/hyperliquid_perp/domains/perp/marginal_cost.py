@@ -226,6 +226,9 @@ def build_position_context(
             unrealized = unrealized_pnl(size, mark, entry_price)
         equity = account_equity(book.wallet_balance, unrealized)
         if equity <= 0:
+            # Wording pinned by test (issue #161): "is not positive" must read
+            # apart from ``cli._provider``'s "no books yet" — same prompt,
+            # same context_shape, no store column; rationale in RUNBOOK §7.
             logger.warning(
                 "position section omitted: account equity %s is not positive at mark %s "
                 "(wallet %s) — nothing to price a move against",

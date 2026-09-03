@@ -20,7 +20,9 @@ __all__ = [
     "insert_ai_output",
     "insert_decision_attempt",
     "insert_position_snapshot",
+    "ai_inputs_without_format_fingerprint",
     "prompt_regime_counts",
+    "stamp_ai_input_format_fingerprint",
     "update_decision_attempt",
 ]
 
@@ -131,6 +133,47 @@ def prompt_regime_counts(
         )
         for row in rows
     )
+
+
+def ai_inputs_without_format_fingerprint(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """The run's ``ai_inputs`` rows written before the v11 column existed, oldest first.
+
+    What the offline backfill (``persistence.backfill``) works from: the row
+    id, the payload path and digest it needs to prove the file it reads is
+    the artifact the row describes, and the other two segmentation keys so
+    it can tell a pre-v10 row (no shape either) from a pre-v11 one. A list,
+    not a cursor: the caller reads files between this and its write
+    transaction on the same connection.
+    """
+    return conn.execute(
+        "SELECT input_id, input_payload_path, input_payload_hash, prompt_version, context_shape"
+        " FROM ai_inputs WHERE run_id = ? AND format_fingerprint IS NULL"
+        " ORDER BY timestamp, rowid",
+        (run_id,),
+    ).fetchall()
+
+
+def stamp_ai_input_format_fingerprint(
+    conn: sqlite3.Connection, input_id: str, fingerprint: str
+) -> int:
+    """Fill ONE row's ``NULL`` ``format_fingerprint``; returns rows written (0 or 1).
+
+    The predicate is the contract: only a ``NULL`` cell (a value the daemon
+    stamped is never replaced by a recomputation), and only on a row that
+    already carries the other two keys — the triple is one set
+    (``DecisionInput``), and a fingerprint on a shapeless pre-v10 row would
+    be a half-stamped bucket the daemon never writes. Rules and counts:
+    ``persistence.backfill``.
+    """
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError(f"format_fingerprint must be a non-empty string, got {fingerprint!r}")
+    cursor = conn.execute(
+        "UPDATE ai_inputs SET format_fingerprint = ?"
+        " WHERE input_id = ? AND format_fingerprint IS NULL"
+        " AND prompt_version IS NOT NULL AND context_shape IS NOT NULL",
+        (fingerprint, input_id),
+    )
+    return cursor.rowcount
 
 
 def find_in_progress_attempt(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:

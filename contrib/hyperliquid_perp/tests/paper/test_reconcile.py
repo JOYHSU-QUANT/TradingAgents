@@ -671,6 +671,47 @@ def test_backfill_still_reads_a_corrupt_stored_timestamp_as_a_corrupt_row(tmp_pa
     db.close()
 
 
+@pytest.mark.parametrize("column", ["funding_timestamp", "position_size"])
+def test_backfill_reads_a_wrong_typed_stored_cell_as_a_corrupt_row(tmp_path, caplog, column):
+    """A cell of the wrong TYPE is the store's fault, and must be said to be.
+
+    Both columns reach a parser that answers a non-string with ``TypeError``,
+    not ``ValueError`` — ``datetime.fromisoformat`` and ``Decimal``. Catching
+    only ``ValueError`` sent those rows to the outer lane, which tells the
+    operator to read a traceback and stop suspecting the store, for a row that
+    is exactly the store's problem — issue #193's misdirection, reversed.
+
+    Driven with a BLOB rather than a NULL: both columns are ``TEXT NOT NULL``,
+    so NULL is unreachable, but SQLite's TEXT affinity does NOT convert a
+    BLOB — it stores and returns ``bytes``. That is what makes this lane
+    reachable, and therefore worth having.
+    """
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,
+        mark_price=_MARK,
+    )
+    with db.transaction() as conn:
+        conn.execute(f"UPDATE funding_events SET {column} = X'0102'")  # noqa: S608 — literal
+
+    with caplog.at_level(logging.ERROR):
+        posted, still_pending = reconcile_module.backfill_pending_funding(
+            db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+        )
+
+    assert (posted, still_pending) == (0, 1)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("fix it in the store" in m for m in messages)
+    assert not any("no lane claimed this one" in m for m in messages)
+    db.close()
+
+
 def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatch):
     """"Never allowed to abort" must not depend on the handler lists.
 

@@ -71,11 +71,15 @@ STALE_PENDING_FUNDING = timedelta(hours=6)
 def _event_label(event: sqlite3.Row) -> str:
     """``"BTC @ 2026-09-04T12:00:00+00:00"``, or a stand-in if the row won't say.
 
-    Used by the outer containment lane, which must not be able to raise: it
-    reports on a row whose own shape may be the problem, and
-    ``sqlite3.Row[...]`` answers an unknown column with ``IndexError``. A raise
-    inside that handler would propagate and abort the pass — the one outcome
-    the lane exists to make impossible.
+    It describes a row whose own shape may be the problem, and
+    ``sqlite3.Row[...]`` answers an unknown column with ``IndexError`` — so
+    every subscript AND the formatting sit inside the ``try``.
+
+    Both its callers need that. The outer containment lane would propagate a
+    raise from its own handler and abort the pass, the one outcome that lane
+    exists to make impossible; and the ``already_posted`` line below runs
+    OUTSIDE the outer ``try`` altogether (after every ``except … continue``),
+    so a raise there has no containment at all.
     """
     try:
         return f"{event['symbol']} @ {event['funding_timestamp']}"
@@ -218,6 +222,21 @@ def backfill_pending_funding(
                 else:
                     young_pending += 1
                 continue
+            # The stored SIZE is converted in its own lane, not inside the call
+            # below. It is the only other thing here that can answer a bad cell
+            # with ``TypeError`` (``Decimal(None)``), and widening the call's
+            # handler to catch that would have claimed every ``TypeError`` out
+            # of ``record_funding`` too — a drifted signature reported as
+            # "corrupt stored row; fix it in the store", sending the operator
+            # to SQLite to find every row well-formed. That is issue #193's
+            # misdirection pointing the other way, and it is why this one
+            # expression gets its own three lines.
+            try:
+                position_size = Decimal(event["position_size"])  # stored basis wins anyway
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                not_posted += 1
+                _log_corrupt_event(run_id, event, exc)
+                continue
             try:
                 res = accounting.record_funding(
                     db,
@@ -225,17 +244,17 @@ def backfill_pending_funding(
                     mode=event["mode"],
                     symbol=event["symbol"],
                     funding_timestamp=settlement,
-                    position_size=Decimal(event["position_size"]),  # stored basis wins anyway
+                    position_size=position_size,
                     funding_rate=rate,
                     source="funding_history_backfill",
                     recorded_at=now,
                 )
-            except (ValueError, InvalidOperation, TypeError) as exc:
-                # Any corrupt stored field — size, or the settlement basis
-                # record_funding guards — takes this one-event lane. The stored
-                # TIMESTAMP is parsed above, before the reader, and takes it too.
-                # ``TypeError`` for the same reason as up there: a NULL
-                # ``position_size`` reaches ``Decimal(None)``, which raises it.
+            except (ValueError, InvalidOperation) as exc:
+                # The settlement basis ``record_funding`` itself guards (a
+                # legacy row with no stored mark). NOT ``TypeError``: nothing
+                # in this call can raise one about the STORE any more, so
+                # listing it would only mislabel a code defect — the outer lane
+                # takes those, and says to read the traceback.
                 not_posted += 1
                 _log_corrupt_event(run_id, event, exc)
                 continue
@@ -267,22 +286,53 @@ def backfill_pending_funding(
             )
             continue
         if res is None:
-            continue
-        if res.status == "posted":
-            posted += 1
-        else:
-            # ``already_posted``: the exactly-once key found the settlement
-            # already booked, so this row is resolved, not pending — it belongs
-            # in NEITHER total, which is why the sum can be short of the rows
-            # iterated. Said out loud rather than left as a silent gap: a
-            # pending row whose event id points at a posted settlement means a
-            # non-hour-aligned legacy or hand-edited row, worth knowing about.
-            logger.info(
-                "funding backfill for %s found %s already posted (%s) — the row is "
-                "resolved, not pending; it is counted in neither total",
+            # Unreachable today — every path to here has assigned ``res`` — so
+            # this is the guard, not a lane: it exists so a future edit cannot
+            # drop an event out of BOTH totals in silence, which is the one
+            # failure the counters could not show.
+            not_posted += 1
+            logger.warning(
+                "funding backfill for %s reached the tail with no result for %s — "
+                "the loop has a path that neither posts nor claims the event",
                 run_id,
                 _event_label(event),
+            )
+        elif res.status == "posted":
+            posted += 1
+        elif res.status == "already_posted":
+            # The exactly-once key found the settlement already booked, so
+            # nothing moved and this event belongs in NEITHER total — which is
+            # why the two can sum to less than the rows iterated.
+            #
+            # Note what it does NOT mean: THIS row keeps ``status='pending'``
+            # in the store. The id is derived from the hour-floored settlement,
+            # and the loop only walks pending rows, so the only way here is a
+            # row whose floored id points at a DIFFERENT, already-posted one —
+            # a non-hour-aligned legacy or hand-edited row. It will be found
+            # again every pass and counted as stale by the acceptance report
+            # after six hours, so the message says the row needs repairing
+            # rather than claiming it is resolved.
+            logger.info(
+                "funding backfill for %s found the settlement behind %s already "
+                "posted under another event id — nothing to post, but the row itself "
+                "stays pending and will be seen again every pass; its timestamp is "
+                "very likely not on the hour, and repairing it in the store is what "
+                "resolves it",
+                run_id,
+                _event_label(event),
+            )
+        else:
+            # A status this loop has no verdict for. Named rather than folded
+            # into the branch above it: announcing an unknown status as
+            # "already posted" would be a claim about the books.
+            not_posted += 1
+            logger.warning(
+                "funding backfill for %s got an unrecognised result %r for %s — the "
+                "event is left pending; the funding result vocabulary has grown and "
+                "this loop was not taught the new word",
+                run_id,
                 res.status,
+                _event_label(event),
             )
     # A stuck-forever pending event (its rate never resolves) resets the fetch
     # source's own consecutive-failure counter on every successful fetch, so only

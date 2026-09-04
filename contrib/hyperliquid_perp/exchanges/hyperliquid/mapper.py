@@ -526,10 +526,15 @@ def map_candles(
             )
         except (ValueError, MalformedResponseError) as exc:
             # A single bad bar — whether it violates Candle's invariant (bad OHLC
-            # ordering, time ordering, negative volume -> ValueError) or has a
-            # missing / non-numeric / undecodable field
+            # ordering, time ordering, a non-positive stamp, negative volume ->
+            # ValueError) or has a missing / non-numeric / undecodable field
             # (-> MalformedResponseError, the latter from :func:`_stamp`) —
             # is a transient feed glitch, not a reason to abort the whole run.
+            # The non-positive stamp is new (issue #193 moved that floor into
+            # the DTO guard both stamps share, where only ``FundingPoint`` had
+            # carried it): ``_stamp`` passes ``0`` through as decodable, and
+            # ``Candle`` now drops the bar. Synthetic fixtures numbering their
+            # bars from zero have to start at one.
             # Drop it and warn; the warm-up threshold downstream still aborts if
             # too few bars survive.
             #

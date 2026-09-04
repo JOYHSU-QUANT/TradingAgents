@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.schema import Candle
+from contrib.hyperliquid_perp.domains.perp.schema import Candle, epoch_ms_out_of_range
 from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
@@ -161,7 +161,10 @@ def test_funding_history_out_of_range_stamp_is_dropped_like_any_bad_point(caplog
         points = mapper.map_funding_history(raw, max_drop_fraction=1.0)
     assert [p.time for p in points] == [1000]  # one bad point costs one point
     assert "dropping malformed fundingHistory[1]" in caplog.text
-    assert "outside the decodable" in caplog.text
+    # The WHOLE shared sentence, so the wire lane cannot be reworded away from
+    # the DTO lane that says the same thing (``tests/domains/test_schema.py``
+    # pins the other side against the same builder).
+    assert epoch_ms_out_of_range(Decimal("1788163200000000000"), what="field 'time'") in caplog.text
 
 
 def test_candles_out_of_range_stamp_is_dropped_like_any_bad_bar(caplog):

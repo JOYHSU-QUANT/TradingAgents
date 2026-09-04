@@ -596,6 +596,18 @@ def test_stale_pending_funding_warns_not_gates(tmp_path):
     corrupt = validate_run(db, run_id="r", now=_T0 + timedelta(hours=1))
     assert any("unparseable" in w and "corrupt" in w for w in corrupt.warnings)
     assert not any("still pending more than" in w for w in corrupt.warnings)
+
+    # A cell of the wrong TYPE is the same verdict and must not be a different
+    # outcome. The column is ``TEXT NOT NULL``, but SQLite's TEXT affinity does
+    # not convert a BLOB, so it comes back as ``bytes`` and reaches
+    # ``datetime.fromisoformat`` as a ``TypeError`` rather than a
+    # ``ValueError``. Catching only the latter made ``validate`` DIE on exactly
+    # the corrupt row the backfill survives and reports — the acceptance
+    # validator unrunnable on the store it exists to inspect.
+    with db.transaction() as conn:
+        conn.execute("UPDATE funding_events SET funding_timestamp = X'0102' WHERE run_id = 'r'")
+    wrong_type = validate_run(db, run_id="r", now=_T0 + timedelta(hours=1))
+    assert any("unparseable" in w and "corrupt" in w for w in wrong_type.warnings)
     db.close()
 
 

@@ -398,14 +398,16 @@ def test_funding_point_rejects_an_undecodable_time():
     """
     FundingPoint(time=MAX_EPOCH_MS, rate=Decimal("0.0001"))  # the last decodable ms builds
     for bad in (MAX_EPOCH_MS + 1, 1_788_163_200_000_000_000):
-        with pytest.raises(ValueError, match=r"FundingPoint\.time \(.+E\+\d+\) is outside"):
+        with pytest.raises(ValueError) as excinfo:
             FundingPoint(time=bad, rate=Decimal("0.0001"))
-        # The WHOLE sentence, not just its opening. The wire guard
-        # (``mapper._stamp``) refuses the same bound with the same words, and
-        # asserting only a prefix would let the two lanes drift apart while
-        # every test stayed green — so both sides pin this one builder's
-        # output, and the builder is what they share.
-        assert epoch_ms_out_of_range(bad, what="FundingPoint.time").endswith(
+        # The RAISED message, whole — not just its opening, and not the
+        # builder's return value in isolation. The wire guard
+        # (``mapper._stamp``) refuses the same bound with the same words, so
+        # this pins that the DTO actually goes through the shared builder;
+        # asserting a prefix, or asserting about the builder alone, would let
+        # either lane grow its own wording while every test stayed green.
+        assert str(excinfo.value) == epoch_ms_out_of_range(bad, what="FundingPoint.time")
+        assert str(excinfo.value).endswith(
             f"is outside the decodable UTC epoch-ms range [{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] "
             "— a nanosecond-scale or corrupt stamp"
         )

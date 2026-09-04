@@ -74,12 +74,20 @@ class SnapshotOutcome(str, Enum):
     # drifted from the reader's signature, a bug in a scripted feed. Split from
     # ``ERROR`` so it can never again be read as an exchange outage and leave
     # market data paused forever while the exchange was answering (issue #157).
-    # It is still a FAILED REQUEST, not a raise: ``fetch`` returning for every
-    # failure is a property three call sites depend on, one of which
-    # (``engine.try_write_cycle_snapshot``, reached from the scheduler's
-    # terminal lane) is deliberately not fail-stop and sits in no broad
-    # handler — a raise there kills the daemon after the terminal row commits,
-    # with no halt breadcrumb (issue #193).
+    # It is still a FAILED REQUEST, not a raise: that ``fetch`` returns for
+    # every failure is a property all five of its call sites depend on (three
+    # in ``paper.engine``, two in ``live.engine``), and one of them —
+    # ``engine.try_write_cycle_snapshot``, reached from the scheduler's
+    # terminal lane — is deliberately not fail-stop and sits in no broad
+    # handler, so a raise there kills the daemon after the terminal row has
+    # committed, with no halt breadcrumb (issue #193).
+    #
+    # What this does NOT change is the engine's response: it routes on
+    # ``is_valid``, so a ``DEFECT`` counts toward the same 3-strike pause as an
+    # ``ERROR`` and market data still stalls. The stall was never the half that
+    # could be fixed here — being unable to TELL the two apart was, and an
+    # operator now gets an ERROR with a traceback instead of a warning that
+    # reads like an outage.
     DEFECT = "defect"
 
 
@@ -183,13 +191,20 @@ class SnapshotProvider(Protocol):
     "did a fresh, complete response arrive in time?" decision so the engine's
     freshness logic stays provider-agnostic.
 
-    An implementation MUST NOT raise: every failure is a
-    :class:`SnapshotResult` carrying a non-``OK`` :class:`SnapshotOutcome`.
-    Three call sites rely on that, and one of them
+    A FAILED REQUEST must come back as a :class:`SnapshotResult` carrying a
+    non-``OK`` :class:`SnapshotOutcome`, never as an exception — whether the
+    port timed out, refused, answered malformed, or blew up. All five call
+    sites rely on that, and one of them
     (``engine.try_write_cycle_snapshot``, called from the scheduler's terminal
     lane) is deliberately not fail-stop and sits inside no broad handler, so a
     raise there ends the daemon after the terminal row has committed — with no
     halt breadcrumb for the operator to find.
+
+    Programmer errors are a different matter and do raise: a non-positive
+    ``timeout_seconds`` is refused before the request goes out, and
+    :class:`ScriptedSnapshotProvider` raises on a coin it was not scripted for
+    or a script it has run past. Those are caller bugs, not answers about the
+    market.
     """
 
     def fetch(
@@ -213,8 +228,11 @@ class PortSnapshotProvider:
     failure it is: the venue-failure family the port declares becomes
     ``ERROR``, anything else becomes ``DEFECT`` with an ERROR-level traceback.
 
-    NEVER raises. Every failure comes back as a :class:`SnapshotResult` — see
-    :class:`SnapshotOutcome`'s ``DEFECT`` for the call sites that depend on it.
+    No failure of the REQUEST escapes as an exception — see
+    :class:`SnapshotOutcome`'s ``DEFECT`` for the call sites that depend on
+    that. (The timeout argument is validated before the request, and the
+    ``PriceSnapshot`` built on the way out enforces its own invariants; both
+    are caller bugs rather than answers about the market.)
     """
 
     def __init__(self, market: ExchangeMarketData, clock: Clock) -> None:
@@ -243,14 +261,18 @@ class PortSnapshotProvider:
             # and the engine paused market data and stayed paused — one
             # WARNING per tick, forever, about an exchange that was answering.
             #
-            # Loud (ERROR + traceback) but still a RETURN. Raising instead
-            # would trade a silent stall for a crash-loop: ``engine.tick`` is
-            # ``@_fail_stop`` and ``cli/paper.py`` does not wrap it, so the
-            # daemon would exit 2 and a supervised restart would meet the same
-            # deterministic defect, taking the exports, the funding backfill
-            # and the heartbeat down with it — the shape issue #191 is about.
-            # ``live_loop`` already contains its tick; paper does not, and the
-            # provider is shared, so containment belongs here.
+            # Loud (ERROR + traceback) but still a RETURN, and the engine's
+            # response is unchanged: it routes on ``is_valid``, so this still
+            # counts toward the 3-strike pause. Telling the two apart is the
+            # win; the stall is not something this layer can fix.
+            #
+            # Raising instead would trade a silent stall for a crash-loop:
+            # ``engine.tick`` is ``@_fail_stop`` and ``cli/paper.py`` does not
+            # wrap it, so the daemon would exit 2 and a supervised restart
+            # would meet the same deterministic defect, taking the exports, the
+            # funding backfill and the heartbeat down with it — the shape issue
+            # #191 is about. ``live_loop`` already contains its tick; paper
+            # does not, and the provider is shared, so containment belongs here.
             logger.error(
                 "market snapshot fetch for %s raised a non-venue error — this is a defect "
                 "on our side, not an exchange outage; read the traceback: %s",

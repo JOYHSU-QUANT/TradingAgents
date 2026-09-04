@@ -229,7 +229,15 @@ def _require_venue_stamp(value: object, *, what: str) -> None:
     # pre-1970 ``open_time`` — the same rule, enforced on one of the two DTOs
     # that carry the same field. Wording preserved verbatim: it is pinned.
     if value <= 0:
-        raise ValueError(f"{what} must be > 0 (UTC epoch ms), got {value}")
+        # Rendered exactly while it is small enough to read, and by exponent
+        # once it is not — for the same reason as the range message below: a
+        # hand-built stamp can be arbitrarily large in EITHER direction, and
+        # formatting a raw ``int`` past ``sys.get_int_max_str_digits()`` raises
+        # instead of naming the field. ``abs()`` on a big int is cheap; it is
+        # the decimal expansion that is not. Ordinary values (``0``, ``-1``)
+        # still render as themselves, so the wording a test pins is unchanged.
+        shown = value if abs(value) < 10**18 else f"{Decimal(value):.6E}"
+        raise ValueError(f"{what} must be > 0 (UTC epoch ms), got {shown}")
     if value > MAX_EPOCH_MS:
         raise ValueError(epoch_ms_out_of_range(value, what=what))
 

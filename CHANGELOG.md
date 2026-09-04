@@ -148,6 +148,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: the live daemon no longer crash-loops on a stored
+  decision response that fails to re-parse** (issue #180; the #181 tail).
+  ``LiveDecisionDriver.resume_startup`` rebuilds a stranded cycle from its
+  ``pending_raw_response`` before the loop's tick guard exists, and the
+  re-parse ran unguarded: a poisoned row (a corrupted store, or a parser
+  change that turned a check into a raise) exited the daemon at startup,
+  systemd restarted it into the same deterministic parse, and the real
+  position with its resting SL/TP sat unwatched between restarts. The parse
+  now fails the cycle closed the way the paper lane already did (PR #178):
+  the row goes ``api_failed`` with no ``error_type`` and a
+  ``non-retryable:`` message, the response is cleared, and its full text is
+  logged at ERROR first (the row was its only durable copy). The one write
+  that guard still cannot contain is its own ``api_failed`` record meeting a
+  locked store at startup: that exits and the supervisor retries — a
+  transient, not the deterministic loop. Two invariants that guard moves
+  through now live in the repository instead of each writer:
+  ``store_pending_response`` is the one writer of the resumable row (the
+  paper store, the live store and the live shutdown salvage all land the
+  same shape through it; ``update_decision_attempt`` refuses a string for
+  that column and ``insert_decision_attempt`` refuses it outright), and a
+  terminal write lands ``pending_raw_response`` as ``NULL`` whatever the
+  row held — silently, so a writer that forgets the clear cannot kill a
+  daemon holding a position. ``ParsedDecision`` now refuses a non-``str``
+  ``raw_response`` at construction, so the store's own refusal can never be
+  what a retry lane spins on.
 - **dataflows: an optional category's failure no longer writes the raw
   transport message — request URL and API key included — into the prompt**
   (issue #171; the #172 and #187 tails). ``route_to_vendor``'s

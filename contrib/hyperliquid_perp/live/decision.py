@@ -335,14 +335,32 @@ class LiveDecisionDriver:
         if raw is not None:
             # Live attempts are always try 1 (no within-cycle ladder in v1), so
             # the per-try ids are re-derived the same way _start minted them.
-            self._inflight = _InFlight(
-                attempt_id,
-                f"{attempt_id}#in1",
-                f"{attempt_id}#out1",
-                scheduled_at,
-                parsed=parse_target_decision(raw, self._decision_cfg),
-                raw_stored=True,  # the parse SOURCE is the store — durable by definition
+            inflight = self._inflight = _InFlight(
+                attempt_id, f"{attempt_id}#in1", f"{attempt_id}#out1", scheduled_at
             )
+            try:
+                inflight.parsed = parse_target_decision(raw, self._decision_cfg)
+            except Exception as exc:  # noqa: BLE001 — a bug fails the cycle closed, not the daemon
+                # A raise here is a parser bug or a corrupted store (the parse
+                # is fail-closed by contract — see PaperScheduler._resume_pending,
+                # the same guard), and DETERMINISTIC: this runs before the
+                # loop's tick guard exists, so propagating would exit the daemon
+                # into a supervised crash-loop with the position and its SL/TP
+                # unwatched between restarts (issue #180). _fail_closed clears
+                # the poisoned response, so log the full text FIRST — the row
+                # was its only durable copy. The bare in-flight above is what
+                # _fail_closed asserts on; it buys the traceback and the streak
+                # count, NOT its pending_fail retry — a store miss on the fail
+                # record still propagates out of this pre-loop call (a
+                # transient fault a restart retries, unlike the parse).
+                logger.error(
+                    "decision attempt %s: stored response failed to parse and is being "
+                    "cleared; preserving it here for diagnosis: %r",
+                    attempt_id,
+                    raw,
+                )
+                return self._fail_closed(None, f"non-retryable: {exc!r}")
+            inflight.raw_stored = True  # the parse SOURCE is the store — durable by definition
             logger.info("resuming in-progress decision %s from its stored response", attempt_id)
             return "resumed"
         # The AI never answered (the LLM call died with the process): fail the
@@ -539,13 +557,13 @@ class LiveDecisionDriver:
     ) -> None:
         """What makes a decision resumable (§3.1): the stored raw response.
 
-        The single writer of ``pending_raw_response`` — ``_collect`` (the normal
-        path) and ``salvage_shutdown`` (the shutdown window) must stamp the SAME
-        record shape, or a salvaged cycle would resume from an incomplete row.
+        Both callers — ``_persist_pending_response`` (the normal path) and
+        ``salvage_shutdown`` (the shutdown window) — land the one record shape
+        through ``repo.store_pending_response`` (issue #181).
         """
         with self._db.transaction() as conn:
-            repo.update_decision_attempt(
-                conn, inflight.attempt_id, pending_raw_response=parsed.raw_response, timestamp=now
+            repo.store_pending_response(
+                conn, inflight.attempt_id, parsed.raw_response, timestamp=now
             )
 
     def _gate(self, now: datetime) -> str | None:
@@ -576,7 +594,6 @@ class LiveDecisionDriver:
                     next_decision_at=next_at,
                     error_type=None,
                     error_message=None,
-                    pending_raw_response=None,
                     timestamp=now,
                 )
                 repo.upsert_scheduler_state(
@@ -680,12 +697,6 @@ class LiveDecisionDriver:
                 error_type=error_type,
                 error_message=error_message,
                 next_decision_at=next_at,
-                # A terminal row carries no resumable response (issue #163
-                # parity with the paper lane): a cycle failing closed AFTER its
-                # §3.1 store landed would otherwise leave an api_failed row
-                # presenting the consumed response as resumable state — and
-                # terminal rows are immutable, so nothing could clean it later.
-                pending_raw_response=None,
                 timestamp=now,
             )
             repo.upsert_scheduler_state(

@@ -239,6 +239,14 @@ class ParsedDecision:
             raise ValueError(
                 "an invalid parse must carry the fail-closed maintain_current decision"
             )
+        # ``raw_response`` is what the §3.1 store persists for resume, and
+        # that store refuses a non-str; caught HERE, a hand-built instance
+        # fails its cycle closed at construction instead of wedging the store
+        # retry lane (which retries a deterministic refusal forever).
+        if not isinstance(self.raw_response, str):
+            raise ValueError(
+                f"raw_response must be the engine text as a str, got {self.raw_response!r}"
+            )
 
 
 # --------------------------------------------------------------------------

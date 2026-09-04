@@ -721,9 +721,6 @@ class PaperScheduler:
                 error_type=error_type,
                 error_message=error_message,
                 next_decision_at=next_at,
-                # A terminal row carries no resumable response (issue #163 —
-                # the parse-failure lane logs the text before landing here).
-                pending_raw_response=None,
                 timestamp=now,
             )
             repo.upsert_scheduler_state(
@@ -809,11 +806,9 @@ class PaperScheduler:
             return True
         try:
             with self._db.transaction() as conn:
-                repo.update_decision_attempt(
-                    conn,
-                    pending.attempt_id,
-                    pending_raw_response=pending.parsed.raw_response,
-                    timestamp=now,
+                # §3.1 store — see repo.store_pending_response (issue #181).
+                repo.store_pending_response(
+                    conn, pending.attempt_id, pending.parsed.raw_response, timestamp=now
                 )
         except Exception:  # noqa: BLE001 — the decision only exists in memory; keep it
             if self._persist_budget_spent(pending, "the §3.1 response store"):
@@ -892,10 +887,9 @@ class PaperScheduler:
                     next_decision_at=next_at,
                     # A completed cycle carries no live error state: clear any
                     # earlier retry's breadcrumbs (a "completed + timeout" row
-                    # would misread as a failed cycle) and the consumed response.
+                    # would misread as a failed cycle).
                     error_type=None,
                     error_message=None,
-                    pending_raw_response=None,
                     timestamp=now,
                 )
                 repo.upsert_scheduler_state(

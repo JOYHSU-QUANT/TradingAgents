@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -362,6 +363,46 @@ def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode=
                 status=status,
                 error_type=error_type,
             )
+
+
+def arm_lock_fault(monkeypatch, target, name, *, shots=1, when=lambda *a, **k: True):
+    """Make ``target.name`` raise "database is locked" for its first ``shots`` hits.
+
+    ``when`` filters which calls count. Returns the mutable state so a test
+    can assert how many faults actually fired. Shared by the paper and live
+    suites: both lanes' §3.1 response store is one repository writer
+    (``repo.store_pending_response``, issue #181), faulted the same way.
+    """
+    real = getattr(target, name)
+    state = {"fired": 0}
+
+    def flaky(*args, **kwargs):
+        if state["fired"] < shots and when(*args, **kwargs):
+            state["fired"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, flaky)
+    return state
+
+
+def poison_stored_parse(monkeypatch, module):
+    """Make ``module.parse_target_decision`` RAISE, counting the calls.
+
+    The parse is fail-closed by contract (malformed content returns an
+    invalid decision), so a raise stands for a parser bug or a corrupted
+    store — the deterministic kind that recurs on every restart. Both lanes'
+    resume guards (paper ``_resume_pending``, live ``resume_startup``) are
+    pinned against this same poison.
+    """
+    calls = {"n": 0}
+
+    def boom(raw, cfg):
+        calls["n"] += 1
+        raise ValueError("corrupt stored response")
+
+    monkeypatch.setattr(module, "parse_target_decision", boom)
+    return calls
 
 
 def write_payload(path: Path, body) -> tuple[str, str]:

@@ -61,6 +61,7 @@ from .decisions import (
     insert_position_snapshot,
     prompt_regime_counts,
     stamp_ai_input_format_fingerprint,
+    store_pending_response,
     update_decision_attempt,
 )
 from .events import (
@@ -233,6 +234,7 @@ __all__ = [
     "set_position_liquidation_price",
     "set_position_protection",
     "stamp_ai_input_format_fingerprint",
+    "store_pending_response",
     "update_decision_attempt",
     "update_execution_plan",
     "update_live_order_attempt",

@@ -9,7 +9,7 @@ from typing import Any, NamedTuple
 
 from ...common.enum_guard import check_enum
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
-from ._vocab import _ATTEMPT_STATUSES, _MODES, ERROR_TYPES
+from ._vocab import _ATTEMPT_STATUSES, _MODES, ERROR_TYPES, TERMINAL_ATTEMPT_STATUSES
 
 __all__ = [
     "PromptRegime",
@@ -24,6 +24,7 @@ __all__ = [
     "insert_position_snapshot",
     "prompt_regime_counts",
     "stamp_ai_input_format_fingerprint",
+    "store_pending_response",
     "update_decision_attempt",
 ]
 
@@ -72,13 +73,20 @@ def insert_decision_attempt(conn: sqlite3.Connection, **fields: Any) -> None:
 
     The deterministic ``decision_attempt_id`` plus the UNIQUE ``(run_id,
     scheduled_at)`` keep one scheduled cycle to one attempt row across restarts
-    (phase2-spec §3.1).
+    (phase2-spec §3.1). A row is born without a resumable response: the §3.1
+    store lands later, through :func:`store_pending_response` only (issue
+    #181) — so the terminal-row invariant below cannot be bypassed at birth.
     """
     _check_mode(fields)
     if "status" in fields:
         check_enum(fields["status"], _ATTEMPT_STATUSES, name="status")
     if fields.get("error_type") is not None:
         check_enum(fields["error_type"], ERROR_TYPES, name="error_type")
+    if fields.get("pending_raw_response") is not None:
+        raise ValueError(
+            "decision attempt rows are inserted without a pending_raw_response; "
+            "store one through store_pending_response"
+        )
     _insert(conn, "decision_attempts", fields)
 
 
@@ -211,6 +219,37 @@ def find_in_progress_attempt(conn: sqlite3.Connection, run_id: str) -> sqlite3.R
     return rows[0] if rows else None
 
 
+def _patch_decision_attempt(
+    conn: sqlite3.Connection,
+    decision_attempt_id: str,
+    provided: dict[str, Any],
+    *,
+    timestamp: datetime | None,
+) -> None:
+    """The one UPDATE on ``decision_attempts``: exists, still in progress, stamped.
+
+    A terminal row is immutable — phase2-spec §3.1's exactly-once retry
+    accounting depends on ``api_failed`` / ``completed`` / ``invalid_output``
+    never being reopened or re-counted. ``provided`` is already validated by
+    its public caller (:func:`update_decision_attempt` or
+    :func:`store_pending_response`); this layer only encodes and writes.
+    """
+    row = get_decision_attempt(conn, decision_attempt_id)
+    if row is None:
+        raise ValueError(f"decision attempt {decision_attempt_id!r} does not exist")
+    if row["status"] != "in_progress":
+        raise ValueError(
+            f"decision attempt {decision_attempt_id!r} is terminal ({row['status']}) and immutable"
+        )
+    encoded = {col: _encode(val) for col, val in provided.items()}
+    encoded["timestamp"] = _iso_utc(timestamp or datetime.now(timezone.utc))
+    assignments = ", ".join(f"{col} = ?" for col in encoded)
+    conn.execute(
+        f"UPDATE decision_attempts SET {assignments} WHERE decision_attempt_id = ?",
+        (*encoded.values(), decision_attempt_id),
+    )
+
+
 def update_decision_attempt(
     conn: sqlite3.Connection,
     decision_attempt_id: str,
@@ -224,27 +263,40 @@ def update_decision_attempt(
     error_type: str | None | _Unset = _UNSET,
     error_message: str | None | _Unset = _UNSET,
     next_decision_at: datetime | None | _Unset = _UNSET,
-    pending_raw_response: str | None | _Unset = _UNSET,
+    pending_raw_response: None | _Unset = _UNSET,
     timestamp: datetime | None = None,
 ) -> None:
     """Patch-update one attempt row; always stamp ``timestamp`` (last state change).
 
     Same convention as :func:`update_order`: an omitted keyword leaves the column
-    untouched, an explicit ``None`` clears it. A terminal row is immutable —
-    phase2-spec §3.1's exactly-once retry accounting depends on ``api_failed`` /
-    ``completed`` / ``invalid_output`` never being reopened or re-counted.
+    untouched, an explicit ``None`` clears it. A terminal row is immutable
+    (:func:`_patch_decision_attempt`).
+
+    ``pending_raw_response`` is clear-only here: a response is stored through
+    :func:`store_pending_response`, the column's one writer (issue #181), and
+    a string passed to this function is refused as the writer bug it is. A
+    terminal row carries no resumable response: a write that moves the row to
+    a terminal ``status`` lands the column as ``NULL`` whatever the row held
+    — the designed path (every cycle stores its response before its terminal
+    write) as much as a writer that forgot the clear. Enforced HERE, the row's
+    one gate, rather than at each writer: a cycle that fails closed after its
+    §3.1 store landed would otherwise leave an ``api_failed`` row presenting
+    the consumed response as resumable state, and terminal rows being
+    immutable, nothing could clean it later. Normalized silently, not refused
+    — a forgotten clear must never be the bare exception that kills a daemon
+    holding a position (the PR #179 lesson).
     """
     if not isinstance(status, _Unset):
         check_enum(status, _ATTEMPT_STATUSES, name="status")
     if not isinstance(error_type, _Unset) and error_type is not None:
         check_enum(error_type, ERROR_TYPES, name="error_type")
-    row = get_decision_attempt(conn, decision_attempt_id)
-    if row is None:
-        raise ValueError(f"decision attempt {decision_attempt_id!r} does not exist")
-    if row["status"] != "in_progress":
+    if not isinstance(pending_raw_response, _Unset) and pending_raw_response is not None:
         raise ValueError(
-            f"decision attempt {decision_attempt_id!r} is terminal ({row['status']}) and immutable"
+            f"decision attempt {decision_attempt_id!r}: pending_raw_response is written only "
+            f"through store_pending_response (got {pending_raw_response!r})"
         )
+    if status in TERMINAL_ATTEMPT_STATUSES:
+        pending_raw_response = None
     provided: dict[str, Any] = {}
     for col, val in (
         ("input_id", input_id),
@@ -259,10 +311,32 @@ def update_decision_attempt(
         ("pending_raw_response", pending_raw_response),
     ):
         if not isinstance(val, _Unset):
-            provided[col] = _encode(val)
-    provided["timestamp"] = _iso_utc(timestamp or datetime.now(timezone.utc))
-    assignments = ", ".join(f"{col} = ?" for col in provided)
-    conn.execute(
-        f"UPDATE decision_attempts SET {assignments} WHERE decision_attempt_id = ?",
-        (*provided.values(), decision_attempt_id),
+            provided[col] = val
+    _patch_decision_attempt(conn, decision_attempt_id, provided, timestamp=timestamp)
+
+
+def store_pending_response(
+    conn: sqlite3.Connection, decision_attempt_id: str, raw_response: str, *, timestamp: datetime
+) -> None:
+    """Land the §3.1 resumable response on an in-progress attempt — the ONE writer.
+
+    Every lane that stores a response (the paper scheduler's post-answer
+    store, the live driver's, the live shutdown salvage) stamps this same
+    shape — the text and the state-change ``timestamp``, nothing else — so a
+    salvaged cycle never resumes from a row unlike the normal one (issue
+    #181; shared here because ``paper`` and ``live`` share only
+    ``persistence``). Clearing is not this writer's job (a terminal write
+    does it, :func:`update_decision_attempt`), so ``None`` is refused rather
+    than read as "clear"; ``""`` is accepted — ``parse_target_decision``
+    preserves an engine that answered nothing as ``""`` (an
+    ``invalid_output`` decision), and that cycle must store and resume like
+    any other rather than fail its persist.
+    """
+    if not isinstance(raw_response, str):
+        raise ValueError(
+            f"decision attempt {decision_attempt_id!r}: a resumable response must be a "
+            f"string, got {raw_response!r}"
+        )
+    _patch_decision_attempt(
+        conn, decision_attempt_id, {"pending_raw_response": raw_response}, timestamp=timestamp
     )

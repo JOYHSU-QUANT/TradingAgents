@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -24,6 +25,7 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
+from contrib.hyperliquid_perp.live import decision as decision_mod
 from contrib.hyperliquid_perp.live.decision import LiveDecisionDriver, LiveDecisionWorker
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.clock import ManualClock
@@ -36,6 +38,8 @@ from contrib.hyperliquid_perp.paper.scheduler import (
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+
+from ..conftest import arm_lock_fault, poison_stored_parse
 
 
 def _decision() -> ParsedDecision:
@@ -544,8 +548,10 @@ def _strand_attempt(db, *, raw):
             status="in_progress",
             first_attempt_at=_T0,
             last_attempt_at=_T0,
-            pending_raw_response=raw,
         )
+        if raw is not None:
+            # Through the one writer, as the crashed process's own store did.
+            repo.store_pending_response(conn, attempt_id, raw, timestamp=_T0)
     return attempt_id
 
 
@@ -583,6 +589,52 @@ def test_resume_startup_without_response_fails_closed(tmp_path):
     assert engine.plans == []  # no order off the dead cycle (§10.2)
 
 
+def test_resume_startup_with_a_poisoned_stored_response_fails_closed(
+    tmp_path, monkeypatch, caplog
+):
+    """issue #180: resume_startup runs BEFORE the loop's tick guard exists, so a
+    re-parse that raises would exit the daemon at startup and every supervised
+    restart would resume into the same deterministic parse — a crash-loop with
+    the real position and its SL/TP unwatched in between. The cycle fails
+    closed instead, exactly as the paper lane's _resume_pending does."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    attempt_id = _strand_attempt(db, raw=_RAW_LONG)
+    calls = poison_stored_parse(monkeypatch, decision_mod)
+    with caplog.at_level(logging.ERROR, logger=decision_mod.__name__):
+        assert driver.resume_startup() == "api_failed"  # returned, never raised
+    assert calls["n"] == 1
+    assert driver._inflight is None
+    row = repo.get_decision_attempt(db.conn, attempt_id)
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    assert row["error_message"].startswith("non-retryable:")
+    assert row["pending_raw_response"] is None  # never again presented as resumable
+    # The row was the only durable copy (ai_outputs never stores raw text), so
+    # clearing it without preserving the text would destroy the evidence the
+    # post-mortem needs to tell a parser bug from a corrupted store. The line
+    # logs the text with %r, so its repr is what the log carries.
+    assert repr(_RAW_LONG) in caplog.text
+    assert provider.requests == 0  # never a second AI call
+    assert engine.plans == []  # no order off the dead cycle (§10.2)
+
+
+def test_a_poisoned_resume_is_not_retried_by_the_following_pumps(tmp_path, monkeypatch):
+    """The failed cycle re-anchored next_decision_at: later pumps neither
+    re-parse the (now cleared) text nor collide on the duplicate attempt id, so
+    there is no per-tick crash-loop either."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=_RAW_LONG)
+    calls = poison_stored_parse(monkeypatch, decision_mod)
+    assert driver.resume_startup() == "api_failed"
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) > _T0  # re-anchored
+    assert driver.pump() is None  # not due
+    assert driver.pump() is None
+    assert calls["n"] == 1  # the poisoned parse ran exactly once, at startup
+    assert provider.requests == 0
+    assert repo.find_in_progress_attempt(db.conn, "r") is None
+
+
 def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.resume_startup() is None
@@ -590,13 +642,14 @@ def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
 
 
 def test_a_cycle_failing_closed_after_its_store_clears_the_stored_response(tmp_path):
-    """A terminal row carries no resumable response (issue #163 lane parity).
+    """The live fail-closed path reaches the repository's terminal clear (issue #181).
 
     A cycle whose §3.1 store landed and then failed closed — here the gate
-    blows up, so pump's in-flight guard records api_failed — would otherwise
-    leave that row still holding the consumed text; terminal rows are
-    immutable, so nothing could ever clean it, and a reader trusting "a stored
-    response means resumable" would find one on a cycle that is over.
+    blows up, so pump's in-flight guard records api_failed — passes nothing
+    about the response to its terminal write; the repository lands the
+    column NULL anyway (pinned at the repository level in
+    tests/persistence), so no api_failed row ever presents the consumed
+    text as resumable state.
     """
     db, clock, driver, engine, worker, provider = _driver(
         tmp_path, start_error=RuntimeError("gate blew up")
@@ -656,23 +709,13 @@ def test_collected_decision_store_failure_retries_persist_only(tmp_path, monkeyp
     parsed decision survives on _inflight, and the next pump retries ONLY the
     store — never re-polling the worker, never re-asking the AI, and never
     gating an unstored decision (§3.1: resumability before action)."""
-    import sqlite3
 
     from contrib.hyperliquid_perp.live.decision import _PendingResponsePersistError
 
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.pump() == "cycle_started"
     _await(worker)
-    real = repo.update_decision_attempt
-    boom = {"left": 1}
-
-    def flaky(conn, attempt_id, **kw):
-        if boom["left"] and "pending_raw_response" in kw:
-            boom["left"] -= 1
-            raise sqlite3.OperationalError("database is locked")
-        return real(conn, attempt_id, **kw)
-
-    monkeypatch.setattr(repo, "update_decision_attempt", flaky)
+    arm_lock_fault(monkeypatch, repo, "store_pending_response")
     with pytest.raises(_PendingResponsePersistError):
         driver.pump()  # collected, but the store missed
     inflight = driver._inflight
@@ -849,23 +892,13 @@ def test_salvage_shutdown_stores_a_collected_but_unstored_decision(tmp_path, mon
     """Salvage covers the OTHER undurable shape too: _collect polled the worker
     but the §3.1 store missed (parsed set, raw_stored False). Shutdown gets one
     last store attempt so restart resumes instead of re-asking the AI."""
-    import sqlite3
 
     from contrib.hyperliquid_perp.live.decision import _PendingResponsePersistError
 
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.pump() == "cycle_started"
     _await(worker)
-    real = repo.update_decision_attempt
-    boom = {"left": 1}
-
-    def flaky(conn, attempt_id, **kw):
-        if boom["left"] and "pending_raw_response" in kw:
-            boom["left"] -= 1
-            raise sqlite3.OperationalError("database is locked")
-        return real(conn, attempt_id, **kw)
-
-    monkeypatch.setattr(repo, "update_decision_attempt", flaky)
+    arm_lock_fault(monkeypatch, repo, "store_pending_response")
     with pytest.raises(_PendingResponsePersistError):
         driver.pump()  # collected, store missed — the retry lane is armed
     assert driver.salvage_shutdown() is True  # the DB healed: one last try lands

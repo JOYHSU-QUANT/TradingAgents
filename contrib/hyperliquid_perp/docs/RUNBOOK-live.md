@@ -416,7 +416,16 @@ payload 的 cycle 也會在 log 印同一格式的 `prompt_regime: …`（INFO�
 另：live 車道的 `api_failed` 列若 `error_type` **空**、`error_message` 以 `non-retryable:`
 開頭，是非 Retryable 例外（通常是程式缺陷，主機問題看 repr 分辨）——driver 把該 cycle
 fail closed、倉位與 SL/TP 照舊、下個 cycle 照排，daemon 不退出；連續 3 筆走 no-decision
-streak 升級。判讀同 [RUNBOOK §7](./RUNBOOK.md) 那一列。
+streak 升級。判讀同 [RUNBOOK §7](./RUNBOOK.md) 那一列。重啟時 resume 到**存壞的回覆**
+（`pending_raw_response` re-parse 丟例外）也走同一條：該 cycle 記成 `api_failed` 並清掉該
+回覆（否則重啟會無限 crash-loop 進同一個 parse，期間真倉位與掛著的 SL/TP 無人看管；清除前
+會先把回覆全文印進 ERROR log 供事後診斷）——與 paper 的 [RUNBOOK §3](./RUNBOOK.md) 同義。
+唯一例外是那筆 `api_failed` 記錄**本身**寫不進去（開機當下 store 被 export／validate 鎖住）：
+resume 在迴圈之前跑、沒有 tick guard，例外會讓 daemon 退出交監管重啟——那是暫時性鎖，
+重啟會再試，不是確定性的 parse 迴圈；但每次重試都會再印一次 ERROR 全文。
+終態列（`completed`／`api_failed`／`invalid_output`）一律不帶 `pending_raw_response`，這由
+repository 在寫入時保證（終態寫入一律落成 NULL；回覆只能經 `store_pending_response` 寫入），
+不靠各寫入端自己清。
 
 > smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only
 > <key>` 重跑，latest-per-key 覆蓋），歸 exit 4 的「未到 gate」。exit 5 保留給不可

@@ -25,6 +25,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISDIR
+from urllib.parse import quote
 
 from .schema import LEASE_READABLE_SINCE, MIGRATIONS, SCHEMA_MIGRATIONS_DDL
 
@@ -131,6 +133,57 @@ _BOOKKEEPING_TABLE = "schema_migrations"
 # into a refusal.
 _STORE_TABLES = ("decision_attempts", "scheduler_state")
 
+# A foreign object name is echoed back to the operator; ``sqlite_master.name``
+# has no length limit, so one pathological name would swamp the message.
+_MAX_NAME_CHARS = 40
+
+
+def _read_only_uri(file: Path) -> str:
+    """``file`` as a SQLite URI, for any absolute path this platform allows.
+
+    Not :meth:`Path.as_uri`, which is wrong here twice. It rejects a relative
+    path outright, and ``--db paper.db`` is perfectly ordinary. And for a
+    Windows UNC path it produces ``file://server/share/x.db``, whose authority
+    SQLite refuses (``invalid uri authority: server``) — so a store on a share
+    that opened fine before would stop opening at all. Both are fixed by
+    resolving first and always emitting an EMPTY authority, which leaves a UNC
+    path as ``file:////server/share/x.db``, the form SQLite reads.
+
+    Percent-encoding matters: a path can hold a space (``C:/Users/JOY HSU``) or
+    a ``?``, which would otherwise start the query string. ``:`` is left alone
+    so a drive letter reads as itself, exactly as ``as_uri`` renders it.
+    """
+    posix = file.resolve().as_posix()
+    if not posix.startswith("/"):
+        posix = "/" + posix  # a drive-letter path: C:/… → /C:/…
+    return "file://" + quote(posix, safe="/:")
+
+
+def _is_our_unused_bookkeeping(conn: sqlite3.Connection) -> bool:
+    """True when a lone ``schema_migrations`` is OURS and has recorded nothing.
+
+    The one state this project leaves behind with no schema under it: an open
+    that died before v1 committed, or an OLDER build's refusal, back when
+    :func:`stored_schema_version` created this table before reading it. Both
+    leave it empty and in our shape.
+
+    Presence of the NAME proves nothing — golang-migrate's sqlite3 driver
+    creates ``schema_migrations (version uint64, dirty bool)`` and often
+    nothing else, so a database whose only table is that name is as likely to
+    be somebody else's as ours. Passing one through on the name alone had two
+    ways of going wrong, both reachable from a single mistyped ``--db``: a
+    populated foreign one read its ``version`` as a schema number and told the
+    operator the store "was migrated by a NEWER build … restore a backup",
+    which is the one refusal the RUNBOOK says to treat as a rollback incident;
+    an empty foreign one got past every guard and died inside the first
+    migration on ``no column named applied_at`` — an unnamed exit 2, the shape
+    this refusal exists to replace.
+    """
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({_BOOKKEEPING_TABLE})")}
+    if not {"version", "applied_at"} <= columns:
+        return False
+    return conn.execute(f"SELECT 1 FROM {_BOOKKEEPING_TABLE} LIMIT 1").fetchone() is None
+
 
 def _refuse_a_foreign_store(path: str | Path) -> None:
     """Refuse a SQLite file that belongs to something other than this project.
@@ -151,9 +204,11 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     and removes it when the last connection closes, so a probe would have
     performed a crashed foreign application's recovery for it. Under
     ``mode=ro`` the database file is never modified, whatever journal mode or
-    crash state it is in. The one mark left anywhere is SQLite's own empty
-    ``-shm`` / ``-wal`` pair beside a WAL database that had none, which its
-    owner reclaims on its next open.
+    crash state it is in. That is also exactly what the refusal claims, and no
+    more: opening a WAL database read-only materialises SQLite's own empty
+    ``-shm`` / ``-wal`` pair beside one that had none, which its owner reclaims
+    on its next open. Unlinking those again would mean racing the sidecars of a
+    process that may be live — worse than leaving them.
 
     ``immutable=1`` would leave even those alone but is unusable here: it
     ignores the ``-wal``, so a LIVE foreign database reads back as holding no
@@ -162,40 +217,83 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     A file that is not a SQLite database at all raises ``sqlite3.DatabaseError``
     from the read, as it did from ``connect``.
     """
-    if str(path) == ":memory:":
+    if str(path) == _IN_MEMORY:
         return  # a fresh private database every time; nothing to inherit
     file = Path(path)
     try:
-        if file.stat().st_size == 0:
-            return  # ``touch``-ed: ours to build in full
-    except OSError:
-        return  # absent (or unreachable): connect() below owns that verdict
-    # ``resolve()`` only to build the URI — a relative ``--db`` is perfectly
-    # ordinary and ``as_uri()`` rejects one. The message keeps ``file``, which
-    # is the path the operator actually typed.
-    probe = sqlite3.connect(f"{file.resolve().as_uri()}?mode=ro", uri=True)
+        info = file.stat()
+    except FileNotFoundError:
+        if file.parent.is_dir():
+            return  # nothing there yet; connect() creates it, as it always has
+        # The parent is missing too, so ``connect`` cannot create anything —
+        # it raises `unable to open database file`, which main()'s last resort
+        # prints as exit 2. Named here for the same reason as the branches
+        # below: a mistyped --db must say what is wrong with it.
+        raise SchemaVersionError(
+            f"cannot open {file}: its directory {file.parent} does not exist. "
+            "Check the --db path (a store is created only where its directory "
+            "already is)."
+        ) from None
+    except OSError as exc:
+        # Unreadable for some other reason (permissions, a file where a
+        # directory was expected). ``connect`` would raise too, but as an
+        # OperationalError that reaches main()'s last resort as exit 2 — and
+        # this whole function exists to make a bad --db a NAMED exit 1.
+        raise SchemaVersionError(
+            f"cannot read {file} to tell whether it is one of this project's "
+            f"stores: {exc}. Check the --db path and its permissions."
+        ) from exc
+    if S_ISDIR(info.st_mode):
+        # A directory stats fine and reports st_size == 0, so without this it
+        # would pass as an empty store and die in ``connect`` as that same
+        # exit 2. Forgetting the filename on --db is an ordinary typo.
+        raise SchemaVersionError(
+            f"{file} is a directory, not a database file. A store is a single "
+            "file — give --db its name (for example "
+            f"{file / 'paper_trading.db'})."
+        )
+    if info.st_size == 0:
+        return  # ``touch``-ed: ours to build in full
+    probe = sqlite3.connect(f"{_read_only_uri(file)}?mode=ro", uri=True)
     try:
         objects = [row[0] for row in probe.execute(_FOREIGN_OBJECTS_SQL)]
+        ours = (
+            not objects  # EMPTY: nothing here to belong to anyone
+            or any(table in objects for table in _STORE_TABLES)
+            # Our own leftover bookkeeping and nothing else; the policies below
+            # decide whether THIS caller may build on it.
+            or (objects == [_BOOKKEEPING_TABLE] and _is_our_unused_bookkeeping(probe))
+        )
+        # Only asked on the way to refusing — every store we own carries this
+        # table, and the answer is used in the message and nowhere else.
+        stray = (
+            not ours
+            and _BOOKKEEPING_TABLE in objects
+            and _is_our_unused_bookkeeping(probe)
+        )
     finally:
         probe.close()
-    if set(objects) <= {_BOOKKEEPING_TABLE}:
-        # Nothing, or nothing but our own bookkeeping table with no schema
-        # under it — an open that died before v1 committed, or an OLDER build's
-        # refusal, which used to create that table before reading it. Ours to
-        # build; the policies below decide whether this caller may.
+    if ours:
         return
-    if any(table in objects for table in _STORE_TABLES):
-        return
-    shown = ", ".join(objects[:5])
+    shown = ", ".join(name[:_MAX_NAME_CHARS] for name in objects[:5])
     more = f", and {len(objects) - 5} more" if len(objects) > 5 else ""
+    # Hedged deliberately: all that was measured is an empty table of our
+    # shape, and this is advice about someone else's database.
+    ours_too = (
+        f" Its {_BOOKKEEPING_TABLE} is empty and in this project's own shape, "
+        "so it was most likely left by an OLDER build of this project doing "
+        "what this refusal now prevents."
+        if stray
+        else ""
+    )
     raise SchemaVersionError(
         f"{file} is a SQLite database, but not one of this project's stores: it "
-        f"holds {len(objects)} object(s) of its own ({shown}{more}) and none of "
-        f"this project's tables ({', '.join(_STORE_TABLES)}). Refusing to open "
-        "it — building this project's tables into another application's "
-        "database would corrupt it, and would leave a file that looks like a "
-        "store to whoever opens it next. Nothing has been written; check the "
-        "--db path."
+        f"holds {len(objects)} object(s) ({shown}{more}) and none of this "
+        f"project's tables ({', '.join(_STORE_TABLES)}). Refusing to open it — "
+        "building this project's tables into another application's database "
+        "would leave a file that looks like a store to whoever opens it next, "
+        f"this daemon included.{ours_too} The database file has not been "
+        "modified; check the --db path."
     )
 
 

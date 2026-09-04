@@ -3725,6 +3725,29 @@ def test_paper_builds_an_empty_store_file_in_full(tmp_path, capsys, paper_seams)
     assert _stored_version(path) == SCHEMA_VERSION
 
 
+def test_paper_refuses_a_db_that_is_another_application_s_database(tmp_path, capsys, paper_seams):
+    # Issue #174 end to end, through the CLI an operator actually types: the
+    # damage was reachable by a typo in --db, and the fix is only worth
+    # anything if it surfaces as a named exit 1 rather than a main() exit-2
+    # traceback. --create is the more dangerous half — it is the flag that
+    # says "build me a store here".
+    path = tmp_path / "someone-elses.db"
+    other = sqlite3.connect(str(path))
+    try:
+        other.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT)")
+        other.commit()
+    finally:
+        other.close()
+    before = path.read_bytes()
+
+    rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams, create=True))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not one of this project's stores" in err
+    assert "customers" in err  # names what it found, so the operator sees WHICH file
+    assert path.read_bytes() == before  # and did not build a store into it
+
+
 def test_paper_create_builds_a_new_store_in_full(tmp_path, monkeypatch, paper_seams):
     # A store that does not exist yet has no daemon to own it, so --create
     # still migrates on open (the lease table it needs is itself a migration).

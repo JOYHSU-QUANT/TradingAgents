@@ -1330,9 +1330,10 @@ def test_store_pending_response_stamps_only_the_response_and_the_timestamp(tmp_p
 
 def test_store_pending_response_refuses_a_non_string_but_accepts_the_empty_one(tmp_path):
     """Clearing is not this writer's job (a terminal write does it), so ``None``
-    is a caller bug rather than "clear". ``""`` IS a response: an engine that
-    answered nothing parses to an invalid_output decision carrying ``""``, and
-    that cycle must store like any other rather than fail its persist."""
+    is a caller bug rather than "clear". ``""`` is accepted defensively: no
+    lane stores an invalid parse any more, so nothing reaches here with one,
+    but the guard must refuse by TYPE — a writer that did pass the empty
+    answer should land its row, not meet a check reasoning about content."""
     db = Database(tmp_path / "p.db")
     aid = _in_progress_attempt(db)
     with db.transaction() as conn:

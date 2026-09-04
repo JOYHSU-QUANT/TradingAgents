@@ -211,6 +211,8 @@ attempt 3 failed → decision_status = api_failed
 
 若 AI API 成功回應，但 schema、型別或 cross-field validation 無效，則不再次呼叫 AI；依 fail-closed 規則記為 `decision_status = invalid_output`、套用 `maintain_current`、不建立 order，並保存原始 response。此 cycle 視為已完成，下一次以實際 `decision_at + 4 hours` 排程。
 
+> **原始 response 保存在哪裡（2026-09-04 修訂）**：無效回覆**不寫進 `pending_raw_response`**，只在跳過該次寫入時以 WARNING 印出全文（grep `did not parse to a decision`）。`pending_raw_response` 的用途是「崩潰後可續」，而無效回覆不是可以續的決策，且它保存下來的文字不保證重 parse 得到同一個判決——非 str 的回答是以 `repr` 保存，重啟後它就是一個 str，`extract_json_block` 可能從中萃取出這一輪已經拒絕掉的方向性目標並下單（PR #204 實測）。代價：(a) 該文字的唯一副本在 log，不在 store 與 export；(b) 若 cycle 恰好崩潰在「回答之後、gate 之前」這個窗口，重啟後 live 走 fail closed、paper 回到 §3.1 重試階梯（可能多花一次 AI 呼叫），而不是從存下來的文字續跑。兩者都不下單。
+
 所有 retry state 必須先寫入 SQLite。Process restart 後只能繼續尚未超過三次的同一 `decision_attempt_id`，不得因重啟把 attempt counter 歸零或產生另一個重複 AI decision。
 
 ---

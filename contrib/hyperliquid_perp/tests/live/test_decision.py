@@ -831,12 +831,14 @@ _BYTES_ANSWER = (
 )
 
 
-def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path):
+def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
     """PR #204 review: a parse that failed closed is no decision to resume, and
     its preserved text is not guaranteed to re-parse to the same verdict — so
     the §3.1 store is skipped for it. Nothing is lost: with no stored response
     a crash in that window fails the cycle closed, the same held position and
-    no order the gate records for an invalid answer."""
+    no order the gate records for an invalid answer. The text is then durable
+    NOWHERE (ai_outputs keeps only the machine tag), so the skip's WARNING is
+    the post-mortem's only copy and is pinned here like the poisoned lane's."""
     from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
     from contrib.hyperliquid_perp.live.engine import PlanRegistration
 
@@ -855,9 +857,15 @@ def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path):
     )
     assert driver.pump() == "cycle_started"
     _await(worker)
-    assert driver.pump() == "pending_market_data"
+    with caplog.at_level(logging.WARNING, logger=decision_mod.__name__):
+        assert driver.pump() == "pending_market_data"
     row = repo.find_in_progress_attempt(db.conn, "r")
     assert row["pending_raw_response"] is None  # nothing a restart could resume
+    # The log is the only surviving copy — the repr, so a bytes answer's shape
+    # survives too, and the reason tag so the post-mortem starts somewhere.
+    record = next(r for r in caplog.records if "did not parse to a decision" in r.getMessage())
+    assert repr(invalid.raw_response) in record.getMessage()
+    assert "invalid_output" in record.getMessage()
     # A valid answer in the same spot DOES land — the skip is about validity,
     # not about the gate being blocked.
     other = tmp_path / "valid"
@@ -869,17 +877,25 @@ def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path):
     assert repo.find_in_progress_attempt(db2.conn, "r")["pending_raw_response"] == "{}"
 
 
-def test_a_restart_over_an_unstored_invalid_answer_fails_closed(tmp_path):
-    """The other half: with nothing stored, the restart adopts the stranded row
-    through the "AI never answered" branch — api_failed, no second AI call, no
-    order off the answer this run had already refused."""
-    db, clock, driver, engine, worker, provider = _driver(tmp_path)
-    _strand_attempt(db, raw=None)  # what the skipped store leaves behind
-    assert driver.resume_startup() == "api_failed"
-    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
-    assert row["status"] == "api_failed"
-    assert provider.requests == 0
-    assert engine.plans == []
+def test_shutdown_salvage_stores_nothing_for_an_invalid_answer(tmp_path, caplog):
+    """The skip reaches the shutdown window too. A worker that finished DURING
+    shutdown was never polled, so salvage polls it — and must not store an
+    answer that failed closed either, nor claim it did: the row stays NULL and
+    salvage reports False, so the operator's log does not promise a resumable
+    cycle the next boot will fail closed."""
+    from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
+
+    invalid = parse_target_decision(_BYTES_ANSWER, DecisionConfig())
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, parsed=invalid)
+    assert driver.pump() == "cycle_started"
+    _await(worker)  # finished during the shutdown window; never polled
+    with caplog.at_level(logging.INFO, logger=decision_mod.__name__):
+        assert driver.salvage_shutdown() is False
+    assert driver._inflight is not None and driver._inflight.raw_stored is False
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["pending_raw_response"] is None
+    assert any("did not parse to a decision" in r.getMessage() for r in caplog.records)
+    assert not [r for r in caplog.records if "restart resumes it" in r.getMessage()]
 
 
 # -- R4 loop: fail-record double fault (pending-fail retry) -------------------

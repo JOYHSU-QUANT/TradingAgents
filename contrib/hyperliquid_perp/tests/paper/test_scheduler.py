@@ -954,7 +954,7 @@ _BYTES_ANSWER = (
 )
 
 
-def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path):
+def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
     """PR #204 review: a parse that failed closed is no decision to resume, and
     its preserved text is not guaranteed to re-parse to the same verdict, so the
     §3.1 store is skipped for it — a restart then fails the cycle closed instead
@@ -971,9 +971,15 @@ def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path):
     db, clock, engine, scheduler, provider = _setup(
         tmp_path, [invalid], [SnapshotOutcome.TIMEOUT, _snap()]
     )
-    r1 = scheduler.poll()
+    from contrib.hyperliquid_perp.paper import scheduler as sched_mod
+
+    with caplog.at_level(logging.WARNING, logger=sched_mod.__name__):
+        r1 = scheduler.poll()
     assert r1.event is CycleEvent.PENDING_MARKET_DATA
     assert repo.find_in_progress_attempt(db.conn, "r")["pending_raw_response"] is None
+    record = next(r for r in caplog.records if "did not parse to a decision" in r.getMessage())
+    assert repr(invalid.raw_response) in record.getMessage()
+    assert "invalid_output" in record.getMessage()
     # A restart therefore cannot resume it. With nothing stored the attempt
     # goes down the §3.1 retry ladder instead — here still between retries, so
     # the poll does nothing at all. Before the skip it resumed, re-parsed the

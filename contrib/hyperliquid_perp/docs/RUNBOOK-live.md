@@ -445,7 +445,10 @@ the loop anyway` 就是這條路。之後兩條分支各自自癒，鎖放開後
 §3.1 store 直接跳過——那不是可以 resume 的決策，而它被保留下來的文字不保證重 parse 得到
 同一個判決（非 str 的回答是以 `repr` 保存，重啟後它就是一個 str，可能被重新萃取出這一輪
 已經拒絕掉的方向性目標）。少存的代價只是：那個 cycle 若在此時崩潰，重啟後 fail closed
-（live）或走 §3.1 重試階梯（paper），兩者都是持倉不動、不下單。
+（live）或走 §3.1 重試階梯（paper），兩者都是持倉不動、不下單。**那份文字唯一的副本在
+log**（`ai_outputs` 只記機器標籤如 `invalid_output`），所以要事後追「模型到底回了什麼」
+就 grep `did not parse to a decision`——連續好幾個 cycle 都 `invalid_output` 時，
+journald 輪替之前把那幾行撈出來。
 終態列（`completed`／`api_failed`／`invalid_output`）一律不帶 `pending_raw_response`，這由
 repository 在寫入時保證（終態寫入一律落成 NULL；回覆只能經 `store_pending_response` 寫入），
 不靠各寫入端自己清。

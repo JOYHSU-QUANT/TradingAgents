@@ -322,9 +322,9 @@ class _PendingDecision:
     parsed: ParsedDecision
     # Whether the §3.1 store is SETTLED — the response landed durably, or the
     # answer was invalid and deliberately not stored
-    # (``_store_pending_response``). Defaults to the
-    # conservative state — gating is forbidden until the store lands, mirroring
-    # the live driver's ``_InFlight.raw_stored``.
+    # (``_store_pending_response``). Defaults to the conservative state —
+    # gating is forbidden until the store SETTLES, mirroring the live driver's
+    # ``_InFlight.raw_stored``.
     raw_stored: bool = False
     # The engine's start_plan outcome, cached the moment it exists: a persist
     # failure after the gate ran must retry the PERSIST against THIS

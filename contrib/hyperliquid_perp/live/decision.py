@@ -403,9 +403,12 @@ class LiveDecisionDriver:
             inflight.raw_stored = True  # the parse SOURCE is the store — durable by definition
             logger.info("resuming in-progress decision %s from its stored response", attempt_id)
             return "resumed"
-        # The AI never answered (the LLM call died with the process): fail the
-        # cycle closed — §10.2 hold — and re-anchor, exactly like an in-process
-        # non-retryable failure. The paid-for call is gone either way.
+        # No resumable response: the LLM call died with the process, or it
+        # answered something that did not parse to a decision and was
+        # deliberately not stored (_store_pending_response). Either way there
+        # is nothing to resume — fail the cycle closed (§10.2 hold) and
+        # re-anchor, exactly like an in-process non-retryable failure. The
+        # message names the row's state rather than guessing which it was.
         logger.warning(
             "in-progress decision %s had no stored response after restart — failing it closed",
             attempt_id,
@@ -414,7 +417,10 @@ class LiveDecisionDriver:
             attempt_id,
             scheduled_at,
             error_type=None,
-            error_message="process restart interrupted this cycle before the AI answered",
+            error_message=(
+                "process restart found this cycle with no resumable response "
+                "(the AI never answered, or its answer did not parse to a decision)"
+            ),
         )
         # This process's first terminal outcome: the counter is per-process and
         # starts at zero anyway, so this is the honest 1 rather than a reset.
@@ -735,8 +741,11 @@ class LiveDecisionDriver:
     def _flush_pending_fail(self) -> str:
         """Write the armed ``api_failed`` record; clear ``_inflight`` on success.
 
-        Raises (to the loop's tick guard — visible safe mode) when the write
-        fails, keeping ``_inflight.pending_fail`` armed for the next pump.
+        Raises when the write fails, keeping ``_inflight.pending_fail`` armed
+        for the next pump. Where the raise LANDS depends on the caller: the
+        loop's tick guard for an in-cycle failure, and the CLI's startup
+        containment when :meth:`resume_startup` reached here at boot — both
+        recoverable safe mode, both retried on the next pump.
         """
         inflight = self._inflight
         assert inflight is not None and inflight.pending_fail is not None

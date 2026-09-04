@@ -327,10 +327,13 @@ def store_pending_response(
     #181; shared here because ``paper`` and ``live`` share only
     ``persistence``). Clearing is not this writer's job (a terminal write
     does it, :func:`update_decision_attempt`), so ``None`` is refused rather
-    than read as "clear"; ``""`` is accepted — ``parse_target_decision``
-    preserves an engine that answered nothing as ``""`` (an
-    ``invalid_output`` decision), and that cycle must store and resume like
-    any other rather than fail its persist.
+    than read as "clear".
+
+    ``""`` is accepted, defensively: an engine that answered nothing is
+    preserved as ``""`` by ``parse_target_decision``, and no caller reaches
+    here with one today — both lanes skip the store for a parse that failed
+    closed — but a writer that did should land the row it asked for, not meet
+    a refusal from a type check reasoning about content.
     """
     if not isinstance(raw_response, str):
         raise ValueError(

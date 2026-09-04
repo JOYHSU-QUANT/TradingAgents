@@ -68,6 +68,21 @@ logger = logging.getLogger(__name__)
 STALE_PENDING_FUNDING = timedelta(hours=6)
 
 
+def _event_label(event: sqlite3.Row) -> str:
+    """``"BTC @ 2026-09-04T12:00:00+00:00"``, or a stand-in if the row won't say.
+
+    Used by the outer containment lane, which must not be able to raise: it
+    reports on a row whose own shape may be the problem, and
+    ``sqlite3.Row[...]`` answers an unknown column with ``IndexError``. A raise
+    inside that handler would propagate and abort the pass — the one outcome
+    the lane exists to make impossible.
+    """
+    try:
+        return f"{event['symbol']} @ {event['funding_timestamp']}"
+    except Exception:  # noqa: BLE001 — a label is never worth aborting the pass for
+        return "<a pending funding_events row that could not be described>"
+
+
 def _log_corrupt_event(run_id: str, event: sqlite3.Row, exc: Exception) -> None:
     """The corrupt-row lane's ERROR, from either of the two places it is reached.
 
@@ -120,34 +135,52 @@ def backfill_pending_funding(
     "Never allowed to abort" is enforced by an outer per-event handler, not by
     the inner lanes' exception lists: those lists are what issue #191 got
     through. The lanes exist to give an operator the right verdict, and the
-    outer one to guarantee there is always a verdict. Every non-posting
-    outcome counts into ``still_pending`` — the event did not post, whatever
-    the reason, and its funding P&L stays uncounted rather than fabricated.
+    outer one to guarantee there is always a verdict. Every outcome that
+    leaves the event PENDING counts into ``still_pending`` — whatever the
+    reason, its funding P&L stays uncounted rather than fabricated. (An
+    ``already_posted`` row is in neither total: it is resolved, not pending,
+    so the two can sum to less than the rows iterated. It gets its own INFO.)
     """
     posted = 0
     young_pending = 0
     stale_pending = 0
     # ONE counter for every event that did not post, whatever the reason. The
     # reasons differ and are told apart where telling them apart pays — in the
-    # three log messages below, which are what an operator acts on and what the
-    # tests assert. A counter per reason would only ever be read as this sum.
+    # four per-event messages below (corrupt row, funding reader, store error,
+    # and the outer lane's "no lane claimed it"), which are what an operator
+    # acts on and what the tests assert. A counter per reason would only ever
+    # be read as this sum.
     not_posted = 0
     for event in repo.iter_funding_events(db.conn, run_id, status="pending"):
+        # Rebound per event, and never read across one: ``res`` is
+        # function-scoped, so a future lane that dropped out of the inner try
+        # without ``continue`` would credit THIS event with the previous one's
+        # posted status — a silent over-count in the acceptance numbers, with
+        # no exception to notice.
+        res = None
         # The OUTER lane makes "this pass may never abort" (see the docstring)
         # structural rather than a promise three handler lists have to keep.
         # Those lists are the failure mode of this very issue: an unlisted type
         # is exactly what showed up (an ``OverflowError`` from a nanosecond
-        # stamp — issue #191), and a ``TypeError`` out of ``record_funding`` or
-        # a NULL ``funding_timestamp`` would abort the same way today. Aborting
-        # at restart fires BEFORE the protection-only fork — a live position
-        # left unwatched, crash-looping on the same event every retry — and
-        # mid-run it kills the loop that keeps SL/TP alive. The inner lanes
-        # keep their distinct verdicts; this one only guarantees there is
-        # always a verdict.
+        # stamp — issue #191), and a ``TypeError`` out of ``record_funding``
+        # would abort the same way today. Aborting at restart fires BEFORE the
+        # protection-only fork — a live position left unwatched, crash-looping
+        # on the same event every retry — and mid-run it kills the loop that
+        # keeps SL/TP alive. The inner lanes keep their distinct verdicts; this
+        # one only guarantees there is always a verdict.
         try:
             try:
                 settlement = parse_instant(event["funding_timestamp"])
-            except (ValueError, InvalidOperation) as exc:
+            except (ValueError, TypeError) as exc:
+                # ``TypeError`` too: ``parse_instant`` is
+                # ``datetime.fromisoformat``, which answers a NULL or a BLOB
+                # cell with ``TypeError``, not ``ValueError``. Both are the
+                # same fact about the same column — a bad stored row — and
+                # without this the ``TypeError`` fell to the outer lane and
+                # was reported as "a defect, read the traceback rather than
+                # the store", which is the exact misdirection issue #193 is
+                # about, pointing the other way. (``InvalidOperation`` is not
+                # listed: no ``Decimal`` is parsed here.)
                 not_posted += 1
                 _log_corrupt_event(run_id, event, exc)
                 continue
@@ -197,10 +230,12 @@ def backfill_pending_funding(
                     source="funding_history_backfill",
                     recorded_at=now,
                 )
-            except (ValueError, InvalidOperation) as exc:
+            except (ValueError, InvalidOperation, TypeError) as exc:
                 # Any corrupt stored field — size, or the settlement basis
                 # record_funding guards — takes this one-event lane. The stored
                 # TIMESTAMP is parsed above, before the reader, and takes it too.
+                # ``TypeError`` for the same reason as up there: a NULL
+                # ``position_size`` reaches ``Decimal(None)``, which raises it.
                 not_posted += 1
                 _log_corrupt_event(run_id, event, exc)
                 continue
@@ -222,27 +257,44 @@ def backfill_pending_funding(
         except Exception as exc:  # noqa: BLE001 — the pass may never abort; see above
             not_posted += 1
             logger.error(
-                "funding backfill for %s hit an unexpected failure on %s @ %s: %s — the "
-                "event stays pending; this one is a defect (no lane claimed it), so read "
-                "the traceback rather than the store",
+                "funding backfill for %s hit an unexpected failure on %s: %s — the "
+                "event stays pending; no lane claimed this one, so read the traceback "
+                "before suspecting the stored row",
                 run_id,
-                event["symbol"],
-                event["funding_timestamp"],
+                _event_label(event),
                 exc,
                 exc_info=True,
             )
             continue
+        if res is None:
+            continue
         if res.status == "posted":
             posted += 1
+        else:
+            # ``already_posted``: the exactly-once key found the settlement
+            # already booked, so this row is resolved, not pending — it belongs
+            # in NEITHER total, which is why the sum can be short of the rows
+            # iterated. Said out loud rather than left as a silent gap: a
+            # pending row whose event id points at a posted settlement means a
+            # non-hour-aligned legacy or hand-edited row, worth knowing about.
+            logger.info(
+                "funding backfill for %s found %s already posted (%s) — the row is "
+                "resolved, not pending; it is counted in neither total",
+                run_id,
+                _event_label(event),
+                res.status,
+            )
     # A stuck-forever pending event (its rate never resolves) resets the fetch
     # source's own consecutive-failure counter on every successful fetch, so only
     # this age check can distinguish it from a rate that is merely un-published yet.
     if stale_pending:
         logger.error(
             "funding backfill for %s left %d event(s) pending past %s after their "
-            "settlement hour (rate for a settled hour likely never resolves — "
-            "delisted coin or an hour the exchange never published; that funding "
-            "P&L stays uncounted)",
+            "settlement hour (that funding P&L stays uncounted). Usually the rate "
+            "for a settled hour will never resolve — a delisted coin, an hour the "
+            "exchange never published — but this count cannot tell that apart from "
+            "an event the reader or a defect has been failing on every pass, so "
+            "check the per-event ERROR lines above before concluding",
             run_id,
             stale_pending,
             STALE_PENDING_FUNDING,

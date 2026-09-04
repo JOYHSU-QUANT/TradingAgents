@@ -144,11 +144,14 @@ def test_funding_history_missing_field_point_dropped_keeping_valid(caplog):
 def test_funding_history_out_of_range_stamp_is_dropped_like_any_bad_point(caplog):
     """The nanosecond-scale ``"time"`` of issue #191 joins the per-point drop budget.
 
-    ``int(_dec(...))`` builds that integer happily, so the refusal has to come
-    from ``FundingPoint`` — and it has to come as a ``ValueError``, the type
-    this handler already drops and counts. Escaping instead, it reached the
-    rate lookup's ``from_epoch_ms`` as an ``OverflowError`` past every
-    ``except`` in between, halting the paper engine and aborting the backfill.
+    The refusal comes from ``_stamp``, as the ``MalformedResponseError`` this
+    handler already drops and counts — not from ``FundingPoint``, whose own
+    bound is unreachable here because ``_stamp`` has already returned an
+    in-range ``int``. (The DTO's copy of the bound covers the hand-built feeds
+    instead; ``tests/domains/test_schema.py`` pins that side.) Before either
+    guard, the bad point reached the rate lookup's ``from_epoch_ms`` as an
+    ``OverflowError`` past every ``except`` in between, halting the paper
+    engine and aborting the backfill pass.
     """
     raw = [
         {"time": 1000, "fundingRate": "0.00001", "premium": "0"},
@@ -301,7 +304,7 @@ def test_candles_excessive_drop_fraction_raises():
     # Above the default 10% drop ceiling (2 of 10 bad = 20%), the survivor set has too
     # many silent gaps to feed indicators safely — fail loud rather than return a short,
     # non-contiguous window that still clears the downstream warm-up count gate.
-    raw = [_ok_candle(i * 1000) for i in range(8)] + [{"o": "1"}, {"o": "1"}]  # 2 missing "t"
+    raw = [_ok_candle((i + 1) * 1000) for i in range(8)] + [{"o": "1"}, {"o": "1"}]  # 2 missing "t"
     with pytest.raises(MalformedResponseError, match="exceeds 10% threshold"):
         mapper.map_candles(raw)
 
@@ -309,7 +312,7 @@ def test_candles_excessive_drop_fraction_raises():
 def test_candles_drop_fraction_at_threshold_survives(caplog):
     # Exactly at the threshold (1 of 10 = 10%, not strictly above) stays a tolerable
     # glitch: drop and warn, do not raise.
-    raw = [_ok_candle(i * 1000) for i in range(9)] + [{"o": "1"}]  # 1 missing "t"
+    raw = [_ok_candle((i + 1) * 1000) for i in range(9)] + [{"o": "1"}]  # 1 missing "t"
     with caplog.at_level(logging.WARNING):
         candles = mapper.map_candles(raw)
     assert len(candles) == 9
@@ -318,7 +321,7 @@ def test_candles_drop_fraction_at_threshold_survives(caplog):
 
 def test_candles_drop_fraction_override_tolerates_more():
     # A caller can raise the ceiling (e.g. from config) so a 20% drop is tolerated.
-    raw = [_ok_candle(i * 1000) for i in range(8)] + [{"o": "1"}, {"o": "1"}]
+    raw = [_ok_candle((i + 1) * 1000) for i in range(8)] + [{"o": "1"}, {"o": "1"}]
     candles = mapper.map_candles(raw, max_drop_fraction=0.5)
     assert len(candles) == 8
 

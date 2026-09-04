@@ -250,8 +250,14 @@ def test_stale_pending_funding_escalates_to_error(tmp_path, caplog):
         )
     assert (posted, still_pending) == (0, 1)
     assert any(
-        r.levelno == logging.ERROR and "likely never resolves" in r.getMessage()
+        r.levelno == logging.ERROR and "will never resolve" in r.getMessage()
         for r in caplog.records
+    )
+    # The line no longer ASSERTS a cause it cannot know: the same count also
+    # covers an event the reader or a defect has been failing on every pass,
+    # so it points at the per-event ERRORs rather than blaming a delisted coin.
+    assert any(
+        "check the per-event ERROR lines above" in r.getMessage() for r in caplog.records
     )
     db.close()
 
@@ -615,7 +621,7 @@ def test_backfill_reads_a_reader_failure_apart_from_a_corrupt_row(tmp_path, capl
 
     class _BrokenReader:
         def rate_at(self, coin, ts):
-            raise ValueError("market data window end must be timezone-aware (UTC)")
+            raise ValueError("funding history window end must be timezone-aware (UTC)")
 
     with caplog.at_level(logging.ERROR):
         posted, still_pending = reconcile_module.backfill_pending_funding(
@@ -687,7 +693,11 @@ def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatc
     )
 
     def drifted(*args, **kwargs):
-        raise TypeError("record_funding() got an unexpected keyword argument 'source'")
+        # Deliberately NOT a TypeError/ValueError: those are claimed by the
+        # corrupt-row lane (a NULL column reaches Decimal/fromisoformat as
+        # one). This has to be a type no inner lane lists, which is the whole
+        # category the outer lane exists for.
+        raise RuntimeError("the reconciler asked accounting for something it no longer does")
 
     monkeypatch.setattr(accounting, "record_funding", drifted)
     with caplog.at_level(logging.ERROR):
@@ -697,7 +707,7 @@ def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatc
 
     assert (posted, still_pending) == (0, 1)  # the pass finished; the event stays pending
     messages = [r.getMessage() for r in caplog.records]
-    assert any("no lane claimed it" in m for m in messages)
+    assert any("no lane claimed this one" in m for m in messages)
     # Not misfiled as either of the verdicts that send an operator somewhere.
     assert not any("fix it in the store" in m for m in messages)
     assert not any("the funding reader failed" in m for m in messages)

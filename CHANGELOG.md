@@ -186,13 +186,31 @@ Breaking changes within the 0.x line are called out explicitly.
   and left market data paused forever, one WARNING per tick, about an
   exchange that was answering; it now catches only the venue-failure family,
   which ``ports.ExchangeMarketData`` states as the contract all three of that
-  reader's consumers share. Making that true required
-  ``mapper.map_market_snapshot`` — the one mapper that returned its DTO's
-  construction untranslated — to raise its ``MarketSnapshot`` refusals (a
-  ``"markPx": "0"``) as ``MalformedResponseError`` too, and a null coin name
-  in the universe no longer raises a bare ``TypeError`` from inside the
-  unknown-coin message itself. Finally the two windowed reads no longer share
-  one refusal wording, so a naive ``end`` says which read was handed it.
+  reader's consumers share. That failure now sorts into two outcomes instead
+  of one: the venue's stays ``ERROR``, while ours becomes a new ``DEFECT``
+  carrying an ERROR-level traceback. Sorted rather than raised, deliberately —
+  ``fetch`` returning for every failure is a property three call sites rely
+  on, and one of them (``engine.try_write_cycle_snapshot``, reached from the
+  scheduler's terminal lane) is not fail-stop and sits in no broad handler, so
+  a raise there would end the daemon after the terminal row committed, with no
+  halt breadcrumb; the paper loop does not wrap its tick the way the live loop
+  does, so a raise would also have traded a silent stall for a crash-loop.
+  Making the narrowing safe required ``mapper.map_market_snapshot`` — which
+  returned its DTO's construction untranslated — to raise its
+  ``MarketSnapshot`` refusals (a ``"markPx": "0"``) as
+  ``MalformedResponseError`` too; a side effect is that such a response is now
+  classified as a retryable malformed response and recorded with an honest
+  ``error_type`` rather than escaping to the last-resort handler. A null coin
+  name in the universe no longer raises a bare ``TypeError`` from inside the
+  unknown-coin message itself. (``map_account_snapshot`` and the position
+  mapper still return theirs untranslated; their consumers compensate by
+  widening, and that is tracked separately.) The backfill pass's "never
+  abort" also stopped depending on its handlers' exception lists — those lists
+  are what issue #191 got through — and is now held by an outer per-event
+  lane that gives every event a verdict; a stored timestamp or size that is
+  NULL reads as the corrupt row it is rather than falling through to it.
+  Finally the two windowed reads no longer share one refusal wording, so a
+  naive ``end`` says which read was handed it.
 - **hyperliquid_perp: the live daemon no longer crash-loops on a stored
   decision response that fails to re-parse** (issue #180; the #181 tail).
   ``LiveDecisionDriver.resume_startup`` rebuilds a stranded cycle from its

@@ -30,6 +30,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     derive_day_change_pct,
     derive_profile_shape,
     derive_round_trip_rate,
+    epoch_ms_out_of_range,
     interval_to_ms,
     parse_interval,
 )
@@ -397,13 +398,14 @@ def test_funding_point_rejects_an_undecodable_time():
     """
     FundingPoint(time=MAX_EPOCH_MS, rate=Decimal("0.0001"))  # the last decodable ms builds
     for bad in (MAX_EPOCH_MS + 1, 1_788_163_200_000_000_000):
-        with pytest.raises(ValueError, match=r"FundingPoint\.time \(\d+\) is outside") as excinfo:
+        with pytest.raises(ValueError, match=r"FundingPoint\.time \(.+E\+\d+\) is outside"):
             FundingPoint(time=bad, rate=Decimal("0.0001"))
-        # The WHOLE sentence, not just its opening: the wire guard
-        # (``mapper._stamp``) says the same thing about the same bound, and
+        # The WHOLE sentence, not just its opening. The wire guard
+        # (``mapper._stamp``) refuses the same bound with the same words, and
         # asserting only a prefix would let the two lanes drift apart while
-        # every test stayed green.
-        assert str(excinfo.value).endswith(
+        # every test stayed green — so both sides pin this one builder's
+        # output, and the builder is what they share.
+        assert epoch_ms_out_of_range(bad, what="FundingPoint.time").endswith(
             f"is outside the decodable UTC epoch-ms range [{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] "
             "— a nanosecond-scale or corrupt stamp"
         )
@@ -429,10 +431,28 @@ def test_candle_rejects_undecodable_and_non_int_times_by_name():
     _candle(open_time=1_000, close_time=MAX_EPOCH_MS)  # the last decodable ms builds
     with pytest.raises(ValueError, match=r"Candle\.close_time .* outside the decodable"):
         _candle(open_time=1_000, close_time=MAX_EPOCH_MS + 1)
-    with pytest.raises(ValueError, match=r"Candle\.open_time .* outside the decodable"):
-        _candle(open_time=MIN_EPOCH_MS - 1, close_time=1_000)
     with pytest.raises(ValueError, match=r"Candle\.close_time must be an int of UTC epoch ms"):
         _candle(open_time=1_000, close_time=1_999.0)
+
+
+def test_candle_rejects_a_nonpositive_open_time_like_funding_does():
+    # The floor lives in the shared guard so BOTH stamps carry it. ``Candle``
+    # used to accept a pre-1970 ``open_time`` while ``FundingPoint`` rejected
+    # ``<= 0`` — one rule, enforced on one of the two DTOs that hold the same
+    # kind of field.
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match=r"Candle\.open_time must be > 0"):
+            _candle(open_time=bad, close_time=1_999)
+
+
+def test_the_out_of_range_message_names_the_field_even_for_an_absurd_stamp():
+    # The guard exists for hand-built feeds, and a hand-built stamp can be
+    # arbitrarily large. Formatting that as a raw ``int`` raises ``ValueError``
+    # on its own (``sys.get_int_max_str_digits()``), so the refusal would come
+    # back as the interpreter's digit-limit complaint instead of naming the
+    # field — the anonymous failure this whole guard replaces.
+    with pytest.raises(ValueError, match=r"FundingPoint\.time .* outside the decodable"):
+        FundingPoint(time=10**5000, rate=Decimal("0.0001"))
 
 
 def test_candle_checks_its_stamps_before_ordering_them():

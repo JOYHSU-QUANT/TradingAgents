@@ -1908,7 +1908,7 @@ class _DriftedMarket:
 
 class _RefusingMarket:
     def get_funding_history(self, coin, days, *, end):
-        raise ValueError("market data window end must be timezone-aware (UTC)")
+        raise ValueError("funding history window end must be timezone-aware (UTC)")
 
 
 @pytest.mark.parametrize(

@@ -150,13 +150,40 @@ def interval_to_ms(interval: str) -> int:
 # --------------------------------------------------------------------------
 
 
+def epoch_ms_out_of_range(value: int | Decimal, *, what: str) -> str:
+    """The ONE sentence both guards on the epoch-ms bound refuse with.
+
+    The rule is enforced twice — at the wire by ``mapper._stamp`` (which must
+    compare the ``Decimal`` before ``int()``) and here at the DTO (which covers
+    the hand-built feeds ``ports`` exists for) — and the two raise different
+    exception TYPES on purpose, because ``domains`` may not import
+    ``exchanges``. The wording has no such excuse: written out twice it could
+    be reworded on one side while every test stayed green, leaving the two
+    lanes describing the same bound differently.
+    """
+    # Rendered in scientific notation, never as the raw integer: formatting an
+    # ``int`` past ``sys.get_int_max_str_digits()`` (4300) itself raises
+    # ``ValueError``, so a hand-built ``FundingPoint(time=10**5000)`` — exactly
+    # the scripted-feed case the DTO guard exists for — would answer with the
+    # interpreter's digit-limit message instead of naming the field. ``Decimal``
+    # formats by exponent, so the cost is bounded whatever the magnitude.
+    shown = value if isinstance(value, Decimal) else Decimal(value)
+    return (
+        f"{what} ({shown:.6E}) is outside the decodable UTC epoch-ms range "
+        f"[{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] — a nanosecond-scale or corrupt stamp"
+    )
+
+
 def _require_venue_stamp(value: object, *, what: str) -> None:
     """Refuse a venue timestamp ``from_epoch_ms`` could not decode, naming ``what``.
 
     The two DTOs below carry the venue's time form as a bare ``int`` of UTC
-    epoch milliseconds, and four call sites decode one downstream
-    (``context_builder``'s ``as_of``, ``cli._provider``'s funding-rate lookup,
-    and the two windowed reads' filters). ``from_epoch_ms`` answers a stamp it
+    epoch milliseconds, and two call sites decode one downstream — the context
+    builder's ``as_of`` (``from_epoch_ms(candles[-1].close_time)``) and
+    ``cli._provider``'s funding-rate lookup, which decodes EVERY point of a
+    fetched window outside its own ``except ExchangeError``. (The two windowed
+    reads only ever compare these stamps as integers; they do not decode
+    them.) ``from_epoch_ms`` answers a stamp it
     cannot decode with ``OverflowError`` and a non-``int`` with ``TypeError`` —
     NEITHER of which is an ``ExchangeError`` or a ``ValueError``, so both slip
     through every venue-failure and corrupt-row handler standing between the
@@ -175,20 +202,36 @@ def _require_venue_stamp(value: object, *, what: str) -> None:
     exists) is covered by the same guard rather than by the wire path's
     ``int(_dec(...))``.
 
-    ``ValueError``, not ``TypeError``, for the type check too (issue #193):
-    ``TypeError`` is exactly the family that escapes those handlers, and a
-    ``float`` here is a bad record, not a caller passing the wrong argument.
+    ``ValueError``, not ``TypeError``, for the type check too (issue #193).
+    ``TypeError`` is exactly the family that escapes those handlers, so the
+    type branch is deliberately filed with the DATA errors even though the
+    only population that can reach it is caller bugs: the wire path builds
+    these through ``mapper._stamp``, which has already returned an ``int``, so
+    a non-``int`` here can only come from a hand-built feed or a test.
     ``bool`` is an ``int`` to ``isinstance`` but never a timestamp.
+
+    WHAT THIS DOES NOT DO: it bounds DECODABILITY, plus a positive floor — not
+    plausibility. A seconds-scale stamp (the venue sending 1.79e9 where 1.79e12
+    belongs) decodes happily to 1970 and passes. Candles are caught downstream
+    by the freshness guard, which refuses a stale ``as_of``; a funding point is
+    not, and simply falls below ``funding_zscore``'s window. Judging whether a
+    decodable stamp is a PLAUSIBLE one needs a clock, which a frozen DTO has
+    no business reading — that job stays with the freshness layer.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
             f"{what} must be an int of UTC epoch ms, got {type(value).__name__} ({value!r})"
         )
-    if not MIN_EPOCH_MS <= value <= MAX_EPOCH_MS:
-        raise ValueError(
-            f"{what} ({value}) is outside the decodable UTC epoch-ms range "
-            f"[{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] — a nanosecond-scale or corrupt stamp"
-        )
+    # The positive floor lives HERE rather than on one DTO so both carry it:
+    # ``FundingPoint`` has rejected ``<= 0`` since it was written (a
+    # non-positive stamp is a corrupt record ``funding_zscore``'s window filter
+    # would silently drop, biasing the sample), while ``Candle`` accepted a
+    # pre-1970 ``open_time`` — the same rule, enforced on one of the two DTOs
+    # that carry the same field. Wording preserved verbatim: it is pinned.
+    if value <= 0:
+        raise ValueError(f"{what} must be > 0 (UTC epoch ms), got {value}")
+    if value > MAX_EPOCH_MS:
+        raise ValueError(epoch_ms_out_of_range(value, what=what))
 
 
 @dataclass(frozen=True)
@@ -301,11 +344,9 @@ class FundingPoint:
         # as_of_ms``) would silently drop, biasing the z-score sample with no warning.
         # Reject it at construction, matching the boundary guards on Candle/MarketSnapshot.
         #
-        # The upper end is the one that ended runs — see
-        # :func:`_require_venue_stamp` (issue #191).
+        # Both ends live in the shared guard now: the ``> 0`` floor this class
+        # has always had, and the upper bound that ended runs (issue #191).
         _require_venue_stamp(self.time, what="FundingPoint.time")
-        if self.time <= 0:
-            raise ValueError(f"FundingPoint.time must be > 0 (UTC epoch ms), got {self.time}")
 
 
 @dataclass(frozen=True)

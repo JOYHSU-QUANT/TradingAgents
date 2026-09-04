@@ -71,6 +71,7 @@ from ...domains.perp.schema import (
     FundingPoint,
     MarketSnapshot,
     PerpPosition,
+    epoch_ms_out_of_range,
 )
 from .errors import MalformedResponseError, UnknownCoinError
 
@@ -148,10 +149,9 @@ def _stamp(value: Any, *, field: str) -> int:
     """
     parsed = _dec(value, field=field)
     if not MIN_EPOCH_MS <= parsed <= MAX_EPOCH_MS:
-        raise MalformedResponseError(
-            f"field '{field}' ({parsed}) is outside the decodable UTC epoch-ms range "
-            f"[{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] — a nanosecond-scale or corrupt stamp"
-        )
+        # The sentence is the DTO guard's, shared rather than restated, so the
+        # two lanes enforcing this one bound cannot come to word it differently.
+        raise MalformedResponseError(epoch_ms_out_of_range(parsed, what=f"field '{field}'"))
     return int(parsed)
 
 
@@ -241,10 +241,13 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
 
     index = next((i for i, asset in enumerate(universe) if asset.get("name") == coin), None)
     if index is None:
-        # ``or "?"`` covers a null name as well as a missing key: ``join`` over
-        # a ``None`` raises a bare ``TypeError``, which is not an
-        # ``ExchangeError`` and so escapes this layer's translation contract.
-        known = ", ".join(str(a.get("name") or "?") for a in universe[:10])
+        # ``is None`` rather than a falsy test: ``join`` over a ``None`` raises
+        # a bare ``TypeError``, which is not an ``ExchangeError`` and so
+        # escapes this layer's translation contract from inside the error path
+        # itself. Only the ABSENT name becomes "?" — a present-but-empty one is
+        # shown as it is, so the message cannot claim a name is missing when
+        # the venue sent a blank one.
+        known = ", ".join("?" if a.get("name") is None else str(a.get("name")) for a in universe[:10])
         raise UnknownCoinError(f"coin {coin!r} not in perp universe (e.g. {known})")
     if index >= len(asset_ctxs):
         raise MalformedResponseError(f"assetCtxs has no entry for {coin!r} at index {index}")
@@ -523,8 +526,9 @@ def map_candles(
             )
         except (ValueError, MalformedResponseError) as exc:
             # A single bad bar — whether it violates Candle's invariant (bad OHLC
-            # ordering, time, negative volume, an undecodable stamp -> ValueError)
-            # or has a missing / non-numeric field (-> MalformedResponseError) —
+            # ordering, time ordering, negative volume -> ValueError) or has a
+            # missing / non-numeric / undecodable field
+            # (-> MalformedResponseError, the latter from :func:`_stamp`) —
             # is a transient feed glitch, not a reason to abort the whole run.
             # Drop it and warn; the warm-up threshold downstream still aborts if
             # too few bars survive.
@@ -692,7 +696,13 @@ def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime
         # exponent rather than raising anything the ``except`` below could
         # catch. Its ``MalformedResponseError`` is already in that list.
         return from_epoch_ms(_stamp(stamp, field="time"))
-    except (MalformedResponseError, ValueError, OverflowError, OSError) as exc:
+    # ``MalformedResponseError`` alone now: ``_stamp`` refuses a missing,
+    # non-numeric or undecodable stamp as that type, and ``from_epoch_ms`` on
+    # the in-range ``int`` it returns cannot raise. The ``ValueError`` /
+    # ``OverflowError`` / ``OSError`` this used to list became unreachable when
+    # the bound moved ahead of the decode, and an unreachable clause is the
+    # claim-no-test-can-hold that ``map_candles`` above refuses to make.
+    except MalformedResponseError as exc:
         raise MalformedResponseError(
             f"l2Book 'time' is unusable as epoch ms ({stamp!r}): {exc}"
         ) from exc

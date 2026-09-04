@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -113,16 +114,31 @@ def test_port_provider_error_on_raise():
     assert result.outcome is SnapshotOutcome.ERROR
 
 
-def test_port_provider_lets_a_non_venue_failure_through():
-    # The defect this narrowing exists for (issues #157, #193): a call site
-    # drifted from the reader's signature raises ``TypeError``, and collapsing
-    # THAT to ERROR paused market data forever — one WARNING per tick about an
-    # exchange that was answering. It must reach the caller instead.
+def test_port_provider_sorts_a_non_venue_failure_into_its_own_outcome(caplog):
+    """OUR defect and the venue's outage stop being the same outcome (issue #157).
+
+    A call site drifted from the reader's signature raises ``TypeError``.
+    Collapsed into ``ERROR`` it read as an exchange outage and left market data
+    paused forever, one WARNING per tick, about an exchange that was answering.
+    It is now ``DEFECT``, logged at ERROR with a traceback.
+
+    Still RETURNED, never raised: ``fetch`` is called bare by
+    ``engine.try_write_cycle_snapshot``, which is not fail-stop and sits in no
+    broad handler, so a raise would end the daemon after the terminal row had
+    committed — trading a silent stall for a crash-loop.
+    """
     clock = ManualClock(_T0)
     market = _StubMarket(raise_exc=TypeError("get_market_snapshot() takes 1 argument"))
     provider = PortSnapshotProvider(market, clock)
-    with pytest.raises(TypeError, match="takes 1 argument"):
-        provider.fetch("BTC", requested_at=_T0, timeout_seconds=D(5))
+    with caplog.at_level(logging.ERROR):
+        result = provider.fetch("BTC", requested_at=_T0, timeout_seconds=D(5))
+    assert result.outcome is SnapshotOutcome.DEFECT
+    assert result.snapshot is None
+    assert not result.is_valid
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "defect on our side, not an exchange outage" in message
+    # The two verdicts must stay distinguishable, which is the entire point.
+    assert result.outcome is not SnapshotOutcome.ERROR
 
 
 def test_port_provider_timeout_on_slow_response():

@@ -48,6 +48,11 @@ def _utcnow_iso() -> str:
 # lock collision into a bounded wait instead of an immediate SQLITE_BUSY.
 _BUSY_TIMEOUT_MS = 5000
 
+# sqlite3's own spelling for "a private database in RAM". Named because two
+# places now branch on it — ``connect`` (WAL never applies) and the
+# foreign-store refusal (there is no file to inherit anything from).
+_IN_MEMORY = ":memory:"
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     """Open a SQLite connection tuned for this store.
@@ -58,32 +63,140 @@ def connect(path: str | Path) -> sqlite3.Connection:
     ``Row`` gives name-addressable rows to the repository. WAL + ``busy_timeout``
     set the concurrency posture (an in-memory DB ignores WAL — fine, it is never
     shared across connections).
+
+    ``sqlite3.connect`` itself is lazy — it opens no file and validates nothing —
+    so the first PRAGMA below is what actually fails on a path that is not a
+    SQLite database at all (``DatabaseError: file is not a database``). That
+    used to leave a live handle nobody holds a reference to, which on Windows
+    keeps the file locked against the very ``unlink`` an operator reaches for
+    next (issue #175). Every failure here now closes the handle before it
+    propagates; the error itself is already clear and is left alone.
     """
     # ``str(path)`` so a Path (incl. the special ":memory:" string) both work.
     conn = sqlite3.connect(str(path), isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    # WAL can silently fall back to the prior journal mode when the underlying
-    # VFS lacks shared-memory support (some network mounts / exclusive-locking
-    # setups) — no error is raised either way. An in-memory DB legitimately
-    # ignores WAL and is never shared, so only a file-backed store that failed
-    # to switch is worth flagging. Warn rather than raise: the store is still
-    # correct, just degraded to serialized reader/writer access, which busy_timeout
-    # keeps bounded — the concurrency posture PR3 relies on, not correctness.
-    applied_mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
-    if str(path) != ":memory:" and str(applied_mode).lower() != "wal":
-        logger.warning(
-            "journal_mode is %r (not WAL) for %s; reader/writer overlap is "
-            "degraded to serialized access (busy_timeout still bounds lock waits).",
-            applied_mode,
-            path,
-        )
-    conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        # WAL can silently fall back to the prior journal mode when the underlying
+        # VFS lacks shared-memory support (some network mounts / exclusive-locking
+        # setups) — no error is raised either way. An in-memory DB legitimately
+        # ignores WAL and is never shared, so only a file-backed store that failed
+        # to switch is worth flagging. Warn rather than raise: the store is still
+        # correct, just degraded to serialized reader/writer access, which busy_timeout
+        # keeps bounded — the concurrency posture PR3 relies on, not correctness.
+        applied_mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+        if str(path) != _IN_MEMORY and str(applied_mode).lower() != "wal":
+            logger.warning(
+                "journal_mode is %r (not WAL) for %s; reader/writer overlap is "
+                "degraded to serialized access (busy_timeout still bounds lock waits).",
+                applied_mode,
+                path,
+            )
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
 class SchemaVersionError(RuntimeError):
-    """The store's schema does not match what this build can safely operate on."""
+    """The store's schema does not match what this build can safely operate on.
+
+    Or the file is not one of this project's stores at all: a mistyped ``--db``
+    naming another application's database is the same verdict — this build
+    cannot safely operate on it — reached without reading a version (see
+    :func:`_refuse_a_foreign_store`).
+    """
+
+
+# SQLite reserves the ``sqlite_`` prefix, so no application can create an object
+# with that name: everything matching it is bookkeeping SQLite made for itself
+# (``sqlite_sequence`` behind an AUTOINCREMENT column, ``sqlite_stat*`` from
+# ANALYZE, the implicit indexes behind UNIQUE constraints). Such an object is
+# never evidence of what a file is FOR — it exists only because something else
+# does — so a file holding nothing but those counts as empty here. ``_`` is a
+# LIKE wildcard, hence the ESCAPE.
+_FOREIGN_OBJECTS_SQL = (
+    "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite@_%' ESCAPE '@' ORDER BY name"
+)
+_BOOKKEEPING_TABLE = "schema_migrations"
+
+# What makes a file OURS. Deliberately not ``schema_migrations``: that name is
+# the convention for Rails/ActiveRecord and golang-migrate among others, so a
+# database carrying one is evidence that SOMEBODY migrates it, not that we do.
+# These two have existed since v1, so every store a build can meet has them,
+# and ``test_every_store_version_carries_the_tables_the_refusal_looks_for``
+# pins that against a migration that renames one. ANY of them is enough: a
+# rename should degrade this check, never turn a running daemon's own store
+# into a refusal.
+_STORE_TABLES = ("decision_attempts", "scheduler_state")
+
+
+def _refuse_a_foreign_store(path: str | Path) -> None:
+    """Refuse a SQLite file that belongs to something other than this project.
+
+    "EMPTY store" used to mean ``MAX(schema_migrations.version) == 0``, which is
+    a fact about OUR bookkeeping, not about the file: another application's
+    database has no such rows either, so a mistyped ``--db`` was read as an
+    empty store. A reporting command then wrote ``schema_migrations`` into that
+    file on the way to refusing it, and an owning command (``defer_migration``)
+    skipped the refusal entirely and built all of this project's tables into it,
+    after which the file looks like a store to whoever opens it next (issue
+    #174). EMPTY now means empty: no objects of the file's own.
+
+    Runs BEFORE :func:`connect`, because connecting is itself a write — ``PRAGMA
+    journal_mode = WAL`` rewrites the header of a database not already in WAL —
+    and on a READ-ONLY connection, because merely opening a database read-write
+    is one too: SQLite checkpoints an uncheckpointed ``-wal`` into the main file
+    and removes it when the last connection closes, so a probe would have
+    performed a crashed foreign application's recovery for it. Under
+    ``mode=ro`` the database file is never modified, whatever journal mode or
+    crash state it is in. The one mark left anywhere is SQLite's own empty
+    ``-shm`` / ``-wal`` pair beside a WAL database that had none, which its
+    owner reclaims on its next open.
+
+    ``immutable=1`` would leave even those alone but is unusable here: it
+    ignores the ``-wal``, so a LIVE foreign database reads back as holding no
+    objects at all — the one answer that would have this build write into it.
+
+    A file that is not a SQLite database at all raises ``sqlite3.DatabaseError``
+    from the read, as it did from ``connect``.
+    """
+    if str(path) == ":memory:":
+        return  # a fresh private database every time; nothing to inherit
+    file = Path(path)
+    try:
+        if file.stat().st_size == 0:
+            return  # ``touch``-ed: ours to build in full
+    except OSError:
+        return  # absent (or unreachable): connect() below owns that verdict
+    # ``resolve()`` only to build the URI — a relative ``--db`` is perfectly
+    # ordinary and ``as_uri()`` rejects one. The message keeps ``file``, which
+    # is the path the operator actually typed.
+    probe = sqlite3.connect(f"{file.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        objects = [row[0] for row in probe.execute(_FOREIGN_OBJECTS_SQL)]
+    finally:
+        probe.close()
+    if set(objects) <= {_BOOKKEEPING_TABLE}:
+        # Nothing, or nothing but our own bookkeeping table with no schema
+        # under it — an open that died before v1 committed, or an OLDER build's
+        # refusal, which used to create that table before reading it. Ours to
+        # build; the policies below decide whether this caller may.
+        return
+    if any(table in objects for table in _STORE_TABLES):
+        return
+    shown = ", ".join(objects[:5])
+    more = f", and {len(objects) - 5} more" if len(objects) > 5 else ""
+    raise SchemaVersionError(
+        f"{file} is a SQLite database, but not one of this project's stores: it "
+        f"holds {len(objects)} object(s) of its own ({shown}{more}) and none of "
+        f"this project's tables ({', '.join(_STORE_TABLES)}). Refusing to open "
+        "it — building this project's tables into another application's "
+        "database would corrupt it, and would leave a file that looks like a "
+        "store to whoever opens it next. Nothing has been written; check the "
+        "--db path."
+    )
 
 
 def _newer_build_error(found: int, latest_known: int) -> SchemaVersionError:
@@ -101,11 +214,23 @@ def stored_schema_version(conn: sqlite3.Connection) -> int:
     """The highest migration recorded in the store (0 for a fresh/empty one).
 
     Reads ``schema_migrations`` WITHOUT applying anything, so a caller can
-    decide whether opening this store is safe before it is changed.
+    decide whether opening this store is safe before it is changed. That
+    includes not creating the table it reads: it used to ``CREATE TABLE IF NOT
+    EXISTS`` first, so every refusal keyed on the version returned here — the
+    ones a mistyped ``--db`` reaches included — wrote a table into the file on
+    the way to declining to touch it (issue #174). A store with no bookkeeping
+    table has recorded no migration, which is what 0 already means.
+    :func:`apply_migrations`, the only writer, creates it.
     """
-    conn.execute(SCHEMA_MIGRATIONS_DDL)
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (_BOOKKEEPING_TABLE,),
+    ).fetchone()
+    if exists is None:
+        return 0
+    # An aggregate always returns exactly one row, so only its value can be NULL.
     row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-    return 0 if row is None or row[0] is None else int(row[0])
+    return 0 if row[0] is None else int(row[0])
 
 
 def apply_migrations(conn: sqlite3.Connection) -> int:
@@ -153,10 +278,12 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     found = stored_schema_version(conn)
     if found > latest_known:
         raise _newer_build_error(found, latest_known)
+    # The bookkeeping table is created HERE, by the only function that writes,
+    # rather than by the read above (issue #174) — and after the NEWER refusal,
+    # which never needs it: a store recorded as newer already has one.
+    conn.execute(SCHEMA_MIGRATIONS_DDL)
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
-    latest = 0
     for version in sorted(MIGRATIONS):
-        latest = max(latest, version)
         if version in applied:
             continue
         # Each version is one atomic step: either every statement and the
@@ -199,7 +326,11 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
     newest = stored_schema_version(conn)
     if newest > latest_known:
         raise _newer_build_error(newest, latest_known)
-    return latest
+    # Every version in MIGRATIONS is applied or was already there, so the store
+    # now stands at the newest this build knows. This used to be accumulated in
+    # the loop, which could only ever arrive back at ``latest_known`` — the
+    # accumulator advanced on skipped versions too (issue #175).
+    return latest_known
 
 
 class Database:
@@ -226,8 +357,15 @@ class Database:
         it HOLDS THE LEASE; refused at open only when the store was migrated
         by a NEWER build (nothing has been written yet, and it never becomes
         this build's to upgrade) or predates the lease columns entirely (see
-        below), and an EMPTY store — no schema at all — is built in full,
-        since nothing can own it.
+        below), and an EMPTY store — a file holding no objects at all — is
+        built in full, since nothing can own it.
+
+        Ahead of all three policies sits a fact about the FILE rather than
+        about any policy: a SQLite database holding objects that are not this
+        project's is refused by name, before a connection is even tuned (see
+        :func:`_refuse_a_foreign_store`). Every policy needs that refusal — the
+        two below would otherwise read such a file as an empty store, and
+        ``migrate=True`` would build this project's tables straight into it.
 
         The third policy exists because ``migrate=True`` necessarily runs before
         the lease can be taken (the lease lives in the store being opened), so an
@@ -256,6 +394,7 @@ class Database:
                 "defer_migration requires migrate=False — it IS the deferral, and "
                 "migrate=True would already have upgraded the store on open"
             )
+        _refuse_a_foreign_store(path)  # before connect(), which writes
         self._conn = connect(path)
         self._in_transaction = False
         self._migration_pending = False
@@ -298,10 +437,13 @@ class Database:
                 )
             if defer_migration:
                 if found == 0:
-                    # No schema at all (a ``touch``, or an open that died
-                    # before its first migration committed): nothing can own
-                    # it and there is no lease table to consult, so build it
-                    # in full — there is nobody to defer to.
+                    # No migration recorded (a ``touch``, an open that died
+                    # before its first migration committed, or a file left
+                    # holding nothing but the empty bookkeeping table an older
+                    # build's refusal wrote into it): nothing can own it and
+                    # there is no lease table to consult, so build it in full —
+                    # there is nobody to defer to. A file with objects that are
+                    # NOT ours never reaches here; it was refused above.
                     apply_migrations(self._conn)
                 else:
                     # Owed only when the store is behind; a current store owes

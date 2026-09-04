@@ -9,11 +9,14 @@ event log — plus the v9 exchange-liquidation mirror and its one writer.
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 
+import contrib.hyperliquid_perp.persistence.db as db_module
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import (
     Database,
@@ -24,7 +27,13 @@ from contrib.hyperliquid_perp.persistence.db import (
 )
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 from contrib.hyperliquid_perp.persistence.models import PositionState
-from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS, SCHEMA_VERSION
+from contrib.hyperliquid_perp.persistence.schema import (
+    MIGRATIONS,
+    SCHEMA_MIGRATIONS_DDL,
+    SCHEMA_VERSION,
+)
+
+from ..conftest import build_store_at, migrations_up_to
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -46,17 +55,14 @@ def _columns(conn, table: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
+def test_v5_store_upgrades_to_latest_in_place():
     # Build a store that stops at v5 (an existing paper DB), then re-open with
     # the full migration list: the later migrations (v6, v7's additive ADD
     # COLUMN, and v8's new live_smoke_tests table) apply, and the paper rows
     # survive.
     conn = connect(":memory:")
-    v5_only = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= 5}
-    import contrib.hyperliquid_perp.persistence.db as db_module
-
-    monkeypatch.setattr(db_module, "MIGRATIONS", v5_only)
-    assert apply_migrations(conn) == 5
+    with migrations_up_to(5):
+        assert apply_migrations(conn) == 5
     # Every table v6 adds a column to gets a pre-migration row, not just
     # `orders`: seeding one table would let a mis-targeted ALTER on any of the
     # other four pass unnoticed. The paper run this migrates is live on a
@@ -93,7 +99,6 @@ def test_v5_store_upgrades_to_latest_in_place(monkeypatch):
     )
     conn.execute(f"INSERT INTO scheduler_state (run_id, updated_at) VALUES ('r', '{stamp}')")
 
-    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
     assert apply_migrations(conn) == SCHEMA_VERSION
 
     row = conn.execute("SELECT * FROM orders").fetchone()
@@ -647,18 +652,15 @@ def test_iter_open_live_orders_sees_only_non_terminal_live_rows(db):
 # ---------------------------------------------------------------------------
 
 
-def test_v8_store_upgrades_to_v9_in_place(monkeypatch):
+def test_v8_store_upgrades_to_v9_in_place():
     # Same shape as the v5 upgrade above, one version narrower: the paper run
     # live on the server is already at v8, so v9's additive ADD COLUMN is what
     # its next restart actually runs. Its existing position row must survive
     # and read NULL — a paper run has no exchange estimate to mirror, and a
     # NOT NULL column would have made the upgrade unrunnable.
     conn = connect(":memory:")
-    v8_only = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= 8}
-    import contrib.hyperliquid_perp.persistence.db as db_module
-
-    monkeypatch.setattr(db_module, "MIGRATIONS", v8_only)
-    assert apply_migrations(conn) == 8
+    with migrations_up_to(8):
+        assert apply_migrations(conn) == 8
     assert "exchange_liquidation_price" not in _columns(conn, "current_positions")
     stamp = "2026-07-12T00:00:00+00:00"
     conn.execute(
@@ -666,7 +668,6 @@ def test_v8_store_upgrades_to_v9_in_place(monkeypatch):
         f" updated_at) VALUES ('r', 'BTC', '0.01', '50000', '3', '{stamp}')"
     )
 
-    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
     assert apply_migrations(conn) == SCHEMA_VERSION
 
     assert "exchange_liquidation_price" in _columns(conn, "current_positions")
@@ -794,7 +795,10 @@ def test_stored_schema_version_reads_the_store_without_applying_anything():
     conn = connect(":memory:")
     assert stored_schema_version(conn) == 0  # brand-new store: nothing applied
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert tables == {"schema_migrations"}  # its own bookkeeping table and NOTHING else
+    # NOTHING, not even its own bookkeeping table: the read used to CREATE that
+    # first, which is how a refusal keyed on this number wrote into the very
+    # file it was declining to touch (issue #174). apply_migrations creates it.
+    assert tables == set()
     assert apply_migrations(conn) == SCHEMA_VERSION
     assert stored_schema_version(conn) == SCHEMA_VERSION  # now the max recorded version
     conn.close()
@@ -847,25 +851,20 @@ def test_a_read_only_open_of_an_up_to_date_store_applies_nothing(tmp_path):
     assert after == before  # same versions AND same applied_at stamps: nothing re-ran
 
 
-def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_path, monkeypatch):
+def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_path):
     # The other direction, and the one that bites on the deploy box: a read-style
     # command takes NO run lease, so migrating here would silently upgrade a
     # store a RUNNING daemon owns and leave that daemon writing through a schema
     # it does not know. Refuse and tell the operator instead.
-    import contrib.hyperliquid_perp.persistence.db as db_module
-
     path = tmp_path / "behind.db"
     behind = sorted(MIGRATIONS)[-2]
-    older = {version: MIGRATIONS[version] for version in sorted(MIGRATIONS) if version <= behind}
-    monkeypatch.setattr(db_module, "MIGRATIONS", older)
-    with Database(path) as built:
+    with migrations_up_to(behind), Database(path) as built:
         assert stored_schema_version(built.conn) == behind
         # The LATEST migration's column (v11: ai_inputs.format_fingerprint) is
         # what a one-behind store must lack — re-point this when a new version
         # lands.
         assert "format_fingerprint" not in _columns(built.conn, "ai_inputs")
 
-    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
     with pytest.raises(SchemaVersionError, match="will not migrate"):
         Database(path, migrate=False)
 
@@ -889,19 +888,14 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
         assert "format_fingerprint" in _columns(upgraded.conn, "ai_inputs")
 
 
-def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_path, monkeypatch):
+def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_path):
     # Issue #129: the handle itself says whether the deferred upgrade is still
     # owed, so an owning command's "before I migrate" guards (the sibling
     # lease check) fire only when a migration would actually run. Behind →
     # owed until paid; current → nothing owed; ahead → refused at open, before
     # the caller can write anything; empty → built in full (nobody can own it).
-    import contrib.hyperliquid_perp.persistence.db as db_module
-
     path = tmp_path / "deferred.db"
-    older = {v: MIGRATIONS[v] for v in sorted(MIGRATIONS)[:-1]}
-    monkeypatch.setattr(db_module, "MIGRATIONS", older)
-    Database(path).close()
-    monkeypatch.setattr(db_module, "MIGRATIONS", MIGRATIONS)
+    build_store_at(path, sorted(MIGRATIONS)[-2])
 
     with Database(path, migrate=False, defer_migration=True) as behind:
         assert behind.migration_pending is True
@@ -925,6 +919,180 @@ def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_
     with Database(empty, migrate=False, defer_migration=True) as built:
         assert built.migration_pending is False
         assert stored_schema_version(built.conn) == SCHEMA_VERSION
+
+
+_FOREIGN_TABLE = (
+    "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT)",
+    "INSERT INTO notes (body) VALUES ('someone else''s data')",
+)
+# What Rails/ActiveRecord leaves in a database, migration bookkeeping and all —
+# the shape that makes `schema_migrations` useless as a token of OUR ownership.
+_RAILS_TABLES = (
+    "CREATE TABLE schema_migrations (version varchar NOT NULL PRIMARY KEY)",
+    "CREATE TABLE ar_internal_metadata (key varchar NOT NULL PRIMARY KEY)",
+    "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)",
+    "INSERT INTO schema_migrations (version) VALUES ('20260101120000')",
+)
+
+
+def _write_sqlite_file(path, *statements: str) -> None:
+    """Put statements into ``path`` over a raw connection — no Database, no policy."""
+    other = sqlite3.connect(str(path))
+    try:
+        for statement in statements:
+            other.execute(statement)
+        other.commit()
+    finally:
+        other.close()
+
+
+def _objects(path) -> set[str]:
+    """Every name in ``path``'s ``sqlite_master`` — the vocabulary the refusal judges on."""
+    probe = sqlite3.connect(str(path))
+    try:
+        return {row[0] for row in probe.execute("SELECT name FROM sqlite_master")}
+    finally:
+        probe.close()
+
+
+# Committed into a -wal that autocheckpointing was told to leave alone, in a
+# process that exits without closing: what a killed foreign application leaves
+# on disk, and the one state an in-process writer cannot produce (closing
+# checkpoints and unlinks the -wal).
+_CRASHED_WAL_WRITER = f"""
+import os, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("PRAGMA journal_mode = WAL")
+conn.execute("PRAGMA wal_autocheckpoint = 0")
+for statement in {_FOREIGN_TABLE!r}:
+    conn.execute(statement)
+conn.commit()
+os._exit(0)
+"""
+
+
+def _leave_a_crashed_wal(path) -> None:
+    subprocess.run([sys.executable, "-c", _CRASHED_WAL_WRITER, str(path)], check=True)
+    assert path.with_name(path.name + "-wal").exists()  # the state under test
+
+
+# All three schema policies, because each reached the damage by its own route:
+# the reporting open wrote its bookkeeping table on the way to refusing, the
+# deferring open skipped the refusal and built the whole schema, and the
+# migrating open (safe-mode) did the same without even deferring.
+_POLICIES = {
+    "migrating": {"migrate": True},
+    "reporting": {"migrate": False},
+    "deferring": {"migrate": False, "defer_migration": True},
+}
+
+
+@pytest.mark.parametrize("policy", _POLICIES.values(), ids=_POLICIES)
+@pytest.mark.parametrize(
+    ("kind", "tables"), [("plain", _FOREIGN_TABLE), ("self-migrating", _RAILS_TABLES)]
+)
+def test_a_foreign_database_is_refused_by_name_under_every_policy(tmp_path, policy, kind, tables):
+    # Issue #174: "EMPTY store" used to mean "no rows in schema_migrations",
+    # which another application's database satisfies just as well as a fresh
+    # file does. The most likely way to get here is a typo in --db, and the
+    # answer to that must be a refusal naming what it found, not a store's
+    # worth of tables added to someone else's database. The Rails-shaped case
+    # is why ownership is judged on db._STORE_TABLES and not on the presence of
+    # a schema_migrations table, which several other frameworks also carry.
+    path = tmp_path / f"someone-elses-{kind}.db"
+    _write_sqlite_file(path, *tables)
+    with pytest.raises(SchemaVersionError, match="not one of this project's stores"):
+        Database(path, **policy)
+
+
+@pytest.mark.parametrize("version", sorted(MIGRATIONS))
+def test_every_store_version_carries_the_tables_the_refusal_looks_for(version):
+    # The drift lock behind that verdict: a migration that renamed one of those
+    # tables out from under it would start refusing stores this build OWNS — a
+    # running daemon's own store, on its next restart. Every version a build can
+    # still meet is checked, v1 up.
+    conn = connect(":memory:")
+    try:
+        with migrations_up_to(version):
+            apply_migrations(conn)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+    finally:
+        conn.close()
+    assert set(db_module._STORE_TABLES) <= tables
+
+
+@pytest.mark.parametrize(
+    ("name", "prepare"),
+    [
+        ("default-journal.db", lambda p: _write_sqlite_file(p, *_FOREIGN_TABLE)),
+        (
+            "wal-clean.db",
+            lambda p: _write_sqlite_file(p, "PRAGMA journal_mode = WAL", *_FOREIGN_TABLE),
+        ),
+        ("wal-crashed.db", _leave_a_crashed_wal),
+    ],
+)
+def test_refusing_a_foreign_database_never_modifies_it(tmp_path, name, prepare):
+    # The refusal's whole content is "I did not touch it", so the assertion is
+    # the bytes. Each journal state is written by a different mechanism, and the
+    # crashed one is the reason the probe is read-only: see
+    # db._refuse_a_foreign_store.
+    path = tmp_path / name
+    prepare(path)
+    before = path.read_bytes()
+
+    for policy in _POLICIES.values():
+        with pytest.raises(SchemaVersionError, match="not one of this project's stores"):
+            Database(path, **policy)
+
+    assert path.read_bytes() == before
+    survivors = _objects(path)
+    assert "schema_migrations" not in survivors
+    assert "notes" in survivors
+
+
+def test_a_file_holding_only_sqlite_internal_objects_is_still_ours_to_build(tmp_path):
+    # The discriminating half of the refusal: sqlite_sequence survives DROP
+    # TABLE, so a file whose application tables are all gone holds nothing but
+    # SQLite's own bookkeeping. Nothing there says the file belongs to anyone,
+    # and treating it as foreign would refuse a store this build may build.
+    path = tmp_path / "emptied.db"
+    _write_sqlite_file(path, *_FOREIGN_TABLE)
+    _write_sqlite_file(path, "DROP TABLE notes")
+    assert _objects(path) == {"sqlite_sequence"}
+
+    with Database(path) as built:
+        assert stored_schema_version(built.conn) == SCHEMA_VERSION
+
+
+def test_a_file_holding_only_the_bookkeeping_table_is_still_ours_to_build(tmp_path):
+    # The state OLDER builds left lying around, so it is on deploy boxes now:
+    # stored_schema_version used to CREATE schema_migrations before reading it,
+    # so any reporting command run against a path that did not exist yet left
+    # an empty one behind. That file is still an empty store — refusing it as
+    # foreign would turn this fix into a fresh way to reject the operator's own
+    # store.
+    path = tmp_path / "touched-by-an-older-build.db"
+    _write_sqlite_file(path, SCHEMA_MIGRATIONS_DDL)
+
+    with Database(path, migrate=False, defer_migration=True) as built:
+        assert built.migration_pending is False
+        assert stored_schema_version(built.conn) == SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("opener", [connect, Database], ids=["connect", "Database"])
+def test_a_file_that_is_not_a_database_can_be_deleted_after_the_failed_open(tmp_path, opener):
+    # Issue #175: sqlite3.connect is lazy, so the first PRAGMA is what fails
+    # here — and the handle it failed on used to stay open with no reference to
+    # it, which on Windows locks the file against the unlink an operator (or
+    # this test) reaches for next. The error itself was always clear; only the
+    # leak was not.
+    path = tmp_path / "notes.txt"
+    path.write_bytes(b"this is not a database at all, not even close\n" * 10)
+
+    with pytest.raises(sqlite3.DatabaseError, match="file is not a database"):
+        opener(path)
+    path.unlink()  # the point of the test: no handle is still holding it
 
 
 # ---------------------------------------------------------------------------

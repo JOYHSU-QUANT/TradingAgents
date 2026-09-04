@@ -152,13 +152,17 @@ def backfill_pending_funding(
     posted = 0
     young_pending = 0
     stale_pending = 0
-    # ONE counter for every event that did not post, whatever the reason. The
-    # reasons differ and are told apart where telling them apart pays — in the
-    # six per-event messages below, which are what an operator acts on and
-    # what the tests assert: the three verdict lanes (corrupt row, funding
-    # reader, store error), the outer lane's "no lane claimed it", and the two
-    # tail guards (a result that never arrived, a status this loop has no word
-    # for). A counter per reason would only ever be read as this sum.
+    # ONE counter for every event this pass leaves unposted and still owing.
+    # (``already_posted`` is the documented exception above: nothing moved and
+    # nothing is owed, so it counts into neither total.) The reasons differ and
+    # are told apart where telling them apart pays — in the six per-event
+    # messages below, which are what an operator acts on: the three verdict
+    # lanes (corrupt row, funding reader, store error), the outer lane's "no
+    # lane claimed it", and the two tail guards (a result that never arrived, a
+    # status this loop has no word for). Five of the six are asserted by tests;
+    # the sixth — the missing result — is unreachable by construction and is
+    # documented as such where it is raised. A counter per reason would only
+    # ever be read as this sum.
     not_posted = 0
     for event in repo.iter_funding_events(db.conn, run_id, status="pending"):
         # Rebound per event, and never read across one: ``res`` is

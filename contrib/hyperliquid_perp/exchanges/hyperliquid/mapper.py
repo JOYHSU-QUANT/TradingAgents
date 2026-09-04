@@ -278,8 +278,8 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
         # negative magnitude) raise ``ValueError``, and this mapper let its
         # DTO's refusal out untranslated — the bulk mappers have always caught
         # it per element. (``map_account_snapshot`` and the position mapper
-        # still do let theirs out; their consumers compensate by widening to
-        # ``except (ExchangeError, ValueError)``. Tracked separately — the
+        # still do let theirs out; their consumers compensate by widening all
+        # the way to a bare ``except Exception``. Tracked separately — the
         # narrowing in this PR is on the snapshot path.) It mattered the moment consumers
         # started catching the venue-failure family and nothing wider (issue
         # #193): a ``"markPx": "0"`` would have reached ``paper.engine.tick``,

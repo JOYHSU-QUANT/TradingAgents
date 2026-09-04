@@ -97,8 +97,10 @@ def test_epoch_ms_floors_a_sub_millisecond_instant():
 def test_epoch_ms_refuses_a_naive_instant_naming_what_was_handed_in():
     # A naive instant would be read in the host's local zone — silently off
     # by the UTC offset — so it is refused by name, and the name is the
-    # caller's, REQUIRED (no anonymous refusal): the market-data reader pins
-    # its own wording through ``what``.
+    # caller's, REQUIRED (no anonymous refusal): each caller pins its own
+    # wording through ``what``. The label below is this test's own sample, not
+    # a live one — the two windowed reads now pass "candle window end" and
+    # "funding history window end" and pin those in ``test_market_data.py``.
     naive = datetime(2026, 8, 31, 8, 0)
     with pytest.raises(ValueError, match="^market data window end must be timezone-aware"):
         epoch_ms(naive, what="market data window end")

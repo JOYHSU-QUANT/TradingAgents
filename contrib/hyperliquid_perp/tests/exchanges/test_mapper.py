@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from decimal import Decimal
 
 import pytest
@@ -187,7 +188,9 @@ def test_candles_out_of_range_stamp_is_dropped_like_any_bad_bar(caplog):
         candles = mapper.map_candles(raw, max_drop_fraction=1.0)
     assert [c.open_time for c in candles] == [1000]
     assert "dropping malformed candleSnapshot[1]" in caplog.text
-    assert "outside the decodable" in caplog.text
+    # The whole sentence here too, for the same reason as the funding sibling:
+    # a fragment would survive this lane growing its own wording.
+    assert epoch_ms_out_of_range(Decimal("1788163200000000000"), what="field 'T'") in caplog.text
 
 
 def test_an_absurd_exponent_stamp_is_refused_without_materializing_it():
@@ -201,14 +204,24 @@ def test_an_absurd_exponent_stamp_is_refused_without_materializing_it():
     the exponent, which is what this test's own runtime demonstrates.
     """
     raw = [{"time": "1E+999999999", "fundingRate": "0.00001", "premium": "0"}]
+    started = time.perf_counter()
     with pytest.raises(MalformedResponseError, match="all 1 fundingHistory"):
         mapper.map_funding_history(raw)
+    elapsed = time.perf_counter() - started
+    # Bounded explicitly, because without this the ONLY way this test can
+    # report the check moving back after ``int()`` is by never returning — a
+    # wedged CI run instead of a red one. The margin is three orders of
+    # magnitude: the bounded refusal is microseconds, materializing the int is
+    # minutes, so this can be slow-machine-safe and still discriminate.
+    assert elapsed < 5.0, f"refusal took {elapsed:.1f}s — the bound moved after int()"
 
 
 def test_market_snapshot_translates_its_dtos_refusal():
     """A malformed price must reach consumers as an ``ExchangeError`` (issue #193).
 
-    The one mapper that returned its DTO's construction straight out: a
+    The one mapper ON THE SNAPSHOT PATH that returned its DTO's construction
+    straight out (``map_account_snapshot`` and the position mapper still do,
+    and are tracked separately): a
     ``"markPx": "0"`` raised ``MarketSnapshot``'s bare ``ValueError``, which is
     outside the venue-failure family the port's consumers now catch. It would
     have reached ``paper.engine.tick`` — ``@_fail_stop`` — and halted the

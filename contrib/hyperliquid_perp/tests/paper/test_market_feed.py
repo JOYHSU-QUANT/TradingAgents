@@ -141,6 +141,33 @@ def test_port_provider_sorts_a_non_venue_failure_into_its_own_outcome(caplog):
     assert result.outcome is not SnapshotOutcome.ERROR
 
 
+def test_port_provider_contains_a_backwards_clock_step_on_the_way_out(caplog):
+    """The containment covers the snapshot BUILD, not just the reader call.
+
+    ``PriceSnapshot`` enforces ``received_at >= requested_at``, and a host
+    clock stepped backwards mid-request (NTP correction, VM resume — the
+    RUNBOOK documents this happening) makes it refuse instants nobody passed
+    in. The venue answered perfectly well; leaving that construction outside
+    the guard would let a bare ``ValueError`` reach
+    ``engine.try_write_cycle_snapshot`` — not fail-stop, inside no broad
+    handler, running after the terminal trade — which is the exact crash-loop
+    shape this PR exists to remove.
+    """
+    clock = ManualClock(_T0)
+    market = _StubMarket(snapshot=_market_snapshot(D("49999")))
+    provider = PortSnapshotProvider(market, clock)
+    # The request was stamped a minute AFTER the clock now reads: time moved
+    # backwards between the two reads.
+    requested_at = _T0 + timedelta(minutes=1)
+    with caplog.at_level(logging.ERROR):
+        result = provider.fetch("BTC", requested_at=requested_at, timeout_seconds=D(5))
+    assert result.outcome is SnapshotOutcome.DEFECT  # ours, and it did not escape
+    assert result.snapshot is None
+    assert "defect on our side, not an exchange outage" in "\n".join(
+        r.getMessage() for r in caplog.records
+    )
+
+
 def test_port_provider_timeout_on_slow_response():
     clock = ManualClock(_T0)
     market = _StubMarket(snapshot=_market_snapshot(D("49999")), delay_s=6)

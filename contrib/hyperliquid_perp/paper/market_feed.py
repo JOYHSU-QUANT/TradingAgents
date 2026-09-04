@@ -230,9 +230,17 @@ class PortSnapshotProvider:
 
     No failure of the REQUEST escapes as an exception — see
     :class:`SnapshotOutcome`'s ``DEFECT`` for the call sites that depend on
-    that. (The timeout argument is validated before the request, and the
-    ``PriceSnapshot`` built on the way out enforces its own invariants; both
-    are caller bugs rather than answers about the market.)
+    that. Everything from the reader's return onwards sits inside that same
+    guard, including the ``PriceSnapshot`` built on the way out: it enforces
+    ``received_at >= requested_at``, and a host clock stepped backwards
+    mid-request (NTP correction, VM resume — RUNBOOK §"本機時鐘跳了") makes it
+    reject instants nobody passed in. That is an answer about our clock, not a
+    caller bug, and it must not reach ``engine.try_write_cycle_snapshot``,
+    which runs after the terminal trade and inside no broad handler.
+
+    The one thing validated BEFORE the request is the timeout argument: a
+    nonsensical budget is the caller's error and there is no answer about the
+    market to report on yet.
     """
 
     def __init__(self, market: ExchangeMarketData, clock: Clock) -> None:
@@ -245,6 +253,28 @@ class PortSnapshotProvider:
         budget = _timeout_timedelta(timeout_seconds)
         try:
             snap = self._market.get_market_snapshot(coin)
+            received_at = self._clock.now()
+            # A response that took longer than the budget is stale by the freshness
+            # rule regardless of its contents — treat it as the timeout it exceeded.
+            if received_at - requested_at > budget:
+                return SnapshotResult.failure(
+                    SnapshotOutcome.TIMEOUT, requested_at=requested_at, received_at=received_at
+                )
+            if snap.mid_price is None:
+                # Both prices are required for a valid tick; a mark-only snapshot must
+                # never be promoted into a fill (execution §5.2).
+                return SnapshotResult.failure(
+                    SnapshotOutcome.INVALID, requested_at=requested_at, received_at=received_at
+                )
+            return SnapshotResult.ok(
+                PriceSnapshot(
+                    coin=coin,
+                    mark_price=snap.mark_price,
+                    mid_price=snap.mid_price,
+                    requested_at=requested_at,
+                    received_at=received_at,
+                )
+            )
         except ExchangeError as exc:
             # The VENUE failed — the port's contract (``ports.ExchangeMarketData``).
             # Log the cause before collapsing to the ERROR outcome: downstream this
@@ -283,28 +313,6 @@ class PortSnapshotProvider:
             return SnapshotResult.failure(
                 SnapshotOutcome.DEFECT, requested_at=requested_at, received_at=self._clock.now()
             )
-        received_at = self._clock.now()
-        # A response that took longer than the budget is stale by the freshness
-        # rule regardless of its contents — treat it as the timeout it exceeded.
-        if received_at - requested_at > budget:
-            return SnapshotResult.failure(
-                SnapshotOutcome.TIMEOUT, requested_at=requested_at, received_at=received_at
-            )
-        if snap.mid_price is None:
-            # Both prices are required for a valid tick; a mark-only snapshot must
-            # never be promoted into a fill (execution §5.2).
-            return SnapshotResult.failure(
-                SnapshotOutcome.INVALID, requested_at=requested_at, received_at=received_at
-            )
-        return SnapshotResult.ok(
-            PriceSnapshot(
-                coin=coin,
-                mark_price=snap.mark_price,
-                mid_price=snap.mid_price,
-                requested_at=requested_at,
-                received_at=received_at,
-            )
-        )
 
 
 class ScriptedSnapshotProvider:

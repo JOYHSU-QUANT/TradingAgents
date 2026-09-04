@@ -1975,9 +1975,10 @@ def test_history_funding_source_survives_an_out_of_range_stamp_in_the_window():
     catches ``ValueError`` and ``InvalidOperation`` but not that.
 
     Driven through the REAL mapper, not a hand-built point list: the fix works
-    by making the boundary refuse the stamp as a ``ValueError`` the per-point
-    handler already drops, and a fake that skipped the mapper would skip the
-    fix too. The poisoned hour reads ``None`` — pending, retried next pass —
+    by making the boundary refuse the stamp as a ``MalformedResponseError`` —
+    the second arm of the per-point ``except (ValueError,
+    MalformedResponseError)`` that already drops and counts bad points — and a
+    fake that skipped the mapper would skip the fix too. The poisoned hour reads ``None`` — pending, retried next pass —
     and the good hour in the same response still resolves.
     """
     from contrib.hyperliquid_perp.cli import _HistoryFundingSource

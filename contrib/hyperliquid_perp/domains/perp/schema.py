@@ -200,7 +200,7 @@ def _require_venue_stamp(value: object, *, what: str) -> None:
     and count, so one absurd stamp costs one bar or one point, not the run.
     A scripted or backtest feed building these by hand (the reason ``ports``
     exists) is covered by the same guard rather than by the wire path's
-    ``int(_dec(...))``.
+    ``mapper._stamp``.
 
     ``ValueError``, not ``TypeError``, for the type check too (issue #193).
     ``TypeError`` is exactly the family that escapes those handlers, so the

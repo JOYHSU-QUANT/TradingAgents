@@ -185,8 +185,8 @@ Breaking changes within the 0.x line are called out explicitly.
   an ERROR outcome, so that same drifted signature read as an exchange outage
   and left market data paused forever, one WARNING per tick, about an
   exchange that was answering; it now catches only the venue-failure family,
-  which ``ports.ExchangeMarketData`` states as the contract all three of that
-  reader's consumers share. That failure now sorts into two outcomes instead
+  which ``ports.ExchangeMarketData`` now states as the contract that reader's
+  consumers share. That failure now sorts into two outcomes instead
   of one: the venue's stays ``ERROR``, while ours becomes a new ``DEFECT``
   carrying an ERROR-level traceback. Sorted rather than raised, deliberately —
   ``fetch`` returning for every failure is a property all five of its call
@@ -195,6 +195,11 @@ Breaking changes within the 0.x line are called out explicitly.
   a raise there would end the daemon after the terminal row committed, with no
   halt breadcrumb; the paper loop does not wrap its tick the way the live loop
   does, so a raise would also have traded a silent stall for a crash-loop.
+  The containment covers the whole answer, not just the reader call: the
+  ``PriceSnapshot`` built on the way out enforces ``received_at >=
+  requested_at``, so a host clock stepped backwards mid-request (an NTP
+  correction, a resumed VM) used to refuse instants nobody passed in and
+  escape as a bare ``ValueError`` through that same unwrapped call site.
   Making the narrowing safe required ``mapper.map_market_snapshot`` — which
   returned its DTO's construction untranslated — to raise its
   ``MarketSnapshot`` refusals (a ``"markPx": "0"``) as

@@ -734,10 +734,13 @@ def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatc
     )
 
     def drifted(*args, **kwargs):
-        # Deliberately NOT a TypeError/ValueError: those are claimed by the
-        # corrupt-row lane (a wrong-typed column reaches
-        # Decimal/fromisoformat as one). This has to be a type no inner lane lists, which is the whole
-        # category the outer lane exists for.
+        # Deliberately NOT a ValueError: that one IS claimed by the corrupt-row
+        # lane wrapped around this call. (A ``TypeError`` out of here would
+        # reach the outer lane too — this call deliberately does not list it,
+        # so that signature drift is never reported as a corrupt row — but
+        # ``RuntimeError`` makes the point without depending on that.) It has
+        # to be a type no inner lane lists, which is the whole category the
+        # outer lane exists for.
         raise RuntimeError("the reconciler asked accounting for something it no longer does")
 
     monkeypatch.setattr(accounting, "record_funding", drifted)
@@ -752,6 +755,44 @@ def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatc
     # Not misfiled as either of the verdicts that send an operator somewhere.
     assert not any("fix it in the store" in m for m in messages)
     assert not any("the funding reader failed" in m for m in messages)
+    db.close()
+
+
+def test_backfill_names_a_result_status_it_has_no_verdict_for(tmp_path, caplog, monkeypatch):
+    """A grown result vocabulary must not be announced as "already posted".
+
+    The other tail guard. ``record_funding``'s vocabulary is the loop's to
+    keep up with, and the failure mode of falling through to the branch above
+    would be a claim about the BOOKS — "the settlement is already posted" —
+    made about a status nobody here understands. It stays unposted instead,
+    and says which word it did not know.
+    """
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,
+        mark_price=_MARK,
+    )
+
+    class _GrownVocabulary:
+        status = "reversed"
+
+    monkeypatch.setattr(accounting, "record_funding", lambda *a, **k: _GrownVocabulary())
+    with caplog.at_level(logging.WARNING):
+        posted, still_pending = reconcile_module.backfill_pending_funding(
+            db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+        )
+
+    assert (posted, still_pending) == (0, 1)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("got an unrecognised result 'reversed'" in m for m in messages)
+    # Not silently absorbed by the already-posted branch it sits next to.
+    assert not any("already posted under another event id" in m for m in messages)
     db.close()
 
 

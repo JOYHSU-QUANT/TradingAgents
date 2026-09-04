@@ -455,6 +455,12 @@ def test_the_out_of_range_message_names_the_field_even_for_an_absurd_stamp():
     # field — the anonymous failure this whole guard replaces.
     with pytest.raises(ValueError, match=r"FundingPoint\.time .* outside the decodable"):
         FundingPoint(time=10**5000, rate=Decimal("0.0001"))
+    # The NEGATIVE side renders through its own branch (the ``> 0`` floor, not
+    # the upper bound), and it needs the same exponent treatment for the same
+    # reason. Driving only ``0`` and ``-1`` takes the small-int path and would
+    # leave a raw-``int`` regression here green.
+    with pytest.raises(ValueError, match=r"FundingPoint\.time must be > 0"):
+        FundingPoint(time=-(10**5000), rate=Decimal("0.0001"))
 
 
 def test_candle_checks_its_stamps_before_ordering_them():

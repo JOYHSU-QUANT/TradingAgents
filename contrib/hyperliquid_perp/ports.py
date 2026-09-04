@@ -38,13 +38,13 @@ class ExchangeMarketData(Protocol):
     raising :class:`~.exchanges.hyperliquid.errors.ExchangeError` or a
     subclass, and consumers catch that family and nothing wider. Anything else
     reaching a consumer is a defect on our side, and it must be allowed to say
-    so. Written down because prose was all that held it and the three
-    consumers had already drifted to three different answers:
-    ``engine_bridge`` caught nothing, ``cli._provider``'s rate lookup caught
-    the family, and ``paper.market_feed`` caught everything — where a drifted
-    call signature read as an exchange outage and left market data paused
-    forever, one WARNING per tick, about an exchange that was answering
-    (issues #157, #193). A scripted or backtest feed dropped in here owes the
+    so. Written down because prose was all that held it and the consumers had
+    already drifted apart: ``engine_bridge`` caught nothing, ``cli.smoke``'s
+    mark read sits outside its own ``ExchangeError`` handler, ``cli._provider``'s
+    rate lookup caught the family, and ``paper.market_feed`` caught everything
+    — where a drifted call signature read as an exchange outage and left market
+    data paused forever, one WARNING per tick, about an exchange that was
+    answering (issues #157, #193). A scripted or backtest feed dropped in here owes the
     same discipline: a simulated venue failure is an ``ExchangeError``, and a
     bug in the script must not be able to impersonate one.
 

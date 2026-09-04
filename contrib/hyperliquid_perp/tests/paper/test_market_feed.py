@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from contrib.hyperliquid_perp.domains.perp.schema import MarketSnapshot
+from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.market_feed import (
     PortSnapshotProvider,
@@ -100,11 +102,70 @@ def test_port_provider_missing_mid_is_invalid():
 
 
 def test_port_provider_error_on_raise():
+    # A VENUE failure — the port's declared contract (``ports.ExchangeMarketData``)
+    # — is what becomes ERROR. The fake raises that family, not a bare
+    # ``RuntimeError``: driving this path with an arbitrary exception kept
+    # passing under the broad ``except Exception`` this replaced, which is how
+    # a drifted call signature came to read as an outage.
     clock = ManualClock(_T0)
-    market = _StubMarket(raise_exc=RuntimeError("boom"))
+    market = _StubMarket(raise_exc=ExchangeRequestError("venue refused"))
     provider = PortSnapshotProvider(market, clock)
     result = provider.fetch("BTC", requested_at=_T0, timeout_seconds=D(5))
     assert result.outcome is SnapshotOutcome.ERROR
+
+
+def test_port_provider_sorts_a_non_venue_failure_into_its_own_outcome(caplog):
+    """OUR defect and the venue's outage stop being the same outcome (issue #157).
+
+    A call site drifted from the reader's signature raises ``TypeError``.
+    Collapsed into ``ERROR`` it read as an exchange outage and left market data
+    paused forever, one WARNING per tick, about an exchange that was answering.
+    It is now ``DEFECT``, logged at ERROR with a traceback.
+
+    Still RETURNED, never raised: ``fetch`` is called bare by
+    ``engine.try_write_cycle_snapshot``, which is not fail-stop and sits in no
+    broad handler, so a raise would end the daemon after the terminal row had
+    committed — trading a silent stall for a crash-loop.
+    """
+    clock = ManualClock(_T0)
+    market = _StubMarket(raise_exc=TypeError("get_market_snapshot() takes 1 argument"))
+    provider = PortSnapshotProvider(market, clock)
+    with caplog.at_level(logging.ERROR):
+        result = provider.fetch("BTC", requested_at=_T0, timeout_seconds=D(5))
+    assert result.outcome is SnapshotOutcome.DEFECT
+    assert result.snapshot is None
+    assert not result.is_valid
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "defect on our side, not an exchange outage" in message
+    # The two verdicts must stay distinguishable, which is the entire point.
+    assert result.outcome is not SnapshotOutcome.ERROR
+
+
+def test_port_provider_contains_a_backwards_clock_step_on_the_way_out(caplog):
+    """The containment covers the snapshot BUILD, not just the reader call.
+
+    ``PriceSnapshot`` enforces ``received_at >= requested_at``, and a host
+    clock stepped backwards mid-request (NTP correction, VM resume — the
+    RUNBOOK documents this happening) makes it refuse instants nobody passed
+    in. The venue answered perfectly well; leaving that construction outside
+    the guard would let a bare ``ValueError`` reach
+    ``engine.try_write_cycle_snapshot`` — not fail-stop, inside no broad
+    handler, running after the terminal trade — which is the exact crash-loop
+    shape this PR exists to remove.
+    """
+    clock = ManualClock(_T0)
+    market = _StubMarket(snapshot=_market_snapshot(D("49999")))
+    provider = PortSnapshotProvider(market, clock)
+    # The request was stamped a minute AFTER the clock now reads: time moved
+    # backwards between the two reads.
+    requested_at = _T0 + timedelta(minutes=1)
+    with caplog.at_level(logging.ERROR):
+        result = provider.fetch("BTC", requested_at=requested_at, timeout_seconds=D(5))
+    assert result.outcome is SnapshotOutcome.DEFECT  # ours, and it did not escape
+    assert result.snapshot is None
+    assert "defect on our side, not an exchange outage" in "\n".join(
+        r.getMessage() for r in caplog.records
+    )
 
 
 def test_port_provider_timeout_on_slow_response():

@@ -588,10 +588,16 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
     for event in pending_events:
         try:
             settlement = parse_instant(event["funding_timestamp"])
-        except ValueError:
+        except (ValueError, TypeError):
             # backfill_pending_funding's vocabulary: an unparseable stored
             # timestamp is a *corrupt* row, not a stale one — it resolves only
             # by repairing the store, so it gets its own warning line.
+            # ``TypeError`` for the same reason the backfill lists it: a cell
+            # of the wrong type (a BLOB — TEXT affinity does not convert one)
+            # reaches ``datetime.fromisoformat`` as one, and
+            # catching only ``ValueError`` here made the acceptance validator
+            # DIE (exit 2) on precisely the corrupt row the backfill survives
+            # and reports. The two readers of this column must agree.
             corrupt_pending += 1
             continue
         if now - settlement >= STALE_PENDING_FUNDING:

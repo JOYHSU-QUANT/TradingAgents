@@ -126,6 +126,16 @@ def from_epoch_ms(ms: int) -> datetime:
     malformed-response error, so the ``TypeError`` here is for a caller bug,
     not for bad data. An out-of-range value raises ``OverflowError`` from
     ``timedelta`` itself, as the float route did from ``fromtimestamp``.
+
+    That range is published as ``constants.MIN_EPOCH_MS`` /
+    ``constants.MAX_EPOCH_MS`` for the callers that must refuse an undecodable
+    stamp BEFORE it reaches here: ``OverflowError`` is neither an
+    ``ExchangeError`` nor a ``ValueError``, so it slips through every
+    venue-failure and malformed-row handler between the wire and this call and
+    ends the run (issue #191). ``domains/perp/schema``'s two venue-stamp DTOs
+    hold the bound at construction; a drift pin in ``tests/common/test_instants``
+    keeps the published range equal to what this function actually accepts, so
+    the two can never disagree about where the edge is.
     """
     if isinstance(ms, bool) or not isinstance(ms, int):
         raise TypeError(f"epoch milliseconds must be an int, got {type(ms).__name__}")

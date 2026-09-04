@@ -7,7 +7,7 @@ reason ``config.load_config`` had to lazy-import ``live.config``.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 __all__ = [
@@ -16,6 +16,8 @@ __all__ = [
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
     "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
+    "MAX_EPOCH_MS",
+    "MIN_EPOCH_MS",
     "MIN_VOLUME_PROFILE_WINDOW",
     "POC_LOWER_BAND",
     "POC_UPPER_BAND",
@@ -174,3 +176,24 @@ ERROR_TYPES = frozenset(
 # ``marginal_cost``, which computes it) because ``schema`` re-derives the
 # stored value against it at construction and cannot import the pricer.
 HOLDING_COST_HOURS = 8
+
+# The epoch-millisecond range ``common.instants.from_epoch_ms`` can decode:
+# exactly the stamps that land inside ``datetime``'s own range. DERIVED from
+# ``datetime.min`` / ``datetime.max``, never transcribed — the decoder is
+# ``_EPOCH + timedelta(milliseconds=ms)``, and a hand-copied literal would be a
+# second, silently forkable statement of what ``datetime`` accepts.
+#
+# Here rather than beside the decoder for the reason ``MIN_VOLUME_PROFILE_WINDOW``
+# was extracted above: ``domains/perp/schema`` enforces this bound on its two
+# venue-stamp DTOs (``Candle``, ``FundingPoint``) and sits inside the config
+# loader's load-time import closure, which ``tests/common/test_layering.py``
+# locks to this module and four others. The dependency runs one way only —
+# ``common.instants`` cites these in prose but must not be imported by the
+# closure — so the epoch and millisecond below are a second spelling of that
+# module's own. A drift pin in ``tests/common/test_instants.py`` is what keeps
+# the two honest: it holds this range to what the decoder actually accepts,
+# from both sides of both edges, so the fork cannot open silently.
+_MS = timedelta(milliseconds=1)
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+MIN_EPOCH_MS = (datetime.min.replace(tzinfo=timezone.utc) - _UTC_EPOCH) // _MS
+MAX_EPOCH_MS = (datetime.max.replace(tzinfo=timezone.utc) - _UTC_EPOCH) // _MS

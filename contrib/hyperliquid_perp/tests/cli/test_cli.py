@@ -1908,7 +1908,7 @@ class _DriftedMarket:
 
 class _RefusingMarket:
     def get_funding_history(self, coin, days, *, end):
-        raise ValueError("market data window end must be timezone-aware (UTC)")
+        raise ValueError("funding history window end must be timezone-aware (UTC)")
 
 
 @pytest.mark.parametrize(
@@ -1961,6 +1961,48 @@ def test_history_funding_source_buckets_points_by_the_hour_of_their_stamp():
     assert source.rate_at("BTC", noon) == Decimal("0.0001")
     assert source.rate_at("BTC", one_pm) == Decimal("-0.0002")
     assert source.rate_at("BTC", noon - timedelta(hours=1)) is None
+    assert source._consecutive_failures == {}
+
+
+def test_history_funding_source_survives_an_out_of_range_stamp_in_the_window():
+    """Issue #191 end to end: one absurd stamp costs its hour, not the run.
+
+    The seam where the run used to die. This lookup decodes EVERY point of the
+    fetched window, outside its own ``except ExchangeError``, so a venue
+    ``"time"`` in nanoseconds raised ``OverflowError`` right here — through
+    the engine's ``@_fail_stop`` funding loop (engine halted, daemon exit 2,
+    no shutdown export) and through the backfill pass's corrupt lane, which
+    catches ``ValueError`` and ``InvalidOperation`` but not that.
+
+    Driven through the REAL mapper, not a hand-built point list: the fix works
+    by making the boundary refuse the stamp as a ``MalformedResponseError`` —
+    the second arm of the per-point ``except (ValueError,
+    MalformedResponseError)`` that already drops and counts bad points — and a
+    fake that skipped the mapper would skip the fix too. The poisoned hour reads ``None`` — pending, retried next pass —
+    and the good hour in the same response still resolves.
+    """
+    from contrib.hyperliquid_perp.cli import _HistoryFundingSource
+    from contrib.hyperliquid_perp.common.instants import epoch_ms
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
+
+    noon = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
+    one_pm = noon + timedelta(hours=1)
+    raw = [
+        {"time": epoch_ms(noon, what="x"), "fundingRate": "0.0001", "coin": "BTC"},
+        # Nanoseconds where milliseconds belong — venue drift, or any integer
+        # past ``datetime``'s range.
+        {"time": "1788163200000000000", "fundingRate": "-0.0002", "coin": "BTC"},
+    ]
+
+    class _DriftingMarket:
+        def get_funding_history(self, coin, days, *, end):
+            return mapper.map_funding_history(raw, expected_coin=coin, max_drop_fraction=1.0)
+
+    source = _HistoryFundingSource(_DriftingMarket())
+    assert source.rate_at("BTC", noon) == Decimal("0.0001")
+    assert source.rate_at("BTC", one_pm) is None  # pending, not a crashed run
+    # Not a venue failure either: the counter must not escalate toward the
+    # ERROR that reads as an endpoint outage.
     assert source._consecutive_failures == {}
 
 

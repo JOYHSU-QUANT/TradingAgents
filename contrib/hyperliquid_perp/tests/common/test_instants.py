@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from contrib.hyperliquid_perp.common.constants import MAX_EPOCH_MS, MIN_EPOCH_MS
 from contrib.hyperliquid_perp.common.instants import (
     delta_ms,
     epoch_ms,
@@ -96,8 +97,10 @@ def test_epoch_ms_floors_a_sub_millisecond_instant():
 def test_epoch_ms_refuses_a_naive_instant_naming_what_was_handed_in():
     # A naive instant would be read in the host's local zone — silently off
     # by the UTC offset — so it is refused by name, and the name is the
-    # caller's, REQUIRED (no anonymous refusal): the market-data reader pins
-    # its own wording through ``what``.
+    # caller's, REQUIRED (no anonymous refusal): each caller pins its own
+    # wording through ``what``. The label below is this test's own sample, not
+    # a live one — the two windowed reads now pass "candle window end" and
+    # "funding history window end" and pin those in ``test_market_data.py``.
     naive = datetime(2026, 8, 31, 8, 0)
     with pytest.raises(ValueError, match="^market data window end must be timezone-aware"):
         epoch_ms(naive, what="market data window end")
@@ -120,3 +123,33 @@ def test_from_epoch_ms_overflows_like_the_float_route_did():
     # wire-boundary ``except`` clauses that list OverflowError still hold.
     with pytest.raises(OverflowError):
         from_epoch_ms(10**20)
+
+
+def test_the_published_epoch_ms_range_is_exactly_what_the_decoder_accepts():
+    # The DRIFT PIN behind ``constants.MIN_EPOCH_MS`` / ``MAX_EPOCH_MS``
+    # (issue #191). ``domains.perp.schema`` refuses a venue stamp outside that
+    # range so an ``OverflowError`` — which is neither an ``ExchangeError`` nor
+    # a ``ValueError``, and so escapes every handler between the wire and the
+    # decode — can never be raised in production. That guard is only as good as
+    # the constants agreeing with the decoder, and the two are declared in
+    # different modules (``schema`` sits inside the config loader's locked
+    # import closure and cannot reach ``instants``).
+    #
+    # Both edges, from both sides: each bound decodes, and one millisecond
+    # further out does not. A bound transcribed as a literal, or drifting a
+    # millisecond if ``datetime``'s range ever moved, fails here rather than
+    # in a paper run.
+    assert from_epoch_ms(MAX_EPOCH_MS).year == 9999
+    assert from_epoch_ms(MIN_EPOCH_MS).year == 1
+    with pytest.raises(OverflowError):
+        from_epoch_ms(MAX_EPOCH_MS + 1)
+    with pytest.raises(OverflowError):
+        from_epoch_ms(MIN_EPOCH_MS - 1)
+
+
+def test_the_epoch_ms_range_round_trips_through_epoch_ms():
+    # The bounds are stamps, not merely numbers the decoder tolerates: the
+    # module's own round-trip identity has to hold at the very edges, or the
+    # guard would be admitting a value the rest of the pipeline cannot carry.
+    for edge in (MIN_EPOCH_MS, MAX_EPOCH_MS):
+        assert epoch_ms(from_epoch_ms(edge), what="range edge") == edge

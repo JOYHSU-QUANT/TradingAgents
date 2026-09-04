@@ -148,6 +148,51 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: one out-of-range venue timestamp costs its own bar or
+  hour, not the run** (issue #191; the #193 tail). ``Candle`` and
+  ``FundingPoint`` carry the venue's stamps as bare epoch-millisecond ints,
+  and nothing bounded them. A ``fundingHistory`` point stamped in nanoseconds
+  — venue drift, or any integer past ``datetime``'s range — therefore reached
+  ``from_epoch_ms`` in the funding-rate lookup, which decodes every point of
+  a fetched window outside its own ``except ExchangeError``. The
+  ``OverflowError`` that came back is neither an ``ExchangeError`` nor a
+  ``ValueError``, so it slipped every handler between the wire and that
+  decode: the paper engine's funding loop is ``@_fail_stop``, so the engine
+  halted and the daemon exited with no shutdown export, while the
+  pending-funding backfill pass — which is contractually never allowed to
+  abort — aborted, and a supervised restart re-fetched the same response and
+  crash-looped on it. The decodable range is now published as
+  ``common.constants.MIN_EPOCH_MS`` / ``MAX_EPOCH_MS``, derived from
+  ``datetime``'s own limits and held equal to what the decoder accepts by a
+  drift pin, and it is enforced twice on purpose: at the wire, where the
+  mapper refuses the stamp on the ``Decimal`` BEFORE ``int()`` (an
+  ``"1E+999999999"`` is finite, so converting first would wedge the fetch
+  materializing a billion digits) as the ``MalformedResponseError`` its
+  per-element handler already drops and counts; and at the two DTOs, whose
+  ``__post_init__`` now also names a non-``int`` stamp, covering the
+  scripted and backtest feeds ``ports`` exists for. The poisoned hour reads
+  as pending and retries; the good points in the same response still resolve.
+- **hyperliquid_perp: a failing funding reader no longer reads as a corrupt
+  stored row, and the market-data port's exception contract is written down**
+  (issue #193). Three fixes to one confusion — which failures are the
+  venue's. The funding backfill wrapped the rate lookup in the same handler
+  as the stored fields, so a defect of ours (a drifted call signature, a
+  naive clock) was logged as "corrupt stored row; fix it in the store" and
+  sent an operator to SQLite to hunt a fault in the code; the reader now has
+  its own contained lane, logged apart with its traceback and counted into
+  the still-pending total, and the runbook names the line.
+  ``PortSnapshotProvider.fetch`` caught every exception and collapsed it to
+  an ERROR outcome, so that same drifted signature read as an exchange outage
+  and left market data paused forever, one WARNING per tick, about an
+  exchange that was answering; it now catches only the venue-failure family,
+  which ``ports.ExchangeMarketData`` states as the contract all three of that
+  reader's consumers share. Making that true required
+  ``mapper.map_market_snapshot`` — the one mapper that returned its DTO's
+  construction untranslated — to raise its ``MarketSnapshot`` refusals (a
+  ``"markPx": "0"``) as ``MalformedResponseError`` too, and a null coin name
+  in the universe no longer raises a bare ``TypeError`` from inside the
+  unknown-coin message itself. Finally the two windowed reads no longer share
+  one refusal wording, so a naive ``end`` says which read was handed it.
 - **hyperliquid_perp: the live daemon no longer crash-loops on a stored
   decision response that fails to re-parse** (issue #180; the #181 tail).
   ``LiveDecisionDriver.resume_startup`` rebuilds a stranded cycle from its

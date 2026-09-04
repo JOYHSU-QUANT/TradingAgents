@@ -16,7 +16,7 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
-from contrib.hyperliquid_perp.paper import accounting
+from contrib.hyperliquid_perp.paper import accounting, reconcile as reconcile_module
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine
@@ -180,17 +180,23 @@ def test_pending_funding_backfills_exactly_once(tmp_path):
     db.close()
 
 
-def test_force_cycle_survives_crash_before_replay(tmp_path):
+def test_force_cycle_survives_crash_before_replay(tmp_path, monkeypatch):
     """The step-8 force commits with the cancels, not a later transaction.
 
     A crash during the funding/replay work after the cancels must not strand the
     store with canceled plans but the *old* next_decision_at — that would idle the
     position until the stale clock (up to 4h) while a re-run, finding the plans
     already canceled_restart, rebuilds an empty canceled list and never re-forces.
+
+    The crash is injected at the backfill CALL, not inside it through a raising
+    ``rate_at``: every lane within that pass is contained on purpose (the pass
+    may never abort — issue #193), so driving this through the reader would be
+    asserting the containment is absent. What this pins is the commit
+    boundary, whatever it is that fails after the cancels.
     """
     db = _init(tmp_path)
     clock, plan_id = _engine_with_plan(db, slices_filled=1)  # non-flat, live plan
-    accounting.record_funding(  # a pending event so backfill calls the source
+    accounting.record_funding(  # a pending event so backfill has work to do
         db,
         run_id="r",
         mode="paper",
@@ -201,13 +207,13 @@ def test_force_cycle_survives_crash_before_replay(tmp_path):
         mark_price=_MARK,
     )
 
-    class _Boom:
-        def rate_at(self, coin, ts):
-            raise RuntimeError("network down mid-backfill")
+    def boom(*args, **kwargs):
+        raise RuntimeError("network down mid-backfill")
 
+    monkeypatch.setattr(reconcile_module, "backfill_pending_funding", boom)
     now = clock.now() + timedelta(minutes=5)
     with pytest.raises(RuntimeError, match="network down"):
-        reconcile_on_restart(db, run_id="r", now=now, funding_source=_Boom())
+        reconcile_on_restart(db, run_id="r", now=now, funding_source=_Rates(D("0.0001")))
 
     # The cancel + force committed before the crash — the force signal is durable.
     assert repo.get_execution_plan(db.conn, plan_id)["status"] == "canceled_restart"
@@ -582,6 +588,119 @@ def test_backfill_contains_corrupt_stored_row(tmp_path, caplog):
     assert not any("still unavailable" in r.getMessage() for r in caplog.records)
     # The good event moved the wallet exactly once; the corrupt one never did.
     assert repo.get_current_account_state(db.conn, "r").wallet_balance == D("999.995")
+    db.close()
+
+
+def test_backfill_reads_a_reader_failure_apart_from_a_corrupt_row(tmp_path, caplog):
+    """A failing funding READER is not a corrupt stored row (issue #193).
+
+    Both are contained per event — the pass may never abort — but they send an
+    operator to opposite places. ``rate_at`` answers a venue failure with
+    ``None`` and lets everything else through on purpose (issue #157), so what
+    lands here is a defect of ours: a drifted signature, a naive clock. Filed
+    under "corrupt stored row; fix it in the store", it sent that operator to
+    SQLite to hunt a fault that was in the code.
+    """
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,  # pending, so the backfill calls the reader
+        mark_price=_MARK,
+    )
+
+    class _BrokenReader:
+        def rate_at(self, coin, ts):
+            raise ValueError("market data window end must be timezone-aware (UTC)")
+
+    with caplog.at_level(logging.ERROR):
+        posted, still_pending = reconcile_module.backfill_pending_funding(
+            db, run_id="r", now=_T0, funding_source=_BrokenReader()
+        )
+
+    # The pass completed and the event stays pending — it did not post, so it
+    # still counts, whatever the reason.
+    assert (posted, still_pending) == (0, 1)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("the funding reader failed" in m for m in messages)
+    # The verdict an operator acts on: NOT the store.
+    assert not any("fix it in the store" in m for m in messages)
+    assert repo.get_current_account_state(db.conn, "r").wallet_balance == D("1000")
+    db.close()
+
+
+def test_backfill_still_reads_a_corrupt_stored_timestamp_as_a_corrupt_row(tmp_path, caplog):
+    # The stored timestamp is now parsed in its own ``try``, ahead of the
+    # reader, so its verdict had to be carried across the split deliberately:
+    # a naive/garbled ``funding_timestamp`` IS a bad row, and must keep saying
+    # so. Both ends of the split are pinned — this one and the reader lane
+    # above — because the whole point is that they differ.
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,
+        mark_price=_MARK,
+    )
+    with db.transaction() as conn:
+        conn.execute("UPDATE funding_events SET funding_timestamp = ?", ("not-a-timestamp",))
+
+    with caplog.at_level(logging.ERROR):
+        posted, still_pending = reconcile_module.backfill_pending_funding(
+            db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+        )
+
+    assert (posted, still_pending) == (0, 1)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("fix it in the store" in m for m in messages)
+    assert not any("the funding reader failed" in m for m in messages)
+    db.close()
+
+
+def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatch):
+    """"Never allowed to abort" must not depend on the handler lists.
+
+    Those lists are exactly what issue #191 got through — an ``OverflowError``
+    no lane named. A ``TypeError`` out of ``record_funding`` is the same shape
+    and still reaches nothing enumerated, so the guarantee is structural: an
+    outer per-event handler gives the event a verdict whatever was raised, and
+    says in its own words that this one is a defect to read the traceback for.
+    """
+    db = _init(tmp_path)
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=_T0,
+        position_size=D("0.001"),
+        funding_rate=None,
+        mark_price=_MARK,
+    )
+
+    def drifted(*args, **kwargs):
+        raise TypeError("record_funding() got an unexpected keyword argument 'source'")
+
+    monkeypatch.setattr(accounting, "record_funding", drifted)
+    with caplog.at_level(logging.ERROR):
+        posted, still_pending = reconcile_module.backfill_pending_funding(
+            db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+        )
+
+    assert (posted, still_pending) == (0, 1)  # the pass finished; the event stays pending
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("no lane claimed it" in m for m in messages)
+    # Not misfiled as either of the verdicts that send an operator somewhere.
+    assert not any("fix it in the store" in m for m in messages)
+    assert not any("the funding reader failed" in m for m in messages)
     db.close()
 
 

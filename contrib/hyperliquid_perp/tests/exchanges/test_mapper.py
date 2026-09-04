@@ -141,6 +141,99 @@ def test_funding_history_missing_field_point_dropped_keeping_valid(caplog):
     assert "dropping malformed fundingHistory[1]" in caplog.text
 
 
+def test_funding_history_out_of_range_stamp_is_dropped_like_any_bad_point(caplog):
+    """The nanosecond-scale ``"time"`` of issue #191 joins the per-point drop budget.
+
+    ``int(_dec(...))`` builds that integer happily, so the refusal has to come
+    from ``FundingPoint`` — and it has to come as a ``ValueError``, the type
+    this handler already drops and counts. Escaping instead, it reached the
+    rate lookup's ``from_epoch_ms`` as an ``OverflowError`` past every
+    ``except`` in between, halting the paper engine and aborting the backfill.
+    """
+    raw = [
+        {"time": 1000, "fundingRate": "0.00001", "premium": "0"},
+        {"time": "1788163200000000000", "fundingRate": "0.00002", "premium": "0"},
+    ]
+    with caplog.at_level(logging.WARNING):
+        points = mapper.map_funding_history(raw, max_drop_fraction=1.0)
+    assert [p.time for p in points] == [1000]  # one bad point costs one point
+    assert "dropping malformed fundingHistory[1]" in caplog.text
+    assert "outside the decodable" in caplog.text
+
+
+def test_candles_out_of_range_stamp_is_dropped_like_any_bad_bar(caplog):
+    # Parity on the candle path: an undecodable ``T`` would otherwise become
+    # the context's ``as_of`` (``from_epoch_ms(candles[-1].close_time)``) and
+    # end the whole context build instead of costing one bar.
+    raw = [
+        {"t": 1000, "T": 1999, "o": "1", "h": "2", "l": "1", "c": "1", "v": "1"},
+        {
+            "t": 2000,
+            "T": "1788163200000000000",
+            "o": "1",
+            "h": "2",
+            "l": "1",
+            "c": "1",
+            "v": "9",
+        },
+    ]
+    with caplog.at_level(logging.WARNING):
+        candles = mapper.map_candles(raw, max_drop_fraction=1.0)
+    assert [c.open_time for c in candles] == [1000]
+    assert "dropping malformed candleSnapshot[1]" in caplog.text
+    assert "outside the decodable" in caplog.text
+
+
+def test_an_absurd_exponent_stamp_is_refused_without_materializing_it():
+    """The range check runs on the ``Decimal``, before ``int()`` (issue #191).
+
+    ``_dec`` admits any FINITE value and ``"1E+999999999"`` is finite, so an
+    ``int()`` first would try to build a number with a billion digits — a
+    wedged fetch, not an exception any per-element handler could drop
+    (``int(Decimal("1E+100000"))`` measured at 0.21s and scaling
+    super-linearly). Bounded on the ``Decimal``, the refusal is O(1) whatever
+    the exponent, which is what this test's own runtime demonstrates.
+    """
+    raw = [{"time": "1E+999999999", "fundingRate": "0.00001", "premium": "0"}]
+    with pytest.raises(MalformedResponseError, match="all 1 fundingHistory"):
+        mapper.map_funding_history(raw)
+
+
+def test_market_snapshot_translates_its_dtos_refusal():
+    """A malformed price must reach consumers as an ``ExchangeError`` (issue #193).
+
+    The one mapper that returned its DTO's construction straight out: a
+    ``"markPx": "0"`` raised ``MarketSnapshot``'s bare ``ValueError``, which is
+    outside the venue-failure family the port's consumers now catch. It would
+    have reached ``paper.engine.tick`` — ``@_fail_stop`` — and halted the
+    engine on a merely malformed response, then crash-looped across restarts.
+    """
+    raw = [
+        {"universe": [{"name": "BTC"}]},
+        [
+            {
+                "markPx": "0",  # a price the DTO refuses
+                "oraclePx": "50000",
+                "prevDayPx": "49000",
+                "openInterest": "100",
+                "dayNtlVlm": "1000",
+                "funding": "0.00001",
+            }
+        ],
+    ]
+    with pytest.raises(MalformedResponseError, match=r"assetCtxs\[0\] for 'BTC' is malformed"):
+        mapper.map_market_snapshot(raw, "BTC")
+
+
+def test_unknown_coin_message_survives_a_null_name_in_the_universe():
+    # The "e.g. ..." list is built by ``join`` over the universe's names; a
+    # null name made that raise a bare ``TypeError``, escaping this layer's
+    # translation contract from inside the error path itself.
+    raw = [{"universe": [{"name": None}, {"name": "ETH"}]}, []]
+    with pytest.raises(UnknownCoinError, match=r"not in perp universe \(e\.g\. \?, ETH\)"):
+        mapper.map_market_snapshot(raw, "BTC")
+
+
 def test_funding_history_all_points_malformed_raises():
     # If *every* point is malformed, that is a systematic feed fault, not a glitch —
     # fail loud rather than silently return an empty history.

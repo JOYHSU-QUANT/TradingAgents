@@ -13,7 +13,9 @@ Two concrete providers:
 
 - :class:`PortSnapshotProvider` — production. Wraps an
   :class:`~..ports.ExchangeMarketData`, stamps timing off the injected clock, and
-  fails the snapshot when the port errors, omits ``mid_price``, or answers slower
+  fails the snapshot when the port reports a VENUE failure
+  (:class:`~..exchanges.hyperliquid.errors.ExchangeError`, the port's declared
+  contract), omits ``mid_price``, or answers slower
   than the timeout. A true wall-clock cancellation of a hung request needs the
   caller's own timeout (threads/async); this provider measures round-trip latency
   against the clock and rejects an over-budget response, so a slow answer is
@@ -37,6 +39,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
+from ..exchanges.hyperliquid.errors import ExchangeError
 from ..ports import ExchangeMarketData
 from .clock import Clock
 
@@ -196,10 +199,19 @@ class PortSnapshotProvider:
         budget = _timeout_timedelta(timeout_seconds)
         try:
             snap = self._market.get_market_snapshot(coin)
-        except Exception as exc:  # noqa: BLE001 — any port/feed failure is a request failure
+        except ExchangeError as exc:
+            # ONLY the venue-failure family (the port's contract — see
+            # ``ports.ExchangeMarketData``). A broad ``except Exception`` here
+            # read every defect as an outage: a call site drifted from the
+            # reader's signature raises ``TypeError``, this collapsed it to
+            # ERROR, and the engine paused market data and stayed paused —
+            # one WARNING per tick, forever, about an exchange that was in
+            # fact answering (issues #157, #193). The same reader is now read
+            # the same way by all three of its consumers.
+            #
             # Log the cause before collapsing to the ERROR outcome: downstream this
             # only surfaces as pending/paused market data, so without this an operator
-            # cannot tell an exchange outage from a bug in the port or bad credentials.
+            # cannot tell an exchange outage from bad credentials.
             logger.warning("market snapshot fetch failed for %s: %s", coin, exc, exc_info=True)
             return SnapshotResult.failure(
                 SnapshotOutcome.ERROR, requested_at=requested_at, received_at=self._clock.now()

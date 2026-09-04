@@ -68,6 +68,26 @@ logger = logging.getLogger(__name__)
 STALE_PENDING_FUNDING = timedelta(hours=6)
 
 
+def _log_corrupt_event(run_id: str, event: sqlite3.Row, exc: Exception) -> None:
+    """The corrupt-row lane's ERROR, from either of the two places it is reached.
+
+    The stored timestamp is parsed before the funding reader runs and the rest
+    of the stored basis after it, so the one verdict ("this ROW is bad; fix it
+    in the store") is now raised from two ``except`` clauses. One wording, one
+    place — the reader lane between them says something different on purpose,
+    and that difference is the whole point of issue #193.
+    """
+    logger.error(
+        "funding backfill for %s could not post %s @ %s: %s — the event "
+        "stays pending and its funding P&L stays uncounted (corrupt "
+        "stored row; fix it in the store to resolve it)",
+        run_id,
+        event["symbol"],
+        event["funding_timestamp"],
+        exc,
+    )
+
+
 def backfill_pending_funding(
     db: Database,
     *,
@@ -90,66 +110,126 @@ def backfill_pending_funding(
     unwatched, permanent crash-loop on the same row), and mid-run it would kill
     the loop that keeps SL/TP alive. Its funding P&L stays uncounted, never
     fabricated.
+
+    A failure of the funding READER is contained the same way but reported
+    apart, because it means something else entirely (issue #193): the stored
+    row is fine and the fault is ours — a drifted call signature, a naive
+    clock, a stamp no ``datetime`` can hold. Sending an operator to the store
+    for that costs a diagnosis.
+
+    "Never allowed to abort" is enforced by an outer per-event handler, not by
+    the inner lanes' exception lists: those lists are what issue #191 got
+    through. The lanes exist to give an operator the right verdict, and the
+    outer one to guarantee there is always a verdict. Every non-posting
+    outcome counts into ``still_pending`` — the event did not post, whatever
+    the reason, and its funding P&L stays uncounted rather than fabricated.
     """
     posted = 0
     young_pending = 0
     stale_pending = 0
-    corrupt = 0
+    # ONE counter for every event that did not post, whatever the reason. The
+    # reasons differ and are told apart where telling them apart pays — in the
+    # three log messages below, which are what an operator acts on and what the
+    # tests assert. A counter per reason would only ever be read as this sum.
+    not_posted = 0
     for event in repo.iter_funding_events(db.conn, run_id, status="pending"):
+        # The OUTER lane makes "this pass may never abort" (see the docstring)
+        # structural rather than a promise three handler lists have to keep.
+        # Those lists are the failure mode of this very issue: an unlisted type
+        # is exactly what showed up (an ``OverflowError`` from a nanosecond
+        # stamp — issue #191), and a ``TypeError`` out of ``record_funding`` or
+        # a NULL ``funding_timestamp`` would abort the same way today. Aborting
+        # at restart fires BEFORE the protection-only fork — a live position
+        # left unwatched, crash-looping on the same event every retry — and
+        # mid-run it kills the loop that keeps SL/TP alive. The inner lanes
+        # keep their distinct verdicts; this one only guarantees there is
+        # always a verdict.
         try:
-            settlement = parse_instant(event["funding_timestamp"])
-            rate = (
-                funding_source.rate_at(event["symbol"], settlement)
-                if funding_source is not None
-                else None
-            )
+            try:
+                settlement = parse_instant(event["funding_timestamp"])
+            except (ValueError, InvalidOperation) as exc:
+                not_posted += 1
+                _log_corrupt_event(run_id, event, exc)
+                continue
+            # The READER gets its own lane, apart from the corrupt one (issue
+            # #193). ``rate_at`` answers a venue failure with ``None`` and lets
+            # everything else through on purpose (issue #157) — so what arrives
+            # here is a defect in OUR code, never a bad stored row, and the
+            # corrupt lane's "fix it in the store" would send an operator to
+            # SQLite to hunt a fault that is in the clock or in a signature.
+            # ``exc_info`` keeps the traceback that diagnosis needs.
+            try:
+                rate = (
+                    funding_source.rate_at(event["symbol"], settlement)
+                    if funding_source is not None
+                    else None
+                )
+            except Exception as exc:  # noqa: BLE001 — see the outer lane
+                not_posted += 1
+                logger.error(
+                    "funding backfill for %s could not read the rate for %s @ %s: %s — the "
+                    "funding reader failed (not a corrupt stored row); the event stays "
+                    "pending and retries at the next cycle boundary or restart",
+                    run_id,
+                    event["symbol"],
+                    event["funding_timestamp"],
+                    exc,
+                    exc_info=True,
+                )
+                continue
             if rate is None:
+                # Outside the post lane below: no rate is not a failure to post,
+                # it is the ordinary "not settled yet" the next pass retries.
                 if now - settlement >= STALE_PENDING_FUNDING:
                     stale_pending += 1
                 else:
                     young_pending += 1
                 continue
-            res = accounting.record_funding(
-                db,
-                run_id=run_id,
-                mode=event["mode"],
-                symbol=event["symbol"],
-                funding_timestamp=settlement,
-                position_size=Decimal(event["position_size"]),  # stored basis wins anyway
-                funding_rate=rate,
-                source="funding_history_backfill",
-                recorded_at=now,
-            )
-        except (ValueError, InvalidOperation) as exc:
-            # Any corrupt stored field — timestamp, size, or the settlement
-            # basis record_funding guards — takes this one-event lane.
-            corrupt += 1
+            try:
+                res = accounting.record_funding(
+                    db,
+                    run_id=run_id,
+                    mode=event["mode"],
+                    symbol=event["symbol"],
+                    funding_timestamp=settlement,
+                    position_size=Decimal(event["position_size"]),  # stored basis wins anyway
+                    funding_rate=rate,
+                    source="funding_history_backfill",
+                    recorded_at=now,
+                )
+            except (ValueError, InvalidOperation) as exc:
+                # Any corrupt stored field — size, or the settlement basis
+                # record_funding guards — takes this one-event lane. The stored
+                # TIMESTAMP is parsed above, before the reader, and takes it too.
+                not_posted += 1
+                _log_corrupt_event(run_id, event, exc)
+                continue
+            except sqlite3.Error as exc:
+                # A STORE failure, not a corrupt row. ``record_funding`` opens its OWN
+                # transaction, so a transient "database is locked" is reachable right
+                # here. Logged apart from the corrupt lane so a transient lock is never
+                # misdiagnosed as a bad row: the event stays pending, the next pass retries.
+                not_posted += 1
+                logger.error(
+                    "funding backfill for %s hit a store error posting %s @ %s: %s — the "
+                    "event stays pending and will be retried on the next pass",
+                    run_id,
+                    event["symbol"],
+                    event["funding_timestamp"],
+                    exc,
+                )
+                continue
+        except Exception as exc:  # noqa: BLE001 — the pass may never abort; see above
+            not_posted += 1
             logger.error(
-                "funding backfill for %s could not post %s @ %s: %s — the event "
-                "stays pending and its funding P&L stays uncounted (corrupt "
-                "stored row; fix it in the store to resolve it)",
+                "funding backfill for %s hit an unexpected failure on %s @ %s: %s — the "
+                "event stays pending; this one is a defect (no lane claimed it), so read "
+                "the traceback rather than the store",
                 run_id,
                 event["symbol"],
                 event["funding_timestamp"],
                 exc,
-            )
-            continue
-        except sqlite3.Error as exc:
-            # A STORE failure, not a corrupt row — and it must take the same per-event
-            # lane. ``record_funding`` opens its OWN transaction, so a transient
-            # "database is locked" is reachable right here; escaping, it aborts the
-            # whole pass, and at restart that abort fires BEFORE the protection-only
-            # fallback — a live position left unwatched, crash-looping on the same
-            # event. Logged apart from the corrupt lane so a transient lock is never
-            # misdiagnosed as a bad row: the event stays pending, the next pass retries.
-            corrupt += 1
-            logger.error(
-                "funding backfill for %s hit a store error posting %s @ %s: %s — the "
-                "event stays pending and will be retried on the next pass",
-                run_id,
-                event["symbol"],
-                event["funding_timestamp"],
-                exc,
+                exc_info=True,
             )
             continue
         if res.status == "posted":
@@ -176,7 +256,7 @@ def backfill_pending_funding(
             run_id,
             young_pending,
         )
-    return posted, young_pending + stale_pending + corrupt
+    return posted, young_pending + stale_pending + not_posted
 
 
 def classify_replay(db: Database, *, run_id: str) -> tuple[str, str | None, Exception | None]:

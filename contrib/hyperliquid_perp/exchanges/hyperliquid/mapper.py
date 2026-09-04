@@ -62,6 +62,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from ...common.constants import MAX_EPOCH_MS, MIN_EPOCH_MS
 from ...common.instants import from_epoch_ms
 from ...domains.perp.margin import MarginSchedule, MarginTier
 from ...domains.perp.schema import (
@@ -126,6 +127,32 @@ def _dec(value: Any, *, field: str) -> Decimal:
 # through Decimal(str(...)) and would reach OrderAck, the orders row, and every
 # PnL computed from it. Aliased rather than renamed: _dec has 33 call sites here.
 require_decimal = _dec
+
+
+def _stamp(value: Any, *, field: str) -> int:
+    """A required venue epoch-ms stamp as an ``int``, refusing an undecodable one.
+
+    The range check happens on the ``Decimal``, BEFORE ``int()``. That ordering
+    is the whole point: ``_dec`` admits any finite value, and ``"1E+999999999"``
+    is finite, so ``int()`` alone would try to materialize a number with a
+    billion digits — measured at 0.21s for ``1E+100000`` and scaling
+    super-linearly, i.e. a wedged fetch, not an exception any handler could
+    drop. Comparing the ``Decimal`` to the bounds is exact and O(1) whatever
+    the exponent.
+
+    ``MalformedResponseError``, so the per-element handlers in the two mappers
+    drop and count this point like any other bad field. ``Candle`` and
+    ``FundingPoint`` hold the same bound at construction (issue #191) and that
+    is not redundant: this guard covers the WIRE, theirs covers every other
+    way one is built — the scripted and backtest feeds ``ports`` exists for.
+    """
+    parsed = _dec(value, field=field)
+    if not MIN_EPOCH_MS <= parsed <= MAX_EPOCH_MS:
+        raise MalformedResponseError(
+            f"field '{field}' ({parsed}) is outside the decodable UTC epoch-ms range "
+            f"[{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] — a nanosecond-scale or corrupt stamp"
+        )
+    return int(parsed)
 
 
 def _opt_dec(value: Any, *, field: str) -> Decimal | None:
@@ -214,7 +241,10 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
 
     index = next((i for i, asset in enumerate(universe) if asset.get("name") == coin), None)
     if index is None:
-        known = ", ".join(a.get("name", "?") for a in universe[:10])
+        # ``or "?"`` covers a null name as well as a missing key: ``join`` over
+        # a ``None`` raises a bare ``TypeError``, which is not an
+        # ``ExchangeError`` and so escapes this layer's translation contract.
+        known = ", ".join(str(a.get("name") or "?") for a in universe[:10])
         raise UnknownCoinError(f"coin {coin!r} not in perp universe (e.g. {known})")
     if index >= len(asset_ctxs):
         raise MalformedResponseError(f"assetCtxs has no entry for {coin!r} at index {index}")
@@ -227,17 +257,38 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
         raise MalformedResponseError(
             f"assetCtxs[{index}] for {coin!r} is {type(ctx).__name__}, expected dict"
         )
-    return MarketSnapshot(
-        coin=coin,
-        mark_price=_dec(ctx.get("markPx"), field="markPx"),
-        oracle_price=_dec(ctx.get("oraclePx"), field="oraclePx"),
-        prev_day_price=_dec(ctx.get("prevDayPx"), field="prevDayPx"),
-        open_interest=_dec(ctx.get("openInterest"), field="openInterest"),
-        day_ntl_volume=_dec(ctx.get("dayNtlVlm"), field="dayNtlVlm"),
-        funding=_dec(ctx.get("funding"), field="funding"),
-        mid_price=_opt_dec(ctx.get("midPx"), field="midPx"),
-        premium=_opt_dec(ctx.get("premium"), field="premium"),
-    )
+    try:
+        return MarketSnapshot(
+            coin=coin,
+            mark_price=_dec(ctx.get("markPx"), field="markPx"),
+            oracle_price=_dec(ctx.get("oraclePx"), field="oraclePx"),
+            prev_day_price=_dec(ctx.get("prevDayPx"), field="prevDayPx"),
+            open_interest=_dec(ctx.get("openInterest"), field="openInterest"),
+            day_ntl_volume=_dec(ctx.get("dayNtlVlm"), field="dayNtlVlm"),
+            funding=_dec(ctx.get("funding"), field="funding"),
+            mid_price=_opt_dec(ctx.get("midPx"), field="midPx"),
+            premium=_opt_dec(ctx.get("premium"), field="premium"),
+        )
+    except ValueError as exc:
+        # ``MarketSnapshot``'s own invariants (a non-positive mark/oracle/mid, a
+        # negative magnitude) raise ``ValueError``, and this mapper let its
+        # DTO's refusal out untranslated — the bulk mappers have always caught
+        # it per element. (``map_account_snapshot`` and the position mapper
+        # still do let theirs out; their consumers compensate by widening to
+        # ``except (ExchangeError, ValueError)``. Tracked separately — the
+        # narrowing in this PR is on the snapshot path.) It mattered the moment consumers
+        # started catching the venue-failure family and nothing wider (issue
+        # #193): a ``"markPx": "0"`` would have reached ``paper.engine.tick``,
+        # which is ``@_fail_stop``, halting the engine on a response that is
+        # simply malformed — and a supervised restart would re-fetch and
+        # crash-loop on it, the very shape of issue #191.
+        #
+        # No per-field drop lane here, unlike candles/funding: this response
+        # carries ONE snapshot, so there is no good element to keep. The
+        # freshness path treats it as the failed request it is.
+        raise MalformedResponseError(
+            f"assetCtxs[{index}] for {coin!r} is malformed: {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------
@@ -462,8 +513,8 @@ def map_candles(
     for i, c in enumerate(raw_candles):
         try:
             candle = Candle(
-                open_time=int(_dec(c.get("t"), field="t")),
-                close_time=int(_dec(c.get("T"), field="T")),
+                open_time=_stamp(c.get("t"), field="t"),
+                close_time=_stamp(c.get("T"), field="T"),
                 open=_dec(c.get("o"), field="o"),
                 high=_dec(c.get("h"), field="h"),
                 low=_dec(c.get("l"), field="l"),
@@ -472,10 +523,18 @@ def map_candles(
             )
         except (ValueError, MalformedResponseError) as exc:
             # A single bad bar — whether it violates Candle's invariant (bad OHLC
-            # ordering, time, negative volume -> ValueError) or has a missing/
-            # non-numeric field (-> MalformedResponseError) — is a transient feed
-            # glitch, not a reason to abort the whole run. Drop it and warn; the
-            # warm-up threshold downstream still aborts if too few bars survive.
+            # ordering, time, negative volume, an undecodable stamp -> ValueError)
+            # or has a missing / non-numeric field (-> MalformedResponseError) —
+            # is a transient feed glitch, not a reason to abort the whole run.
+            # Drop it and warn; the warm-up threshold downstream still aborts if
+            # too few bars survive.
+            #
+            # No ``OverflowError`` here, deliberately (issue #191): the stamps
+            # are built by :func:`_stamp`, which refuses anything outside the
+            # decodable range as a ``MalformedResponseError`` before it can
+            # reach ``int()`` or the DTO. Nothing on this path can raise
+            # ``OverflowError``, and listing a type no input can produce would
+            # be a claim no test could hold.
             logger.warning("dropping malformed candleSnapshot[%d]: %s", i, exc)
             continue
         candles.append(candle)
@@ -555,14 +614,18 @@ def map_funding_history(
     for i, p in enumerate(raw):
         try:
             point = FundingPoint(
-                time=int(_dec(p.get("time"), field="time")),
+                time=_stamp(p.get("time"), field="time"),
                 rate=_dec(p.get("fundingRate"), field="fundingRate"),
                 premium=_opt_dec(p.get("premium"), field="premium"),
             )
         except (ValueError, MalformedResponseError) as exc:
-            # Mirror map_candles: a single bad point (missing/non-numeric field) is a
+            # Mirror map_candles: a single bad point (missing/non-numeric field, or a
+            # stamp outside the decodable epoch-ms range) is a
             # transient glitch, not a reason to abort. Funding is non-critical — the
             # z-score degrades to None on too few samples — so drop and warn.
+            # The nanosecond-scale ``"time"`` of issue #191 lands here, as the
+            # ``MalformedResponseError`` :func:`_stamp` raises — see map_candles
+            # above for why ``OverflowError`` is not (and must not be) listed.
             logger.warning("dropping malformed fundingHistory[%d]: %s", i, exc)
             continue
         points.append(point)
@@ -624,8 +687,11 @@ def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime
     _require_identity_echo(raw, site="l2Book", key="coin", label="coin", expected=expected_coin)
     stamp = raw.get("time")
     try:
-        millis = int(_dec(stamp, field="time"))
-        return from_epoch_ms(millis)
+        # :func:`_stamp`, like the candle and funding stamps: this reads the
+        # same wire, and ``int(_dec(...))`` wedges the fetch on an absurd
+        # exponent rather than raising anything the ``except`` below could
+        # catch. Its ``MalformedResponseError`` is already in that list.
+        return from_epoch_ms(_stamp(stamp, field="time"))
     except (MalformedResponseError, ValueError, OverflowError, OSError) as exc:
         raise MalformedResponseError(
             f"l2Book 'time' is unusable as epoch ms ({stamp!r}): {exc}"

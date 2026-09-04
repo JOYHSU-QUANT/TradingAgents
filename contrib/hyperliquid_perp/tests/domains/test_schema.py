@@ -9,11 +9,14 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.common.constants import (
+    MAX_EPOCH_MS,
+    MIN_EPOCH_MS,
     MIN_VOLUME_PROFILE_WINDOW,
     VOLUME_PROFILE_BUCKET_COUNT,
 )
 from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
+    Candle,
     CandleInterval,
     FundingPoint,
     MarginalCostRow,
@@ -364,6 +367,81 @@ def test_funding_point_rejects_nonpositive_time():
     for bad in (0, -1):
         with pytest.raises(ValueError, match="FundingPoint.time must be > 0"):
             FundingPoint(time=bad, rate=Decimal("0.0001"))
+
+
+def _candle(open_time, close_time) -> Candle:
+    """A structurally valid candle whose only variables are its two stamps."""
+    return Candle(
+        open_time=open_time,
+        close_time=close_time,
+        open=Decimal("100"),
+        high=Decimal("110"),
+        low=Decimal("90"),
+        close=Decimal("105"),
+        volume=Decimal("1"),
+    )
+
+
+def test_funding_point_rejects_an_undecodable_time():
+    """The stamp that halted a paper run (issue #191), refused at construction.
+
+    A nanosecond-scale ``"time"`` — venue drift, or any integer past
+    ``datetime``'s range — used to build a ``FundingPoint`` happily. The rate
+    lookup then decoded EVERY point of the fetched window outside its own
+    ``except ExchangeError``, and the ``OverflowError`` that came back was
+    neither an ``ExchangeError`` nor a ``ValueError``: the engine's funding
+    loop is ``@_fail_stop`` (engine halted, daemon exit 2, no shutdown export)
+    and the backfill pass's corrupt lane did not catch it either — the whole
+    pass aborted, and a supervised restart re-fetched the same response and
+    crash-looped on it.
+    """
+    FundingPoint(time=MAX_EPOCH_MS, rate=Decimal("0.0001"))  # the last decodable ms builds
+    for bad in (MAX_EPOCH_MS + 1, 1_788_163_200_000_000_000):
+        with pytest.raises(ValueError, match=r"FundingPoint\.time \(\d+\) is outside") as excinfo:
+            FundingPoint(time=bad, rate=Decimal("0.0001"))
+        # The WHOLE sentence, not just its opening: the wire guard
+        # (``mapper._stamp``) says the same thing about the same bound, and
+        # asserting only a prefix would let the two lanes drift apart while
+        # every test stayed green.
+        assert str(excinfo.value).endswith(
+            f"is outside the decodable UTC epoch-ms range [{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] "
+            "— a nanosecond-scale or corrupt stamp"
+        )
+
+
+@pytest.mark.parametrize("bad", [1_788_163_200_000.0, True, "1788163200000", None])
+def test_funding_point_rejects_a_non_int_time_by_name(bad):
+    # ``from_epoch_ms`` answers a non-int with ``TypeError``, which escapes every
+    # handler between the wire and the decode exactly as ``OverflowError`` did —
+    # and names no field. Production reaches these DTOs through
+    # ``int(_dec(...))``, but ``ports`` exists for the scripted/backtest feeds
+    # that build them by hand, and a hand-built ``Candle(close_time=1.7e12)``
+    # blew up deep inside ``build_market_context`` naming nothing (issue #193).
+    # ``bool`` is an ``int`` to ``isinstance`` but is never a timestamp.
+    with pytest.raises(ValueError, match=r"FundingPoint\.time must be an int of UTC epoch ms"):
+        FundingPoint(time=bad, rate=Decimal("0.0001"))
+
+
+def test_candle_rejects_undecodable_and_non_int_times_by_name():
+    # The same guard on the candle path, which ``context_builder`` anchors the
+    # context's ``as_of`` on (``from_epoch_ms(candles[-1].close_time)``): an
+    # undecodable close_time there ends the whole context build, not one bar.
+    _candle(open_time=1_000, close_time=MAX_EPOCH_MS)  # the last decodable ms builds
+    with pytest.raises(ValueError, match=r"Candle\.close_time .* outside the decodable"):
+        _candle(open_time=1_000, close_time=MAX_EPOCH_MS + 1)
+    with pytest.raises(ValueError, match=r"Candle\.open_time .* outside the decodable"):
+        _candle(open_time=MIN_EPOCH_MS - 1, close_time=1_000)
+    with pytest.raises(ValueError, match=r"Candle\.close_time must be an int of UTC epoch ms"):
+        _candle(open_time=1_000, close_time=1_999.0)
+
+
+def test_candle_checks_its_stamps_before_ordering_them():
+    # Order matters: the ordering check compares the two stamps, so a
+    # non-int would reach it first and raise an unnamed ``TypeError`` from
+    # the comparison itself — the anonymous failure this guard exists to
+    # replace. The stamp guard has to run first, and says which field.
+    with pytest.raises(ValueError, match=r"Candle\.open_time must be an int of UTC epoch ms"):
+        _candle(open_time="1000", close_time=1_999)
 
 
 def _profile(**overrides) -> dict:

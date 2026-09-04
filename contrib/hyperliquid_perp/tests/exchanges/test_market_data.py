@@ -299,9 +299,13 @@ def test_windowed_reads_refuse_a_naive_end():
     client.info = _VenueLikeInfo()
     reader = HyperliquidMarketData(client)
     naive = datetime(2026, 8, 31, 8, 0)
-    with pytest.raises(ValueError, match="window end must be timezone-aware"):
+    # Each read names ITSELF (issue #193): the two messages were byte-identical,
+    # so a traceback could not say which read had been handed a naive clock —
+    # and their callers differ (the context build hands both the exchange's
+    # clock; the rate lookup passes its own host clock deliberately).
+    with pytest.raises(ValueError, match="^candle window end must be timezone-aware"):
         reader.get_candles("BTC", "4h", 3, end=naive)
-    with pytest.raises(ValueError, match="window end must be timezone-aware"):
+    with pytest.raises(ValueError, match="^funding history window end must be timezone-aware"):
         reader.get_funding_history("BTC", 7, end=naive)
     assert client.info.candle_windows == [] and client.info.funding_windows == []
 

@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.domains.perp.schema import MarketSnapshot
+from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.market_feed import (
     PortSnapshotProvider,
@@ -100,11 +101,28 @@ def test_port_provider_missing_mid_is_invalid():
 
 
 def test_port_provider_error_on_raise():
+    # A VENUE failure — the port's declared contract (``ports.ExchangeMarketData``)
+    # — is what becomes ERROR. The fake raises that family, not a bare
+    # ``RuntimeError``: driving this path with an arbitrary exception kept
+    # passing under the broad ``except Exception`` this replaced, which is how
+    # a drifted call signature came to read as an outage.
     clock = ManualClock(_T0)
-    market = _StubMarket(raise_exc=RuntimeError("boom"))
+    market = _StubMarket(raise_exc=ExchangeRequestError("venue refused"))
     provider = PortSnapshotProvider(market, clock)
     result = provider.fetch("BTC", requested_at=_T0, timeout_seconds=D(5))
     assert result.outcome is SnapshotOutcome.ERROR
+
+
+def test_port_provider_lets_a_non_venue_failure_through():
+    # The defect this narrowing exists for (issues #157, #193): a call site
+    # drifted from the reader's signature raises ``TypeError``, and collapsing
+    # THAT to ERROR paused market data forever — one WARNING per tick about an
+    # exchange that was answering. It must reach the caller instead.
+    clock = ManualClock(_T0)
+    market = _StubMarket(raise_exc=TypeError("get_market_snapshot() takes 1 argument"))
+    provider = PortSnapshotProvider(market, clock)
+    with pytest.raises(TypeError, match="takes 1 argument"):
+        provider.fetch("BTC", requested_at=_T0, timeout_seconds=D(5))
 
 
 def test_port_provider_timeout_on_slow_response():

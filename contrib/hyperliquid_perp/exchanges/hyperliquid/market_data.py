@@ -25,10 +25,18 @@ from .sdk_client import HyperliquidClient, call_sdk
 logger = logging.getLogger(__name__)
 
 _MS_PER_DAY = 24 * 60 * 60_000
-# ``what`` for the naive-``end`` refusal both windowed reads share. The window
-# ends are compared against the exchange's own ``close_time`` stamps, so the
-# conversion must be exact — that argument lives on ``common.instants.epoch_ms``.
-_WINDOW_END = "market data window end"
+# ``what`` for each windowed read's naive-``end`` refusal. The window ends are
+# compared against the exchange's own ``close_time`` stamps, so the conversion
+# must be exact — that argument lives on ``common.instants.epoch_ms``.
+#
+# One string per read, not one shared: ``epoch_ms``'s ``what`` is required so
+# that no refusal is anonymous, yet the two reads' messages were still
+# byte-identical, leaving a traceback unable to say which of them had been
+# handed a naive clock (issue #193). Their callers differ — the context build
+# hands both the exchange's clock, while the rate lookup passes its own host
+# clock deliberately — so which one refused is the first thing to know.
+_CANDLE_WINDOW_END = "candle window end"
+_FUNDING_WINDOW_END = "funding history window end"
 
 
 class HyperliquidMarketData:
@@ -72,7 +80,7 @@ class HyperliquidMarketData:
         the ``close_time <= end`` filter below while the response carried its
         OHLCV as captured before that close — the very defect this closes.
         """
-        end_ms = epoch_ms(end, what=_WINDOW_END)
+        end_ms = epoch_ms(end, what=_CANDLE_WINDOW_END)
         # Pad the window so we comfortably clear `lookback` closed candles (the +1
         # absorbs the still-forming bar dropped just below).
         start = end_ms - (lookback + 1) * interval_to_ms(interval)
@@ -129,7 +137,7 @@ class HyperliquidMarketData:
         where a miss is "pending", never a wrong rate) may pass its own
         clock, and says so at the call site.
         """
-        end_ms = epoch_ms(end, what=_WINDOW_END)
+        end_ms = epoch_ms(end, what=_FUNDING_WINDOW_END)
         start = end_ms - window_days * _MS_PER_DAY
         raw = call_sdk(self._info.funding_history, coin, start, end_ms)
         # Identity echo: same discipline as get_candles above.

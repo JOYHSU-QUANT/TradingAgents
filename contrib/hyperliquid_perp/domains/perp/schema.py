@@ -21,6 +21,8 @@ from types import MappingProxyType
 
 from ...common.constants import (
     HOLDING_COST_HOURS,
+    MAX_EPOCH_MS,
+    MIN_EPOCH_MS,
     MIN_VOLUME_PROFILE_WINDOW,
     POC_LOWER_BAND,
     POC_UPPER_BAND,
@@ -148,6 +150,47 @@ def interval_to_ms(interval: str) -> int:
 # --------------------------------------------------------------------------
 
 
+def _require_venue_stamp(value: object, *, what: str) -> None:
+    """Refuse a venue timestamp ``from_epoch_ms`` could not decode, naming ``what``.
+
+    The two DTOs below carry the venue's time form as a bare ``int`` of UTC
+    epoch milliseconds, and four call sites decode one downstream
+    (``context_builder``'s ``as_of``, ``cli._provider``'s funding-rate lookup,
+    and the two windowed reads' filters). ``from_epoch_ms`` answers a stamp it
+    cannot decode with ``OverflowError`` and a non-``int`` with ``TypeError`` —
+    NEITHER of which is an ``ExchangeError`` or a ``ValueError``, so both slip
+    through every venue-failure and corrupt-row handler standing between the
+    wire and those decodes. One nanosecond-scale ``"time"`` in a
+    ``fundingHistory`` response therefore halted the paper engine outright
+    (``paper.engine``'s funding loop is ``@_fail_stop``) and aborted the whole
+    pending-funding backfill pass — a supervised restart re-fetched the same
+    response and crash-looped on it (issue #191).
+
+    So the bound belongs HERE, at the DTO boundary, beside the ordering and
+    sign invariants: it is the same kind of statement (a malformed record must
+    never reach the math), it names the offending field, and it raises
+    ``ValueError`` — the type ``mapper``'s per-element handlers already drop
+    and count, so one absurd stamp costs one bar or one point, not the run.
+    A scripted or backtest feed building these by hand (the reason ``ports``
+    exists) is covered by the same guard rather than by the wire path's
+    ``int(_dec(...))``.
+
+    ``ValueError``, not ``TypeError``, for the type check too (issue #193):
+    ``TypeError`` is exactly the family that escapes those handlers, and a
+    ``float`` here is a bad record, not a caller passing the wrong argument.
+    ``bool`` is an ``int`` to ``isinstance`` but never a timestamp.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"{what} must be an int of UTC epoch ms, got {type(value).__name__} ({value!r})"
+        )
+    if not MIN_EPOCH_MS <= value <= MAX_EPOCH_MS:
+        raise ValueError(
+            f"{what} ({value}) is outside the decodable UTC epoch-ms range "
+            f"[{MIN_EPOCH_MS}, {MAX_EPOCH_MS}] — a nanosecond-scale or corrupt stamp"
+        )
+
+
 @dataclass(frozen=True)
 class Candle:
     """A single OHLCV candle. Times are UTC epoch milliseconds."""
@@ -166,6 +209,12 @@ class Candle:
         # decision. Enforce the invariant at the type so a malformed candle can never
         # reach the math; ``mapper.map_candles`` catches this per-candle to drop a
         # single bad bar without aborting the whole run.
+        #
+        # Stamps first: the ordering comparison below is only meaningful between
+        # two decodable ints, and ``close_time`` is what ``context_builder``
+        # anchors the context's ``as_of`` on (:func:`_require_venue_stamp`).
+        _require_venue_stamp(self.open_time, what="Candle.open_time")
+        _require_venue_stamp(self.close_time, what="Candle.close_time")
         if self.open_time >= self.close_time:
             raise ValueError(
                 f"Candle open_time ({self.open_time}) must be < close_time ({self.close_time})"
@@ -251,6 +300,10 @@ class FundingPoint:
         # corrupt record that ``funding_zscore``'s window filter (``cutoff <= p.time <
         # as_of_ms``) would silently drop, biasing the z-score sample with no warning.
         # Reject it at construction, matching the boundary guards on Candle/MarketSnapshot.
+        #
+        # The upper end is the one that ended runs — see
+        # :func:`_require_venue_stamp` (issue #191).
+        _require_venue_stamp(self.time, what="FundingPoint.time")
         if self.time <= 0:
             raise ValueError(f"FundingPoint.time must be > 0 (UTC epoch ms), got {self.time}")
 

@@ -320,7 +320,9 @@ class _PendingDecision:
     input_id: str
     output_id: str
     parsed: ParsedDecision
-    # Whether ``pending_raw_response`` landed durably. Defaults to the
+    # Whether the §3.1 store is SETTLED — the response landed durably, or the
+    # answer was invalid and deliberately not stored
+    # (``_store_pending_response``). Defaults to the
     # conservative state — gating is forbidden until the store lands, mirroring
     # the live driver's ``_InFlight.raw_stored``.
     raw_stored: bool = False
@@ -810,7 +812,8 @@ class PaperScheduler:
             # driver's _store_pending_response carries the full reasoning: a
             # non-str answer is kept as its repr, which IS a str on resume).
             # "Nothing stored" IS the settled §3.1 state for an invalid answer
-            # — a crash here retries the try, no order either way. The text is
+            # — a crash here retries the try (or terminalizes it, if the §3.1
+            # budget is already spent); no order either way. The text is
             # durable nowhere else (ai_outputs records only the machine tag),
             # so preserve it in the log or a run that suddenly answers
             # invalid_output every cycle leaves the post-mortem only a counter.

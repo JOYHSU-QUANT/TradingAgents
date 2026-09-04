@@ -311,9 +311,12 @@ def _run_live_loop(
         # exiting here hands the supervisor a restart that may meet the same
         # lock, with the real position and its resting SL/TP unwatched in
         # between and systemd's StartLimitBurst counting down. Inside the
-        # loop, the driver's armed pending_fail lane retries only that write
-        # on each pump, safe mode pauses new risk until a clean reconcile
-        # releases it, and the position is watched throughout.
+        # loop both branches heal on their own: a poisoned re-parse has
+        # already armed the driver's pending_fail lane, which retries just
+        # that write on each pump, and an unanswered attempt is re-adopted by
+        # pump (nothing is armed there, so without that retry containment
+        # would wedge the driver — issue #180 review round 2). Safe mode
+        # pauses new risk meanwhile, and the position is watched throughout.
         _contain_as_recoverable_safe_mode(
             safe_mode,
             log_message=(

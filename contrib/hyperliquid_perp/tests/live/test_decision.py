@@ -651,9 +651,11 @@ def test_a_startup_adoption_whose_write_missed_is_retried_by_pump(tmp_path, monk
     with pytest.raises(sqlite3.OperationalError):
         driver.resume_startup()  # the caller contains this and starts the loop
     assert state["fired"] == 1
+    assert driver._adopted is False  # the step is owed, so pump must not skip it
     assert repo.find_in_progress_attempt(db.conn, "r") is not None  # still stranded
     # The lock has cleared. The next pump must adopt, not start a fresh cycle.
     assert driver.pump() == "api_failed"
+    assert driver._adopted is True  # ... and the step is not owed twice
     row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
     assert row["status"] == "api_failed"
     assert repo.find_in_progress_attempt(db.conn, "r") is None
@@ -667,6 +669,9 @@ def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.resume_startup() is None
     assert driver._inflight is None
+    # The step is done even though there was nothing to adopt: an unlatched
+    # flag would leave every pump of the run's life re-reading the row.
+    assert driver._adopted is True
 
 
 def test_a_cycle_failing_closed_after_its_store_clears_the_stored_response(tmp_path):

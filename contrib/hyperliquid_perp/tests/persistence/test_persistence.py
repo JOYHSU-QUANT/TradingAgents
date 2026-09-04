@@ -1351,7 +1351,9 @@ def test_the_other_doors_into_the_resumable_column_are_shut(tmp_path):
     """"One writer" is enforced, not just documented: a string through the patch
     writer, or a response carried in at insert, is refused as the writer bug it
     is — otherwise a row could be born terminal-with-a-response, and terminal
-    rows are immutable, so nothing could ever clean it."""
+    rows are immutable, so nothing could ever clean it. And a refusal must not
+    CLOBBER: the response already on the row is the only resumable copy, so
+    losing it to a rejected write would be the silent half of the same bug."""
     db = Database(tmp_path / "p.db")
     aid = _in_progress_attempt(db)
     # Against a row that ALREADY holds one: a refusal that still clobbered the

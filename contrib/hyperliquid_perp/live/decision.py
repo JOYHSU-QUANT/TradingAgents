@@ -342,8 +342,23 @@ class LiveDecisionDriver:
         forever, while the run looks alive. Mirrors ``PaperScheduler.poll``'s
         adoption: a persisted raw response resumes at the gate (never a second
         AI call, §3.1); an attempt the AI never answered fails closed to the
-        next cycle. Call once at loop start, before the first :meth:`pump`.
+        next cycle. Call at loop start, before the first :meth:`pump`.
+
+        Adoption is a step the run cannot skip, not a one-shot: a raise here
+        (its own fail-closed write meeting a locked store, say) leaves
+        ``_adopted`` False, and :meth:`pump` retries it before starting any
+        cycle. The caller contains that raise rather than exiting, so without
+        the retry the containment would produce exactly the wedge this method
+        exists to prevent — the stranded attempt keeps ``next_decision_at``,
+        and ``_start`` would collide on its deterministic id every tick.
+        Safe to re-enter: it re-reads the row, and the branch that leaves
+        ``_inflight`` armed is drained by pump's in-flight guard first.
         """
+        result = self._adopt()
+        self._adopted = True
+        return result
+
+    def _adopt(self) -> str | None:
         row = repo.find_in_progress_attempt(self._db.conn, self._run_id)
         if row is None:
             return None

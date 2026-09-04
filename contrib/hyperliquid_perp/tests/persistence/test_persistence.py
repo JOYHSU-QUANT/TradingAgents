@@ -1354,8 +1354,12 @@ def test_the_other_doors_into_the_resumable_column_are_shut(tmp_path):
     rows are immutable, so nothing could ever clean it."""
     db = Database(tmp_path / "p.db")
     aid = _in_progress_attempt(db)
+    # Against a row that ALREADY holds one: a refusal that still clobbered the
+    # stored text would be a silent loss of the only resumable copy.
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=_TS)
     with pytest.raises(ValueError, match="store_pending_response"), db.transaction() as conn:
-        repo.update_decision_attempt(conn, aid, pending_raw_response=_RAW)
+        repo.update_decision_attempt(conn, aid, pending_raw_response="other")
     with pytest.raises(ValueError, match="store_pending_response"), db.transaction() as conn:
         repo.insert_decision_attempt(
             conn,
@@ -1367,7 +1371,7 @@ def test_the_other_doors_into_the_resumable_column_are_shut(tmp_path):
             status="in_progress",
             pending_raw_response=_RAW,
         )
-    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] is None
+    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == _RAW  # untouched
     assert repo.get_decision_attempt(db.conn, "born-with-one") is None
     db.close()
 

@@ -636,6 +636,33 @@ def test_a_poisoned_resume_is_not_retried_by_the_following_pumps(tmp_path, monke
     assert repo.find_in_progress_attempt(db.conn, "r") is None
 
 
+def test_a_startup_adoption_whose_write_missed_is_retried_by_pump(tmp_path, monkeypatch):
+    """The containment in the loop (issue #180 review) must not itself become
+    the wedge. Adoption's OWN fail-closed write can miss — an operator's
+    export/validate holding the lock at boot — and the caller now contains that
+    raise instead of exiting. But the stranded attempt still owns
+    next_decision_at, so a pump that fell through to _start would re-derive its
+    deterministic id and collide on the primary key every tick, forever: the
+    C2 wedge, reached through the containment. pump retries the ADOPTION until
+    it lands instead."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)  # the AI never answered — no pending_fail lane
+    state = arm_lock_fault(monkeypatch, repo, "update_decision_attempt")
+    with pytest.raises(sqlite3.OperationalError):
+        driver.resume_startup()  # the caller contains this and starts the loop
+    assert state["fired"] == 1
+    assert repo.find_in_progress_attempt(db.conn, "r") is not None  # still stranded
+    # The lock has cleared. The next pump must adopt, not start a fresh cycle.
+    assert driver.pump() == "api_failed"
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert repo.find_in_progress_attempt(db.conn, "r") is None
+    # ... and once adopted, the driver goes back to ordinary scheduling.
+    assert driver.pump() is None  # re-anchored, not due
+    assert provider.requests == 0
+    assert engine.plans == []
+
+
 def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.resume_startup() is None

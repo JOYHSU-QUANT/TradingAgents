@@ -162,9 +162,13 @@ Breaking changes within the 0.x line are called out explicitly.
   logged at ERROR first (the row was its only durable copy). Startup adoption
   is now contained the way an in-loop tick is: should its own ``api_failed``
   record meet a locked store (an operator's export/validate), the loop enters
-  recoverable safe mode and starts anyway, retrying just that write on each
-  pump — exiting would hand the supervisor a restart that can meet the same
-  lock, with the position and its resting SL/TP unwatched in between.
+  recoverable safe mode and starts anyway — exiting would hand the supervisor
+  a restart that can meet the same lock, with the position and its resting
+  SL/TP unwatched in between. Adoption is then retried on each pump until it
+  lands, and no new cycle starts before it does: the stranded attempt still
+  owns ``next_decision_at``, so starting one would re-derive its deterministic
+  id and collide on the primary key every tick — the wedge adoption exists to
+  prevent, reached through the containment.
   Relatedly, a response that did not parse to a decision is no longer stored
   as resumable at all, in either lane: it is nothing to resume, and its
   preserved text is not guaranteed to re-parse to the same verdict — a

@@ -422,10 +422,13 @@ streak 升級。判讀同 [RUNBOOK §7](./RUNBOOK.md) 那一列。重啟時 resu
 會先把回覆全文印進 ERROR log 供事後診斷）——與 paper 的 [RUNBOOK §3](./RUNBOOK.md) 同義。
 那筆 `api_failed` 記錄**本身**寫不進去時（開機當下 store 被 export／validate 鎖住）
 daemon **不退出**：startup adoption 與迴圈內的 tick 一樣被容納——印 ERROR traceback、
-進 recoverable safe mode（新單暫停到下一次乾淨 reconcile 自動解除）、照常起迴圈，之後每個
-pump 只重試那一筆寫入。理由是退出等於把重啟交給監管，而重啟可能撞上同一把鎖，期間真倉位
-與掛著的 SL/TP 無人看管，systemd 的 `StartLimitBurst` 還在倒數。看到 `entering recoverable
-safe mode and starting the loop anyway` 就是這條路。
+進 recoverable safe mode（新單暫停到下一次乾淨 reconcile 自動解除）、照常起迴圈。理由是
+退出等於把重啟交給監管，而重啟可能撞上同一把鎖，期間真倉位與掛著的 SL/TP 無人看管，
+systemd 的 `StartLimitBurst` 還在倒數。看到 `entering recoverable safe mode and starting
+the loop anyway` 就是這條路。**adoption 沒跑完之前 pump 不會開新 cycle**，而是每個 tick
+重試 adoption（成功時印 `startup adoption (retried): …`）——那個 stranded attempt 還握著
+`next_decision_at`，直接開新 cycle 會用同一個 attempt id 去 insert 而每 tick 撞主鍵，
+變成另一種永久僵住。鎖放開後下一個 tick 就會自己收斂，不需要人工介入。
 另外：**parse 失敗的回覆一開始就不會被存**。AI 回答 parse 不出決策（`is_valid=False`）時
 §3.1 store 直接跳過——那不是可以 resume 的決策，而它被保留下來的文字不保證重 parse 得到
 同一個判決（非 str 的回答是以 `repr` 保存，重啟後它就是一個 str，可能被重新萃取出這一輪

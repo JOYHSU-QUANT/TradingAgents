@@ -809,8 +809,18 @@ class PaperScheduler:
             # is not guaranteed to re-parse to the same verdict (the live
             # driver's _store_pending_response carries the full reasoning: a
             # non-str answer is kept as its repr, which IS a str on resume).
-            # "Nothing stored" IS the resumable shape for an invalid answer —
-            # a crash here fails the cycle closed, the same no-order hold.
+            # "Nothing stored" IS the settled §3.1 state for an invalid answer
+            # — a crash here retries the try, no order either way. The text is
+            # durable nowhere else (ai_outputs records only the machine tag),
+            # so preserve it in the log or a run that suddenly answers
+            # invalid_output every cycle leaves the post-mortem only a counter.
+            logger.warning(
+                "decision attempt %s: the answer did not parse to a decision (%s) and is "
+                "not resumable; preserving it here for diagnosis: %r",
+                pending.attempt_id,
+                pending.parsed.invalid_reason,
+                pending.parsed.raw_response,
+            )
             pending.raw_stored = True
             return True
         try:

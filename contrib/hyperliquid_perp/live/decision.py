@@ -174,10 +174,11 @@ class _InFlight:
     output_id: str
     scheduled_at: datetime
     parsed: ParsedDecision | None = None  # set once the worker returns, gate pending
-    # Whether ``pending_raw_response`` landed durably. ``parsed`` is set the
-    # moment poll() hands over the one-shot result — BEFORE the fallible §3.1
-    # store — so "collected but not yet stored" is a real state, and gating is
-    # forbidden in it (see _PendingResponsePersistError).
+    # Whether the §3.1 store is SETTLED — the response landed durably, or the
+    # answer was invalid and deliberately not stored (_store_pending_response).
+    # ``parsed`` is set the moment poll() hands over the one-shot result —
+    # BEFORE the fallible store — so "collected but not yet settled" is a real
+    # state, and gating is forbidden in it (see _PendingResponsePersistError).
     raw_stored: bool = False
     # The engine's start_plan outcome, cached the moment it returns: a persist
     # failure after registration must retry the PERSIST, never re-gate (a
@@ -249,6 +250,11 @@ class LiveDecisionDriver:
         self._cycle_interval = cycle_interval
         self._mode = mode
         self._inflight: _InFlight | None = None
+        # Whether §3.1 startup adoption has RUN TO COMPLETION. False until it
+        # does, and pump refuses to start a cycle while it is: the stranded
+        # attempt still owns next_decision_at, so _start would collide on its
+        # deterministic id every tick (see resume_startup).
+        self._adopted = False
         self._paused_for_latch = False  # one log line per manual-latch pause episode
         self._no_decision_streak = 0  # issue #50: consecutive cycles with no decision
 
@@ -292,6 +298,18 @@ class LiveDecisionDriver:
                 return self._fail_closed(exc.error_type, exc.message)
             except Exception as exc:  # noqa: BLE001 — a bug must still fail the cycle closed
                 return self._fail_closed(None, f"non-retryable: {exc!r}")
+        if not self._adopted:
+            # Startup adoption raised and the caller contained it (the loop
+            # must keep watching the position rather than exit). Retry it
+            # HERE, before anything else: the stranded attempt still holds
+            # next_decision_at, so falling through to _start would re-derive
+            # its id and collide on the primary key every tick — the C2 wedge,
+            # reached through the containment instead of through a crash.
+            adopted = self.resume_startup()
+            if adopted is not None:
+                logger.info("decision driver startup adoption (retried): %s", adopted)
+                return adopted
+            # Nothing was stranded after all — no reason to burn this tick.
         if not self._due(now):
             return None
         # A standing §13.5 manual latch means a human must intervene and every
@@ -343,16 +361,16 @@ class LiveDecisionDriver:
             except Exception as exc:  # noqa: BLE001 — a bug fails the cycle closed, not the daemon
                 # A raise here is a parser bug or a corrupted store (the parse
                 # is fail-closed by contract — see PaperScheduler._resume_pending,
-                # the same guard), and DETERMINISTIC: this runs before the
-                # loop's tick guard exists, so propagating would exit the daemon
-                # into a supervised crash-loop with the position and its SL/TP
+                # the same guard), and DETERMINISTIC: uncontained it would exit
+                # the daemon at startup and every supervised restart would
+                # resume into the same parse, with the position and its SL/TP
                 # unwatched between restarts (issue #180). _fail_closed clears
                 # the poisoned response, so log the full text FIRST — the row
                 # was its only durable copy. The bare in-flight above is what
-                # _fail_closed asserts on; it buys the traceback and the streak
-                # count, NOT its pending_fail retry — a store miss on the fail
-                # record still propagates out of this pre-loop call (a
-                # transient fault a restart retries, unlike the parse).
+                # _fail_closed asserts on, and it also ARMS the pending_fail
+                # lane: a store miss on the fail record is then retried by
+                # pump like any other, the caller having contained the raise
+                # rather than exiting.
                 logger.error(
                     "decision attempt %s: stored response failed to parse and is being "
                     "cleared; preserving it here for diagnosis: %r",
@@ -399,7 +417,10 @@ class LiveDecisionDriver:
             return False
         parsed = inflight.parsed
         if inflight.raw_stored:
-            return False  # already durable — restart resumes from the store as-is
+            # The §3.1 store is settled: either the response is durable and a
+            # restart resumes it, or the answer was invalid and deliberately
+            # not stored (both logged where they happened). Nothing to salvage.
+            return False
         if parsed is None:
             try:
                 parsed = self._worker.poll()
@@ -557,6 +578,9 @@ class LiveDecisionDriver:
             raise _PendingResponsePersistError(
                 f"decision {inflight.attempt_id} collected but its store failed: {exc!r}"
             ) from exc
+        # True for a skipped invalid answer too: the flag gates GATING, and
+        # "no row to resume" is the settled §3.1 state for one (see
+        # _store_pending_response), not a store still owed.
         inflight.raw_stored = True
 
     def _store_pending_response(
@@ -579,6 +603,17 @@ class LiveDecisionDriver:
         have recorded for an invalid answer.
         """
         if not parsed.is_valid:
+            # The text is durable NOWHERE else (ai_outputs records only the
+            # machine tag), so preserve it here or the post-mortem for a run
+            # that suddenly answers invalid_output every cycle has nothing to
+            # read but the counter.
+            logger.warning(
+                "decision attempt %s: the answer did not parse to a decision (%s) and is "
+                "not resumable; preserving it here for diagnosis: %r",
+                inflight.attempt_id,
+                parsed.invalid_reason,
+                parsed.raw_response,
+            )
             return False
         with self._db.transaction() as conn:
             repo.store_pending_response(

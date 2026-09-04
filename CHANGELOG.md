@@ -189,8 +189,8 @@ Breaking changes within the 0.x line are called out explicitly.
   reader's consumers share. That failure now sorts into two outcomes instead
   of one: the venue's stays ``ERROR``, while ours becomes a new ``DEFECT``
   carrying an ERROR-level traceback. Sorted rather than raised, deliberately —
-  ``fetch`` returning for every failure is a property three call sites rely
-  on, and one of them (``engine.try_write_cycle_snapshot``, reached from the
+  ``fetch`` returning for every failure is a property all five of its call
+  sites rely on, and one of them (``engine.try_write_cycle_snapshot``, reached from the
   scheduler's terminal lane) is not fail-stop and sits in no broad handler, so
   a raise there would end the daemon after the terminal row committed, with no
   halt breadcrumb; the paper loop does not wrap its tick the way the live loop
@@ -207,8 +207,8 @@ Breaking changes within the 0.x line are called out explicitly.
   widening, and that is tracked separately.) The backfill pass's "never
   abort" also stopped depending on its handlers' exception lists — those lists
   are what issue #191 got through — and is now held by an outer per-event
-  lane that gives every event a verdict; a stored timestamp or size that is
-  NULL reads as the corrupt row it is rather than falling through to it.
+  lane that gives every event a verdict; a stored timestamp or size of the
+  wrong type reads as the corrupt row it is rather than falling through to it.
   Finally the two windowed reads no longer share one refusal wording, so a
   naive ``end`` says which read was handed it.
 - **hyperliquid_perp: the live daemon no longer crash-loops on a stored

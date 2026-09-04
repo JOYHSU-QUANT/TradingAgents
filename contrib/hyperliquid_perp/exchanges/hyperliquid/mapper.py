@@ -244,9 +244,10 @@ def map_market_snapshot(meta_and_asset_ctxs: Any, coin: str) -> MarketSnapshot:
         # ``is None`` rather than a falsy test: ``join`` over a ``None`` raises
         # a bare ``TypeError``, which is not an ``ExchangeError`` and so
         # escapes this layer's translation contract from inside the error path
-        # itself. Only the ABSENT name becomes "?" — a present-but-empty one is
-        # shown as it is, so the message cannot claim a name is missing when
-        # the venue sent a blank one.
+        # itself. A missing key and an explicit null both read as "?" (they are
+        # the same absence to ``.get``); a present-but-EMPTY name is shown as
+        # it is, so a blank the venue really sent is not reported as though
+        # the field had never been there.
         known = ", ".join("?" if a.get("name") is None else str(a.get("name")) for a in universe[:10])
         raise UnknownCoinError(f"coin {coin!r} not in perp universe (e.g. {known})")
     if index >= len(asset_ctxs):

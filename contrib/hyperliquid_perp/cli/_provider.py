@@ -87,7 +87,10 @@ class _HistoryFundingSource:
                 # read as an outage, while every settlement stayed pending
                 # forever (issue #157). What the callers make of it is theirs:
                 # the engine tick lets it end the run; the cycle-boundary
-                # backfill's corrupt-row lane still catches a ``ValueError``.
+                # backfill contains it in a lane of its own, which says the
+                # READER failed rather than blaming the stored row (issue
+                # #193 — it used to land in the corrupt-row lane and send an
+                # operator to SQLite to hunt a fault that is in the code).
                 failures = self._consecutive_failures.get(coin, 0) + 1
                 self._consecutive_failures[coin] = failures
                 log = (

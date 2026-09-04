@@ -75,11 +75,14 @@ def _event_label(event: sqlite3.Row) -> str:
     ``sqlite3.Row[...]`` answers an unknown column with ``IndexError`` — so
     every subscript AND the formatting sit inside the ``try``.
 
-    Both its callers need that. The outer containment lane would propagate a
-    raise from its own handler and abort the pass, the one outcome that lane
-    exists to make impossible; and the ``already_posted`` line below runs
+    Every per-event message goes through it, so the discipline is the loop's
+    rather than one lane's. Two places need it most: the outer containment
+    lane would propagate a raise from its own handler and abort the pass — the
+    one outcome that lane exists to make impossible — and the tail messages run
     OUTSIDE the outer ``try`` altogether (after every ``except … continue``),
-    so a raise there has no containment at all.
+    where a raise has no containment at all. Anywhere else, a subscript raising
+    from inside an inner ``except`` would fall to the outer lane and have the
+    event counted, and mis-reported, twice.
     """
     try:
         return f"{event['symbol']} @ {event['funding_timestamp']}"
@@ -88,21 +91,21 @@ def _event_label(event: sqlite3.Row) -> str:
 
 
 def _log_corrupt_event(run_id: str, event: sqlite3.Row, exc: Exception) -> None:
-    """The corrupt-row lane's ERROR, from either of the two places it is reached.
+    """The corrupt-row lane's ERROR, from each of the three places it is reached.
 
-    The stored timestamp is parsed before the funding reader runs and the rest
-    of the stored basis after it, so the one verdict ("this ROW is bad; fix it
-    in the store") is now raised from two ``except`` clauses. One wording, one
-    place — the reader lane between them says something different on purpose,
-    and that difference is the whole point of issue #193.
+    The stored fields are parsed at three points around the funding reader —
+    the timestamp before it, the size and then the settlement basis after — so
+    the one verdict ("this ROW is bad; fix it in the store") is raised from
+    three ``except`` clauses. One wording, one place: the reader lane among
+    them says something different on purpose, and that difference is the whole
+    point of issue #193.
     """
     logger.error(
-        "funding backfill for %s could not post %s @ %s: %s — the event "
+        "funding backfill for %s could not post %s: %s — the event "
         "stays pending and its funding P&L stays uncounted (corrupt "
         "stored row; fix it in the store to resolve it)",
         run_id,
-        event["symbol"],
-        event["funding_timestamp"],
+        _event_label(event),
         exc,
     )
 
@@ -142,18 +145,20 @@ def backfill_pending_funding(
     outer one to guarantee there is always a verdict. Every outcome that
     leaves the event PENDING counts into ``still_pending`` — whatever the
     reason, its funding P&L stays uncounted rather than fabricated. (An
-    ``already_posted`` row is in neither total: it is resolved, not pending,
-    so the two can sum to less than the rows iterated. It gets its own INFO.)
+    ``already_posted`` result is in neither total — nothing moved, and nothing
+    is owed — so the two can sum to less than the rows iterated. That row does
+    stay ``pending`` in the store, and its INFO says so.)
     """
     posted = 0
     young_pending = 0
     stale_pending = 0
     # ONE counter for every event that did not post, whatever the reason. The
     # reasons differ and are told apart where telling them apart pays — in the
-    # four per-event messages below (corrupt row, funding reader, store error,
-    # and the outer lane's "no lane claimed it"), which are what an operator
-    # acts on and what the tests assert. A counter per reason would only ever
-    # be read as this sum.
+    # six per-event messages below, which are what an operator acts on and
+    # what the tests assert: the three verdict lanes (corrupt row, funding
+    # reader, store error), the outer lane's "no lane claimed it", and the two
+    # tail guards (a result that never arrived, a status this loop has no word
+    # for). A counter per reason would only ever be read as this sum.
     not_posted = 0
     for event in repo.iter_funding_events(db.conn, run_id, status="pending"):
         # Rebound per event, and never read across one: ``res`` is
@@ -177,8 +182,10 @@ def backfill_pending_funding(
                 settlement = parse_instant(event["funding_timestamp"])
             except (ValueError, TypeError) as exc:
                 # ``TypeError`` too: ``parse_instant`` is
-                # ``datetime.fromisoformat``, which answers a NULL or a BLOB
-                # cell with ``TypeError``, not ``ValueError``. Both are the
+                # ``datetime.fromisoformat``, which answers a cell of the
+                # wrong TYPE with ``TypeError``, not ``ValueError`` (the column
+                # is ``TEXT NOT NULL``, so NULL is out, but SQLite's TEXT
+                # affinity does not convert a BLOB). Both are the
                 # same fact about the same column — a bad stored row — and
                 # without this the ``TypeError`` fell to the outer lane and
                 # was reported as "a defect, read the traceback rather than
@@ -204,12 +211,11 @@ def backfill_pending_funding(
             except Exception as exc:  # noqa: BLE001 — see the outer lane
                 not_posted += 1
                 logger.error(
-                    "funding backfill for %s could not read the rate for %s @ %s: %s — the "
+                    "funding backfill for %s could not read the rate for %s: %s — the "
                     "funding reader failed (not a corrupt stored row); the event stays "
                     "pending and retries at the next cycle boundary or restart",
                     run_id,
-                    event["symbol"],
-                    event["funding_timestamp"],
+                    _event_label(event),
                     exc,
                     exc_info=True,
                 )
@@ -265,11 +271,10 @@ def backfill_pending_funding(
                 # misdiagnosed as a bad row: the event stays pending, the next pass retries.
                 not_posted += 1
                 logger.error(
-                    "funding backfill for %s hit a store error posting %s @ %s: %s — the "
+                    "funding backfill for %s hit a store error posting %s: %s — the "
                     "event stays pending and will be retried on the next pass",
                     run_id,
-                    event["symbol"],
-                    event["funding_timestamp"],
+                    _event_label(event),
                     exc,
                 )
                 continue

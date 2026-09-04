@@ -735,8 +735,8 @@ def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatc
 
     def drifted(*args, **kwargs):
         # Deliberately NOT a TypeError/ValueError: those are claimed by the
-        # corrupt-row lane (a NULL column reaches Decimal/fromisoformat as
-        # one). This has to be a type no inner lane lists, which is the whole
+        # corrupt-row lane (a wrong-typed column reaches
+        # Decimal/fromisoformat as one). This has to be a type no inner lane lists, which is the whole
         # category the outer lane exists for.
         raise RuntimeError("the reconciler asked accounting for something it no longer does")
 

@@ -665,6 +665,37 @@ def test_a_startup_adoption_whose_write_missed_is_retried_by_pump(tmp_path, monk
     assert engine.plans == []
 
 
+def test_a_poisoned_adoption_drains_its_armed_record_before_re_adopting(tmp_path, monkeypatch):
+    """The other containment lane — and the one the runbook says LOOKS different.
+    A poisoned re-parse arms pending_fail BEFORE its write, so when that write
+    misses, pump drains the armed record and never re-parses; the owed adoption
+    runs only afterwards, over a row that is terminal by then, as a clean no-op.
+    Order matters: adopting first would re-read a row whose fail record is still
+    owed, and re-parsing the poison would log it and count the cycle twice."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=_RAW_LONG)
+    calls = poison_stored_parse(monkeypatch, decision_mod)
+    arm_lock_fault(monkeypatch, repo, "update_decision_attempt")
+    with pytest.raises(sqlite3.OperationalError):
+        driver.resume_startup()  # contained by the caller; the loop starts
+    assert driver._adopted is False  # the step is still owed
+    assert driver._inflight is not None and driver._inflight.pending_fail is not None
+
+    assert driver.pump() == "api_failed"  # the ARMED record, not the adoption
+    assert driver._inflight is None
+    assert driver._adopted is False
+    assert calls["n"] == 1  # the poisoned text was parsed exactly once
+
+    assert driver.pump() is None  # the owed adoption: nothing in progress now
+    assert driver._adopted is True
+    assert calls["n"] == 1  # ... and still exactly once
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["pending_raw_response"] is None
+    assert provider.requests == 0
+    assert engine.plans == []
+
+
 def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.resume_startup() is None

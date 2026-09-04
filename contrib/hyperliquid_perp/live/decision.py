@@ -359,6 +359,13 @@ class LiveDecisionDriver:
         return result
 
     def _adopt(self) -> str | None:
+        # Re-entrant only from a clean slate. The resumed branch installs a
+        # FRESH _InFlight, so running this over a live one would drop a cached
+        # ``registration`` — a plan the engine has already committed and armed
+        # — and the next gate would call start_plan a second time. Both
+        # callers satisfy this (the CLI at boot, and pump only past its
+        # in-flight branch); pin it rather than leave it to prose.
+        assert self._inflight is None, "startup adoption must not run over an in-flight cycle"
         row = repo.find_in_progress_attempt(self._db.conn, self._run_id)
         if row is None:
             return None

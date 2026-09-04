@@ -957,8 +957,11 @@ _BYTES_ANSWER = (
 def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
     """PR #204 review: a parse that failed closed is no decision to resume, and
     its preserved text is not guaranteed to re-parse to the same verdict, so the
-    §3.1 store is skipped for it — a restart then fails the cycle closed instead
-    of lifting a live target out of the repr this run had already refused."""
+    §3.1 store is skipped for it — a restart then cannot lift a live target out
+    of the repr this run had already refused, and re-enters the §3.1 ladder (a
+    second AI call; the live lane fails the cycle closed instead). The text is
+    durable NOWHERE after the skip — ai_outputs keeps only the machine tag — so
+    the WARNING is the post-mortem's only copy and is pinned here too."""
     from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
 
     invalid = parse_target_decision(_BYTES_ANSWER, DecisionConfig())

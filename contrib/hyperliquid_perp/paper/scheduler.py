@@ -56,9 +56,12 @@ record itself, the cycle-boundary scheduling writes outside every guard
 (``_execute``'s pre-call counter, ``poll``'s new-cycle insert), and a
 non-DB error out of the best-effort cycle-end snapshot.
 
-Restart safety of a half-finished cycle: the successful AI response is
-persisted onto the attempt row (``pending_raw_response``) *before* the gate
-runs, so ONCE THAT STORE LANDS a crash anywhere up to the audit commit — the
+Restart safety of a half-finished cycle: an AI response that PARSED to a
+decision is persisted onto the attempt row (``pending_raw_response``) *before*
+the gate runs — one that did not is deliberately never stored (issue #204: it
+is nothing to resume, and its preserved text is not guaranteed to re-parse to
+the same verdict), so that cycle restarts down the §3.1 ladder instead. Once
+the store lands, a crash anywhere up to the audit commit — the
 market-data-blocked gate phase, or the window between ``start_plan``'s
 plan/order commit and the ``ai_outputs`` commit — resumes by re-parsing the
 stored response (deterministic), never by re-asking the AI (spec §3.1). A

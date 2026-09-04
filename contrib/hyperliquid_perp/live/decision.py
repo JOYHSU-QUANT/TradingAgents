@@ -341,8 +341,10 @@ class LiveDecisionDriver:
         id and ``insert_decision_attempt`` raises on its UNIQUE — every tick,
         forever, while the run looks alive. Mirrors ``PaperScheduler.poll``'s
         adoption: a persisted raw response resumes at the gate (never a second
-        AI call, §3.1); an attempt the AI never answered fails closed to the
-        next cycle. Call at loop start, before the first :meth:`pump`.
+        AI call, §3.1); an attempt with NO resumable response fails closed to
+        the next cycle — the AI never answered, or its answer did not parse to
+        a decision and was deliberately not stored, and the row cannot tell
+        the two apart. Call at loop start, before the first :meth:`pump`.
 
         Adoption is a step the run cannot skip, not a one-shot: a raise here
         (its own fail-closed write meeting a locked store, say) leaves
@@ -468,6 +470,10 @@ class LiveDecisionDriver:
             logger.exception("shutdown salvage: persist failed — the cycle fails closed on restart")
             return False
         if not stored:
+            # Settled, not owed: the answer was invalid and is deliberately
+            # unstored, so the flag reads the same here as on the pump path
+            # (_persist_pending_response). Nothing was salvaged — hence False.
+            inflight.raw_stored = True
             logger.info(
                 "shutdown salvage: the answer for %s did not parse to a decision — "
                 "the cycle fails closed on restart rather than resuming it",

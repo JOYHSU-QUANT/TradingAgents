@@ -583,6 +583,9 @@ def test_resume_startup_without_response_fails_closed(tmp_path):
     assert driver._inflight is None
     row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
     assert row["status"] == "api_failed"
+    # The row cannot tell "never answered" from "answered unparseably and was
+    # deliberately not stored", so its message must not claim either one.
+    assert "no resumable response" in row["error_message"]
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["next_decision_at"] is not None
     assert parse_instant(state["next_decision_at"]) > _T0  # re-anchored
@@ -866,6 +869,12 @@ def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
     record = next(r for r in caplog.records if "did not parse to a decision" in r.getMessage())
     assert repr(invalid.raw_response) in record.getMessage()
     assert "invalid_output" in record.getMessage()
+    # The skip still SETTLES the store, so a gate that stays blocked does not
+    # re-enter it every tick and re-log the whole response into journald.
+    assert driver._inflight is not None and driver._inflight.raw_stored is True
+    caplog.clear()
+    assert driver.pump() == "invalid_output"  # the gate ran; the store did not
+    assert not [r for r in caplog.records if "did not parse to a decision" in r.getMessage()]
     # A valid answer in the same spot DOES land — the skip is about validity,
     # not about the gate being blocked.
     other = tmp_path / "valid"
@@ -891,7 +900,9 @@ def test_shutdown_salvage_stores_nothing_for_an_invalid_answer(tmp_path, caplog)
     _await(worker)  # finished during the shutdown window; never polled
     with caplog.at_level(logging.INFO, logger=decision_mod.__name__):
         assert driver.salvage_shutdown() is False
-    assert driver._inflight is not None and driver._inflight.raw_stored is False
+    # Settled (nothing owed), even though nothing was salvaged: the same
+    # reading _persist_pending_response gives the skip on the pump path.
+    assert driver._inflight is not None and driver._inflight.raw_stored is True
     row = repo.find_in_progress_attempt(db.conn, "r")
     assert row["pending_raw_response"] is None
     assert any("did not parse to a decision" in r.getMessage() for r in caplog.records)

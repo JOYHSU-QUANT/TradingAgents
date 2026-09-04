@@ -174,10 +174,11 @@ class _InFlight:
     output_id: str
     scheduled_at: datetime
     parsed: ParsedDecision | None = None  # set once the worker returns, gate pending
-    # Whether ``pending_raw_response`` landed durably. ``parsed`` is set the
-    # moment poll() hands over the one-shot result — BEFORE the fallible §3.1
-    # store — so "collected but not yet stored" is a real state, and gating is
-    # forbidden in it (see _PendingResponsePersistError).
+    # Whether the §3.1 store is SETTLED — the response landed durably, or the
+    # answer was invalid and deliberately not stored (_store_pending_response).
+    # ``parsed`` is set the moment poll() hands over the one-shot result —
+    # BEFORE the fallible store — so "collected but not yet settled" is a real
+    # state, and gating is forbidden in it (see _PendingResponsePersistError).
     raw_stored: bool = False
     # The engine's start_plan outcome, cached the moment it returns: a persist
     # failure after registration must retry the PERSIST, never re-gate (a
@@ -249,6 +250,11 @@ class LiveDecisionDriver:
         self._cycle_interval = cycle_interval
         self._mode = mode
         self._inflight: _InFlight | None = None
+        # Whether §3.1 startup adoption has RUN TO COMPLETION. False until it
+        # does, and pump refuses to start a cycle while it is: the stranded
+        # attempt still owns next_decision_at, so _start would collide on its
+        # deterministic id every tick (see resume_startup).
+        self._adopted = False
         self._paused_for_latch = False  # one log line per manual-latch pause episode
         self._no_decision_streak = 0  # issue #50: consecutive cycles with no decision
 
@@ -292,6 +298,18 @@ class LiveDecisionDriver:
                 return self._fail_closed(exc.error_type, exc.message)
             except Exception as exc:  # noqa: BLE001 — a bug must still fail the cycle closed
                 return self._fail_closed(None, f"non-retryable: {exc!r}")
+        if not self._adopted:
+            # Startup adoption raised and the caller contained it (the loop
+            # must keep watching the position rather than exit). Retry it
+            # HERE, before anything else: the stranded attempt still holds
+            # next_decision_at, so falling through to _start would re-derive
+            # its id and collide on the primary key every tick — the C2 wedge,
+            # reached through the containment instead of through a crash.
+            adopted = self.resume_startup()
+            if adopted is not None:
+                logger.info("decision driver startup adoption (retried): %s", adopted)
+                return adopted
+            # Nothing was stranded after all — no reason to burn this tick.
         if not self._due(now):
             return None
         # A standing §13.5 manual latch means a human must intervene and every
@@ -323,9 +341,33 @@ class LiveDecisionDriver:
         id and ``insert_decision_attempt`` raises on its UNIQUE — every tick,
         forever, while the run looks alive. Mirrors ``PaperScheduler.poll``'s
         adoption: a persisted raw response resumes at the gate (never a second
-        AI call, §3.1); an attempt the AI never answered fails closed to the
-        next cycle. Call once at loop start, before the first :meth:`pump`.
+        AI call, §3.1); an attempt with NO resumable response fails closed to
+        the next cycle — the AI never answered, or its answer did not parse to
+        a decision and was deliberately not stored, and the row cannot tell
+        the two apart. Call at loop start, before the first :meth:`pump`.
+
+        Adoption is a step the run cannot skip, not a one-shot: a raise here
+        (its own fail-closed write meeting a locked store, say) leaves
+        ``_adopted`` False, and :meth:`pump` retries it before starting any
+        cycle. The caller contains that raise rather than exiting, so without
+        the retry the containment would produce exactly the wedge this method
+        exists to prevent — the stranded attempt keeps ``next_decision_at``,
+        and ``_start`` would collide on its deterministic id every tick.
+        Safe to re-enter: it re-reads the row, and the branch that leaves
+        ``_inflight`` armed is drained by pump's in-flight guard first.
         """
+        result = self._adopt()
+        self._adopted = True
+        return result
+
+    def _adopt(self) -> str | None:
+        # Re-entrant only from a clean slate. The resumed branch installs a
+        # FRESH _InFlight, so running this over a live one would drop a cached
+        # ``registration`` — a plan the engine has already committed and armed
+        # — and the next gate would call start_plan a second time. Both
+        # callers satisfy this (the CLI at boot, and pump only past its
+        # in-flight branch); pin it rather than leave it to prose.
+        assert self._inflight is None, "startup adoption must not run over an in-flight cycle"
         row = repo.find_in_progress_attempt(self._db.conn, self._run_id)
         if row is None:
             return None
@@ -335,19 +377,40 @@ class LiveDecisionDriver:
         if raw is not None:
             # Live attempts are always try 1 (no within-cycle ladder in v1), so
             # the per-try ids are re-derived the same way _start minted them.
-            self._inflight = _InFlight(
-                attempt_id,
-                f"{attempt_id}#in1",
-                f"{attempt_id}#out1",
-                scheduled_at,
-                parsed=parse_target_decision(raw, self._decision_cfg),
-                raw_stored=True,  # the parse SOURCE is the store — durable by definition
+            inflight = self._inflight = _InFlight(
+                attempt_id, f"{attempt_id}#in1", f"{attempt_id}#out1", scheduled_at
             )
+            try:
+                inflight.parsed = parse_target_decision(raw, self._decision_cfg)
+            except Exception as exc:  # noqa: BLE001 — a bug fails the cycle closed, not the daemon
+                # A raise here is a parser bug or a corrupted store (the parse
+                # is fail-closed by contract — see PaperScheduler._resume_pending,
+                # the same guard), and DETERMINISTIC: uncontained it would exit
+                # the daemon at startup and every supervised restart would
+                # resume into the same parse, with the position and its SL/TP
+                # unwatched between restarts (issue #180). _fail_closed clears
+                # the poisoned response, so log the full text FIRST — the row
+                # was its only durable copy. The bare in-flight above is what
+                # _fail_closed asserts on, and it also ARMS the pending_fail
+                # lane: a store miss on the fail record is then retried by
+                # pump like any other, the caller having contained the raise
+                # rather than exiting.
+                logger.error(
+                    "decision attempt %s: stored response failed to parse and is being "
+                    "cleared; preserving it here for diagnosis: %r",
+                    attempt_id,
+                    raw,
+                )
+                return self._fail_closed(None, f"non-retryable: {exc!r}")
+            inflight.raw_stored = True  # the parse SOURCE is the store — durable by definition
             logger.info("resuming in-progress decision %s from its stored response", attempt_id)
             return "resumed"
-        # The AI never answered (the LLM call died with the process): fail the
-        # cycle closed — §10.2 hold — and re-anchor, exactly like an in-process
-        # non-retryable failure. The paid-for call is gone either way.
+        # No resumable response: the LLM call died with the process, or it
+        # answered something that did not parse to a decision and was
+        # deliberately not stored (_store_pending_response). Either way there
+        # is nothing to resume — fail the cycle closed (§10.2 hold) and
+        # re-anchor, exactly like an in-process non-retryable failure. The
+        # message names the row's state rather than guessing which it was.
         logger.warning(
             "in-progress decision %s had no stored response after restart — failing it closed",
             attempt_id,
@@ -356,7 +419,10 @@ class LiveDecisionDriver:
             attempt_id,
             scheduled_at,
             error_type=None,
-            error_message="process restart interrupted this cycle before the AI answered",
+            error_message=(
+                "process restart found this cycle with no resumable response "
+                "(the AI never answered, or its answer did not parse to a decision)"
+            ),
         )
         # This process's first terminal outcome: the counter is per-process and
         # starts at zero anyway, so this is the honest 1 rather than a reset.
@@ -381,7 +447,10 @@ class LiveDecisionDriver:
             return False
         parsed = inflight.parsed
         if inflight.raw_stored:
-            return False  # already durable — restart resumes from the store as-is
+            # The §3.1 store is settled: either the response is durable and a
+            # restart resumes it, or the answer was invalid and deliberately
+            # not stored (both logged where they happened). Nothing to salvage.
+            return False
         if parsed is None:
             try:
                 parsed = self._worker.poll()
@@ -396,9 +465,20 @@ class LiveDecisionDriver:
         # (never polled), or _collect polled it and the §3.1 store missed
         # (parsed set, raw_stored False) — one last try either way.
         try:
-            self._store_pending_response(inflight, parsed, self._clock.now())
+            stored = self._store_pending_response(inflight, parsed, self._clock.now())
         except Exception:  # noqa: BLE001 — a store miss must not block shutdown
             logger.exception("shutdown salvage: persist failed — the cycle fails closed on restart")
+            return False
+        if not stored:
+            # Settled, not owed: the answer was invalid and is deliberately
+            # unstored, so the flag reads the same here as on the pump path
+            # (_persist_pending_response). Nothing was salvaged — hence False.
+            inflight.raw_stored = True
+            logger.info(
+                "shutdown salvage: the answer for %s did not parse to a decision — "
+                "the cycle fails closed on restart rather than resuming it",
+                inflight.attempt_id,
+            )
             return False
         inflight.raw_stored = True
         logger.info(
@@ -532,21 +612,48 @@ class LiveDecisionDriver:
             raise _PendingResponsePersistError(
                 f"decision {inflight.attempt_id} collected but its store failed: {exc!r}"
             ) from exc
+        # True for a skipped invalid answer too: the flag gates GATING, and
+        # "no row to resume" is the settled §3.1 state for one (see
+        # _store_pending_response), not a store still owed.
         inflight.raw_stored = True
 
     def _store_pending_response(
         self, inflight: _InFlight, parsed: ParsedDecision, now: datetime
-    ) -> None:
+    ) -> bool:
         """What makes a decision resumable (§3.1): the stored raw response.
 
-        The single writer of ``pending_raw_response`` — ``_collect`` (the normal
-        path) and ``salvage_shutdown`` (the shutdown window) must stamp the SAME
-        record shape, or a salvaged cycle would resume from an incomplete row.
+        Both callers — ``_persist_pending_response`` (the normal path) and
+        ``salvage_shutdown`` (the shutdown window) — land the one record shape
+        through ``repo.store_pending_response`` (issue #181).
+
+        An INVALID parse is deliberately not stored (returns ``False``): it is
+        no decision to resume, and its preserved text is not guaranteed to
+        re-parse to the same verdict. A non-str engine answer is kept as its
+        ``repr`` for the audit trail, and that repr IS a str on resume, where
+        ``extract_json_block`` can lift a live target out of it that the first
+        pass refused outright — the fail-open found in PR #204's review.
+        Nothing is lost by skipping: with no stored response a restart fails
+        the cycle closed, the same held position and no order the gate would
+        have recorded for an invalid answer.
         """
-        with self._db.transaction() as conn:
-            repo.update_decision_attempt(
-                conn, inflight.attempt_id, pending_raw_response=parsed.raw_response, timestamp=now
+        if not parsed.is_valid:
+            # The text is durable NOWHERE else (ai_outputs records only the
+            # machine tag), so preserve it here or the post-mortem for a run
+            # that suddenly answers invalid_output every cycle has nothing to
+            # read but the counter.
+            logger.warning(
+                "decision attempt %s: the answer did not parse to a decision (%s) and is "
+                "not resumable; preserving it here for diagnosis: %r",
+                inflight.attempt_id,
+                parsed.invalid_reason,
+                parsed.raw_response,
             )
+            return False
+        with self._db.transaction() as conn:
+            repo.store_pending_response(
+                conn, inflight.attempt_id, parsed.raw_response, timestamp=now
+            )
+        return True
 
     def _gate(self, now: datetime) -> str | None:
         inflight = self._inflight
@@ -576,7 +683,6 @@ class LiveDecisionDriver:
                     next_decision_at=next_at,
                     error_type=None,
                     error_message=None,
-                    pending_raw_response=None,
                     timestamp=now,
                 )
                 repo.upsert_scheduler_state(
@@ -641,8 +747,11 @@ class LiveDecisionDriver:
     def _flush_pending_fail(self) -> str:
         """Write the armed ``api_failed`` record; clear ``_inflight`` on success.
 
-        Raises (to the loop's tick guard — visible safe mode) when the write
-        fails, keeping ``_inflight.pending_fail`` armed for the next pump.
+        Raises when the write fails, keeping ``_inflight.pending_fail`` armed
+        for the next pump. Where the raise LANDS depends on the caller: the
+        loop's tick guard for an in-cycle failure, and the CLI's startup
+        containment when :meth:`resume_startup` reached here at boot — both
+        recoverable safe mode, both retried on the next pump.
         """
         inflight = self._inflight
         assert inflight is not None and inflight.pending_fail is not None
@@ -680,12 +789,6 @@ class LiveDecisionDriver:
                 error_type=error_type,
                 error_message=error_message,
                 next_decision_at=next_at,
-                # A terminal row carries no resumable response (issue #163
-                # parity with the paper lane): a cycle failing closed AFTER its
-                # §3.1 store landed would otherwise leave an api_failed row
-                # presenting the consumed response as resumable state — and
-                # terminal rows are immutable, so nothing could clean it later.
-                pending_raw_response=None,
                 timestamp=now,
             )
             repo.upsert_scheduler_state(

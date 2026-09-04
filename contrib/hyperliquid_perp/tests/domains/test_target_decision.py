@@ -418,6 +418,20 @@ def test_parsed_decision_rejects_invalid_with_live_target():
         ParsedDecision(decision=live, is_valid=False, invalid_reason="x", raw_response="raw")
 
 
+def test_parsed_decision_rejects_a_non_str_raw_response():
+    # raw_response is what the §3.1 store persists (repo.store_pending_response
+    # refuses a non-str); caught at construction, a hand-built instance fails
+    # its cycle closed instead of wedging the live store-retry lane on a
+    # deterministic refusal. parse_target_decision itself never builds one:
+    # a non-str engine answer is preserved as its repr, None as "".
+    stub = TargetDecision.fail_closed()
+    for bad in (None, b"bytes", {"decision_mode": "maintain_current"}):
+        with pytest.raises(ValueError, match="raw_response"):
+            ParsedDecision(decision=stub, is_valid=False, invalid_reason="x", raw_response=bad)
+    assert parse_target_decision(None, DecisionConfig()).raw_response == ""
+    assert parse_target_decision(["drift"], DecisionConfig()).raw_response == "['drift']"
+
+
 # --------------------------------------------------------------------------
 # JSON extraction
 # --------------------------------------------------------------------------

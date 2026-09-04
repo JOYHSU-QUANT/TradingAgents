@@ -40,6 +40,8 @@ from contrib.hyperliquid_perp.paper.scheduler import (
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 
+from ..conftest import arm_lock_fault, poison_stored_parse
+
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
 _MARK = D(50000)
@@ -816,44 +818,17 @@ def test_completed_cycle_clears_stale_error_fields(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _arm_lock_fault(monkeypatch, target, name, *, shots=1, when=lambda *a, **k: True):
-    """Make ``target.name`` raise "database is locked" for its first ``shots`` hits.
-
-    ``when`` filters which calls count (the store lane patches the shared
-    ``repository`` module object, so the filter is what keeps the fault on the
-    raw-response update rather than every attempt write in the poll). Returns
-    the mutable state so a test can assert how many faults actually fired.
-    """
-    real = getattr(target, name)
-    state = {"fired": 0}
-
-    def flaky(*args, **kwargs):
-        if state["fired"] < shots and when(*args, **kwargs):
-            state["fired"] += 1
-            raise sqlite3.OperationalError("database is locked")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(target, name, flaky)
-    return state
-
-
 def _arm_flaky_response_store(monkeypatch, *, shots=1):
     """Fail the §3.1 response store for its first ``shots`` attempts.
 
-    ``sched_mod.repo`` is the shared ``persistence.repository`` module object,
-    so the ``pending_raw_response`` filter — not the patch site — is what keeps
-    the pre-call counter update and ``_finalize``'s clearing pass (``None``)
-    going through untouched.
+    The store is its own repository writer (``store_pending_response``, issue
+    #181), so faulting it leaves the pre-call counter update and every
+    terminal write going through untouched. ``sched_mod.repo`` is the shared
+    ``persistence.repository`` module object.
     """
     from contrib.hyperliquid_perp.paper import scheduler as sched_mod
 
-    return _arm_lock_fault(
-        monkeypatch,
-        sched_mod.repo,
-        "update_decision_attempt",
-        shots=shots,
-        when=lambda conn, attempt_id, **kwargs: kwargs.get("pending_raw_response") is not None,
-    )
+    return arm_lock_fault(monkeypatch, sched_mod.repo, "store_pending_response", shots=shots)
 
 
 def test_response_store_failure_retries_the_store_never_the_ai(tmp_path, monkeypatch):
@@ -922,7 +897,7 @@ def test_a_persist_that_lands_clears_the_failure_streak(tmp_path, monkeypatch):
     _arm_flaky_response_store(monkeypatch, shots=_MAX_PERSIST_FAILURES - 1)
     for _ in range(_MAX_PERSIST_FAILURES - 1):
         assert scheduler.poll() is None
-    _arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")  # one audit miss
+    arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")  # one audit miss
     assert scheduler.poll() is None  # store lands, gate runs, audit misses once
     r = scheduler.poll()
     assert r.event is CycleEvent.COMPLETED  # no escalation: the streak was reset
@@ -948,15 +923,13 @@ def test_resume_with_a_poisoned_stored_response_fails_the_cycle_closed(
     # non-retryable error, and the poisoned response is cleared.
     from contrib.hyperliquid_perp.paper import scheduler as sched_mod
 
-    def boom(raw, cfg):
-        raise ValueError("corrupt stored response")
-
-    monkeypatch.setattr(sched_mod, "parse_target_decision", boom)
+    calls = poison_stored_parse(monkeypatch, sched_mod)
     scheduler2 = _restart(db, clock, engine, _FakeProvider([]))
     with caplog.at_level(logging.ERROR, logger=sched_mod.__name__):
         r2 = scheduler2.poll()
     assert r2.event is CycleEvent.API_FAILED
     assert r2.error_type is None
+    assert calls["n"] == 1
     row = repo.get_decision_attempt(db.conn, r2.decision_attempt_id)
     assert row["status"] == "api_failed"
     assert row["error_type"] is None
@@ -964,8 +937,74 @@ def test_resume_with_a_poisoned_stored_response_fails_the_cycle_closed(
     assert row["pending_raw_response"] is None  # never again presented as resumable
     # The row was the only durable copy (ai_outputs never stores raw text), so
     # clearing it without preserving the text would destroy the evidence the
-    # post-mortem needs to tell a parser bug from a corrupted store.
-    assert _RAW_LONG_1 in caplog.text
+    # post-mortem needs to tell a parser bug from a corrupted store. The line
+    # logs the text with %r, so its repr is what the log carries.
+    assert repr(_RAW_LONG_1) in caplog.text
+    db.close()
+
+
+# An engine answering with BYTES rather than text: parse_target_decision keeps
+# a non-str answer as its repr for the audit trail and fails it closed BEFORE
+# extraction, "its repr may embed a JSON-looking span that must never be parsed
+# as a live decision". That repr IS a str on resume — hence this fixture.
+_BYTES_ANSWER = (
+    b'{"decision_mode": "set_target", "target_side": "long", '
+    b'"requested_target_margin_pct": 5, "confidence": 0.8, '
+    b'"rationale": "drift", "key_risks": ["a risk"]}'
+)
+
+
+def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
+    """PR #204 review: a parse that failed closed is no decision to resume, and
+    its preserved text is not guaranteed to re-parse to the same verdict, so the
+    §3.1 store is skipped for it — a restart then cannot lift a live target out
+    of the repr this run had already refused, and re-enters the §3.1 ladder (a
+    second AI call; the live lane fails the cycle closed instead). The text is
+    durable NOWHERE after the skip — ai_outputs keeps only the machine tag — so
+    the WARNING is the post-mortem's only copy and is pinned here too."""
+    from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
+
+    invalid = parse_target_decision(_BYTES_ANSWER, DecisionConfig())
+    assert invalid.is_valid is False  # this process refuses it outright
+    # ... and THIS is why storing it would be unsafe: the preserved repr is a
+    # str on resume, and re-parsing lifts out the live target just refused.
+    assert parse_target_decision(invalid.raw_response, DecisionConfig()).is_valid is True
+
+    # TIMEOUT first: the gate is blocked, so the post-store row is observable.
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [invalid], [SnapshotOutcome.TIMEOUT, _snap()]
+    )
+    from contrib.hyperliquid_perp.paper import scheduler as sched_mod
+
+    with caplog.at_level(logging.WARNING, logger=sched_mod.__name__):
+        r1 = scheduler.poll()
+    assert r1.event is CycleEvent.PENDING_MARKET_DATA
+    assert repo.find_in_progress_attempt(db.conn, "r")["pending_raw_response"] is None
+    record = next(r for r in caplog.records if "did not parse to a decision" in r.getMessage())
+    assert repr(invalid.raw_response) in record.getMessage()
+    assert "invalid_output" in record.getMessage()
+    # A restart therefore cannot resume it. With nothing stored the attempt
+    # goes down the §3.1 retry ladder instead — here still between retries, so
+    # the poll does nothing at all. Before the skip it resumed, re-parsed the
+    # repr into a live LONG target and gated it. The empty provider script is
+    # part of the assertion: a re-ask would raise IndexError here.
+    scheduler2 = _restart(db, clock, engine, _FakeProvider([]))
+    assert scheduler2.poll() is None
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["status"] == "in_progress"  # never gated, never terminalized
+    assert row["pending_raw_response"] is None
+    db.close()
+
+
+def test_a_valid_answer_blocked_at_the_gate_is_still_stored(tmp_path):
+    """The skip above is about validity, not about the gate being blocked: the
+    same TIMEOUT-first setup with a VALID answer still lands the §3.1 store, so
+    a restart resumes it without a second AI call (the discriminator)."""
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [_decision("long", 1)], [SnapshotOutcome.TIMEOUT, _snap()]
+    )
+    assert scheduler.poll().event is CycleEvent.PENDING_MARKET_DATA
+    assert repo.find_in_progress_attempt(db.conn, "r")["pending_raw_response"] == "{}"
     db.close()
 
 
@@ -995,7 +1034,7 @@ def test_audit_persist_failure_retries_the_persist_never_the_gate(tmp_path, monk
         return real_start(parsed, output_id=output_id)
 
     monkeypatch.setattr(engine, "start_plan", counting)
-    _arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")
+    arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")
     # The engine committed a plan before the audit txn; failing the cycle
     # closed now would write "no action" into the audit trail while that plan
     # keeps filling — so the poll holds the decision AND its registration.

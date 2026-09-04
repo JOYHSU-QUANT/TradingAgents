@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -17,9 +18,10 @@ from contrib.hyperliquid_perp.persistence.ids import (
     slice_id,
 )
 from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
+from contrib.hyperliquid_perp.persistence.repository._vocab import TERMINAL_ATTEMPT_STATUSES
 from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE, SCHEMA_VERSION
 
-from ..conftest import build_store_at
+from ..conftest import build_store_at, insert_decision_attempts
 
 _TS = datetime(2026, 7, 1, tzinfo=timezone.utc)
 
@@ -1289,6 +1291,122 @@ def test_decision_attempt_error_type_validated_at_write_boundary(tmp_path):
             status="in_progress",
             error_type="Timeout",
         )
+    db.close()
+
+
+_DECISIONS_LOGGER = "contrib.hyperliquid_perp.persistence.repository.decisions"
+_RAW = '{"decision_mode": "set_target", "target_side": "long"}'
+
+
+def _in_progress_attempt(db, run_id="r1"):
+    insert_decision_attempts(db, ["in_progress"], run_id=run_id, start=_TS)
+    return decision_attempt_id(run_id, _TS)
+
+
+def test_store_pending_response_stamps_only_the_response_and_the_timestamp(tmp_path):
+    """issue #181: the ONE writer of the resumable row — every lane that stores
+    a response (paper store, live store, live shutdown salvage) lands this same
+    shape, so a salvaged cycle never resumes from a row unlike the normal one."""
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
+    before = dict(repo.get_decision_attempt(db.conn, aid))
+    later = _TS + timedelta(hours=1)
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=later)
+    after = dict(repo.get_decision_attempt(db.conn, aid))
+    assert {col for col in before if before[col] != after[col]} == {
+        "pending_raw_response",
+        "timestamp",
+    }
+    assert after["pending_raw_response"] == _RAW
+    assert after["timestamp"] == later.isoformat()
+    # It shares the patch writer's immutability: no store on a terminal row.
+    with db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, status="api_failed")
+    with pytest.raises(ValueError, match="immutable"), db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=later)
+    db.close()
+
+
+def test_store_pending_response_refuses_a_non_string_but_accepts_the_empty_one(tmp_path):
+    """Clearing is not this writer's job (a terminal write does it), so ``None``
+    is a caller bug rather than "clear". ``""`` is accepted defensively: no
+    lane stores an invalid parse any more, so nothing reaches here with one,
+    but the guard must refuse by TYPE — a writer that did pass the empty
+    answer should land its row, not meet a check reasoning about content."""
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=_TS)
+    for bad in (None, b"bytes", 1):
+        with pytest.raises(ValueError, match="must be a string"), db.transaction() as conn:
+            repo.store_pending_response(conn, aid, bad, timestamp=_TS)
+    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == _RAW
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, "", timestamp=_TS)
+    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == ""
+    db.close()
+
+
+def test_the_other_doors_into_the_resumable_column_are_shut(tmp_path):
+    """"One writer" is enforced, not just documented: a string through the patch
+    writer, or a response carried in at insert, is refused as the writer bug it
+    is — otherwise a row could be born terminal-with-a-response, and terminal
+    rows are immutable, so nothing could ever clean it. And a refusal must not
+    CLOBBER: the response already on the row is the only resumable copy, so
+    losing it to a rejected write would be the silent half of the same bug."""
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
+    # Against a row that ALREADY holds one: a refusal that still clobbered the
+    # stored text would be a silent loss of the only resumable copy.
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=_TS)
+    with pytest.raises(ValueError, match="store_pending_response"), db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, pending_raw_response="other")
+    with pytest.raises(ValueError, match="store_pending_response"), db.transaction() as conn:
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id="born-with-one",
+            timestamp=_TS,
+            mode="paper",
+            run_id="r1",
+            scheduled_at=_TS + timedelta(hours=4),
+            status="in_progress",
+            pending_raw_response=_RAW,
+        )
+    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == _RAW  # untouched
+    assert repo.get_decision_attempt(db.conn, "born-with-one") is None
+    db.close()
+
+
+@pytest.mark.parametrize("terminal", TERMINAL_ATTEMPT_STATUSES)
+def test_a_terminal_attempt_write_lands_no_resumable_response(tmp_path, caplog, terminal):
+    """issue #181: the repository, not each writer, keeps a terminal row free of
+    a pending_raw_response. Left on the row by the §3.1 store and not mentioned
+    by the terminal write — the designed path of every cycle, and equally a
+    writer that forgot the clear — it lands NULL, silently (a per-cycle log
+    line about the invariant working would bury the ERROR that matters)."""
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=_TS)
+    # A non-terminal patch leaves the resumable response alone.
+    with db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, error_type="timeout")
+    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == _RAW
+    with caplog.at_level(logging.DEBUG, logger=_DECISIONS_LOGGER), db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, status=terminal, error_type=None)
+    row = repo.get_decision_attempt(db.conn, aid)
+    assert row["status"] == terminal
+    assert row["pending_raw_response"] is None
+    assert caplog.records == []
+    # An explicit clear on the terminal write (the pre-#181 writers' habit)
+    # is still accepted — it is the invariant spelled out, not a violation.
+    aid2 = _in_progress_attempt(db, run_id="r2")
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid2, _RAW, timestamp=_TS)
+        repo.update_decision_attempt(conn, aid2, status=terminal, pending_raw_response=None)
+    assert repo.get_decision_attempt(db.conn, aid2)["pending_raw_response"] is None
     db.close()
 
 

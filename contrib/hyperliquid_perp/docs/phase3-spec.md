@@ -1823,6 +1823,8 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
     Ctrl-C/SIGTERM 時 `worker.join(5s)` 之後再 poll 一次，若背景決策已完成、把
     raw response 寫入 `pending_raw_response`——重啟後 `resume_startup` 從 stored
     text 續 gate（§3.1，絕不重問 AI），不必把付費的 LLM call 燒掉並空等最多 4h。
+    **例外：parse 不出決策的回覆不寫**（PR #204，理由見 phase2-spec §3.1 修訂框），
+    salvage 回 `False` 並記一筆 INFO，該 cycle 重啟時照舊 fail closed。
     全程 contained：poll 或寫入失敗只記 log，shutdown 照常進行、該 cycle 重啟時
     照舊 fail closed。
 

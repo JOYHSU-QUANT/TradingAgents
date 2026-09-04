@@ -416,7 +416,42 @@ payload 的 cycle 也會在 log 印同一格式的 `prompt_regime: …`（INFO�
 另：live 車道的 `api_failed` 列若 `error_type` **空**、`error_message` 以 `non-retryable:`
 開頭，是非 Retryable 例外（通常是程式缺陷，主機問題看 repr 分辨）——driver 把該 cycle
 fail closed、倉位與 SL/TP 照舊、下個 cycle 照排，daemon 不退出；連續 3 筆走 no-decision
-streak 升級。判讀同 [RUNBOOK §7](./RUNBOOK.md) 那一列。
+streak 升級。判讀同 [RUNBOOK §7](./RUNBOOK.md) 那一列。重啟時 resume 到**存壞的回覆**
+（`pending_raw_response` re-parse 丟例外）也走同一條：該 cycle 記成 `api_failed` 並清掉該
+回覆（否則重啟會無限 crash-loop 進同一個 parse，期間真倉位與掛著的 SL/TP 無人看管；清除前
+會先把回覆全文印進 ERROR log 供事後診斷）——與 paper 的 [RUNBOOK §3](./RUNBOOK.md) 同義。
+那筆 `api_failed` 記錄**本身**寫不進去時（開機當下 store 被 export／validate 鎖住）
+daemon **不退出**：startup adoption 與迴圈內的 tick 一樣被容納——印 ERROR traceback、
+進 recoverable safe mode（新單暫停到下一次乾淨 reconcile 自動解除）、照常起迴圈。理由是
+退出等於把重啟交給監管，而重啟可能撞上同一把鎖，期間真倉位與掛著的 SL/TP 無人看管，
+systemd 的 `StartLimitBurst` 還在倒數。看到 `entering recoverable safe mode and starting
+the loop anyway` 就是這條路。之後兩條分支各自自癒，鎖放開後下一個 tick 就收斂，不需要
+人工介入，但**日誌長相不同**：
+
+- **存壞的回覆**（re-parse 丟例外）：失敗記錄在寫入前就已武裝，之後每個 pump 只重試
+  那一筆寫入。看到的是 `live decision cycle … failed (None): non-retryable: …` 重複出現，
+  **不會**有 `startup adoption (retried)`。
+- **AI 從未回答**（`pending_raw_response` 是 NULL）：沒有東西可武裝，改由 pump 每個 tick
+  重試整個 adoption，成功時印 `startup adoption (retried): api_failed`。**adoption 沒跑完
+  之前 pump 不會開新 cycle**——那個 stranded attempt 還握著 `next_decision_at`，直接開新
+  cycle 會用同一個 attempt id 去 insert 而每 tick 撞主鍵，變成另一種永久僵住。
+
+> **鎖一直不放開時 `validate` 看不到。** 兩條分支在收斂前都不會寫出終端列，而
+> `no_decision_streak` 只數非 `in_progress` 的列，所以一個卡在這裡好幾小時的 run 在
+> `validate` 眼中和「run 還很年輕」沒有差別，期間倉位只靠既有 SL/TP 看管。判斷依據只有
+> journald：上面兩種訊息之一以 tick 頻率重複，並伴隨 `live tick raised — entering
+> recoverable safe mode and continuing`。看到就照 §5 人工介入，先確認誰握著 SQLite 鎖。
+另外：**parse 失敗的回覆一開始就不會被存**。AI 回答 parse 不出決策（`is_valid=False`）時
+§3.1 store 直接跳過——那不是可以 resume 的決策，而它被保留下來的文字不保證重 parse 得到
+同一個判決（非 str 的回答是以 `repr` 保存，重啟後它就是一個 str，可能被重新萃取出這一輪
+已經拒絕掉的方向性目標）。少存的代價只是：那個 cycle 若在此時崩潰，重啟後 fail closed
+（live）或走 §3.1 重試階梯（paper），兩者都是持倉不動、不下單。**那份文字唯一的副本在
+log**（`ai_outputs` 只記機器標籤如 `invalid_output`），所以要事後追「模型到底回了什麼」
+就 grep `did not parse to a decision`——連續好幾個 cycle 都 `invalid_output` 時，
+journald 輪替之前把那幾行撈出來。
+終態列（`completed`／`api_failed`／`invalid_output`）一律不帶 `pending_raw_response`，這由
+repository 在寫入時保證（終態寫入一律落成 NULL；回覆只能經 `store_pending_response` 寫入），
+不靠各寫入端自己清。
 
 > smoke 的 failed／errored **不算** exit 5——它可補救（修好原因、`live-smoke --only
 > <key>` 重跑，latest-per-key 覆蓋），歸 exit 4 的「未到 gate」。exit 5 保留給不可

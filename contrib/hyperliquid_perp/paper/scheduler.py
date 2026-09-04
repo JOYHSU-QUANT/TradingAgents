@@ -56,9 +56,12 @@ record itself, the cycle-boundary scheduling writes outside every guard
 (``_execute``'s pre-call counter, ``poll``'s new-cycle insert), and a
 non-DB error out of the best-effort cycle-end snapshot.
 
-Restart safety of a half-finished cycle: the successful AI response is
-persisted onto the attempt row (``pending_raw_response``) *before* the gate
-runs, so ONCE THAT STORE LANDS a crash anywhere up to the audit commit — the
+Restart safety of a half-finished cycle: an AI response that PARSED to a
+decision is persisted onto the attempt row (``pending_raw_response``) *before*
+the gate runs — one that did not is deliberately never stored (issue #204: it
+is nothing to resume, and its preserved text is not guaranteed to re-parse to
+the same verdict), so that cycle restarts down the §3.1 ladder instead. Once
+the store lands, a crash anywhere up to the audit commit — the
 market-data-blocked gate phase, or the window between ``start_plan``'s
 plan/order commit and the ``ai_outputs`` commit — resumes by re-parsing the
 stored response (deterministic), never by re-asking the AI (spec §3.1). A
@@ -320,9 +323,11 @@ class _PendingDecision:
     input_id: str
     output_id: str
     parsed: ParsedDecision
-    # Whether ``pending_raw_response`` landed durably. Defaults to the
-    # conservative state — gating is forbidden until the store lands, mirroring
-    # the live driver's ``_InFlight.raw_stored``.
+    # Whether the §3.1 store is SETTLED — the response landed durably, or the
+    # answer was invalid and deliberately not stored
+    # (``_store_pending_response``). Defaults to the conservative state —
+    # gating is forbidden until the store SETTLES, mirroring the live driver's
+    # ``_InFlight.raw_stored``.
     raw_stored: bool = False
     # The engine's start_plan outcome, cached the moment it exists: a persist
     # failure after the gate ran must retry the PERSIST against THIS
@@ -721,9 +726,6 @@ class PaperScheduler:
                 error_type=error_type,
                 error_message=error_message,
                 next_decision_at=next_at,
-                # A terminal row carries no resumable response (issue #163 —
-                # the parse-failure lane logs the text before landing here).
-                pending_raw_response=None,
                 timestamp=now,
             )
             repo.upsert_scheduler_state(
@@ -807,13 +809,31 @@ class PaperScheduler:
         """
         if pending.raw_stored:
             return True
+        if not pending.parsed.is_valid:
+            # An invalid parse is no decision to resume, and its preserved text
+            # is not guaranteed to re-parse to the same verdict (the live
+            # driver's _store_pending_response carries the full reasoning: a
+            # non-str answer is kept as its repr, which IS a str on resume).
+            # "Nothing stored" IS the settled §3.1 state for an invalid answer
+            # — a crash here retries the try (or terminalizes it, if the §3.1
+            # budget is already spent); no order either way. The text is
+            # durable nowhere else (ai_outputs records only the machine tag),
+            # so preserve it in the log or a run that suddenly answers
+            # invalid_output every cycle leaves the post-mortem only a counter.
+            logger.warning(
+                "decision attempt %s: the answer did not parse to a decision (%s) and is "
+                "not resumable; preserving it here for diagnosis: %r",
+                pending.attempt_id,
+                pending.parsed.invalid_reason,
+                pending.parsed.raw_response,
+            )
+            pending.raw_stored = True
+            return True
         try:
             with self._db.transaction() as conn:
-                repo.update_decision_attempt(
-                    conn,
-                    pending.attempt_id,
-                    pending_raw_response=pending.parsed.raw_response,
-                    timestamp=now,
+                # §3.1 store — see repo.store_pending_response (issue #181).
+                repo.store_pending_response(
+                    conn, pending.attempt_id, pending.parsed.raw_response, timestamp=now
                 )
         except Exception:  # noqa: BLE001 — the decision only exists in memory; keep it
             if self._persist_budget_spent(pending, "the §3.1 response store"):
@@ -892,10 +912,9 @@ class PaperScheduler:
                     next_decision_at=next_at,
                     # A completed cycle carries no live error state: clear any
                     # earlier retry's breadcrumbs (a "completed + timeout" row
-                    # would misread as a failed cycle) and the consumed response.
+                    # would misread as a failed cycle).
                     error_type=None,
                     error_message=None,
-                    pending_raw_response=None,
                     timestamp=now,
                 )
                 repo.upsert_scheduler_state(

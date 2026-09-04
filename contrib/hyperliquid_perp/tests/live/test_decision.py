@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -24,6 +25,7 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
+from contrib.hyperliquid_perp.live import decision as decision_mod
 from contrib.hyperliquid_perp.live.decision import LiveDecisionDriver, LiveDecisionWorker
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.clock import ManualClock
@@ -36,6 +38,8 @@ from contrib.hyperliquid_perp.paper.scheduler import (
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+
+from ..conftest import arm_lock_fault, poison_stored_parse
 
 
 def _decision() -> ParsedDecision:
@@ -216,6 +220,7 @@ def _driver(
     start_error=None,
     first_regs=(),
     request_gate=None,
+    parsed=None,
 ):
     from contrib.hyperliquid_perp.live.engine import PlanRegistration
 
@@ -235,7 +240,7 @@ def _driver(
     engine = _DriverEngine(reg, start_error=start_error, first_regs=first_regs)
     provider = _DriverProvider(
         _decision_input(),
-        parsed=_decision(),
+        parsed=_decision() if parsed is None else parsed,
         build_error=build_error,
         request_error=request_error,
         request_gate=request_gate,
@@ -544,8 +549,10 @@ def _strand_attempt(db, *, raw):
             status="in_progress",
             first_attempt_at=_T0,
             last_attempt_at=_T0,
-            pending_raw_response=raw,
         )
+        if raw is not None:
+            # Through the one writer, as the crashed process's own store did.
+            repo.store_pending_response(conn, attempt_id, raw, timestamp=_T0)
     return attempt_id
 
 
@@ -576,6 +583,9 @@ def test_resume_startup_without_response_fails_closed(tmp_path):
     assert driver._inflight is None
     row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
     assert row["status"] == "api_failed"
+    # The row cannot tell "never answered" from "answered unparseably and was
+    # deliberately not stored", so its message must not claim either one.
+    assert "no resumable response" in row["error_message"]
     state = repo.get_scheduler_state(db.conn, "r")
     assert state["next_decision_at"] is not None
     assert parse_instant(state["next_decision_at"]) > _T0  # re-anchored
@@ -583,20 +593,130 @@ def test_resume_startup_without_response_fails_closed(tmp_path):
     assert engine.plans == []  # no order off the dead cycle (§10.2)
 
 
+def test_resume_startup_with_a_poisoned_stored_response_fails_closed(
+    tmp_path, monkeypatch, caplog
+):
+    """issue #180: resume_startup runs BEFORE the loop's tick guard exists, so a
+    re-parse that raises would exit the daemon at startup and every supervised
+    restart would resume into the same deterministic parse — a crash-loop with
+    the real position and its SL/TP unwatched in between. The cycle fails
+    closed instead, exactly as the paper lane's _resume_pending does."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    attempt_id = _strand_attempt(db, raw=_RAW_LONG)
+    calls = poison_stored_parse(monkeypatch, decision_mod)
+    with caplog.at_level(logging.ERROR, logger=decision_mod.__name__):
+        assert driver.resume_startup() == "api_failed"  # returned, never raised
+    assert calls["n"] == 1
+    assert driver._inflight is None
+    row = repo.get_decision_attempt(db.conn, attempt_id)
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    assert row["error_message"].startswith("non-retryable:")
+    assert row["pending_raw_response"] is None  # never again presented as resumable
+    # The row was the only durable copy (ai_outputs never stores raw text), so
+    # clearing it without preserving the text would destroy the evidence the
+    # post-mortem needs to tell a parser bug from a corrupted store. The line
+    # logs the text with %r, so its repr is what the log carries.
+    assert repr(_RAW_LONG) in caplog.text
+    assert provider.requests == 0  # never a second AI call
+    assert engine.plans == []  # no order off the dead cycle (§10.2)
+
+
+def test_a_poisoned_resume_is_not_retried_by_the_following_pumps(tmp_path, monkeypatch):
+    """The failed cycle re-anchored next_decision_at: later pumps neither
+    re-parse the (now cleared) text nor collide on the duplicate attempt id, so
+    there is no per-tick crash-loop either."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=_RAW_LONG)
+    calls = poison_stored_parse(monkeypatch, decision_mod)
+    assert driver.resume_startup() == "api_failed"
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) > _T0  # re-anchored
+    assert driver.pump() is None  # not due
+    assert driver.pump() is None
+    assert calls["n"] == 1  # the poisoned parse ran exactly once, at startup
+    assert provider.requests == 0
+    assert repo.find_in_progress_attempt(db.conn, "r") is None
+
+
+def test_a_startup_adoption_whose_write_missed_is_retried_by_pump(tmp_path, monkeypatch):
+    """The containment in the loop (issue #180 review) must not itself become
+    the wedge. Adoption's OWN fail-closed write can miss — an operator's
+    export/validate holding the lock at boot — and the caller now contains that
+    raise instead of exiting. But the stranded attempt still owns
+    next_decision_at, so a pump that fell through to _start would re-derive its
+    deterministic id and collide on the primary key every tick, forever: the
+    C2 wedge, reached through the containment. pump retries the ADOPTION until
+    it lands instead."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)  # the AI never answered — no pending_fail lane
+    state = arm_lock_fault(monkeypatch, repo, "update_decision_attempt")
+    with pytest.raises(sqlite3.OperationalError):
+        driver.resume_startup()  # the caller contains this and starts the loop
+    assert state["fired"] == 1
+    assert driver._adopted is False  # the step is owed, so pump must not skip it
+    assert repo.find_in_progress_attempt(db.conn, "r") is not None  # still stranded
+    # The lock has cleared. The next pump must adopt, not start a fresh cycle.
+    assert driver.pump() == "api_failed"
+    assert driver._adopted is True  # ... and the step is not owed twice
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert repo.find_in_progress_attempt(db.conn, "r") is None
+    # ... and once adopted, the driver goes back to ordinary scheduling.
+    assert driver.pump() is None  # re-anchored, not due
+    assert provider.requests == 0
+    assert engine.plans == []
+
+
+def test_a_poisoned_adoption_drains_its_armed_record_before_re_adopting(tmp_path, monkeypatch):
+    """The other containment lane — and the one the runbook says LOOKS different.
+    A poisoned re-parse arms pending_fail BEFORE its write, so when that write
+    misses, pump drains the armed record and never re-parses; the owed adoption
+    runs only afterwards, over a row that is terminal by then, as a clean no-op.
+    Order matters: adopting first would re-read a row whose fail record is still
+    owed, and re-parsing the poison would log it and count the cycle twice."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=_RAW_LONG)
+    calls = poison_stored_parse(monkeypatch, decision_mod)
+    arm_lock_fault(monkeypatch, repo, "update_decision_attempt")
+    with pytest.raises(sqlite3.OperationalError):
+        driver.resume_startup()  # contained by the caller; the loop starts
+    assert driver._adopted is False  # the step is still owed
+    assert driver._inflight is not None and driver._inflight.pending_fail is not None
+
+    assert driver.pump() == "api_failed"  # the ARMED record, not the adoption
+    assert driver._inflight is None
+    assert driver._adopted is False
+    assert calls["n"] == 1  # the poisoned text was parsed exactly once
+
+    assert driver.pump() is None  # the owed adoption: nothing in progress now
+    assert driver._adopted is True
+    assert calls["n"] == 1  # ... and still exactly once
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert row["pending_raw_response"] is None
+    assert provider.requests == 0
+    assert engine.plans == []
+
+
 def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.resume_startup() is None
     assert driver._inflight is None
+    # The step is done even though there was nothing to adopt: an unlatched
+    # flag would leave every pump of the run's life re-reading the row.
+    assert driver._adopted is True
 
 
 def test_a_cycle_failing_closed_after_its_store_clears_the_stored_response(tmp_path):
-    """A terminal row carries no resumable response (issue #163 lane parity).
+    """The live fail-closed path reaches the repository's terminal clear (issue #181).
 
     A cycle whose §3.1 store landed and then failed closed — here the gate
-    blows up, so pump's in-flight guard records api_failed — would otherwise
-    leave that row still holding the consumed text; terminal rows are
-    immutable, so nothing could ever clean it, and a reader trusting "a stored
-    response means resumable" would find one on a cycle that is over.
+    blows up, so pump's in-flight guard records api_failed — passes nothing
+    about the response to its terminal write; the repository lands the
+    column NULL anyway (pinned at the repository level in
+    tests/persistence), so no api_failed row ever presents the consumed
+    text as resumable state.
     """
     db, clock, driver, engine, worker, provider = _driver(
         tmp_path, start_error=RuntimeError("gate blew up")
@@ -656,23 +776,13 @@ def test_collected_decision_store_failure_retries_persist_only(tmp_path, monkeyp
     parsed decision survives on _inflight, and the next pump retries ONLY the
     store — never re-polling the worker, never re-asking the AI, and never
     gating an unstored decision (§3.1: resumability before action)."""
-    import sqlite3
 
     from contrib.hyperliquid_perp.live.decision import _PendingResponsePersistError
 
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.pump() == "cycle_started"
     _await(worker)
-    real = repo.update_decision_attempt
-    boom = {"left": 1}
-
-    def flaky(conn, attempt_id, **kw):
-        if boom["left"] and "pending_raw_response" in kw:
-            boom["left"] -= 1
-            raise sqlite3.OperationalError("database is locked")
-        return real(conn, attempt_id, **kw)
-
-    monkeypatch.setattr(repo, "update_decision_attempt", flaky)
+    arm_lock_fault(monkeypatch, repo, "store_pending_response")
     with pytest.raises(_PendingResponsePersistError):
         driver.pump()  # collected, but the store missed
     inflight = driver._inflight
@@ -709,6 +819,94 @@ def test_gate_pending_market_data_holds_parsed_and_retries(tmp_path):
     assert driver.pump() == "completed"  # the gate retried with fresh data
     assert provider.requests == 1  # ... and the AI still only once
     assert len(engine.plans) == 2  # start_plan re-ran; the AI did not
+
+
+# -- an invalid answer is never stored as resumable ---------------------------
+
+# An engine answering with BYTES rather than text: parse_target_decision keeps
+# a non-str answer as its repr for the audit trail and fails it closed BEFORE
+# extraction, "its repr may embed a JSON-looking span that must never be parsed
+# as a live decision". That repr IS a str on resume — hence this fixture.
+_BYTES_ANSWER = (
+    b'{"decision_mode": "set_target", "target_side": "long", '
+    b'"requested_target_margin_pct": 5, "confidence": 0.8, '
+    b'"rationale": "drift", "key_risks": ["a risk"]}'
+)
+
+
+def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
+    """PR #204 review: a parse that failed closed is no decision to resume, and
+    its preserved text is not guaranteed to re-parse to the same verdict — so
+    the §3.1 store is skipped for it. Nothing is lost: with no stored response
+    a crash in that window fails the cycle closed, the same held position and
+    no order the gate records for an invalid answer. The text is then durable
+    NOWHERE (ai_outputs keeps only the machine tag), so the skip's WARNING is
+    the post-mortem's only copy and is pinned here like the poisoned lane's."""
+    from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
+    from contrib.hyperliquid_perp.live.engine import PlanRegistration
+
+    invalid = parse_target_decision(_BYTES_ANSWER, DecisionConfig())
+    assert invalid.is_valid is False  # this process refuses it outright
+    # ... and THIS is why storing it would be unsafe: the preserved repr is a
+    # str on resume, and re-parsing lifts out the live target just refused.
+    assert parse_target_decision(invalid.raw_response, DecisionConfig()).is_valid is True
+
+    # Hold the cycle at the gate so the post-store, pre-gate row is observable.
+    pending = PlanRegistration(
+        gate=None, plan_id=None, disposition=None, reason="pending_market_data"
+    )
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, parsed=invalid, first_regs=[pending]
+    )
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    with caplog.at_level(logging.WARNING, logger=decision_mod.__name__):
+        assert driver.pump() == "pending_market_data"
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["pending_raw_response"] is None  # nothing a restart could resume
+    # The log is the only surviving copy — the repr, so a bytes answer's shape
+    # survives too, and the reason tag so the post-mortem starts somewhere.
+    record = next(r for r in caplog.records if "did not parse to a decision" in r.getMessage())
+    assert repr(invalid.raw_response) in record.getMessage()
+    assert "invalid_output" in record.getMessage()
+    # The skip still SETTLES the store, so a gate that stays blocked does not
+    # re-enter it every tick and re-log the whole response into journald.
+    assert driver._inflight is not None and driver._inflight.raw_stored is True
+    caplog.clear()
+    assert driver.pump() == "invalid_output"  # the gate ran; the store did not
+    assert not [r for r in caplog.records if "did not parse to a decision" in r.getMessage()]
+    # A valid answer in the same spot DOES land — the skip is about validity,
+    # not about the gate being blocked.
+    other = tmp_path / "valid"
+    other.mkdir()
+    db2, _c, driver2, _e, worker2, _p = _driver(other, first_regs=[pending])
+    assert driver2.pump() == "cycle_started"
+    _await(worker2)
+    assert driver2.pump() == "pending_market_data"
+    assert repo.find_in_progress_attempt(db2.conn, "r")["pending_raw_response"] == "{}"
+
+
+def test_shutdown_salvage_stores_nothing_for_an_invalid_answer(tmp_path, caplog):
+    """The skip reaches the shutdown window too. A worker that finished DURING
+    shutdown was never polled, so salvage polls it — and must not store an
+    answer that failed closed either, nor claim it did: the row stays NULL and
+    salvage reports False, so the operator's log does not promise a resumable
+    cycle the next boot will fail closed."""
+    from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
+
+    invalid = parse_target_decision(_BYTES_ANSWER, DecisionConfig())
+    db, clock, driver, engine, worker, provider = _driver(tmp_path, parsed=invalid)
+    assert driver.pump() == "cycle_started"
+    _await(worker)  # finished during the shutdown window; never polled
+    with caplog.at_level(logging.INFO, logger=decision_mod.__name__):
+        assert driver.salvage_shutdown() is False
+    # Settled (nothing owed), even though nothing was salvaged: the same
+    # reading _persist_pending_response gives the skip on the pump path.
+    assert driver._inflight is not None and driver._inflight.raw_stored is True
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["pending_raw_response"] is None
+    assert any("did not parse to a decision" in r.getMessage() for r in caplog.records)
+    assert not [r for r in caplog.records if "restart resumes it" in r.getMessage()]
 
 
 # -- R4 loop: fail-record double fault (pending-fail retry) -------------------
@@ -849,23 +1047,13 @@ def test_salvage_shutdown_stores_a_collected_but_unstored_decision(tmp_path, mon
     """Salvage covers the OTHER undurable shape too: _collect polled the worker
     but the §3.1 store missed (parsed set, raw_stored False). Shutdown gets one
     last store attempt so restart resumes instead of re-asking the AI."""
-    import sqlite3
 
     from contrib.hyperliquid_perp.live.decision import _PendingResponsePersistError
 
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.pump() == "cycle_started"
     _await(worker)
-    real = repo.update_decision_attempt
-    boom = {"left": 1}
-
-    def flaky(conn, attempt_id, **kw):
-        if boom["left"] and "pending_raw_response" in kw:
-            boom["left"] -= 1
-            raise sqlite3.OperationalError("database is locked")
-        return real(conn, attempt_id, **kw)
-
-    monkeypatch.setattr(repo, "update_decision_attempt", flaky)
+    arm_lock_fault(monkeypatch, repo, "store_pending_response")
     with pytest.raises(_PendingResponsePersistError):
         driver.pump()  # collected, store missed — the retry lane is armed
     assert driver.salvage_shutdown() is True  # the DB healed: one last try lands

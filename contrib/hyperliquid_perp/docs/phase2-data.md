@@ -248,7 +248,7 @@ AI input
 
 - 每個 scheduled cycle 建立 attempt 時記錄一筆 logical record
 - 每次 retry、成功、或進入 terminal status（`api_failed` / `invalid_output`）時更新同一筆 record
-- Live（Phase 3 PR 5）：`in_progress` 可跨 process 存活——重啟時由 loop 啟動領養：已存有 raw response 者從 gate 續跑至 `completed` / `invalid_output`（不重問 AI），AI 從未回應者記為 `api_failed`；更新的仍是同一筆 record
+- Live（Phase 3 PR 5）：`in_progress` 可跨 process 存活——重啟時由 loop 啟動領養：已存有 raw response 者從 gate 續跑至 `completed` / `invalid_output`（不重問 AI；該回覆若 re-parse 丟例外則記 `api_failed`，見 phase2-spec §3.1 修訂框），**沒有可續回覆者**記為 `api_failed`（兩種成因：AI 從未回應，或它的回覆 parse 不出決策而刻意不存——列上分不出來，`error_message` 也如實只說「沒有可續回覆」）；更新的仍是同一筆 record
 
 ### 6.2 欄位
 

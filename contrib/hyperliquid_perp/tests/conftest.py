@@ -365,19 +365,23 @@ def insert_decision_attempts(db, outcomes, *, run_id="r", start: datetime, mode=
             )
 
 
-def arm_lock_fault(monkeypatch, target, name, *, shots=1, when=lambda *a, **k: True):
+def arm_lock_fault(monkeypatch, target, name, *, shots=1):
     """Make ``target.name`` raise "database is locked" for its first ``shots`` hits.
 
-    ``when`` filters which calls count. Returns the mutable state so a test
-    can assert how many faults actually fired. Shared by the paper and live
-    suites: both lanes' §3.1 response store is one repository writer
-    (``repo.store_pending_response``, issue #181), faulted the same way.
+    Returns the mutable state so a test can assert how many faults fired.
+    Shared by the paper and live suites: both lanes' §3.1 response store is
+    one repository writer (``repo.store_pending_response``, issue #181), so
+    patching the NAME is what scopes the fault. Deliberately no predicate on
+    the arguments: the paper-local ancestor needed one only because it
+    patched the shared ``update_decision_attempt`` and had to tell the store
+    apart from every other attempt write in the poll — splitting the writer
+    is the fix, and a filter here would invite that pattern back.
     """
     real = getattr(target, name)
     state = {"fired": 0}
 
     def flaky(*args, **kwargs):
-        if state["fired"] < shots and when(*args, **kwargs):
+        if state["fired"] < shots:
             state["fired"] += 1
             raise sqlite3.OperationalError("database is locked")
         return real(*args, **kwargs)

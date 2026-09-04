@@ -5373,6 +5373,65 @@ def test_a_venue_identity_fault_latched_at_shutdown_persists_manual_for_the_next
         db.close()
 
 
+def test_a_raising_startup_adoption_is_contained_instead_of_exiting():
+    """issue #180 review: ``resume_startup`` runs BEFORE the loop, so its own
+    fail-closed write meeting a locked store (an operator's export/validate)
+    used to exit the daemon — and the supervisor's restart can meet the same
+    lock, with the real position and its resting SL/TP unwatched in between
+    while systemd's StartLimitBurst counts down. The call must sit in a try
+    whose handler routes to the loop's one containment idiom, so the loop
+    starts anyway and the driver's armed pending_fail lane retries only that
+    write on each pump.
+
+    Structural, on the AST: the loop BODY needs a whole live session to drive
+    (see ``_drive_live_loop_construction``), and the adoption call is past the
+    point that drive stops at. Same idiom as the blocking-seam pin in
+    live/test_kill_switch.py — parsed, never string-searched.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from contrib.hyperliquid_perp import cli as cli_mod
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cli_mod._run_live_loop)))
+
+    def _calls(node):
+        return [n for n in ast.walk(node) if isinstance(n, ast.Call)]
+
+    adopting = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(call.func, ast.Attribute) and call.func.attr == "resume_startup"
+            for stmt in node.body
+            for call in _calls(stmt)
+        )
+    ]
+    assert len(adopting) == 1, (
+        "driver.resume_startup() is not inside exactly one try — a raise there "
+        "ends the process before the loop ever watches the position"
+    )
+    handlers = adopting[0].handlers
+    assert handlers, "the try around resume_startup catches nothing"
+    for handler in handlers:
+        # Broad on purpose: the motivating failure is a locked store, but ANY
+        # raise here has the same consequence (no loop, no watched position).
+        assert isinstance(handler.type, ast.Name) and handler.type.id == "Exception", (
+            "the startup adoption guard is narrower than Exception — the raises "
+            "it misses still exit before the loop starts"
+        )
+        assert not [n for n in ast.walk(handler) if isinstance(n, ast.Raise)], (
+            "the startup adoption guard re-raises — containment means the loop runs"
+        )
+        contained = [call.func.id for call in _calls(handler) if isinstance(call.func, ast.Name)]
+        assert "_contain_as_recoverable_safe_mode" in contained, (
+            "a raising startup adoption does not reach the loop's containment "
+            "idiom, so new risk is not paused while the write keeps failing"
+        )
+
+
 class _StopBeforeTheLoop(Exception):
     """Sentinel: every kwarg the pins below assert is already decided."""
 

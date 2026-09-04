@@ -302,9 +302,29 @@ def _run_live_loop(
     # §3.1: adopt a prior process's stranded in-progress decision (resume from
     # its stored response, or fail it closed) — without this the deterministic
     # attempt id collides every tick and the driver never decides again.
-    adopted = driver.resume_startup()
-    if adopted is not None:
-        logger.info("decision driver startup adoption: %s", adopted)
+    try:
+        adopted = driver.resume_startup()
+    except Exception:  # noqa: BLE001 — adoption must not exit before the loop watches the position
+        # Contained like a tick error rather than propagating (issue #180
+        # review). The motivating failure is the fail-closed record's OWN
+        # write meeting a locked store — an operator's export/validate — and
+        # exiting here hands the supervisor a restart that may meet the same
+        # lock, with the real position and its resting SL/TP unwatched in
+        # between and systemd's StartLimitBurst counting down. Inside the
+        # loop, the driver's armed pending_fail lane retries only that write
+        # on each pump, safe mode pauses new risk until a clean reconcile
+        # releases it, and the position is watched throughout.
+        _contain_as_recoverable_safe_mode(
+            safe_mode,
+            log_message=(
+                "decision driver startup adoption raised — entering recoverable "
+                "safe mode and starting the loop anyway"
+            ),
+            detail="startup adoption raised (see log)",
+        )
+    else:
+        if adopted is not None:
+            logger.info("decision driver startup adoption: %s", adopted)
     pid = os.getpid()
     print(
         f"live loop started for {run_id!r} ({live_cfg.mode.value}) — Ctrl-C to stop",

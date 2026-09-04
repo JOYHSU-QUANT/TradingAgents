@@ -159,11 +159,18 @@ Breaking changes within the 0.x line are called out explicitly.
   now fails the cycle closed the way the paper lane already did (PR #178):
   the row goes ``api_failed`` with no ``error_type`` and a
   ``non-retryable:`` message, the response is cleared, and its full text is
-  logged at ERROR first (the row was its only durable copy). The one write
-  that guard still cannot contain is its own ``api_failed`` record meeting a
-  locked store at startup: that exits and the supervisor retries — a
-  transient, not the deterministic loop. Two invariants that guard moves
-  through now live in the repository instead of each writer:
+  logged at ERROR first (the row was its only durable copy). Startup adoption
+  is now contained the way an in-loop tick is: should its own ``api_failed``
+  record meet a locked store (an operator's export/validate), the loop enters
+  recoverable safe mode and starts anyway, retrying just that write on each
+  pump — exiting would hand the supervisor a restart that can meet the same
+  lock, with the position and its resting SL/TP unwatched in between.
+  Relatedly, a response that did not parse to a decision is no longer stored
+  as resumable at all, in either lane: it is nothing to resume, and its
+  preserved text is not guaranteed to re-parse to the same verdict — a
+  non-str engine answer is kept as its ``repr``, which IS a str on resume and
+  re-parsed into the very target the first pass refused. Two invariants that
+  guard moves through now live in the repository instead of each writer:
   ``store_pending_response`` is the one writer of the resumable row (the
   paper store, the live store and the live shutdown salvage all land the
   same shape through it; ``update_decision_attempt`` refuses a string for

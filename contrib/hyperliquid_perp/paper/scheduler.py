@@ -804,6 +804,15 @@ class PaperScheduler:
         """
         if pending.raw_stored:
             return True
+        if not pending.parsed.is_valid:
+            # An invalid parse is no decision to resume, and its preserved text
+            # is not guaranteed to re-parse to the same verdict (the live
+            # driver's _store_pending_response carries the full reasoning: a
+            # non-str answer is kept as its repr, which IS a str on resume).
+            # "Nothing stored" IS the resumable shape for an invalid answer —
+            # a crash here fails the cycle closed, the same no-order hold.
+            pending.raw_stored = True
+            return True
         try:
             with self._db.transaction() as conn:
                 # §3.1 store — see repo.store_pending_response (issue #181).

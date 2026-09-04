@@ -943,6 +943,62 @@ def test_resume_with_a_poisoned_stored_response_fails_the_cycle_closed(
     db.close()
 
 
+# An engine answering with BYTES rather than text: parse_target_decision keeps
+# a non-str answer as its repr for the audit trail and fails it closed BEFORE
+# extraction, "its repr may embed a JSON-looking span that must never be parsed
+# as a live decision". That repr IS a str on resume — hence this fixture.
+_BYTES_ANSWER = (
+    b'{"decision_mode": "set_target", "target_side": "long", '
+    b'"requested_target_margin_pct": 5, "confidence": 0.8, '
+    b'"rationale": "drift", "key_risks": ["a risk"]}'
+)
+
+
+def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path):
+    """PR #204 review: a parse that failed closed is no decision to resume, and
+    its preserved text is not guaranteed to re-parse to the same verdict, so the
+    §3.1 store is skipped for it — a restart then fails the cycle closed instead
+    of lifting a live target out of the repr this run had already refused."""
+    from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
+
+    invalid = parse_target_decision(_BYTES_ANSWER, DecisionConfig())
+    assert invalid.is_valid is False  # this process refuses it outright
+    # ... and THIS is why storing it would be unsafe: the preserved repr is a
+    # str on resume, and re-parsing lifts out the live target just refused.
+    assert parse_target_decision(invalid.raw_response, DecisionConfig()).is_valid is True
+
+    # TIMEOUT first: the gate is blocked, so the post-store row is observable.
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [invalid], [SnapshotOutcome.TIMEOUT, _snap()]
+    )
+    r1 = scheduler.poll()
+    assert r1.event is CycleEvent.PENDING_MARKET_DATA
+    assert repo.find_in_progress_attempt(db.conn, "r")["pending_raw_response"] is None
+    # A restart therefore cannot resume it. With nothing stored the attempt
+    # goes down the §3.1 retry ladder instead — here still between retries, so
+    # the poll does nothing at all. Before the skip it resumed, re-parsed the
+    # repr into a live LONG target and gated it. The empty provider script is
+    # part of the assertion: a re-ask would raise IndexError here.
+    scheduler2 = _restart(db, clock, engine, _FakeProvider([]))
+    assert scheduler2.poll() is None
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["status"] == "in_progress"  # never gated, never terminalized
+    assert row["pending_raw_response"] is None
+    db.close()
+
+
+def test_a_valid_answer_blocked_at_the_gate_is_still_stored(tmp_path):
+    """The skip above is about validity, not about the gate being blocked: the
+    same TIMEOUT-first setup with a VALID answer still lands the §3.1 store, so
+    a restart resumes it without a second AI call (the discriminator)."""
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [_decision("long", 1)], [SnapshotOutcome.TIMEOUT, _snap()]
+    )
+    assert scheduler.poll().event is CycleEvent.PENDING_MARKET_DATA
+    assert repo.find_in_progress_attempt(db.conn, "r")["pending_raw_response"] == "{}"
+    db.close()
+
+
 def test_a_start_plan_bug_still_exits_the_daemon(tmp_path, monkeypatch):
     db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
 

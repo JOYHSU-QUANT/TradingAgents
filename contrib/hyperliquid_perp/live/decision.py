@@ -414,9 +414,16 @@ class LiveDecisionDriver:
         # (never polled), or _collect polled it and the §3.1 store missed
         # (parsed set, raw_stored False) — one last try either way.
         try:
-            self._store_pending_response(inflight, parsed, self._clock.now())
+            stored = self._store_pending_response(inflight, parsed, self._clock.now())
         except Exception:  # noqa: BLE001 — a store miss must not block shutdown
             logger.exception("shutdown salvage: persist failed — the cycle fails closed on restart")
+            return False
+        if not stored:
+            logger.info(
+                "shutdown salvage: the answer for %s did not parse to a decision — "
+                "the cycle fails closed on restart rather than resuming it",
+                inflight.attempt_id,
+            )
             return False
         inflight.raw_stored = True
         logger.info(
@@ -554,17 +561,30 @@ class LiveDecisionDriver:
 
     def _store_pending_response(
         self, inflight: _InFlight, parsed: ParsedDecision, now: datetime
-    ) -> None:
+    ) -> bool:
         """What makes a decision resumable (§3.1): the stored raw response.
 
         Both callers — ``_persist_pending_response`` (the normal path) and
         ``salvage_shutdown`` (the shutdown window) — land the one record shape
         through ``repo.store_pending_response`` (issue #181).
+
+        An INVALID parse is deliberately not stored (returns ``False``): it is
+        no decision to resume, and its preserved text is not guaranteed to
+        re-parse to the same verdict. A non-str engine answer is kept as its
+        ``repr`` for the audit trail, and that repr IS a str on resume, where
+        ``extract_json_block`` can lift a live target out of it that the first
+        pass refused outright — the fail-open found in PR #204's review.
+        Nothing is lost by skipping: with no stored response a restart fails
+        the cycle closed, the same held position and no order the gate would
+        have recorded for an invalid answer.
         """
+        if not parsed.is_valid:
+            return False
         with self._db.transaction() as conn:
             repo.store_pending_response(
                 conn, inflight.attempt_id, parsed.raw_response, timestamp=now
             )
+        return True
 
     def _gate(self, now: datetime) -> str | None:
         inflight = self._inflight

@@ -1320,21 +1320,40 @@ def test_store_pending_response_stamps_only_the_response_and_the_timestamp(tmp_p
     }
     assert after["pending_raw_response"] == _RAW
     assert after["timestamp"] == later.isoformat()
-    # Clearing is not this writer's job (a terminal write does it): a
-    # non-string "response" — None included — is a caller bug, refused
-    # before any write.
+    # It shares the patch writer's immutability: no store on a terminal row.
+    with db.transaction() as conn:
+        repo.update_decision_attempt(conn, aid, status="api_failed")
+    with pytest.raises(ValueError, match="immutable"), db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=later)
+    db.close()
+
+
+def test_store_pending_response_refuses_a_non_string_but_accepts_the_empty_one(tmp_path):
+    """Clearing is not this writer's job (a terminal write does it), so ``None``
+    is a caller bug rather than "clear". ``""`` IS a response: an engine that
+    answered nothing parses to an invalid_output decision carrying ``""``, and
+    that cycle must store like any other rather than fail its persist."""
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=_TS)
     for bad in (None, b"bytes", 1):
         with pytest.raises(ValueError, match="must be a string"), db.transaction() as conn:
-            repo.store_pending_response(conn, aid, bad, timestamp=later)
+            repo.store_pending_response(conn, aid, bad, timestamp=_TS)
     assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == _RAW
-    # The empty string is a response (an engine that answered nothing parses
-    # to an invalid_output decision with raw_response ""): stored, not refused,
-    # so that cycle resumes as invalid instead of failing its persist.
     with db.transaction() as conn:
-        repo.store_pending_response(conn, aid, "", timestamp=later)
+        repo.store_pending_response(conn, aid, "", timestamp=_TS)
     assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == ""
-    # The other doors into the column are shut: a string through the patch
-    # writer, or a response at insert, is refused as the writer bug it is.
+    db.close()
+
+
+def test_the_other_doors_into_the_resumable_column_are_shut(tmp_path):
+    """"One writer" is enforced, not just documented: a string through the patch
+    writer, or a response carried in at insert, is refused as the writer bug it
+    is — otherwise a row could be born terminal-with-a-response, and terminal
+    rows are immutable, so nothing could ever clean it."""
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
     with pytest.raises(ValueError, match="store_pending_response"), db.transaction() as conn:
         repo.update_decision_attempt(conn, aid, pending_raw_response=_RAW)
     with pytest.raises(ValueError, match="store_pending_response"), db.transaction() as conn:
@@ -1348,12 +1367,8 @@ def test_store_pending_response_stamps_only_the_response_and_the_timestamp(tmp_p
             status="in_progress",
             pending_raw_response=_RAW,
         )
-    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] == ""  # untouched
-    # It shares the patch writer's immutability: no store on a terminal row.
-    with db.transaction() as conn:
-        repo.update_decision_attempt(conn, aid, status="api_failed")
-    with pytest.raises(ValueError, match="immutable"), db.transaction() as conn:
-        repo.store_pending_response(conn, aid, _RAW, timestamp=later)
+    assert repo.get_decision_attempt(db.conn, aid)["pending_raw_response"] is None
+    assert repo.get_decision_attempt(db.conn, "born-with-one") is None
     db.close()
 
 

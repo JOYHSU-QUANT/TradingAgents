@@ -220,6 +220,7 @@ def _driver(
     start_error=None,
     first_regs=(),
     request_gate=None,
+    parsed=None,
 ):
     from contrib.hyperliquid_perp.live.engine import PlanRegistration
 
@@ -239,7 +240,7 @@ def _driver(
     engine = _DriverEngine(reg, start_error=start_error, first_regs=first_regs)
     provider = _DriverProvider(
         _decision_input(),
-        parsed=_decision(),
+        parsed=_decision() if parsed is None else parsed,
         build_error=build_error,
         request_error=request_error,
         request_gate=request_gate,
@@ -752,6 +753,70 @@ def test_gate_pending_market_data_holds_parsed_and_retries(tmp_path):
     assert driver.pump() == "completed"  # the gate retried with fresh data
     assert provider.requests == 1  # ... and the AI still only once
     assert len(engine.plans) == 2  # start_plan re-ran; the AI did not
+
+
+# -- an invalid answer is never stored as resumable ---------------------------
+
+# An engine answering with BYTES rather than text: parse_target_decision keeps
+# a non-str answer as its repr for the audit trail and fails it closed BEFORE
+# extraction, "its repr may embed a JSON-looking span that must never be parsed
+# as a live decision". That repr IS a str on resume — hence this fixture.
+_BYTES_ANSWER = (
+    b'{"decision_mode": "set_target", "target_side": "long", '
+    b'"requested_target_margin_pct": 5, "confidence": 0.8, '
+    b'"rationale": "drift", "key_risks": ["a risk"]}'
+)
+
+
+def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path):
+    """PR #204 review: a parse that failed closed is no decision to resume, and
+    its preserved text is not guaranteed to re-parse to the same verdict — so
+    the §3.1 store is skipped for it. Nothing is lost: with no stored response
+    a crash in that window fails the cycle closed, the same held position and
+    no order the gate records for an invalid answer."""
+    from contrib.hyperliquid_perp.domains.perp.target_decision import parse_target_decision
+    from contrib.hyperliquid_perp.live.engine import PlanRegistration
+
+    invalid = parse_target_decision(_BYTES_ANSWER, DecisionConfig())
+    assert invalid.is_valid is False  # this process refuses it outright
+    # ... and THIS is why storing it would be unsafe: the preserved repr is a
+    # str on resume, and re-parsing lifts out the live target just refused.
+    assert parse_target_decision(invalid.raw_response, DecisionConfig()).is_valid is True
+
+    # Hold the cycle at the gate so the post-store, pre-gate row is observable.
+    pending = PlanRegistration(
+        gate=None, plan_id=None, disposition=None, reason="pending_market_data"
+    )
+    db, clock, driver, engine, worker, provider = _driver(
+        tmp_path, parsed=invalid, first_regs=[pending]
+    )
+    assert driver.pump() == "cycle_started"
+    _await(worker)
+    assert driver.pump() == "pending_market_data"
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row["pending_raw_response"] is None  # nothing a restart could resume
+    # A valid answer in the same spot DOES land — the skip is about validity,
+    # not about the gate being blocked.
+    other = tmp_path / "valid"
+    other.mkdir()
+    db2, _c, driver2, _e, worker2, _p = _driver(other, first_regs=[pending])
+    assert driver2.pump() == "cycle_started"
+    _await(worker2)
+    assert driver2.pump() == "pending_market_data"
+    assert repo.find_in_progress_attempt(db2.conn, "r")["pending_raw_response"] == "{}"
+
+
+def test_a_restart_over_an_unstored_invalid_answer_fails_closed(tmp_path):
+    """The other half: with nothing stored, the restart adopts the stranded row
+    through the "AI never answered" branch — api_failed, no second AI call, no
+    order off the answer this run had already refused."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)  # what the skipped store leaves behind
+    assert driver.resume_startup() == "api_failed"
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    assert provider.requests == 0
+    assert engine.plans == []
 
 
 # -- R4 loop: fail-record double fault (pending-fail retry) -------------------

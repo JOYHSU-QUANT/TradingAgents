@@ -159,10 +159,11 @@ def _sqlite_file_uri(file: Path) -> str:
     a ``#``, which SQLite would otherwise read as a fragment. ``:`` is left
     alone so a drive letter reads as itself, exactly as ``as_uri`` renders it.
 
-    Not universal: a Windows extended-length path (``\\\\?\\C:\\…``, for paths
-    past 260 characters) has a ``?`` that must be encoded and then is no longer
-    the prefix SQLite needs, so the probe fails on it. ``as_uri`` could not
-    express one either — this narrows nothing that used to work.
+    A Windows extended-length path (``\\\\?\\C:\\…``, for paths past 260
+    characters) survives this too: its ``?`` is encoded to ``%3F``, and SQLite
+    decodes it before opening, so the prefix reaches the OS intact. ``as_uri``
+    renders the same path as ``file://%3F/C%3A/…``, which SQLite rejects for
+    its authority — one more thing this spelling fixes rather than breaks.
     """
     posix = file.resolve().as_posix()
     if not posix.startswith("/"):
@@ -260,7 +261,10 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # here for the same reason as the branches below: a mistyped --db must
         # say what is wrong with it. A parent that EXISTS but is not a
         # directory (``--db notes.db/store.db``) is a different sentence — the
-        # path is there, it just cannot hold a file.
+        # path is there, it just cannot hold a file. That branch is reachable
+        # on Windows only: POSIX raises ENOTDIR rather than ENOENT for it, so
+        # there it is named by the ``except OSError`` lane above instead. Both
+        # are exit 1; only the sentence differs.
         problem = (
             f"{parent} is not a directory"
             if parent.exists()
@@ -284,8 +288,9 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # stats perfectly well, so it needs saying out loud. What it used to do
         # instead depended on the platform, which is its own argument for
         # naming it: on Windows a directory reports st_size == 0 and so read as
-        # an empty store; on Linux it reports its block size and fell into the
-        # probe below. Both ended as an unnamed exit 2.
+        # an empty store; elsewhere it reports a non-zero size (4096 on ext4, a
+        # smaller entry-derived one on tmpfs or XFS) and fell into the probe
+        # below. Both ended as an unnamed exit 2.
         raise SchemaVersionError(
             f"{file} is a directory, not a database file. A store is a single "
             f"file — give --db its name (for example {file / '<name>.db'})."

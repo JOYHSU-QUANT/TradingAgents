@@ -1021,8 +1021,15 @@ def test_a_foreign_database_is_refused_by_name_under_every_policy(tmp_path, poli
         # Empty and carrying both our column names, but wider. Nothing in this
         # project ever adds a column to that table, so a wider one is theirs.
         ("wider", ("CREATE TABLE schema_migrations (version, applied_at, dirty)",)),
+        # A VIEW of that name, and the file's ONLY object — the shape that
+        # actually needs the `type='table'` guard, since PRAGMA table_info
+        # answers for a view and would report our two columns, empty.
+        (
+            "a-view",
+            ("CREATE VIEW schema_migrations AS SELECT 1 AS version, 2 AS applied_at WHERE 0",),
+        ),
     ],
-    ids=["populated", "empty", "wider"],
+    ids=["populated", "empty", "wider", "a-view"],
 )
 @pytest.mark.parametrize("policy", _POLICIES.values(), ids=_POLICIES)
 def test_a_lone_foreign_schema_migrations_is_refused_not_read_as_our_own(
@@ -1207,6 +1214,16 @@ def test_a_db_whose_directory_does_not_exist_is_refused_by_name(tmp_path):
     # returned on any OSError from stat(). All of them are named now.
     with pytest.raises(SchemaVersionError, match="does not exist"):
         Database(tmp_path / "no-such-dir" / "store.db", migrate=False)
+
+    # And a parent that exists but is a FILE. Which sentence it gets is the
+    # platform's choice — Windows raises ENOENT and lands in the branch above,
+    # POSIX raises ENOTDIR and lands in the generic unreadable one — so pin
+    # what is actually promised: a named exit 1 either way, never the exit-2
+    # `unable to open database file` all of these used to produce.
+    not_a_dir = tmp_path / "notes.db"
+    not_a_dir.write_bytes(b"plain text, not a database")
+    with pytest.raises(SchemaVersionError, match="not a directory|Not a directory"):
+        Database(not_a_dir / "store.db", migrate=False)
 
 
 def test_a_db_path_that_is_a_directory_is_refused_by_name(tmp_path):

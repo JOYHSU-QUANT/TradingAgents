@@ -175,8 +175,9 @@ Breaking changes within the 0.x line are called out explicitly.
   state an older build of this project could have left. Three neighbouring
   mistypes are named rather than left to ``main()``'s exit-2 last resort as
   ``unable to open database file``: a ``--db`` that is a directory, one whose
-  directory does not exist (or is not a directory), and one that cannot be
-  read at all. The read-only probe builds its URI itself rather than through
+  directory does not exist or is not a directory, and one that cannot be read
+  at all. (The missing-directory case reached that exit 2 only through
+  ``--create``; the reporting commands already refused it by name.) The read-only probe builds its URI itself rather than through
   ``Path.as_uri``, which rejects a relative ``--db`` outright and renders a
   Windows UNC path with an authority SQLite refuses — a store on a share
   would have stopped opening. The verdict is read from ``sqlite_master``

@@ -24,7 +24,7 @@ from tradingagents.agents.analysts.market_analyst import create_market_analyst
 from tradingagents.agents.utils import crypto_data_tools
 from tradingagents.dataflows import deribit, interface
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.errors import VendorRateLimitError
+from tradingagents.dataflows.errors import VendorRateLimitError, VendorUnavailableError
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -1581,7 +1581,8 @@ class TestRequest:
         ):
             assert deribit._request(DVOL_ENDPOINT, {}) == 42
         assert (
-            "Deribit get_volatility_index_data request failed (HTTP 503); retrying in 2s"
+            "Deribit get_volatility_index_data request failed (answered HTTP 503 without "
+            "data); retrying in 2s"
             in caplog.text
         )
 
@@ -1607,6 +1608,59 @@ class TestRequest:
             pytest.raises(VendorRateLimitError),
         ):
             deribit._request(CHAIN_ENDPOINT, {})
+
+    @pytest.mark.parametrize(
+        "fault",
+        [
+            pytest.param(
+                requests.ConnectionError(
+                    "HTTPSConnectionPool(host='www.deribit.com'): Max retries exceeded "
+                    "with url: /api/v2/public/get_volatility_index_data?currency=BTC"
+                ),
+                id="unreached",
+            ),
+            pytest.param(_response(status=503, payload={}), id="5xx"),
+            pytest.param(_response(text_body="<html>WAF</html>"), id="non-json"),
+        ],
+    )
+    def test_a_spent_retry_raises_the_outage_type(self, fault):
+        # All three retryable faults are the vendor being down: the raise
+        # keeps the outage type for the router (#172) and stays a
+        # DeribitError for every caller written against the module type.
+        # A requests message quotes the request URL; only its class rides
+        # along (#203).
+        side_effect = fault if isinstance(fault, Exception) else None
+        with (
+            mock.patch.object(
+                deribit.requests,
+                "get",
+                side_effect=side_effect,
+                return_value=None if side_effect else fault,
+            ),
+            mock.patch.object(deribit.time, "sleep"),
+            pytest.raises(VendorUnavailableError, match="did not return a usable response") as e,
+        ):
+            deribit._request(DVOL_ENDPOINT, {})
+        assert isinstance(e.value, deribit.DeribitError)
+        assert "url" not in str(e.value)
+        if isinstance(fault, Exception):
+            assert "could not be reached: ConnectionError" in str(e.value)
+
+    def test_a_rejection_is_not_the_outage_type(self):
+        # The vendor answered about the request — a bare 4xx, a JSON-RPC
+        # error — and the module type says so.
+        payload = {"error": {"code": -32602, "message": "Invalid params"}}
+        for response in (
+            _response(status=403, payload={}),
+            _response(status=400, payload=payload),
+            _response(status=503, payload=payload),
+        ):
+            with (
+                mock.patch.object(deribit.requests, "get", return_value=response),
+                pytest.raises(deribit.DeribitError) as e,
+            ):
+                deribit._request(DVOL_ENDPOINT, {})
+            assert not isinstance(e.value, VendorUnavailableError)
 
     def test_network_error_is_retried_then_wrapped(self):
         with (
@@ -3181,6 +3235,55 @@ class TestPartialDegradation:
             _report(
                 chain=deribit.DeribitError("chain down"), dvol=deribit.DeribitError("dvol down")
             )
+
+    def test_both_halves_down_keeps_the_outage_type(self, caplog):
+        # Every request made ended with the vendor down: the raise keeps the
+        # outage type so the router logs it without a traceback and counts
+        # the vendor as down (#172) — and the per-half warning carries no
+        # traceback either, since a typed vendor failure is not a bug.
+        with (
+            caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.deribit"),
+            pytest.raises(VendorUnavailableError, match="neither DVOL nor an options chain"),
+        ):
+            _report(
+                chain=deribit.DeribitUnavailableError("chain down"),
+                dvol=deribit.DeribitUnavailableError("dvol down"),
+            )
+        halves = [r for r in caplog.records if "unavailable for BTC" in r.getMessage()]
+        assert len(halves) == 2
+        assert all(r.exc_info is None for r in halves)
+
+    def test_a_throttle_and_an_outage_together_keep_the_outage_type(self):
+        # One half 429, the other 503 after its retry: one vendor not serving,
+        # not a bug — the outage lane, without a traceback and without arming
+        # the throttle latch on a half-verdict.
+        with pytest.raises(VendorUnavailableError, match="neither DVOL nor an options chain"):
+            _report(
+                chain=deribit.DeribitUnavailableError("chain down"),
+                dvol=VendorRateLimitError("429"),
+            )
+
+    def test_one_half_rejected_keeps_the_module_type(self):
+        # A rejection is the vendor answering; mixed with an outage the
+        # honest raise is the module type, not "down".
+        with pytest.raises(deribit.DeribitError) as e:
+            _report(
+                chain=deribit.DeribitError("chain rejected"),
+                dvol=deribit.DeribitUnavailableError("dvol down"),
+            )
+        assert not isinstance(e.value, VendorUnavailableError)
+
+    def test_an_outage_on_a_historical_date_keeps_the_outage_type(self):
+        # The chain is never attempted there, so DVOL's outage is the only
+        # verdict — judged over the requests actually made, like the throttle.
+        with pytest.raises(VendorUnavailableError, match="not served for the historical date"):
+            _report(curr_date="2026-07-20", dvol=deribit.DeribitUnavailableError("dvol down"))
+
+    def test_an_unforeseen_exception_still_leaves_a_traceback(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.deribit"):
+            _report(dvol=RuntimeError("something nobody predicted"))
+        halves = [r for r in caplog.records if "DVOL unavailable for BTC" in r.getMessage()]
+        assert len(halves) == 1 and halves[0].exc_info is not None
 
     def test_both_halves_throttled_keeps_the_rate_limit_lane(self):
         # Collapsing a throttle into a DeribitError would make it indistinguishable

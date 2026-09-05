@@ -410,10 +410,12 @@ class TestFetchAll:
             error_tickers=set(LIST_TICKERS),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
-        # A sweep that died purely of transport keeps the TRANSPORT class — see
-        # the macro twin for why the structural class would misclassify it.
+        # A sweep that died purely of transport is the vendor down: the OUTAGE
+        # type — see the macro twin for why the structural class would
+        # misclassify it.
         with pytest.raises(
-            requests.RequestException, match=r"12 selected .*failed at the transport layer"
+            sosovalue_common.SoSoValueUnavailableError,
+            match=r"12 selected .*failed to reach the vendor",
         ) as exc:
             sosovalue_treasuries._fetch_all()
         assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
@@ -421,6 +423,43 @@ class TestFetchAll:
         # Literal 3, not the constant under test — see the macro twin.
         assert len(history_calls) == 3
         assert sosovalue_treasuries.MAX_CONSECUTIVE_NETWORK_FAILURES == 3
+
+    def test_an_outage_answer_mid_sweep_takes_the_transport_lane(self, monkeypatch, caplog):
+        # A 5xx the envelope does not explain is the gateway, not a contract
+        # break (#172): the company joins companies_failed, the sweep goes on,
+        # and nothing is logged at ERROR.
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueUnavailableError(
+                "SoSoValue answered HTTP 502 without data"
+            ),
+            error_tickers={LIST_TICKERS[2]},
+        )
+        monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
+        with caplog.at_level("DEBUG", logger="tradingagents.dataflows.sosovalue_treasuries"):
+            payload = sosovalue_treasuries._fetch_all()
+        assert payload["companies_failed"] == [LIST_TICKERS[2]]
+        assert LIST_TICKERS[2] not in payload["companies"]
+        assert len([c for c in impl.calls if c != "/btc-treasuries"]) == len(LIST_TICKERS)
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_an_all_outage_sweep_keeps_the_outage_type(self, monkeypatch):
+        # The transport twin of the network-streak test: a sweep that died
+        # purely of the vendor being down raises the outage type, so the
+        # router counts the vendor as down rather than as broken.
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueUnavailableError(
+                "SoSoValue answered HTTP 503 without data"
+            ),
+            error_tickers=set(LIST_TICKERS),
+        )
+        monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="was answered without data"
+        ) as exc:
+            sosovalue_treasuries._fetch_all()
+        assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
+        # The breaker counts an outage answer like a transport failure.
+        assert len([c for c in impl.calls if c != "/btc-treasuries"]) == 3
 
     def test_an_all_empty_sweep_stays_structural(self, monkeypatch):
         # The other side of that split: nothing failed at the transport layer,
@@ -564,7 +603,7 @@ class TestCacheAndLoad:
             raise requests.ConnectionError("down")
 
         monkeypatch.setattr(sosovalue_treasuries, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="no usable cache"):
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="no usable cache"):
             sosovalue_treasuries._load_snapshot()
         assert not (tmp_path / "sosovalue_treasuries.json").exists()
 
@@ -587,7 +626,8 @@ class TestCacheAndLoad:
 
         self._write_cache(tmp_path)
         monkeypatch.setattr(sosovalue_treasuries, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="days stale"):
+        # An unreached vendor past the cap is the outage type (#172).
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="days stale"):
             sosovalue_treasuries._load_snapshot()
 
     def test_legitimate_degraded_payload_shapes_are_accepted(self, tmp_path, monkeypatch):
@@ -1759,7 +1799,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
             error_tickers=set(LIST_TICKERS),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
-        with pytest.raises(requests.RequestException) as exc:
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as exc:
             sosovalue_treasuries._fetch_all()
         assert f"({sosovalue_treasuries.MAX_CONSECUTIVE_NETWORK_FAILURES} of " in str(exc.value)
         assert "every attempt failed" not in str(exc.value)

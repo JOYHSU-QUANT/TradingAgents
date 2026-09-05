@@ -2,8 +2,9 @@
 
 SoSoValue's OpenAPI (https://sosovalue.gitbook.io/soso-value-api-doc) serves
 several product modules off one base URL, one ``x-soso-api-key`` header, one
-``{"code": 0, "data": [...]}`` response envelope, and one 20 req/min /
-100k req/month plan limit. The vendor modules built on it — spot-ETF flows
+``{"code": 0, "data": [...]}`` response envelope, and one 10 req/min /
+100k req/month plan limit (the plan page says 20; the server was measured
+at 10, #215). The vendor modules built on it — spot-ETF flows
 (``sosovalue.py``), the macro economic calendar (``sosovalue_macro.py``), and
 BTC corporate treasuries (``sosovalue_treasuries.py``) — share that plumbing
 here: the error taxonomy, API-key retrieval and sanitization, the request
@@ -44,8 +45,13 @@ from typing import NamedTuple, NoReturn
 import requests
 
 from .config import get_config
-from .errors import VendorError, VendorNotConfiguredError, VendorRateLimitError
-from .utils import sanitize_untrusted
+from .errors import (
+    VendorError,
+    VendorNotConfiguredError,
+    VendorRateLimitError,
+    VendorUnavailableError,
+)
+from .utils import failure_account, is_unreached, sanitize_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -54,19 +60,26 @@ SOSOVALUE_API_BASE = "https://openapi.sosovalue.com/openapi/v1"
 # Network timeout (seconds), consistent with the other vendors.
 REQUEST_TIMEOUT = 30
 
-# The plan limit every request on the shared key counts against: 20 per
-# minute, per key. (The 100k-per-month tier is not budgeted here — a day of
-# every module refreshing on every 4h paper cycle stays under 300.) The three
-# vendor modules refresh 10 (macro), ~15 (ETF) and 16 (treasuries) requests
-# at a time, so any two expiring inside one analyst turn overrun the minute
-# and whichever runs second takes a 429 for the rest of it (#189). Each
+# The limit every request on the shared key counts against: 10 per minute,
+# per key — MEASURED, not the plan page's 20. On 2026-09-05, from the paper
+# box in an idle gap, ten back-to-back GETs answered 200 and the eleventh
+# 429 (body code 402901); refused requests did not extend the window, which
+# cleared about 60s after the first request; no answer carried a rate-limit
+# or Retry-After header. With the page's number in here every ETF and
+# treasuries sweep in production ended in a 429 at its 11th-12th request
+# and no cache ever completed (#215). (The 100k-per-month tier is not
+# budgeted here — a day of every module refreshing on every 4h paper cycle
+# stays under 300.) The three vendor modules refresh 10 (macro), ~15 (ETF)
+# and 16 (treasuries) requests at a time, so a sweep past its tenth request
+# waits out the window once inside the caller's tool call, and any two
+# expiring inside one analyst turn wait rather than overrun it (#189). Each
 # module's TTL only knows its own traffic; the budget below is the one thing
 # that sees all of it, and it spaces requests so the overrun never happens.
-# The budget is per PROCESS and spends the whole plan limit: do not run a
-# second process against the same key while the daemon is up (a CLI run on
-# the box, say) — both would count to 20, the server would 429 them, and
-# each 429 parks the process that took it for a window.
-RATE_LIMIT_REQUESTS = 20
+# The budget is per PROCESS and spends the whole limit: do not run a second
+# process against the same key while the daemon is up (a CLI run on the
+# box, say) — both would count to 10, the server would 429 them, and each
+# 429 parks the process that took it for a window.
+RATE_LIMIT_REQUESTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 # Added to every wait: the server's window edge is not observable from here,
 # and a request that leaves this process at second 60.0 by our clock can
@@ -120,25 +133,35 @@ class _RequestBudget:
         self._blocked_until = 0.0
         self._lock = threading.Lock()
 
-    def _wait_needed(self, now: float) -> float:
+    def _wait_needed(self, now: float) -> tuple[float, str]:
+        """The wait before the next send, and the words for the bound that set it.
+
+        Named here, where both bounds are computed, because the park and
+        the count can hold at once and the log line must name whichever
+        the caller is actually waiting on — read off ``_blocked_until``
+        alone, a count-bound wait was attributed to the 429 (#195). Ties
+        go to the park: the server's verdict outranks the local count.
+        """
         while self._sent and self._sent[0] <= now - RATE_LIMIT_WINDOW_SECONDS:
             self._sent.popleft()
         wait = self._blocked_until - now
+        bound = "the server answered 429, so the window is full whatever this process counted"
         if len(self._sent) >= RATE_LIMIT_REQUESTS:
-            wait = max(wait, self._sent[0] + RATE_LIMIT_WINDOW_SECONDS - now)
-        return wait + RATE_LIMIT_SLACK_SECONDS if wait > 0 else 0.0
+            counted = self._sent[0] + RATE_LIMIT_WINDOW_SECONDS - now
+            if counted > wait:
+                wait = counted
+                bound = (
+                    f"{len(self._sent)} requests already sent in the last "
+                    f"{RATE_LIMIT_WINDOW_SECONDS:.0f}s on the shared key"
+                )
+        return (wait + RATE_LIMIT_SLACK_SECONDS if wait > 0 else 0.0), bound
 
     def acquire(self, path: str) -> None:
         """Block until a request may be sent."""
         with self._lock:
             now = _monotonic()
-            if (wait := self._wait_needed(now)) > 0:
-                reason = (
-                    "the server answered 429, so the window is full whatever this process counted"
-                    if self._blocked_until > now
-                    else f"{len(self._sent)} requests already sent in the last "
-                    f"{RATE_LIMIT_WINDOW_SECONDS:.0f}s on the shared key"
-                )
+            wait, reason = self._wait_needed(now)
+            if wait > 0:
                 logger.info(
                     "SoSoValue request budget: %s; waiting %.1fs before %s", reason, wait, path
                 )
@@ -195,11 +218,15 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
 
 
 class SoSoValueError(VendorError):
-    """SoSoValue was unreachable, returned an error, or its response shape changed.
+    """SoSoValue answered with an error envelope, or its response shape changed.
 
     A ``VendorError`` (the shared taxonomy in ``errors.py``) so the routing
     layer reacts by behaviour rather than by vendor and an optional
     SoSoValue-backed category degrades down the chain instead of aborting.
+    The family reads this type as STRUCTURAL — the client likely needs a
+    fix — and logs it at ERROR with a traceback, so it is not raised for
+    the vendor being down: that is ``SoSoValueUnavailableError``, which the
+    cache lane also wraps an unreached vendor's ``requests`` exception as.
     """
 
 
@@ -215,7 +242,7 @@ class SoSoValueNotConfiguredError(VendorNotConfiguredError):
 
 
 class SoSoValueRateLimitError(VendorRateLimitError):
-    """The 20 req/min / 100k req/month plan limit was hit (HTTP 429).
+    """The 10 req/min / 100k req/month limit was hit (HTTP 429).
 
     Reaches the router only when the throttled call ALSO had no usable cache
     (see ``load_rolling_snapshot``): the sibling tools, each with its own cache
@@ -227,6 +254,21 @@ class SoSoValueRateLimitError(VendorRateLimitError):
     """
 
     latches_vendor = False
+
+
+class SoSoValueUnavailableError(VendorUnavailableError):
+    """SoSoValue was down: a 5xx it did not explain, a non-JSON 2xx/5xx body, or unreached.
+
+    Raised by ``_request`` for the first two (status and path only, never
+    the body — the gateway's error page — since the message travels into a
+    sentinel the model reads), by ``raise_all_failed`` for a sweep that
+    died purely of those and of transport, and by the cache lane for an
+    unreached vendor. Deliberately NOT a ``SoSoValueError``: every per-item
+    handler and cache lane in the family reads that type as structural
+    breakage (ERROR, traceback, "the client likely needs a fix"), and a
+    gateway that is down is none of that — it takes the transport lane
+    instead, like the rate-limit type takes its own.
+    """
 
 
 def get_api_key() -> str:
@@ -290,10 +332,20 @@ def _request(path: str, params: dict) -> list:
     """GET a SoSoValue endpoint and return its ``data`` list.
 
     Raises the vendor taxonomy: 401 -> not-configured (bad key is config
-    breakage, not an outage), 429 -> rate-limited, anything else that is not a
-    clean ``{"code": 0, "data": [...]}`` -> ``SoSoValueError``. Network errors
-    propagate as ``requests.RequestException`` for the caller's stale-cache
-    handling, mirroring the Farside vendor.
+    breakage, not an outage), 429 -> rate-limited, a 5xx the envelope does
+    not explain or a body that is not JSON at a 2xx or 5xx -> unavailable
+    (the vendor is down, #172), anything else that is not a clean
+    ``{"code": 0, "data": [...]}`` -> ``SoSoValueError``. "Explain" is
+    Deribit's rule: an envelope with a non-zero ``code`` is the vendor
+    answering about this request whatever status it rode in on (the live
+    over-window error is an HTTP 403 with code 400301), so it stays the
+    structural type; a 5xx with no such envelope is the gateway, not the
+    API. A 4xx with a body that is not JSON — a renamed endpoint's 404
+    page, a WAF's 403 — is the vendor answering about this request too, and
+    stays structural, as a 4xx the boundary leaves alone does at Farside
+    and Fear & Greed. Network errors propagate as
+    ``requests.RequestException`` for the caller's stale-cache handling,
+    mirroring the Farside vendor.
 
     Every call passes through the shared ``_BUDGET`` first — after the key
     check, so an unset key still fails instantly rather than after a wait —
@@ -311,6 +363,9 @@ def _request(path: str, params: dict) -> list:
         body = response.json()
     except ValueError:
         body = None
+        decodable = False
+    else:
+        decodable = True
     if response.status_code == 401:
         raise SoSoValueNotConfiguredError(
             f"SoSoValue rejected the API key (HTTP 401): {_error_message(body, api_key)} "
@@ -321,6 +376,16 @@ def _request(path: str, params: dict) -> list:
         raise SoSoValueRateLimitError(
             f"SoSoValue rate limit hit (HTTP 429) on {path}: {_error_message(body, api_key)}"
         )
+    # The outage verdicts come before the envelope read, and carry no body
+    # text: the body is whatever page the gateway served.
+    status = response.status_code
+    if not decodable and not 400 <= status < 500:
+        raise SoSoValueUnavailableError(
+            f"SoSoValue answered HTTP {status} with a body that is not JSON on {path}"
+        )
+    explained = isinstance(body, dict) and "code" in body and body["code"] != 0
+    if status >= 500 and not explained:
+        raise SoSoValueUnavailableError(f"SoSoValue answered HTTP {status} without data on {path}")
     # Envelope errors can ride on any HTTP status (a missing-param error is
     # HTTP 400 with code 1; the over-window error is HTTP 403 with code
     # 400301), so judge the body, not just the status.
@@ -667,8 +732,10 @@ class FetchSweep(NamedTuple):
       by callers (not just logged) because the drain fills ``failed`` with
       items this client never asked for, and by render time the local that
       knew why is long gone.
-    * ``last_network`` — the last transport failure, kept because without it
-      a pure outage could only surface as structural breakage.
+    * ``last_network`` — the last transport failure or outage answer (a
+      ``requests`` exception, or the family's ``VendorUnavailableError``),
+      kept because without it a pure outage could only surface as
+      structural breakage.
     * ``structural_failure`` — True when ``fetch_one`` returned None (it
       swallowed a parse/contract break), so the transport classification
       cannot claim a pure outage while a real structural break is in the
@@ -686,7 +753,7 @@ class FetchSweep(NamedTuple):
     failed: list[str]
     flagged: list[str]
     rate_limited: SoSoValueRateLimitError | None
-    last_network: requests.RequestException | None
+    last_network: Exception | None
     structural_failure: bool
     breaker_skipped: bool
     attempted: int
@@ -736,16 +803,20 @@ def fetch_each(
     failures this loop owns:
 
     * A 429 proves every further request in this sweep would 429 too (the
-      20 req/min limit is per-key and per-minute), so the rest is drained
+      10 req/min limit is per-key and per-minute), so the rest is drained
       into ``failed`` (short-TTL retry) instead of burning a quota call per
       remaining item.
     * ``max_consecutive_network`` transport failures trip the breaker: a
       network that hangs instead of failing fast would otherwise turn one
       refresh into sequential full timeouts inside a single analyst tool
       call, and the post-breaker outcome (disclosed-incomplete, short TTL)
-      is identical to riding the brownout out. Any completed request resets
-      the streak — the server answered, so each remaining item is still
-      worth its own try.
+      is identical to riding the brownout out. An outage answer — a 5xx
+      the envelope does not explain, a non-JSON body
+      (``SoSoValueUnavailableError``) — takes this lane too: the item goes
+      to ``failed`` and the streak counts it, since a gateway that is down
+      costs the same per remaining item (#172). Any completed request
+      resets the streak — the server answered, so each remaining item is
+      still worth its own try.
 
     ``label``/``failed_bucket``/``noun`` only shape the two log lines;
     ``key`` names an item in the buckets and ``describe`` renders it in logs
@@ -767,7 +838,7 @@ def fetch_each(
     failed: list[str] = []
     flagged: list[str] = []
     rate_limited: SoSoValueRateLimitError | None = None
-    last_network: requests.RequestException | None = None
+    last_network: Exception | None = None
     structural_failure = False
     consecutive_network = 0
     breaker_skipped = False
@@ -793,7 +864,7 @@ def fetch_each(
                 failed_bucket,
             )
             break
-        except requests.RequestException as e:
+        except (requests.RequestException, VendorUnavailableError) as e:
             last_network = e
             failed.append(key(item))
             consecutive_network += 1
@@ -848,13 +919,17 @@ def raise_all_failed(
 
     * A 429 that drained the whole sweep must not masquerade as structural
       breakage (ERROR + traceback logs for a routine quota trip).
-    * A sweep that died PURELY of transport must raise the transport class,
-      routing it to the warning branch where network failures already land —
-      not a bare ``SoSoValueError``, which reads as "the client likely needs
-      a fix" for an outage no code change can heal. "Purely" is the gate: a
-      flagged item (the provider answered and served nothing) or a swallowed
-      parse break means something structural is in the mix, and the generic
-      error stays the honest answer.
+    * A sweep that died PURELY of transport — unreached, or answered with a
+      gateway page (``SoSoValueUnavailableError``) — is the vendor down, and
+      raises the outage type: the cache lane's warning branch, where network
+      failures already land, and the router's no-traceback lane that counts
+      the vendor as down (#172) — not a bare ``SoSoValueError``, which reads
+      as "the client likely needs a fix" for an outage no code change can
+      heal. One type for both flavours, so the verdict cannot depend on
+      which of them happened to come last. "Purely" is the gate: a flagged
+      item (the provider answered and served nothing) or a swallowed parse
+      break means something structural is in the mix, and the generic error
+      stays the honest answer.
 
     The callables supply each module's message — worded over its own universe
     and counts — so the shared predicate cannot drift between modules while
@@ -863,7 +938,7 @@ def raise_all_failed(
     if sweep.rate_limited is not None:
         raise SoSoValueRateLimitError(on_rate_limited()) from sweep.rate_limited
     if sweep.last_network is not None and not sweep.structural_failure and not sweep.flagged:
-        raise requests.RequestException(on_transport()) from sweep.last_network
+        raise SoSoValueUnavailableError(on_transport()) from sweep.last_network
     raise SoSoValueError(on_structural())
 
 
@@ -925,7 +1000,13 @@ def load_rolling_snapshot(
     except SoSoValueNotConfiguredError:
         raise
     except (requests.RequestException, VendorError) as e:
-        wrap_cls = type(e) if isinstance(e, VendorError) else SoSoValueError
+        # A typed failure keeps its type; an unreached vendor is the outage
+        # type, as in the Farside twin (#172); any other requests exception
+        # — a ValueError-flavoured one, a bug — is structural.
+        if isinstance(e, VendorError):
+            wrap_cls = type(e)
+        else:
+            wrap_cls = SoSoValueUnavailableError if is_unreached(e) else SoSoValueError
         if cached:
             fetched_at = cached["fetched_at"]
             age = _days_stale(fetched_at)
@@ -940,7 +1021,7 @@ def load_rolling_snapshot(
                 )
                 raise wrap_cls(
                     f"SoSoValue {label} fetch failed and the newest cache {stale_desc} "
-                    f"(> {max_stale_days}-day cap): {_sanitize(e)}"
+                    f"(> {max_stale_days}-day cap): {failure_account(e)}"
                 ) from e
             # A SoSoValueError here is a contract/parse break (a code fix is
             # likely needed) and must not hide among network-blip warnings for
@@ -964,11 +1045,12 @@ def load_rolling_snapshot(
                 )
             return cached, fetched_at, True, False
         # "usable": the file may exist but have failed read-side validation.
-        # Not capped, only flattened: most of this string is the module's own
-        # diagnostic, and a foreign requests.RequestException can carry a
-        # server-influenced URL into the same LLM-visible line.
+        # The cause is quoted through ``failure_account``: a typed error's
+        # own text, flattened and capped; a requests exception contributes
+        # its status or class only, never its message — that quotes the
+        # request URL, and this line is LLM-visible (#203).
         raise wrap_cls(
-            f"SoSoValue {label} unavailable and no usable cache exists: {_sanitize(e)}"
+            f"SoSoValue {label} unavailable and no usable cache exists: {failure_account(e)}"
         ) from e
 
     fetched_at = _iso_now()

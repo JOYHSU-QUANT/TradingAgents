@@ -209,6 +209,70 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows: the vendors that own their transport handling now raise the
+  outage type when they are down, and a throttled or skipped vendor makes
+  a fallback's "no data" unconfirmed too** (issue #172; the #195 and #203
+  tails). PR #170 typed a 5xx as ``VendorUnavailableError`` only at the four
+  boundaries that are a bare ``requests.get``; SoSoValue, Deribit and Fear
+  & Greed classify their statuses themselves and Farside wraps its transport
+  failure in ``FarsideError``, so a gateway error page or an unreachable
+  vendor at those four still reached the router's generic lane — logged as
+  a bug with a traceback, absent from the no-data verdict, and for SoSoValue
+  read by every per-item handler as structural breakage ("the client likely
+  needs a fix", ERROR, traceback). Each boundary now raises the outage type
+  itself: ``SoSoValueUnavailableError`` for a 5xx the envelope does not
+  explain, a body that is not JSON at a 2xx or 5xx, and — from the cache
+  lane — an unreached vendor (deliberately not a ``SoSoValueError``, which
+  the family reads as structural; a 4xx page such as a renamed endpoint's
+  404 stays that structural type, since it is the vendor answering about
+  the request). The per-item sweeps, the ETF fund loop and the cache lane
+  take the outage type through their transport branch, and a sweep that
+  died purely of transport or outage answers raises it from
+  ``raise_all_failed`` — one type for both flavours, so the verdict cannot
+  depend on which failure came last. ``DeribitUnavailableError`` and
+  ``FearGreedUnavailableError`` once their retry is spent on a transport
+  failure, a 5xx or an undecodable body (both subclasses of the module
+  error too, so every partial-report ``except`` and caller keeps working;
+  Fear & Greed now reads its status and body through the shared
+  ``raise_for_http_status`` / ``json_body_or_outage``, and a 4xx it leaves
+  alone stays the module error, as at Farside); and
+  ``FarsideUnavailableError`` when the fetch never reached the vendor and no
+  cache could stand in (a Cloudflare 403 stays the module error, as pinned
+  by #170). Deribit's both-halves-failed raise keeps the outage type when
+  every request made ended down or throttled, and its per-half warning no
+  longer carries a traceback for a throttle or an outage (a structural
+  ``DeribitError`` keeps it). The router's outage predicate and both
+  vocabularies moved to ``utils`` (``is_unreached``, ``is_vendor_outage``,
+  ``generic_failure_words``, ``failure_account``) so the boundaries and the
+  router judge and word the same event the same way — and the boundaries'
+  wrapped messages, the SoSoValue sweep verdicts included, now quote a
+  lower failure through ``failure_account`` (its status or class, never a
+  ``requests`` message with the request URL in it; #203). ``route_to_vendor``'s no-data verdict,
+  which only an outage used to soften to "unconfirmed rather than invalid",
+  now does the same for a 429 actually met (``vendor 'X' was rate limited
+  (...) ... a source that would normally serve it was rate limited before it
+  could answer``) and for a latch skip (``was skipped after a recent rate
+  limit ... was not asked``) — an outage outranks a throttle, a throttle a
+  skip, whatever the chain order; a missing key keeps the symbol wording.
+  ``_RequestBudget`` names the bound that set a wait where both are
+  computed (#195), and the drain's "one park per sweep" promise is now
+  proved through the real ``_request`` with ``requests.get`` as the mock
+  boundary.
+
+- **sosovalue_common: the request budget assumed the plan page's 20 req/min;
+  the key allows 10** (issue #215). Measured on 2026-09-05 from the paper
+  box in an idle gap: ten back-to-back GETs answered 200, the eleventh 429
+  (body code 402901), refused requests did not extend the window, which
+  cleared about 60s after the first request, and no answer carried a
+  rate-limit or ``Retry-After`` header. With 20 in the budget every ETF and
+  treasuries sweep in production ended in a 429 at its 11th-12th request
+  from the 2026-09-03 deploy on, so no cache ever completed, the incomplete
+  caches sat on their short TTLs and re-swept every two cycles, and each
+  429 parked the next module for a window. ``RATE_LIMIT_REQUESTS`` is now
+  10: macro's ten requests fit one window, ETF's ~15 and treasuries' 16 wait
+  the window out once mid-sweep inside the tool call, which is what #189
+  designed the budget to do.
+
 - **hyperliquid_perp: a ``--db`` pointed at somebody else's SQLite database is
   refused without being written into** (issue #174; the #175 tail). "An EMPTY
   store" was decided by ``MAX(schema_migrations.version) == 0``, which is a

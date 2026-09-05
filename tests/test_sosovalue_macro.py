@@ -772,13 +772,18 @@ class TestFetchAll:
             history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
-        # A sweep that died purely of transport keeps the TRANSPORT class.
-        # _load_snapshot classifies by type: a SoSoValueError here logs the
-        # outage at ERROR with a traceback and "the client likely needs a fix"
-        # — a structural verdict on something no code change can heal.
-        with pytest.raises(requests.RequestException, match="failed at the transport layer") as exc:
+        # A sweep that died purely of transport is the vendor down: the
+        # OUTAGE type. _load_snapshot classifies by type: a SoSoValueError
+        # here logs the outage at ERROR with a traceback and "the client
+        # likely needs a fix" — a structural verdict on something no code
+        # change can heal. The cause is quoted as the exception's class,
+        # never its text (#203).
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="failed to reach the vendor"
+        ) as exc:
             sosovalue_macro._fetch_all()
         assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
+        assert "could not be reached: ConnectionError" in str(exc.value)
         history_calls = [c for c in impl.calls if c != "/macro/events"]
         # Literal 3, not the constant: comparing against the value under test
         # makes the assertion true for every breaker setting, including a 9
@@ -986,7 +991,7 @@ class TestCacheAndLoad:
             raise requests.ConnectionError("down")
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="no usable cache"):
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="no usable cache"):
             sosovalue_macro._load_snapshot()
         assert not (tmp_path / "sosovalue_macro.json").exists()
 
@@ -1009,7 +1014,8 @@ class TestCacheAndLoad:
             raise requests.ConnectionError("down")
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="days stale"):
+        # An unreached vendor past the cap is the outage type (#172).
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="days stale"):
             sosovalue_macro._load_snapshot()
 
     def test_stale_cache_at_cap_is_still_served(self, tmp_path, monkeypatch):
@@ -1030,7 +1036,9 @@ class TestCacheAndLoad:
             raise requests.ConnectionError("down")
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="unparseable or future-dated"):
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="unparseable or future-dated"
+        ):
             sosovalue_macro._load_snapshot()
 
     def test_rate_limit_wrap_keeps_its_type_past_the_cap(self, tmp_path, monkeypatch):
@@ -3171,7 +3179,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
             history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
-        with pytest.raises(requests.RequestException) as exc:
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as exc:
             sosovalue_macro._fetch_all()
         assert f"({sosovalue_macro.MAX_CONSECUTIVE_NETWORK_FAILURES} of {len(TRACKED)})" in str(
             exc.value

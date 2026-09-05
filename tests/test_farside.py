@@ -962,6 +962,33 @@ class TestCache:
             farside.get_etf_flow_data("BTC", "2026-07-09")
         assert not isinstance(exc.value, VendorUnavailableError)
 
+    def test_a_transport_failure_with_no_cache_is_the_outage_type(self, tmp_path, monkeypatch):
+        # Unreached is down: the router's generic lane already says so, and
+        # trying the cache first must not downgrade that to a bug (#172).
+        # Still a FarsideError for callers; the message carries the
+        # exception's class, never its text — that quotes the URL (#203).
+        self._use_tmp_cache(tmp_path)
+        reset = requests.ConnectionError(
+            "HTTPSConnectionPool(host='farside.co.uk'): Max retries exceeded "
+            "with url: /bitcoin-etf-flow-all-data/"
+        )
+        monkeypatch.setattr(farside, "_request_html", mock.Mock(side_effect=reset))
+        with pytest.raises(VendorUnavailableError, match="no cache exists") as exc:
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert isinstance(exc.value, farside.FarsideError)
+        assert "url" not in str(exc.value)
+        assert "could not be reached: ConnectionError" in str(exc.value)
+
+    def test_a_transport_failure_past_the_cap_is_the_outage_type(self, tmp_path, monkeypatch):
+        self._use_tmp_cache(tmp_path)
+        self._write_cache(tmp_path, fetched_at="2026-07-01")
+        monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-16"))  # 15 days
+        monkeypatch.setattr(
+            farside, "_request_html", mock.Mock(side_effect=requests.ConnectionError("boom"))
+        )
+        with pytest.raises(VendorUnavailableError, match="cap"):
+            farside.get_etf_flow_data("BTC", "2026-07-09")
+
 
 # --------------------------------------------------------------------------- #
 # Router integration

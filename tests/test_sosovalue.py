@@ -178,15 +178,39 @@ class TestRequestBudget:
     def test_the_request_past_the_limit_waits_for_the_oldest_to_age_out(
         self, budget_clock, caplog
     ):
-        # One request a second: when the 21st arrives the oldest is 20s old,
-        # so it has 40s left in the window, plus the slack.
+        # One request a second: when the 11th arrives the oldest is 10s old,
+        # so it has 50s left in the window, plus the slack. The literal pins
+        # the measured limit (10, #215) — a budget "tidied" back to the plan
+        # page's 20 would wait 42s here and 429 in production.
         for _ in range(self.LIMIT):
             self._send()
             budget_clock.now += 1.0
         with caplog.at_level(logging.INFO, logger="tradingagents.dataflows.sosovalue_common"):
             self._send("/macro/events")
         assert budget_clock.sleeps == [self.WINDOW - self.LIMIT + self.SLACK]
-        assert "waiting 42.0s before /macro/events" in caplog.text
+        assert "waiting 52.0s before /macro/events" in caplog.text
+        assert sosovalue_common.RATE_LIMIT_REQUESTS == 10
+
+    def test_the_wait_log_names_the_bound_that_set_it(self):
+        # Both bounds can hold at once; the reason must follow the larger
+        # (#195). Through ``acquire`` alone the count bound can never exceed
+        # the park — every counted send predates the 429 that set it — so
+        # the state is set directly: the binding is pinned regardless of
+        # which sequence produces it.
+        budget = sosovalue_common._RequestBudget()
+        budget._sent.extend([1000.0] * sosovalue_common.RATE_LIMIT_REQUESTS)
+        budget._blocked_until = 1030.0
+        wait, reason = budget._wait_needed(1010.0)
+        assert wait == 50.0 + self.SLACK
+        assert reason.startswith(f"{self.LIMIT} requests already sent")
+        budget._blocked_until = 1070.0
+        wait, reason = budget._wait_needed(1010.0)
+        assert wait == 60.0 + self.SLACK
+        assert reason.startswith("the server answered 429")
+        # A tie goes to the park: the server's verdict outranks the local count.
+        budget._blocked_until = 1060.0
+        _, reason = budget._wait_needed(1010.0)
+        assert reason.startswith("the server answered 429")
 
     def test_an_aged_out_window_needs_no_wait(self, budget_clock):
         for _ in range(self.LIMIT):
@@ -290,11 +314,54 @@ class TestRequest:
         with pytest.raises(sosovalue.SoSoValueError, match="code 500"):
             self._get(_FakeResponse(200, {"code": 500, "message": "oops"}))
 
-    def test_non_json_body_is_an_error(self):
-        with pytest.raises(sosovalue.SoSoValueError, match="no-json") as excinfo:
+    def test_a_non_json_body_is_the_outage_type(self):
+        # A CDN or WAF page at whatever status it came with is not this API
+        # answering: the outage type (#172), never the structural one the
+        # family logs as "the client likely needs a fix".
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="not JSON") as e:
             self._get(_FakeResponse(200, None))
-        assert "(non-JSON response body)" in str(excinfo.value)
-        assert "None" not in str(excinfo.value)
+        assert not isinstance(e.value, sosovalue.SoSoValueError)
+        assert isinstance(e.value, sosovalue_common.VendorUnavailableError)
+        assert "None" not in str(e.value)
+
+    @pytest.mark.parametrize("status", [500, 502, 503])
+    def test_a_5xx_the_envelope_does_not_explain_is_the_outage_type(self, status):
+        # No non-zero ``code`` -> the gateway, not the API: the outage type,
+        # carrying the status and path only, never the body.
+        body = {"message": "<html>upstream error page | ## forged</html>"}
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as e:
+            self._get(_FakeResponse(status, body))
+        assert str(e.value) == (
+            f"SoSoValue answered HTTP {status} without data on /etfs/summary-history"
+        )
+        assert not isinstance(e.value, sosovalue.SoSoValueError)
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_a_non_json_4xx_is_the_vendor_answering_not_down(self, status):
+        # A renamed endpoint's 404 page or a WAF's 403 block is a deterministic
+        # answer about this request: the structural type, logged as such, not
+        # an outage stale-served for the cap — as a 4xx left alone is at the
+        # Farside and Fear & Greed boundaries.
+        with pytest.raises(sosovalue.SoSoValueError, match=f"HTTP {status}, code no-json") as e:
+            self._get(_FakeResponse(status, None))
+        assert not isinstance(e.value, sosovalue_common.VendorUnavailableError)
+        assert "(non-JSON response body)" in str(e.value)
+        assert "None" not in str(e.value)
+
+    def test_a_401_with_a_non_json_body_stays_not_configured(self):
+        # The key verdict comes before the body verdict, and the placeholder
+        # for an undecodable body never renders as the literal "None".
+        with pytest.raises(sosovalue.SoSoValueNotConfiguredError) as e:
+            self._get(_FakeResponse(401, None))
+        assert "(non-JSON response body)" in str(e.value)
+        assert "None" not in str(e.value)
+
+    def test_a_5xx_with_an_explaining_envelope_stays_structural(self):
+        # Deribit's rule: an envelope with a non-zero code is the vendor
+        # answering about this request whatever status it rode in on.
+        with pytest.raises(sosovalue.SoSoValueError, match="500001") as e:
+            self._get(_FakeResponse(500, {"code": 500001, "message": "internal"}))
+        assert not isinstance(e.value, sosovalue_common.VendorUnavailableError)
 
     def test_missing_data_list_is_an_error(self):
         with pytest.raises(sosovalue.SoSoValueError, match="'data' list"):
@@ -1703,7 +1770,8 @@ class TestCacheAndLoad:
     def test_failure_without_cache_raises_and_writes_nothing(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue.SoSoValueError, match="no usable cache"):
+        # An unreached vendor is the outage type from the cache lane (#172).
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="no usable cache"):
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert not [f for f in os.listdir(tmp_path) if f.startswith("sosovalue_")]
 
@@ -1733,6 +1801,55 @@ class TestCacheAndLoad:
         )
         with pytest.raises(sosovalue.SoSoValueRateLimitError, match="cap"):
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+
+    def test_an_outage_answer_falls_back_to_stale_cache_as_a_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # The family's cache lane reads SoSoValueError as structural (ERROR +
+        # traceback); a gateway page is an outage and must take the warning
+        # branch like a network failure (#172).
+        self._setup(tmp_path, monkeypatch)
+        _stub_requests(monkeypatch)
+        sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-08-02T00:00:00Z"))
+        down = sosovalue_common.SoSoValueUnavailableError(
+            "SoSoValue answered HTTP 503 without data on /etfs/summary-history"
+        )
+        _stub_requests(monkeypatch, errors={"/etfs/summary-history": down})
+        with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
+            out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "STALE by 1 day:" in out
+        assert not any(
+            r.levelno >= logging.ERROR for r in caplog.records if r.name == SOSOVALUE_LOGGER
+        )
+
+    def test_an_outage_answer_past_the_stale_cap_keeps_the_outage_type(
+        self, tmp_path, monkeypatch
+    ):
+        self._setup(tmp_path, monkeypatch, now="2026-08-15T00:00:00Z")  # 15 days
+        self._write_cache(tmp_path)
+        down = sosovalue_common.SoSoValueUnavailableError(
+            "SoSoValue answered HTTP 503 without data on /etfs/summary-history"
+        )
+        _stub_requests(monkeypatch, errors={"/etfs/summary-history": down})
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap"):
+            sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+
+    def test_a_transport_failure_message_carries_no_url(self, tmp_path, monkeypatch):
+        # The no-cache raise is LLM-visible through the router's sentinel; a
+        # requests message quotes the request URL (#203).
+        self._setup(tmp_path, monkeypatch)
+        reset = requests.ConnectionError(
+            "HTTPSConnectionPool(host='openapi.sosovalue.com'): Max retries exceeded "
+            "with url: /openapi/v1/etfs/summary-history?symbol=BTC"
+        )
+        _stub_requests(monkeypatch, errors={"/etfs/summary-history": reset})
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="no usable cache exists"
+        ) as e:
+            sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "url" not in str(e.value)
+        assert "could not be reached: ConnectionError" in str(e.value)
 
     def test_failure_falls_back_to_stale_cache(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
@@ -1775,14 +1892,14 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch, now="2026-08-15T00:00:00Z")  # 15 days
         self._write_cache(tmp_path)
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue.SoSoValueError, match="cap"):
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap"):
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
 
     def test_future_dated_fetched_at_degrades(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch, now="2026-07-25T00:00:00Z")
         self._write_cache(tmp_path, fetched_at="2026-07-31T00:00:00Z")  # future stamp
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue.SoSoValueError, match="cap") as excinfo:
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap") as excinfo:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         # The stamp parses fine; the message must not send an operator hunting
         # a parse bug when the cause is clock skew.
@@ -1792,7 +1909,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
         self._write_cache(tmp_path, fetched_at="2026-07-31T00:00:00")  # no trailing Z
         _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue.SoSoValueError, match="cap") as excinfo:
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap") as excinfo:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         assert "unparseable or future-dated fetch date" in str(excinfo.value)
 
@@ -1877,6 +1994,61 @@ class TestCacheAndLoad:
         )
         assert history_calls == ["/etfs/AAA/history", "/etfs/BBB/history"]
         assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+
+    def test_an_outage_answer_mid_sweep_takes_the_transport_lane(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # A 5xx on one fund history is the gateway, not a contract break: the
+        # fund joins funds_failed, the sweep goes on (no drain — only a 429
+        # proves the rest would fail), and nothing is logged at ERROR (#172).
+        tickers = ("AAA", "BBB", "CCC")
+        down = sosovalue_common.SoSoValueUnavailableError(
+            "SoSoValue answered HTTP 502 without data on /etfs/BBB/history"
+        )
+        with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
+            _, history_calls, payload = self._run_fund_breaker(
+                tmp_path,
+                monkeypatch,
+                tickers,
+                fail={"/etfs/AAA/history", "/etfs/CCC/history"},
+                errors={"/etfs/BBB/history": down},
+            )
+        assert history_calls == [f"/etfs/{t}/history" for t in tickers]
+        assert payload["funds_failed"] == ["AAA", "BBB", "CCC"]
+        assert not any(
+            r.levelno >= logging.ERROR for r in caplog.records if r.name == SOSOVALUE_LOGGER
+        )
+
+    def test_a_429_pays_the_park_at_most_once_per_sweep(self, tmp_path, monkeypatch, budget_clock):
+        # #195: the drain's promise, proved through the real ``_request`` and
+        # the budget with ``requests.get`` as the mock boundary — a stub that
+        # replaces ``_request`` cannot see whether a later fund would have
+        # paid the park. BBB's 429 parks the budget; every remaining fund
+        # would sleep a window and 429 again, so none may be requested:
+        # ``budget_clock.sleeps`` stays empty.
+        self._setup(tmp_path, monkeypatch)
+        sent = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            path = url.removeprefix(sosovalue_common.SOSOVALUE_API_BASE)
+            sent.append(path)
+            if path == "/etfs/summary-history":
+                return _FakeResponse(200, {"code": 0, "message": "ok", "data": SUMMARY_API})
+            if path == "/etfs":
+                listing = [{"ticker": t, "name": t} for t in ("AAA", "BBB", "CCC", "DDD")]
+                return _FakeResponse(200, {"code": 0, "message": "ok", "data": listing})
+            if path == "/etfs/AAA/history":
+                raise requests.ConnectionError("blip")
+            if path == "/etfs/BBB/history":
+                return _FakeResponse(429, {"code": 429, "message": "slow down"})
+            raise AssertionError(f"a fund after the 429 was requested: {path}")
+
+        monkeypatch.setattr(sosovalue_common.requests, "get", fake_get)
+        sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert sent == ["/etfs/summary-history", "/etfs", "/etfs/AAA/history", "/etfs/BBB/history"]
+        assert budget_clock.sleeps == []
+        payload = json.loads((tmp_path / "sosovalue_btc.json").read_text(encoding="utf-8"))
+        assert payload["funds_failed"] == ["AAA", "BBB", "CCC", "DDD"]
 
     def test_fund_list_failure_omits_breakdown_not_the_vendor(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)

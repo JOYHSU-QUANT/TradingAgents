@@ -71,9 +71,9 @@ from typing import Literal, NamedTuple, TypeVar
 
 import requests
 
-from .errors import VendorError, VendorRateLimitError
+from .errors import VendorError, VendorRateLimitError, VendorUnavailableError
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal, sanitize_untrusted
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal, generic_failure_words, sanitize_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -367,11 +367,23 @@ _BOTH_REJECTION_CLASSES = (
 
 
 class DeribitError(VendorError):
-    """Deribit was unreachable, or returned a payload this module cannot use.
+    """Deribit rejected the request, or returned a payload this module cannot use.
 
     A ``VendorError`` (the shared taxonomy in ``errors.py``) so the routing layer
     reacts by behaviour rather than by vendor, and the optional options_data
-    category degrades to a sentinel instead of aborting the run.
+    category degrades to a sentinel instead of aborting the run. The vendor
+    being DOWN is the subclass below, so the router can tell the two apart.
+    """
+
+
+class DeribitUnavailableError(DeribitError, VendorUnavailableError):
+    """Deribit was down: unreachable, or answering with something that is not the API.
+
+    Raised by ``_request`` once its retry is spent on a transport failure,
+    an undecodable body or a 5xx with no JSON-RPC error object, and by
+    ``get_options_market_data`` when every request it made ended that way
+    or throttled (#172). A ``DeribitError`` too, so every ``except`` and
+    caller written against the module type keeps working unchanged.
     """
 
 
@@ -644,8 +656,12 @@ def _request(endpoint: str, params: dict) -> object:
                 payload = response.json()
             except ValueError as e:
                 # A CDN/WAF error page rather than the API: transient enough to be
-                # worth the one retry.
-                raise _TransientDeribitFault(f"undecodable response body ({e})") from e
+                # worth the one retry. Worded as the shared boundary helpers word
+                # it, never with the decoder's message: this text ends up in a
+                # raised message the model reads (#203).
+                raise _TransientDeribitFault(
+                    f"answered HTTP {response.status_code} with a body that is not JSON"
+                ) from e
             if isinstance(payload, dict) and payload.get("error"):
                 error = payload["error"]
                 detail = error.get("message", error) if isinstance(error, dict) else error
@@ -661,7 +677,9 @@ def _request(endpoint: str, params: dict) -> object:
                     f"{_sanitize(detail, limit=MAX_UNTRUSTED_CHARS)}"
                 )
             if response.status_code >= 500:
-                raise _TransientDeribitFault(f"HTTP {response.status_code}")
+                raise _TransientDeribitFault(
+                    f"answered HTTP {response.status_code} without data"
+                )
             if response.status_code >= 400:
                 # Deterministic rejection with no JSON-RPC error object to explain
                 # it — a WAF block, a renamed endpoint. Raised here rather than
@@ -695,10 +713,18 @@ def _request(endpoint: str, params: dict) -> object:
     # CDN error page lands here) and a 5xx, where the server plainly responded.
     # Only requests.RequestException is genuinely a reachability failure, and
     # naming it for all three sends an operator hunting an outage that a WAF
-    # interception will not explain.
-    raise DeribitError(
+    # interception will not explain. All three ARE the vendor being down, so
+    # the raise is the outage type (#172); the cause is quoted as this
+    # module's own fault text, or for a requests exception as its status or
+    # class only — its message carries the request URL (#203).
+    cause = (
+        str(last_error)
+        if isinstance(last_error, _TransientDeribitFault)
+        else generic_failure_words(last_error)
+    )
+    raise DeribitUnavailableError(
         f"Deribit {endpoint} did not return a usable response after {_RETRY_ATTEMPTS} "
-        f"attempts: {last_error}"
+        f"attempts: {cause}"
     ) from last_error
 
 
@@ -2500,7 +2526,20 @@ def _try_fetch(
     try:
         return fetch(), None
     except Exception as e:
-        logger.warning("Deribit %s unavailable for %s: %s", label, currency, e, exc_info=True)
+        # A throttle or an outage is an ordinary outcome of this module and
+        # gets no traceback; a structural DeribitError (a parser several
+        # frames down meeting a changed row shape) and anything unforeseen
+        # keep the traceback that says which frame raised. None rather than
+        # False: the record keeps the value it is given, and "no traceback"
+        # is read as ``exc_info is None``.
+        traceback_free = isinstance(e, (VendorRateLimitError, VendorUnavailableError))
+        logger.warning(
+            "Deribit %s unavailable for %s: %s",
+            label,
+            currency,
+            e,
+            exc_info=None if traceback_free else True,
+        )
         return None, e
 
 
@@ -2723,6 +2762,18 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         attempted = [e for e in (dvol_error, skew_error) if e is not None]
         if all(isinstance(e, VendorRateLimitError) for e in attempted):
             raise VendorRateLimitError(f"Deribit rate-limited every request made for {currency}")
+        # The same judgment for an outage: when every request made ended
+        # with the vendor down — or throttled, for a mix of the two, since a
+        # 429 on one half and a 503 on the other is one vendor not serving,
+        # not a bug — the raise below keeps the outage type so the router
+        # logs it without a traceback and counts the vendor as down (#172);
+        # the message stays each branch's own, since a withheld chain is
+        # still the fact worth telling the reader.
+        failure_cls = (
+            DeribitUnavailableError
+            if all(isinstance(e, (VendorUnavailableError, VendorRateLimitError)) for e in attempted)
+            else DeribitError
+        )
         # Every message below is handed to the model by route_to_vendor as
         # "DATA_UNAVAILABLE: optional options_data could not be retrieved
         # ({error})", so the cause text is flattened here for the same reason the
@@ -2755,7 +2806,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 if withheld_mid_run
                 else f"the historical date {curr_date}"
             )
-            raise DeribitError(
+            raise failure_cls(
                 f"Deribit DVOL is unavailable for {currency} ({dvol_reason}), and the options "
                 f"chain is not served for {basis}{proxy_note}"
             )
@@ -2766,7 +2817,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # have burned its full retry envelope (~62s) to be reached at all, so
             # it carries the highest prior of a midnight crossing of any site the
             # sweep touched, and it was the site the sweep missed.
-            raise DeribitError(
+            raise failure_cls(
                 # Parenthesised for the reason chain_absence's far-future branch is:
                 # proxy_note appends ", and this vendor reads no options chain for
                 # '{asset}' on any date", and against a trailing "which ..." clause
@@ -2779,11 +2830,11 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 f"the UTC clock ({today}) when this report was built){proxy_note}"
             )
         if chain_withheld == "proxy":
-            raise DeribitError(
+            raise failure_cls(
                 f"Deribit DVOL is unavailable for {currency} ({dvol_reason}), and the options "
                 f"chain is not served for '{asset}', which has no Deribit chain of its own"
             )
-        raise DeribitError(
+        raise failure_cls(
             f"Deribit returned neither DVOL nor an options chain for {currency} "
             f"(DVOL: {dvol_reason}; chain: {_sanitize(skew_error)})"
         )

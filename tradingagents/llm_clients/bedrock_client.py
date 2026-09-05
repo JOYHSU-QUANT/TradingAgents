@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 from .validators import validate_model
 
 # Bedrock has no global default region; us-west-2 hosts the broadest model set.
@@ -59,7 +59,9 @@ class BedrockClient(BaseLLMClient):
             or _DEFAULT_REGION
         )
         llm_kwargs = {"model": self.model, "region_name": region}
-        for key in ("temperature", "max_tokens", "max_retries", "callbacks"):
+        # ChatBedrockConverse takes no ``timeout``/``api_key`` (auth is the
+        # AWS credential chain), so only the cross-provider set is forwarded.
+        for key in _COMMON_PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
         return chat_cls(**llm_kwargs)

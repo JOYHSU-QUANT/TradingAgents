@@ -31,6 +31,15 @@ _ENV_OVERRIDES = {
 _BOOL_TRUE = ("true", "1", "yes", "on")
 _BOOL_FALSE = ("false", "0", "no", "off")
 
+# Completion-token cap the interactive CLI applies when neither the config nor
+# TRADINGAGENTS_MAX_TOKENS sets one. A module constant, deliberately NOT the
+# value of DEFAULT_CONFIG["max_tokens"]: the library path stays at None (each
+# provider's own default) so importing the package changes nobody's requests,
+# while the CLI — the one non-perp path with an operator at the keyboard —
+# never goes out uncapped through a gateway (#177, #183). The perp bridge
+# declares the same number as its own default; a contrib test pins them equal.
+DEFAULT_MAX_TOKENS = 8192
+
 
 def _coerce(value: str, reference):
     """Coerce env-var string to the type of the existing default value.
@@ -103,7 +112,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Completion-token cap, forwarded to every provider when set. None leaves
     # each provider at its own default — risky through gateway providers,
     # where some upstreams treat "no cap" as "full context" and reject every
-    # call (#177).
+    # call (#177); the graph warns once when a gateway provider runs uncapped.
+    # The CLI fills DEFAULT_MAX_TOKENS in when this is still None (#183).
     "max_tokens": None,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.

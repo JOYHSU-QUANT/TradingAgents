@@ -75,6 +75,14 @@ def int_from_yaml(value: object) -> int:
     A bare ``int()`` would silently accept ``no``/``yes`` (YAML bools → 0/1)
     and truncate ``59.9`` to ``59`` — for risk-limit fields a config typo must
     fail loud, never silently shift the limit.
+
+    One deliberate departure from the cap convention in ``decimal_from_yaml``
+    (a switch-off spelled as an explicit ``0`` sentinel): the completion cap
+    this seam coerces, ``engine.max_completion_tokens``, has no off sentinel —
+    its callers reject ``0`` by name. "Off" there means an uncapped request,
+    which is the very failure the cap exists to close (issue #177), so an off
+    switch could only ever spell the bug. A new cap key should pick one of the
+    two conventions on purpose and say which in its own docstring.
     """
     if isinstance(value, bool):
         raise ValueError(f"expected an integer, got a YAML boolean ({value!r})")

@@ -2,8 +2,13 @@ from typing import Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 from .validators import validate_model
+
+# ``max_tokens`` is ChatGoogleGenerativeAI's declared alias for its
+# ``max_output_tokens`` field, so the unified spelling works here too.
+# ``api_key`` is deliberately absent: it maps to ``google_api_key`` in get_llm.
+_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + ("timeout", "http_client", "http_async_client")
 
 
 class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
@@ -31,9 +36,7 @@ class GoogleClient(BaseLLMClient):
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        # ``max_tokens`` is ChatGoogleGenerativeAI's declared alias for its
-        # ``max_output_tokens`` field, so the unified spelling works here too.
-        for key in ("timeout", "max_retries", "temperature", "max_tokens", "callbacks", "http_client", "http_async_client"):
+        for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 

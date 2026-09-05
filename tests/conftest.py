@@ -115,6 +115,32 @@ def frozen_clock(monkeypatch):
     return clock
 
 
+def repo_text(name: str) -> str:
+    """Text of a file at the repository root (``README.md``, ``.env.example``).
+
+    For pins that assert a rendered constant is quoted in a root document;
+    anchored here so no pin re-derives its own ``parents[N]`` index.
+    """
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+
+
+def provider_kwargs_for(config: dict) -> dict:
+    """``TradingAgentsGraph._get_provider_kwargs`` for ``config``, on a bare
+    instance — no graph (and no LLM client) is built.
+
+    The one spelling of the ``__new__``-without-``__init__`` recipe; the method
+    reads only ``self.config`` today, and if that ever changes this is the one
+    place to fix.
+    """
+    from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+    graph = TradingAgentsGraph.__new__(TradingAgentsGraph)
+    graph.config = config
+    return TradingAgentsGraph._get_provider_kwargs(graph)
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

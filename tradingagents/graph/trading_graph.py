@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.llm_clients import create_llm_client
+from tradingagents.llm_clients import create_llm_client, is_gateway_provider
 from tradingagents.reporting import write_report_tree
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -173,6 +174,10 @@ class TradingAgentsGraph:
                 # truncating every completion with nothing raised anywhere.
                 if isinstance(max_tokens, bool):
                     raise ValueError
+                # A programmatic 4096.7 must not int()-truncate to a cap the
+                # caller never asked for; the string "4096.5" already fails.
+                if isinstance(max_tokens, float) and not max_tokens.is_integer():
+                    raise ValueError
                 parsed = int(max_tokens)
                 if parsed <= 0:
                     raise ValueError
@@ -182,6 +187,24 @@ class TradingAgentsGraph:
                     f"be a positive integer, got {max_tokens!r}"
                 ) from None
             kwargs["max_tokens"] = parsed
+        elif is_gateway_provider(provider):
+            # Uncapped through a gateway is the #177 shape: some upstreams
+            # substitute the model's full context for a missing cap and
+            # reject every call with HTTP 400. The library default stays
+            # None (see default_config), so this warning is what a library
+            # caller on a gateway gets. Issued here, where the knob is read,
+            # so it names the config the caller passed; stacklevel 3 points
+            # at the caller's TradingAgentsGraph(...) line (this method is
+            # only called from __init__), which under Python's default
+            # warning filter also means once per construction site.
+            warnings.warn(
+                f"llm_provider '{provider}' is a gateway and no 'max_tokens' "
+                "cap is set: some upstreams treat a missing cap as the model's "
+                "full context and reject every call (issue #177). Set "
+                "config['max_tokens'] or TRADINGAGENTS_MAX_TOKENS.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
         return kwargs
 

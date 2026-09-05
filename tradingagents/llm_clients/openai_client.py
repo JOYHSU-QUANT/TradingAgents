@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
 from .api_key_env import get_api_key_env
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
 
@@ -162,10 +162,10 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
         return payload
 
 
-# Kwargs forwarded from user config to ChatOpenAI
-_PASSTHROUGH_KWARGS = (
-    "timeout", "max_retries", "reasoning_effort", "temperature", "max_tokens",
-    "api_key", "callbacks", "http_client", "http_async_client",
+# Kwargs forwarded from user config to ChatOpenAI: the cross-provider set plus
+# the OpenAI-specific extras.
+_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + (
+    "timeout", "reasoning_effort", "api_key", "http_client", "http_async_client",
 )
 
 # OpenAI's ``reasoning_effort`` is only accepted by reasoning models — the GPT-5
@@ -204,6 +204,11 @@ class ProviderSpec:
     placeholder_key: str = "EMPTY"            # sent when no key is available (keyless local servers)
     require_base_url: bool = False            # error if no base_url is resolved (generic endpoint)
     use_responses_api: bool = False           # native OpenAI Responses API
+    # Routes each call to a third-party upstream rather than serving the model
+    # itself, so "no max_tokens" means whatever that upstream decides — some
+    # substitute the model's full context and 400 every call (#177). The graph
+    # warns once when such a provider runs uncapped (#183).
+    gateway: bool = False
 
 
 # Single source of truth for the OpenAI-compatible provider family. Dual-region
@@ -219,7 +224,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "glm-cn":     ProviderSpec(base_url="https://open.bigmodel.cn/api/paas/v4/"),
     "minimax":    ProviderSpec(base_url="https://api.minimax.io/v1", chat_class=MinimaxChatOpenAI),
     "minimax-cn": ProviderSpec(base_url="https://api.minimaxi.com/v1", chat_class=MinimaxChatOpenAI),
-    "openrouter": ProviderSpec(base_url="https://openrouter.ai/api/v1"),
+    "openrouter": ProviderSpec(base_url="https://openrouter.ai/api/v1", gateway=True),
     "mistral":    ProviderSpec(base_url="https://api.mistral.ai/v1"),
     "kimi":       ProviderSpec(base_url="https://api.moonshot.ai/v1"),
     "groq":       ProviderSpec(base_url="https://api.groq.com/openai/v1"),
@@ -227,8 +232,13 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
                                key_optional=True, placeholder_key="ollama"),
     # Generic endpoint: user supplies base_url; key optional (keyless local).
+    # A gateway by definition — the upstream behind the URL is unknown here
+    # (a LiteLLM proxy, or openrouter.ai itself), so "no cap" is its call.
     "openai_compatible": ProviderSpec(
-        require_base_url=True, key_optional=True, chat_class=LocalCompatibleChatOpenAI
+        require_base_url=True,
+        key_optional=True,
+        chat_class=LocalCompatibleChatOpenAI,
+        gateway=True,
     ),
 }
 
@@ -236,6 +246,16 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
 def is_openai_compatible(provider: str) -> bool:
     """Whether ``provider`` is served by the OpenAI-compatible registry."""
     return provider.lower() in OPENAI_COMPATIBLE_PROVIDERS
+
+
+def is_gateway_provider(provider: str) -> bool:
+    """Whether ``provider`` is a gateway routing calls to third-party upstreams.
+
+    Read off ``ProviderSpec.gateway``; providers outside the registry (the
+    native Anthropic / Google clients, unknown names) are not gateways.
+    """
+    spec = OPENAI_COMPATIBLE_PROVIDERS.get(provider.lower())
+    return spec is not None and spec.gateway
 
 
 def _is_native_openai_base_url(base_url: str | None) -> bool:

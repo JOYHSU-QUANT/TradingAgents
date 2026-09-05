@@ -627,6 +627,11 @@ def test_the_runbook_names_the_truncation_tag_and_the_sidecar():
     assert "completion truncated in <node>" in runbook
     assert "completion usage:" in runbook
     assert "`<payload>.usage.json`" in runbook
+    # The no-parse exit's two spellings: the ERROR line and the error_message
+    # suffix the api_failed row carries (the code side is pinned by
+    # test_a_run_that_fails_after_a_cut_decision_still_names_the_cap).
+    assert "and the engine run then failed before the answer could be parsed" in runbook
+    assert "(decision completion truncated: N output tokens against cap C)" in runbook
 
 
 def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypatch):

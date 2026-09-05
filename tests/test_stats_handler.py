@@ -8,6 +8,7 @@ same completion differently (issue #182 moved the extraction into
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -41,3 +42,21 @@ def test_a_response_without_usage_adds_nothing_and_does_not_raise():
     handler.on_llm_end(LLMResult(generations=[]), run_id=uuid.uuid4())
     stats = handler.get_stats()
     assert (stats["tokens_in"], stats["tokens_out"]) == (0, 0)
+
+
+def test_counts_go_through_the_shared_reader_not_a_local_get():
+    # The discriminating input: the shared reader drops a bool count (bool is
+    # an int subclass a provider never legitimately reports); the old inline
+    # ``usage_metadata.get("output_tokens", 0)`` would have added 1. AIMessage
+    # coerces the TypedDict, so the shape reaches the handler unvalidated the
+    # way a third-party integration could hand it in.
+    message = SimpleNamespace(
+        response_metadata={},
+        usage_metadata={"input_tokens": 7, "output_tokens": True, "total_tokens": 8},
+    )
+    generation = SimpleNamespace(message=message, generation_info=None)
+    result = LLMResult.model_construct(generations=[[generation]], llm_output=None)
+    handler = StatsCallbackHandler()
+    handler.on_llm_end(result, run_id=uuid.uuid4())
+    stats = handler.get_stats()
+    assert (stats["tokens_in"], stats["tokens_out"]) == (7, 0)

@@ -35,8 +35,15 @@ Breaking changes within the 0.x line are called out explicitly.
   …`` line and writes ``<payload>.usage.json`` beside the input payload (per-call
   node / model / output_tokens / reasoning_tokens / stop_reason / truncated) —
   the payload itself is hash-locked by ``ai_inputs.input_payload_hash`` and
-  cannot be appended to. The one-shot ``main.py`` lane records the same tag
-  and line. Provider stop-reason spellings are read by the new
+  cannot be appended to. When the decision completion bound the cap and the
+  run then failed before parsing (a trailing engine call raising, an
+  unusable return shape), the resulting ``api_failed`` row's
+  ``error_message`` ends with ``(decision completion truncated: N output
+  tokens against cap C)`` beside an ERROR line, and live ``validate``'s
+  non-gating ``invalid_output`` warning now points at
+  ``ai_outputs.risk_reason`` (``truncated_output`` = raise the cap, anything
+  else = the prompt contract). The one-shot ``main.py`` lane records the same
+  tag and line. Provider stop-reason spellings are read by the new
   ``tradingagents.llm_clients.completion_metadata`` (table in its docstring;
   each row pinned through the installed langchain converter), which the CLI's
   ``StatsCallbackHandler`` now also reads token counts through. Measurement

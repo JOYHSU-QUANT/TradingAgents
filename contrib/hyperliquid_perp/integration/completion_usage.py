@@ -9,8 +9,10 @@ langgraph's ``langgraph_node`` run metadata), how many output tokens it used,
 and whether the provider said the completion stopped at its token cap.
 
 Measurement must never cost a decision: langchain swallows handler
-exceptions (``raise_error`` is False), every method here catches its own,
-and the collector holds no reference to the engine. One instance per
+exceptions (``raise_error`` is False, so a failing hook is logged by the
+callback manager and the run continues), the two places that do real work —
+``on_llm_end``'s metadata read and ``report_usage`` — catch and log their
+own, and the collector holds no reference to the engine. One instance per
 ``request_decision`` — the live lane runs that on a worker thread and the
 cycle's calls must not mix with another cycle's. That per-request instance is
 the whole isolation story: langchain's sync callback manager invokes handlers

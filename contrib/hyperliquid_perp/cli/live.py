@@ -506,9 +506,10 @@ def _live_startup_recovery(
     # lease (read-only) — and the store is migrated once they all pass. The
     # definitive lease is still taken below; a process starting concurrently
     # loses there, having written nothing the migration cannot share. The
-    # peek exempts no pid, not even this one: a lease stamped with a pid the
-    # OS recycled to us after a hard kill refuses here for LOCK_STALE_SECONDS,
-    # where acquire alone would have silently re-taken it.
+    # peek has no pid to exempt: it holds no lease of its own, which is the
+    # reason ``run_lock.peek_run_lock`` gives for refusing ANY fresh holder —
+    # this process included, if a lease still carries a pid the OS recycled to
+    # us after a hard kill.
     db = _open_owned_store(db_path)
     if db is None:
         return 1

@@ -148,6 +148,61 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: a ``--db`` pointed at somebody else's SQLite database is
+  refused without being written into** (issue #174; the #175 tail). "An EMPTY
+  store" was decided by ``MAX(schema_migrations.version) == 0``, which is a
+  fact about this project's bookkeeping rather than about the file — and
+  another application's database has no such rows either. A mistyped ``--db``
+  therefore read as a fresh store: the reporting commands (``validate``,
+  ``export``, ``--gate-status``) wrote a ``schema_migrations`` table into that
+  file on the way to refusing it, and the owning commands (``paper``,
+  ``live``) skipped the refusal altogether and built all of this project's
+  tables into it, after which a daemon opened its books inside someone else's
+  database and the file looked like a store to whoever opened it next. EMPTY
+  now means empty: a SQLite file holding no objects of its own is built in
+  full, one holding this project's tables goes on to the version policies
+  unchanged, and one holding anything else is refused by name, listing what it
+  found. Ownership is recognised by those tables and NOT by the presence of a
+  ``schema_migrations`` table, which is the same name Rails/ActiveRecord and
+  golang-migrate use — a database carrying one is evidence that somebody
+  migrates it, not that we do. golang-migrate in particular often leaves that
+  table and nothing else, and both halves of it used to end badly from one
+  typo: populated, its ``version`` was read as a schema number and the
+  operator was told the store "was migrated by a NEWER build … restore a
+  backup"; empty, it passed every guard and died inside the first migration on
+  ``no column named applied_at``. A lone ``schema_migrations`` is now accepted
+  only when it is empty AND in this project's own shape, which is the one
+  state an older build of this project could have left. Two neighbouring
+  mistypes are named rather than left to ``main()``'s exit-2 last resort as
+  ``unable to open database file``: a ``--db`` that is a directory, and one
+  whose directory does not exist or is not a directory (the latter is
+  ``cannot open …`` on Windows and ``cannot read … to tell whether it is one
+  of this project's stores`` on POSIX, which raises ENOTDIR for it). Either
+  parent mistype reached that exit 2 only through ``--create``; every other
+  command already refused it by name. A file that exists but cannot be READ is
+  not in this set — ``stat`` succeeds on one, so the guard has nothing to
+  refuse on, and it fails in the probe as it did before: issue #210. The
+  read-only probe builds its URI itself rather than through
+  ``Path.as_uri``, which rejects a relative ``--db`` outright and renders a
+  Windows UNC path with an authority SQLite refuses — a store on a share
+  would have stopped opening. The verdict is read from ``sqlite_master``
+  before the connection is even tuned, because tuning is itself a write
+  (``PRAGMA journal_mode = WAL`` rewrites the header of a database not already
+  in WAL), and over a read-only connection, because opening a database
+  read-write is one too: SQLite checkpoints an uncheckpointed ``-wal`` into
+  the main file at last close, so a plain probe would silently perform a
+  crashed foreign application's recovery for it. The refused file is therefore
+  left byte-for-byte as it was in every journal and crash state; the only mark
+  left anywhere is SQLite's own empty ``-shm`` / ``-wal`` pair beside a WAL
+  database that had none, which its owner reclaims on its next open.
+  ``stored_schema_version`` is read-only accordingly (it used to ``CREATE
+  TABLE IF NOT EXISTS`` the very table it reads); ``apply_migrations``, the
+  only writer, creates it. Objects SQLite makes for itself
+  (``sqlite_sequence``, ``sqlite_stat*``, implicit indexes) are not evidence of
+  ownership and do not make a file foreign. Also from the same review: a
+  failed open no longer leaks its connection handle, which on Windows locked a
+  non-database file against the ``unlink`` an operator reaches for next.
+
 - **hyperliquid_perp: one out-of-range venue timestamp costs its own bar or
   hour, not the run** (issue #191; the #193 tail). ``Candle`` and
   ``FundingPoint`` carry the venue's stamps as bare epoch-millisecond ints,

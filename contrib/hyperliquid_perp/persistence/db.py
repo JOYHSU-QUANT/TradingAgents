@@ -220,9 +220,9 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     path mistypes that sit either side of one: a directory, and a parent that
     is missing or is not a directory. Those used to reach ``main()``'s last
     resort as an exit-2 ``unable to open database file``, which tells an
-    operator nothing about which of them it was — the missing parent only
-    under ``--create``, since the reporting commands stop at their own
-    ``database ... does not exist`` before reaching this.
+    operator nothing about which of them it was — either parent mistype only
+    under ``--create``, since every other command stops at its own ``database
+    ... does not exist`` first (``Path.exists`` is False for both).
 
     NOT every unopenable path: a file that exists but cannot be READ still
     fails in the probe as a bare ``OperationalError``, because ``stat``
@@ -300,45 +300,53 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         ) from exc
     if S_ISDIR(info.st_mode):
         # Forgetting the filename on --db is an ordinary typo, and a directory
-        # stats perfectly well, so it needs saying out loud. What it used to do
-        # instead depended on the platform, which is its own argument for
-        # naming it: on Windows a directory reports st_size == 0 and so read as
-        # an empty store; elsewhere it reports a non-zero size (4096 on ext4, a
-        # smaller entry-derived one on tmpfs or XFS) and fell into the probe
-        # below. Both ended as an unnamed exit 2.
+        # stats perfectly well, so it needs saying out loud — and ahead of the
+        # empty-file shortcut below, whose ``st_size`` a directory can satisfy:
+        # NTFS reports 0 while the directory's index still fits in its MFT
+        # record (an empty or nearly empty one, such as a fresh tmp dir), and
+        # only its index allocation once it does not; ext4 reports 4096, tmpfs
+        # and XFS a smaller entry-derived size. Before this guard existed the
+        # platform made no difference: ``connect`` failed on a directory
+        # everywhere, as an unnamed exit 2.
         raise SchemaVersionError(
             f"{file} is a directory, not a database file. A store is a single "
             f"file — give --db its name (for example {file / '<name>.db'})."
         )
     if info.st_size == 0:
         return  # ``touch``-ed: ours to build in full
-    # Same bounded wait as :func:`connect`, for the same reason: this opens the
-    # store a sibling daemon may be writing to (RUNBOOK-live §7.3 keeps two
-    # live runs in one file), and a lock collision should be a wait rather than
-    # an immediate ``OperationalError: database is locked`` — which, arriving
-    # from HERE, is the unnamed exit 2 this guard exists to reduce. ``timeout``
-    # is sqlite3's own spelling of ``PRAGMA busy_timeout``, in seconds. It
-    # bounds what SQLite makes waitable: an EXCLUSIVE writer on a non-WAL store
-    # is waited out, a RESERVED one still fails at once, and WAL — what the
-    # deploy box runs — never blocks a reader at all.
+    # The same bounded wait as :func:`connect`, spelled out so the two cannot
+    # drift: this opens a store a sibling daemon may be writing to (RUNBOOK-live
+    # §7.3 keeps two live runs in one file), and a lock collision should be a
+    # wait rather than an immediate ``OperationalError: database is locked``.
+    # ``timeout`` is sqlite3's own spelling of ``PRAGMA busy_timeout``, in
+    # seconds; its default happens to equal ``_BUSY_TIMEOUT_MS`` today, so
+    # passing it changes nothing until the constant does. What it bounds is
+    # what SQLite makes waitable: an EXCLUSIVE writer on a non-WAL store is
+    # waited out; a RESERVED one never blocks a reader in the first place; and
+    # WAL — what the deploy box runs — never blocks a reader at all.
     probe = sqlite3.connect(
         f"{_sqlite_file_uri(file)}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_MS / 1000
     )
     try:
         objects = [row[0] for row in probe.execute(_FOREIGN_OBJECTS_SQL)]
-        # Our own leftover bookkeeping and nothing else; the policies below
-        # decide whether THIS caller may build on it. Asked once and kept: the
-        # verdict and the message below both want the same fact.
-        lone_bookkeeping = objects == [_BOOKKEEPING_TABLE] and _is_our_unused_bookkeeping(probe)
+        carries_our_tables = any(table in objects for table in _STORE_TABLES)
+        # Asked once, and never of a store that already proved itself by its
+        # tables: the verdict wants it when the bookkeeping table is the file's
+        # ONLY object, the message when it sits BESIDE foreign ones.
+        bookkeeping_unused = (
+            not carries_our_tables
+            and _BOOKKEEPING_TABLE in objects
+            and _is_our_unused_bookkeeping(probe)
+        )
         ours = (
             not objects  # EMPTY: nothing here to belong to anyone
-            or any(table in objects for table in _STORE_TABLES)
-            or lone_bookkeeping
+            or carries_our_tables
+            # Our own leftover bookkeeping and nothing else; the policies below
+            # decide whether THIS caller may build on it.
+            or (objects == [_BOOKKEEPING_TABLE] and bookkeeping_unused)
         )
-        # Only asked on the way to refusing, and only when the table sits
-        # BESIDE foreign ones — a different question from the one above, and
-        # used in the message and nowhere else.
-        stray = not ours and _BOOKKEEPING_TABLE in objects and _is_our_unused_bookkeeping(probe)
+        # Used in the message and nowhere else.
+        stray = not ours and bookkeeping_unused
     finally:
         with suppress(Exception):
             probe.close()

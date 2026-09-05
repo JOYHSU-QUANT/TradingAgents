@@ -1009,8 +1009,15 @@ def test_a_foreign_database_is_refused_by_name_under_every_policy(tmp_path, poli
     # a schema_migrations table, which several other frameworks also carry.
     path = tmp_path / f"someone-elses-{kind}.db"
     _write_sqlite_file(path, *tables)
-    with pytest.raises(SchemaVersionError, match="not one of this project's stores"):
+    before = path.read_bytes()
+
+    with pytest.raises(SchemaVersionError, match="not one of this project's stores") as caught:
         Database(path, **policy)
+
+    # Both halves of that promise: the first foreign table is named back to
+    # the operator, and nothing was added to the file on the way to refusing.
+    assert ("notes" if kind == "plain" else "ar_internal_metadata") in str(caught.value)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize(
@@ -1021,9 +1028,10 @@ def test_a_foreign_database_is_refused_by_name_under_every_policy(tmp_path, poli
         # Empty and carrying both our column names, but wider. Nothing in this
         # project ever adds a column to that table, so a wider one is theirs.
         ("wider", ("CREATE TABLE schema_migrations (version, applied_at, dirty)",)),
-        # A VIEW of that name, and the file's ONLY object — the shape that
-        # actually needs the `type='table'` guard, since PRAGMA table_info
-        # answers for a view and would report our two columns, empty.
+        # A VIEW of that name, and the file's ONLY object — the shape the
+        # `type='table'` guard exists for, since PRAGMA table_info answers for
+        # a view and would report our two columns, empty. Without the guard
+        # this one is not merely misdescribed but ACCEPTED as ours.
         (
             "a-view",
             ("CREATE VIEW schema_migrations AS SELECT 1 AS version, 2 AS applied_at WHERE 0",),
@@ -1092,12 +1100,13 @@ def test_the_refusal_tells_an_operator_which_leftover_table_is_ours(tmp_path):
 def test_the_probe_is_opened_with_the_same_bounded_wait_as_connect(tmp_path, monkeypatch):
     # The probe opens the store BEFORE connect() does, and a sibling daemon may
     # be writing to it (RUNBOOK-live §7.3 puts two live runs in one file).
-    # connect() bounds that collision with busy_timeout on purpose, and the
-    # probe was inheriting none of it. What this pins is that the two agree on
-    # the bound, not how long any particular lock is waited out: which locks
-    # are waitable at all is SQLite's business (an EXCLUSIVE writer on a
-    # non-WAL store yes, a RESERVED one no, WAL never blocks a reader), and a
-    # test of that would be testing SQLite.
+    # connect() bounds that collision with busy_timeout on purpose; the probe
+    # was getting sqlite3's default, which today is the same five seconds by
+    # coincidence rather than by reference. What this pins is that the two are
+    # sourced from one constant, not how long any particular lock is waited
+    # out: which locks are waitable at all is SQLite's business (an EXCLUSIVE
+    # writer on a non-WAL store is, a RESERVED one never blocks a reader, WAL
+    # never blocks one at all), and a test of that would be testing SQLite.
     seen = {}
     real = sqlite3.connect
 
@@ -1113,6 +1122,13 @@ def test_the_probe_is_opened_with_the_same_bounded_wait_as_connect(tmp_path, mon
         Database(path, migrate=False)
 
     assert seen["timeout"] == db_module._BUSY_TIMEOUT_MS / 1000
+    # ...and connect() really does set that constant, so "the same as connect"
+    # is observed here rather than assumed.
+    conn = connect(tmp_path / "ours.db")
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == db_module._BUSY_TIMEOUT_MS
+    finally:
+        conn.close()
 
 
 def test_the_refusal_and_the_schema_agree_on_the_bookkeeping_table(tmp_path):
@@ -1274,10 +1290,11 @@ def test_a_db_whose_directory_does_not_exist_is_refused_by_name(tmp_path):
 
 def test_a_db_path_that_is_a_directory_is_refused_by_name(tmp_path):
     # Dropping the filename off --db is an ordinary typo, and a directory stats
-    # perfectly well, so it has to be said out loud. What it did before this
-    # depended on the platform — on Windows a directory reports st_size == 0
-    # and read as an empty store, on Linux it reported its block size and fell
-    # into the probe — but both ended at main()'s last resort as exit 2.
+    # perfectly well, so it has to be said out loud — and checked ahead of the
+    # empty-file shortcut, which a directory's st_size can satisfy (NTFS
+    # reports 0 for one whose index still fits in its MFT record, exactly the
+    # fresh tmp dir used here). Before the guard, connect() failed on a
+    # directory on every platform, at main()'s last resort as exit 2.
     # Everything this function refuses has to come back as a named exit 1.
     a_directory = tmp_path / "data"
     a_directory.mkdir()

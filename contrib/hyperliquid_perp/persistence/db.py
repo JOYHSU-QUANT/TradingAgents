@@ -96,7 +96,11 @@ def connect(path: str | Path) -> sqlite3.Connection:
             )
         conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     except BaseException:
-        conn.close()
+        # Suppressed like every other cleanup in this module (transaction,
+        # read_transaction, apply_migrations): a close that itself fails must
+        # not replace the PRAGMA failure being propagated.
+        with suppress(Exception):
+            conn.close()
         raise
     return conn
 
@@ -213,10 +217,18 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     """Refuse a ``--db`` this build must not open, by name.
 
     Chiefly a SQLite file belonging to another application, and with it the
-    path mistypes that sit either side of one: a directory, a parent that is
-    missing or is not a directory, a file that cannot be read. Every one of
-    those used to reach ``main()``'s last resort as an exit-2 ``unable to open
-    database file``, which tells an operator nothing about which of them it was.
+    path mistypes that sit either side of one: a directory, and a parent that
+    is missing or is not a directory. Those used to reach ``main()``'s last
+    resort as an exit-2 ``unable to open database file``, which tells an
+    operator nothing about which of them it was — the missing parent only
+    under ``--create``, since the reporting commands stop at their own
+    ``database ... does not exist`` before reaching this.
+
+    NOT every unopenable path: a file that exists but cannot be READ still
+    fails in the probe as a bare ``OperationalError``, because ``stat``
+    succeeds on it and so the guard has nothing to refuse on. That is what it
+    did before this too; naming it means wrapping the probe's own errors,
+    which is issue #210.
 
     "EMPTY store" used to mean ``MAX(schema_migrations.version) == 0``, which is
     a fact about OUR bookkeeping, not about the file: another application's
@@ -263,7 +275,7 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # directory (``--db notes.db/store.db``) is a different sentence — the
         # path is there, it just cannot hold a file. That branch is reachable
         # on Windows only: POSIX raises ENOTDIR rather than ENOENT for it, so
-        # there it is named by the ``except OSError`` lane above instead. Both
+        # there it is named by the ``except OSError`` lane below instead. Both
         # are exit 1; only the sentence differs.
         problem = (
             f"{parent} is not a directory"
@@ -275,13 +287,16 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
             "created only where its directory already is."
         ) from None
     except OSError as exc:
-        # Unreadable for some other reason (permissions, a file where a
-        # directory was expected). ``connect`` would raise too, but as an
-        # OperationalError that reaches main()'s last resort as exit 2 — and
-        # this whole function exists to make a bad --db a NAMED exit 1.
+        # Something about the PATH stops us even asking: on POSIX a parent that
+        # is a file (ENOTDIR), or a directory we may not traverse. Not the file
+        # being unreadable — ``stat`` succeeds on one of those, so it reaches
+        # the probe instead (issue #210). ``connect`` would raise here too, but
+        # as an OperationalError that reaches main()'s last resort as exit 2,
+        # and this function exists to make a bad --db a NAMED exit 1.
         raise SchemaVersionError(
             f"cannot read {file} to tell whether it is one of this project's "
-            f"stores: {exc}. Check the --db path and its permissions."
+            f"stores: {exc}. Check the --db path and the permissions on its "
+            "directory."
         ) from exc
     if S_ISDIR(info.st_mode):
         # Forgetting the filename on --db is an ordinary typo, and a directory
@@ -297,25 +312,36 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         )
     if info.st_size == 0:
         return  # ``touch``-ed: ours to build in full
-    probe = sqlite3.connect(f"{_sqlite_file_uri(file)}?mode=ro", uri=True)
+    # Same bounded wait as :func:`connect`, for the same reason: this opens the
+    # store a sibling daemon may be writing to (RUNBOOK-live §7.3 keeps two
+    # live runs in one file), and a lock collision should be a wait rather than
+    # an immediate ``OperationalError: database is locked`` — which, arriving
+    # from HERE, is the unnamed exit 2 this guard exists to reduce. ``timeout``
+    # is sqlite3's own spelling of ``PRAGMA busy_timeout``, in seconds. It
+    # bounds what SQLite makes waitable: an EXCLUSIVE writer on a non-WAL store
+    # is waited out, a RESERVED one still fails at once, and WAL — what the
+    # deploy box runs — never blocks a reader at all.
+    probe = sqlite3.connect(
+        f"{_sqlite_file_uri(file)}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_MS / 1000
+    )
     try:
         objects = [row[0] for row in probe.execute(_FOREIGN_OBJECTS_SQL)]
+        # Our own leftover bookkeeping and nothing else; the policies below
+        # decide whether THIS caller may build on it. Asked once and kept: the
+        # verdict and the message below both want the same fact.
+        lone_bookkeeping = objects == [_BOOKKEEPING_TABLE] and _is_our_unused_bookkeeping(probe)
         ours = (
             not objects  # EMPTY: nothing here to belong to anyone
             or any(table in objects for table in _STORE_TABLES)
-            # Our own leftover bookkeeping and nothing else; the policies below
-            # decide whether THIS caller may build on it.
-            or (objects == [_BOOKKEEPING_TABLE] and _is_our_unused_bookkeeping(probe))
+            or lone_bookkeeping
         )
-        # Only asked on the way to refusing — every store we own carries this
-        # table, and the answer is used in the message and nowhere else.
-        stray = (
-            not ours
-            and _BOOKKEEPING_TABLE in objects
-            and _is_our_unused_bookkeeping(probe)
-        )
+        # Only asked on the way to refusing, and only when the table sits
+        # BESIDE foreign ones — a different question from the one above, and
+        # used in the message and nowhere else.
+        stray = not ours and _BOOKKEEPING_TABLE in objects and _is_our_unused_bookkeeping(probe)
     finally:
-        probe.close()
+        with suppress(Exception):
+            probe.close()
     if ours:
         return
     # Marked when cut: the operator is told to recognise their file by these
@@ -503,15 +529,17 @@ class Database:
         it HOLDS THE LEASE; refused at open only when the store was migrated
         by a NEWER build (nothing has been written yet, and it never becomes
         this build's to upgrade) or predates the lease columns entirely (see
-        below), and an EMPTY store — a file holding no objects at all — is
-        built in full, since nothing can own it.
+        below), and an EMPTY store — a file with no objects of its own, or
+        nothing but this project's empty bookkeeping table — is built in full,
+        since nothing can own it.
 
         Ahead of all three policies sits a fact about the FILE rather than
         about any policy: a SQLite database holding objects that are not this
         project's is refused by name, before a connection is even tuned (see
-        :func:`_refuse_a_foreign_store`). Every policy needs that refusal — the
-        two below would otherwise read such a file as an empty store, and
-        ``migrate=True`` would build this project's tables straight into it.
+        :func:`_refuse_a_foreign_store`). Every policy needs that refusal:
+        each would otherwise read such a file as an empty store, and both the
+        migrating and the deferring open go on to build this project's tables
+        straight into it.
 
         The third policy exists because ``migrate=True`` necessarily runs before
         the lease can be taken (the lease lives in the store being opened), so an
@@ -615,8 +643,11 @@ class Database:
                     )
         except BaseException:
             # The caller never receives the instance, so nothing else can
-            # release the already-open connection.
-            self._conn.close()
+            # release the already-open connection. Suppressed for the same
+            # reason as the cleanups above: a failing close must not replace
+            # the refusal being propagated.
+            with suppress(Exception):
+                self._conn.close()
             raise
 
     @property

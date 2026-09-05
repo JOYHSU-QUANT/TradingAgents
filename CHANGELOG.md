@@ -174,10 +174,13 @@ Breaking changes within the 0.x line are called out explicitly.
   only when it is empty AND in this project's own shape, which is the one
   state an older build of this project could have left. Three neighbouring
   mistypes are named rather than left to ``main()``'s exit-2 last resort as
-  ``unable to open database file``: a ``--db`` that is a directory, one whose
-  directory does not exist or is not a directory, and one that cannot be read
-  at all. (The missing-directory case reached that exit 2 only through
-  ``--create``; the reporting commands already refused it by name.) The read-only probe builds its URI itself rather than through
+  ``unable to open database file``: a ``--db`` that is a directory, and one
+  whose directory does not exist or is not a directory. (The missing-directory
+  case reached that exit 2 only through ``--create``; the reporting commands
+  already refused it by name. A file that exists but cannot be READ is not in
+  this set — ``stat`` succeeds on one, so the guard has nothing to refuse on,
+  and it fails in the probe as it did before: issue #210.) The read-only probe
+  builds its URI itself rather than through
   ``Path.as_uri``, which rejects a relative ``--db`` outright and renders a
   Windows UNC path with an authority SQLite refuses — a store on a share
   would have stopped opening. The verdict is read from ``sqlite_master``

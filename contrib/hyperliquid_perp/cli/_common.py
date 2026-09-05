@@ -74,8 +74,9 @@ def _open_owned_store(path: str | Path) -> Database | None:
     refusing (issue #129). So a populated store is opened AS-IS and the
     upgrade is owed to :func:`_migrate_owned_store`, which the caller runs at
     the point it owns the store. :class:`Database`'s deferred policy settles
-    the edge cases at open: an EMPTY store (no file, or a file holding no
-    objects at all) has no owner and is built in full; a SQLite file holding
+    the edge cases at open: an EMPTY store (no file, a file holding no objects
+    of its own, or one holding nothing but this project's empty bookkeeping
+    table) has no owner and is built in full; a SQLite file holding
     objects that are NOT this project's is refused by name rather than built
     into, so a mistyped ``--db`` cannot open a daemon's books inside another
     application's database (issue #174); a store migrated by a

@@ -1089,6 +1089,50 @@ def test_the_refusal_tells_an_operator_which_leftover_table_is_ours(tmp_path):
         assert "left by an OLDER build" not in str(caught.value), name
 
 
+def test_the_probe_is_opened_with_the_same_bounded_wait_as_connect(tmp_path, monkeypatch):
+    # The probe opens the store BEFORE connect() does, and a sibling daemon may
+    # be writing to it (RUNBOOK-live §7.3 puts two live runs in one file).
+    # connect() bounds that collision with busy_timeout on purpose, and the
+    # probe was inheriting none of it. What this pins is that the two agree on
+    # the bound, not how long any particular lock is waited out: which locks
+    # are waitable at all is SQLite's business (an EXCLUSIVE writer on a
+    # non-WAL store yes, a RESERVED one no, WAL never blocks a reader), and a
+    # test of that would be testing SQLite.
+    seen = {}
+    real = sqlite3.connect
+
+    def spy(target, *args, **kwargs):
+        if "mode=ro" in str(target):
+            seen["timeout"] = kwargs.get("timeout")
+        return real(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", spy)
+    path = tmp_path / "busy.db"
+    _write_sqlite_file(path, *_FOREIGN_TABLE)
+    with pytest.raises(SchemaVersionError):
+        Database(path, migrate=False)
+
+    assert seen["timeout"] == db_module._BUSY_TIMEOUT_MS / 1000
+
+
+def test_the_refusal_and_the_schema_agree_on_the_bookkeeping_table(tmp_path):
+    # db.py names this table and its two columns by hand; schema.py creates it
+    # by hand. Nothing else backstops that pair: _STORE_TABLES protects a
+    # POPULATED store, but the lone-bookkeeping lane is the only thing standing
+    # between a crashed-before-v1 store and being called somebody else's, and
+    # it matches on exactly this name and these columns. Rename the table in
+    # schema.py and it would silently start refusing that store.
+    path = tmp_path / "bookkeeping-only.db"
+    _write_sqlite_file(path, SCHEMA_MIGRATIONS_DDL)
+    assert _objects(path) == {db_module._BOOKKEEPING_TABLE}
+    probe = connect(path)
+    try:
+        assert _columns(probe, db_module._BOOKKEEPING_TABLE) == {"version", "applied_at"}
+        assert db_module._is_our_unused_bookkeeping(probe) is True
+    finally:
+        probe.close()
+
+
 @pytest.mark.parametrize("version", sorted(MIGRATIONS))
 def test_every_store_version_carries_the_tables_the_refusal_looks_for(version):
     # The drift lock behind that verdict: a migration that renamed one of those
@@ -1152,8 +1196,10 @@ def test_a_file_holding_only_sqlite_internal_objects_is_still_ours_to_build(tmp_
 def test_a_file_holding_only_the_bookkeeping_table_is_still_ours_to_build(tmp_path):
     # The state OLDER builds left lying around, so it is on deploy boxes now:
     # stored_schema_version used to CREATE schema_migrations before reading it,
-    # so any reporting command run against a path that did not exist yet left
-    # an empty one behind. That file is still an empty store — refusing it as
+    # so a reporting command run against an EXISTING but empty file (a `touch`,
+    # or an open that died before v1 committed) left one behind. Not against a
+    # missing path — those are refused by name before Database is built. That
+    # file is still an empty store of ours — refusing it as
     # foreign would turn this fix into a fresh way to reject the operator's own
     # store.
     path = tmp_path / "touched-by-an-older-build.db"
@@ -1241,11 +1287,13 @@ def test_a_db_path_that_is_a_directory_is_refused_by_name(tmp_path):
 
 @pytest.mark.parametrize("opener", [connect, Database], ids=["connect", "Database"])
 def test_a_file_that_is_not_a_database_can_be_deleted_after_the_failed_open(tmp_path, opener):
-    # Issue #175: sqlite3.connect is lazy, so the first PRAGMA is what fails
-    # here — and the handle it failed on used to stay open with no reference to
+    # Issue #175: sqlite3.connect is lazy, so the first PRAGMA is what used to
+    # fail here — and the handle it failed on stayed open with no reference to
     # it, which on Windows locks the file against the unlink an operator (or
     # this test) reaches for next. The error itself was always clear; only the
-    # leak was not.
+    # leak was not. Under the Database id the raise now comes from the guard's
+    # read-only probe instead, which has to close its handle for the same
+    # reason; connect() is never reached.
     path = tmp_path / "notes.txt"
     path.write_bytes(b"this is not a database at all, not even close\n" * 10)
 

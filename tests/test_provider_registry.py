@@ -62,19 +62,21 @@ def test_native_provider_set_matches_the_factory_dispatch_chain():
 
     dispatched: set[str] = set()
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Compare) and mentions(node.left)):
-            # Any other test on the name (``provider_lower in (...)``,
-            # ``provider_lower.startswith(...)``) is a dispatch this lock
-            # cannot count — refuse it so a new branch has to be spelled
-            # ``provider_lower == "<literal>"``. The registry lookup passes
-            # the name as an argument, which is not a comparison.
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                assert not mentions(node.func.value), ast.dump(node)
-            continue
-        [op], [comparator] = node.ops, node.comparators
-        assert isinstance(op, ast.Eq) and isinstance(comparator, ast.Constant), ast.dump(node)
-        assert isinstance(comparator.value, str), ast.dump(node)
-        dispatched.add(comparator.value)
+        # EVERY comparison in the function must be the one dispatch shape,
+        # ``provider_lower == "<literal>"``: a reversed ``"x" == provider_lower``,
+        # an inline ``provider.lower() == "x"``, ``provider_lower in (...)`` or
+        # ``!=`` would all be dispatches this lock cannot count, so they are
+        # refused rather than skipped. Method calls on the name
+        # (``provider_lower.startswith(...)``) likewise; passing it as a call
+        # argument (the registry lookup) is not a comparison and is fine.
+        if isinstance(node, ast.Compare):
+            [op], [comparator] = node.ops, node.comparators
+            assert mentions(node.left), ast.dump(node)
+            assert isinstance(op, ast.Eq) and isinstance(comparator, ast.Constant), ast.dump(node)
+            assert isinstance(comparator.value, str), ast.dump(node)
+            dispatched.add(comparator.value)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            assert not mentions(node.func.value), ast.dump(node)
     assert dispatched == set(factory._NATIVE_PROVIDERS)
 
 

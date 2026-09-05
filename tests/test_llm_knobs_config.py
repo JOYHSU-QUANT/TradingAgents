@@ -233,6 +233,26 @@ class TestProviderKwargs:
         with pytest.raises(ValueError, match="max_tokens"):
             _provider_kwargs(max_tokens=bad)
 
+    def test_an_absurd_decimal_exponent_is_refused_without_hanging(self):
+        # int(Decimal("1E999999999")) never returns (PR #207's shape), so the
+        # range check has to run before the conversion. Run in a thread with a
+        # deadline: a regression must fail this test, not hang the suite.
+        import threading
+
+        outcome: dict = {}
+
+        def attempt():
+            try:
+                _provider_kwargs(max_tokens=Decimal("1E999999999"))
+            except ValueError as exc:
+                outcome["error"] = str(exc)
+
+        worker = threading.Thread(target=attempt, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "int() on the absurd Decimal hung"
+        assert "max_tokens" in outcome["error"]
+
 
 @pytest.mark.unit
 class TestGatewayUncappedWarning:
@@ -240,7 +260,8 @@ class TestGatewayUncappedWarning:
     provider, or a gateway with a cap, stays quiet.
 
     ``pytest.warns`` installs an ``always`` filter, so ``len == 1`` here pins
-    "one ``warn`` call per graph"; under Python's default filter the same
+    "one ``warn`` call per ``_get_provider_kwargs`` call" (the graph makes
+    exactly one, from ``__init__``); under Python's default filter the same
     text from the same call site shows once per process, which is the intent.
     """
 

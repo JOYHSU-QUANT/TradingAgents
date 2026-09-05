@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import sys
 import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -174,17 +175,24 @@ class TradingAgentsGraph:
                 # truncating every completion with nothing raised anywhere.
                 if isinstance(max_tokens, bool):
                     raise ValueError
+                if not isinstance(max_tokens, str):
+                    # Range-check numerics BEFORE int(): int(Decimal("1E999999999"))
+                    # is a hang, not an exception, and a cap that does not fit
+                    # a machine int (inf, NaN, absurd exponents) is junk anyway.
+                    # A comparison is O(digits); the conversion is not.
+                    if not (0 < max_tokens <= sys.maxsize):
+                        raise ValueError
+                    # A programmatic 4096.7 (or Decimal / Fraction) must not
+                    # int()-truncate to a cap the caller never asked for;
+                    # compared by value, not type, so every numeric shape is
+                    # covered. A numeric string goes straight to int() below.
+                    if int(max_tokens) != max_tokens:
+                        raise ValueError
                 parsed = int(max_tokens)
-                # A programmatic 4096.7 (or Decimal / Fraction) must not
-                # int()-truncate to a cap the caller never asked for; compared
-                # by value, not type, so every numeric shape is covered. A
-                # numeric string was already rejected by int() above.
-                if not isinstance(max_tokens, str) and parsed != max_tokens:
-                    raise ValueError
                 if parsed <= 0:
                     raise ValueError
-            # OverflowError: int(float("inf")) — an "unlimited" spelling that
-            # must be refused by name like every other bad cap, not leak raw.
+            # OverflowError kept for belt-and-braces: the range check above
+            # already refuses inf, but a bad cap must never leak raw.
             except (TypeError, ValueError, OverflowError):
                 raise ValueError(
                     f"config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) must "

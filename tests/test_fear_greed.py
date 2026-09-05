@@ -342,8 +342,9 @@ class TestRequestWiring:
             pytest.raises(fear_greed.FearGreedError, match="expected an object") as e,
         ):
             fear_greed._request(75)
-        # The same interstitial the non-JSON case types as down.
-        assert isinstance(e.value, VendorUnavailableError)
+        # Decoded but not this contract is what a schema change looks like:
+        # structural, not the outage subclass — the one rule across boundaries.
+        assert not isinstance(e.value, VendorUnavailableError)
 
 
 @pytest.mark.unit

@@ -780,7 +780,11 @@ class OutageVerdictTests(unittest.TestCase):
         with _chain("get_stock_data", {"yfinance": yf, "alpha_vantage": _no_data}):
             out = _stock()
         yf.assert_not_called()
-        self.assertIn("vendor 'yfinance' was skipped after a recent rate limit and", out)
+        # The remaining stand-off rides along: it is what tells a skip from
+        # an outage to the model.
+        self.assertRegex(
+            out, r"vendor 'yfinance' was skipped after a recent rate limit \(for another \d+s\) and"
+        )
         self.assertIn("a source that would normally serve it was not asked", out)
         self.assertIn("unconfirmed rather than invalid", out)
         self.assertNotIn("may be invalid", out)

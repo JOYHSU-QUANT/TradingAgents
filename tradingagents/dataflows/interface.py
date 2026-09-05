@@ -334,7 +334,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     # that is standing configuration the operator already sees in the log,
     # not a source that would normally have answered.
     first_rate_limit: tuple[str, VendorRateLimitError] | None = None
-    first_skip: tuple[str, VendorRateLimitError] | None = None
+    first_skip: tuple[str, VendorRateLimitError, float] | None = None
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
@@ -366,6 +366,7 @@ def route_to_vendor(method: str, *args, **kwargs):
                         f"Vendor {vendor!r} rate limited a recent request; skipped without "
                         f"contacting it for another {remaining:.0f}s"
                     ),
+                    remaining,
                 )
             continue
 
@@ -512,8 +513,12 @@ def route_to_vendor(method: str, *args, **kwargs):
             state = f"was rate limited ({failure_account(throttle)})"
             why = "was rate limited before it could answer"
         elif first_skip is not None:
-            unasked_vendor, _ = first_skip
-            state, why = "was skipped after a recent rate limit", "was not asked"
+            # The remaining stand-off is the one fact that tells a skip from
+            # an outage: a source back in a minute is not a source that is
+            # down, and the model should weigh the two differently.
+            unasked_vendor, _, remaining = first_skip
+            state = f"was skipped after a recent rate limit (for another {remaining:.0f}s)"
+            why = "was not asked"
         if unasked_vendor is not None:
             verdict = (
                 f": vendor '{unasked_vendor}' {state} and the other configured vendor(s) had "

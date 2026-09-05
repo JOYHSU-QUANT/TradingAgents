@@ -9,8 +9,9 @@ row carries ``value`` (0-100 string), ``value_classification``, and
 ``timestamp`` (unix seconds string). A network error or malformed payload raises
 so the routing layer degrades the optional crypto_sentiment category to a
 sentinel instead of aborting the run — as the outage type when the vendor was
-down (unreachable, a 5xx, a body that is not a JSON object), so the router
-logs it without a traceback and counts the vendor as down (#172).
+down (unreachable, a 5xx, a body that is not JSON), so the router logs it
+without a traceback and counts the vendor as down (#172); a body that decodes
+but is not this contract stays the module type, as a schema change would.
 """
 
 import logging
@@ -85,7 +86,7 @@ class FearGreedError(VendorError):
 
 
 class FearGreedUnavailableError(FearGreedError, VendorUnavailableError):
-    """alternative.me was down: unreachable, a 5xx, or a body that is not a JSON object.
+    """alternative.me was down: unreachable, a 5xx, or a body that is not JSON.
 
     Raised by ``_request`` once its retry is spent on any of those (#172).
     A ``FearGreedError`` too, so every caller written against the module
@@ -136,10 +137,12 @@ def _request(limit: int) -> dict:
 
     # A CDN/WAF error page can decode as valid JSON that is not an object; guard
     # the shape here so it surfaces as this module's typed error rather than a
-    # bare AttributeError from the .get() below — the outage subclass, since it
-    # is the same interstitial the non-JSON case types as down.
+    # bare AttributeError from the .get() below. The module type, not the
+    # outage subclass: a body that decodes but is not this contract is what
+    # an upstream schema change looks like too, and that must surface as
+    # structural — the one rule across SoSoValue, Deribit and this boundary.
     if not isinstance(payload, dict):
-        raise FearGreedUnavailableError(
+        raise FearGreedError(
             f"alternative.me returned a JSON {type(payload).__name__}, expected an object"
         )
     return payload

@@ -227,6 +227,12 @@ class SoSoValueError(VendorError):
     fix — and logs it at ERROR with a traceback, so it is not raised for
     the vendor being down: that is ``SoSoValueUnavailableError``, which the
     cache lane also wraps an unreached vendor's ``requests`` exception as.
+    One answer that is not the client's to fix still lands here: a 4xx
+    with a body that is not JSON (a WAF's 403 page, a renamed endpoint's
+    404 page) is the vendor refusing or not knowing this request, kept
+    structural because it is deterministic — retrying and stale-serving it
+    as an outage would hide it for the whole stale cap — so the "needs a
+    fix" in the log may mean the vendor's side, not this client's.
     """
 
 

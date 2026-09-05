@@ -40,7 +40,7 @@ from uuid import UUID
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
-from tradingagents.llm_clients.completion_metadata import completion_metadata_of
+from tradingagents.llm_clients.completion_metadata import completion_metadata_of, is_truncated
 
 from ..common.digest import json_bytes
 from ..domains.perp.target_decision import TRUNCATED_OUTPUT
@@ -69,10 +69,15 @@ class CompletionCall:
     output_tokens: int | None  # includes reasoning tokens when the provider reports them
     reasoning_tokens: int | None
     stop_reason: str | None
-    truncated: bool
+
+    @property
+    def truncated(self) -> bool:
+        # Derived, never stored: the same rule ``CompletionMetadata`` applies,
+        # so a call cannot carry a stop reason and a verdict that disagree.
+        return is_truncated(self.stop_reason)
 
     def to_record(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "truncated": self.truncated}
 
 
 class CompletionUsageCollector(BaseCallbackHandler):
@@ -122,7 +127,6 @@ class CompletionUsageCollector(BaseCallbackHandler):
             output_tokens=meta.output_tokens,
             reasoning_tokens=meta.reasoning_tokens,
             stop_reason=meta.stop_reason,
-            truncated=meta.truncated,
         )
         self._calls.append(call)
 

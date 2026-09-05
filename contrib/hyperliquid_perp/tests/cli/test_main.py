@@ -2164,6 +2164,65 @@ def test_run_engine_records_a_cut_decision_as_truncated_output(monkeypatch, caps
     assert any("the decision completion was truncated: 8192 output tokens" in m for m in messages)
 
 
+@pytest.mark.parametrize(
+    ("outcome", "stderr_marker"),
+    [
+        ("raise", "engine run failed"),
+        ("bad_shape", "unexpected shape"),
+        ("non_dict", "non-dict final_state"),
+    ],
+)
+def test_run_engine_names_the_cap_when_a_cut_decision_is_followed_by_a_failed_run(
+    monkeypatch, capsys, caplog, outcome, stderr_marker
+):
+    # Each no-parse exit of the one-shot lane: the decision completion hit the
+    # cap and the run then failed before the answer could be parsed. The cap
+    # is named on every one of them, not only on the happy-parse path.
+    import logging
+    import uuid
+
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    from ..conftest import fake_completion_message
+
+    _stub_engine(monkeypatch)
+
+    class _CutThenFail:
+        def __init__(self, callbacks):
+            (self.collector,) = callbacks
+
+        def propagate(self, *a, **k):
+            run_id = uuid.uuid4()
+            self.collector.on_chat_model_start(
+                {}, [[]], run_id=run_id, metadata={"langgraph_node": "Portfolio Manager"}
+            )
+            message = fake_completion_message(finish_reason="length", output_tokens=8192)
+            self.collector.on_llm_end(
+                LLMResult(generations=[[ChatGeneration(message=message)]]), run_id=run_id
+            )
+            if outcome == "raise":
+                raise RuntimeError("signal processing timed out")
+            if outcome == "bad_shape":
+                return {"final_trade_decision": ""}
+            return None, None
+
+    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _CutThenFail(k["callbacks"]))
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.integration.completion_usage"):
+        rc = main_mod.run_engine({}, "BTC")
+
+    assert rc == 1
+    assert stderr_marker in capsys.readouterr().err
+    # main.py's own ``logger.exception`` on the raise path is a separate ERROR;
+    # the cap line is the usage module's.
+    (error,) = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and r.name.endswith("completion_usage")
+    ]
+    assert "the engine run then failed before the answer could be parsed" in error
+    assert "8192 output tokens against a cap of" in error
+
+
 def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):
     # An empty final_trade_decision carries no structured target: the Phase 2
     # contract fails closed to maintain_current (invalid_output) and the round IS

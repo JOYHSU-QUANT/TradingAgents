@@ -417,6 +417,39 @@ def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, 
     assert "the cap bound regardless" in error
 
 
+def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch, caplog):
+    # The other no-parse exit: propagate returned, but not the (final_state,
+    # signal) pair. The cap still bound on the decision call and is still named.
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="",
+        completions=[_completion("Portfolio Manager", finish_reason="length", output_tokens=4096)],
+    )
+    import contrib.hyperliquid_perp.integration.trading_graph as tg
+
+    built = tg.build_graph  # the stub installed by _usage_provider
+
+    class _OneValue:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def propagate(self, *a, **k):
+            self._inner.propagate(*a, **k)  # drives the collector
+            return {"final_trade_decision": ""}  # a single dict, not a 2-tuple
+
+    monkeypatch.setattr(tg, "build_graph", lambda **kw: _OneValue(built(**kw)))
+    with (
+        caplog.at_level(logging.INFO, logger=_USAGE_LOGGER),
+        pytest.raises(RetryableDecisionError) as exc_info,
+    ):
+        provider.request_decision(_decision_input())
+    assert exc_info.value.error_type == "server_error"
+    (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "the engine run then failed before the answer could be parsed" in error
+
+
 def test_request_decision_warns_per_truncated_analyst_and_keeps_the_decision(monkeypatch, caplog):
     # A cut report is a quality problem, not a contract problem: the cycle
     # continues, the verdict is untouched, and the WARNING names the node.

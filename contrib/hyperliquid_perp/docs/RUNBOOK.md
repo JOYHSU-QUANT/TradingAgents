@@ -338,7 +338,8 @@ completion 上限（`engine.max_completion_tokens`，預設 8192）綁到時供�
 `completion usage: N call(s), T output tokens total, cap C; truncated: …`，並在 payload
 目錄旁寫一個 `<payload>.usage.json`（per-call 的 node／model／output_tokens／stop_reason），
 「8192 夠不夠」從此可量測——注意那個檔沒有任何列指向它，也**不在** `input_payload_hash`
-的契約內（payload 本體 bytes 被 hash 釘住，不能事後補寫）。
+的契約內（payload 本體 bytes 被 hash 釘住，不能事後補寫）；`validate`、`export`、
+fingerprint backfill 都不讀它，刪掉或輪替 sidecar 不影響任何驗收判定，只會少掉那段量測。
 
 ## 6. 驗收（約 5 天後）
 

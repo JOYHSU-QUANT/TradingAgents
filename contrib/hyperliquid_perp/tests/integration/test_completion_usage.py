@@ -72,7 +72,6 @@ def test_calls_are_attributed_to_the_langgraph_node_that_made_them():
             output_tokens=1200,
             reasoning_tokens=None,
             stop_reason="stop",
-            truncated=False,
         ),
         CompletionCall(
             node="Portfolio Manager",
@@ -81,10 +80,24 @@ def test_calls_are_attributed_to_the_langgraph_node_that_made_them():
             output_tokens=8192,
             reasoning_tokens=None,
             stop_reason="length",
-            truncated=True,
         ),
     )
+    assert [c.truncated for c in collector.calls] == [False, True]
     assert collector.total_output_tokens() == 9392
+
+
+def test_a_string_prompt_llm_is_attributed_through_on_llm_start():
+    # Legacy (non-chat) LLM clients start through on_llm_start, not
+    # on_chat_model_start; the node attribution must not depend on which hook
+    # langchain picked.
+    collector = CompletionUsageCollector()
+    run_id = uuid.uuid4()
+    collector.on_llm_start({}, ["prompt"], run_id=run_id, metadata={"langgraph_node": "Trader"})
+    message = _ai("…", finish_reason="length", output_tokens=8192)
+    collector.on_llm_end(LLMResult(generations=[[ChatGeneration(message=message)]]), run_id=run_id)
+    (call,) = collector.calls
+    assert call.node == "Trader"
+    assert call.truncated is True
 
 
 def test_the_decision_lane_reads_its_own_last_call_not_the_analysts_cut():

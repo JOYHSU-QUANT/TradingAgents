@@ -2,7 +2,11 @@
 
 Every provider answers HTTP 200 when the completion cap binds; the only signal
 is the stop reason, and each langchain integration spells it and files it
-differently (installed versions, 2026-09-05):
+differently. Rows verified against the installed packages on 2026-09-05
+(langchain-openai 1.3.3, langchain-anthropic 1.4.8, langchain-google-genai
+4.2.6) EXCEPT Bedrock: ``langchain-aws`` is an optional extra not installed
+here, so that row is transcribed from its documented Converse response shape
+and pinned only by a hand-built result in the tests.
 
 | provider (langchain package)                 | key                          | slot on the LLMResult                                   | truncated value       |
 |----------------------------------------------|------------------------------|---------------------------------------------------------|-----------------------|

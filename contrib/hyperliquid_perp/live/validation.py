@@ -1625,7 +1625,9 @@ def validate_live_run(
         warnings.append(
             f"{invalid_output_count} cycle(s) produced unparseable model output and do "
             "NOT count toward the ≥30 gate — the scheduler advanced but the run "
-            "produced no usable decision; check the model/prompt contract"
+            "produced no usable decision; check ai_outputs.risk_reason: truncated_output "
+            "means the completion cap bound (raise engine.max_completion_tokens), anything "
+            "else is the model/prompt contract"
         )
     if emergency_close_event_count:
         warnings.append(

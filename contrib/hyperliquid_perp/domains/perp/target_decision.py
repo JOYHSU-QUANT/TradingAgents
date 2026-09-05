@@ -32,6 +32,8 @@ from typing import Any
 from ...common.config_coercion import config_overrides, decimal_from_yaml, int_from_yaml
 
 __all__ = [
+    "INVALID_OUTPUT",
+    "TRUNCATED_OUTPUT",
     "DecisionConfig",
     "DecisionMode",
     "ParsedDecision",
@@ -43,6 +45,16 @@ __all__ = [
     "parse_target_decision",
     "validate_target_decision",
 ]
+
+# The two ``invalid_reason`` tags for "no usable JSON block" — the class the
+# risk gate records as ``ai_outputs.risk_reason`` on a fail-closed round.
+# ``INVALID_OUTPUT``: the text carried no parseable block (empty, non-str, no
+# JSON, malformed JSON). ``TRUNCATED_OUTPUT``: the same shape, but the provider
+# said the completion stopped at its token cap (issue #182) — the block is
+# missing because it was cut off, not because the model ignored the contract.
+# Kept apart so an operator reading the trail audits the cap, not the prompt.
+INVALID_OUTPUT = "invalid_output"
+TRUNCATED_OUTPUT = "truncated_output"
 
 
 class DecisionMode(str, Enum):
@@ -413,7 +425,9 @@ def validate_target_decision(decision: TargetDecision, config: DecisionConfig) -
     return None
 
 
-def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision:
+def parse_target_decision(
+    raw: object, config: DecisionConfig, *, truncated: bool = False
+) -> ParsedDecision:
     """Parse one engine response into a :class:`ParsedDecision`, fail-closed.
 
     ``raw`` is whatever ``final_state["final_trade_decision"]`` held — a non-str
@@ -423,6 +437,17 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
     differently-shaped object". ``invalid_reason`` is a stable machine tag (e.g.
     ``invalid_output``, ``margin_off_step_grid``) recorded alongside the
     preserved raw response.
+
+    ``truncated`` is what the caller learned from the provider's stop reason
+    (issue #182): the completion hit its token cap. It changes ONE verdict —
+    the no-usable-JSON class ``invalid_output`` on a STRING is recorded as
+    ``truncated_output`` instead, so the audit trail names the cap rather than
+    the model's format discipline. Nothing else moves: a complete JSON block
+    that survived the cut parses as it always did (the answer met the
+    contract); ``missing_fields``/``unexpected_fields`` mean the JSON was
+    whole, so the cap is not what broke them; and a non-str ``raw`` stays
+    ``invalid_output`` whatever the flag says — a cap shortens text, it cannot
+    change the engine's return type, so that one is schema drift.
     """
     is_str = isinstance(raw, str)
     raw_text = raw if is_str else ("" if raw is None else repr(raw))
@@ -435,14 +460,20 @@ def parse_target_decision(raw: object, config: DecisionConfig) -> ParsedDecision
             raw_response=raw_text,
         )
 
-    if not is_str or not raw_text.strip():
+    if not is_str:
         # A non-str always fails closed here, *before* extraction — its repr may
         # embed a JSON-looking span that must never be parsed as a live decision.
-        return _invalid("invalid_output")
+        return _invalid(INVALID_OUTPUT)
+
+    # The one verdict the stop reason relabels (see the docstring).
+    no_usable_json = TRUNCATED_OUTPUT if truncated else INVALID_OUTPUT
+
+    if not raw_text.strip():
+        return _invalid(no_usable_json)
 
     source = extract_json_block(raw_text)
     if source is None:
-        return _invalid("invalid_output")
+        return _invalid(no_usable_json)
     payload = json.loads(source)  # extract_json_block guarantees this is a dict
 
     keys = set(payload)

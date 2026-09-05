@@ -2,8 +2,9 @@ import threading
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage
 from langchain_core.outputs import LLMResult
+
+from tradingagents.llm_clients.completion_metadata import completion_metadata_of
 
 
 class StatsCallbackHandler(BaseCallbackHandler):
@@ -38,22 +39,17 @@ class StatsCallbackHandler(BaseCallbackHandler):
             self.llm_calls += 1
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
-        """Extract token usage from LLM response."""
-        try:
-            generation = response.generations[0][0]
-        except (IndexError, TypeError):
-            return
+        """Extract token usage from LLM response.
 
-        usage_metadata = None
-        if hasattr(generation, "message"):
-            message = generation.message
-            if isinstance(message, AIMessage) and hasattr(message, "usage_metadata"):
-                usage_metadata = message.usage_metadata
-
-        if usage_metadata:
-            with self._lock:
-                self.tokens_in += usage_metadata.get("input_tokens", 0)
-                self.tokens_out += usage_metadata.get("output_tokens", 0)
+        Read through the shared ``completion_metadata`` reader so the CLI's
+        stats panel and the perp lane's usage record count the same tokens
+        for the same response (a count one reader accepts and the other drops
+        would make the two disagree about one run).
+        """
+        meta = completion_metadata_of(response)
+        with self._lock:
+            self.tokens_in += meta.input_tokens or 0
+            self.tokens_out += meta.output_tokens or 0
 
     def on_tool_start(
         self,

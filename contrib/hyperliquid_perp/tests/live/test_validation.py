@@ -316,8 +316,13 @@ def test_invalid_output_cycles_do_not_count_toward_the_gate(tmp_path):
     assert not report.live_ready
     assert report.failures == ()
     assert any("cycle_count" in s for s in report.shortfalls)
-    # Non-gating, but the operator is told why the count is short.
-    assert any("unparseable model output" in w for w in report.warnings)
+    # Non-gating, but the operator is told why the count is short — and where
+    # to look: a cut completion (truncated_output) is a cap problem, not a
+    # prompt-contract problem (issue #182), and the two need different fixes.
+    (warning,) = [w for w in report.warnings if "unparseable model output" in w]
+    assert "ai_outputs.risk_reason" in warning
+    assert "truncated_output" in warning
+    assert "engine.max_completion_tokens" in warning
 
 
 def test_missing_smoke_is_a_shortfall(tmp_path):

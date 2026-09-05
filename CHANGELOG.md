@@ -10,6 +10,46 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **hyperliquid_perp: a bound completion cap now has a name and a
+  measurement** (issue #182). Every provider answers HTTP 200 when
+  ``max_tokens`` binds, and nothing in the repo read the stop reason, so a
+  truncated decision was filed as a plain ``invalid_output`` (the operator
+  audited the prompt contract, not the config number) and a truncated
+  analyst report degraded the cycle silently. The perp provider now attaches
+  a ``CompletionUsageCollector`` (``integration/completion_usage.py``) to
+  both LLM clients through ``build_graph(callbacks=…)`` — the base graph's
+  existing ``callbacks`` constructor argument, the one seam through which
+  per-call response metadata leaves an engine whose ``propagate()`` returns
+  only text — and attributes each completion to its graph node via langgraph's
+  ``langgraph_node`` run metadata. The decision node
+  (``tradingagents.node_names.PORTFOLIO_MANAGER_NODE``, a new leaf constant the
+  graph itself registers under, so the consumer cannot drift from it) stopping
+  at its cap with no usable JSON is recorded as ``risk_reason =
+  truncated_output`` instead of ``invalid_output`` (``parse_target_decision(…,
+  truncated=True)`` relabels exactly that one class; ``decision_attempts.status``
+  stays ``invalid_output``, fail-closed, no re-ask, per phase2-spec §3.1) with an
+  ERROR naming the cap and the actual output tokens; a JSON block that survived
+  the cut is accepted with a WARNING; any other node stopping at the cap logs a
+  WARNING naming the node and the cycle continues. Every engine run logs one
+  INFO ``completion usage: N call(s), T output tokens total, cap C; truncated:
+  …`` line and writes ``<payload>.usage.json`` beside the input payload (per-call
+  node / model / output_tokens / reasoning_tokens / stop_reason / truncated) —
+  the payload itself is hash-locked by ``ai_inputs.input_payload_hash`` and
+  cannot be appended to. When the decision completion bound the cap and the
+  run then failed before parsing (a trailing engine call raising, an
+  unusable return shape), the resulting ``api_failed`` row's
+  ``error_message`` ends with ``(decision completion truncated: N output
+  tokens against cap C)`` beside an ERROR line, and live ``validate``'s
+  non-gating ``invalid_output`` warning now points at
+  ``ai_outputs.risk_reason`` (``truncated_output`` = raise the cap, anything
+  else = the prompt contract). The one-shot ``main.py`` lane records the same
+  tag and line. Provider stop-reason spellings are read by the new
+  ``tradingagents.llm_clients.completion_metadata`` (table in its docstring;
+  each row pinned through the installed langchain converter), which the CLI's
+  ``StatsCallbackHandler`` now also reads token counts through. Measurement
+  never costs a decision: the collector and the reporter catch their own
+  failures and log them.
+
 - **hyperliquid_perp: the running daemons say which prompt regime they are
   in, and the rows a run wrote before schema v11 can be told** (issue
   #163). The paper and live lanes log one INFO line ``prompt_regime:

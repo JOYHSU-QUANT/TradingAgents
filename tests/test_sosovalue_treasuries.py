@@ -441,6 +441,15 @@ class TestFetchAll:
         assert LIST_TICKERS[2] not in payload["companies"]
         assert len([c for c in impl.calls if c != "/btc-treasuries"]) == len(LIST_TICKERS)
         assert not any(r.levelname == "ERROR" for r in caplog.records)
+        # The per-item handler logged it as a transient (the sweep's own
+        # lane would absorb an uncaught raise silently, so this line is what
+        # pins the handler's except tuple).
+        assert any(
+            r.levelname == "WARNING"
+            and "history failed" in r.getMessage()
+            and LIST_TICKERS[2] in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_an_all_outage_sweep_keeps_the_outage_type(self, monkeypatch):
         # The transport twin of the network-streak test: a sweep that died

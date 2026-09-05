@@ -87,7 +87,10 @@ def _openai_responses_result(*, complete: bool) -> LLMResult:
                 "input_tokens": 10,
                 "output_tokens": 8192,
                 "total_tokens": 8202,
-                "input_tokens_details": {"cached_tokens": 0},
+                # ``cache_write_tokens`` is required by openai>=3 (CI) and an
+                # accepted extra on openai 2.x; the fixture carries both so the
+                # SDK's own validator accepts it on either.
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
                 "output_tokens_details": {"reasoning_tokens": 100},
             },
         }

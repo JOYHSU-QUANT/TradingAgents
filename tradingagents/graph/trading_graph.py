@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import sys
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,8 +32,8 @@ from tradingagents.agents.utils.agent_utils import (
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.llm_clients import create_llm_client
+from tradingagents.default_config import DEFAULT_CONFIG, DEFAULT_MAX_TOKENS
+from tradingagents.llm_clients import create_llm_client, is_gateway_provider
 from tradingagents.reporting import write_report_tree
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -173,15 +175,53 @@ class TradingAgentsGraph:
                 # truncating every completion with nothing raised anywhere.
                 if isinstance(max_tokens, bool):
                     raise ValueError
+                if not isinstance(max_tokens, str):
+                    # Range-check numerics BEFORE int(): int(Decimal("1E999999999"))
+                    # is a hang, not an exception, and a cap that does not fit
+                    # a machine int (inf, NaN, absurd exponents) is junk anyway.
+                    # A comparison is O(digits); the conversion is not.
+                    if not (0 < max_tokens <= sys.maxsize):
+                        raise ValueError
+                    # A programmatic 4096.7 (or Decimal / Fraction) must not
+                    # int()-truncate to a cap the caller never asked for;
+                    # compared by value, not type, so every numeric shape is
+                    # covered. A numeric string goes straight to int() below.
+                    if int(max_tokens) != max_tokens:
+                        raise ValueError
                 parsed = int(max_tokens)
                 if parsed <= 0:
                     raise ValueError
-            except (TypeError, ValueError):
+            # OverflowError kept for belt-and-braces: the range check above
+            # already refuses inf, but a bad cap must never leak raw.
+            except (TypeError, ValueError, OverflowError):
                 raise ValueError(
                     f"config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) must "
                     f"be a positive integer, got {max_tokens!r}"
                 ) from None
             kwargs["max_tokens"] = parsed
+        elif is_gateway_provider(provider):
+            # Uncapped through a gateway is the #177 shape: some upstreams
+            # substitute the model's full context for a missing cap and
+            # reject every call with HTTP 400. The library default stays
+            # None (see default_config), so this warning is what a library
+            # caller on a gateway gets. Issued here, where the knob is read,
+            # so it names the config the caller passed; stacklevel 3 points
+            # at the caller's TradingAgentsGraph(...) line (this method is
+            # only called from __init__), which under Python's default
+            # warning filter also means once per construction site.
+            # "routes to an upstream this process cannot see", not "is a
+            # gateway": openai_compatible carries the flag too, and for a
+            # local vLLM the second phrasing would be false.
+            warnings.warn(
+                f"llm_provider '{provider}' routes to an upstream this process "
+                "cannot see, and no 'max_tokens' cap is set: some upstreams "
+                "treat a missing cap as the model's full context and reject "
+                "every call (issue #177). Set config['max_tokens'] or "
+                f"TRADINGAGENTS_MAX_TOKENS, e.g. {DEFAULT_MAX_TOKENS} "
+                "(tradingagents.default_config.DEFAULT_MAX_TOKENS).",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
         return kwargs
 

@@ -40,7 +40,7 @@ from cli.utils import (
     select_research_depth,
     select_shallow_thinking_agent,
 )
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, DEFAULT_MAX_TOKENS
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
     build_analyst_execution_plan,
@@ -984,6 +984,14 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
     config["anthropic_effort"] = selections.get("anthropic_effort")
     config["output_language"] = selections.get("output_language", "English")
+    # Completion cap: an env value (TRADINGAGENTS_MAX_TOKENS, already overlaid
+    # onto DEFAULT_CONFIG like the round counts above) wins; otherwise the CLI
+    # never sends an uncapped request — through a gateway some upstreams read
+    # "no cap" as "the model's full context" and 400 every call (#177). The
+    # library default stays None so only this operator-driven path is capped
+    # (#183).
+    if config.get("max_tokens") is None:
+        config["max_tokens"] = DEFAULT_MAX_TOKENS
     # --checkpoint/--no-checkpoint overrides only when explicitly given; omitting
     # the flag preserves TRADINGAGENTS_CHECKPOINT_ENABLED / the default (#976).
     if checkpoint is not None:
@@ -991,11 +999,30 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     return config
 
 
+def _announce_completion_cap(config: dict) -> None:
+    """Print the completion cap that will apply, and where it came from.
+
+    A cap that binds is invisible downstream — the answer comes back truncated
+    with no error to point at (the perp bridge logs its cap for the same
+    reason) — so the number and its source must be on screen before the run.
+    The CLI only ever has two sources: the env override, or its own default.
+    """
+    source = (
+        "from TRADINGAGENTS_MAX_TOKENS"
+        if os.environ.get("TRADINGAGENTS_MAX_TOKENS")
+        else "CLI default; set TRADINGAGENTS_MAX_TOKENS to change"
+    )
+    console.print(
+        f"[green]✓ Completion cap:[/green] {config['max_tokens']} tokens ({source})"
+    )
+
+
 def run_analysis(checkpoint: bool | None = None):
     # First get all user selections
     selections = get_user_selections()
 
     config = _build_run_config(selections, checkpoint)
+    _announce_completion_cap(config)
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()

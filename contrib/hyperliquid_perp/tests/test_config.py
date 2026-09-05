@@ -12,6 +12,7 @@ import os
 import pytest
 
 from contrib.hyperliquid_perp.config import (
+    _ENGINE_KEYS,
     _EXAMPLE,
     _WALLET_PLACEHOLDER,
     dotenv_diagnosis,
@@ -469,6 +470,80 @@ def test_the_example_config_and_setup_doc_quote_the_completion_cap_default():
     cap = _DEFAULT_MAX_COMPLETION_TOKENS
     assert f"# max_completion_tokens: {cap}" in config_text()
     assert f"perp 預設 {cap}" in doc_text("SETUP.md")
+
+
+def test_the_perp_default_cap_equals_the_cli_default_cap():
+    """One number, declared twice on purpose, pinned equal (#183).
+
+    The bridge keeps its own ``_DEFAULT_MAX_COMPLETION_TOKENS`` rather than
+    reading ``tradingagents.default_config.DEFAULT_MAX_TOKENS`` through the
+    deferred engine import: the perp default must be declared where the perp
+    docs (SETUP.md, the example YAML) pin it, and a stale engine lacking the
+    new name would otherwise be misreported as "DEFAULT_CONFIG not importable"
+    instead of the cap refusal ``_build_engine_config`` already names. So the
+    two are pinned equal here — the one place both are importable — rather
+    than by a perp run and a CLI run quietly capping at different numbers.
+    """
+    from contrib.hyperliquid_perp.engine_bridge import _DEFAULT_MAX_COMPLETION_TOKENS
+    from tradingagents.default_config import DEFAULT_MAX_TOKENS
+
+    assert _DEFAULT_MAX_COMPLETION_TOKENS == DEFAULT_MAX_TOKENS
+
+
+def test_engine_keys_are_exactly_the_keys_the_bridge_reads():
+    """``_ENGINE_KEYS`` derived from ``_build_engine_config``'s source, not retyped.
+
+    The unknown-key warning is only as honest as this set: a key the bridge
+    reads but the set lacks would hand every operator who sets it a false
+    "not supported, ignored" warning while the value silently applied; a key
+    the set carries but the bridge no longer reads would load without a word
+    and do nothing (#184). Walk the function's AST for every
+    ``eng_cfg.get("<literal>")`` and demand equality in both directions.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from contrib.hyperliquid_perp import engine_bridge
+
+    # dedent so the pin survives the function moving into a class or a nest.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(engine_bridge._build_engine_config)))
+    def is_eng_cfg(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == "eng_cfg"
+
+    read: set[str] = set()
+    receivers: list[ast.AST] = []  # the ``eng_cfg`` Name node of each ``eng_cfg.get(...)``
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and is_eng_cfg(node.func.value)
+        ):
+            continue
+        receivers.append(node.func.value)
+        # A computed key could not be checked here — refuse rather than
+        # silently under-count.
+        assert node.args and isinstance(node.args[0], ast.Constant), ast.dump(node)
+        assert isinstance(node.args[0].value, str), ast.dump(node)
+        read.add(node.args[0].value)
+    # Every other use of the name (``eng_cfg["k"]``, ``"k" in eng_cfg``,
+    # ``eng_cfg.pop(...)``, ``eng_cfg.items()``, ``helper(cfg=eng_cfg)``,
+    # ``**eng_cfg``) is a read this lock cannot see and would re-open the
+    # false-warning hole — refuse them all, so a new read has to be spelled
+    # the one way the lock checks. The assignment target is the only store.
+    stray = [
+        node
+        for node in ast.walk(tree)
+        if is_eng_cfg(node)
+        and isinstance(node.ctx, ast.Load)
+        and not any(node is r for r in receivers)
+    ]
+    assert not stray, "spell every eng_cfg read as eng_cfg.get('<literal>'): " + ", ".join(
+        f"line {n.lineno}" for n in stray
+    )
+    assert read, "no eng_cfg.get(...) reads found — was the local renamed?"
+    assert read == set(_ENGINE_KEYS)
 
 
 @pytest.mark.parametrize(

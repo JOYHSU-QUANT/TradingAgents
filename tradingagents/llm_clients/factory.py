@@ -52,3 +52,24 @@ def create_llm_client(
         return OpenAIClient(model, base_url, provider=provider_lower, **kwargs)
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+# The providers ``create_llm_client`` routes to their own clients above; none is
+# in the OpenAI-compatible registry, so none can be a gateway.
+_NATIVE_PROVIDERS = frozenset({"anthropic", "google", "azure", "bedrock"})
+
+
+def is_gateway_provider(provider: str) -> bool:
+    """Lazy re-export of the registry predicate ``openai_client.is_gateway_provider``.
+
+    The same import discipline as ``create_llm_client``: native providers are
+    answered without touching the OpenAI SDK (the graph asks this for every
+    uncapped config, so an Anthropic-only process must not pay a
+    ``langchain_openai`` import for a "no"); everything else consults the
+    registry, which that provider's own client would import anyway.
+    """
+    if provider.lower() in _NATIVE_PROVIDERS:
+        return False
+    from .openai_client import is_gateway_provider as _is_gateway_provider
+
+    return _is_gateway_provider(provider)

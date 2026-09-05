@@ -2,6 +2,15 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
+# Kwargs every provider client forwards from user config to its chat class: the
+# cross-provider knobs (``temperature``, ``max_tokens``) plus the two
+# transport-neutral extras every langchain chat class accepts. Each client
+# builds its allowlist as this tuple plus its own provider-specific keys, so a
+# new cross-provider knob is one edit here rather than one per client — the
+# allowlist loops drop unrecognised keys silently, so a client left out of a
+# five-file edit would simply never forward the knob (#184).
+_COMMON_PASSTHROUGH_KWARGS = ("temperature", "max_tokens", "max_retries", "callbacks")
+
 
 def normalize_content(response):
     """Normalize LLM response content to a plain string.

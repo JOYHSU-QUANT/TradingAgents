@@ -3,12 +3,11 @@ from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 from .validators import validate_model
 
-_PASSTHROUGH_KWARGS = (
-    "timeout", "max_retries", "api_key", "max_tokens", "temperature",
-    "callbacks", "http_client", "http_async_client", "effort",
+_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + (
+    "timeout", "api_key", "http_client", "http_async_client", "effort",
 )
 
 # Anthropic's extended-thinking ``effort`` parameter is accepted by Opus 4.5+

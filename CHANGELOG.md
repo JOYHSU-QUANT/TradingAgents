@@ -35,6 +35,27 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The interactive CLI never sends an uncapped completion request, and a
+  library caller on a gateway provider is warned once** (issue #183; the
+  #177 tail). ``cli/main.py`` fills ``DEFAULT_MAX_TOKENS`` (8192 — the perp
+  bridge's number; a contrib test pins the two equal) into ``max_tokens``
+  when neither the config nor ``TRADINGAGENTS_MAX_TOKENS`` set one, and
+  prints the cap and its source before the run (a cap that binds is
+  otherwise invisible — the answer just comes back truncated). The
+  library default ``DEFAULT_CONFIG["max_tokens"]`` stays ``None`` so
+  importing the package changes nobody's requests; instead
+  ``TradingAgentsGraph`` emits a ``RuntimeWarning`` (attributed to the
+  caller's construction line) when a gateway provider
+  (``ProviderSpec.gateway``) is about to run uncapped — some upstreams read a
+  missing cap as the model's full context and 400 every call. A programmatic
+  non-integral float cap is now rejected by name instead of int()-truncated.
+  The five LLM clients now build their passthrough allowlists from one
+  ``_COMMON_PASSTHROUGH_KWARGS`` in ``base_client.py`` (``temperature``,
+  ``max_tokens``, ``max_retries``, ``callbacks``) plus their own extras, a
+  drift-lock test checks ``_ENGINE_KEYS`` against the keys
+  ``_build_engine_config`` actually reads, and the ``max_tokens`` /
+  ``temperature`` knob tests merge into one parametrized module (issue
+  #184).
 - **dataflows: a throttle met while a sibling tool call was in flight is no
   longer forgotten, and a spent Alpha Vantage daily quota is remembered for
   an hour** (issue #153; the #137 tail). ``ThrottleLatch`` now records when

@@ -3,11 +3,10 @@ from typing import Any
 
 from langchain_openai import AzureChatOpenAI
 
-from .base_client import BaseLLMClient, normalize_content
+from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 
-_PASSTHROUGH_KWARGS = (
-    "timeout", "max_retries", "api_key", "reasoning_effort", "temperature",
-    "max_tokens", "callbacks", "http_client", "http_async_client",
+_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + (
+    "timeout", "api_key", "reasoning_effort", "http_client", "http_async_client",
 )
 
 

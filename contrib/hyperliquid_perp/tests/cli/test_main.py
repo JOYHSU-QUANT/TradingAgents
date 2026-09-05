@@ -143,9 +143,12 @@ def test_build_engine_config_completion_cap_env_precedence(monkeypatch):
     assert engine_config["max_tokens"] == 4096
 
 
-def test_build_engine_config_rejects_an_explicit_zero_cap():
-    # 0 has no "off" meaning for this key — off is the bug it closes — so it
-    # must be rejected by name, never fall through to the next source.
+def test_build_engine_config_is_the_inner_line_against_a_zero_cap():
+    # Defence in depth, not the operator-facing check: YAML validation upstream
+    # refuses a 0 before any config reaches the bridge, so this feeds the
+    # bridge directly to pin that the inner resolver refuses on its own — 0
+    # has no "off" meaning for this key (off is the bug it closes) and must
+    # never fall through to the next source, whichever layer sees it.
     with pytest.raises(bridge_mod.EngineConfigError, match="engine.max_completion_tokens"):
         bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 0}})
 

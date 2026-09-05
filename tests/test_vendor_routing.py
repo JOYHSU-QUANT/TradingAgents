@@ -750,6 +750,80 @@ class OutageVerdictTests(unittest.TestCase):
         self.assertNotIn("|", out)
         self.assertNotIn("\n", out)
 
+    def test_a_throttle_met_makes_a_fallbacks_no_data_unconfirmed(self):
+        # A 429 never asked the vendor about the symbol either (#172). Named
+        # in its own words — "rate limited", not "unavailable" — under the
+        # same prefix and tail as the outage variant. A non-latching throttle
+        # type, so the vendor is contacted (the skip case is its own test).
+        class _NonLatching(VendorRateLimitError):
+            latches_vendor = False
+
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        throttled = _raises(_NonLatching("rate limit hit (HTTP 429)"))
+        with _chain("get_stock_data", {"yfinance": throttled, "alpha_vantage": _no_data}):
+            out = _stock()
+        self.assertTrue(out.startswith("NO_DATA_AVAILABLE:"))
+        self.assertIn("vendor 'yfinance' was rate limited (rate limit hit (HTTP 429))", out)
+        self.assertIn("was rate limited before it could answer", out)
+        self.assertIn("unconfirmed rather than invalid", out)
+        self.assertIn("the other configured vendor(s) had no usable data (no rows)", out)
+        self.assertNotIn("may be invalid", out)
+        self.assertNotIn("was unavailable", out)
+        self.assertTrue(out.endswith("report that data is unavailable for this symbol."))
+
+    def test_a_latch_skip_makes_a_fallbacks_no_data_unconfirmed(self):
+        # The vendor was never sent the request at all: the sentinel says so
+        # — "skipped", quoting no vendor text, since there is none.
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+        VENDOR_THROTTLE_LATCH.arm("yfinance")
+        yf = mock.Mock()
+        with _chain("get_stock_data", {"yfinance": yf, "alpha_vantage": _no_data}):
+            out = _stock()
+        yf.assert_not_called()
+        # The remaining stand-off rides along: it is what tells a skip from
+        # an outage to the model.
+        self.assertRegex(
+            out, r"vendor 'yfinance' was skipped after a recent rate limit \(for another \d+s\) and"
+        )
+        self.assertIn("a source that would normally serve it was not asked", out)
+        self.assertIn("unconfirmed rather than invalid", out)
+        self.assertNotIn("may be invalid", out)
+        self.assertTrue(out.endswith("report that data is unavailable for this symbol."))
+
+    def test_a_missing_key_keeps_the_symbol_wording(self):
+        # Standing configuration the operator already sees in the log, not a
+        # source that would normally have answered: the verdict stands.
+        set_config({"data_vendors": {"core_stock_apis": "alpha_vantage,yfinance"}})
+        unset = _raises(VendorNotConfiguredError("ALPHA_VANTAGE_API_KEY is not set"))
+        with _chain("get_stock_data", {"alpha_vantage": unset, "yfinance": _no_data}):
+            out = _stock()
+        self.assertIn("may be invalid", out)
+        self.assertNotIn("unconfirmed", out)
+
+    def test_an_outage_outranks_a_throttle_whatever_the_chain_order(self):
+        # Three verdicts on one chain: the outage wording wins over the
+        # throttle's, and the throttle's over a skip's, in either order —
+        # the sentence must be true for every branch sequence.
+        class _NonLatching(VendorRateLimitError):
+            latches_vendor = False
+
+        set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage,local"}})
+        throttled = _raises(_NonLatching("429"))
+        with _chain(
+            "get_stock_data", {"yfinance": throttled, "alpha_vantage": _down, "local": _no_data}
+        ):
+            out = _stock()
+        self.assertIn("vendor 'alpha_vantage' was unavailable", out)
+        self.assertNotIn("was rate limited", out)
+        VENDOR_THROTTLE_LATCH.arm("yfinance")
+        with _chain(
+            "get_stock_data",
+            {"yfinance": mock.Mock(), "alpha_vantage": throttled, "local": _no_data},
+        ):
+            out = _stock()
+        self.assertIn("vendor 'alpha_vantage' was rate limited", out)
+        self.assertNotIn("was skipped", out)
+
     def test_the_outage_wording_does_not_depend_on_chain_order(self):
         # "Any vendor in the chain", not "the primary": the fallback being the
         # one that was down leaves the primary's no-data just as unconfirmed.
@@ -828,7 +902,7 @@ class OptionalSentinelTests(unittest.TestCase):
     A requests message quotes the request URL, and FRED's API key is a query
     parameter on it, so one connection failure wrote the key into the LLM
     context and the persisted report artifacts (#171). Now the generic lane's
-    exception contributes ``_generic_failure_words`` — the status it carries,
+    exception contributes ``generic_failure_words`` — the status it carries,
     or its class — and a typed vendor error its message flattened and
     capped; the message itself goes to the warning log only.
     """

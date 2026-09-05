@@ -772,19 +772,66 @@ class TestFetchAll:
             history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
-        # A sweep that died purely of transport keeps the TRANSPORT class.
-        # _load_snapshot classifies by type: a SoSoValueError here logs the
-        # outage at ERROR with a traceback and "the client likely needs a fix"
-        # — a structural verdict on something no code change can heal.
-        with pytest.raises(requests.RequestException, match="failed at the transport layer") as exc:
+        # A sweep that died purely of transport is the vendor down: the
+        # OUTAGE type. _load_snapshot classifies by type: a SoSoValueError
+        # here logs the outage at ERROR with a traceback and "the client
+        # likely needs a fix" — a structural verdict on something no code
+        # change can heal. The cause is quoted as the exception's class,
+        # never its text (#203).
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="failed to reach the vendor"
+        ) as exc:
             sosovalue_macro._fetch_all()
         assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
+        assert "could not be reached: ConnectionError" in str(exc.value)
         history_calls = [c for c in impl.calls if c != "/macro/events"]
         # Literal 3, not the constant: comparing against the value under test
         # makes the assertion true for every breaker setting, including a 9
         # that equals len(TRACKED_EVENTS) and disables the breaker outright.
         assert len(history_calls) == 3
         assert sosovalue_macro.MAX_CONSECUTIVE_NETWORK_FAILURES == 3
+
+    def test_an_outage_answer_mid_sweep_takes_the_transport_lane(self, monkeypatch, caplog):
+        # The macro twin of the treasuries test: a 5xx the envelope does not
+        # explain is the gateway, not a contract break (#172) — the event
+        # joins events_failed, the sweep goes on, nothing is logged at ERROR.
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueUnavailableError(
+                "SoSoValue answered HTTP 502 without data"
+            ),
+            error_names={TRACKED[2]},
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        with caplog.at_level("DEBUG", logger="tradingagents.dataflows.sosovalue_macro"):
+            payload = sosovalue_macro._fetch_all()
+        assert payload["events_failed"] == [TRACKED[2]]
+        assert len([c for c in impl.calls if c != "/macro/events"]) == len(TRACKED)
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
+        # The per-item handler logged it as a transient (the sweep's own
+        # lane would absorb an uncaught raise silently, so this line is what
+        # pins the handler's except tuple).
+        assert any(
+            r.levelname == "WARNING"
+            and "history failed" in r.getMessage()
+            and TRACKED[2] in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_an_all_outage_sweep_keeps_the_outage_type(self, monkeypatch):
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueUnavailableError(
+                "SoSoValue answered HTTP 503 without data"
+            ),
+            error_names=set(TRACKED),
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="was answered without data"
+        ) as exc:
+            sosovalue_macro._fetch_all()
+        assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
+        # The breaker counts an outage answer like a transport failure.
+        assert len([c for c in impl.calls if c != "/macro/events"]) == 3
 
     def test_an_all_unknown_sweep_stays_structural(self, monkeypatch):
         # The other side of that split: nothing failed at the transport layer,
@@ -986,7 +1033,7 @@ class TestCacheAndLoad:
             raise requests.ConnectionError("down")
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="no usable cache"):
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="no usable cache"):
             sosovalue_macro._load_snapshot()
         assert not (tmp_path / "sosovalue_macro.json").exists()
 
@@ -1009,7 +1056,8 @@ class TestCacheAndLoad:
             raise requests.ConnectionError("down")
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="days stale"):
+        # An unreached vendor past the cap is the outage type (#172).
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="days stale"):
             sosovalue_macro._load_snapshot()
 
     def test_stale_cache_at_cap_is_still_served(self, tmp_path, monkeypatch):
@@ -1030,7 +1078,9 @@ class TestCacheAndLoad:
             raise requests.ConnectionError("down")
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
-        with pytest.raises(sosovalue_common.SoSoValueError, match="unparseable or future-dated"):
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="unparseable or future-dated"
+        ):
             sosovalue_macro._load_snapshot()
 
     def test_rate_limit_wrap_keeps_its_type_past_the_cap(self, tmp_path, monkeypatch):
@@ -3171,7 +3221,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
             history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
-        with pytest.raises(requests.RequestException) as exc:
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as exc:
             sosovalue_macro._fetch_all()
         assert f"({sosovalue_macro.MAX_CONSECUTIVE_NETWORK_FAILURES} of {len(TRACKED)})" in str(
             exc.value

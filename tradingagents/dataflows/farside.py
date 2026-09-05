@@ -50,7 +50,7 @@ from .config import get_config
 from .errors import VendorError, VendorUnavailableError
 from .sosovalue_common import _cache_rejecter, _read_cache_preamble, _stale_caveat
 from .symbol_utils import classify_crypto_asset
-from .utils import date_refusal, raise_for_http_status
+from .utils import date_refusal, failure_account, is_unreached, raise_for_http_status
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +141,24 @@ _BLANK_CELLS = {"", "-", "–", "—"}
 
 
 class FarsideError(VendorError):
-    """Farside was unreachable, blocked, or its table structure changed.
+    """Farside blocked this client, or its table structure changed.
 
     A ``VendorError`` (the shared taxonomy in ``errors.py``) so the routing layer
     reacts by behaviour rather than by vendor, and the optional crypto_etf_flows
-    category degrades to a sentinel instead of aborting the run.
+    category degrades to a sentinel instead of aborting the run. The vendor
+    being DOWN — a 5xx, or unreachable — is the subclass below.
+    """
+
+
+class FarsideUnavailableError(FarsideError, VendorUnavailableError):
+    """Farside was down: a 5xx, or unreachable — and no cache could stand in.
+
+    What ``_load_flows`` raises when the fetch failed that way and the cache
+    is absent or past its cap (#172). Not for a status the boundary left
+    alone — a Cloudflare 403 is Farside refusing this client, which stays
+    the module type (#170) — nor for a structural break. A ``FarsideError``
+    too, so every caller written against the module type keeps working
+    unchanged.
     """
 
 
@@ -626,8 +639,9 @@ def _load_flows(asset: str) -> _FlowSnapshot:
     calls). Otherwise fetch + parse + overwrite the rolling cache file. On a fetch
     or parse failure, fall back to the cached snapshot (``stale=True``); if there
     is none, or it is beyond the staleness cap, raise so the router degrades —
-    as FarsideError, except that a 5xx keeps the boundary's outage type. A
-    failed fetch is never written to cache.
+    as FarsideError, except that a 5xx and a transport failure that never
+    reached the vendor raise the outage subclass (#172). A failed fetch is
+    never written to cache.
     """
     path = _cache_path(asset)
     cached = _read_cache(path, asset)
@@ -647,12 +661,18 @@ def _load_flows(asset: str) -> _FlowSnapshot:
         parsed = _parse_flow_table(_request_html(asset), asset)
     except (requests.RequestException, VendorUnavailableError, FarsideError) as e:
         # What the context-adding raises below wrap the failure as: the
-        # boundary's outage verdict keeps its type (the router logs a Farside
-        # 5xx without a traceback, like any vendor's); a transport failure —
-        # a Cloudflare 403 included, which the router then does not count as
-        # an outage — or a structural break is this module's own error. Named
+        # boundary's outage verdict keeps its type, and so does a transport
+        # failure that never reached the vendor — the router's generic lane
+        # reads an unreached vendor as down, and trying the cache first must
+        # not downgrade that to a bug (#172). A status the boundary left
+        # alone — the Cloudflare 403 the router then does not count as an
+        # outage — or a structural break is this module's own error. Named
         # rather than ``type(e)``: every type this wraps takes one message.
-        wrap_cls = VendorUnavailableError if isinstance(e, VendorUnavailableError) else FarsideError
+        wrap_cls = (
+            FarsideUnavailableError
+            if isinstance(e, VendorUnavailableError) or is_unreached(e)
+            else FarsideError
+        )
         if cached:
             fetched_at = cached["fetched_at"]
             age = _days_stale(fetched_at)
@@ -668,9 +688,13 @@ def _load_flows(asset: str) -> _FlowSnapshot:
                     if age is None
                     else f"is {age} days stale"
                 )
+                # The cause is quoted through ``failure_account``: a typed
+                # error's own text (flattened, not capped — the router caps
+                # its slot), a requests exception's status or class only —
+                # its message carries the request URL (#203).
                 raise wrap_cls(
                     f"Farside {asset} fetch failed and the newest cache {stale_desc} "
-                    f"(> {MAX_STALE_DAYS}-day cap): {e}"
+                    f"(> {MAX_STALE_DAYS}-day cap): {failure_account(e, limit=None)}"
                 ) from e
             # A structural FarsideError means the scraper itself is broken (a real
             # code fix needed), not a transient outage — log it at ERROR with a
@@ -701,7 +725,9 @@ def _load_flows(asset: str) -> _FlowSnapshot:
                 stale=True,
                 issuers_named=cached["issuers_named"],
             )
-        raise wrap_cls(f"Farside {asset} unavailable and no cache exists: {e}") from e
+        raise wrap_cls(
+            f"Farside {asset} unavailable and no cache exists: {failure_account(e, limit=None)}"
+        ) from e
 
     # Stamp the fetch instant from _iso_now() (the same clock _cache_age_hours and
     # _days_stale read) so the TTL, cache freshness, and the staleness cap all key

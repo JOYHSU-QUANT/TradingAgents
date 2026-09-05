@@ -8,7 +8,10 @@ Keyless: GET https://api.alternative.me/fng/?limit=N&format=json. Each ``data``
 row carries ``value`` (0-100 string), ``value_classification``, and
 ``timestamp`` (unix seconds string). A network error or malformed payload raises
 so the routing layer degrades the optional crypto_sentiment category to a
-sentinel instead of aborting the run.
+sentinel instead of aborting the run — as the outage type when the vendor was
+down (unreachable, a 5xx, a body that is not JSON), so the router logs it
+without a traceback and counts the vendor as down (#172); a body that decodes
+but is not this contract stays the module type, as a schema change would.
 """
 
 import logging
@@ -17,8 +20,14 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from .errors import VendorError
-from .utils import date_refusal
+from .errors import VendorError, VendorUnavailableError
+from .utils import (
+    date_refusal,
+    failure_account,
+    is_unreached,
+    json_body_or_outage,
+    raise_for_http_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +74,23 @@ MAX_DATA_LAG_DAYS = 2
 
 
 class FearGreedError(VendorError):
-    """alternative.me was unreachable or returned an unusable payload.
+    """alternative.me returned an unusable payload, or refused the request.
 
     A ``VendorError`` (the shared taxonomy in ``errors.py``) so the routing layer
     reacts by behaviour rather than by vendor, and the optional crypto_sentiment
     category degrades to a sentinel instead of aborting the run. Every failure
     mode — network error, non-2xx, undecodable body, wrong payload shape, or a
-    malformed row — is funnelled through this one type.
+    malformed row — is funnelled through this one type; the ones that mean
+    the vendor was DOWN come as the subclass below.
+    """
+
+
+class FearGreedUnavailableError(FearGreedError, VendorUnavailableError):
+    """alternative.me was down: unreachable, a 5xx, or a body that is not JSON.
+
+    Raised by ``_request`` once its retry is spent on any of those (#172).
+    A ``FearGreedError`` too, so every caller written against the module
+    type keeps working unchanged.
     """
 
 
@@ -79,7 +98,15 @@ def _request(limit: int) -> dict:
     """GET the Fear & Greed history, retrying once on a transient failure.
 
     Wraps every failure in FearGreedError so a caller written against this
-    module's documented exception type sees network errors too.
+    module's documented exception type sees network errors too — as the
+    outage subclass when the vendor was down. The boundary reads its status
+    and body through the shared helpers (``raise_for_http_status``,
+    ``json_body_or_outage``), so a 5xx and a non-JSON body are the outage
+    type before the retry, and the retry treats them like a network blip;
+    of what is left after the retry, an unreached vendor (``is_unreached``)
+    is down too, while a 4xx the helper left alone — a 404, a 403 — is the
+    vendor answering about this request and stays the module type, as at
+    the Farside boundary.
     """
     last_error: Exception | None = None
     for attempt in range(_RETRY_ATTEMPTS):
@@ -87,11 +114,10 @@ def _request(limit: int) -> dict:
             response = requests.get(
                 FNG_URL, params={"limit": limit, "format": "json"}, timeout=REQUEST_TIMEOUT
             )
-            response.raise_for_status()
-            payload = response.json()
+            raise_for_http_status(response, "alternative.me")
+            payload = json_body_or_outage(response, "alternative.me")
             break
-        except (requests.RequestException, ValueError) as e:
-            # ValueError also covers response.json()'s JSONDecodeError subclass.
+        except (requests.RequestException, VendorUnavailableError) as e:
             last_error = e
             if attempt + 1 < _RETRY_ATTEMPTS:
                 logger.warning(
@@ -99,13 +125,22 @@ def _request(limit: int) -> dict:
                 )
                 time.sleep(_RETRY_DELAY_SECONDS)
     else:
-        raise FearGreedError(
-            f"alternative.me unreachable after {_RETRY_ATTEMPTS} attempts: {last_error}"
+        # The cause is quoted through ``failure_account``: an outage type's
+        # own text, a requests exception's status or class only — its
+        # message carries the request URL (#203).
+        down = isinstance(last_error, VendorUnavailableError) or is_unreached(last_error)
+        failure_cls = FearGreedUnavailableError if down else FearGreedError
+        raise failure_cls(
+            f"alternative.me did not answer with data after {_RETRY_ATTEMPTS} attempts "
+            f"({failure_account(last_error)})"
         ) from last_error
 
     # A CDN/WAF error page can decode as valid JSON that is not an object; guard
     # the shape here so it surfaces as this module's typed error rather than a
-    # bare AttributeError from the .get() below.
+    # bare AttributeError from the .get() below. The module type, not the
+    # outage subclass: a body that decodes but is not this contract is what
+    # an upstream schema change looks like too, and that must surface as
+    # structural — the one rule across SoSoValue, Deribit and this boundary.
     if not isinstance(payload, dict):
         raise FearGreedError(
             f"alternative.me returned a JSON {type(payload).__name__}, expected an object"

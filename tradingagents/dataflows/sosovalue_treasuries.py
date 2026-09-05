@@ -35,7 +35,7 @@ Live-verified API facts this module is built on (2026-08-11):
   report discloses that instead of reading absence as inactivity.
 
 The fan-out is capped at ``MAX_COMPANIES`` histories (1 + N requests against
-the shared 20 req/min plan limit), taken in listing order — i.e. the largest
+the shared 10 req/min limit, #215), taken in listing order — i.e. the largest
 holders. Vendor success needs the listing AND at least one company history
 (decision Q3): unlike the ETF module there is no aggregate endpoint, the
 signal lives entirely in the histories, and a report of bare company names
@@ -77,6 +77,7 @@ from urllib.parse import quote
 
 import requests
 
+from .errors import VendorUnavailableError
 from .sosovalue_common import (
     SoSoValueError,
     _cache_dir,
@@ -101,7 +102,7 @@ from .sosovalue_common import (
     raise_all_failed,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal, failure_account
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,9 @@ SUPPORTED_ASSETS = {"BTC"}
 
 # Histories fetched per refresh, taken in listing order — the provider lists
 # by holdings, largest first (live-verified), so this is a top-holders cut.
-# 1 + 15 requests fits a single refresh inside the shared 20 req/min limit.
+# 1 + 15 requests is one window plus six: the shared request budget waits
+# out the window once mid-sweep (the plan page's 20 req/min was measured
+# at 10, #215), which the 24h TTL below makes a once-a-day cost.
 MAX_COMPANIES = 15
 
 # Default trailing window for the activity section. Treasury disclosures are
@@ -147,7 +150,7 @@ MAX_COMPANY_NAME_CHARS = 60
 
 # Cache lifetimes. 24h TTL: disclosures are event-frequency (announcement
 # driven), and the longer interval keeps this module's 16-request refresh
-# from crowding the ETF/macro modules on the shared 20 req/min plan. The
+# from crowding the ETF/macro modules on the shared 10 req/min key. The
 # short TTL re-tries missing histories; stale serves are capped + disclosed.
 CACHE_TTL_HOURS = 24
 # Not the family's 1h: the short TTL re-runs the WHOLE 16-request sweep (there
@@ -541,8 +544,8 @@ def _fetch_one_company(ticker: str, name: str) -> dict | str | None:
     propagate (config breakage must reach the router; a 429 makes the rest
     of the sweep pointless, so the caller drains it), a structural break
     logs at ERROR with a traceback, a transient stays a warning, and a
-    transport failure is re-raised after logging so the caller's breaker can
-    count the streak.
+    transport failure or an outage answer (``VendorUnavailableError``, #172)
+    is re-raised after logging so the caller's breaker can count the streak.
     """
     try:
         data = _request(
@@ -559,7 +562,7 @@ def _fetch_one_company(ticker: str, name: str) -> dict | str | None:
             return "empty"
         rows = _parse_purchase_rows(data, ticker)
         return {"name": name, "rows": rows}
-    except (requests.RequestException, SoSoValueError) as e:
+    except (requests.RequestException, VendorUnavailableError, SoSoValueError) as e:
         if isinstance(e, SoSoValueError):
             logger.error(
                 "SoSoValue treasuries %s history failed structurally (coverage "
@@ -575,7 +578,7 @@ def _fetch_one_company(ticker: str, name: str) -> dict | str | None:
                 ticker,
                 e,
             )
-        if isinstance(e, requests.RequestException):
+        if not isinstance(e, SoSoValueError):
             raise
         return None
 
@@ -632,8 +635,8 @@ def _fetch_all() -> dict:
             on_transport=lambda: (
                 f"SoSoValue treasuries returned no usable history for any of the "
                 f"{len(selected)} selected companies; every request this sweep made "
-                f"({sweep.attempted} of {len(selected)}) failed at the transport layer "
-                f"(last: {sweep.last_network})"
+                f"({sweep.attempted} of {len(selected)}) failed to reach the vendor or "
+                f"was answered without data (last: {failure_account(sweep.last_network)})"
             ),
             on_structural=lambda: (
                 f"SoSoValue treasuries returned no usable history for any of the "

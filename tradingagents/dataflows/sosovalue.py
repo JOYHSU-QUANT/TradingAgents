@@ -26,10 +26,10 @@ everything it will serve and filter to ``date <= curr_date`` client-side, like
 the Farside vendor does with its live table.
 
 One refresh is 2 + N requests (aggregate summary, fund list, then one history
-per fund — N is 13 for BTC today) against a 20 req/min plan limit. A single
-asset refresh fits; two assets (or two modules) refreshing in the same minute
-would overrun it, which the shared request budget in ``sosovalue_common``
-(#189) now turns into a wait rather than a 429 — the per-fund failures stay
+per fund — N is 13 for BTC today) against a 10 req/min limit (#215). A single
+asset refresh already overruns one window, as do two modules refreshing in the
+same minute; the shared request budget in ``sosovalue_common`` (#189) turns
+both into a wait rather than a 429 — the per-fund failures stay
 non-fatal for the 429s that reach us anyway (another process on the key):
 the aggregate summary alone decides vendor success, and a partial
 (or absent) issuer breakdown is disclosed in the report rather than failing
@@ -88,6 +88,7 @@ import requests
 # form): this module is the family's public face, and its tests and callers
 # address the key check and the config-breakage type through it even though the
 # shared load skeleton is what raises them now.
+from .errors import VendorUnavailableError
 from .sosovalue_common import (
     SoSoValueError,
     SoSoValueNotConfiguredError as SoSoValueNotConfiguredError,
@@ -627,15 +628,17 @@ def _diff_cum_restatement(cached: dict | None, summary_rows: list[dict]) -> dict
 def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
     """Fetch and parse one fund's history; ``None`` on a non-fatal failure.
 
-    Catches only non-config failures (network, rate limit, contract break):
-    a rejected key (``SoSoValueNotConfiguredError``) matches neither caught
-    type and propagates, so a mid-batch 401 can never be absorbed as a fund
-    failure. A structural break is logged at ERROR with a traceback — the
-    breakdown would otherwise stay silently incomplete refresh after refresh
-    — while a transient failure stays a warning. A transport-level failure
-    and a 429 are logged here like any other transient, then re-raised: the
-    caller's consecutive-failure breaker counts the transport streak, and
-    the caller drains the sweep on the 429 (see ``_fetch_all``).
+    Catches only non-config failures (network, outage, rate limit, contract
+    break): a rejected key (``SoSoValueNotConfiguredError``) matches none of
+    the caught types and propagates, so a mid-batch 401 can never be
+    absorbed as a fund failure. A structural break is logged at ERROR with
+    a traceback — the breakdown would otherwise stay silently incomplete
+    refresh after refresh — while a transient failure stays a warning. A
+    transport-level failure, an outage answer (``VendorUnavailableError``,
+    #172) and a 429 are logged here like any other transient, then
+    re-raised: the caller's consecutive-failure breaker counts the
+    transport streak, and the caller drains the sweep on the 429 (see
+    ``_fetch_all``).
     """
     try:
         rows = _parse_fund_rows(
@@ -643,9 +646,14 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
             ticker,
         )
         return {"name": name, "rows": rows}
-    except (requests.RequestException, SoSoValueRateLimitError, SoSoValueError) as e:
-        # SoSoValueRateLimitError is a VendorRateLimitError, not a
-        # SoSoValueError, so this branch is the structural break only.
+    except (
+        requests.RequestException,
+        VendorUnavailableError,
+        SoSoValueRateLimitError,
+        SoSoValueError,
+    ) as e:
+        # Neither SoSoValueRateLimitError nor the family's unavailable type
+        # is a SoSoValueError, so this branch is the structural break only.
         if isinstance(e, SoSoValueError):
             logger.error(
                 "SoSoValue %s fund %s history failed structurally "
@@ -706,7 +714,12 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
         listing, funds_unusable = _parse_etf_list(
             _request("/etfs", {"symbol": asset, "country_code": COUNTRY_CODE}), asset
         )
-    except (requests.RequestException, SoSoValueRateLimitError, SoSoValueError) as e:
+    except (
+        requests.RequestException,
+        VendorUnavailableError,
+        SoSoValueRateLimitError,
+        SoSoValueError,
+    ) as e:
         # Deliberately NOT the broad VendorError: a rejected key
         # (SoSoValueNotConfiguredError) matches none of these, so config
         # breakage structurally cannot be absorbed as a breakdown failure —
@@ -756,10 +769,11 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
                     len(skipped) - 1,
                 )
                 break
-            except requests.RequestException:
+            except (requests.RequestException, VendorUnavailableError):
                 # Already logged by _fetch_one_fund, which re-raises so this
                 # loop — the only layer that can see a failure streak — can
-                # count it.
+                # count it. An outage answer counts like a transport failure
+                # (#172): a gateway that is down costs the same per fund.
                 funds_failed.append(ticker)
                 consecutive_network += 1
                 if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:

@@ -14,6 +14,7 @@ import requests
 
 from tradingagents.dataflows import fear_greed, interface
 from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.errors import VendorUnavailableError
 
 
 def _ts(date_str: str) -> str:
@@ -210,6 +211,7 @@ class TestRequestWiring:
         response = mock.Mock()
         response.json.return_value = _PAYLOAD
         response.raise_for_status.return_value = None
+        response.status_code = 200
         with mock.patch.object(fear_greed.requests, "get", return_value=response) as get:
             assert fear_greed._request(75) == _PAYLOAD
         _, kwargs = get.call_args
@@ -247,6 +249,7 @@ class TestRequestWiring:
         response = mock.Mock()
         response.json.return_value = _PAYLOAD
         response.raise_for_status.return_value = None
+        response.status_code = 200
         with (
             mock.patch.object(fear_greed.time, "sleep") as sleep,
             mock.patch.object(
@@ -260,15 +263,72 @@ class TestRequestWiring:
         sleep.assert_called_once_with(fear_greed._RETRY_DELAY_SECONDS)
 
     def test_gives_up_after_retry_with_typed_error(self):
+        # An unreached vendor is the outage type (#172) — still a
+        # FearGreedError for every caller written against the module type —
+        # and the message carries the exception's class, never its text,
+        # which quotes the request URL (#203).
         with (
             mock.patch.object(fear_greed.time, "sleep"),
             mock.patch.object(
-                fear_greed.requests, "get", side_effect=requests.RequestException("down")
+                fear_greed.requests,
+                "get",
+                side_effect=requests.ConnectionError(
+                    "HTTPSConnectionPool(host='api.alternative.me'): Max retries exceeded "
+                    "with url: /fng/?limit=30&format=json"
+                ),
             ) as get,
-            pytest.raises(fear_greed.FearGreedError, match="unreachable"),
+            pytest.raises(fear_greed.FearGreedError, match="did not answer with data") as e,
         ):
             fear_greed._request(75)
         assert get.call_count == fear_greed._RETRY_ATTEMPTS
+        assert isinstance(e.value, VendorUnavailableError)
+        assert "url" not in str(e.value)
+        assert "could not be reached: ConnectionError" in str(e.value)
+
+    @pytest.mark.parametrize("status", [500, 503])
+    def test_a_5xx_is_retried_then_raised_as_the_outage_type(self, status):
+        response = mock.Mock()
+        response.status_code = status
+        with (
+            mock.patch.object(fear_greed.time, "sleep") as sleep,
+            mock.patch.object(fear_greed.requests, "get", return_value=response) as get,
+            pytest.raises(fear_greed.FearGreedUnavailableError, match=f"answered HTTP {status}"),
+        ):
+            fear_greed._request(75)
+        assert get.call_count == fear_greed._RETRY_ATTEMPTS
+        assert sleep.call_count == 1
+        response.json.assert_not_called()
+
+    def test_a_non_json_body_is_the_outage_type(self):
+        response = mock.Mock()
+        response.status_code = 200
+        response.raise_for_status.return_value = None
+        response.json.side_effect = ValueError("Expecting value")
+        with (
+            mock.patch.object(fear_greed.time, "sleep"),
+            mock.patch.object(fear_greed.requests, "get", return_value=response),
+            pytest.raises(fear_greed.FearGreedUnavailableError, match="not JSON"),
+        ):
+            fear_greed._request(75)
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_a_4xx_the_boundary_left_alone_is_not_the_outage_type(self, status):
+        # A 4xx the helper leaves alone is the vendor answering about this
+        # request — a 403 refusal included, as at the Farside boundary: the
+        # module type, and the router then treats a fallback's no-data as a
+        # verdict on the symbol.
+        response = mock.Mock()
+        response.status_code = status
+        response.raise_for_status.side_effect = requests.HTTPError(
+            f"{status} Client Error", response=mock.Mock(status_code=status)
+        )
+        with (
+            mock.patch.object(fear_greed.time, "sleep"),
+            mock.patch.object(fear_greed.requests, "get", return_value=response),
+            pytest.raises(fear_greed.FearGreedError, match=f"answered HTTP {status}") as e,
+        ):
+            fear_greed._request(75)
+        assert not isinstance(e.value, VendorUnavailableError)
 
     def test_non_object_payload_raises_typed_error(self):
         # A CDN/WAF error page can decode as valid JSON that is not an object;
@@ -276,11 +336,15 @@ class TestRequestWiring:
         response = mock.Mock()
         response.json.return_value = [1, 2, 3]
         response.raise_for_status.return_value = None
+        response.status_code = 200
         with (
             mock.patch.object(fear_greed.requests, "get", return_value=response),
-            pytest.raises(fear_greed.FearGreedError, match="expected an object"),
+            pytest.raises(fear_greed.FearGreedError, match="expected an object") as e,
         ):
             fear_greed._request(75)
+        # Decoded but not this contract is what a schema change looks like:
+        # structural, not the outage subclass — the one rule across boundaries.
+        assert not isinstance(e.value, VendorUnavailableError)
 
 
 @pytest.mark.unit

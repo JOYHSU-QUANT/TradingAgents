@@ -5,7 +5,9 @@ import re
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from .errors import VendorUnavailableError
+import requests
+
+from .errors import UnsupportedIndicatorError, VendorError, VendorUnavailableError
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -623,6 +625,108 @@ def http_status(exc: BaseException) -> int | None:
     asking "did the vendor answer a status?" must hear no.
     """
     return getattr(getattr(exc, "response", None), "status_code", None) or None
+
+
+def is_unreached(e: BaseException) -> bool:
+    """Whether an untyped failure means the vendor was never reached at all.
+
+    A transport exception with no status to read: every ``requests`` and
+    curl_cffi failure is an ``OSError`` (curl_cffi attaches a status-0
+    response to its transport failures, which ``http_status`` reads as
+    none). The ``ValueError``-flavoured requests exceptions (MissingSchema,
+    InvalidURL, a JSONDecodeError) are a bug or an answer, and a
+    ``requests.HTTPError`` is an answer even with its response missing.
+    ``TooManyRedirects`` and ``RetryError`` read as unreached too —
+    ``RequestException``s with no ``.response`` although the vendor did
+    answer (#172): a loose reading, harmless to every verdict, so no third
+    class is drawn for them. The one definition behind
+    ``is_vendor_outage``'s unreached branch, ``generic_failure_words``'
+    "could not be reached", and the boundaries that classify their own
+    transport failures (Farside, Fear & Greed, SoSoValue's cache lane).
+    """
+    return (
+        isinstance(e, OSError)
+        and not isinstance(e, (ValueError, requests.HTTPError))
+        and http_status(e) is None
+    )
+
+
+def is_vendor_outage(e: BaseException) -> bool:
+    """Whether an untyped failure means the vendor was DOWN, not answering about the request.
+
+    The one predicate behind the router's no-data verdict — a fallback's
+    "no data" is unconfirmed when a vendor in the chain was down (#142).
+    Judged by the status the exception carries, never by its class: an
+    unreached vendor (``is_unreached``) is down, and an answered status can
+    say as much — a 5xx, or a 401/403 refusing this client (what the
+    yfinance window lets out raw for exactly that reason). Any other
+    status is the vendor answering about this request (the 404 a boundary
+    leaves alone), as is a ``requests.HTTPError`` with no status to read.
+    A typed ``VendorError`` is never judged here — its type already says
+    what it is — so it reads as ``False``. The boundaries that classify
+    their own transport failures use ``is_unreached`` rather than this:
+    they type a 5xx themselves through ``raise_for_http_status``, and a
+    4xx they left alone — Farside's Cloudflare 403 — is by their decision
+    the vendor answering, not an outage (#170).
+    """
+    if is_unreached(e):
+        return True
+    if not isinstance(e, OSError) or isinstance(e, ValueError):
+        return False
+    status = http_status(e)
+    return status is not None and (status >= 500 or status in (401, 403))
+
+
+def generic_failure_words(e: BaseException) -> str:
+    """The words for an untyped vendor failure, by status and class — never its text.
+
+    One vocabulary for every slot the model reads — the router's no-data
+    outage clause and optional parenthesis, and the typed messages the
+    boundaries that own their transport handling build when a request
+    fails below their own taxonomy — so one 503 reads "answered HTTP 503"
+    everywhere rather than one site saying ``HTTPError: HTTP 503``. The
+    status first, read off the exception the library-neutral way
+    (``http_status``): a 401/403 is the vendor refusing this client, any
+    other status is its answer; no status and the wire (``is_unreached``)
+    is the vendor not reached; anything else — a library bug — is its
+    class name. Never the message: a ``requests`` message quotes the
+    request URL, API key included (#171). Which of these count as an
+    OUTAGE is ``is_vendor_outage``'s decision, not this function's.
+    """
+    status = http_status(e)
+    if status is not None:
+        refused = ", refusing this client" if status in (401, 403) else ""
+        return f"answered HTTP {status}{refused}"
+    if is_unreached(e):
+        return f"could not be reached: {type(e).__name__}"
+    return type(e).__name__
+
+
+def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS) -> str:
+    """The words a failed vendor call contributes to a sentinel the model reads.
+
+    Written into two slots of ``route_to_vendor`` — the optional category's
+    ``DATA_UNAVAILABLE`` parenthesis and the no-data sentinel's unconfirmed
+    clause — and by the boundaries that wrap a lower failure into a typed
+    message of their own (#203). A typed vendor error's message was
+    authored at the boundary, so it rides along — flattened and capped,
+    because not every boundary caps what it quotes (yfinance quotes the
+    library's exception, decoded error body included, #172); a remedy a
+    boundary appends after the vendor's text is the operator's, in the
+    log. So would the caller's own indicator mistake, whose message is the
+    remedy, should an optional category ever compute one. Anything else is
+    untyped and contributes ``generic_failure_words`` — never its text: a
+    ``requests`` message quotes the request URL, API key included (#171).
+    The caller's warning log has the full message either way. ``limit`` is
+    the cap on a typed message: the router's slots take the default; a
+    boundary wrapping a typed cause into a message the router will cap
+    again passes ``None``, so the cause's tail — a sweep verdict's
+    ``(last: ...)`` — survives into the boundary's own log line.
+    """
+    if isinstance(e, (VendorError, UnsupportedIndicatorError)):
+        # A typed error raised with no message would render as "()".
+        return sanitize_untrusted(e, limit=limit) or type(e).__name__
+    return generic_failure_words(e)
 
 
 def raise_for_http_status(response, vendor: str) -> None:

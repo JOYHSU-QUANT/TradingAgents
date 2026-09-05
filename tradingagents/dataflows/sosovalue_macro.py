@@ -34,7 +34,7 @@ Live-verified API facts this module is built on (2026-08-11):
 Importance filtering is a curated whitelist (``TRACKED_EVENTS``, exact
 live-verified names): the API has no importance field, so the whitelist IS the
 importance filter, and it bounds the fan-out to 1 + len(TRACKED_EVENTS)
-requests per refresh against the shared 20 req/min plan limit. Calendar names
+requests per refresh against the shared 10 req/min limit (#215). Calendar names
 outside the whitelist still appear in the scheduled section as name-only lines
 (zero extra requests), so coverage beyond the whitelist stays visible even
 though it carries no figures.
@@ -96,6 +96,7 @@ from urllib.parse import quote
 
 import requests
 
+from .errors import VendorUnavailableError
 from .sosovalue_common import (
     SoSoValueError,
     _cache_dir,
@@ -116,7 +117,7 @@ from .sosovalue_common import (
     load_rolling_snapshot,
     raise_all_failed,
 )
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal, failure_account
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +238,7 @@ MAX_ROWS = 40
 # and stale serves are capped and disclosed.
 #
 # 5h, deliberately NOT the ETF module's 6h: the three SoSoValue modules share
-# one 20 req/min key, and this module's refresh is 1 + len(TRACKED_EVENTS)
+# one 10 req/min key, and this module's refresh is 1 + len(TRACKED_EVENTS)
 # requests while the ETF module's is ~15. Equal TTLs make the two caches
 # expire together, so a single analyst turn that touches both fires ~25
 # requests inside one minute and whichever runs second takes a 429 — the
@@ -740,8 +741,9 @@ def _fetch_one_event(name: str) -> list[dict] | str | None:
     breakage must reach the router even mid-batch, the 429 because the
     per-minute quota makes the rest of the sweep pointless (the caller drains
     it). A structural break is logged at ERROR with a traceback, a transient
-    stays a warning, and a transport-level failure is re-raised after logging
-    so the caller's consecutive-failure breaker can count the streak.
+    stays a warning, and a transport-level failure or an outage answer
+    (``VendorUnavailableError``, #172) is re-raised after logging so the
+    caller's consecutive-failure breaker can count the streak.
     """
     try:
         data = _request(f"/macro/events/{quote(name, safe='')}/history", {"limit": HISTORY_LIMIT})
@@ -754,7 +756,7 @@ def _fetch_one_event(name: str) -> list[dict] | str | None:
             )
             return "unknown"
         return _parse_event_rows(data, name)
-    except (requests.RequestException, SoSoValueError) as e:
+    except (requests.RequestException, VendorUnavailableError, SoSoValueError) as e:
         if isinstance(e, SoSoValueError):
             logger.error(
                 "SoSoValue macro event %r history failed structurally (its rows "
@@ -771,7 +773,7 @@ def _fetch_one_event(name: str) -> list[dict] | str | None:
                 name,
                 e,
             )
-        if isinstance(e, requests.RequestException):
+        if not isinstance(e, SoSoValueError):
             raise
         return None
 
@@ -830,8 +832,8 @@ def _fetch_all() -> dict:
             on_transport=lambda: (
                 f"SoSoValue macro: no usable history for any of the "
                 f"{len(TRACKED_EVENTS)} tracked events; every request this sweep made "
-                f"({sweep.attempted} of {len(TRACKED_EVENTS)}) failed at the transport layer "
-                f"(last: {sweep.last_network})"
+                f"({sweep.attempted} of {len(TRACKED_EVENTS)}) failed to reach the vendor or "
+                f"was answered without data (last: {failure_account(sweep.last_network)})"
             ),
             on_structural=lambda: (
                 f"SoSoValue macro: no usable history for any of the "

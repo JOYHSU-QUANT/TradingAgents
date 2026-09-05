@@ -8,7 +8,7 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
     VendorError
     ├── NoMarketDataError          no usable rows (empty result OR stale data)
     ├── VendorRateLimitError       transient throttle -> skip to next vendor
-    ├── VendorUnavailableError     answered, but not with data -> next vendor, no traceback
+    ├── VendorUnavailableError     down: an outage page, or unreachable -> next vendor, no traceback
     └── VendorNotConfiguredError   missing API key/config -> vendor unavailable
 
 The number of types is the number of distinct router reactions, not the number
@@ -82,7 +82,7 @@ class VendorRateLimitError(VendorError):
 
 
 class VendorUnavailableError(VendorError):
-    """A vendor answered, but with something that is not data.
+    """A vendor was down: it answered with something that is not data, or not at all.
 
     The outage page or the unparsable body a scraper meets when the vendor is
     down or refusing this client. yfinance parses the body before it looks at
@@ -100,11 +100,20 @@ class VendorUnavailableError(VendorError):
     map a 5xx (and, where every data answer is JSON, a non-JSON body) to
     this type through the shared ``utils.raise_for_http_status`` /
     ``utils.json_body_or_outage``, so one real event — a vendor down — is
-    one router reaction across those (#142). SoSoValue, Deribit and Fear &
-    Greed classify their statuses into types of their own and still reach
-    the router's generic lane. The router remembers this type past the
-    chain: a fallback's "no data" after it is reported as unconfirmed by the
-    vendor that was down, not as the symbol being invalid.
+    one router reaction across those (#142). The boundaries that own their
+    transport handling — Deribit's retry loop, Fear & Greed's, Farside's
+    and SoSoValue's cache lanes, SoSoValue's own status check — raise it
+    themselves for the same events, a request that could not be reached
+    included: the router's generic lane already reads an unreached vendor
+    as down (``utils.is_vendor_outage``), and a boundary that retries or
+    serves stale first must not downgrade that verdict to a bug on the way
+    out (#172). Deribit's, Fear & Greed's and Farside's are subclasses of
+    their module errors too, so every ``except`` and caller written against
+    those keeps working; SoSoValue's is not a ``SoSoValueError``, because
+    that family reads its module error as structural breakage. The router remembers
+    this type past the chain: a fallback's "no data" after it is reported
+    as unconfirmed by the vendor that was down, not as the symbol being
+    invalid.
     """
 
 

@@ -333,6 +333,11 @@ completion 上限（`engine.max_completion_tokens`，預設 8192）綁到時供�
 `the decision completion was truncated: N output tokens against a cap of C`——處置是調大
 `engine.max_completion_tokens`（換 thinking 模型尤其會踩到，上限含 reasoning tokens），
 **不是**去稽核 prompt 契約。JSON 區塊倖存、只有後面的說明被砍時照常接受，只留一行 WARNING。
+決策 completion 綁到上限、但引擎**隨後**才失敗（例如尾端的 `process_signal` 呼叫逾時、
+回傳形狀壞掉）時沒有 parse 可判，那條走 §3.1 ladder 記成 `api_failed`：log 有一行 ERROR
+`… and the engine run then failed before the answer could be parsed`，列上的 `error_message`
+尾端也帶 `(decision completion truncated: N output tokens against cap C)`——看到這個後綴就是
+cap 的問題，不是那個 timeout。
 分析師／辯論段被砍不 fail-close（品質問題不是契約問題），每筆一行 WARNING
 `completion truncated in <node>`。每次引擎跑完都有一行 INFO
 `completion usage: N call(s), T output tokens total, cap C; truncated: …`，並在 payload

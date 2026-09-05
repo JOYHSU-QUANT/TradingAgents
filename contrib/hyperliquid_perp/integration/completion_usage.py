@@ -280,18 +280,22 @@ def log_decision_truncation(call: CompletionCall, parsed: ParsedDecision, *, cap
         )
 
 
-def log_unparsed_decision_truncation(call: CompletionCall | None, *, cap: int | None) -> None:
+def log_unparsed_decision_truncation(call: CompletionCall | None, *, cap: int | None) -> str:
     """The cap bound on the decision call, and the run then failed before parsing.
 
     ``report_usage`` leaves the decision node to the post-parse verdict; when
     the run raises after that completion (the engine's trailing
     ``process_signal`` call timing out, say) or returns an unusable shape, no
     parse happens and the only trace would be a word in the INFO list. Say it
-    outright — the cap bound whatever the run did next. No-op when ``call`` is
-    ``None`` (the node never completed) or was not truncated.
+    outright — the cap bound whatever the run did next — and hand the caller a
+    note to append to the failure it is about to raise, so the ``api_failed``
+    row's ``error_message`` (the RUNBOOK's free-text discriminator for that
+    status) carries the fact too, not only the log. Returns ``""`` and logs
+    nothing when ``call`` is ``None`` (the node never completed) or was not
+    truncated.
     """
     if call is None or not call.truncated:
-        return
+        return ""
     logger.error(
         "the decision completion was truncated (%s output tokens against a cap of %s, "
         "model %s) and the engine run then failed before the answer could be parsed; "
@@ -300,6 +304,7 @@ def log_unparsed_decision_truncation(call: CompletionCall | None, *, cap: int | 
         cap,
         call.model,
     )
+    return f" (decision completion truncated: {call.output_tokens} output tokens against cap {cap})"
 
 
 def _call_label(call: CompletionCall) -> str:

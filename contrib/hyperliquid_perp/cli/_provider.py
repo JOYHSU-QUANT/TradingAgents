@@ -451,8 +451,10 @@ class _EngineDecisionProvider:
         try:
             propagated = graph.propagate(coin, trade_date, asset_type="crypto")
         except Exception as exc:  # noqa: BLE001 — engine-run failures are external (§3.1)
-            log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
-            raise RetryableDecisionError(_classify_engine_error(exc), str(exc)) from exc
+            # The api_failed row this becomes carries the cap fact in its
+            # error_message, beside the failure that ended the run.
+            note = log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
+            raise RetryableDecisionError(_classify_engine_error(exc), str(exc) + note) from exc
         finally:
             # Paid for whether or not a decision came back: an engine run that
             # raised after ten completions still spent them, so the usage line
@@ -470,10 +472,10 @@ class _EngineDecisionProvider:
         ):
             # A drifted return contract is indistinguishable from a broken
             # response — retryable server_error, and api_failed after 3 tries.
-            log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
+            note = log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
             raise RetryableDecisionError(
                 "server_error",
-                f"engine.propagate returned an unexpected shape ({type(propagated).__name__})",
+                f"engine.propagate returned an unexpected shape ({type(propagated).__name__}){note}",
             )
         # The decision completion's own stop reason decides ONE verdict: a
         # missing target JSON under a bound cap is recorded as truncated_output,

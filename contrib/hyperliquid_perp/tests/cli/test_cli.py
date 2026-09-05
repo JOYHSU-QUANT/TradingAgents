@@ -408,13 +408,21 @@ def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, 
     )
     with (
         caplog.at_level(logging.INFO, logger=_USAGE_LOGGER),
-        pytest.raises(RetryableDecisionError),
+        pytest.raises(RetryableDecisionError) as exc_info,
     ):
         provider.request_decision(_decision_input())
     (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert "the engine run then failed before the answer could be parsed" in error
     assert "4096 output tokens against a cap of 4096" in error
     assert "the cap bound regardless" in error
+    # The api_failed row this becomes says it too: error_message is the
+    # RUNBOOK's free-text discriminator for that status, and the log alone
+    # would leave the DB row reading as a plain timeout.
+    assert exc_info.value.error_type == "timeout"
+    assert exc_info.value.message == (
+        "signal processing timed out"
+        " (decision completion truncated: 4096 output tokens against cap 4096)"
+    )
 
 
 def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch, caplog):
@@ -446,6 +454,9 @@ def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch
     ):
         provider.request_decision(_decision_input())
     assert exc_info.value.error_type == "server_error"
+    assert exc_info.value.message.endswith(
+        " (decision completion truncated: 4096 output tokens against cap 4096)"
+    )
     (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert "the engine run then failed before the answer could be parsed" in error
 

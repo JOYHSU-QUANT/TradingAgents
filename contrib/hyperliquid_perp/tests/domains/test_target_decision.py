@@ -13,6 +13,8 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
+    INVALID_OUTPUT,
+    TRUNCATED_OUTPUT,
     DecisionConfig,
     DecisionMode,
     ParsedDecision,
@@ -338,6 +340,54 @@ def test_non_string_output_fails_closed():
     parsed = parse_target_decision(None, _CFG)
     _assert_fail_closed(parsed, "invalid_output")
     assert parsed.raw_response == ""
+
+
+# --------------------------------------------------------------------------
+# Truncation (issue #182): the cap, not the model, took the JSON away
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Rationale first... then the block:\n```json\n{\"decision_mode\": \"set_tar",  # cut mid-JSON
+        "Rationale first, and the answer never reached the block.",  # cut before it
+        "",  # cut so early nothing came back
+    ],
+)
+def test_truncated_no_json_is_recorded_as_truncated_output(raw):
+    # Same fail-closed shape as invalid_output, different machine tag: the
+    # operator reading ai_outputs.risk_reason is sent to the cap, not the prompt.
+    parsed = parse_target_decision(raw, _CFG, truncated=True)
+    _assert_fail_closed(parsed, TRUNCATED_OUTPUT)
+    assert TRUNCATED_OUTPUT != INVALID_OUTPUT
+    # Discriminating half: without the flag the SAME text is plain invalid_output.
+    _assert_fail_closed(parse_target_decision(raw, _CFG), INVALID_OUTPUT)
+
+
+@pytest.mark.parametrize("drifted", [None, {"chunks": ["not", "text"]}, ["a", "list"]])
+def test_a_non_str_output_is_never_blamed_on_the_cap(drifted):
+    # A cap shortens text; it cannot change the engine's return TYPE. A non-str
+    # under a bound cap is schema drift and keeps the drift tag, or the operator
+    # raises the cap and the next cycle fails identically.
+    _assert_fail_closed(parse_target_decision(drifted, _CFG, truncated=True), INVALID_OUTPUT)
+
+
+def test_truncated_flag_relabels_only_the_no_json_class():
+    # A complete block that fails a FIELD rule was not broken by the cap: the
+    # JSON is whole, so the reason stays what the field rule says.
+    payload = _payload()
+    del payload["confidence"]
+    cut_after_block = f"```json\n{json.dumps(payload)}\n```\nand then the rationale was cu"
+    parsed = parse_target_decision(cut_after_block, _CFG, truncated=True)
+    _assert_fail_closed(parsed, "missing_fields")
+
+
+def test_truncated_flag_does_not_reject_a_block_that_survived_the_cut():
+    # The contract was met — the tail prose after the block is what got cut.
+    parsed = parse_target_decision(_text() + "Further commentary that was cu", _CFG, truncated=True)
+    assert parsed.is_valid is True
+    assert parsed.invalid_reason is None
 
 
 def test_non_string_output_preserves_repr_in_raw_response():

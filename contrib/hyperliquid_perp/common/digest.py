@@ -3,8 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from typing import Any
 
-__all__ = ["payload_digest"]
+__all__ = ["json_bytes", "payload_digest"]
+
+
+def json_bytes(obj: Any) -> bytes:
+    """The one spelling of "indented JSON as UTF-8 bytes" the artifacts are written in.
+
+    The input payload (``cli._provider``), its ``.usage.json`` sidecar and the
+    tests that fabricate payload files all write this shape; ``payload_digest``
+    hashes exactly these bytes. One function so an ``indent``/``sort_keys``
+    change for digest stability cannot land on one writer and not the others.
+    """
+    return json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
 
 
 def payload_digest(raw: bytes) -> str:

@@ -416,16 +416,34 @@ def write_payload(path: Path, body) -> tuple[str, str]:
     with its own formula, or wrote in text mode, would pin a reader against
     rows the daemon never writes.
     """
-    from contrib.hyperliquid_perp.common.digest import payload_digest
+    from contrib.hyperliquid_perp.common.digest import json_bytes, payload_digest
 
-    raw = (
-        body
-        if isinstance(body, bytes)
-        else json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
-    )
+    raw = body if isinstance(body, bytes) else json_bytes(body)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
     return str(path), payload_digest(raw)
+
+
+def fake_completion_message(
+    *, finish_reason, output_tokens, model="fake-1", content="…", input_tokens=10
+):
+    """An ``AIMessage`` shaped like the one ``on_llm_end`` sees after langchain_core's
+    metadata merge: stop reason and model in ``response_metadata``, counts in
+    ``usage_metadata``. The test-side half of the provider-slot contract
+    ``tradingagents.llm_clients.completion_metadata`` documents — one builder so
+    the collector tests and the provider tests cannot drift onto different fakes.
+    """
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content=content,
+        response_metadata={"finish_reason": finish_reason, "model_name": model},
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    )
 
 
 def stamp_prompt_regimes(db, regimes, *, run_id="r", mode="paper", symbol="BTC"):

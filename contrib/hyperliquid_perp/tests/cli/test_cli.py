@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import signal
 import sqlite3
@@ -48,6 +49,7 @@ from ..conftest import (
     assert_payload_dir,
     build_store_at,
     doc_text,
+    fake_completion_message,
     identity_latch_rows,
     insert_decision_attempts,
     migrations_up_to,
@@ -196,16 +198,7 @@ def test_request_decision_drives_engine_with_cycle_as_of_not_now(monkeypatch):
     class _FakeGraph:
         def propagate(self, coin, trade_date, asset_type="crypto"):
             captured.update(coin=coin, trade_date=trade_date, asset_type=asset_type)
-            return (
-                {
-                    "final_trade_decision": (
-                        '{"decision_mode": "set_target", "target_side": "long", '
-                        '"requested_target_margin_pct": 1, "confidence": 0.8, '
-                        '"rationale": "r", "key_risks": ["a risk"]}'
-                    )
-                },
-                "signal",
-            )
+            return {"final_trade_decision": _DECISION_JSON}, "signal"
 
     monkeypatch.setattr(tg, "build_graph", lambda **_kw: _FakeGraph())
 
@@ -224,6 +217,372 @@ def test_request_decision_drives_engine_with_cycle_as_of_not_now(monkeypatch):
     assert captured["trade_date"] == "2026-03-15"  # the cycle's as_of date, not today
     assert captured["coin"] == "BTC"
     assert captured["asset_type"] == "crypto"
+
+
+# --------------------------------------------------------------------------
+# request_decision: the completion cap has a name and a measurement (#182)
+# --------------------------------------------------------------------------
+
+_DECISION_JSON = (
+    '{"decision_mode": "set_target", "target_side": "long", '
+    '"requested_target_margin_pct": 1, "confidence": 0.8, '
+    '"rationale": "r", "key_risks": ["a risk"]}'
+)
+_USAGE_LOGGER = "contrib.hyperliquid_perp.integration.completion_usage"
+
+
+def _completion(node, *, finish_reason, output_tokens, model="m"):
+    return (node, finish_reason, output_tokens, model)
+
+
+def _usage_provider(monkeypatch, *, decision_text, completions, cap=4096, raise_from_engine=None):
+    """A provider whose stubbed engine feeds ``completions`` into the collector.
+
+    The stub reaches the collector the way the real engine does — through the
+    ``callbacks`` kwarg ``build_graph`` receives — and drives it with the
+    handler API (start with the node's ``langgraph_node`` metadata, end with an
+    ``LLMResult``), so the test exercises the provider's reading of the
+    collector, not a hand-set attribute.
+    """
+    import uuid
+
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    import contrib.hyperliquid_perp.integration.trading_graph as tg
+    from contrib.hyperliquid_perp.cli import _EngineDecisionProvider
+
+    class _FakeGraph:
+        def __init__(self, callbacks):
+            (self.collector,) = callbacks
+
+        def propagate(self, coin, trade_date, asset_type="crypto"):
+            for node, finish_reason, output_tokens, model in completions:
+                run_id = uuid.uuid4()
+                metadata = {"langgraph_node": node} if node is not None else {}
+                self.collector.on_chat_model_start({}, [[]], run_id=run_id, metadata=metadata)
+                message = fake_completion_message(
+                    finish_reason=finish_reason, output_tokens=output_tokens, model=model
+                )
+                self.collector.on_llm_end(
+                    LLMResult(generations=[[ChatGeneration(message=message)]]), run_id=run_id
+                )
+            if raise_from_engine is not None:
+                raise raise_from_engine
+            return {"final_trade_decision": decision_text}, "signal"
+
+    monkeypatch.setattr(tg, "build_graph", lambda **kw: _FakeGraph(kw["callbacks"]))
+
+    provider = object.__new__(_EngineDecisionProvider)
+    provider._context_text = "ctx"
+    provider._format_text = "fmt"
+    provider._analysts = []
+    provider._engine_config = {"deep_think_llm": "model-x", "max_tokens": cap}
+    provider._decision = DecisionConfig()
+    return provider
+
+
+def _decision_input(as_of=None, **kw):
+    return DecisionInput(context=_perp_ctx(as_of or datetime(2026, 3, 15, tzinfo=timezone.utc)), **kw)
+
+
+def test_request_decision_names_the_cap_when_the_decision_completion_was_cut(monkeypatch, caplog):
+    # The stop reason, not the parse, says what happened: the target JSON is
+    # missing because the cap bound, so the audit tag is truncated_output and
+    # the ERROR points at the config number.
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="Rationale first, then the block:\n```json\n{\"decision_mo",
+        completions=[
+            _completion("Market Analyst", finish_reason="stop", output_tokens=900),
+            _completion("Portfolio Manager", finish_reason="length", output_tokens=4096, model="deep"),
+        ],
+        cap=4096,
+    )
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+
+    assert parsed.is_valid is False
+    assert parsed.invalid_reason == "truncated_output"
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    msg = errors[0].getMessage()
+    assert "the decision completion was truncated" in msg
+    assert "4096 output tokens against a cap of 4096" in msg
+    assert "model deep" in msg
+    assert "fails closed as truncated_output" in msg
+    assert "engine.max_completion_tokens" in msg
+    # The decision lane owns its verdict: no second, analyst-style WARNING for it.
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_request_decision_accepts_a_block_that_survived_the_cut_with_a_warning(monkeypatch, caplog):
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```\nAnd some commentary that was cu",
+        completions=[
+            _completion("Portfolio Manager", finish_reason="length", output_tokens=4096),
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+
+    assert parsed.is_valid is True
+    warnings_ = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings_) == 1
+    assert "target JSON survived the cut" in warnings_[0]
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+def test_a_whole_block_that_fails_a_field_rule_is_not_blamed_on_the_cap(monkeypatch, caplog):
+    # The completion was cut, but the JSON block came through whole and lost a
+    # field: that verdict is the block's own. A WARNING says so; the ERROR that
+    # names the cap as the fix must not fire for a failure the cap did not cause.
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=(
+            '```json\n{"decision_mode": "set_target", "target_side": "long", '
+            '"requested_target_margin_pct": 1, "rationale": "r", "key_risks": ["a risk"]}\n```\n'
+            "and the rationale was cu"
+        ),
+        completions=[_completion("Portfolio Manager", finish_reason="length", output_tokens=4096)],
+    )
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+
+    assert parsed.invalid_reason == "missing_fields"
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "target JSON block was whole" in warning
+    assert "the verdict missing_fields is the block's own" in warning
+
+
+def test_the_verdict_reads_the_last_decision_completion_not_any_truncated_one(monkeypatch, caplog):
+    # With structured_output on, the Portfolio Manager node makes two calls: a
+    # structured attempt and the free-text fallback whose text is what gets
+    # parsed. A cut ATTEMPT followed by a whole fallback with no JSON is a
+    # contract failure of the fallback, not a cap failure.
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="I decline to produce a JSON block.",
+        completions=[
+            _completion("Portfolio Manager", finish_reason="length", output_tokens=4096),
+            _completion("Portfolio Manager", finish_reason="stop", output_tokens=300),
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+    assert parsed.invalid_reason == "invalid_output"
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+    # The cut attempt is still in the usage line: it was paid for.
+    (info,) = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert info.endswith("truncated: Portfolio Manager")
+
+    # And the reverse order — a whole attempt, then a cut fallback — IS the cap.
+    caplog.clear()
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="Rationale first, then the block:\n```json\n{\"decision_mo",
+        completions=[
+            _completion("Portfolio Manager", finish_reason="stop", output_tokens=300),
+            _completion("Portfolio Manager", finish_reason="length", output_tokens=4096),
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+    assert parsed.invalid_reason == "truncated_output"
+    (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "4096 output tokens against a cap of 4096" in error
+
+
+def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, caplog):
+    # The decision completion hit the cap, then the engine's trailing call
+    # raised: no parse happens, so the post-parse verdict never fires. The cap
+    # is still named outright, not left as a word in the INFO list.
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="",
+        completions=[_completion("Portfolio Manager", finish_reason="length", output_tokens=4096)],
+        raise_from_engine=TimeoutError("signal processing timed out"),
+    )
+    with (
+        caplog.at_level(logging.INFO, logger=_USAGE_LOGGER),
+        pytest.raises(RetryableDecisionError),
+    ):
+        provider.request_decision(_decision_input())
+    (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "the engine run then failed before the answer could be parsed" in error
+    assert "4096 output tokens against a cap of 4096" in error
+    assert "the cap bound regardless" in error
+
+
+def test_request_decision_warns_per_truncated_analyst_and_keeps_the_decision(monkeypatch, caplog):
+    # A cut report is a quality problem, not a contract problem: the cycle
+    # continues, the verdict is untouched, and the WARNING names the node.
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[
+            _completion("Market Analyst", finish_reason="length", output_tokens=4096, model="quick"),
+            _completion("News Analyst", finish_reason="stop", output_tokens=700),
+            _completion(None, finish_reason="length", output_tokens=4096),  # outside the graph
+            _completion("Portfolio Manager", finish_reason="stop", output_tokens=1200),
+        ],
+        cap=4096,
+    )
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+
+    assert parsed.is_valid is True
+    assert parsed.invalid_reason is None
+    warnings_ = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings_) == 2
+    assert (
+        "completion truncated in Market Analyst (model quick): 4096 output tokens against a cap of 4096"
+        in warnings_[0]
+    )
+    assert "completion truncated in (outside the graph)" in warnings_[1]
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+def test_request_decision_logs_one_usage_line_per_run_and_nothing_else_when_nothing_was_cut(
+    monkeypatch, caplog
+):
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[
+            _completion("Market Analyst", finish_reason="stop", output_tokens=800),
+            _completion("Portfolio Manager", finish_reason="stop", output_tokens=500),
+        ],
+        cap=8192,
+    )
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+
+    assert parsed.is_valid is True
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert infos == ["completion usage: 2 call(s), 1300 output tokens total, cap 8192; truncated: none"]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_request_decision_writes_the_usage_sidecar_beside_the_payload(monkeypatch, tmp_path):
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[
+            _completion("Market Analyst", finish_reason="stop", output_tokens=800, model="quick"),
+            _completion("Portfolio Manager", finish_reason="length", output_tokens=4096, model="deep"),
+        ],
+        cap=4096,
+    )
+    provider.request_decision(
+        _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+    )
+
+    sidecar = tmp_path / "BTC-20260315T000000_000000Z.usage.json"
+    assert sidecar.exists()
+    assert payload.read_bytes() == b"{}"  # the hash-locked payload is untouched
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record == {
+        "cap": 4096,
+        "call_count": 2,
+        "total_output_tokens": 4896,
+        "truncated_nodes": ["Portfolio Manager"],
+        "calls": [
+            {
+                "node": "Market Analyst",
+                "model": "quick",
+                "input_tokens": 10,
+                "output_tokens": 800,
+                "reasoning_tokens": None,
+                "stop_reason": "stop",
+                "truncated": False,
+            },
+            {
+                "node": "Portfolio Manager",
+                "model": "deep",
+                "input_tokens": 10,
+                "output_tokens": 4096,
+                "reasoning_tokens": None,
+                "stop_reason": "length",
+                "truncated": True,
+            },
+        ],
+    }
+    # Without a payload path (the one-shot / test harnesses) there is nowhere
+    # to put a sidecar, and nothing is written anywhere.
+    before = sorted(tmp_path.iterdir())
+    provider.request_decision(_decision_input())
+    assert sorted(tmp_path.iterdir()) == before
+
+
+def test_a_sidecar_write_failure_is_logged_and_does_not_cost_the_decision(
+    monkeypatch, tmp_path, caplog
+):
+    from pathlib import Path
+
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[_completion("Portfolio Manager", finish_reason="stop", output_tokens=500)],
+    )
+
+    def _refuse(self, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", _refuse)
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(
+            _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+        )
+
+    assert parsed.is_valid is True
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "completion usage could not be reported; the decision is unaffected" in error.getMessage()
+    assert error.exc_info is not None  # the traceback travels with it
+
+
+def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):
+    # Ten completions that end in a provider exception were still paid for:
+    # the usage line is written on the raising exit too, before the retryable
+    # classification the scheduler ladder relies on.
+    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="",
+        completions=[_completion("Market Analyst", finish_reason="stop", output_tokens=800)],
+        cap=8192,
+        raise_from_engine=TimeoutError("upstream timed out"),
+    )
+    with (
+        caplog.at_level(logging.INFO, logger=_USAGE_LOGGER),
+        pytest.raises(RetryableDecisionError) as exc_info,
+    ):
+        provider.request_decision(_decision_input())
+
+    assert exc_info.value.error_type == "timeout"
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert infos == ["completion usage: 1 call(s), 800 output tokens total, cap 8192; truncated: none"]
+
+
+def test_the_runbook_names_the_truncation_tag_and_the_sidecar():
+    # RUNBOOK §5 and the §7 table are where an operator meets these two
+    # spellings; the code that emits them is the pin's other half.
+    from contrib.hyperliquid_perp.domains.perp.target_decision import TRUNCATED_OUTPUT
+
+    runbook = doc_text("RUNBOOK.md")
+    assert f"`risk_reason = {TRUNCATED_OUTPUT}`" in runbook
+    assert "the decision completion was truncated" in runbook
+    assert "completion truncated in <node>" in runbook
+    assert "completion usage:" in runbook
+    assert "`<payload>.usage.json`" in runbook
 
 
 def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypatch):

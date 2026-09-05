@@ -57,10 +57,11 @@ def _stub_engine_base(monkeypatch):
     inside build_graph resolves without touching the real package."""
 
     class _StubBase:
-        def __init__(self, *, selected_analysts, debug, config):
+        def __init__(self, *, selected_analysts, debug, config, callbacks=None):
             self.selected_analysts = selected_analysts
             self.debug = debug
             self.config = config
+            self.callbacks = callbacks
 
         def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
             return f"BASE[{ticker}/{asset_type}]"
@@ -95,3 +96,20 @@ def test_build_graph_wires_context_and_format_into_resolution(monkeypatch):
     assert resolved.startswith("BASE[BTC/crypto]")
     assert "## Perpetual market context\nfunding z 1.4" in resolved
     assert resolved.endswith("## Required final decision output format\nreturn JSON")
+
+
+def test_build_graph_forwards_callbacks_to_the_base_constructor(monkeypatch):
+    # Issue #182: the callback list is the only seam through which stop reasons
+    # and token usage leave the engine. Dropping the kwarg here would silently
+    # blind the truncation signal — every run would look uncapped and healthy.
+    _stub_engine_base(monkeypatch)
+    handler = object()
+
+    graph = build_graph(
+        perp_context_text="", config={}, selected_analysts=["market"], callbacks=[handler]
+    )
+    assert graph.callbacks == [handler]
+    assert graph.callbacks[0] is handler
+
+    # The default attaches nothing (the base treats None as "no handlers").
+    assert build_graph(perp_context_text="", config={}, selected_analysts=["market"]).callbacks is None

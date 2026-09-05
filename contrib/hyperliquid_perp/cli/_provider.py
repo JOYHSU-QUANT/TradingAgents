@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -359,13 +358,13 @@ class _EngineDecisionProvider:
             "context_text": context_text,
             "format_instructions": format_text,
         }
-        from ..common.digest import payload_digest
+        from ..common.digest import json_bytes, payload_digest
 
         # Bytes end to end: the digest is over exactly the bytes the file
         # holds, so a verifier that rehashes the file (the fingerprint
         # backfill, issue #163) agrees with the row on every platform — a
         # text-mode write would let the OS rewrite the newlines in between.
-        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        raw = json_bytes(payload)
         digest = payload_digest(raw)
         # Microsecond-stamped: each retry try builds its own payload, and two
         # tries landing in the same wall-clock second must not overwrite each
@@ -419,15 +418,28 @@ class _EngineDecisionProvider:
         )
 
     def request_decision(self, decision_input):
+        from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
+
         from ..domains.perp.target_decision import parse_target_decision
+        from ..integration.completion_usage import (
+            CompletionUsageCollector,
+            log_decision_truncation,
+            log_unparsed_decision_truncation,
+            report_usage,
+        )
         from ..integration.trading_graph import build_graph
         from ..paper.scheduler import RetryableDecisionError
 
+        # One collector per request (issue #182): the live lane runs this on a
+        # worker thread, and a cycle's completions must not mix with another's.
+        usage = CompletionUsageCollector()
+        cap = self._engine_config.get("max_tokens")
         graph = build_graph(
             perp_context_text=self._context_text,
             config=self._engine_config,
             selected_analysts=self._analysts,
             output_format_text=self._format_text,
+            callbacks=[usage],
         )
         coin = decision_input.context.coin
         # Drive the base engine off the cycle's own as_of, not wall-clock now:
@@ -439,7 +451,18 @@ class _EngineDecisionProvider:
         try:
             propagated = graph.propagate(coin, trade_date, asset_type="crypto")
         except Exception as exc:  # noqa: BLE001 — engine-run failures are external (§3.1)
+            log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
             raise RetryableDecisionError(_classify_engine_error(exc), str(exc)) from exc
+        finally:
+            # Paid for whether or not a decision came back: an engine run that
+            # raised after ten completions still spent them, so the usage line
+            # and sidecar are written on both exits. Never raises.
+            report_usage(
+                usage,
+                cap=cap,
+                payload_path=decision_input.input_payload_path,
+                decision_node=PORTFOLIO_MANAGER_NODE,
+            )
         if (
             not isinstance(propagated, (tuple, list))
             or len(propagated) < 2
@@ -447,11 +470,25 @@ class _EngineDecisionProvider:
         ):
             # A drifted return contract is indistinguishable from a broken
             # response — retryable server_error, and api_failed after 3 tries.
+            log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
             raise RetryableDecisionError(
                 "server_error",
                 f"engine.propagate returned an unexpected shape ({type(propagated).__name__})",
             )
-        return parse_target_decision(propagated[0].get("final_trade_decision"), self._decision)
+        # The decision completion's own stop reason decides ONE verdict: a
+        # missing target JSON under a bound cap is recorded as truncated_output,
+        # not invalid_output (issue #182) — the operator audits the cap number,
+        # not the prompt contract. Parse first: a block that survived the cut
+        # met the contract and is accepted as it always was. The LAST decision
+        # completion, because only its text reached final_trade_decision.
+        decision_call = usage.last_call(PORTFOLIO_MANAGER_NODE)
+        truncated = decision_call is not None and decision_call.truncated
+        parsed = parse_target_decision(
+            propagated[0].get("final_trade_decision"), self._decision, truncated=truncated
+        )
+        if truncated:
+            log_decision_truncation(decision_call, parsed, cap=cap)
+        return parsed
 
 
 def _classify_engine_error(exc: Exception) -> str:

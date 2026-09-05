@@ -21,6 +21,7 @@ from tradingagents.agents import (
     create_trader,
 )
 from tradingagents.agents.utils.agent_states import AgentState
+from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
 
 from .analyst_execution import build_analyst_execution_plan
 from .conditional_logic import ConditionalLogic
@@ -92,7 +93,7 @@ class GraphSetup:
         workflow.add_node("Aggressive Analyst", aggressive_analyst)
         workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
-        workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        workflow.add_node(PORTFOLIO_MANAGER_NODE, portfolio_manager_node)
 
         # Define edges
         # Start with the first analyst
@@ -142,7 +143,7 @@ class GraphSetup:
             self.conditional_logic.should_continue_risk_analysis,
             {
                 "Conservative Analyst": "Conservative Analyst",
-                "Portfolio Manager": "Portfolio Manager",
+                PORTFOLIO_MANAGER_NODE: PORTFOLIO_MANAGER_NODE,
             },
         )
         workflow.add_conditional_edges(
@@ -150,7 +151,7 @@ class GraphSetup:
             self.conditional_logic.should_continue_risk_analysis,
             {
                 "Neutral Analyst": "Neutral Analyst",
-                "Portfolio Manager": "Portfolio Manager",
+                PORTFOLIO_MANAGER_NODE: PORTFOLIO_MANAGER_NODE,
             },
         )
         workflow.add_conditional_edges(
@@ -158,10 +159,10 @@ class GraphSetup:
             self.conditional_logic.should_continue_risk_analysis,
             {
                 "Aggressive Analyst": "Aggressive Analyst",
-                "Portfolio Manager": "Portfolio Manager",
+                PORTFOLIO_MANAGER_NODE: PORTFOLIO_MANAGER_NODE,
             },
         )
 
-        workflow.add_edge("Portfolio Manager", END)
+        workflow.add_edge(PORTFOLIO_MANAGER_NODE, END)
 
         return workflow

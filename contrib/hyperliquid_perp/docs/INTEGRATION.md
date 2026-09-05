@@ -30,7 +30,7 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 
 | Symbol | 角色 | 我們的用法 |
 |---|---|---|
-| `TradingAgentsGraph(selected_analysts, config, …)` | 建構子 | 子類別化。 |
+| `TradingAgentsGraph(selected_analysts, config, callbacks=…)` | 建構子；`callbacks` 是掛到兩個 LLM client 上的 langchain callback handlers。 | 子類別化。`callbacks` 是每次呼叫的 response metadata（stop reason、token 用量）離開引擎的**唯一** seam（`propagate()` 只回渲染後的文字）：`integration/completion_usage.CompletionUsageCollector` 每次 `request_decision` 掛一個新實例，靠 langgraph 在 run metadata 上蓋的 `langgraph_node` 把每筆 completion 歸到節點；決策節點名稱從 `tradingagents.node_names.PORTFOLIO_MANAGER_NODE` 取（graph 自己也從那裡註冊節點），不手抄（issue #182）。 |
 | `.resolve_instrument_context(ticker, asset_type) -> str` | 建立注入每個 agent 的 per-instrument context 字串。 | **Override 點**——附加 perp snapshot。 |
 | `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——加即時 HL tool（不在 Phase 3 第一版範圍，見 phase3-spec §25）。 |
 | `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |

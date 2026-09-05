@@ -47,12 +47,19 @@ def build_graph(
     selected_analysts: list[str],
     debug: bool = False,
     output_format_text: str = "",
+    callbacks: list[Any] | None = None,
 ) -> TradingAgentsGraph:
     """Construct a :class:`HyperliquidTradingGraph`.
 
     Defined as a factory so the ``tradingagents`` import — and therefore the
     ``langchain``/``langgraph`` dependency tree — is only pulled in when an
     actual engine run is requested, keeping ``--context-only`` import-light.
+
+    ``callbacks`` are langchain callback handlers the base graph attaches to
+    both LLM clients (issue #182): the one seam through which per-call
+    response metadata — stop reason, token usage — leaves the engine, since
+    ``propagate()`` returns only the rendered text. Passed through untouched;
+    ``None`` (the default) attaches nothing.
     """
     from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -86,6 +93,7 @@ def build_graph(
         selected_analysts=selected_analysts,
         debug=debug,
         config=config,
+        callbacks=callbacks,
         perp_context_text=perp_context_text,
         output_format_text=output_format_text,
     )

@@ -236,11 +236,30 @@ def run_engine(config: dict, coin: str) -> int:
         # "unexpected error" bucket; see _build_engine_config for the causes.
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    # Imported here, not at module top: the collector carries langchain_core,
+    # and ``--context-only`` must stay importable without the engine tree.
+    from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
+
+    from .integration.completion_usage import (
+        CompletionUsageCollector,
+        log_decision_truncation,
+        log_unparsed_decision_truncation,
+        report_usage,
+    )
+
+    # The same truncation signal the daemon lanes record (issue #182): an
+    # operator reproducing a paper ``truncated_output`` cycle with this
+    # one-shot must see the same tag and the same usage line, or the two
+    # lanes disagree about one physical condition. No payload file here, so
+    # no ``.usage.json`` sidecar — the INFO line is the record.
+    usage = CompletionUsageCollector()
+    cap = engine_config.get("max_tokens")
     graph = build_graph(
         perp_context_text=ctx_text,
         config=engine_config,
         selected_analysts=selected_analysts,
         output_format_text=output_format_text,
+        callbacks=[usage],
     )
 
     trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -259,13 +278,17 @@ def run_engine(config: dict, coin: str) -> int:
         # it fall through to main's last-resort handler as an opaque exit-2 "unexpected
         # error". The full traceback is still logged for a post-mortem.
         logger.exception("engine.propagate failed for %s", coin)
+        log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
         print(
             f"error: engine run failed ({type(exc).__name__}: {exc}) — check the LLM "
             "provider status/credentials and retry. No decision was produced or logged.",
             file=sys.stderr,
         )
         return 1
+    finally:
+        report_usage(usage, cap=cap, payload_path=None, decision_node=PORTFOLIO_MANAGER_NODE)
     if not isinstance(propagated, (tuple, list)) or len(propagated) < 2:
+        log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
         # ``propagate`` is the seam to the unmodified engine — the most likely place
         # for a version drift to change the return contract. A bad shape would
         # otherwise blow up as an opaque unpack ``ValueError`` in the last-resort
@@ -279,6 +302,7 @@ def run_engine(config: dict, coin: str) -> int:
         return 1
     final_state, _signal = propagated[0], propagated[1]
     if not isinstance(final_state, dict):
+        log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
         # The parse seam reads ``final_state`` as a dict; a non-dict (e.g.
         # ``None`` from an engine crash) would otherwise surface as an opaque
         # ``AttributeError`` in the last-resort handler. Fail clean instead.
@@ -293,7 +317,13 @@ def run_engine(config: dict, coin: str) -> int:
     # final_trade_decision. Any invalid output — no JSON, bad schema, illegal
     # cross-field combination — fails closed to maintain_current inside the
     # parse seam; the raw response is preserved for the audit record either way.
-    parsed = parse_target_decision(final_state.get("final_trade_decision"), decision_cfg)
+    decision_call = usage.last_call(PORTFOLIO_MANAGER_NODE)
+    truncated = decision_call is not None and decision_call.truncated
+    parsed = parse_target_decision(
+        final_state.get("final_trade_decision"), decision_cfg, truncated=truncated
+    )
+    if truncated:
+        log_decision_truncation(decision_call, parsed, cap=cap)
     if not parsed.is_valid:
         # Repeated contract failures are the model-drift signal alerting must
         # see: the cycle still completes fail-closed (gate + audit record

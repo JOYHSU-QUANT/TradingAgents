@@ -108,6 +108,25 @@ def test_env_completion_cap_wins_over_the_cli_default():
     assert cfg["max_tokens"] == "4096"
 
 
+@pytest.mark.parametrize(
+    "env_value,expected_source",
+    [(None, "CLI default"), ("4096", "from TRADINGAGENTS_MAX_TOKENS")],
+)
+def test_cli_announces_the_cap_and_its_source(monkeypatch, env_value, expected_source):
+    # A cap that binds is invisible downstream (the answer just comes back
+    # truncated), so the number and where it came from must be on screen.
+    if env_value is None:
+        monkeypatch.delenv("TRADINGAGENTS_MAX_TOKENS", raising=False)
+    else:
+        monkeypatch.setenv("TRADINGAGENTS_MAX_TOKENS", env_value)
+    cap = env_value or DEFAULT_MAX_TOKENS
+    with mock.patch.object(m, "console") as console:
+        m._announce_completion_cap({"max_tokens": cap})
+    (line,), _ = console.print.call_args
+    assert f"{cap} tokens" in line
+    assert expected_source in line
+
+
 def test_the_readme_and_env_example_quote_the_cli_cap_default():
     # Derived, not retyped — the drift lock the perp side keeps for SETUP.md.
     assert f"default of {DEFAULT_MAX_TOKENS}" in repo_text("README.md")

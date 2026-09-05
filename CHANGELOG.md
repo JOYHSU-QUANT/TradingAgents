@@ -39,7 +39,9 @@ Breaking changes within the 0.x line are called out explicitly.
   library caller on a gateway provider is warned once** (issue #183; the
   #177 tail). ``cli/main.py`` fills ``DEFAULT_MAX_TOKENS`` (8192 — the perp
   bridge's number; a contrib test pins the two equal) into ``max_tokens``
-  when neither the config nor ``TRADINGAGENTS_MAX_TOKENS`` set one. The
+  when neither the config nor ``TRADINGAGENTS_MAX_TOKENS`` set one, and
+  prints the cap and its source before the run (a cap that binds is
+  otherwise invisible — the answer just comes back truncated). The
   library default ``DEFAULT_CONFIG["max_tokens"]`` stays ``None`` so
   importing the package changes nobody's requests; instead
   ``TradingAgentsGraph`` emits a ``RuntimeWarning`` (attributed to the

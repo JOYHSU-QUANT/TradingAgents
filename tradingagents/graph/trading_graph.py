@@ -31,7 +31,7 @@ from tradingagents.agents.utils.agent_utils import (
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import safe_ticker_component
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, DEFAULT_MAX_TOKENS
 from tradingagents.llm_clients import create_llm_client, is_gateway_provider
 from tradingagents.reporting import write_report_tree
 
@@ -174,11 +174,13 @@ class TradingAgentsGraph:
                 # truncating every completion with nothing raised anywhere.
                 if isinstance(max_tokens, bool):
                     raise ValueError
-                # A programmatic 4096.7 must not int()-truncate to a cap the
-                # caller never asked for; the string "4096.5" already fails.
-                if isinstance(max_tokens, float) and not max_tokens.is_integer():
-                    raise ValueError
                 parsed = int(max_tokens)
+                # A programmatic 4096.7 (or Decimal / Fraction) must not
+                # int()-truncate to a cap the caller never asked for; compared
+                # by value, not type, so every numeric shape is covered. A
+                # numeric string was already rejected by int() above.
+                if not isinstance(max_tokens, str) and parsed != max_tokens:
+                    raise ValueError
                 if parsed <= 0:
                     raise ValueError
             except (TypeError, ValueError):
@@ -197,11 +199,16 @@ class TradingAgentsGraph:
             # at the caller's TradingAgentsGraph(...) line (this method is
             # only called from __init__), which under Python's default
             # warning filter also means once per construction site.
+            # "routes to an upstream this process cannot see", not "is a
+            # gateway": openai_compatible carries the flag too, and for a
+            # local vLLM the second phrasing would be false.
             warnings.warn(
-                f"llm_provider '{provider}' is a gateway and no 'max_tokens' "
-                "cap is set: some upstreams treat a missing cap as the model's "
-                "full context and reject every call (issue #177). Set "
-                "config['max_tokens'] or TRADINGAGENTS_MAX_TOKENS.",
+                f"llm_provider '{provider}' routes to an upstream this process "
+                "cannot see, and no 'max_tokens' cap is set: some upstreams "
+                "treat a missing cap as the model's full context and reject "
+                "every call (issue #177). Set config['max_tokens'] or "
+                f"TRADINGAGENTS_MAX_TOKENS, e.g. {DEFAULT_MAX_TOKENS} "
+                "(tradingagents.default_config.DEFAULT_MAX_TOKENS).",
                 RuntimeWarning,
                 stacklevel=3,
             )

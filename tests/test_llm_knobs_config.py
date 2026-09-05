@@ -17,12 +17,13 @@ warning pinned at the bottom instead (#183).
 
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 
-from tradingagents.default_config import DEFAULT_CONFIG, _apply_env_overrides
+from tradingagents.default_config import DEFAULT_CONFIG, DEFAULT_MAX_TOKENS, _apply_env_overrides
 from tradingagents.llm_clients.base_client import _COMMON_PASSTHROUGH_KWARGS
 from tradingagents.llm_clients.factory import create_llm_client
 
@@ -217,13 +218,16 @@ class TestProviderKwargs:
     def test_empty_string_omitted(self, knob):
         assert knob.key not in _provider_kwargs(**{knob.key: ""})
 
-    @pytest.mark.parametrize("bad", [0, -1, "0", "-1", "8k", "4096.5", 4096.7, True])
+    @pytest.mark.parametrize(
+        "bad", [0, -1, "0", "-1", "8k", "4096.5", 4096.7, Decimal("4096.5"), True]
+    )
     def test_non_positive_and_junk_max_tokens_rejected_naming_the_key(self, bad):
         # Forwarding 0 or a negative cap is a deterministic provider 400 on
         # every call — the #177 stall shape — and a typo must not surface as
-        # a bare int() ValueError with no key name. A programmatic 4096.7 must
-        # not be silently int()-truncated either. Temperature has no such
-        # gate: 0.0 is a legal value there.
+        # a bare int() ValueError with no key name. A programmatic 4096.7 (or
+        # any non-integral numeric, Decimal included) must not be silently
+        # int()-truncated either. Temperature has no such gate: 0.0 is a legal
+        # value there.
         with pytest.raises(ValueError, match="max_tokens"):
             _provider_kwargs(max_tokens=bad)
 
@@ -247,6 +251,10 @@ class TestGatewayUncappedWarning:
         message = str(ours[0].message)
         assert "'openrouter'" in message
         assert "TRADINGAGENTS_MAX_TOKENS" in message
+        assert str(DEFAULT_MAX_TOKENS) in message  # a value to reach for, not just a knob name
+        # openai_compatible carries the flag too, and a local vLLM is no
+        # gateway — the text must stay true for it.
+        assert "is a gateway" not in message
 
     @pytest.mark.parametrize(
         "provider,max_tokens",

@@ -999,11 +999,30 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     return config
 
 
+def _announce_completion_cap(config: dict) -> None:
+    """Print the completion cap that will apply, and where it came from.
+
+    A cap that binds is invisible downstream — the answer comes back truncated
+    with no error to point at (the perp bridge logs its cap for the same
+    reason) — so the number and its source must be on screen before the run.
+    The CLI only ever has two sources: the env override, or its own default.
+    """
+    source = (
+        "from TRADINGAGENTS_MAX_TOKENS"
+        if os.environ.get("TRADINGAGENTS_MAX_TOKENS")
+        else "CLI default; set TRADINGAGENTS_MAX_TOKENS to change"
+    )
+    console.print(
+        f"[green]✓ Completion cap:[/green] {config['max_tokens']} tokens ({source})"
+    )
+
+
 def run_analysis(checkpoint: bool | None = None):
     # First get all user selections
     selections = get_user_selections()
 
     config = _build_run_config(selections, checkpoint)
+    _announce_completion_cap(config)
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()

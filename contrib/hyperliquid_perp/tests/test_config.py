@@ -512,17 +512,8 @@ def test_engine_keys_are_exactly_the_keys_the_bridge_reads():
         return isinstance(node, ast.Name) and node.id == "eng_cfg"
 
     read: set[str] = set()
+    receivers: list[ast.AST] = []  # the ``eng_cfg`` Name node of each ``eng_cfg.get(...)``
     for node in ast.walk(tree):
-        # Any other read shape (``eng_cfg["k"]``, ``"k" in eng_cfg``, a bare
-        # ``eng_cfg`` handed to a helper) would slip past the ``.get`` walk
-        # below and re-open the false-warning hole — refuse those outright so
-        # a new read has to be spelled the one way this lock can see.
-        if isinstance(node, ast.Subscript) and is_eng_cfg(node.value):
-            pytest.fail(f"spell eng_cfg reads as eng_cfg.get(...): {ast.dump(node)}")
-        if isinstance(node, ast.Compare) and any(is_eng_cfg(c) for c in node.comparators):
-            pytest.fail(f"spell eng_cfg reads as eng_cfg.get(...): {ast.dump(node)}")
-        if isinstance(node, ast.Call) and any(is_eng_cfg(a) for a in node.args):
-            pytest.fail(f"eng_cfg escapes into a call, out of this lock's sight: {ast.dump(node)}")
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -530,11 +521,27 @@ def test_engine_keys_are_exactly_the_keys_the_bridge_reads():
             and is_eng_cfg(node.func.value)
         ):
             continue
+        receivers.append(node.func.value)
         # A computed key could not be checked here — refuse rather than
         # silently under-count.
         assert node.args and isinstance(node.args[0], ast.Constant), ast.dump(node)
         assert isinstance(node.args[0].value, str), ast.dump(node)
         read.add(node.args[0].value)
+    # Every other use of the name (``eng_cfg["k"]``, ``"k" in eng_cfg``,
+    # ``eng_cfg.pop(...)``, ``eng_cfg.items()``, ``helper(cfg=eng_cfg)``,
+    # ``**eng_cfg``) is a read this lock cannot see and would re-open the
+    # false-warning hole — refuse them all, so a new read has to be spelled
+    # the one way the lock checks. The assignment target is the only store.
+    stray = [
+        node
+        for node in ast.walk(tree)
+        if is_eng_cfg(node)
+        and isinstance(node.ctx, ast.Load)
+        and not any(node is r for r in receivers)
+    ]
+    assert not stray, "spell every eng_cfg read as eng_cfg.get('<literal>'): " + ", ".join(
+        f"line {n.lineno}" for n in stray
+    )
     assert read, "no eng_cfg.get(...) reads found — was the local renamed?"
     assert read == set(_ENGINE_KEYS)
 

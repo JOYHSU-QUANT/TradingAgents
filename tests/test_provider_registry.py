@@ -56,14 +56,25 @@ def test_native_provider_set_matches_the_factory_dispatch_chain():
     from tradingagents.llm_clients import factory
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(factory.create_llm_client)))
-    dispatched = {
-        node.comparators[0].value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Compare)
-        and isinstance(node.left, ast.Name)
-        and node.left.id == "provider_lower"
-        and isinstance(node.comparators[0], ast.Constant)
-    }
+
+    def mentions(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == "provider_lower"
+
+    dispatched: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Compare) and mentions(node.left)):
+            # Any other test on the name (``provider_lower in (...)``,
+            # ``provider_lower.startswith(...)``) is a dispatch this lock
+            # cannot count — refuse it so a new branch has to be spelled
+            # ``provider_lower == "<literal>"``. The registry lookup passes
+            # the name as an argument, which is not a comparison.
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                assert not mentions(node.func.value), ast.dump(node)
+            continue
+        [op], [comparator] = node.ops, node.comparators
+        assert isinstance(op, ast.Eq) and isinstance(comparator, ast.Constant), ast.dump(node)
+        assert isinstance(comparator.value, str), ast.dump(node)
+        dispatched.add(comparator.value)
     assert dispatched == set(factory._NATIVE_PROVIDERS)
 
 

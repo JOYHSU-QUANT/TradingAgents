@@ -791,6 +791,39 @@ class TestFetchAll:
         assert len(history_calls) == 3
         assert sosovalue_macro.MAX_CONSECUTIVE_NETWORK_FAILURES == 3
 
+    def test_an_outage_answer_mid_sweep_takes_the_transport_lane(self, monkeypatch, caplog):
+        # The macro twin of the treasuries test: a 5xx the envelope does not
+        # explain is the gateway, not a contract break (#172) — the event
+        # joins events_failed, the sweep goes on, nothing is logged at ERROR.
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueUnavailableError(
+                "SoSoValue answered HTTP 502 without data"
+            ),
+            error_names={TRACKED[2]},
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        with caplog.at_level("DEBUG", logger="tradingagents.dataflows.sosovalue_macro"):
+            payload = sosovalue_macro._fetch_all()
+        assert payload["events_failed"] == [TRACKED[2]]
+        assert len([c for c in impl.calls if c != "/macro/events"]) == len(TRACKED)
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_an_all_outage_sweep_keeps_the_outage_type(self, monkeypatch):
+        impl = _request_impl(
+            history_error=sosovalue_common.SoSoValueUnavailableError(
+                "SoSoValue answered HTTP 503 without data"
+            ),
+            error_names=set(TRACKED),
+        )
+        monkeypatch.setattr(sosovalue_macro, "_request", impl)
+        with pytest.raises(
+            sosovalue_common.SoSoValueUnavailableError, match="was answered without data"
+        ) as exc:
+            sosovalue_macro._fetch_all()
+        assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
+        # The breaker counts an outage answer like a transport failure.
+        assert len([c for c in impl.calls if c != "/macro/events"]) == 3
+
     def test_an_all_unknown_sweep_stays_structural(self, monkeypatch):
         # The other side of that split: nothing failed at the transport layer,
         # the provider answered every tracked name with an empty history (a

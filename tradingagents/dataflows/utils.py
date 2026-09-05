@@ -702,7 +702,7 @@ def generic_failure_words(e: BaseException) -> str:
     return type(e).__name__
 
 
-def failure_account(e: BaseException) -> str:
+def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS) -> str:
     """The words a failed vendor call contributes to a sentinel the model reads.
 
     Written into two slots of ``route_to_vendor`` — the optional category's
@@ -717,11 +717,15 @@ def failure_account(e: BaseException) -> str:
     remedy, should an optional category ever compute one. Anything else is
     untyped and contributes ``generic_failure_words`` — never its text: a
     ``requests`` message quotes the request URL, API key included (#171).
-    The caller's warning log has the full message either way.
+    The caller's warning log has the full message either way. ``limit`` is
+    the cap on a typed message: the router's slots take the default; a
+    boundary wrapping a typed cause into a message the router will cap
+    again passes ``None``, so the cause's tail — a sweep verdict's
+    ``(last: ...)`` — survives into the boundary's own log line.
     """
     if isinstance(e, (VendorError, UnsupportedIndicatorError)):
         # A typed error raised with no message would render as "()".
-        return sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS) or type(e).__name__
+        return sanitize_untrusted(e, limit=limit) or type(e).__name__
     return generic_failure_words(e)
 
 

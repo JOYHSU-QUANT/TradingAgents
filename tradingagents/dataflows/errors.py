@@ -107,10 +107,10 @@ class VendorUnavailableError(VendorError):
     included: the router's generic lane already reads an unreached vendor
     as down (``utils.is_vendor_outage``), and a boundary that retries or
     serves stale first must not downgrade that verdict to a bug on the way
-    out (#172). Deribit's and Fear & Greed's are subclasses of their module
-    errors too, so every ``except`` and caller written against those keeps
-    working; SoSoValue's is not a ``SoSoValueError``, because that family
-    reads its module error as structural breakage. The router remembers
+    out (#172). Deribit's, Fear & Greed's and Farside's are subclasses of
+    their module errors too, so every ``except`` and caller written against
+    those keeps working; SoSoValue's is not a ``SoSoValueError``, because
+    that family reads its module error as structural breakage. The router remembers
     this type past the chain: a fallback's "no data" after it is reported
     as unconfirmed by the vendor that was down, not as the symbol being
     invalid.

@@ -942,16 +942,20 @@ class TestCache:
     def test_a_5xx_with_no_cache_keeps_its_outage_type(self, tmp_path, monkeypatch):
         self._use_tmp_cache(tmp_path)
         monkeypatch.setattr(farside.requests, "get", _patched_get("", status_code=503))
-        with pytest.raises(VendorUnavailableError, match="no cache exists"):
+        with pytest.raises(VendorUnavailableError, match="no cache exists") as exc:
             farside.get_etf_flow_data("BTC", "2026-07-09")
+        # The outage subclass, so callers written against the module type
+        # still catch it.
+        assert isinstance(exc.value, farside.FarsideError)
 
     def test_a_5xx_past_the_cap_keeps_its_outage_type(self, tmp_path, monkeypatch):
         self._use_tmp_cache(tmp_path)
         self._write_cache(tmp_path, fetched_at="2026-07-01")
         monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-16"))  # 15 days
         monkeypatch.setattr(farside.requests, "get", _patched_get("", status_code=502))
-        with pytest.raises(VendorUnavailableError, match="cap"):
+        with pytest.raises(VendorUnavailableError, match="cap") as exc:
             farside.get_etf_flow_data("BTC", "2026-07-09")
+        assert isinstance(exc.value, farside.FarsideError)
 
     def test_a_4xx_keeps_the_network_error_path(self, tmp_path, monkeypatch):
         # A Cloudflare 403 is Farside refusing this client, not an outage: it
@@ -983,11 +987,16 @@ class TestCache:
         self._use_tmp_cache(tmp_path)
         self._write_cache(tmp_path, fetched_at="2026-07-01")
         monkeypatch.setattr(farside, "_utc_now", lambda: _at("2026-07-16"))  # 15 days
-        monkeypatch.setattr(
-            farside, "_request_html", mock.Mock(side_effect=requests.ConnectionError("boom"))
+        reset = requests.ConnectionError(
+            "HTTPSConnectionPool(host='farside.co.uk'): Max retries exceeded "
+            "with url: /bitcoin-etf-flow-all-data/"
         )
-        with pytest.raises(VendorUnavailableError, match="cap"):
+        monkeypatch.setattr(farside, "_request_html", mock.Mock(side_effect=reset))
+        with pytest.raises(VendorUnavailableError, match="cap") as exc:
             farside.get_etf_flow_data("BTC", "2026-07-09")
+        # The past-cap raise quotes the cause the same way as the no-cache one.
+        assert "url" not in str(exc.value)
+        assert "could not be reached: ConnectionError" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- #

@@ -689,11 +689,12 @@ def _load_flows(asset: str) -> _FlowSnapshot:
                     else f"is {age} days stale"
                 )
                 # The cause is quoted through ``failure_account``: a typed
-                # error's own text, a requests exception's status or class
-                # only — its message carries the request URL (#203).
+                # error's own text (flattened, not capped — the router caps
+                # its slot), a requests exception's status or class only —
+                # its message carries the request URL (#203).
                 raise wrap_cls(
                     f"Farside {asset} fetch failed and the newest cache {stale_desc} "
-                    f"(> {MAX_STALE_DAYS}-day cap): {failure_account(e)}"
+                    f"(> {MAX_STALE_DAYS}-day cap): {failure_account(e, limit=None)}"
                 ) from e
             # A structural FarsideError means the scraper itself is broken (a real
             # code fix needed), not a transient outage — log it at ERROR with a
@@ -725,7 +726,7 @@ def _load_flows(asset: str) -> _FlowSnapshot:
                 issuers_named=cached["issuers_named"],
             )
         raise wrap_cls(
-            f"Farside {asset} unavailable and no cache exists: {failure_account(e)}"
+            f"Farside {asset} unavailable and no cache exists: {failure_account(e, limit=None)}"
         ) from e
 
     # Stamp the fetch instant from _iso_now() (the same clock _cache_age_hours and

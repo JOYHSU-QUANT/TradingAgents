@@ -3279,6 +3279,16 @@ class TestPartialDegradation:
         with pytest.raises(VendorUnavailableError, match="not served for the historical date"):
             _report(curr_date="2026-07-20", dvol=deribit.DeribitUnavailableError("dvol down"))
 
+    def test_a_structural_deribit_error_keeps_its_traceback(self, caplog):
+        # Only a throttle or an outage is traceback-free: a plain DeribitError
+        # may come from a parser several frames down, and the frame is the
+        # diagnosis. A predicate widened to the whole module error would pass
+        # every other test in this class.
+        with caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.deribit"):
+            _report(dvol=deribit.DeribitError("dvol response has no 'result' field"))
+        halves = [r for r in caplog.records if "DVOL unavailable for BTC" in r.getMessage()]
+        assert len(halves) == 1 and halves[0].exc_info is not None
+
     def test_an_unforeseen_exception_still_leaves_a_traceback(self, caplog):
         with caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.deribit"):
             _report(dvol=RuntimeError("something nobody predicted"))

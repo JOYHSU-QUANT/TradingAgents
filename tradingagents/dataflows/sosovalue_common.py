@@ -753,7 +753,7 @@ class FetchSweep(NamedTuple):
     failed: list[str]
     flagged: list[str]
     rate_limited: SoSoValueRateLimitError | None
-    last_network: Exception | None
+    last_network: requests.RequestException | VendorUnavailableError | None
     structural_failure: bool
     breaker_skipped: bool
     attempted: int
@@ -838,7 +838,7 @@ def fetch_each(
     failed: list[str] = []
     flagged: list[str] = []
     rate_limited: SoSoValueRateLimitError | None = None
-    last_network: Exception | None = None
+    last_network: requests.RequestException | VendorUnavailableError | None = None
     structural_failure = False
     consecutive_network = 0
     breaker_skipped = False
@@ -1021,7 +1021,7 @@ def load_rolling_snapshot(
                 )
                 raise wrap_cls(
                     f"SoSoValue {label} fetch failed and the newest cache {stale_desc} "
-                    f"(> {max_stale_days}-day cap): {failure_account(e)}"
+                    f"(> {max_stale_days}-day cap): {failure_account(e, limit=None)}"
                 ) from e
             # A SoSoValueError here is a contract/parse break (a code fix is
             # likely needed) and must not hide among network-blip warnings for
@@ -1046,11 +1046,14 @@ def load_rolling_snapshot(
             return cached, fetched_at, True, False
         # "usable": the file may exist but have failed read-side validation.
         # The cause is quoted through ``failure_account``: a typed error's
-        # own text, flattened and capped; a requests exception contributes
-        # its status or class only, never its message — that quotes the
-        # request URL, and this line is LLM-visible (#203).
+        # own text, flattened but not capped here — the router caps its
+        # slot, and a sweep verdict's ``(last: ...)`` tail must survive into
+        # this module's log line; a requests exception contributes its
+        # status or class only, never its message — that quotes the request
+        # URL, and this line is LLM-visible (#203).
         raise wrap_cls(
-            f"SoSoValue {label} unavailable and no usable cache exists: {failure_account(e)}"
+            f"SoSoValue {label} unavailable and no usable cache exists: "
+            f"{failure_account(e, limit=None)}"
         ) from e
 
     fetched_at = _iso_now()

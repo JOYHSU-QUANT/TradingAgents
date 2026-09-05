@@ -1891,9 +1891,16 @@ class TestCacheAndLoad:
     def test_stale_cache_past_cap_degrades(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch, now="2026-08-15T00:00:00Z")  # 15 days
         self._write_cache(tmp_path)
-        _stub_requests(monkeypatch, fail={"/etfs/summary-history"})
-        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap"):
+        reset = requests.ConnectionError(
+            "HTTPSConnectionPool(host='openapi.sosovalue.com'): Max retries exceeded "
+            "with url: /openapi/v1/etfs/summary-history?symbol=BTC"
+        )
+        _stub_requests(monkeypatch, errors={"/etfs/summary-history": reset})
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap") as e:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        # The past-cap raise quotes the cause the same way as the no-cache one.
+        assert "url" not in str(e.value)
+        assert "could not be reached: ConnectionError" in str(e.value)
 
     def test_future_dated_fetched_at_degrades(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch, now="2026-07-25T00:00:00Z")

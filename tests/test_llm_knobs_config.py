@@ -219,15 +219,17 @@ class TestProviderKwargs:
         assert knob.key not in _provider_kwargs(**{knob.key: ""})
 
     @pytest.mark.parametrize(
-        "bad", [0, -1, "0", "-1", "8k", "4096.5", 4096.7, Decimal("4096.5"), True]
+        "bad",
+        [0, -1, "0", "-1", "8k", "4096.5", 4096.7, Decimal("4096.5"), float("inf"), True],
     )
     def test_non_positive_and_junk_max_tokens_rejected_naming_the_key(self, bad):
         # Forwarding 0 or a negative cap is a deterministic provider 400 on
         # every call — the #177 stall shape — and a typo must not surface as
         # a bare int() ValueError with no key name. A programmatic 4096.7 (or
         # any non-integral numeric, Decimal included) must not be silently
-        # int()-truncated either. Temperature has no such gate: 0.0 is a legal
-        # value there.
+        # int()-truncated either, and inf as an "unlimited" spelling must not
+        # leak a bare OverflowError. Temperature has no such gate: 0.0 is a
+        # legal value there.
         with pytest.raises(ValueError, match="max_tokens"):
             _provider_kwargs(max_tokens=bad)
 

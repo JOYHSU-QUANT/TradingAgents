@@ -183,7 +183,9 @@ class TradingAgentsGraph:
                     raise ValueError
                 if parsed <= 0:
                     raise ValueError
-            except (TypeError, ValueError):
+            # OverflowError: int(float("inf")) — an "unlimited" spelling that
+            # must be refused by name like every other bad cap, not leak raw.
+            except (TypeError, ValueError, OverflowError):
                 raise ValueError(
                     f"config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) must "
                     f"be a positive integer, got {max_tokens!r}"

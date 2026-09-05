@@ -174,12 +174,12 @@ Breaking changes within the 0.x line are called out explicitly.
   only when it is empty AND in this project's own shape, which is the one
   state an older build of this project could have left. Three neighbouring
   mistypes are named rather than left to ``main()``'s exit-2 last resort as
-  ``unable to open database file``: a ``--db`` that is a directory (it stats
-  at size 0, so it used to read as an empty store), one whose directory does
-  not exist, and one that cannot be read at all. The read-only probe builds
-  its URI itself rather than through ``Path.as_uri``, which rejects a relative
-  ``--db`` outright and renders a Windows UNC path with an authority SQLite
-  refuses — a store on a share would have stopped opening. The verdict is read from ``sqlite_master``
+  ``unable to open database file``: a ``--db`` that is a directory, one whose
+  directory does not exist (or is not a directory), and one that cannot be
+  read at all. The read-only probe builds its URI itself rather than through
+  ``Path.as_uri``, which rejects a relative ``--db`` outright and renders a
+  Windows UNC path with an authority SQLite refuses — a store on a share
+  would have stopped opening. The verdict is read from ``sqlite_master``
   before the connection is even tuned, because tuning is itself a write
   (``PRAGMA journal_mode = WAL`` rewrites the header of a database not already
   in WAL), and over a read-only connection, because opening a database

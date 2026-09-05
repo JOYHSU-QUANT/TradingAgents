@@ -1015,8 +1015,14 @@ def test_a_foreign_database_is_refused_by_name_under_every_policy(tmp_path, poli
 
 @pytest.mark.parametrize(
     ("kind", "tables"),
-    [("populated", _GO_MIGRATE_ONLY), ("empty", (_GO_MIGRATE_TABLE,))],
-    ids=["populated", "empty"],
+    [
+        ("populated", _GO_MIGRATE_ONLY),
+        ("empty", (_GO_MIGRATE_TABLE,)),
+        # Empty and carrying both our column names, but wider. Nothing in this
+        # project ever adds a column to that table, so a wider one is theirs.
+        ("wider", ("CREATE TABLE schema_migrations (version, applied_at, dirty)",)),
+    ],
+    ids=["populated", "empty", "wider"],
 )
 @pytest.mark.parametrize("policy", _POLICIES.values(), ids=_POLICIES)
 def test_a_lone_foreign_schema_migrations_is_refused_not_read_as_our_own(
@@ -1028,7 +1034,10 @@ def test_a_lone_foreign_schema_migrations_is_refused_not_read_as_our_own(
     # a schema number, so the operator was told the store "was migrated by a
     # NEWER build ... restore a backup" — the one refusal the RUNBOOK says to
     # treat as a rollback incident. Empty: past every guard, then dead inside
-    # the first migration on `no column named applied_at`, an unnamed exit 2.
+    # the first migration on `no column named applied_at`, an unnamed exit 2 —
+    # under the migrating and deferring policies; the reporting one refused it
+    # as a v0 store and sent the operator to an owning command, which would
+    # then have done exactly that damage.
     path = tmp_path / f"go-migrate-{kind}.db"
     _write_sqlite_file(path, *tables)
     before = path.read_bytes()
@@ -1049,12 +1058,28 @@ def test_the_refusal_tells_an_operator_which_leftover_table_is_ours(tmp_path):
     with pytest.raises(SchemaVersionError, match="left by an OLDER build of this project"):
         Database(path, migrate=False)
 
-    # ...and it does not say that about a foreign table that merely shares the name.
-    rails = tmp_path / "rails.db"
-    _write_sqlite_file(rails, *_RAILS_TABLES)
-    with pytest.raises(SchemaVersionError) as caught:
-        Database(rails, migrate=False)
-    assert "left by an OLDER build" not in str(caught.value)
+    # ...and it does not say that about anything that merely shares the name:
+    # a foreign table of another shape, a WIDER table (nothing in this project
+    # has ever added a column to it, so a wider one is somebody else's — and
+    # accepting one would build the whole schema into their database), or a
+    # VIEW, which PRAGMA table_info answers for just as readily as a table.
+    for name, tables in (
+        ("rails.db", _RAILS_TABLES),
+        ("wider.db", (*_FOREIGN_TABLE, "CREATE TABLE schema_migrations (version, applied_at, x)")),
+        (
+            "a-view.db",
+            (
+                *_FOREIGN_TABLE,
+                "CREATE TABLE real_versions (version, applied_at)",
+                "CREATE VIEW schema_migrations AS SELECT * FROM real_versions",
+            ),
+        ),
+    ):
+        path = tmp_path / name
+        _write_sqlite_file(path, *tables)
+        with pytest.raises(SchemaVersionError) as caught:
+            Database(path, migrate=False)
+        assert "left by an OLDER build" not in str(caught.value), name
 
 
 @pytest.mark.parametrize("version", sorted(MIGRATIONS))
@@ -1147,23 +1172,28 @@ def test_the_probe_uri_survives_the_paths_as_uri_cannot_express(tmp_path):
     # working to not opening at all. An empty authority is what SQLite reads.
     store = tmp_path / "a store.db"
     Database(store).close()
-    assert db_module._read_only_uri(store) == store.resolve().as_uri()  # ordinary paths unchanged
+    assert db_module._sqlite_file_uri(store) == store.resolve().as_uri()  # ordinary paths unchanged
 
     if os.name == "nt":  # a UNC path is only a path at all on Windows
         unc = pathlib.Path(chr(92) * 2 + "server" + chr(92) + "share" + chr(92) + "live.db")
         # Four slashes: file:// (empty authority) + //server/share/... — what
         # SQLite reads. as_uri() gives three, making "server" the authority,
         # which it rejects outright.
-        assert db_module._read_only_uri(unc) == "file:////server/share/live.db"
+        assert db_module._sqlite_file_uri(unc) == "file:////server/share/live.db"
         assert unc.as_uri() == "file://server/share/live.db"  # the form that broke
 
     # A relative path resolves rather than raising, and still opens read-only.
     cwd = pathlib.Path.cwd()
     os.chdir(tmp_path)
     try:
-        probe = sqlite3.connect(db_module._read_only_uri(pathlib.Path("a store.db")), uri=True)
+        uri = db_module._sqlite_file_uri(pathlib.Path("a store.db")) + "?mode=ro"
+        probe = sqlite3.connect(uri, uri=True)
         try:
             assert probe.execute("SELECT 1").fetchone() == (1,)
+            # The read-only half is the property the whole refusal rests on, so
+            # pin it here rather than trusting the call site's ``?mode=ro``.
+            with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+                probe.execute("CREATE TABLE nope (x)")
         finally:
             probe.close()
     finally:
@@ -1173,18 +1203,19 @@ def test_the_probe_uri_survives_the_paths_as_uri_cannot_express(tmp_path):
 def test_a_db_whose_directory_does_not_exist_is_refused_by_name(tmp_path):
     # connect() cannot create a file in a directory that is not there, so this
     # used to reach main()'s last resort as `unable to open database file`,
-    # exit 2. A permission failure on the very same path was already named,
-    # which made the inconsistency the giveaway.
+    # exit 2 — as did every other unreadable path, since the guard above simply
+    # returned on any OSError from stat(). All of them are named now.
     with pytest.raises(SchemaVersionError, match="does not exist"):
         Database(tmp_path / "no-such-dir" / "store.db", migrate=False)
 
 
 def test_a_db_path_that_is_a_directory_is_refused_by_name(tmp_path):
     # Dropping the filename off --db is an ordinary typo, and a directory stats
-    # fine at st_size == 0 — so without a check of its own it read as an empty
-    # store and died in connect() as `unable to open database file`, which
-    # main()'s last resort prints as exit 2. Everything this function refuses
-    # has to come back as a named exit 1.
+    # perfectly well, so it has to be said out loud. What it did before this
+    # depended on the platform — on Windows a directory reports st_size == 0
+    # and read as an empty store, on Linux it reported its block size and fell
+    # into the probe — but both ended at main()'s last resort as exit 2.
+    # Everything this function refuses has to come back as a named exit 1.
     a_directory = tmp_path / "data"
     a_directory.mkdir()
     with pytest.raises(SchemaVersionError, match="is a directory, not a database file"):

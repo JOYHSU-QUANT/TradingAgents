@@ -104,10 +104,13 @@ def connect(path: str | Path) -> sqlite3.Connection:
 class SchemaVersionError(RuntimeError):
     """The store's schema does not match what this build can safely operate on.
 
-    Or the file is not one of this project's stores at all: a mistyped ``--db``
-    naming another application's database is the same verdict — this build
-    cannot safely operate on it — reached without reading a version (see
-    :func:`_refuse_a_foreign_store`).
+    Or there is no store to read a schema from: a mistyped ``--db`` naming
+    another application's database, a directory, or a path that cannot be read
+    reaches the same verdict — this build will not operate on this file — and
+    reaches it without reading a version at all (see
+    :func:`_refuse_a_foreign_store`). One type, because nothing branches on the
+    difference: every one of them is the CLI's named exit 1, and the remedy
+    that does differ is already in the message.
     """
 
 
@@ -138,8 +141,11 @@ _STORE_TABLES = ("decision_attempts", "scheduler_state")
 _MAX_NAME_CHARS = 40
 
 
-def _read_only_uri(file: Path) -> str:
-    """``file`` as a SQLite URI, for any absolute path this platform allows.
+def _sqlite_file_uri(file: Path) -> str:
+    """``file`` as a SQLite URI, for any path this platform allows, relative or not.
+
+    Spells the path only — the read-only flag belongs to the caller, which
+    appends ``?mode=ro``.
 
     Not :meth:`Path.as_uri`, which is wrong here twice. It rejects a relative
     path outright, and ``--db paper.db`` is perfectly ordinary. And for a
@@ -150,8 +156,13 @@ def _read_only_uri(file: Path) -> str:
     path as ``file:////server/share/x.db``, the form SQLite reads.
 
     Percent-encoding matters: a path can hold a space (``C:/Users/JOY HSU``) or
-    a ``?``, which would otherwise start the query string. ``:`` is left alone
-    so a drive letter reads as itself, exactly as ``as_uri`` renders it.
+    a ``#``, which SQLite would otherwise read as a fragment. ``:`` is left
+    alone so a drive letter reads as itself, exactly as ``as_uri`` renders it.
+
+    Not universal: a Windows extended-length path (``\\\\?\\C:\\…``, for paths
+    past 260 characters) has a ``?`` that must be encoded and then is no longer
+    the prefix SQLite needs, so the probe fails on it. ``as_uri`` could not
+    express one either — this narrows nothing that used to work.
     """
     posix = file.resolve().as_posix()
     if not posix.startswith("/"):
@@ -179,14 +190,32 @@ def _is_our_unused_bookkeeping(conn: sqlite3.Connection) -> bool:
     migration on ``no column named applied_at`` — an unnamed exit 2, the shape
     this refusal exists to replace.
     """
+    # A TABLE: ``PRAGMA table_info`` answers for a view too, and a foreign view
+    # of that name would otherwise be called ours.
+    is_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (_BOOKKEEPING_TABLE,),
+    ).fetchone()
+    if is_table is None:
+        return False
+    # EXACTLY our columns, not merely a superset: nothing in this project has
+    # ever added one, so a wider table is somebody else's — and letting one
+    # through means building the whole schema into their database, which is the
+    # damage this refusal exists to stop.
     columns = {row[1] for row in conn.execute(f"PRAGMA table_info({_BOOKKEEPING_TABLE})")}
-    if not {"version", "applied_at"} <= columns:
+    if columns != {"version", "applied_at"}:
         return False
     return conn.execute(f"SELECT 1 FROM {_BOOKKEEPING_TABLE} LIMIT 1").fetchone() is None
 
 
 def _refuse_a_foreign_store(path: str | Path) -> None:
-    """Refuse a SQLite file that belongs to something other than this project.
+    """Refuse a ``--db`` this build must not open, by name.
+
+    Chiefly a SQLite file belonging to another application, and with it the
+    path mistypes that sit either side of one: a directory, a parent that is
+    missing or is not a directory, a file that cannot be read. Every one of
+    those used to reach ``main()``'s last resort as an exit-2 ``unable to open
+    database file``, which tells an operator nothing about which of them it was.
 
     "EMPTY store" used to mean ``MAX(schema_migrations.version) == 0``, which is
     a fact about OUR bookkeeping, not about the file: another application's
@@ -223,16 +252,23 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     try:
         info = file.stat()
     except FileNotFoundError:
-        if file.parent.is_dir():
+        parent = file.parent
+        if parent.is_dir():
             return  # nothing there yet; connect() creates it, as it always has
-        # The parent is missing too, so ``connect`` cannot create anything —
-        # it raises `unable to open database file`, which main()'s last resort
-        # prints as exit 2. Named here for the same reason as the branches
-        # below: a mistyped --db must say what is wrong with it.
+        # There is nowhere to create it, so ``connect`` raises `unable to open
+        # database file`, which main()'s last resort prints as exit 2. Named
+        # here for the same reason as the branches below: a mistyped --db must
+        # say what is wrong with it. A parent that EXISTS but is not a
+        # directory (``--db notes.db/store.db``) is a different sentence — the
+        # path is there, it just cannot hold a file.
+        problem = (
+            f"{parent} is not a directory"
+            if parent.exists()
+            else f"its directory {parent} does not exist"
+        )
         raise SchemaVersionError(
-            f"cannot open {file}: its directory {file.parent} does not exist. "
-            "Check the --db path (a store is created only where its directory "
-            "already is)."
+            f"cannot open {file}: {problem}. Check the --db path — a store is "
+            "created only where its directory already is."
         ) from None
     except OSError as exc:
         # Unreadable for some other reason (permissions, a file where a
@@ -244,17 +280,19 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
             f"stores: {exc}. Check the --db path and its permissions."
         ) from exc
     if S_ISDIR(info.st_mode):
-        # A directory stats fine and reports st_size == 0, so without this it
-        # would pass as an empty store and die in ``connect`` as that same
-        # exit 2. Forgetting the filename on --db is an ordinary typo.
+        # Forgetting the filename on --db is an ordinary typo, and a directory
+        # stats perfectly well, so it needs saying out loud. What it used to do
+        # instead depended on the platform, which is its own argument for
+        # naming it: on Windows a directory reports st_size == 0 and so read as
+        # an empty store; on Linux it reports its block size and fell into the
+        # probe below. Both ended as an unnamed exit 2.
         raise SchemaVersionError(
             f"{file} is a directory, not a database file. A store is a single "
-            "file — give --db its name (for example "
-            f"{file / 'paper_trading.db'})."
+            f"file — give --db its name (for example {file / '<name>.db'})."
         )
     if info.st_size == 0:
         return  # ``touch``-ed: ours to build in full
-    probe = sqlite3.connect(f"{_read_only_uri(file)}?mode=ro", uri=True)
+    probe = sqlite3.connect(f"{_sqlite_file_uri(file)}?mode=ro", uri=True)
     try:
         objects = [row[0] for row in probe.execute(_FOREIGN_OBJECTS_SQL)]
         ours = (
@@ -275,7 +313,12 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         probe.close()
     if ours:
         return
-    shown = ", ".join(name[:_MAX_NAME_CHARS] for name in objects[:5])
+    # Marked when cut: the operator is told to recognise their file by these
+    # names, and a silently shortened one greps against nothing.
+    shown = ", ".join(
+        name if len(name) <= _MAX_NAME_CHARS else name[:_MAX_NAME_CHARS] + "…"
+        for name in objects[:5]
+    )
     more = f", and {len(objects) - 5} more" if len(objects) > 5 else ""
     # Hedged deliberately: all that was measured is an empty table of our
     # shape, and this is advice about someone else's database.

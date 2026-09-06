@@ -201,11 +201,14 @@ def get_prediction_markets(
         # question was a second forgery site three lines below the heading
         # this PR fixed: a question carrying its own "## " line renders a
         # heading impersonating another tool inside this report (#201
-        # review). The date is a vendor field too, and ten characters are
-        # enough for a newline and a marker.
+        # review). The date is a vendor field too — and it is flattened
+        # BEFORE the slice, not after: slicing first spends the ten
+        # characters on the junk and the flatten then deletes the evidence
+        # the junk was there, so "\n2030-12-31" rendered as "2030-12-3" — a
+        # date 28 days early with nothing left in the line to say it was cut.
         label = sanitize_untrusted(outcomes[0], limit=MAX_UNTRUSTED_CHARS)
         volume = m.get("volumeNum") or 0
-        end_date = sanitize_untrusted((m.get("endDate") or "")[:10])
+        end_date = sanitize_untrusted(m.get("endDate") or "")[:10]
         wk = m.get("oneWeekPriceChange")
         wk_str = f", 1-week {wk * 100:+.1f}pp" if isinstance(wk, (int, float)) and wk else ""
         question = sanitize_untrusted(m.get("question"), limit=MAX_UNTRUSTED_CHARS)

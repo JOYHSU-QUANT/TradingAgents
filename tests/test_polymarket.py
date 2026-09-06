@@ -279,13 +279,36 @@ class PolymarketOutageTests(unittest.TestCase):
     def test_a_clean_topic_still_reads_byte_for_byte_in_the_header(self):
         # The other half of the claim: the echo must not disturb an ordinary
         # topic, apostrophes, an em-dash and non-ASCII included.
-        for topic in ("Fed rate cut", "Will Trump's tariffs pass?", "US recession — 2026", "美聯儲降息"):
-            with (
-                self.subTest(topic=topic),
-                mock.patch.object(polymarket, "_request", return_value=copy.deepcopy(_SEARCH)),
-            ):
-                out = polymarket.get_prediction_markets(topic)
-            self.assertEqual(out.splitlines()[0], f'## Polymarket prediction markets: "{topic}"')
+        topics = ("Fed rate cut", "Will Trump's tariffs pass?", "US recession — 2026", "美聯儲降息")
+        for topic in topics:
+            with self.subTest(topic=topic):
+                with mock.patch.object(
+                    polymarket, "_request", return_value=copy.deepcopy(_SEARCH)
+                ):
+                    out = polymarket.get_prediction_markets(topic)
+                self.assertEqual(
+                    out.splitlines()[0], f'## Polymarket prediction markets: "{topic}"'
+                )
+
+    def test_a_junk_prefix_does_not_shorten_the_resolution_date(self):
+        # The date is flattened before it is sliced. The other order spent
+        # the ten-character budget on the junk and then removed the junk,
+        # rendering "2030-12-3" for a market resolving 2030-12-31 — a
+        # plausible wrong date, 28 days early, with no tell left in the line.
+        # These are exactly the values _is_forward_looking cannot parse, so
+        # it fails open and they are the ones that DO get rendered.
+        for raw in (
+            "2030-12-31T00:00:00Z",
+            "\n2030-12-31T00:00:00Z",
+            "_2030-12-31",
+            "  2030-12-31",
+        ):
+            with self.subTest(endDate=raw):
+                payload = copy.deepcopy(_SEARCH)
+                payload["events"][0]["markets"][0]["endDate"] = raw
+                with mock.patch.object(polymarket, "_request", return_value=payload):
+                    out = polymarket.get_prediction_markets("Fed rate cut")
+                self.assertIn("resolves 2030-12-31", out)
 
     def test_a_5xx_degrades_through_the_router_without_a_traceback(self):
         set_config({"data_vendors": {"prediction_markets": "polymarket"}})

@@ -16,7 +16,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
 from types import MappingProxyType
 
 from ...common.constants import (
@@ -31,14 +30,16 @@ from ...common.constants import (
     VALUE_AREA_FRACTION,
     VOLUME_PROFILE_BUCKET_COUNT,
 )
+from ...common.enum_guard import VocabEnum
 
 
-class MarketRegime(str, Enum):
+class MarketRegime(VocabEnum, noun="market regime"):
     """Computed by ``context_builder``, carried through for the Reflection agent.
 
     Held as an enum (not a free string) so an unknown regime fails at context
     construction — where it is cheap to spot — rather than deep in an engine run
-    where it would burn an LLM call before raising.
+    where it would burn an LLM call before raising, and the refusal names the
+    vocabulary (:class:`~...common.enum_guard.VocabEnum`).
     """
 
     TRENDING = "trending"
@@ -46,7 +47,7 @@ class MarketRegime(str, Enum):
     VOLATILE = "volatile"
 
 
-class ProfileShape(str, Enum):
+class ProfileShape(VocabEnum, noun="volume profile shape"):
     """The volume-profile shape :func:`..perp.volume_profile.classify_shape` assigns.
 
     Held as an enum for the same reason as :class:`MarketRegime`: an unknown
@@ -62,7 +63,7 @@ class ProfileShape(str, Enum):
     THIN = "thin"
 
 
-class PositionSide(str, Enum):
+class PositionSide(VocabEnum, noun="position side"):
     """Which way an OPEN position points, as the prompt's position section says it.
 
     A flat account is ``None`` on :class:`PositionContext`, never a third
@@ -85,13 +86,13 @@ class PositionSide(str, Enum):
     SHORT = "short"
 
 
-class CandleInterval(str, Enum):
+class CandleInterval(VocabEnum, noun="candle interval"):
     """The supported candle intervals — the single source of truth for the set.
 
     :data:`_INTERVAL_MS` below keys its lookup by these members, and
     :class:`PerpMarketContext` validates its ``candle_interval`` against them,
-    so adding an interval is a two-line change here. A ``str`` mix-in keeps
-    ``"4h" == CandleInterval.H4`` for callers that pass a plain string.
+    so adding an interval is a two-line change here, and the refusal lists the
+    members in this (ascending) order.
     """
 
     M1 = "1m"
@@ -100,18 +101,6 @@ class CandleInterval(str, Enum):
     H1 = "1h"
     H4 = "4h"
     D1 = "1d"
-
-    @classmethod
-    def _missing_(cls, value: object):
-        # The lookup's own failure, worded for the operator: ``Enum`` would say
-        # "'4H' is not a valid CandleInterval", naming neither the vocabulary
-        # nor the fix. Raised HERE rather than translated by ``parse_interval``
-        # so a caller that resolves the enum directly gets the same sentence
-        # (issue #155). ``Enum.__new__`` re-raises a ``ValueError`` from
-        # ``_missing_`` with its message intact.
-        raise ValueError(
-            f"unsupported candle interval {value!r}; choose from {[i.value for i in cls]}"
-        )
 
 
 # How many milliseconds each supported candle interval spans. Lives beside the
@@ -1121,9 +1110,9 @@ class PerpMarketContext:
             # The §6.1/§6.3 formulas by name (margin.py's one-definition
             # rule). Function-local: ``schema`` sits in config.py's load-time
             # import closure, which tests/common/test_layering.py pins to a
-            # short allowlist ``margin`` is not on — that guard walks
-            # top-level statements only, and this branch runs only when a
-            # position is attached, never on a config load.
+            # short allowlist ``margin`` is not on — that guard defers only
+            # function bodies, and this branch runs only when a position
+            # is attached, never on a config load.
             from .margin import funding_cost, position_notional, unrealized_pnl
 
             # Both non-None on an open position (PositionContext's guard).

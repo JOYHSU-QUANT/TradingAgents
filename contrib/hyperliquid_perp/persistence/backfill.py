@@ -98,10 +98,13 @@ def _payload_file(recorded: str, payload_root: Path | None) -> Path:
     ``PureWindowsPath`` splits on both separators, so a store written on the
     Linux host (``/srv/…/BTC-20260828T040000_000000Z.json``) and one written
     on Windows both yield the daemon's ``<coin>-<stamp>.json`` name whichever
-    host runs the pass; the name itself carries neither separator. A recorded
-    path that names no file (a bare root) remaps to the root directory itself
-    and is refused by the read as ``unreadable`` — the verdict the same row
-    gets without a root.
+    host runs the pass; the name itself carries neither separator. No daemon
+    records a path without a file name; should one appear, a bare root
+    (``/``, ``C:\\``) has no name and remaps to the root directory itself,
+    which the read refuses as ``unreadable`` — the same verdict the row gets
+    without a root. (A directory path WITH a trailing separator keeps its
+    last component as the name, so it remaps like any file and is judged on
+    whether that name exists under the root.)
     """
     if payload_root is None:
         return Path(recorded)
@@ -113,26 +116,29 @@ def _recorded_format_text(row, *, payload_root: Path | None) -> str | _LeftNull:
 
     ``row`` is a ``repository.UnstampedInput``. A tagged outcome rather than
     a bare string, so a format block can never be mistaken for a reason word.
-    The log lines name the path actually read — under ``payload_root``, the
-    remapped one — so an operator can open the file the verdict was about.
+    The log lines name the path actually read — the recorded text as it
+    stands on the row, or under ``payload_root`` the remapped one — so an
+    operator can open the file the verdict was about, or grep the store for
+    the row's own string.
     """
     if row.context_shape is None or row.prompt_version is None:
         return _LeftNull("pre_v10")
     if row.input_payload_path is None:
         return _LeftNull("missing_payload")
     path = _payload_file(row.input_payload_path, payload_root)
+    shown = row.input_payload_path if payload_root is None else path
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
         return _LeftNull("missing_payload")
     except OSError as exc:
-        logger.warning("payload %s for %s could not be read: %s", path, row.input_id, exc)
+        logger.warning("payload %s for %s could not be read: %s", shown, row.input_id, exc)
         return _LeftNull("unreadable")
     digest = payload_digest(raw)
     if row.input_payload_hash != digest:
         logger.warning(
             "payload %s does not hash to the digest recorded on %s (%s vs %s) — left NULL",
-            path,
+            shown,
             row.input_id,
             digest,
             row.input_payload_hash,
@@ -143,7 +149,7 @@ def _recorded_format_text(row, *, payload_root: Path | None) -> str | _LeftNull:
     except (ValueError, KeyError, TypeError) as exc:
         logger.warning(
             "payload %s for %s carries no format block (%s: %s) — left NULL",
-            path,
+            shown,
             row.input_id,
             type(exc).__name__,
             exc,
@@ -152,7 +158,7 @@ def _recorded_format_text(row, *, payload_root: Path | None) -> str | _LeftNull:
     if not isinstance(text, str):
         logger.warning(
             "payload %s for %s has a non-text format block (%s) — left NULL",
-            path,
+            shown,
             row.input_id,
             type(text).__name__,
         )

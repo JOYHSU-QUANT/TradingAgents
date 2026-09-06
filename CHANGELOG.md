@@ -23,11 +23,15 @@ Breaking changes within the 0.x line are called out explicitly.
   Without the option the pass reads the recorded paths exactly as before.
   The option without ``--backfill-format-fingerprint``, or with an empty
   value, is a usage error (exit 2); a root that is not a directory is a
-  named ``error:`` (exit 1) rather than N × ``missing_payload``; and a root
-  under which no recorded name matched at all is followed by a ``hint:``
-  naming the ``<db dir>/payloads/<run_id>/`` layout, since the wrong level
-  is far likelier than a tree that lost its files. RUNBOOK §6 carries the
-  invocation.
+  named ``error:`` (exit 1) rather than N × ``missing_payload``; and when
+  every payload the pass looked for is missing (no ``unreadable`` /
+  ``unverified`` at all) the count line is followed by a ``hint:`` — without
+  a root, naming the option; under a root, naming the wrong level — both
+  carrying the concrete ``<db dir>/payloads/<run_id>`` candidate beside the
+  store, since a store away from its host or a root one level too high is
+  far likelier than a tree that lost its files. The pass's own WARNING lines
+  name the path actually read: the row's recorded text as it stands, or the
+  remapped one under a root. RUNBOOK §6 carries the invocation.
 - **hyperliquid_perp: a bound completion cap now has a name and a
   measurement** (issue #182). Every provider answers HTTP 200 when
   ``max_tokens`` binds, and nothing in the repo read the stop reason, so a

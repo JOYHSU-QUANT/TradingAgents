@@ -151,8 +151,8 @@ prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，
 內容等不等於舊版無所謂；`v4` 已被 2026-08-27 的 `Position:` 段用掉、`v5` 已被 2026-09-01
-的「格式段不印門檻數字」用掉，都不是回滾備用值）。另注意 `decision_format_instructions` 的文字與這個常數不在同一個
-模組——`cli/_provider.py` 確實 import 了它，但 import 不會讓常數跟著文字動——所以有一個測試把
+的「格式段不印門檻數字」用掉，都不是回滾備用值）。另注意 `decision_format_instructions` 的文字（`domains/perp/target_decision.py`）與這個常數
+（`common/prompt_regime.py`）不在同一個模組，也沒有任何東西讓常數跟著文字動——所以有一個測試把
 版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
 
 **例外：只改 prompt 的 A/B 驗證**。上面那條規則是為了讓**績效指標**跨段可比。若這次
@@ -383,7 +383,8 @@ A→B→A 翻回去仍只印兩行。另有一條自我檢查：各桶總和應�
 python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir exports/ --backfill-format-fingerprint
 # 對搬到別台主機的備份 store：把 payload 目錄一起搬來，再用 --payload-root 指過去——
 # 每列只取記錄路徑的「檔名」到這個目錄下找（issue #197）；hash 規則不變，搬來的檔要 bytes 相同才算證據。
-# 指到 run 自己那一層（daemon 寫在 <db 目錄>/payloads/<run-id>/）——指到上一層 payloads/ 會全數 missing_payload，stderr 會多印一行 hint 提醒
+# 指到 run 自己那一層（daemon 寫在 <db 目錄>/payloads/<run-id>/）——指到上一層 payloads/ 會全數 missing_payload。
+# 不帶或帶錯 root 而全數 missing_payload（沒有任何 unreadable／unverified）時，stderr 會多印一行 hint，附上 <db 目錄>/payloads/<run-id> 這個具體候選路徑
 python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir exports/ --db backup.db --backfill-format-fingerprint --payload-root /path/to/payloads/paper-BTC-3
 ```
 

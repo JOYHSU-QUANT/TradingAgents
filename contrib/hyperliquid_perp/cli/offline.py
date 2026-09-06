@@ -96,17 +96,37 @@ def _cmd_export(argv: list[str]) -> int:
                 return 1
             if report is not None:
                 print(report.summary(args.run_id), file=sys.stderr)
-                if payload_root is not None and report.stamped == 0 and report.missing_payload:
-                    # The likeliest cause under a root is the wrong level, not
-                    # a tree that lost its files: the daemons write
-                    # ``<db dir>/payloads/<run_id>/<coin>-<stamp>.json`` and
-                    # the root has to be that run's own directory.
-                    print(
-                        f"hint: no payload under --payload-root {args.payload_root!r} matched "
-                        f"a recorded file name; the daemon writes them under "
-                        f"<db dir>/payloads/{args.run_id}/ — point at that directory",
-                        file=sys.stderr,
-                    )
+                if (
+                    report.stamped == 0
+                    and report.missing_payload
+                    and not (report.unreadable or report.unverified)
+                ):
+                    # Every payload the pass looked for was absent (pre_v10
+                    # rows aside): far likelier a store away from its host, or
+                    # a root at the wrong level, than a tree that lost its
+                    # files. The daemons write ``<db dir>/payloads/<run_id>/
+                    # <coin>-<stamp>.json`` (cli/paper.py, cli/live.py,
+                    # cli/smoke.py), so the candidate beside THIS store is
+                    # named — a copy that moved the db and its payloads
+                    # together lands there. Only when the counts make the
+                    # sentence true: a root under which some name matched
+                    # (unverified / unreadable > 0) gets no hint.
+                    candidate = Path(args.db).resolve().parent / "payloads" / args.run_id
+                    if payload_root is None:
+                        print(
+                            "hint: every payload is missing at its recorded path; a store "
+                            "copied off the host that wrote it needs --payload-root pointing "
+                            f"at that run's payload directory (here: {candidate})",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"hint: no payload under --payload-root {args.payload_root!r} "
+                            "matched a recorded file name; the daemon writes them under "
+                            f"<db dir>/payloads/{args.run_id}/ (here: {candidate}) — point "
+                            "at that run's own directory",
+                            file=sys.stderr,
+                        )
         try:
             paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
         except ExportError as exc:

@@ -1281,17 +1281,29 @@ def test_export_payload_root_reads_a_copied_stores_payloads_by_name(tmp_path, ca
     assert "error: --payload-root" in capsys.readouterr().err
     assert not out.exists()
 
+    # Without the option on this copied store: the recorded path is what is
+    # read, so nothing is provable — and since EVERY payload is missing, the
+    # count line is followed by a hint naming the option and the candidate
+    # directory beside this store (the layout the daemons write), which is
+    # where a copy that moved db and payloads together lands.
+    candidate = str(path.resolve().parent / "payloads" / "r")
+    assert cli_main([*base, "--backfill-format-fingerprint"]) == 0
+    err = capsys.readouterr().err
+    assert "stamped=0 pre_v10=0 missing_payload=1" in err
+    assert "hint: every payload is missing at its recorded path" in err
+    assert f"--payload-root pointing at that run's payload directory (here: {candidate})" in err
+
     # A root at the wrong LEVEL (the copied ``payloads/`` parent rather than
     # the run's own directory under it) is a directory, so it cannot be
     # refused — but nothing under it matches a recorded name, and that is
     # far likelier the operator's level than a tree that lost its files, so
-    # the count line is followed by a hint naming the layout.
+    # the count line is followed by the root-side hint with the same candidate.
     rc = cli_main([*base, "--backfill-format-fingerprint", "--payload-root", str(tmp_path)])
     assert rc == 0
     err = capsys.readouterr().err
     assert "stamped=0 pre_v10=0 missing_payload=1" in err
     assert "hint: no payload under --payload-root" in err
-    assert "<db dir>/payloads/r/" in err
+    assert f"<db dir>/payloads/r/ (here: {candidate})" in err
 
     rc = cli_main(
         [*base, "--backfill-format-fingerprint", "--payload-root", str(tmp_path / "copied")]

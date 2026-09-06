@@ -16,7 +16,15 @@ from datetime import datetime, timezone
 
 import requests
 
-from .utils import date_refusal, json_body_or_outage, live_snapshot_note, raise_for_http_status
+from .utils import (
+    MAX_UNTRUSTED_CHARS,
+    date_refusal,
+    echo_argument,
+    json_body_or_outage,
+    live_snapshot_note,
+    raise_for_http_status,
+    sanitize_untrusted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,10 +129,18 @@ def get_prediction_markets(
     try:
         data = _request("public-search", {"q": topic, "limit_per_type": 20})
     except requests.RequestException as e:
+        # The log line below keeps the whole reason; the prose gets it
+        # flattened and capped, because a 4xx carries the request URL and
+        # with it the model's own ``topic`` — verbatim, that is a fragment the
+        # model authored flowing back into text it reads (#201). The topic
+        # named in the closing sentence is that same fragment, so it gets the
+        # argument echo too, as do the other two places this getter quotes it
+        # back: the report heading and the no-match sentence (#231).
         logger.warning("Polymarket search failed for %r: %s", topic, e)
         return (
-            f"Polymarket data is currently unavailable (network error: {e}). "
-            f"Proceed without prediction-market signal for '{topic}'."
+            f"Polymarket data is currently unavailable "
+            f"(network error: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}). "
+            f"Proceed without prediction-market signal for '{echo_argument(topic)}'."
         )
 
     now = datetime.now(timezone.utc)
@@ -137,7 +153,7 @@ def get_prediction_markets(
     candidates.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
 
     header = (
-        f'## Polymarket prediction markets: "{topic}"\n'
+        f'## Polymarket prediction markets: "{echo_argument(topic)}"\n'
         f"Live, market-implied probabilities (higher traded volume = deeper, "
         f"more reliable). A probability is the crowd's priced odds of the event, "
         f"not a forecast you should take as certain.\n\n"
@@ -149,7 +165,7 @@ def get_prediction_markets(
 
     if not candidates:
         return header + (
-            f"No open prediction markets matched '{topic}'. Polymarket coverage "
+            f"No open prediction markets matched '{echo_argument(topic)}'. Polymarket coverage "
             f"is concentrated in macro, political, geopolitical, and crypto "
             f"events; a specific equity may have none."
         )

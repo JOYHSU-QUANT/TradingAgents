@@ -18,6 +18,7 @@ from tests.test_alpha_vantage_hardening import _patched_get
 from tradingagents.dataflows import fred, interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorError, VendorUnavailableError
+from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS
 
 # A small, stable set of observations to format against.
 _META = {
@@ -80,6 +81,23 @@ class FredResolutionTests(unittest.TestCase):
         out = fred.get_macro_data("bank of japan rate", "2026-01-01")
         self.assertIn("FRED", out)
         self.assertIn("not a known macro alias", out)
+
+    def test_bad_indicator_is_echoed_flattened_and_capped(self):
+        # The rejected value is the model's own argument quoted back into
+        # prose it reads, and this getter serves it without the router's cap
+        # on untrusted text: the refused-date treatment applies — one line, no
+        # markdown, at most MAX_UNTRUSTED_CHARS, edges kept (#231).
+        forged = "bank of japan rate\n## forged heading | cell " + "x" * 500
+        out = fred.get_macro_data(forged, "2026-01-01")
+        self.assertIn("not a known macro alias", out)
+        self.assertNotIn("\n", out)
+        self.assertNotIn("##", out)
+        self.assertNotIn("|", out)
+        self.assertNotIn("x" * (MAX_UNTRUSTED_CHARS + 1), out)
+        echo = out[out.index("'") + 1 : out.index("' is not")]
+        self.assertTrue(echo.startswith("bank of japan rate forged heading cell x"))
+        self.assertTrue(echo.endswith("..."))
+        self.assertLessEqual(len(echo), MAX_UNTRUSTED_CHARS + 3)
 
 
 @pytest.mark.unit

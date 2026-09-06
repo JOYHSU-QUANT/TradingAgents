@@ -341,6 +341,23 @@ def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bo
     return flat
 
 
+def echo_argument(value: object) -> str:
+    """The model's own argument, flattened and capped, for text it reads again.
+
+    A tool that quotes one of its arguments back — the symbol it could not
+    verify, the topic nothing matched, the alias it does not know — is putting
+    a fragment the MODEL authored into the prompt, exactly the direction
+    :func:`_echo_untrusted` guards for a refused date. Same treatment, and
+    ``keep_edges`` for the same reason: markers become a space rather than
+    vanishing, so ``_foo`` cannot come back as ``foo`` inside a sentence
+    calling it unusable. A clean value comes through byte for byte.
+
+    Not for a VENDOR's message — that one is not quoted back at its author and
+    wants the default edges (see :func:`sanitize_untrusted`).
+    """
+    return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+
+
 def _echo_untrusted(value) -> str:
     """The refused date argument, quoted, flattened and capped, for the sentinel.
 
@@ -355,7 +372,7 @@ def _echo_untrusted(value) -> str:
     comes through byte for byte.
     """
     if isinstance(value, str):
-        flat = sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+        flat = echo_argument(value)
         quoted = repr(flat)
         if len(quoted) > MAX_UNTRUSTED_CHARS + 2:
             # Whole characters, not repr bytes, and repr is recomputed each
@@ -500,11 +517,29 @@ def date_refusal(
         return None
     if value is not None and normalize_iso_date(value) is not None:
         return None
-    # The refusal is RETURNED, so it never reaches the router's warning lane;
-    # without this line an operator's log shows nothing for a model that keeps
-    # sending a date no tool can use (#119). Info, not warning: the model is
-    # told to retry, and the echo is the flattened one the sentence carries —
-    # computed once here and handed to the sentinel (#140).
+    return refuse_date(value, what=what, kind=kind, param=param)
+
+
+def refuse_date(
+    value,
+    *,
+    what: str,
+    kind: DateKind,
+    param: str = "curr_date",
+) -> str:
+    """Refuse a date already judged unusable: log the one operator line, serve the sentinel.
+
+    The refusal is RETURNED, so it never reaches the router's warning lane;
+    without this line an operator's log shows nothing for a model that keeps
+    sending a date no tool can use (#119). Info, not warning: the model is
+    told to retry, and the echo is the flattened one the sentence carries —
+    computed once here and handed to the sentinel (#140).
+
+    Split out of :func:`date_refusal` — which judges the value first — so a
+    tool that keeps its own parse rule (the verification snapshot's looser
+    pandas gate is a decision, #112) can refuse with the same log line and
+    the same sentence rather than a hand-written copy of either (#230).
+    """
     echo = _echo_untrusted(value)
     logger.info("Refusing unusable %s %s for %s", param, echo, what)
     return invalid_date_sentinel(value, what=what, kind=kind, param=param, _echo=echo)

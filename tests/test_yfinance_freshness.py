@@ -262,7 +262,10 @@ class TestUnusableCurrDateIsVendorAgnostic:
         assert yfin.date_range_refusal is utils.date_range_refusal
         assert avs.date_range_refusal is utils.date_range_refusal
         assert avi.date_refusal is utils.date_refusal
-        assert mdv.invalid_date_sentinel is utils.invalid_date_sentinel
+        # The tool keeps its own (looser, #112) parse rule, so it binds the
+        # half of the judgement that follows one: refuse_date logs and serves,
+        # and date_refusal is that same tail behind the shared parse (#230).
+        assert mdv.refuse_date is utils.refuse_date
 
     @pytest.mark.parametrize("curr_date", _UNUSABLE)
     @pytest.mark.parametrize(

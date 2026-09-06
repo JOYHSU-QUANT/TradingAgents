@@ -16,6 +16,7 @@ import pandas as pd
 from stockstats import wrap
 
 from tradingagents.dataflows.errors import NoMarketDataError
+from tradingagents.dataflows.utils import echo_argument
 from tradingagents.dataflows.yfinance_common import load_ohlcv
 
 # A fixed, common indicator set so the snapshot is the same shape every run.
@@ -107,7 +108,12 @@ def build_verified_market_snapshot(
     recent = df.tail(window)
 
     lines = [
-        f"## Verified market data snapshot for {symbol.upper()}",
+        # The heading quotes the model's own ``symbol`` argument back into the
+        # report it reads, so it is flattened and capped like a refused
+        # argument — otherwise a symbol carrying its own "## " line forges a
+        # second heading in the source of truth (#231). Uppercased first, so
+        # the cap holds for a value that grows under ``upper()``.
+        f"## Verified market data snapshot for {echo_argument(symbol.upper())}",
         "",
         f"- Requested analysis date: {curr_date}",
         f"- Latest trading row used: {latest_date}",

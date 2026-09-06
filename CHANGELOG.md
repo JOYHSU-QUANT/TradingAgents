@@ -415,6 +415,26 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **dataflows / agents: the two failure texts that reach the model without
+  passing through the router are flattened and capped too, and a model
+  argument quoted back is echoed the way a refused date is** (issues #201
+  and #231; #230 item 3). PR #202 capped the vendor's share of the router's
+  two sentinel slots at ``MAX_UNTRUSTED_CHARS`` (200), but
+  ``get_verified_market_snapshot`` calls the builder directly and
+  ``get_prediction_markets`` handles its own transport failures, so a Yahoo
+  Finance outage reason (the library's whole decoded error, line breaks and
+  markdown included) and a Gamma 4xx (whose URL carries the model's own
+  ``topic``) still entered the prompt verbatim and unbounded — the former on
+  a tool the market analyst calls every cycle. Both slots now get the same
+  flatten-and-cap; the whole reason goes to the log (the snapshot tool
+  gained a logger for it). The snapshot tool's date refusal now also logs
+  the routed tools' ``Refusing unusable ...`` line, through the new
+  ``utils.refuse_date`` that ``date_refusal`` delegates to — the tool keeps
+  its deliberately looser pandas parse. FRED's alias rejection and
+  Polymarket's report quote the model's ``indicator`` / ``topic`` flattened,
+  capped and edge-kept, as ``_echo_untrusted`` does for a refused date; a
+  clean value reads byte for byte as before.
+
 - **dataflows: the vendors that own their transport handling now raise the
   outage type when they are down, and a throttled or skipped vendor makes
   a fallback's "no data" unconfirmed too** (issue #172; the #195 and #203

@@ -17,6 +17,7 @@ from tests.test_alpha_vantage_hardening import _patched_get
 from tradingagents.dataflows import interface, polymarket
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorUnavailableError
+from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS
 
 
 def _market(question, prob, *, volume, end_date, closed=False, wk=None):
@@ -188,6 +189,66 @@ class PolymarketOutageTests(unittest.TestCase):
             out = polymarket.get_prediction_markets("Fed rate cut")
         self.assertIn("unavailable", out.lower())
         self.assertIn("404", out)
+
+    # A topic the model authored, as a 4xx quotes it back inside the request
+    # URL: line breaks, markdown, no upper bound.
+    _FORGED_TOPIC = "Fed rate cut\n## forged heading | cell " + "x" * 500
+
+    def test_a_4xx_flattens_and_caps_the_transport_reason_it_quotes(self):
+        # This handler sits outside the router's cap on vendor text (#171):
+        # a 4xx's message carries the request URL and with it the model's own
+        # ``topic`` verbatim, into prose the router reads as a successful
+        # answer (#201). One line, no markdown, at most MAX_UNTRUSTED_CHARS
+        # of reason; the log line keeps the whole of it.
+        error = requests.HTTPError(
+            f"404 Client Error: Not Found for url: {polymarket.GAMMA_BASE}/public-search"
+            f"?q={self._FORGED_TOPIC}&limit_per_type=20"
+        )
+        with (
+            mock.patch.object(polymarket.requests, "get", side_effect=error),
+            self.assertLogs("tradingagents.dataflows.polymarket", level="WARNING") as cm,
+        ):
+            out = polymarket.get_prediction_markets(self._FORGED_TOPIC)
+        self.assertIn("unavailable", out.lower())
+        self.assertIn("404", out)
+        self.assertNotIn("\n", out)
+        self.assertNotIn("##", out)
+        self.assertNotIn("|", out)
+        self.assertNotIn("x" * (MAX_UNTRUSTED_CHARS + 1), out)
+        slot = out[out.index("network error: ") + len("network error: ") : out.index(")")]
+        self.assertTrue(slot.endswith("..."))
+        self.assertLessEqual(len(slot), MAX_UNTRUSTED_CHARS + 3)
+        # The closing sentence names the topic too — the same fragment (#231).
+        self.assertIn("signal for 'Fed rate cut forged heading cell x", out)
+        self.assertEqual(len(cm.output), 1)
+        self.assertIn("x" * 500, cm.output[0])
+
+    def test_the_no_match_sentence_quotes_the_topic_flattened_and_capped(self):
+        # The likeliest path for a forged topic: nothing matches it, and the
+        # getter names it back. Left raw, this was the third quoting site and
+        # the one a hostile topic reaches first (#231).
+        empty = {"events": [{"markets": []}]}
+        with mock.patch.object(polymarket, "_request", return_value=empty):
+            out = polymarket.get_prediction_markets(self._FORGED_TOPIC)
+        self.assertIn("No open prediction markets matched", out)
+        self.assertNotIn("##", out.split("\n", 1)[1])
+        self.assertNotIn("|", out)
+        self.assertNotIn("x" * (MAX_UNTRUSTED_CHARS + 1), out)
+        self.assertIn("matched 'Fed rate cut forged heading cell x", out)
+
+    def test_the_report_header_quotes_the_topic_flattened_and_capped(self):
+        # The success path quotes the topic in its heading; a topic carrying
+        # its own "## " line would forge a second heading in the report the
+        # model reads (#231). A clean topic reads byte for byte as before.
+        with mock.patch.object(polymarket, "_request", return_value=copy.deepcopy(_SEARCH)):
+            out = polymarket.get_prediction_markets(self._FORGED_TOPIC)
+        first_line = out.splitlines()[0]
+        self.assertTrue(
+            first_line.startswith('## Polymarket prediction markets: "Fed rate cut forged heading cell x')
+        )
+        self.assertTrue(first_line.endswith('..."'))
+        self.assertNotIn("x" * (MAX_UNTRUSTED_CHARS + 1), out)
+        self.assertNotIn("forged heading |", out)
 
     def test_a_5xx_degrades_through_the_router_without_a_traceback(self):
         set_config({"data_vendors": {"prediction_markets": "polymarket"}})

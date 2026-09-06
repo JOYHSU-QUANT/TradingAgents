@@ -25,6 +25,7 @@ import copy
 import pytest
 
 import tests.test_yfinance_freshness as freshness
+import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.alpha_vantage_stock as avs
@@ -52,15 +53,17 @@ class _VendorReached(Exception):
     """Raised by every mocked network seam: reaching it is the failure."""
 
 
-def _no_network(monkeypatch):
+def _no_network(monkeypatch, reached=None):
     """Every seam a getter under test could reach the vendor through.
 
     Returns the list the seams append to before raising: the getters that
     wear the library lane re-raise the seam's error as ``VendorLibraryError``
     (#187), so "was the vendor asked?" is read from this list, not from the
-    outcome.
+    outcome. ``reached`` lets a caller hand in that list, so seams armed by
+    another suite's helper report into the same one (test_date_refusal_coverage).
     """
-    reached = []
+    if reached is None:
+        reached = []
 
     def _reached(*a, **k):
         reached.append(a)
@@ -73,6 +76,10 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(avn, "_make_api_request", _reached)
     monkeypatch.setattr(avs, "_make_api_request", _reached)
     monkeypatch.setattr(avi, "_make_api_request", _reached)
+    # The fundamentals request is the fourth Alpha Vantage seam; no getter
+    # here reaches it, but a suite that composes this list must not leave it
+    # open to a real request.
+    monkeypatch.setattr(avf, "_make_api_request", _reached)
     # The fetch boundary wraps the call; make it transparent so the seam
     # above is what fires.
     monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())

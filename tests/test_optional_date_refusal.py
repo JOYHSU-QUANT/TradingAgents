@@ -57,9 +57,15 @@ from tradingagents.dataflows.utils import (
 # TypeError from strptime (or, for the three typed twins, a vendor error).
 
 
-def _no_network(monkeypatch):
-    """The first network-touching seam behind each optional getter."""
-    reached = []
+def _no_network(monkeypatch, reached=None):
+    """The first network-touching seam behind each optional getter.
+
+    ``reached`` lets a caller hand in the list to report into, so a suite that
+    composes this with the parity suite's seams reads one list
+    (test_date_refusal_coverage).
+    """
+    if reached is None:
+        reached = []
 
     def _reached(*a, **k):
         reached.append(a)

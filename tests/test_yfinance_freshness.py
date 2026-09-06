@@ -23,8 +23,28 @@ class _FakeTicker:
 
 
 def _patch_ticker(monkeypatch, **attrs):
+    """A yfinance ``Ticker`` with the given attributes behind a transparent
+    ``yf_fetch_unhidden``. Returns the list each fetch is appended to — at the
+    fetch boundaries (``yf_fetch_unhidden`` and ``yf_fetch_statement``), not
+    at ``Ticker`` construction, which is lazy and asks the vendor nothing —
+    for a caller that has to know the vendor WAS asked
+    (test_date_refusal_coverage). The statement boundary keeps its real
+    wrapper underneath, so nothing here changes what the tests below drive."""
+    reached = []
+    fetch_statement = yfin.yf_fetch_statement
+
+    def _unhidden(fn, **kw):
+        reached.append(fn)
+        return fn()
+
+    def _statement_fetch(fn, **kw):
+        reached.append(fn)
+        return fetch_statement(fn, **kw)
+
     monkeypatch.setattr(yfin.yf, "Ticker", lambda symbol: _FakeTicker(**attrs))
-    monkeypatch.setattr(yfin, "yf_fetch_unhidden", lambda fn, **kw: fn())
+    monkeypatch.setattr(yfin, "yf_fetch_unhidden", _unhidden)
+    monkeypatch.setattr(yfin, "yf_fetch_statement", _statement_fetch)
+    return reached
 
 
 def _statement(*cols):
@@ -32,15 +52,22 @@ def _statement(*cols):
     return pd.DataFrame({pd.Timestamp(c): [100.0] for c in cols}, index=["Total Assets"])
 
 
-def _patch_av_request(monkeypatch, body):
+def _patch_av_request(monkeypatch, body, reached=None):
     """Serve ``body`` as the Alpha Vantage response, and hand back the module.
 
     The cross-vendor classes below all drive the real Alpha Vantage getters, so
     the mock shape is defined once here rather than restated at each site.
+    ``reached``, when given, has each requested function name appended to it
+    (test_date_refusal_coverage has to know the vendor WAS asked).
     """
     import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 
-    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
+    def _request(function_name, params):
+        if reached is not None:
+            reached.append(function_name)
+        return body
+
+    monkeypatch.setattr(avf, "_make_api_request", _request)
     return avf
 
 

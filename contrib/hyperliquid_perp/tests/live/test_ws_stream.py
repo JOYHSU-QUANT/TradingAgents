@@ -811,6 +811,63 @@ def test_a_naive_instant_is_rejected_at_the_boundary(kwargs):
         bf.backfill(**kwargs)
 
 
+def test_the_fetch_seam_is_refused_at_construction_like_the_reconcilers_copy():
+    # cli/live.py hands the SAME ``user_fills_by_time`` to this constructor and
+    # to the reconciler's ``fetch_fills``. Only the reconciler's copy was
+    # checked: it refused a payload at boot, while this copy would have read
+    # the same payload as a failed backfill every sweep (issue #169). One guard;
+    # the message's full shape is pinned where it is owned
+    # (``tests/common/test_seam_guard.py``), this pins that THIS seam goes
+    # through it.
+    payload = {"fills": []}
+    with pytest.raises(TypeError, match="fetch must be the exchange seam"):
+        FillBackfiller(fetch=payload, processor=None, clock=ManualClock(_NOW))
+
+
+def test_a_decimal_lookback_converges_to_float_at_construction():
+    # ``Decimal`` is the shape a config number arrives in; it passed ``> 0`` and
+    # failed only inside ``timedelta(seconds=...)`` — at construction since
+    # PR #168, in ``_window_start`` before (issue #169). What the bare ``> 0``
+    # check could not see is refused by name instead: a bool (silently a
+    # one-second window before), a str or a Decimal NaN (died at the
+    # comparison), a float NaN / an infinity / a number beyond timedelta's
+    # range (died inside ``timedelta`` naming nothing).
+    bf = FillBackfiller(
+        fetch=lambda s, e: [],
+        processor=None,
+        clock=ManualClock(_NOW),
+        lookback_seconds=Decimal("3600"),
+    )
+    assert bf.lookback == timedelta(hours=1)
+    assert bf.backfill(_NOW).complete  # the window was computed, not exploded on
+    for not_a_number in ("3600", True):
+        with pytest.raises(TypeError, match="lookback_seconds must be a number of seconds"):
+            FillBackfiller(
+                fetch=lambda s, e: [],
+                processor=None,
+                clock=ManualClock(_NOW),
+                lookback_seconds=not_a_number,
+            )
+    for not_a_span in (
+        Decimal("NaN"),
+        Decimal("sNaN"),  # float() refuses a signaling NaN with its own ValueError
+        float("inf"),
+        10**400,  # too large for a float
+        10**20,  # a float, but beyond timedelta's range
+        Decimal("1e15"),
+        1e-7,  # positive, but timedelta rounds it to a zero-width window
+        0,
+        Decimal("-1"),
+    ):
+        with pytest.raises(ValueError, match="lookback_seconds must be > 0 and finite"):
+            FillBackfiller(
+                fetch=lambda s, e: [],
+                processor=None,
+                clock=ManualClock(_NOW),
+                lookback_seconds=not_a_span,
+            )
+
+
 def test_last_live_fill_time_is_the_startup_backfill_floor(db, tmp_path):
     """PR5's startup floor: the newest booked fill is where the gap begins."""
     clock = ManualClock(_NOW)

@@ -16,7 +16,7 @@ import pytest
 from contrib.hyperliquid_perp.common.instants import whole_hours_label
 from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
 from contrib.hyperliquid_perp.live.config import ExecutionMode
-from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK_SECONDS, FillBackfiller
+from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK, FillBackfiller
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
 from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
@@ -29,6 +29,7 @@ from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
 from ..conftest import echo_order_status_cloid
+from .conftest import StubBackfiller
 
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -955,10 +956,8 @@ def test_a_fractional_hour_lookback_is_refused_when_the_backfiller_is_bound(env,
     with pytest.raises(ValueError, match=refusal):
         reconciler._backfiller = fractional
     assert reconciler._backfiller is None  # the refused binding did not land
-    monkeypatch.setattr(reconcile_mod, "DEFAULT_LOOKBACK_SECONDS", 5 * 3600 + 1800)
-    with pytest.raises(
-        ValueError, match="DEFAULT_LOOKBACK_SECONDS must be a whole number of hours"
-    ):
+    monkeypatch.setattr(reconcile_mod, "DEFAULT_LOOKBACK", timedelta(seconds=5 * 3600 + 1800))
+    with pytest.raises(ValueError, match="DEFAULT_LOOKBACK must be a whole number of hours"):
         _reconciler_over(db, seams, None)
 
 
@@ -987,7 +986,7 @@ def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog)
     # local fill between the two windows reads as "a fill the exchange denies".
     db, seams, _ = env
     one_hour = 3600
-    assert one_hour != DEFAULT_LOOKBACK_SECONDS  # the test proves nothing if they agree
+    assert timedelta(seconds=one_hour) != DEFAULT_LOOKBACK  # proves nothing if they agree
     backfill_calls, backfill_fetch = _recording_fills_seam()
     crosscheck_calls, crosscheck_fetch = _recording_fills_seam()
     backfiller = _backfiller_with_lookback(one_hour, fetch=backfill_fetch)
@@ -1030,7 +1029,7 @@ def test_a_reconciler_without_a_backfiller_cross_checks_over_the_module_default(
     calls, fetch = _recording_fills_seam()
     reconciler = _reconciler_over(db, seams, None, fetch_fills=fetch)
     assert "fill_backfill" in reconciler.run("heartbeat").legs_skipped
-    expected_start = int((_NOW - timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)).timestamp() * 1000)
+    expected_start = int((_NOW - DEFAULT_LOOKBACK).timestamp() * 1000)
     assert [start for start, _ in calls] == [expected_start]
 
 
@@ -1230,7 +1229,7 @@ def test_a_mismatch_enters_recoverable_safe_mode_and_a_clean_pass_recovers_it(en
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     # §13.4 auto-release demands a FULLY wired reconciler (no legs_skipped):
     # bind the backfill seam the shared fixture leaves out.
-    reconciler._backfiller = _StubBackfiller()
+    reconciler._backfiller = StubBackfiller()
 
     seams.clearinghouse = _clearinghouse(account_value="90")  # equity mismatch
     report = reconciler.reconcile_and_apply(
@@ -1436,24 +1435,9 @@ def test_a_capped_fill_window_withholds_invalid_fill_verdicts(env):
     assert stalled.endswith("invalid-fill verdicts withheld")
 
 
-class _StubBackfiller:
-    """Records the ``since`` each pass was asked to cover; books nothing."""
-
-    lookback = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)  # the reconciler reads it
-
-    def __init__(self):
-        self.calls = []
-
-    def backfill(self, now=None, *, since=None):
-        from contrib.hyperliquid_perp.live.fill_backfill import BackfillSummary
-
-        self.calls.append(since)
-        return BackfillSummary(fetched=0, applied=0, duplicate=0, unmapped=0, malformed=0)
-
-
 def test_startup_backfill_floor_reaches_back_to_the_newest_booked_fill(env):
     db, seams, reconciler = env
-    stub = _StubBackfiller()
+    stub = StubBackfiller()
     reconciler._backfiller = stub  # no stream: the startup-command wiring
     fill_time = _NOW - timedelta(days=3)  # far outside the 6h trailing lookback
     _insert_booked_fill(db, fill_time=fill_time)
@@ -1464,7 +1448,7 @@ def test_startup_backfill_floor_reaches_back_to_the_newest_booked_fill(env):
 
 def test_startup_backfill_floor_falls_back_to_run_genesis_with_no_fills(env):
     db, seams, reconciler = env
-    stub = _StubBackfiller()
+    stub = StubBackfiller()
     reconciler._backfiller = stub
     reconciler.run("startup")
     (since,) = stub.calls
@@ -1657,7 +1641,7 @@ def test_a_clean_pass_does_not_reopen_the_gate_while_release_conditions_are_unme
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     # Fully wired (no legs_skipped): this test's subject is the §13.4
     # attestation conditions, not the wiring gate.
-    reconciler._backfiller = _StubBackfiller()
+    reconciler._backfiller = StubBackfiller()
     seams.clearinghouse = _clearinghouse(account_value="90")  # mismatch → recoverable
     reconciler.reconcile_and_apply(
         "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
@@ -1713,7 +1697,7 @@ def test_a_missing_genesis_floor_degradation_is_logged(env, caplog):
     # trailing lookback is money-relevant (an outage longer than 6h loses
     # fills) — it must leave a trace.
     db, seams, reconciler = env
-    stub = _StubBackfiller()
+    stub = StubBackfiller()
     reconciler._backfiller = stub
     with db.transaction() as conn:
         conn.execute("UPDATE runs SET created_at = 'not-a-timestamp' WHERE run_id = 'r'")
@@ -1906,7 +1890,7 @@ def test_a_reconciler_without_fill_seams_names_both_skipped_legs():
 
 def test_a_fully_wired_clean_pass_reports_no_skipped_legs(env):
     db, seams, reconciler = env
-    reconciler._backfiller = _StubBackfiller()
+    reconciler._backfiller = StubBackfiller()
     report = reconciler.run("heartbeat")
     assert report.clean
     assert report.legs_skipped == ()
@@ -1924,6 +1908,33 @@ def test_a_non_callable_exchange_seam_is_refused_at_construction(env, seam_name)
     seams_given = {"fetch_fills": seams.fetch_fills, seam_name: payload}
     with pytest.raises(TypeError, match=f"{seam_name} must be the exchange seam"):
         _reconciler_over(db, seams, None, **seams_given)
+
+
+_STREAM_SEAM_METHODS = ("backfill_epoch", "backfill_since", "mark_backfill_done")
+
+
+@pytest.mark.parametrize("missing", _STREAM_SEAM_METHODS)
+def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_construction(env, missing):
+    # The stream's three methods are all called inside the guarded fill leg
+    # (``_run_fill_backfill``), so a stand-in missing any one would surface as
+    # a failed backfill every sweep, never a crash — the fetch-seam argument
+    # one seam over (issue #169), and the refusal names WHICH method is
+    # missing. ``None`` stays the no-stream wiring (``env``, and every
+    # production site).
+    db, seams, _ = env
+    two_of_three = SimpleNamespace(
+        **{m: (lambda *args: None) for m in _STREAM_SEAM_METHODS if m != missing}
+    )
+    # An ABSENT method reads as ``got NoneType``: the guard sees getattr's
+    # default, and the name in front of it is what tells the operator which
+    # method to add.
+    with pytest.raises(
+        TypeError,
+        match=rf"stream\.{missing} must be the LiveWsStream fill-leg seam .*, got NoneType",
+    ):
+        _reconciler_over(db, seams, None, stream=two_of_three)
+    all_three = SimpleNamespace(**{m: (lambda *args: None) for m in _STREAM_SEAM_METHODS})
+    assert _reconciler_over(db, seams, None, stream=all_three)._stream is all_three
 
 
 def test_fetch_fills_alone_may_be_absent(env):
@@ -2842,7 +2853,7 @@ def test_sweep_failures_make_the_pass_unclean_without_a_release_flap(env):
     db, seams, reconciler = env
     gate = _gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
-    reconciler._backfiller = _StubBackfiller()
+    reconciler._backfiller = StubBackfiller()
     safe_mode.enter("recoverable", "ws_disconnect")  # a latch a clean pass would lift
 
     report = reconciler.reconcile_and_apply(

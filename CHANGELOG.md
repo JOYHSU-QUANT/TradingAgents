@@ -97,6 +97,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the exchange-read seams of the reconciler, the
+  venue-identity monitor and the fill backfiller are refused the same way at
+  construction** (issue #169, follow-ups from PR #168). The reconciler and
+  the venue-identity monitor each carried their
+  own copy of the "must be the … seam" refusal, and ``FillBackfiller`` had
+  none — yet the live loop hands the SAME ``user_fills_by_time`` object to
+  both the reconciler's ``fetch_fills`` and the backfiller's ``fetch``: the
+  reconciler's copy refused a payload at boot, while the backfiller's would
+  have read the same payload as a failed backfill every sweep. One guard now
+  (``common/seam_guard.require_seam``; still ``callable()`` only, no
+  signature check), used by all three constructors, so the message has one
+  owner: ``<name> must be the <kind> seam (<shape>), got <type>``. The
+  reconciler's ``stream`` goes through the same guard method by method
+  (``None`` allowed — and it is ``None`` on every production wiring today;
+  anything else must answer ``backfill_epoch`` / ``backfill_since`` /
+  ``mark_backfill_done``, and the refusal names the missing one).
+  ``FillBackfiller`` also converges ``lookback_seconds`` to ``float`` at
+  construction, refusing by name what the bare ``> 0`` check could not see:
+  a ``Decimal`` or a float NaN / infinity died inside ``timedelta`` with a
+  message naming nothing, a ``Decimal`` NaN and a ``str`` died at the
+  comparison itself, a ``bool`` was silently accepted as a one-second
+  window, and a finite value beyond ``timedelta``'s range still overflowed
+  there (a positive one under its microsecond quietly became a zero-width
+  window). Other injected callables
+  (``refresh_kill_switch`` on both constructors, ``WsReconnector``'s
+  ``connect``) still have no construction-time refusal. ``fill_backfill``
+  exports
+  ``DEFAULT_LOOKBACK: timedelta`` beside ``DEFAULT_LOOKBACK_SECONDS`` (an
+  addition; the constructor's signature is unchanged), and the reconciler's
+  fallback cross-check window names it as its owner
+  (``fill_backfill.DEFAULT_LOOKBACK`` in the whole-hours refusal).
 - **hyperliquid_perp: the paper lane's terminal `api_failed` record rides the
   same retry lane as its other post-answer persists, and the two decision
   lanes drive one in-flight state machine** (issue #181, items 1, 2 and 5;

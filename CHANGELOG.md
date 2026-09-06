@@ -81,7 +81,7 @@ Breaking changes within the 0.x line are called out explicitly.
   rendering ``Error retrieving ...`` prose — a string ``route_to_vendor``
   reads as a successful answer, so the chain stopped at the vendor that had
   just failed and a sibling with its own endpoint (Alpha Vantage's RSI, for
-  a local stockstats bug) was never asked; five of them logged nothing — now
+  a local stockstats bug) was never asked; seven of them logged nothing — now
   run their fetch under one handler, ``with utils.library_failure_lane(logger,
   subject)``, from where each getter's ``try`` used to start: typed vendor
   failures, the caller's indicator mistake and transport failures pass

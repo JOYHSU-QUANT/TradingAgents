@@ -1,8 +1,8 @@
 """The library lane: a getter's untyped failure leaves as ``VendorLibraryError`` (#187, #86).
 
-Ten leaves used to hand-copy ``except VendorError: raise`` / ``except OSError:
+Nine leaves used to hand-copy ``except VendorError: raise`` / ``except OSError:
 raise`` / ``except Exception: return "Error retrieving ..."``. One that forgot
-the guard rendered a throttle as a report (#85), five logged nothing, and the
+the guard rendered a throttle as a report (#85), seven logged nothing, and the
 prose — read by the router as a successful answer — ended the chain at the
 vendor that had just failed even when a sibling computed the same tool its
 own way. ``utils.library_failure_lane`` is that handler once; these tests pin
@@ -33,7 +33,7 @@ _logger = logging.getLogger(__name__)
 
 
 def _leaf(symbol, indicator, fail=None):
-    with library_failure_lane(_logger, f"{indicator} values for {symbol}"):
+    with library_failure_lane(f"{indicator} values for {symbol}", log=_logger):
         if fail is not None:
             raise fail
         return f"{indicator} for {symbol}"

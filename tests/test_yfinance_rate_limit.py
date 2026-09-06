@@ -989,8 +989,8 @@ def test_every_lane_leaf_raises_the_library_type_and_logs_the_traceback(
 ):
     # #187 / #86: the leaves used to hand-copy a broad handler that rendered
     # str(e) as prose — a string the router reads as a successful answer, so
-    # the chain ended at the vendor that had just failed — and five of them
-    # logged nothing. Now every one leaves the failure as the library type,
+    # the chain ended at the vendor that had just failed — and seven of the
+    # eight logged nothing. Now every one leaves the failure as the library type,
     # subject filled in, message whole (the router caps it), with the
     # traceback logged under the leaf's own module.
     prefix = _PROSE_LEAF_PREFIXES[method]
@@ -1031,6 +1031,22 @@ def test_every_lane_leaf_ends_as_one_capped_line_when_it_is_the_only_vendor(
     monkeypatch.setattr(*seam, mock.Mock(side_effect=RuntimeError(_FORGED_MESSAGE)))
     out = interface.route_to_vendor(method, *args)
     _assert_one_capped_line(out, prefix)
+
+
+@pytest.mark.unit
+def test_what_the_global_news_leaf_keeps_outside_the_lane_still_fails_loudly(monkeypatch, caplog):
+    # #200 placed the cache forget above the broad handler so a yfinance that
+    # drops the attribute fails the call rather than freezing again behind a
+    # report; the lane starts where that handler did, so the forget — and
+    # the config reads before it — stay outside it: raw, unlogged by the
+    # lane, never report text (#187).
+    monkeypatch.setattr(ynews.YfData, "cache_get", object())
+    with caplog.at_level(logging.ERROR), pytest.raises(AttributeError):
+        ynews.get_global_news_yfinance("2026-06-01")
+    monkeypatch.setattr(ynews, "get_config", lambda: {})
+    with pytest.raises(KeyError, match="global_news_lookback_days"):
+        ynews.get_global_news_yfinance("2026-06-01")
+    assert not caplog.records
 
 
 

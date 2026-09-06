@@ -99,7 +99,7 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         # frame used to reach here (#110); a label whose TYPE the parser refuses
         # outright still raises, and both statements above are inside this guard
         # so it leaves as a typed vendor failure the router can fall back from
-        # rather than reaching the getters' broad except and coming back as an
+        # rather than reaching the getters' library lane and coming back as an
         # "Error retrieving ..." string the router reads as a successful report.
         # BOTH exception types, because pandas picks by label type and the two
         # families are equally reachable: an iterator or nested tuple raises
@@ -147,7 +147,7 @@ def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str)
     index also put the ``max()`` OUTSIDE the guard, so a set that coerced to
     mixed offsets without raising failed there instead ("Cannot compare tz-naive
     and tz-aware timestamps", measured on ``[naive str, aware Timestamp]``,
-    pandas 2.3.3) and reached the getter's broad except; per label, every value
+    pandas 2.3.3) and reached the getter's library lane; per label, every value
     handed to ``max`` is zone-free. The remaining guard is for a label whose
     TYPE the parser refuses outright, which stays a silent no-note here because
     an annotation must not be the thing that fails a report.
@@ -289,7 +289,7 @@ def get_stock_stats_indicators_window(
     # re-run: this used to fall back to a per-day loop that performed the
     # identical fetch and calculation once per day of the window and
     # rendered a column of blanks under a successful-looking header (#137).
-    with library_failure_lane(logger, f"{indicator} values for {symbol}"):
+    with library_failure_lane(f"{indicator} values for {symbol}", log=logger):
         indicator_data = _get_stock_stats_bulk(symbol, indicator, curr_date)
 
         # Generate the date range we need
@@ -372,7 +372,7 @@ def get_fundamentals(
 ):
     """Get company fundamentals overview from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(logger, f"fundamentals for {ticker}"):
+    with library_failure_lane(f"fundamentals for {ticker}", log=logger):
         ticker_obj = yf.Ticker(canonical)
         # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
         # None its own parser then trips over, which the library lane would
@@ -457,7 +457,7 @@ def get_balance_sheet(
 ):
     """Get balance sheet data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(logger, f"balance sheet for {ticker}"):
+    with library_failure_lane(f"balance sheet for {ticker}", log=logger):
         ticker_obj = yf.Ticker(canonical)
 
         # yf_fetch_statement, not plain yf_retry: the statement properties
@@ -480,7 +480,7 @@ def get_cashflow(
 ):
     """Get cash flow data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(logger, f"cash flow for {ticker}"):
+    with library_failure_lane(f"cash flow for {ticker}", log=logger):
         ticker_obj = yf.Ticker(canonical)
 
         # See get_balance_sheet for why these go through yf_fetch_statement.
@@ -499,7 +499,7 @@ def get_income_statement(
 ):
     """Get income statement data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(logger, f"income statement for {ticker}"):
+    with library_failure_lane(f"income statement for {ticker}", log=logger):
         ticker_obj = yf.Ticker(canonical)
 
         # See get_balance_sheet for why these go through yf_fetch_statement.
@@ -516,7 +516,7 @@ def get_income_statement(
 def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the company"]):
     """Get insider transactions data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(logger, f"insider transactions for {ticker}"):
+    with library_failure_lane(f"insider transactions for {ticker}", log=logger):
         ticker_obj = yf.Ticker(canonical)
         # Un-hidden: the holders scraper swallows a non-429 HTTP failure into
         # an empty frame, which the "no filings" sentence below would then

@@ -95,8 +95,8 @@ class VendorUnavailableError(VendorError):
     Neither a throttle nor "no data": the router reacts as it does to a
     transport failure — the chain goes on and this surfaces when nothing else
     serves — but logs it without the traceback that lane reserves for a bug,
-    and the getters' ``except VendorError: raise`` lets it out without a
-    clause of their own. Not yfinance's alone: the vendors whose boundary
+    and ``library_failure_lane``'s pass-through lets it out without the
+    getters needing a clause of their own. Not yfinance's alone: the vendors whose boundary
     is a bare ``requests.get`` — FRED, Polymarket, Farside, Alpha Vantage —
     map a 5xx (and, where every data answer is JSON, a non-JSON body) to
     this type through the shared ``utils.raise_for_http_status`` /

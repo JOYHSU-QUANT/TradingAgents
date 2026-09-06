@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -192,6 +193,16 @@ INDICATOR_MENU = (
     ("Volume-Based Indicators", ("vwma",)),
 )
 INDICATOR_MENU_OMITS = frozenset({"mfi"})
+
+# Checked at import, not only by the partition test: a described indicator
+# placed in neither the menu nor the omissions would otherwise drop out of
+# the prompt silently in an environment that never ran the tests.
+_MENU_KEYS = [key for _, keys in INDICATOR_MENU for key in keys]
+assert len(_MENU_KEYS) == len(set(_MENU_KEYS)), "INDICATOR_MENU lists an indicator twice"
+assert set(_MENU_KEYS).isdisjoint(INDICATOR_MENU_OMITS), "INDICATOR_MENU lists an omitted indicator"
+assert set(_MENU_KEYS) | INDICATOR_MENU_OMITS == set(INDICATOR_DESCRIPTIONS), (
+    "every described indicator must be placed in INDICATOR_MENU or INDICATOR_MENU_OMITS"
+)
 
 
 def indicator_menu() -> str:
@@ -782,7 +793,7 @@ def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS
 
 
 @contextlib.contextmanager
-def library_failure_lane(logger: logging.Logger, subject: str):
+def library_failure_lane(subject: str, *, log: logging.Logger) -> Iterator[None]:
     """Run a getter's fetch-and-render under the one handler for untyped failures.
 
     What a getter meets outside the taxonomy and outside transport — a
@@ -791,8 +802,8 @@ def library_failure_lane(logger: logging.Logger, subject: str):
     ``VendorLibraryError``. This used to be hand-copied at ten leaves as
     ``except VendorError: raise`` / ``except OSError: raise`` / ``except
     Exception: return "Error retrieving ..."``: a leaf that forgot the guard
-    rendered a throttle as a report (#85), five of them logged nothing, so an
-    operator never saw the degrade happen, and the returned string read to
+    rendered a throttle as a report (#85), seven of them logged nothing (one
+    printed), so an operator never saw the degrade happen, and the returned string read to
     the router as a successful answer, ending the chain at the vendor that
     had just failed (#187). A ``with`` block rather than a decorator, so the
     lane starts where each getter's ``try`` did — after the date refusal,
@@ -809,7 +820,7 @@ def library_failure_lane(logger: logging.Logger, subject: str):
     nothing in yfinance's own YFException family does; the clause is wider
     than the wire on purpose, since the OHLCV cache raises OSError too and a
     cache the process cannot read or write is no more a report than a reset
-    is. Anything else is logged WITH its traceback under ``logger`` — the
+    is. Anything else is logged WITH its traceback under ``log`` — the
     getter's own module logger, the whole message, since the report line is
     capped — and raised as ``VendorLibraryError`` for the router, which is
     where the report line is written, in one place for every vendor.
@@ -823,7 +834,7 @@ def library_failure_lane(logger: logging.Logger, subject: str):
     except (VendorError, UnsupportedIndicatorError, OSError):
         raise
     except Exception as e:
-        logger.exception("Vendor library failed retrieving %s: %s", subject, e)
+        log.exception("Vendor library failed retrieving %s: %s", subject, e)
         raise VendorLibraryError(subject, str(e)) from e
 
 

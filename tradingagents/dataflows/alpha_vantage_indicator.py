@@ -255,7 +255,7 @@ def get_indicator(
     # (#60), or after a 404 or a 503 (#87, #142). The subject is the one the
     # yfinance sibling names, so the report line does not depend on which
     # vendor failed (#187).
-    with library_failure_lane(logger, f"{indicator} values for {symbol}"):
+    with library_failure_lane(f"{indicator} values for {symbol}", log=logger):
         data = _make_api_request(av_function, params)
 
         # Parse CSV data and extract values for the date range

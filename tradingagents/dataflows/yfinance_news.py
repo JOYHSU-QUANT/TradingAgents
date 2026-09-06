@@ -117,7 +117,7 @@ def get_news_yfinance(
     # returns no news. Keep the user's ticker in the report header.
     canonical = normalize_symbol(ticker)
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
-    with library_failure_lane(logger, f"news for {ticker}"):
+    with library_failure_lane(f"news for {ticker}", log=logger):
         stock = yf.Ticker(canonical)
         # Through the shared un-hidden boundary like every other yfinance leaf
         # (#116); an outage body takes its vendor-unavailable lane rather than
@@ -212,7 +212,7 @@ def get_global_news_yfinance(
     all_news = []
     seen_titles = set()
 
-    with library_failure_lane(logger, "global news"):
+    with library_failure_lane("global news", log=logger):
         for query in search_queries:
             # Through the shared un-hidden boundary like every other yfinance
             # leaf (#136): an outage body takes its vendor-unavailable lane

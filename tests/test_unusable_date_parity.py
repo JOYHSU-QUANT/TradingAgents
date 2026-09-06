@@ -25,7 +25,6 @@ import copy
 import pytest
 
 import tests.test_yfinance_freshness as freshness
-import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.alpha_vantage_stock as avs
@@ -76,10 +75,6 @@ def _no_network(monkeypatch, reached=None):
     monkeypatch.setattr(avn, "_make_api_request", _reached)
     monkeypatch.setattr(avs, "_make_api_request", _reached)
     monkeypatch.setattr(avi, "_make_api_request", _reached)
-    # The fundamentals request is the fourth Alpha Vantage seam; no getter
-    # here reaches it, but a suite that composes this list must not leave it
-    # open to a real request.
-    monkeypatch.setattr(avf, "_make_api_request", _reached)
     # The fetch boundary wraps the call; make it transparent so the seam
     # above is what fires.
     monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())

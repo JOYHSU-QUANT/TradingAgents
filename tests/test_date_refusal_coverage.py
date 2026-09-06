@@ -245,11 +245,21 @@ def _dated_params():
 
 def _no_network(monkeypatch):
     """Every vendor seam the two direct-call suites patch, armed to raise into
-    one list. An after-fetch row's ``serve`` re-arms its own seam afterwards,
-    so the list stays what a getter must NOT reach on any path."""
+    one list — plus the Alpha Vantage fundamentals request, which neither
+    suite arms because no getter of theirs reaches it (its own suite serves
+    it a body): without it a fundamentals row whose ``serve`` went missing
+    would make a real request from here. An after-fetch row's ``serve``
+    re-arms its own seam afterwards, so the list stays what a getter must
+    NOT reach on any path."""
     reached = []
     _core_no_network(monkeypatch, reached)
     _optional_no_network(monkeypatch, reached)
+
+    def _reached(*a, **k):
+        reached.append(a)
+        raise _VendorReached("the vendor was asked before the date was judged")
+
+    monkeypatch.setattr(avf, "_make_api_request", _reached)
     return reached
 
 
@@ -322,17 +332,19 @@ class TestTheTableIsTheRegistry:
         # Both directions: a row cannot name a date the impl does not take,
         # and — the direction that matters for coverage — an impl cannot take
         # a date the row never drives, else a getter could grow an ungated
-        # date argument and ship green. "A date" is read off the name, not
-        # off the closed tag set, so an ``as_of_date`` nobody tagged fails
-        # here and forces the tag decision ``_DATE_ARGUMENT_TAGS`` reserves;
-        # ``look_back_days`` is the only date-ish parameter today and is an
-        # int. A ``None`` row is the claim that the impl takes no date at
-        # all, held to the same check.
+        # date argument and ship green. "A date" is read off the name as a
+        # token (``date``, ``*_date``, ``date_*`` — not a substring, which
+        # ``validate`` or ``updated`` would trip), not off the closed tag
+        # set, so an ``as_of_date`` nobody tagged fails here and forces the
+        # tag decision ``_DATE_ARGUMENT_TAGS`` reserves; ``look_back_days``
+        # is the only date-ish parameter today and is an int. A ``None`` row
+        # is the claim that the impl takes no date at all, held to the same
+        # check.
         method, vendor = key
         taken = inspect.signature(interface.VENDOR_METHODS[method][vendor]).parameters
         claimed = set(row.params) if row else set()
         assert claimed <= set(_DATE_ARGUMENT_TAGS), key
-        assert {p for p in taken if "date" in p.lower()} == claimed, key
+        assert {p for p in taken if "date" in p.lower().split("_")} == claimed, key
 
     def test_the_vendors_of_one_tool_share_the_sentence(self):
         # The agent cannot see which vendor answered (#89), so the parts of

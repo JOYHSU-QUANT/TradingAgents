@@ -286,6 +286,41 @@ def test_driver_runs_a_full_cycle(tmp_path):
     assert driver.pump() is None
 
 
+def test_the_in_flight_is_the_shared_state_machine(tmp_path):
+    """Both lanes drive ONE state machine (issue #181): the live in-flight IS the
+    common object (plus this lane's stall stamps), its ids come from the shared
+    scheme, and the gate rule is the shared method's."""
+    from contrib.hyperliquid_perp.common.inflight import InFlightDecision, inflight_ids
+
+    assert issubclass(decision_mod._InFlight, InFlightDecision)
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    assert driver.pump() == "cycle_started"
+    inflight = driver._inflight
+    assert isinstance(inflight, InFlightDecision)
+    assert inflight.attempt_count == 1  # no within-cycle ladder on this lane
+    assert (inflight.input_id, inflight.output_id) == inflight_ids(inflight.attempt_id, 1)
+    assert inflight.submitted_at is not None  # the lane's own stamp, beside the shared state
+    with pytest.raises(AssertionError, match="no decision has been collected"):
+        inflight.require_gateable()  # the worker is still running: nothing to gate
+    _await(worker)
+    assert driver.pump() == "completed"
+    assert driver._inflight is None
+
+
+def test_the_gate_rule_is_checked_where_the_gate_runs(tmp_path):
+    """pump routes an armed failure away from _gate, so no healthy path exercises
+    the check and removing it would go unnoticed. Pin its POSITION: the shared
+    rule refuses the in-flight at the gate, before start_plan can register."""
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    armed = decision_mod._InFlight.for_try("r|armed", _T0, 1, parsed=_decision())
+    armed.raw_stored = True  # as the store step settles it
+    armed.arm_fail(None, "non-retryable: RuntimeError('x')")
+    driver._inflight = armed
+    with pytest.raises(AssertionError, match="only its api_failed record is owed"):
+        driver._gate(clock.now())
+    assert engine.plans == []  # refused BEFORE the engine could register a plan
+
+
 def test_driver_writes_the_audit_row_from_the_books_the_provider_carried(tmp_path):
     # Issue #134 on the live lane: the same one-read contract the paper
     # scheduler keeps — books carried on the input are written as-is, and the
@@ -650,7 +685,7 @@ def test_a_startup_adoption_whose_write_missed_is_retried_by_pump(tmp_path, monk
     it lands instead."""
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     _strand_attempt(db, raw=None)  # the AI never answered — no pending_fail lane
-    state = arm_lock_fault(monkeypatch, repo, "update_decision_attempt")
+    state = arm_lock_fault(monkeypatch, repo, "record_api_failed")
     with pytest.raises(sqlite3.OperationalError):
         driver.resume_startup()  # the caller contains this and starts the loop
     assert state["fired"] == 1
@@ -678,7 +713,7 @@ def test_a_poisoned_adoption_drains_its_armed_record_before_re_adopting(tmp_path
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     _strand_attempt(db, raw=_RAW_LONG)
     calls = poison_stored_parse(monkeypatch, decision_mod)
-    arm_lock_fault(monkeypatch, repo, "update_decision_attempt")
+    arm_lock_fault(monkeypatch, repo, "record_api_failed")
     with pytest.raises(sqlite3.OperationalError):
         driver.resume_startup()  # contained by the caller; the loop starts
     assert driver._adopted is False  # the step is still owed
@@ -925,18 +960,18 @@ def test_fail_record_double_fault_retries_write_only(tmp_path, monkeypatch):
     )
     assert driver.pump() == "cycle_started"
     _await(worker)
-    real = repo.update_decision_attempt
+    real = repo.record_api_failed  # the terminal writer both lanes share (issue #181)
 
-    def _locked(conn, attempt_id, **kw):
+    def _locked(*args, **kw):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(repo, "update_decision_attempt", _locked)
+    monkeypatch.setattr(repo, "record_api_failed", _locked)
     with pytest.raises(sqlite3.OperationalError):
         driver.pump()  # the retryable failure's OWN record write fails
     assert driver._inflight is not None
     assert driver._inflight.pending_fail is not None  # verdict survived the fault
     # The wedge this guards against: pump must NOT read the emptied poll slot.
-    monkeypatch.setattr(repo, "update_decision_attempt", real)
+    monkeypatch.setattr(repo, "record_api_failed", real)
     assert driver.pump() == "api_failed"  # retried ONLY the write
     assert driver._inflight is None
     assert provider.requests == 1  # the AI was never re-asked
@@ -959,17 +994,17 @@ def test_start_fail_record_double_fault_adopts_and_retries(tmp_path, monkeypatch
 
     err = RetryableDecisionError("connection", "market data unreachable")
     db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=err)
-    real = repo.update_decision_attempt
+    real = repo.record_api_failed  # the terminal writer both lanes share (issue #181)
 
-    def _locked(conn, attempt_id, **kw):
+    def _locked(*args, **kw):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(repo, "update_decision_attempt", _locked)
+    monkeypatch.setattr(repo, "record_api_failed", _locked)
     with pytest.raises(sqlite3.OperationalError):
         driver.pump()  # build fails, then the fail record's write also fails
     assert driver._inflight is not None
     assert driver._inflight.pending_fail is not None
-    monkeypatch.setattr(repo, "update_decision_attempt", real)
+    monkeypatch.setattr(repo, "record_api_failed", real)
     assert driver.pump() == "api_failed"  # no duplicate INSERT, just the write
     assert driver._inflight is None
     row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()

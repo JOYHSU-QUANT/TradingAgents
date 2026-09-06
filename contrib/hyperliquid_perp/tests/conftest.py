@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from contrib.hyperliquid_perp.common.inflight import inflight_ids
 from contrib.hyperliquid_perp.common.instants import parse_instant
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id as derive_attempt_id
@@ -469,7 +470,7 @@ def stamp_prompt_regimes(db, regimes, *, run_id="r", mode="paper", symbol="BTC")
                 continue
             version, shape, fingerprint, *artifact = regime
             path, digest = artifact if artifact else (None, None)
-            input_id = f"{row['decision_attempt_id']}#in1"
+            input_id, _ = inflight_ids(row["decision_attempt_id"], 1)  # the drivers' scheme
             repo.insert_ai_input(
                 conn,
                 input_id=input_id,

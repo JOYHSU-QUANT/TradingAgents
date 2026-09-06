@@ -10,6 +10,7 @@ from typing import Any, NamedTuple
 from ...common.enum_guard import check_enum
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
 from ._vocab import _ATTEMPT_STATUSES, _MODES, ERROR_TYPES, TERMINAL_ATTEMPT_STATUSES
+from .scheduler import upsert_scheduler_state
 
 __all__ = [
     "PromptRegime",
@@ -23,6 +24,7 @@ __all__ = [
     "insert_decision_attempt",
     "insert_position_snapshot",
     "prompt_regime_counts",
+    "record_api_failed",
     "stamp_ai_input_format_fingerprint",
     "store_pending_response",
     "update_decision_attempt",
@@ -342,4 +344,44 @@ def store_pending_response(
         )
     _patch_decision_attempt(
         conn, decision_attempt_id, {"pending_raw_response": raw_response}, timestamp=timestamp
+    )
+
+
+def record_api_failed(
+    conn: sqlite3.Connection,
+    run_id: str,
+    decision_attempt_id: str,
+    *,
+    error_type: str | None,
+    error_message: str,
+    next_decision_at: datetime,
+    timestamp: datetime,
+) -> None:
+    """The §3.1 terminal failure — the ONE writer, for both decision lanes.
+
+    A failed cycle ends on exactly this pair of writes: the attempt row goes
+    ``api_failed`` (``error_type`` a §6.2 class, or ``None`` for a
+    non-retryable error whose detail rides ``error_message``) and the run's
+    ``scheduler_state`` re-anchors on ``next_decision_at`` with no attempt
+    current. Shared here (issue #181, like :func:`store_pending_response`)
+    because ``paper`` and ``live`` share only ``persistence``, and so that no
+    lane can write one half. The caller owns the transaction — both lanes
+    retry the whole pair when it misses — and the anchoring rule for
+    ``next_decision_at`` is ``common.inflight.failed_cycle_next_at``.
+    """
+    update_decision_attempt(
+        conn,
+        decision_attempt_id,
+        status="api_failed",
+        error_type=error_type,
+        error_message=error_message,
+        next_decision_at=next_decision_at,
+        timestamp=timestamp,
+    )
+    upsert_scheduler_state(
+        conn,
+        run_id,
+        next_decision_at=next_decision_at,
+        current_attempt_id=None,
+        updated_at=timestamp,
     )

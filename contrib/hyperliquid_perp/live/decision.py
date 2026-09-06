@@ -31,6 +31,12 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ..common.constants import CYCLE_INTERVAL
+from ..common.inflight import (
+    InFlightDecision,
+    failed_cycle_next_at,
+    non_retryable_message,
+    parse_stored_response,
+)
 from ..common.instants import parse_instant
 from ..common.no_decision import note_cycle_outcome
 from ..domains.perp.risk_gate import RiskConfig
@@ -48,7 +54,9 @@ from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
 
 if TYPE_CHECKING:
-    from .engine import PlanRegistration
+    # Referenced as a forward-ref STRING in _InFlight's generic base (the base
+    # is evaluated at import time, and a runtime import of .engine would cycle).
+    from .engine import PlanRegistration  # noqa: F401
 
 __all__ = ["LiveDecisionDriver", "LiveDecisionWorker"]
 
@@ -168,33 +176,22 @@ class _PendingResponsePersistError(RuntimeError):
 
 
 @dataclass
-class _InFlight:
-    attempt_id: str
-    input_id: str
-    output_id: str
-    scheduled_at: datetime
-    parsed: ParsedDecision | None = None  # set once the worker returns, gate pending
-    # Whether the §3.1 store is SETTLED — the response landed durably, or the
-    # answer was invalid and deliberately not stored (_store_pending_response).
-    # ``parsed`` is set the moment poll() hands over the one-shot result —
-    # BEFORE the fallible store — so "collected but not yet settled" is a real
-    # state, and gating is forbidden in it (see _PendingResponsePersistError).
-    raw_stored: bool = False
-    # The engine's start_plan outcome, cached the moment it returns: a persist
-    # failure after registration must retry the PERSIST, never re-gate (a
-    # second start_plan would re-run the RiskGate and could register a second
-    # plan).
-    registration: PlanRegistration | None = None
-    # Armed when the cycle has FAILED but the api_failed record could not be
-    # written (a double fault: the failure handler's own DB write raised).
-    # While set, pump() retries ONLY that write — it never re-polls the
-    # worker (poll() is one-shot; a second call reads as "not ready" forever,
-    # the C1 wedge) and never re-asks the AI. Mirrors the
-    # _PlanRegisteredPersistError pattern: keep _inflight, retry the persist.
-    pending_fail: tuple[str | None, str] | None = None  # (error_type, message)
+class _InFlight(InFlightDecision[ParsedDecision, "PlanRegistration"]):
+    """This lane's in-flight cycle: the shared state machine plus its stall stamps.
+
+    The fields and the ordering rules are ``common.inflight.InFlightDecision``'s
+    (issue #181; the paper scheduler drives the same object). ``attempt_count``
+    is always 1 here — no within-cycle ladder in v1 — and the escalation
+    policy stays this driver's own: the typed persist errors above, into the
+    tick guard's recoverable safe mode. While ``pending_fail`` stands, pump()
+    retries only that write and never re-polls the worker (poll() is
+    one-shot; a second call reads as "not ready" forever, the C1 wedge).
+    """
+
     # Stall visibility: when the LLM call was handed to the worker thread — NOT
     # scheduled_at, which for an overdue cycle (downtime, latch) lies hours in
-    # the past and would trip the warning on the first busy tick.
+    # the past and would trip the warning on the first busy tick. Worker
+    # bookkeeping rather than decision state, hence not on the shared object.
     submitted_at: datetime | None = None
     last_stall_log_at: datetime | None = None
 
@@ -297,7 +294,7 @@ class LiveDecisionDriver:
             except RetryableDecisionError as exc:
                 return self._fail_closed(exc.error_type, exc.message)
             except Exception as exc:  # noqa: BLE001 — a bug must still fail the cycle closed
-                return self._fail_closed(None, f"non-retryable: {exc!r}")
+                return self._fail_closed(None, non_retryable_message(exc))
         if not self._adopted:
             # Startup adoption raised and the caller contained it (the loop
             # must keep watching the position rather than exit). Retry it
@@ -377,32 +374,30 @@ class LiveDecisionDriver:
         if raw is not None:
             # Live attempts are always try 1 (no within-cycle ladder in v1), so
             # the per-try ids are re-derived the same way _start minted them.
-            inflight = self._inflight = _InFlight(
-                attempt_id, f"{attempt_id}#in1", f"{attempt_id}#out1", scheduled_at
-            )
+            inflight = self._inflight = _InFlight.for_try(attempt_id, scheduled_at, 1)
             try:
-                inflight.parsed = parse_target_decision(raw, self._decision_cfg)
+                # The shared resume step (PaperScheduler._resume_pending runs
+                # the same one, issue #181): parse, and settle raw_stored —
+                # the parse SOURCE is the store, durable by definition.
+                parse_stored_response(
+                    inflight,
+                    raw,
+                    lambda text: parse_target_decision(text, self._decision_cfg),
+                    log=logger,
+                )
             except Exception as exc:  # noqa: BLE001 — a bug fails the cycle closed, not the daemon
                 # A raise here is a parser bug or a corrupted store (the parse
-                # is fail-closed by contract — see PaperScheduler._resume_pending,
-                # the same guard), and DETERMINISTIC: uncontained it would exit
-                # the daemon at startup and every supervised restart would
-                # resume into the same parse, with the position and its SL/TP
-                # unwatched between restarts (issue #180). _fail_closed clears
-                # the poisoned response, so log the full text FIRST — the row
-                # was its only durable copy. The bare in-flight above is what
-                # _fail_closed asserts on, and it also ARMS the pending_fail
-                # lane: a store miss on the fail record is then retried by
-                # pump like any other, the caller having contained the raise
-                # rather than exiting.
-                logger.error(
-                    "decision attempt %s: stored response failed to parse and is being "
-                    "cleared; preserving it here for diagnosis: %r",
-                    attempt_id,
-                    raw,
-                )
-                return self._fail_closed(None, f"non-retryable: {exc!r}")
-            inflight.raw_stored = True  # the parse SOURCE is the store — durable by definition
+                # is fail-closed by contract), and DETERMINISTIC: uncontained
+                # it would exit the daemon at startup and every supervised
+                # restart would resume into the same parse, with the position
+                # and its SL/TP unwatched between restarts (issue #180). The
+                # helper has already logged the full text — the row was its
+                # only durable copy, and _fail_closed clears it. The bare
+                # in-flight above is what _fail_closed asserts on, and it also
+                # ARMS the pending_fail lane: a store miss on the fail record
+                # is then retried by pump like any other, the caller having
+                # contained the raise rather than exiting.
+                return self._fail_closed(None, non_retryable_message(exc))
             logger.info("resuming in-progress decision %s from its stored response", attempt_id)
             return "resumed"
         # No resumable response: the LLM call died with the process, or it
@@ -539,8 +534,9 @@ class LiveDecisionDriver:
     def _start(self, now: datetime) -> str | None:
         scheduled_at = self._scheduled_at(now)
         attempt_id = ids.decision_attempt_id(self._run_id, scheduled_at)
-        input_id = f"{attempt_id}#in1"
-        output_id = f"{attempt_id}#out1"
+        # Try 1 of this cycle (no within-cycle ladder in v1); the per-try ids
+        # come from the shared scheme, so a restart's adoption re-derives them.
+        inflight = _InFlight.for_try(attempt_id, scheduled_at, 1)
         with self._db.transaction() as conn:
             repo.insert_decision_attempt(
                 conn,
@@ -557,21 +553,21 @@ class LiveDecisionDriver:
             repo.upsert_scheduler_state(
                 conn, self._run_id, current_attempt_id=attempt_id, updated_at=now
             )
+        # The attempt row is `in_progress` from here on; leaving it unresolved
+        # with next_decision_at in the past would crash-loop every tick on the
+        # duplicate attempt_id (C2). Install the in-flight NOW, so every
+        # failure below — build, input persist, submit — fails the cycle
+        # closed through _fail_closed, and even a double fault (the fail
+        # record's own write raising) retries the record instead of
+        # re-INSERTing the same attempt id forever.
+        self._inflight = inflight
         try:
             decision_input = self._provider.build_input(coin=self._coin, as_of=now)
-            self._persist_ai_input(now, input_id, attempt_id, decision_input)
+            self._persist_ai_input(now, inflight.input_id, attempt_id, decision_input)
         except RetryableDecisionError as exc:
-            # The attempt row is already `in_progress`; leaving it unresolved with
-            # next_decision_at in the past crash-loops every tick on the duplicate
-            # attempt_id (C2). Adopt it as a failed in-flight so even a double
-            # fault (the fail record's own write raising) retries the record
-            # instead of re-INSERTing the same attempt id forever.
-            self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
             return self._fail_closed(exc.error_type, exc.message)
         except Exception as exc:  # noqa: BLE001 — a bug must fail the cycle CLOSED, never wedge it
-            self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
-            return self._fail_closed(None, f"non-retryable: {exc!r}")
-        self._inflight = _InFlight(attempt_id, input_id, output_id, scheduled_at)
+            return self._fail_closed(None, non_retryable_message(exc))
         try:
             self._worker.submit(decision_input)
         except Exception as exc:  # noqa: BLE001 — Thread.start() can raise under pressure
@@ -580,7 +576,7 @@ class LiveDecisionDriver:
             # would answer None forever — the cycle never completes and never
             # fails. _inflight is already set, so fail it CLOSED like any other
             # start failure; the next due cycle submits a fresh worker thread.
-            return self._fail_closed(None, f"non-retryable: {exc!r}")
+            return self._fail_closed(None, non_retryable_message(exc))
         self._inflight.submitted_at = now
         return "cycle_started"
 
@@ -657,21 +653,25 @@ class LiveDecisionDriver:
 
     def _gate(self, now: datetime) -> str | None:
         inflight = self._inflight
-        assert inflight is not None and inflight.parsed is not None
+        assert inflight is not None
+        # Settled store, collected answer, no armed failure — the shared
+        # object's ordering rules, checked where the gate is about to run.
+        parsed = inflight.require_gateable()
         reg = inflight.registration
         if reg is None:
-            reg = self._engine.start_plan(inflight.parsed, output_id=inflight.output_id)
+            reg = self._engine.start_plan(parsed, output_id=inflight.output_id)
             if reg.gate is None:
                 # No fresh snapshot: the gate never ran. Hold the parsed decision and
                 # retry the gate next tick — never re-ask the AI (§3.1).
                 return "pending_market_data"
             # Cache the outcome the moment it exists: from here on the engine may
             # have COMMITTED (and armed) a plan, so a persist failure below must
-            # retry the persist against THIS registration — never re-gate.
-            inflight.registration = reg
+            # retry the persist against THIS registration — never re-gate (the
+            # shared object refuses a second cache).
+            inflight.cache_registration(reg)
         decision_at = now
         next_at = decision_at + self._cycle_interval
-        status = "completed" if inflight.parsed.is_valid else "invalid_output"
+        status = "completed" if parsed.is_valid else "invalid_output"
         try:
             with self._db.transaction() as conn:
                 self._persist_ai_output(conn, now, inflight, reg)
@@ -741,7 +741,7 @@ class LiveDecisionDriver:
         # would have reached the ERROR threshold within three ticks and claimed
         # "3 consecutive (~12h with no decision)" about a single cycle.
         self._note_cycle_outcome("api_failed", error_type)
-        self._inflight.pending_fail = (error_type, message)
+        self._inflight.arm_fail(error_type, message)
         return self._flush_pending_fail()
 
     def _flush_pending_fail(self) -> str:
@@ -771,9 +771,7 @@ class LiveDecisionDriver:
         error_message: str,
     ) -> None:
         now = self._clock.now()
-        next_at = scheduled_at + self._cycle_interval
-        if next_at <= now:
-            next_at = now + self._cycle_interval
+        next_at = failed_cycle_next_at(scheduled_at, now, self._cycle_interval)
         logger.warning(
             "live decision cycle %s failed (%s): %s — holding position, retry at %s",
             attempt_id,
@@ -782,21 +780,15 @@ class LiveDecisionDriver:
             next_at.isoformat(),
         )
         with self._db.transaction() as conn:
-            repo.update_decision_attempt(
+            # The one terminal writer both lanes share (issue #181).
+            repo.record_api_failed(
                 conn,
+                self._run_id,
                 attempt_id,
-                status="api_failed",
                 error_type=error_type,
                 error_message=error_message,
                 next_decision_at=next_at,
                 timestamp=now,
-            )
-            repo.upsert_scheduler_state(
-                conn,
-                self._run_id,
-                next_decision_at=next_at,
-                current_attempt_id=None,
-                updated_at=now,
             )
 
     # -- audit rows (phase2-data §5 / §7) — assembly shared with PaperScheduler

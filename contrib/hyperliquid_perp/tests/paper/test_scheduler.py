@@ -1051,6 +1051,254 @@ def test_audit_persist_failure_retries_the_persist_never_the_gate(tmp_path, monk
 
 
 # --------------------------------------------------------------------------
+# the terminal api_failed record rides the same retry lane (issue #181)
+# --------------------------------------------------------------------------
+
+
+def _exhaust_the_ladder(scheduler, clock):
+    """Drive tries 1 and 2 to their scheduled retries; the next poll is try 3."""
+    assert scheduler.poll().event is CycleEvent.RETRY_SCHEDULED
+    clock.advance(10)
+    assert scheduler.poll().event is CycleEvent.RETRY_SCHEDULED
+    clock.advance(30)
+
+
+def _arm_flaky_terminal_write(monkeypatch, *, shots=1):
+    """Fail the terminal ``api_failed`` record for its first ``shots`` attempts.
+
+    The record is its own repository writer (``record_api_failed``, issue
+    #181 — the same one the live driver's ``_fail_cycle`` lands), so faulting
+    it by NAME leaves the ladder's per-try counter writes and every other
+    attempt write untouched. Same shape as ``_arm_flaky_response_store``.
+    """
+    from contrib.hyperliquid_perp.paper import scheduler as sched_mod
+
+    return arm_lock_fault(monkeypatch, sched_mod.repo, "record_api_failed", shots=shots)
+
+
+def test_a_terminal_api_failed_write_that_misses_is_retried_next_poll(tmp_path, monkeypatch):
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path,
+        [_err("timeout"), _err("connection"), _err("server_error")],
+        [SnapshotOutcome.ERROR],
+    )
+    _exhaust_the_ladder(scheduler, clock)
+    faults = _arm_flaky_terminal_write(monkeypatch)
+    # Try 3 fails and the ladder is spent, but the api_failed record's own
+    # write meets a locked store. Before #181 that exception exited the daemon
+    # — the very failure mode the post-answer lanes were built to contain.
+    assert scheduler.poll() is None
+    assert faults["fired"] == 1
+    row = repo.find_in_progress_attempt(db.conn, "r")
+    assert row is not None and row["attempt_count"] == 3  # still open, budget spent
+    assert scheduler.next_due_at() is None  # the write retry is due at once
+    r = scheduler.poll()  # the lock has cleared: ONLY the record is written
+    assert r.event is CycleEvent.API_FAILED
+    assert r.error_type == "server_error"  # the original verdict, not a new one
+    assert r.attempt_count == 3
+    assert provider.decide_calls == 3  # the ladder was not re-run, the AI not re-asked
+    done = repo.get_decision_attempt(db.conn, r.decision_attempt_id)
+    assert done["status"] == "api_failed" and done["error_type"] == "server_error"
+    assert repo.find_in_progress_attempt(db.conn, "r") is None
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) == r.next_decision_at  # re-anchored
+    assert scheduler._pending is None  # the armed verdict was consumed
+    db.close()
+
+
+def test_a_non_retryable_failure_whose_record_misses_logs_the_bug_once(
+    tmp_path, monkeypatch, caplog
+):
+    from contrib.hyperliquid_perp.paper import scheduler as sched_mod
+
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [_err("timeout"), RuntimeError("provider bug")], [SnapshotOutcome.ERROR]
+    )
+    assert scheduler.poll().event is CycleEvent.RETRY_SCHEDULED  # the cycle now exists
+    clock.advance(10)
+    faults = _arm_flaky_terminal_write(monkeypatch)
+    with caplog.at_level(logging.ERROR, logger=sched_mod.__name__):
+        assert scheduler.poll() is None  # try 2 hits the bug; its record misses
+        r = scheduler.poll()  # retried: only the write
+    assert faults["fired"] == 1
+    assert r.event is CycleEvent.API_FAILED and r.error_type is None
+    assert provider.decide_calls == 2  # the failing try was not re-run to re-decide
+    row = repo.get_decision_attempt(db.conn, r.decision_attempt_id)
+    assert row["error_message"].startswith("non-retryable:")
+    assert "RuntimeError('provider bug')" in row["error_message"]
+    # The traceback is logged where the verdict is ARMED — once — and the retry
+    # poll logs the missed write, not a second "bug" line for the same cycle.
+    bug_lines = [rec for rec in caplog.records if "non-retryable error" in rec.getMessage()]
+    assert len(bug_lines) == 1
+    assert any(
+        "api_failed record could not be written" in rec.getMessage() for rec in caplog.records
+    )
+    db.close()
+
+
+def test_a_terminal_write_fault_that_outlives_the_budget_escalates_and_a_restart_rejudges(
+    tmp_path, monkeypatch
+):
+    from contrib.hyperliquid_perp.paper.scheduler import _MAX_PERSIST_FAILURES
+
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path,
+        [_err("timeout"), _err("connection"), _err("server_error")],
+        [SnapshotOutcome.ERROR],
+    )
+    _exhaust_the_ladder(scheduler, clock)
+    faults = _arm_flaky_terminal_write(monkeypatch, shots=_MAX_PERSIST_FAILURES)
+    for _ in range(_MAX_PERSIST_FAILURES - 1):
+        assert scheduler.poll() is None  # contained: verdict held, write retried
+    with pytest.raises(sqlite3.OperationalError):
+        scheduler.poll()  # the shared budget is spent — propagate to the supervisor
+    assert faults["fired"] == _MAX_PERSIST_FAILURES
+    assert provider.decide_calls == 3  # never re-asked across the whole streak
+    # The armed verdict died with the process; the row is still in_progress
+    # with its try counter spent, so the restart re-judges it from the row —
+    # the pre-existing "interrupted" terminal — and never re-asks the AI.
+    provider2 = _FakeProvider([])
+    scheduler2 = _restart(db, clock, engine, provider2)
+    r = scheduler2.poll()
+    assert r.event is CycleEvent.API_FAILED and r.error_type == "interrupted"
+    assert provider2.decide_calls == 0
+    db.close()
+
+
+def test_the_pending_decision_is_the_shared_inflight_state_machine(tmp_path):
+    from contrib.hyperliquid_perp.common.inflight import InFlightDecision, inflight_ids
+
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [_decision("long", 1)], [SnapshotOutcome.TIMEOUT]
+    )
+    r = scheduler.poll()
+    assert r.event is CycleEvent.PENDING_MARKET_DATA  # stored, gate blocked: pending stands
+    pending = scheduler._pending
+    # One state machine for both lanes (issue #181): the paper pending decision
+    # IS the common object, its ids from the shared scheme, its store settled.
+    assert isinstance(pending, InFlightDecision)
+    assert (pending.input_id, pending.output_id) == inflight_ids(r.decision_attempt_id, 1)
+    assert pending.raw_stored is True
+    assert pending.registration is None and pending.pending_fail is None
+    db.close()
+
+
+def test_the_persist_streak_is_consecutive_and_reports_the_bound():
+    # This lane's addition to the shared object: the escalation counter.
+    from contrib.hyperliquid_perp.paper.scheduler import _Pending
+
+    f = _Pending.for_try("r|a", _T0, 1)
+    assert [f.count_persist_failure(3) for _ in range(2)] == [False, False]
+    f.persist_landed()  # one landed: the streak is over, not merely paused
+    assert f.persist_failures == 0
+    assert [f.count_persist_failure(3) for _ in range(3)] == [False, False, True]
+
+
+def test_the_gate_rule_is_checked_where_the_gate_runs(tmp_path, monkeypatch):
+    """No healthy path exercises the check — poll routes an armed failure away
+    from _finalize — so removing it would go unnoticed. Pin its POSITION: an
+    in-flight that violates the shared rule is refused at the gate, before
+    start_plan can commit anything."""
+    from contrib.hyperliquid_perp.common.inflight import InFlightDecision
+
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [], [_snap()])
+    calls = {"n": 0}
+    real_start = engine.start_plan
+
+    def counting(parsed, *, output_id):
+        calls["n"] += 1
+        return real_start(parsed, output_id=output_id)
+
+    monkeypatch.setattr(engine, "start_plan", counting)
+    armed = InFlightDecision.for_try("r|armed", _T0, 1, parsed=_decision("long", 1))
+    armed.raw_stored = True  # as the store step settles it
+    armed.arm_fail("timeout", "boom")
+    scheduler._pending = armed
+    with pytest.raises(AssertionError, match="only its api_failed record is owed"):
+        scheduler._finalize(clock.now())
+    assert calls["n"] == 0  # refused BEFORE the engine could commit a plan
+    db.close()
+
+
+def test_a_terminal_verdict_never_arms_over_a_standing_decision(tmp_path, monkeypatch):
+    """No caller reaches _terminalize_api_failed with a decision standing (poll
+    routes one away first), so the guard has no healthy path either. Pin it:
+    arming over a standing decision would drop its cached registration and let
+    the api_failed record contradict a plan the engine has committed."""
+    from contrib.hyperliquid_perp.paper.scheduler import _Pending
+
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")
+    assert scheduler.poll() is None  # gated, plan committed, audit persist missed
+    standing = scheduler._pending
+    assert standing is not None and standing.registration is not None
+    stray = _Pending.for_try("r|stray", _T0, 1)
+    with pytest.raises(AssertionError, match="over a standing decision"):
+        scheduler._terminalize_api_failed(
+            clock.now(), stray, error_type=None, error_message="non-retryable: x"
+        )
+    assert scheduler._pending is standing  # the committed plan's registration survives
+    assert stray.pending_fail is None  # ... and the stray verdict was never armed
+    assert repo.get_decision_attempt(db.conn, standing.attempt_id)["status"] == "in_progress"
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# one store read per idle tick (issue #181, item 5)
+# --------------------------------------------------------------------------
+
+
+def _count_attempt_reads(monkeypatch):
+    from contrib.hyperliquid_perp.paper import scheduler as sched_mod
+
+    real = sched_mod.repo.find_in_progress_attempt
+    reads = {"n": 0}
+
+    def counted(conn, run_id):
+        reads["n"] += 1
+        return real(conn, run_id)
+
+    monkeypatch.setattr(sched_mod.repo, "find_in_progress_attempt", counted)
+    return reads
+
+
+def test_an_idle_tick_reads_the_in_progress_attempt_once(tmp_path, monkeypatch):
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    assert scheduler.poll().event is CycleEvent.COMPLETED
+    reads = _count_attempt_reads(monkeypatch)
+    # The loop's tick: poll, then size the sleep. Each used to issue the same
+    # SELECT; the poll that found nothing due now answers both.
+    assert scheduler.poll() is None
+    assert scheduler.next_due_at() == _T0 + CYCLE_INTERVAL
+    assert reads["n"] == 1
+    db.close()
+
+
+def test_every_poll_answers_next_due_at_itself(tmp_path, monkeypatch):
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [_err("timeout"), _decision("long", 1)], [_snap()]
+    )
+    reads = _count_attempt_reads(monkeypatch)
+    assert scheduler.next_due_at() is None  # no poll yet: a fresh run decides at once
+    r1 = scheduler.poll()
+    assert r1.event is CycleEvent.RETRY_SCHEDULED
+    # A poll that produced a result already knows the answer — its own retry
+    # instant — so sizing the sleep costs nothing beyond the poll's one read.
+    assert scheduler.next_due_at() == r1.retry_at
+    assert reads["n"] == 1
+    clock.advance(5)
+    reads["n"] = 0
+    assert scheduler.poll() is None  # between retries: nothing written
+    assert scheduler.next_due_at() == r1.retry_at
+    assert reads["n"] == 1
+    clock.advance(5)
+    r2 = scheduler.poll()
+    assert r2.event is CycleEvent.COMPLETED
+    assert scheduler.next_due_at() == r2.next_decision_at  # a terminal result's anchor
+    db.close()
+
+
+# --------------------------------------------------------------------------
 # ai_inputs with a real (non-flat) position and an active plan
 # --------------------------------------------------------------------------
 

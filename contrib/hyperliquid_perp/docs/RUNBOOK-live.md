@@ -436,6 +436,11 @@ the loop anyway` 就是這條路。之後兩條分支各自自癒，鎖放開後
   之前 pump 不會開新 cycle**——那個 stranded attempt 還握著 `next_decision_at`，直接開新
   cycle 會用同一個 attempt id 去 insert 而每 tick 撞主鍵，變成另一種永久僵住。
 
+paper 車道從 issue #181 起有同一條車道（兩車道現在共用同一個 in-flight 狀態物件
+`common/inflight.py`，只在升級政策上不同）：判決先武裝在記憶體，記錄寫不進去時 `poll()`
+回 `None`、下一次 poll 只重試那筆寫入；差別是 paper 沒有 safe mode，同一 cycle 連續
+10 次 poll 都寫不進去就讓例外傳播（daemon 退出交監管），見 [RUNBOOK §3](./RUNBOOK.md)。
+
 > **鎖一直不放開時 `validate` 看不到。** 兩條分支在收斂前都不會寫出終端列，而
 > `no_decision_streak` 只數非 `in_progress` 的列，所以一個卡在這裡好幾小時的 run 在
 > `validate` 眼中和「run 還很年輕」沒有差別，期間倉位只靠既有 SL/TP 看管。判斷依據只有

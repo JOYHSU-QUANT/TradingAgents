@@ -97,6 +97,52 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the paper lane's terminal `api_failed` record rides the
+  same retry lane as its other post-answer persists, and the two decision
+  lanes drive one in-flight state machine** (issue #181, items 1, 2 and 5;
+  with the resume seam PR #204 left to it and the ``non-retryable:`` prefix
+  from issue #206). Issue #163 gave the §3.1 response store and the audit
+  commit an in-process retry, but the ``api_failed`` record itself — the
+  write every failed cycle ends on — still propagated when the store was
+  locked, so an operator's ``export``/``validate`` landing on it exited the
+  paper daemon over the very transient that lane was built for. The verdict
+  is now ARMED on the in-flight before the write (the live driver's
+  ``pending_fail`` lane): a miss returns ``None`` from ``poll()``, the daemon
+  stays up, and the next poll retries only that write — never the §3.1
+  ladder, never the AI — under the same ten-poll bound the other two persists
+  share (any persist that lands clears the streak). An armed verdict does not
+  survive a restart: the row is still ``in_progress`` and the restart
+  re-judges it from the row as before (a spent try counter → ``interrupted``,
+  a spare one → back onto the ladder). The RUNBOOK's list of what still
+  exits the daemon loses that entry; "the one post-answer step given no
+  containment at all is ``start_plan``" is now true as written.
+  The state both lanes advance a cycle through — the collected answer, the
+  settled §3.1 store, the cached ``start_plan`` registration, the armed
+  failure, the persist-failure streak — and the ordering rules between them
+  (no gate before the store settles, one registration ever, one verdict
+  ever) were two hand-copied dataclasses kept in step by comments pointing
+  at each other. They are one object now, ``common.inflight.InFlightDecision``,
+  generic over each lane's decision and registration types (``common``
+  imports nothing above it), with the rules as methods both lanes call at
+  the gate; each lane subclasses it for what only it tracks — the paper
+  scheduler its persist-failure streak, the live driver its stall-visibility
+  stamps. The per-try id scheme (``#in<n>``/``#out<n>``), the resume step
+  (re-parse the stored text; on a raise, log it in full first — the row was
+  its only durable copy) and the next-cycle anchor after a failed cycle
+  moved beside it as ``inflight_ids``, ``parse_stored_response`` and
+  ``failed_cycle_next_at``; the terminal ``api_failed`` record itself is one
+  repository writer, ``record_api_failed`` (beside ``store_pending_response``),
+  so the two lanes' adoption paths and terminal writes run the same code,
+  and the ``non-retryable:`` prefix the RUNBOOKs read as a contract is
+  spelled once (``non_retryable_message``). The lanes differ only in
+  escalation policy, which stays where it was.
+  ``PaperScheduler.next_due_at`` no longer reads the store: every ``poll``
+  records the answer on its way out (the retry it scheduled, the boundary it
+  found still ahead, the next cycle a terminal result anchored, or "poll
+  now"), so the loop's sleep sizing costs nothing beyond the poll's own
+  reads — two per idle tick instead of four, and in WAL-fallback mode two
+  fewer reads serialised against the writer.
+
 - **hyperliquid_perp: `PROMPT_VERSION` lives beside the `prompt_regime:`
   renderer, and the two `position section omitted` WARNINGs share one
   template** (issue #197, items 1–2). The version stamp moves from

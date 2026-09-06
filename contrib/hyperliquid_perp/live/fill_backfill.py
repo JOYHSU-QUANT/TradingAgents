@@ -138,7 +138,7 @@ class BackfillSummary:
 class FillBackfiller:
     """Poll REST ``userFillsByTime`` over a trailing window into a processor.
 
-    ``fetch`` is the injected REST seam — ``(start_ms, end_ms) -> list[fill dict]`` —
+    ``fetch`` is the injected exchange seam — ``(start_ms, end_ms) -> list[fill dict]`` —
     bound in production to the wallet's ``user_fills_by_time`` and in tests to a fake,
     so the whole thing runs without a network. ``processor`` is the SAME
     :class:`LiveFillProcessor` the WS drain feeds, which is what makes WS and REST
@@ -169,11 +169,14 @@ class FillBackfiller:
         require_seam("fetch", fetch, kind="exchange", shape="(start_ms, end_ms) -> fills list")
         # Converge on float BEFORE ``timedelta(seconds=...)`` (issue #169). The
         # bare ``<= 0`` check let through what it could not see: a ``Decimal``
-        # or a non-finite number died inside ``timedelta`` with a message
+        # or a float NaN / infinity died inside ``timedelta`` with a message
         # naming nothing, a ``bool`` was silently a one-second window, a
-        # ``str`` died at the comparison. Each is refused by name here — and
-        # ``timedelta``'s own range is checked too, so nothing is left for it
-        # to refuse.
+        # ``str`` (or a Decimal NaN) died at the comparison. Each is refused
+        # by name here, and so is what ``timedelta`` itself would refuse or
+        # quietly round (beyond its range; under its microsecond, which
+        # becomes a zero-width window). A span the datetime arithmetic in
+        # ``_window_start`` cannot honour — thousands of years — is not
+        # refused here; no wiring passes one.
         if isinstance(lookback_seconds, bool) or not isinstance(
             lookback_seconds, (numbers.Real, Decimal)
         ):
@@ -185,7 +188,11 @@ class FillBackfiller:
             seconds = float(lookback_seconds)
         except (OverflowError, ValueError):  # too large for a float; a signaling NaN
             seconds = math.nan
-        if not math.isfinite(seconds) or not 0 < seconds < timedelta.max.total_seconds():
+        if (
+            not math.isfinite(seconds)
+            or not 0 < seconds < timedelta.max.total_seconds()
+            or timedelta(seconds=seconds) <= timedelta(0)
+        ):
             raise ValueError(
                 "lookback_seconds must be > 0 and finite, within timedelta's range, "
                 f"got {lookback_seconds}"

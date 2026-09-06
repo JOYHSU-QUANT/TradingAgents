@@ -103,9 +103,9 @@ Breaking changes within the 0.x line are called out explicitly.
   the venue-identity monitor each carried their
   own copy of the "must be the … seam" refusal, and ``FillBackfiller`` had
   none — yet the live loop hands the SAME ``user_fills_by_time`` object to
-  both the reconciler's ``fetch_fills`` and the backfiller's ``fetch``, so a
-  payload wired there was refused at boot on one side and read as a failed
-  backfill every sweep on the other. One guard now
+  both the reconciler's ``fetch_fills`` and the backfiller's ``fetch``: the
+  reconciler's copy refused a payload at boot, while the backfiller's would
+  have read the same payload as a failed backfill every sweep. One guard now
   (``common/seam_guard.require_seam``; still ``callable()`` only, no
   signature check), used by all three constructors, so the message has one
   owner: ``<name> must be the <kind> seam (<shape>), got <type>``. The
@@ -115,10 +115,12 @@ Breaking changes within the 0.x line are called out explicitly.
   ``mark_backfill_done``, and the refusal names the missing one).
   ``FillBackfiller`` also converges ``lookback_seconds`` to ``float`` at
   construction, refusing by name what the bare ``> 0`` check could not see:
-  a ``Decimal`` or a non-finite number died inside ``timedelta`` with a
-  message naming nothing, a ``bool`` was silently accepted as a one-second
-  window, a ``str`` died at the comparison, and a finite value beyond
-  ``timedelta``'s range still overflowed there. Other injected callables
+  a ``Decimal`` or a float NaN / infinity died inside ``timedelta`` with a
+  message naming nothing, a ``Decimal`` NaN and a ``str`` died at the
+  comparison itself, a ``bool`` was silently accepted as a one-second
+  window, and a finite value beyond ``timedelta``'s range still overflowed
+  there (a positive one under its microsecond quietly became a zero-width
+  window). Other injected callables
   (``refresh_kill_switch`` on both constructors, ``WsReconnector``'s
   ``connect``) still have no construction-time refusal. ``fill_backfill``
   exports

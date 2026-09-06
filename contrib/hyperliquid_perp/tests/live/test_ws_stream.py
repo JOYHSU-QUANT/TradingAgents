@@ -811,11 +811,11 @@ def test_a_naive_instant_is_rejected_at_the_boundary(kwargs):
         bf.backfill(**kwargs)
 
 
-def test_the_rest_seam_is_refused_at_construction_like_the_reconcilers_copy():
+def test_the_fetch_seam_is_refused_at_construction_like_the_reconcilers_copy():
     # cli/live.py hands the SAME ``user_fills_by_time`` to this constructor and
     # to the reconciler's ``fetch_fills``. Only the reconciler's copy was
-    # checked: a payload wired there was refused at boot, the same payload
-    # wired here was a failed backfill every sweep (issue #169). One guard;
+    # checked: it refused a payload at boot, while this copy would have read
+    # the same payload as a failed backfill every sweep (issue #169). One guard;
     # the message's full shape is pinned where it is owned
     # (``tests/common/test_seam_guard.py``), this pins that THIS seam goes
     # through it.
@@ -829,9 +829,9 @@ def test_a_decimal_lookback_converges_to_float_at_construction():
     # failed only inside ``timedelta(seconds=...)`` — at construction since
     # PR #168, in ``_window_start`` before (issue #169). What the bare ``> 0``
     # check could not see is refused by name instead: a bool (silently a
-    # one-second window before), a str (died at the comparison), NaN / an
-    # infinity / a number beyond timedelta's range (died inside ``timedelta``
-    # naming nothing).
+    # one-second window before), a str or a Decimal NaN (died at the
+    # comparison), a float NaN / an infinity / a number beyond timedelta's
+    # range (died inside ``timedelta`` naming nothing).
     bf = FillBackfiller(
         fetch=lambda s, e: [],
         processor=None,
@@ -855,6 +855,7 @@ def test_a_decimal_lookback_converges_to_float_at_construction():
         10**400,  # too large for a float
         10**20,  # a float, but beyond timedelta's range
         Decimal("1e15"),
+        1e-7,  # positive, but timedelta rounds it to a zero-width window
         0,
         Decimal("-1"),
     ):

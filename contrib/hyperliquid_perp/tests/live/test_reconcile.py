@@ -1910,25 +1910,30 @@ def test_a_non_callable_exchange_seam_is_refused_at_construction(env, seam_name)
         _reconciler_over(db, seams, None, **seams_given)
 
 
-def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_construction(env):
+_STREAM_SEAM_METHODS = ("backfill_epoch", "backfill_since", "mark_backfill_done")
+
+
+@pytest.mark.parametrize("missing", _STREAM_SEAM_METHODS)
+def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_construction(env, missing):
     # The stream's three methods are all called inside the guarded fill leg
-    # (``_run_fill_backfill``), so a stand-in missing one would surface as a
-    # failed backfill every sweep, never a crash — the fetch-seam argument one
-    # seam over (issue #169), and the refusal names WHICH method is missing.
-    # ``None`` stays the no-stream wiring (``env``, and every production site).
+    # (``_run_fill_backfill``), so a stand-in missing any one would surface as
+    # a failed backfill every sweep, never a crash — the fetch-seam argument
+    # one seam over (issue #169), and the refusal names WHICH method is
+    # missing. ``None`` stays the no-stream wiring (``env``, and every
+    # production site).
     db, seams, _ = env
-    two_of_three = SimpleNamespace(backfill_epoch=lambda: 0, backfill_since=lambda: None)
+    two_of_three = SimpleNamespace(
+        **{m: (lambda *args: None) for m in _STREAM_SEAM_METHODS if m != missing}
+    )
     # An ABSENT method reads as ``got NoneType``: the guard sees getattr's
     # default, and the name in front of it is what tells the operator which
     # method to add.
     with pytest.raises(
         TypeError,
-        match=r"stream\.mark_backfill_done must be the LiveWsStream fill-leg seam .*, got NoneType",
+        match=rf"stream\.{missing} must be the LiveWsStream fill-leg seam .*, got NoneType",
     ):
         _reconciler_over(db, seams, None, stream=two_of_three)
-    all_three = SimpleNamespace(
-        backfill_epoch=lambda: 0, backfill_since=lambda: None, mark_backfill_done=lambda epoch: True
-    )
+    all_three = SimpleNamespace(**{m: (lambda *args: None) for m in _STREAM_SEAM_METHODS})
     assert _reconciler_over(db, seams, None, stream=all_three)._stream is all_three
 
 

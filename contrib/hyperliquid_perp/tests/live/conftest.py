@@ -11,8 +11,9 @@ class StubBackfiller:
     """A fully-wired fill leg that books nothing; ``calls`` records each pass's ``since``.
 
     Everything ``LiveReconciler`` reads off a backfiller lives here once, for
-    both suites (issue #169): the ``lookback`` span and a ``backfill`` with the
-    real seam's signature, reporting a complete pass.
+    both suites (issue #169): the ``lookback`` span and a ``backfill`` taking
+    the call shape the reconciler uses (``backfill(now, since=...)``),
+    reporting a complete pass.
     """
 
     lookback = DEFAULT_LOOKBACK  # the reconciler reads it

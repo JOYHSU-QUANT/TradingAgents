@@ -375,7 +375,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         assert not [r for r in caplog.records if r.name == yfin.__name__]
 
     def test_the_shared_filter_refuses_an_unusable_bound_rather_than_dropping_it(self):
-        from tradingagents.dataflows.stockstats_utils import filter_financials_by_date
+        from tradingagents.dataflows.yfinance_common import filter_financials_by_date
 
         # The getters answer the sentinel before reaching here, so this raise is
         # unreachable in production and stands as the contract for a direct
@@ -388,7 +388,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         assert filter_financials_by_date(frame, None) is frame
 
     def test_the_shared_filter_refuses_an_unusable_bound_even_on_an_empty_frame(self):
-        from tradingagents.dataflows.stockstats_utils import filter_financials_by_date
+        from tradingagents.dataflows.yfinance_common import filter_financials_by_date
 
         # "A present-but-unusable curr_date RAISES" used to hold only for a
         # frame with columns: emptiness short-circuited above the check, so the
@@ -408,7 +408,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # (#112). Counted on the UNFILTERED label set — two columns here, one
         # of which the bound drops — because the freshness note legitimately
         # reads the one-column served set afterwards.
-        import tradingagents.dataflows.stockstats_utils as su
+        import tradingagents.dataflows.yfinance_common as su
 
         seen = []
         real = su.coerce_period_labels
@@ -636,7 +636,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         # rather than a scalar. Treating it as the parsed value instead of NaT
         # makes the mask comprehension raise ValueError("truth value ... is
         # ambiguous"), which is not the typed lane either.
-        from tradingagents.dataflows.stockstats_utils import coerce_period_labels
+        from tradingagents.dataflows.yfinance_common import coerce_period_labels
 
         periods, dropped = coerce_period_labels([range(3), pd.Timestamp("2026-06-30", tz="UTC")])
         assert pd.isna(periods[0])
@@ -645,7 +645,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
 
     def test_a_frame_with_no_zone_reports_none_dropped(self):
         # The flag that decides whether the served labels are rewritten.
-        from tradingagents.dataflows.stockstats_utils import coerce_period_labels
+        from tradingagents.dataflows.yfinance_common import coerce_period_labels
 
         periods, dropped = coerce_period_labels([pd.Timestamp("2026-06-30"), "not a date", None])
         assert periods[0] == pd.Timestamp("2026-06-30")

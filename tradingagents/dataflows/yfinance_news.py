@@ -9,7 +9,6 @@ from dateutil.relativedelta import relativedelta
 from yfinance.data import YfData
 
 from .config import get_config
-from .stockstats_utils import yf_fetch_unhidden
 from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
@@ -20,6 +19,7 @@ from .symbol_utils import normalize_symbol
 # raised as ``VendorLibraryError`` for the router to route past and, when no
 # vendor serves, render as one line of report text (#187).
 from .utils import date_range_refusal, date_refusal, library_failure_lane
+from .yfinance_common import yf_fetch_unhidden
 
 logger = logging.getLogger(__name__)
 

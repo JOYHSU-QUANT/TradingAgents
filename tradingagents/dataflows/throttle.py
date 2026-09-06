@@ -3,7 +3,7 @@
 Stdlib-only, like ``utils``, so every vendor module can share it. The router
 holds one latch keyed by the vendor name its chain is built from; yfinance
 holds its own instance at its network boundary, behind its OHLCV cache (see
-``stockstats_utils``), and its rate-limit type tells the router not to latch
+``yfinance_common``), and its rate-limit type tells the router not to latch
 it a second time in front of that cache.
 """
 

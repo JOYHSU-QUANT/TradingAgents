@@ -109,7 +109,7 @@ class _RequestBudget:
     ``throttle.ThrottleLatch`` in miniature rather than a reuse of it: the
     latch's TTL is fixed at five minutes, this one is exactly the window.
 
-    Same altitude as the yfinance latch in ``stockstats_utils`` — the
+    Same altitude as the yfinance latch in ``yfinance_common`` — the
     network boundary BEHIND the caches, so a cache-served call never touches
     the budget and a park cannot turn a sibling's stale-cache report into
     DATA_UNAVAILABLE (#114) — but the opposite verdict for an in-window

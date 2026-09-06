@@ -2,9 +2,10 @@
 
 Reuses the same engine ``tradingagents`` uses — ``stockstats.wrap`` — so the
 numbers match the rest of the project and we add no new dependency
-(``tradingagents/dataflows/stockstats_utils.py`` wraps a DataFrame the same way;
-its public helper is hard-wired to yfinance loading and ``tradingagents/`` is
-read-only, so we mirror just the ``wrap()`` call here over HL candles).
+(``tradingagents/dataflows/y_finance.py`` wraps the frame
+``yfinance_common.load_ohlcv`` serves the same way; that getter is hard-wired
+to yfinance loading and ``tradingagents/`` is read-only, so we mirror just the
+``wrap()`` call here over HL candles).
 
 Indicator names are the project's config names (e.g. ``"ema_20"``); this module
 maps them to the stockstats column that computes them. A value that can't be

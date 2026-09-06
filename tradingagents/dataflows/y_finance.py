@@ -7,14 +7,6 @@ import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
 from .errors import UnsupportedIndicatorError
-from .stockstats_utils import (
-    _assert_ohlcv_not_stale,
-    coerce_period_labels,
-    filter_financials_by_date,
-    load_ohlcv,
-    yf_fetch_statement,
-    yf_fetch_unhidden,
-)
 from .symbol_utils import NoMarketDataError, normalize_symbol
 
 # The insider-filing bound lives in utils so the Alpha Vantage vendor serving
@@ -28,6 +20,14 @@ from .utils import (
     library_failure_lane,
     live_snapshot_note,
     statement_lag_bound,
+)
+from .yfinance_common import (
+    _assert_ohlcv_not_stale,
+    coerce_period_labels,
+    filter_financials_by_date,
+    load_ohlcv,
+    yf_fetch_statement,
+    yf_fetch_unhidden,
 )
 
 logger = logging.getLogger(__name__)

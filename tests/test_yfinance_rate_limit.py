@@ -18,8 +18,8 @@ import requests
 from curl_cffi.requests import exceptions as curl_exceptions
 from yfinance.exceptions import YFRateLimitError
 
-import tradingagents.dataflows.stockstats_utils as su
 import tradingagents.dataflows.y_finance as yfin
+import tradingagents.dataflows.yfinance_common as su
 import tradingagents.dataflows.yfinance_news as ynews
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
@@ -39,6 +39,19 @@ def _throttled(*a, **k):
 
 
 # --- the boundary: yf_retry maps exhaustion into the taxonomy ---
+
+
+@pytest.mark.unit
+def test_the_stockstats_utils_module_name_is_gone():
+    # ``stockstats_utils`` named a class PR #185 removed; what stayed was
+    # yfinance's transport and hardening layer, so the module took the
+    # vendor's name (#187). No import shim: the old name is not served.
+    import importlib
+
+    with pytest.raises(ModuleNotFoundError) as exc:
+        importlib.import_module("tradingagents.dataflows.stockstats_utils")
+    # The old name itself, not a shim whose own import is broken.
+    assert exc.value.name == "tradingagents.dataflows.stockstats_utils"
 
 
 @pytest.mark.unit

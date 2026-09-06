@@ -1,3 +1,15 @@
+"""yfinance's transport and hardening layer, shared by its vendor modules.
+
+The retry ladder and throttle latch (:func:`yf_retry`), the unhide seam that
+keeps the scraper from swallowing a throttle (:func:`yf_fetch_unhidden`), the
+OHLCV loader with its integrity and staleness guards (:func:`load_ohlcv`),
+and the statement-period helpers (:func:`coerce_period_labels`,
+:func:`filter_financials_by_date`) — the yfinance counterpart of
+``alpha_vantage_common`` and ``sosovalue_common``. Indicator computation is
+not here: ``y_finance`` runs stockstats over the frame :func:`load_ohlcv`
+serves (#187).
+"""
+
 import contextlib
 import json
 import logging

@@ -3,8 +3,8 @@
 ``yf_retry`` is the one boundary every yfinance network call goes through; when
 its retries are exhausted, the vendor-native ``YFRateLimitError`` (not a
 taxonomy type) is mapped to ``VendorRateLimitError``. Every yfinance leaf then
-re-raises taxonomy errors (``except VendorError: raise``) instead of degrading
-them to prose the router would read as a successful answer — the failure #60
+lets taxonomy errors through (the library lane's pass-through, #187) instead of
+degrading them to prose the router would read as a successful answer — the failure #60
 fixed on the Alpha Vantage indicator path, on the vendor that is the default
 for every one of these categories.
 """

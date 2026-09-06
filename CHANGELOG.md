@@ -82,14 +82,15 @@ Breaking changes within the 0.x line are called out explicitly.
   reads as a successful answer, so the chain stopped at the vendor that had
   just failed and a sibling with its own endpoint (Alpha Vantage's RSI, for
   a local stockstats bug) was never asked; seven of them logged nothing — now
-  run their fetch under one handler, ``with utils.library_failure_lane(logger,
-  subject)``, from where each getter's ``try`` used to start: typed vendor
+  run their fetch under one handler, ``with utils.library_failure_lane(subject,
+  log=logger)``, from where each getter's ``try`` used to start: typed vendor
   failures, the caller's indicator mistake and transport failures pass
   through to their router lanes, and anything else is logged with its
   traceback under the getter's own module and raised as the new
   ``VendorLibraryError`` (``errors.py``). The router routes past it and, only
   when no vendor serves a core category, renders ONE line of report text
-  (``Error retrieving {subject}: {message}``, each part flattened and capped)
+  (``Error retrieving {subject}: {message}``, each part flattened and capped
+  here — superseding the per-leaf cap the #171 entry below describes)
   — never a raise, and never a sibling's no-data sentinel, whatever the chain
   order, so a missing key, an outage or a "no data" met before or after the
   failing vendor no longer changes the ending; optional categories keep

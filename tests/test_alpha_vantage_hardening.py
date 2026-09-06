@@ -960,7 +960,7 @@ def test_indicator_http_failure_propagates_instead_of_reading_as_success(
     # request boundary rather than a patched _make_api_request: the swallowing
     # happened to an exception that boundary raises, so the test has to make it
     # raise for real. A 5xx now leaves that boundary as the outage type (#142)
-    # and propagates through the getter's VendorError clause instead.
+    # and propagates through the library lane's pass-through instead.
     monkeypatch.setattr(av, "get_api_key", lambda: "k")
     monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=status))
     with pytest.raises(propagated):

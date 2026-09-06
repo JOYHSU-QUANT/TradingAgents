@@ -103,9 +103,13 @@ class TestTool:
         out = get_verified_market_snapshot.invoke({"symbol": forged, "curr_date": "2026-05-20"})
         clean = get_verified_market_snapshot.invoke({"symbol": "cof", "curr_date": "2026-05-20"})
         first_line = out.splitlines()[0]
-        assert first_line.startswith("## Verified market data snapshot for COF FORGED HEADING")
+        prefix = "## Verified market data snapshot for "
+        assert first_line.startswith(prefix + "COF FORGED HEADING")
         assert first_line.endswith("...")
-        assert "x" * (MAX_UNTRUSTED_CHARS + 1) not in out
+        # Uppercased before the echo, so the filler is X here, not x — the
+        # lowercase spelling of this assertion could never fail.
+        assert "X" * (MAX_UNTRUSTED_CHARS + 1) not in out
+        assert len(first_line) <= len(prefix) + MAX_UNTRUSTED_CHARS + 3
         # The report writes headings of its own, so the property is that the
         # symbol added none: same count as the same report for a clean symbol.
         def _headings(report):
@@ -271,6 +275,17 @@ class TestTool:
         assert "|" not in out
         assert "x" * (MAX_UNTRUSTED_CHARS + 1) not in out
         assert "'AAPL forged heading cell x" in out
+
+    def test_an_edge_marker_symbol_does_not_come_back_stripped(self, monkeypatch):
+        # Why the echo passes keep_edges: dropping a leading marker outright
+        # would quote '_cof' back as 'COF' — a value that reads as the clean
+        # one inside a sentence about the value the caller actually sent. The
+        # marker becomes a space instead, so the difference stays visible.
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
+        out = get_verified_market_snapshot.invoke({"symbol": "_cof", "curr_date": "2026-05-20"})
+        first_line = out.splitlines()[0]
+        assert first_line == "## Verified market data snapshot for  COF"
+        assert "snapshot for COF" not in out
 
     def test_a_clean_symbol_still_reads_byte_for_byte(self, monkeypatch):
         # The echo must not disturb the ordinary case: the sentinel names the

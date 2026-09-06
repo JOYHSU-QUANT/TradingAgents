@@ -195,13 +195,22 @@ def get_prediction_markets(
         if not 0.0 <= prob <= 1.0:
             omitted += 1
             continue
-        label = outcomes[0]
+        # Gamma's question text and outcome labels are written by whoever
+        # created the market, and the router serves a successful report
+        # verbatim (it caps only its sentinel slots), so an unflattened
+        # question was a second forgery site three lines below the heading
+        # this PR fixed: a question carrying its own "## " line renders a
+        # heading impersonating another tool inside this report (#201
+        # review). The date is a vendor field too, and ten characters are
+        # enough for a newline and a marker.
+        label = sanitize_untrusted(outcomes[0], limit=MAX_UNTRUSTED_CHARS)
         volume = m.get("volumeNum") or 0
-        end_date = (m.get("endDate") or "")[:10]
+        end_date = sanitize_untrusted((m.get("endDate") or "")[:10])
         wk = m.get("oneWeekPriceChange")
         wk_str = f", 1-week {wk * 100:+.1f}pp" if isinstance(wk, (int, float)) and wk else ""
+        question = sanitize_untrusted(m.get("question"), limit=MAX_UNTRUSTED_CHARS)
         lines.append(
-            f"- **{m.get('question')}** — {label} {prob:.0%} "
+            f"- **{question}** — {label} {prob:.0%} "
             f"(${volume:,.0f} volume, resolves {end_date}{wk_str})"
         )
 

@@ -451,7 +451,7 @@ def invalid_date_sentinel(
     look-ahead filtering off, even where omission is technically legal (the
     statement getters' #73 lane — their ``date_refusal`` gate stays
     ``omitted_ok=True``, their sentence stays a bounding one). ``_echo`` lets
-    :func:`date_refusal` pass the echo it already computed for its log line;
+    :func:`refuse_date` pass the echo it already computed for its log line;
     anyone else leaves it to be computed here.
 
     The echoed value is flattened and capped (see :func:`_echo_untrusted`):
@@ -512,6 +512,11 @@ def date_refusal(
     vendor-local copy would reach that vendor's getters and silently miss the
     other's, which is the drift this whole change exists to close. The three
     inputs that used to be answered differently per vendor are in the CHANGELOG.
+
+    The half that ACTS on the judgement is :func:`refuse_date`, which this
+    delegates to. Prefer this function: reach for that one only where the
+    caller owns a different parse rule on purpose (#112), and read its
+    docstring first — it does not judge.
     """
     if value is None and omitted_ok:
         return None

@@ -432,8 +432,19 @@ Breaking changes within the 0.x line are called out explicitly.
   ``utils.refuse_date`` that ``date_refusal`` delegates to — the tool keeps
   its deliberately looser pandas parse. FRED's alias rejection and
   Polymarket's report quote the model's ``indicator`` / ``topic`` flattened,
-  capped and edge-kept, as ``_echo_untrusted`` does for a refused date; a
-  clean value reads byte for byte as before.
+  capped and edge-kept through a shared ``utils.echo_argument``, as
+  ``_echo_untrusted`` does for a refused date, and so does the verification
+  snapshot's heading — so a symbol carrying its own ``## `` line can no
+  longer forge a second heading in the report the analyst is told to treat
+  as the source of truth. An ordinary value is unchanged: the echo only
+  touches markdown markers, whitespace RUNS, and length, so a topic written
+  with a double space renders with one. Polymarket's report body flattens
+  the vendor's own question text, outcome labels and resolution date for the
+  same reason — those are written by whoever created the market, and a
+  successful report is served through the router verbatim. This covers the
+  sites those two issues name, NOT every getter: the remaining tools that
+  quote an argument or a vendor field back are inventoried in their own
+  issue and are unchanged here.
 
 - **dataflows: the vendors that own their transport handling now raise the
   outage type when they are down, and a throttled or skipped vendor makes

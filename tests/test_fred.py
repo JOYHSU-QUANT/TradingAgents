@@ -99,6 +99,17 @@ class FredResolutionTests(unittest.TestCase):
         self.assertTrue(echo.endswith("..."))
         self.assertLessEqual(len(echo), MAX_UNTRUSTED_CHARS + 3)
 
+    def test_a_clean_indicator_is_echoed_byte_for_byte(self):
+        # The other half of the claim: an ordinary rejected phrase still comes
+        # back exactly as the model sent it, so the guidance names the right
+        # value. The leading-marker case is why the echo keeps its edges — it
+        # must not be quoted back as the clean spelling of a different value.
+        out = fred.get_macro_data("bank of japan rate", "2026-01-01")
+        self.assertIn("'bank of japan rate' is not a known macro alias", out)
+        out = fred.get_macro_data("_bank of japan rate", "2026-01-01")
+        self.assertIn("' bank of japan rate' is not a known macro alias", out)
+        self.assertNotIn("'bank of japan rate' is not", out)
+
 
 @pytest.mark.unit
 class FredConfigTests(unittest.TestCase):

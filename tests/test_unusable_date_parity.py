@@ -52,15 +52,17 @@ class _VendorReached(Exception):
     """Raised by every mocked network seam: reaching it is the failure."""
 
 
-def _no_network(monkeypatch):
+def _no_network(monkeypatch, reached=None):
     """Every seam a getter under test could reach the vendor through.
 
     Returns the list the seams append to before raising: the getters that
     wear the library lane re-raise the seam's error as ``VendorLibraryError``
     (#187), so "was the vendor asked?" is read from this list, not from the
-    outcome.
+    outcome. ``reached`` lets a caller hand in that list, so seams armed by
+    another suite's helper report into the same one (test_date_refusal_coverage).
     """
-    reached = []
+    if reached is None:
+        reached = []
 
     def _reached(*a, **k):
         reached.append(a)

@@ -10,6 +10,24 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **hyperliquid_perp: `export --backfill-format-fingerprint` can read a
+  copied store's payloads from elsewhere** (issue #197, item 3).
+  ``ai_inputs.input_payload_path`` is the absolute path the daemon recorded,
+  so on a store backed up to another host the pass could only count every
+  row as ``missing_payload``. ``--payload-root DIR`` replaces the directory
+  part of each recorded path with ``DIR`` and keeps only the file name
+  (``<coin>-<stamp>.json``; both path separators are understood, so a
+  Linux-written store reads on Windows and vice versa). The trust rules are
+  unchanged under a root — a copied file still has to hash to the row's
+  ``input_payload_hash`` — and the row's recorded path is never rewritten.
+  Without the option the pass reads the recorded paths exactly as before.
+  The option without ``--backfill-format-fingerprint``, or with an empty
+  value, is a usage error (exit 2); a root that is not a directory is a
+  named ``error:`` (exit 1) rather than N × ``missing_payload``; and a root
+  under which no recorded name matched at all is followed by a ``hint:``
+  naming the ``<db dir>/payloads/<run_id>/`` layout, since the wrong level
+  is far likelier than a tree that lost its files. RUNBOOK §6 carries the
+  invocation.
 - **hyperliquid_perp: a bound completion cap now has a name and a
   measurement** (issue #182). Every provider answers HTTP 200 when
   ``max_tokens`` binds, and nothing in the repo read the stop reason, so a
@@ -75,6 +93,25 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: `PROMPT_VERSION` lives beside the `prompt_regime:`
+  renderer, and the two `position section omitted` WARNINGs share one
+  template** (issue #197, items 1–2). The version stamp moves from
+  ``cli/_provider.py`` to ``common/prompt_regime.py`` — the module that
+  already renders the three segmentation keys and, like the stamp, is
+  owned by none of its consumers; ``--context-only`` no longer imports the
+  whole ``cli`` package for one string. ``cli._provider.PROMPT_VERSION`` and
+  ``cli.PROMPT_VERSION`` remain as re-exports of the same object (pinned by
+  identity), the value ``phase2-target-v5`` and the format digest are
+  unchanged, and the bump-discipline test now points at the new home. The
+  two causes of a prompt without its ``Position:`` section (issue #161: same
+  prompt, same ``context_shape``, no store column) are now logged through
+  ``common.prompt_regime.position_section_omitted(reason, detail)`` as
+  ``position section omitted (reason=no_books): …`` /
+  ``(reason=non_positive_equity): …`` — the ``reason=`` member is the grep
+  handle (RUNBOOK §7) instead of two hand-worded English lines; the
+  vocabulary is a closed ``Literal`` the way ``backfill.Reason`` is, and no
+  shape token or column is added. Not a prompt change: nothing the model sees
+  moves, so no ``PROMPT_VERSION`` bump and no segmentation point.
 - **dataflows: a vendor library's failure inside a getter no longer ends
   the vendor chain as a report** (issue #187, items 1–3; the #86 decorator).
   The nine yfinance and Alpha Vantage getters that carried a broad ``except``

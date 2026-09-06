@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from pathlib import Path
 
 from ..persistence.db import Database
 from ._common import _existing_run_row, _open_existing_db
@@ -38,7 +39,33 @@ def _cmd_export(argv: list[str]) -> int:
             "rules in RUNBOOK §6."
         ),
     )
+    parser.add_argument(
+        "--payload-root",
+        metavar="DIR",
+        help=(
+            "With --backfill-format-fingerprint, on a store copied away from "
+            "the host that wrote it: read each row's payload by its recorded "
+            "file name under DIR instead of at the absolute path the daemon "
+            "recorded (which would count every row as missing_payload). The "
+            "files must still hash to the rows' input_payload_hash."
+        ),
+    )
     args = parser.parse_args(argv)
+    payload_root: Path | None = None
+    if args.payload_root is not None:
+        if not args.backfill_format_fingerprint:
+            parser.error("--payload-root only applies with --backfill-format-fingerprint")
+        if not args.payload_root:
+            # ``Path("")`` is the working directory and would pass the check
+            # below — an unset shell variable must not quietly become cwd.
+            parser.error("--payload-root needs a directory, got ''")
+        payload_root = Path(args.payload_root)
+        if not payload_root.is_dir():
+            # Named here rather than reported as N x missing_payload: a typo in
+            # the root would otherwise read exactly like a store whose
+            # payloads are really gone.
+            print(f"error: --payload-root {args.payload_root!r} is not a directory", file=sys.stderr)
+            return 1
 
     from ..persistence.export import ExportError, export_run
 
@@ -57,7 +84,9 @@ def _cmd_export(argv: list[str]) -> int:
             try:
                 known = repo.get_run(db.conn, args.run_id) is not None
                 report = (
-                    backfill_format_fingerprints(db, run_id=args.run_id) if known else None
+                    backfill_format_fingerprints(db, run_id=args.run_id, payload_root=payload_root)
+                    if known
+                    else None
                 )
             except sqlite3.Error as exc:
                 # The pass takes the store's write lock (RUNBOOK §6 says a
@@ -67,6 +96,17 @@ def _cmd_export(argv: list[str]) -> int:
                 return 1
             if report is not None:
                 print(report.summary(args.run_id), file=sys.stderr)
+                if payload_root is not None and report.stamped == 0 and report.missing_payload:
+                    # The likeliest cause under a root is the wrong level, not
+                    # a tree that lost its files: the daemons write
+                    # ``<db dir>/payloads/<run_id>/<coin>-<stamp>.json`` and
+                    # the root has to be that run's own directory.
+                    print(
+                        f"hint: no payload under --payload-root {args.payload_root!r} matched "
+                        f"a recorded file name; the daemon writes them under "
+                        f"<db dir>/payloads/{args.run_id}/ — point at that directory",
+                        file=sys.stderr,
+                    )
         try:
             paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
         except ExportError as exc:

@@ -145,7 +145,8 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 （prompt v5 起 `format_fingerprint` 也不再跟著門檻走，所以門檻的 code 預設值改動在
 `ai_inputs`、drift 戳、`prompt_regime:` 三處**都看不到**——只剩 run-id 這一道。）
 prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措辭的改版），另要 bump
-`cli/_provider.py` 的 `PROMPT_VERSION`，讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
+`common/prompt_regime.py` 的 `PROMPT_VERSION`（issue #197 起住這裡，與 `prompt_regime:` 行的渲染同檔；
+`cli._provider.PROMPT_VERSION` 是它的 re-export），讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，
@@ -380,6 +381,10 @@ A→B→A 翻回去仍只印兩行。另有一條自我檢查：各桶總和應�
 # 先備份 DB；在寫 payload 的那台主機上跑（列上記的是絕對路徑）；daemon 在跑也可以
 # （只寫 v11 前那些列的 NULL 格、單一短交易，daemon 不再碰它們；鎖等超過 5 秒會具名 exit 1，重跑即可）
 python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir exports/ --backfill-format-fingerprint
+# 對搬到別台主機的備份 store：把 payload 目錄一起搬來，再用 --payload-root 指過去——
+# 每列只取記錄路徑的「檔名」到這個目錄下找（issue #197）；hash 規則不變，搬來的檔要 bytes 相同才算證據。
+# 指到 run 自己那一層（daemon 寫在 <db 目錄>/payloads/<run-id>/）——指到上一層 payloads/ 會全數 missing_payload，stderr 會多印一行 hint 提醒
+python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir exports/ --db backup.db --backfill-format-fingerprint --payload-root /path/to/payloads/paper-BTC-3
 ```
 
 回填在 export 之前跑，CSV 直接帶新值；stderr 印一行
@@ -402,7 +407,7 @@ JSON 裡要有字串 `format_instructions`——不符的列保持 NULL 並計�
 | `config not found` / `invalid config` | 對照 example 修 `hyperliquid.local.yaml`；strict 解析會擋未知 key。 |
 | `--context-only` 不印倉位行／完整輪報 no usable account equity（exit 1） | `wallet_address` 還是佔位符；填真實唯讀地址。 |
 | 太年輕的標的每 4h 一筆 `api_failed` | 市場資料 warmup 不足，暖機完成前屬預期行為。 |
-| `context_shape` 少了結尾的 `position` token（prompt 沒有 `Position:` 段），log 有 `position section omitted` | 兩個成因渲染出**完全相同**的 prompt 與 `context_shape`，store 裡沒有欄位分得出（issue #161 拍板：接受現況、不加欄），**只能靠 journald 這行 WARNING 的措辭分辨**——`… the run has no books yet`（`cli._provider`：帳本還沒 seed，生產接線上到不了，出現代表接線或 store 有問題）vs `… account equity … is not positive at mark …`（`domains/perp/marginal_cost`：權益 ≤ 0，該 cycle 省略倉位段是對的，gate 反正也會拒絕方向性目標）。兩句措辭各有測試釘住。 |
+| `context_shape` 少了結尾的 `position` token（prompt 沒有 `Position:` 段），log 有 `position section omitted` | 兩個成因渲染出**完全相同**的 prompt 與 `context_shape`，store 裡沒有欄位分得出（issue #161 拍板：接受現況、不加欄），**只能靠 journald 這行 WARNING 分辨**——兩處走同一個模板 `position section omitted (reason=<成因>): …`（`common/prompt_regime.position_section_omitted`，issue #197），grep `reason=` 這個把手而不是英文：`reason=no_books`（`cli._provider`：帳本還沒 seed，生產接線上到不了，出現代表接線或 store 有問題）vs `reason=non_positive_equity`（`domains/perp/marginal_cost`：權益 ≤ 0，該 cycle 省略倉位段是對的，gate 反正也會拒絕方向性目標）。成因詞彙表只有這兩個成員，兩處各有測試釘住。 |
 | 每 4h 一筆 `api_failed`，`error_type` **空**、`error_message` 以 `non-retryable:` 開頭 | 非 Retryable 例外——**通常是程式缺陷**（store 讀出來的狀態踩到 DTO 守衛、engine 回傳形狀壞掉……），但主機問題也會落到這一列，看 `error_message` 裡的 repr 分辨：`sqlite3.OperationalError`（store 被鎖超過 busy_timeout、檔案系統壞）、`MemoryError` 是主機不是 code（payload 寫檔的 `OSError` 例外——它已被歸類成 `server_error`，走 ladder）。log 同一時間有 ERROR traceback，那才是要修的東西。不會自癒、也**不會讓 daemon 退出**（systemd 的 `NRestarts` 不會動，別拿它當健康訊號）；不走 3 次 ladder，直接 terminal；連續 3 筆起 log 升級 ERROR、`validate` 印 `shortfall:`（exit 4）。修 code（或主機）後部署。live 車道自 Phase 3 起就是這個語意，paper 於 issue #134 對齊。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `every technical indicator failed` 或 `… is/are unavailable`（點名 `atr_14`／`ema_20`／`ema_50` 中死掉的那些） | indicator 引擎（stockstats）壞掉或 regime 指標算不出來——三者任一缺席 regime 都會被捏造成 RANGING，daemon 與 one-shot 同樣拒跑（不燒 LLM）。（非空的 `indicators:` 清單漏配三者任一現在直接在 config load 擋下；會走到這裡的 config 成因只剩刻意的 `indicators: []`。）修 stockstats 相容性後，`--context-only` 走同一套 guard：照樣渲染但印同一句 refusal 警告並 exit 4（健康 context 是 exit 0），可拿來免 key 驗證修好了沒。 |
 | 每 4h 一筆 `api_failed`，error_message 是 `… freshness limit` | K 線 feed 停止推進。context 的 `as_of` 取自最後一根**收盤** K 線，健康 feed 不足一個 interval 舊；超過 `3 × candle_interval`（夾在下限與上限之間——下限＝`domains/perp/freshness.py` 的 `_MAX_CANDLE_AGE_FLOOR_MS`，目前 30 分鐘；上限＝三個決策 cycle，目前 12 小時；**但上限不會壓到一根健康 K 線以下**：`candle_interval: 1d` 的最新收盤 bar 在一天內會從 0 老化到 24h，所以 1d 的界限是「一根 bar ＋ 一個決策 cycle」＝28 小時——日線 feed 漏掉一根，最新收盤 bar 超過 28h 舊就拒跑（漏掉的 boundary 之後第一或第二個 cycle——相鄰 cycle 間隔超過 4h，寬限窗內最多只落得下一個）。目前出貨的 interval 沒有一個真的被 12 小時上限夾到（會被夾的是「大於一個 cycle、不超過三個」的 bar；4h 剛好是一個 cycle、走 `3 x 4h`，1d 走上面的加寬），所以 `… capped at` 這個由來標籤目前不會印出來。這些數字以程式碼的常數為準，訊息本身也會印出生效上限）就拒跑，不燒 LLM。訊息會印出該根 K 線的收盤時戳、實際年齡、生效上限與上限的由來（`3 x 4h`／`… raised to the 30m floor`／`one 1d bar plus one 4h decision cycle`）。**倉位不會被動到**：拒的只有 4h 一次的新決策，30 秒節奏的 monitor tick（清算／`gap_stop_fill`／SL・TP）照常跑——它讀的是 snapshot 的 mark price，與 K 線 endpoint 是不同資料路徑，K 線停了不代表保護瞎了。**成因只有一個＝feed 沒推進**：K 線視窗本身就是用**交易所自己的時鐘**截的（同一次抓取先讀 public `l2Book` 的 `time`，再以它當 K 線與 funding 視窗的上界，issue #124），年齡也是拿同一個讀數量的，所以主機時鐘偏移既推不動視窗、也進不了年齡——訊息會明寫 feed 沒推進，並附上本機與交易所時鐘的差距供參考（偏移 ≥1 分鐘另有 WARNING 提醒修 NTP，因為排程格線與所有紀錄時戳仍走主機時鐘；但那不是這個拒跑的成因）。查交易所 K 線 API 狀態。**這條拒跑信任交易所自己的 `l2Book` `time`**（2026-08-26 實測是伺服器時鐘、冷門幣也每次前進）：若那個時戳本身壞掉（倒退或停住），視窗會被它截短、症狀與 feed 停滯完全同形——守衛刻意沒有第二個參考時鐘，這是接受的殘餘風險。**不再是完全無聲的無限期狀態**：這類 cycle 的 `error_type` 記成 `stale_market_data`（不再與會自癒的環境失敗共用 `server_error`），連續第 3 筆起 log 從 WARNING 升成 ERROR，`validate` 也會把 `no_decision_streak ≥ 3` 列成 exit 4 的 `shortfall:`（該判準**不分 error class**——feed 停滯、l2Book 掛掉、連線問題一律計入，因為對操作員來說都是「連續 N 個 cycle 出不了決策」；報告另印 `stale_feed_refusal_streak` 供分辨。feed 恢復、下一個 cycle 出得了決策就自動歸零；run 停掉超過 2 個 cycle 後也不再套用，已封存的驗收 run 不會被永久判死）。`--context-only` 走同一套 guard：照樣渲染但印同一句警告並 exit 4。live run 的對應行為見 [RUNBOOK-live.md](./RUNBOOK-live.md)（tick 節奏不同，~10s）。 |

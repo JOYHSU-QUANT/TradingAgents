@@ -39,7 +39,11 @@ daemon wrote can never be replaced by a recomputation. Every file is read
 BEFORE the one write transaction opens: the store may be a running daemon's,
 and holding its write lock across file reads would be a needless stall.
 Paths are the absolute ones the daemon recorded, so run this on the host
-that wrote them (or with the payload tree at the same path).
+that wrote them (or with the payload tree at the same path) — or, for a
+store copied elsewhere, pass ``payload_root``: the directory part of every
+recorded path is replaced by it and only the file name is kept (issue #197).
+The hash rule is unchanged under a root, so a copied tree still has to be
+byte-identical to count as evidence.
 """
 
 from __future__ import annotations
@@ -47,7 +51,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal, NamedTuple, get_args
 
 from ..common.digest import payload_digest
@@ -88,19 +92,37 @@ class _LeftNull(NamedTuple):
     reason: Reason
 
 
-def _recorded_format_text(row) -> str | _LeftNull:
+def _payload_file(recorded: str, payload_root: Path | None) -> Path:
+    """Where the row's payload is read from: as recorded, or its name under the root.
+
+    ``PureWindowsPath`` splits on both separators, so a store written on the
+    Linux host (``/srv/…/BTC-20260828T040000_000000Z.json``) and one written
+    on Windows both yield the daemon's ``<coin>-<stamp>.json`` name whichever
+    host runs the pass; the name itself carries neither separator. A recorded
+    path that names no file (a bare root) remaps to the root directory itself
+    and is refused by the read as ``unreadable`` — the verdict the same row
+    gets without a root.
+    """
+    if payload_root is None:
+        return Path(recorded)
+    return payload_root / PureWindowsPath(recorded).name
+
+
+def _recorded_format_text(row, *, payload_root: Path | None) -> str | _LeftNull:
     """The payload's ``format_instructions`` text, or why the row stays NULL.
 
     ``row`` is a ``repository.UnstampedInput``. A tagged outcome rather than
     a bare string, so a format block can never be mistaken for a reason word.
+    The log lines name the path actually read — under ``payload_root``, the
+    remapped one — so an operator can open the file the verdict was about.
     """
     if row.context_shape is None or row.prompt_version is None:
         return _LeftNull("pre_v10")
-    path = row.input_payload_path
-    if path is None:
+    if row.input_payload_path is None:
         return _LeftNull("missing_payload")
+    path = _payload_file(row.input_payload_path, payload_root)
     try:
-        raw = Path(path).read_bytes()
+        raw = path.read_bytes()
     except FileNotFoundError:
         return _LeftNull("missing_payload")
     except OSError as exc:
@@ -138,15 +160,22 @@ def _recorded_format_text(row) -> str | _LeftNull:
     return text
 
 
-def backfill_format_fingerprints(db, *, run_id: str) -> FingerprintBackfill:
-    """Stamp every ``NULL`` ``format_fingerprint`` the run's payloads can prove."""
+def backfill_format_fingerprints(
+    db, *, run_id: str, payload_root: Path | None = None
+) -> FingerprintBackfill:
+    """Stamp every ``NULL`` ``format_fingerprint`` the run's payloads can prove.
+
+    ``payload_root`` reads each payload by its recorded file name under that
+    directory instead of at its recorded path (module docstring); ``None``
+    reads the recorded paths as they are.
+    """
     from ..domains.perp.target_decision import format_fingerprint
     from . import repository as repo
 
     counts: dict[Reason, int] = dict.fromkeys(get_args(Reason), 0)
     stamps: list[tuple[str, str]] = []
     for row in repo.ai_inputs_without_format_fingerprint(db.conn, run_id):
-        outcome = _recorded_format_text(row)
+        outcome = _recorded_format_text(row, payload_root=payload_root)
         if isinstance(outcome, _LeftNull):
             counts[outcome.reason] += 1
             continue

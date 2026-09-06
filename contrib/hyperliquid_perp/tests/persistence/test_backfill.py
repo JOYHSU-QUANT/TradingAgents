@@ -148,6 +148,62 @@ def test_a_row_whose_payload_is_gone_stays_null_and_is_counted(tmp_path):
     db.close()
 
 
+def test_a_payload_root_reads_each_payload_by_its_recorded_name_under_it(tmp_path):
+    # Issue #197: a store copied off the host that wrote it. The rows record
+    # that host's absolute paths (Linux, here — and a Windows-written store
+    # is remapped the same way); under ``payload_root`` only the file name
+    # survives, so the copied tree is read wherever it was put. The hash rule
+    # is unchanged: a copied file that differs from the bytes the row hashed
+    # is still ``unverified``, a name the tree does not carry is still
+    # ``missing_payload``, and a recorded path that names no file lands on
+    # the root directory itself and is ``unreadable`` (as it is without a
+    # root) — a root remaps where the pass LOOKS, never what it trusts.
+    copied, digest = _payload(tmp_path, "BTC-20260828T040000_000000Z")
+    _, edited_digest = _payload(tmp_path, "BTC-20260828T080000_000000Z")
+    write_payload(
+        tmp_path / "payloads" / "BTC-20260828T080000_000000Z.json",
+        {"format_instructions": "not what the row hashed"},
+    )
+    db = _seed(
+        tmp_path,
+        [
+            (_V4, _SHAPE, None, "/srv/hl/payloads/BTC-20260828T040000_000000Z.json", digest),
+            (
+                _V4,
+                _SHAPE,
+                None,
+                r"C:\hl\payloads\BTC-20260828T080000_000000Z.json",
+                edited_digest,
+            ),
+            (_V4, _SHAPE, None, "/srv/hl/payloads/BTC-20260828T120000_000000Z.json", "sha256:00"),
+            (_V4, _SHAPE, None, "/", "sha256:00"),  # no file name: lands on the root itself
+        ],
+    )
+    report = backfill_format_fingerprints(db, run_id="r", payload_root=tmp_path / "payloads")
+    assert report == FingerprintBackfill(
+        stamped=1, pre_v10=0, missing_payload=1, unreadable=1, unverified=1
+    )
+    assert _fingerprints(db) == [_FORMAT_DIGEST, None, None, None]
+    db.close()
+
+
+def test_without_a_payload_root_a_copied_store_is_all_missing_payload(tmp_path):
+    # The pre-#197 reading, unchanged by the option's existence: no root, the
+    # recorded paths are what is read, and a store away from its host proves
+    # nothing — even with the very files sitting in a directory beside it.
+    _, digest = _payload(tmp_path, "BTC-20260828T040000_000000Z")
+    db = _seed(
+        tmp_path,
+        [(_V4, _SHAPE, None, "/srv/hl/payloads/BTC-20260828T040000_000000Z.json", digest)],
+    )
+    report = backfill_format_fingerprints(db, run_id="r")
+    assert report == FingerprintBackfill(
+        stamped=0, pre_v10=0, missing_payload=1, unreadable=0, unverified=0
+    )
+    assert _fingerprints(db) == [None]
+    db.close()
+
+
 def test_a_payload_that_no_longer_hashes_to_its_row_is_not_trusted(tmp_path):
     # The row describes the artifact it hashed at build time. A file that was
     # edited since (or a row that never recorded a hash) is not evidence of

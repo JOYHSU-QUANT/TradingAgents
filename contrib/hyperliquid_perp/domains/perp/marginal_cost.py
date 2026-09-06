@@ -35,6 +35,7 @@ from decimal import Decimal, localcontext
 
 from ...common.constants import HOLDING_COST_HOURS
 from ...common.decimal_context import DECIMAL_CONTEXT
+from ...common.prompt_regime import position_section_omitted
 from .margin import account_equity, funding_cost, unrealized_pnl
 from .risk_gate import CurrentPositionState
 from .schema import MarginalCostRow, PositionContext, PositionSide, derive_round_trip_rate
@@ -226,15 +227,15 @@ def build_position_context(
             unrealized = unrealized_pnl(size, mark, entry_price)
         equity = account_equity(book.wallet_balance, unrealized)
         if equity <= 0:
-            # Wording pinned by test (issue #161): "is not positive" must read
-            # apart from ``cli._provider``'s "no books yet" — same prompt,
-            # same context_shape, no store column; rationale in RUNBOOK §7.
+            # Same prompt and context_shape as ``cli._provider``'s book-less
+            # omission, no store column (issue #161): the ``reason=`` handle
+            # on this line is what tells them apart; rationale in RUNBOOK §7.
             logger.warning(
-                "position section omitted: account equity %s is not positive at mark %s "
-                "(wallet %s) — nothing to price a move against",
-                equity,
-                mark,
-                book.wallet_balance,
+                position_section_omitted(
+                    "non_positive_equity",
+                    f"account equity {equity} is not positive at mark {mark} "
+                    f"(wallet {book.wallet_balance}) — nothing to price a move against",
+                )
             )
             return None
         if size == 0:

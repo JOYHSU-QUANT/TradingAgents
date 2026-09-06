@@ -113,8 +113,7 @@ def run_context_only(config: dict, coin: str) -> int:
     # does NOT (prompt v5 keeps those out of the text): that one needs a new
     # run-id, and an unchanged fingerprint here is not evidence it can skip
     # one.
-    from .cli import PROMPT_VERSION
-    from .common.prompt_regime import prompt_regime_line
+    from .common.prompt_regime import PROMPT_VERSION, prompt_regime_line
 
     risk_cfg, decision_cfg = cfgs
     print(

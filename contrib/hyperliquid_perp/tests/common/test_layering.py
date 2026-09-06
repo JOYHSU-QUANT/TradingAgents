@@ -76,9 +76,10 @@ def test_the_config_loader_imports_no_compute_module():
     # it silently and nothing would fail. Structural, like the check below.
     #
     # To add an import here, put the value in ``common/`` or a ``*_vocab``
-    # module rather than widening this set — ``common.enum_guard`` is on it
-    # because ``schema``'s four vocabulary enums inherit their refusal
-    # sentence from it (issue #166). ``market_data_config`` is the one
+    # module and add THAT module here by name, rather than admitting a
+    # compute module — ``common.enum_guard`` is on it because ``schema``'s
+    # four vocabulary enums inherit their refusal sentence from it (issue
+    # #166). ``market_data_config`` is the one
     # parser on the list — it runs on every load (the block is always
     # present), so a lazy import would buy nothing — and ``schema`` is the DTO
     # module it reaches for the candle-interval vocabulary. Named module by
@@ -414,16 +415,27 @@ def _load_time_statements(node: ast.AST) -> Iterator[ast.stmt]:
     harmless: an import is only ever a statement.
     """
     for child in ast.iter_child_nodes(node):
-        if isinstance(child, ast.stmt):
-            yield child
-        if isinstance(child, _DEFERRED_BODIES):
-            continue
-        if isinstance(child, ast.If) and _is_type_checking_guard(child.test):
-            for stmt in child.orelse:
-                yield stmt
-                yield from _load_time_statements(stmt)
-            continue
-        yield from _load_time_statements(child)
+        yield from _load_time_statements_under(child)
+
+
+def _load_time_statements_under(child: ast.AST) -> Iterator[ast.stmt]:
+    """``child`` itself if it is a statement, then whatever runs on import beneath it.
+
+    One visitor for every node however it was reached — a module's child or a
+    statement in a TYPE_CHECKING guard's ``else:`` — so the two skip rules
+    (function bodies; the guard's own body) apply at every level. The first
+    cut recursed straight into the ``else:`` statements, so a ``def`` or a
+    nested ``if TYPE_CHECKING:`` placed there was walked as load-time.
+    """
+    if isinstance(child, ast.stmt):
+        yield child
+    if isinstance(child, _DEFERRED_BODIES):
+        return
+    if isinstance(child, ast.If) and _is_type_checking_guard(child.test):
+        for stmt in child.orelse:
+            yield from _load_time_statements_under(stmt)
+        return
+    yield from _load_time_statements(child)
 
 
 def test_the_walk_reaches_every_suite_that_runs_on_import_but_not_a_function_body(tmp_path):
@@ -436,7 +448,9 @@ def test_the_walk_reaches_every_suite_that_runs_on_import_but_not_a_function_bod
     # (it runs at import, unlike a function's), the ``else:`` of a
     # TYPE_CHECKING guard, and an ``if`` on a runtime flag that merely shares
     # the name. Not reached: the body of ``if TYPE_CHECKING:`` in both
-    # spellings, a function body, a method body inside a walked class.
+    # spellings, a function body, a method body inside a walked class, and a
+    # function body or nested guard body placed in a TYPE_CHECKING ``else:``
+    # (the skip rules apply at every level, not only to a module's children).
     # Discriminating: a ``.body``-only walk sees only ``top``; a walk that
     # names node types drops ``match``/``klass`` — the shapes the first cut
     # of this walk missed. ``FLAG``/``ctx``/``settings`` are never evaluated:
@@ -477,6 +491,10 @@ def test_the_walk_reaches_every_suite_that_runs_on_import_but_not_a_function_bod
         "    from .tc_name import n\n"
         "else:\n"
         "    from .tc_else import o\n"
+        "    def lazy_in_else():\n"
+        "        from .tc_else_func import s\n"
+        "    if TYPE_CHECKING:\n"
+        "        from .tc_else_nested import u\n"
         "if typing.TYPE_CHECKING:\n"
         "    from .tc_attr import p\n"
         "if settings.TYPE_CHECKING:\n"
@@ -501,7 +519,7 @@ def test_the_walk_reaches_every_suite_that_runs_on_import_but_not_a_function_bod
         "tc_else",
         "runtime_flag",
     }
-    for name in reached | {"method", "tc_name", "tc_attr", "func"}:
+    for name in reached | {"method", "tc_name", "tc_attr", "func", "tc_else_func", "tc_else_nested"}:
         (tmp_path / f"{name}.py").write_text("", encoding="utf-8")
     assert _load_time_import_closure(tmp_path / "a.py", root=tmp_path) == reached
 

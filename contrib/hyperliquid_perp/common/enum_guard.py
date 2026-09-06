@@ -62,7 +62,11 @@ class VocabEnum(str, Enum):
     plain ``_noun = "..."`` into a MEMBER (one leading underscore is neither
     the reserved ``_sunder_`` form nor a dunder); the signature makes it
     required, so a subclass that forgot it fails at definition, not with an
-    ``unsupported None`` sentence at its first bad lookup. The members are
+    ``unsupported None`` sentence at its first bad lookup. The noun is stored
+    under a name-mangled private attribute so no member a subclass declares
+    can collide with it — on 3.10 a member named ``_noun`` would silently
+    replace a plain ``_noun`` attribute (3.11+ refuses the reassignment
+    loudly), and a name-mangled one is out of a subclass's reach. The members are
     listed in DECLARATION order, not sorted (PR #165: the intervals ascend,
     the shapes follow the source article). Raised from ``_missing_`` rather
     than translated at each lookup site, so a direct ``CandleInterval(x)``
@@ -70,14 +74,20 @@ class VocabEnum(str, Enum):
     ``Enum.__new__`` re-raises a ``ValueError`` from ``_missing_`` intact.
     """
 
-    _noun: ClassVar[str]
+    __noun: ClassVar[str]  # ``_VocabEnum__noun`` once mangled; set per subclass below
 
     def __init_subclass__(cls, *, noun: str, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         if not isinstance(noun, str) or not noun.strip():
             raise TypeError(f"{cls.__name__}: noun must be a non-blank str, got {noun!r}")
-        cls._noun = noun
+        cls.__noun = noun
 
     @classmethod
     def _missing_(cls, value: object) -> NoReturn:
-        raise ValueError(f"unsupported {cls._noun} {value!r}; choose from {[m.value for m in cls]}")
+        if cls is VocabEnum:
+            # The base has no noun and no members; 3.11+'s ``EnumType`` refuses
+            # the lookup before reaching here, 3.10 does not — same answer on both.
+            raise TypeError("VocabEnum is the base, not a vocabulary; look up a subclass")
+        raise ValueError(
+            f"unsupported {cls.__noun} {value!r}; choose from {[m.value for m in cls]}"
+        )

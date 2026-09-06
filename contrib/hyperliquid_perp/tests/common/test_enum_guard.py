@@ -34,6 +34,27 @@ def test_an_unknown_value_names_the_noun_and_the_vocabulary_in_declaration_order
         _Colour("")
 
 
+def test_a_member_named_noun_cannot_shadow_the_noun():
+    # The noun lives under a name-mangled attribute precisely so a subclass's
+    # member names are irrelevant to it: with a plain ``_noun`` attribute, a
+    # member called ``_noun`` silently replaced it on 3.10 (the sentence read
+    # ``unsupported x ...``) and made the class fail to define on 3.11+.
+    class _Shadow(VocabEnum, noun="widget"):
+        _noun = "x"
+        A = "a"
+
+    assert [m.name for m in _Shadow] == ["_noun", "A"]
+    with pytest.raises(ValueError, match=r"^unsupported widget 'nope'; choose from \['x', 'a'\]$"):
+        _Shadow("nope")
+
+
+def test_looking_up_the_bare_base_is_a_type_error_not_an_attribute_error():
+    # The base has no noun; 3.11+ refuses the memberless lookup itself, 3.10
+    # reached ``_missing_`` and died on the missing attribute. One answer.
+    with pytest.raises(TypeError):
+        VocabEnum("x")
+
+
 def test_the_noun_is_required_at_class_definition():
     # The signature's own refusal (a required keyword-only parameter), pinned
     # because it is the contract: a subclass that forgot the keyword fails

@@ -382,7 +382,8 @@ def _echo_untrusted(value) -> str:
     value far past the promise (#140) — and the re-cap below drops whole
     characters until the quoted form fits, so an escape sequence stays whole
     or vanishes and the quotes stay balanced. A clean value such as ``'abc'``
-    comes through byte for byte.
+    comes through byte for byte; one containing whitespace does not, since
+    :func:`echo_argument` below collapses every run to a single space.
     """
     if isinstance(value, str):
         flat = echo_argument(value)

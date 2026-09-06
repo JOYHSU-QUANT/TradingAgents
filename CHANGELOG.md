@@ -418,8 +418,8 @@ Breaking changes within the 0.x line are called out explicitly.
 - **dataflows / agents: the two failure texts that reach the model without
   passing through the router are flattened and capped too, and a model
   argument quoted back is echoed with the same flattening as a refused
-  date** (issues #201 and #231; #230 item 3). PR #202 capped the vendor's share of the router's
-  two sentinel slots at ``MAX_UNTRUSTED_CHARS`` (200), but
+  date** (issues #201 and #231; #230 item 3). PR #202 capped the vendor's
+  share of the router's two sentinel slots at ``MAX_UNTRUSTED_CHARS`` (200), but
   ``get_verified_market_snapshot`` calls the builder directly and
   ``get_prediction_markets`` handles its own transport failures, so a Yahoo
   Finance outage reason (the library's whole decoded error, line breaks and

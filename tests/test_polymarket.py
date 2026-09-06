@@ -244,7 +244,8 @@ class PolymarketOutageTests(unittest.TestCase):
     def test_the_report_header_quotes_the_topic_flattened_and_capped(self):
         # The success path quotes the topic in its heading; a topic carrying
         # its own "## " line would forge a second heading in the report the
-        # model reads (#231). A clean topic reads byte for byte as before.
+        # model reads (#231). The clean-topic half is pinned by the sibling
+        # test below, whitespace caveat included.
         with mock.patch.object(polymarket, "_request", return_value=copy.deepcopy(_SEARCH)):
             out = polymarket.get_prediction_markets(self._FORGED_TOPIC)
         first_line = out.splitlines()[0]

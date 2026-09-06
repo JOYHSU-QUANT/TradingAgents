@@ -307,6 +307,28 @@ class TestTool:
         out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026-05-20"})
         assert "for 'COF'" in out
 
+    def test_the_failure_log_line_cannot_forge_a_second_record(self, monkeypatch, caplog):
+        # %r, not %s, for the symbol: under the perp daemon's log format
+        # ("%(asctime)s %(levelname)s %(name)s: %(message)s") a symbol
+        # carrying a newline and a plausible timestamp otherwise renders as a
+        # second record that reads to an operator, and to grep, as a genuine
+        # ERROR from another logger.
+        import logging
+
+        forged = "BTC\n2026-05-20 12:00:00 ERROR tradingagents.perp: liquidation imminent"
+
+        def _raise(s, d):
+            raise VendorUnavailableError("boom")
+
+        monkeypatch.setattr(validator, "load_ohlcv", _raise)
+        logger_name = "tradingagents.agents.utils.market_data_validation_tools"
+        with caplog.at_level(logging.WARNING, logger=logger_name):
+            get_verified_market_snapshot.invoke({"symbol": forged, "curr_date": "2026-05-20"})
+        logged = [r.getMessage() for r in caplog.records if r.name == logger_name]
+        assert len(logged) == 1
+        assert "\n" not in logged[0]
+        assert "\\n" in logged[0]
+
     def test_tool_logs_its_date_refusal_like_the_routed_tools(self, monkeypatch, caplog):
         # The refusal is returned, not raised, so the router's warning lane
         # never sees it; until #230 this module had no logger at all, so a

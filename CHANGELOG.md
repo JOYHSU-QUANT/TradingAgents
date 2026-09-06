@@ -102,8 +102,9 @@ Breaking changes within the 0.x line are called out explicitly.
   template** (issue #197, items 1–2). The version stamp moves from
   ``cli/_provider.py`` to ``common/prompt_regime.py`` — the module that
   already renders the three segmentation keys and, like the stamp, is
-  owned by none of its consumers; ``--context-only`` no longer imports the
-  whole ``cli`` package for one string. ``cli._provider.PROMPT_VERSION`` and
+  owned by none of its consumers; ``run_context_only`` (the
+  ``python -m contrib.hyperliquid_perp.main --context-only`` entry) no longer
+  imports the whole ``cli`` package for one string. ``cli._provider.PROMPT_VERSION`` and
   ``cli.PROMPT_VERSION`` remain as re-exports of the same object (pinned by
   identity), the value ``phase2-target-v5`` and the format digest are
   unchanged, and the bump-discipline test now points at the new home. The

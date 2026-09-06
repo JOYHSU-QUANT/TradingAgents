@@ -6432,10 +6432,11 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     separating them. It lives in ``common/prompt_regime.py`` (issue #197; the
     ``cli`` names below are re-exports of it) while the text it versions
     lives in ``domains/perp/target_decision.py``, and nothing makes the
-    constant track the text — no assertion relates them, and nothing else in
-    the suite references the constant. So a prompt edit that forgot the bump
-    would merge the two populations into one bucket and the merge would be
-    invisible in the data: the query still returns a clean two-value split.
+    constant track the text — no assertion but this one relates them (the
+    suite's other reference, in test_main, only echoes the value). So a
+    prompt edit that forgot the bump would merge the two populations into
+    one bucket and the merge would be invisible in the data: the query still
+    returns a clean two-value split.
 
     The digest covers the block as rendered from ``DecisionConfig()``, so a
     changed config DEFAULT trips it too. That is the intended reading rather

@@ -101,10 +101,9 @@ def _payload_file(recorded: str, payload_root: Path | None) -> Path:
     host runs the pass; the name itself carries neither separator. No daemon
     records a path without a file name; should one appear, a bare root
     (``/``, ``C:\\``) has no name and remaps to the root directory itself,
-    which the read refuses as ``unreadable`` — the same verdict the row gets
-    without a root. (A directory path WITH a trailing separator keeps its
-    last component as the name, so it remaps like any file and is judged on
-    whether that name exists under the root.)
+    which the read refuses as ``unreadable``. (A directory path WITH a
+    trailing separator keeps its last component as the name, so it remaps
+    like any file and is judged on whether that name exists under the root.)
     """
     if payload_root is None:
         return Path(recorded)

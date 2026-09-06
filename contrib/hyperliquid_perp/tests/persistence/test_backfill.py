@@ -156,8 +156,8 @@ def test_a_payload_root_reads_each_payload_by_its_recorded_name_under_it(tmp_pat
     # is unchanged: a copied file that differs from the bytes the row hashed
     # is still ``unverified``, a name the tree does not carry is still
     # ``missing_payload``, and a recorded path that names no file lands on
-    # the root directory itself and is ``unreadable`` (as it is without a
-    # root) — a root remaps where the pass LOOKS, never what it trusts.
+    # the root directory itself and is ``unreadable`` — a root remaps where
+    # the pass LOOKS, never what it trusts.
     copied, digest = _payload(tmp_path, "BTC-20260828T040000_000000Z")
     _, edited_digest = _payload(tmp_path, "BTC-20260828T080000_000000Z")
     write_payload(

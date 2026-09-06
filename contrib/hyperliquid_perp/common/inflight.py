@@ -43,11 +43,12 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Generic, TypeVar
+from typing import Any, Generic, NamedTuple, TypeVar
 
 __all__ = [
     "NON_RETRYABLE_PREFIX",
     "InFlightDecision",
+    "PendingFail",
     "failed_cycle_next_at",
     "inflight_ids",
     "non_retryable_message",
@@ -56,6 +57,21 @@ __all__ = [
 
 ParsedT = TypeVar("ParsedT")
 RegistrationT = TypeVar("RegistrationT")
+# ``for_try`` returns an instance of the class it was called on — a lane's
+# subclass keeps its own fields typed at the call site (``typing.Self`` needs
+# 3.11; the repo supports 3.10).
+_InFlightT = TypeVar("_InFlightT", bound="InFlightDecision[Any, Any]")
+
+
+class PendingFail(NamedTuple):
+    """A cycle's failure verdict, armed before its ``api_failed`` record is written.
+
+    Named, not a bare pair: ``error_type`` and ``message`` are both strings (or
+    ``None``) and would swap silently at an unpacking site.
+    """
+
+    error_type: str | None  # a §6.2 class, or None for a non-retryable error
+    message: str
 
 # The ``error_message`` prefix of an ``api_failed`` row written for a
 # non-retryable error — a bug, or host trouble the provider does not classify
@@ -134,14 +150,17 @@ class InFlightDecision(Generic[ParsedT, RegistrationT]):
     # Whether the §3.1 store is SETTLED: the response landed durably, or the
     # answer was invalid and deliberately not stored (nothing to resume, and
     # its preserved text is not guaranteed to re-parse to the same verdict).
+    # A plain flag, set by each lane's store step: settling carries no
+    # once-only rule (a store step that finds it set simply skips), unlike
+    # the two transitions below — the resume step refuses to settle over it,
+    # since that would mean parsing a response twice.
     raw_stored: bool = False
     # The engine's start_plan outcome, cached the moment it exists (see
     # :meth:`cache_registration`).
     registration: RegistrationT | None = None
     # The cycle's failure verdict, armed BEFORE the api_failed record is
-    # written (see :meth:`arm_fail`): ``(error_type, message)`` — a §6.2 class
-    # or ``None`` for a non-retryable error.
-    pending_fail: tuple[str | None, str] | None = None
+    # written (see :meth:`arm_fail`).
+    pending_fail: PendingFail | None = None
 
     def __post_init__(self) -> None:
         # Mutable-state guard, same convention as the engines' plan state: a
@@ -159,13 +178,13 @@ class InFlightDecision(Generic[ParsedT, RegistrationT]):
 
     @classmethod
     def for_try(
-        cls,
+        cls: type[_InFlightT],
         attempt_id: str,
         scheduled_at: datetime,
         try_no: int,
         *,
         parsed: ParsedT | None = None,
-    ):
+    ) -> _InFlightT:
         """The in-flight for try ``try_no``, its ids derived by :func:`inflight_ids`.
 
         Returns an instance of ``cls``, so each lane's subclass builds through
@@ -235,9 +254,9 @@ class InFlightDecision(Generic[ParsedT, RegistrationT]):
         if self.pending_fail is not None:
             raise AssertionError(
                 f"in-flight {self.attempt_id}: a failure is already armed "
-                f"({self.pending_fail[0]!r}) — a cycle fails once"
+                f"({self.pending_fail.error_type!r}) — a cycle fails once"
             )
-        self.pending_fail = (error_type, message)
+        self.pending_fail = PendingFail(error_type, message)
 
 
 def parse_stored_response(
@@ -262,7 +281,17 @@ def parse_stored_response(
     it is logged IN FULL here first, on the caller's ``log`` (the lane the
     operator greps), because ``ai_outputs`` never stores raw text and that
     row was its only durable copy.
+
+    Once per in-flight, like the other rule-carrying transitions: resuming
+    over a collected answer, a settled store or an armed failure would parse
+    a response twice, or revive a cycle already decided.
     """
+    if inflight.parsed is not None or inflight.raw_stored or inflight.pending_fail is not None:
+        raise AssertionError(
+            f"in-flight {inflight.attempt_id}: the stored response can only be resumed onto a "
+            "fresh in-flight — this one already carries an answer, a settled store or an "
+            "armed failure"
+        )
     try:
         parsed = parse(raw)
     except Exception:

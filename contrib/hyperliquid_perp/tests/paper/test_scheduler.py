@@ -1106,6 +1106,30 @@ def test_a_terminal_api_failed_write_that_misses_is_retried_next_poll(tmp_path, 
     db.close()
 
 
+def test_a_retried_terminal_write_anchors_the_next_cycle_on_the_retry_instant(
+    tmp_path, monkeypatch
+):
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path,
+        [_err("timeout"), _err("connection"), _err("server_error")],
+        [SnapshotOutcome.ERROR],
+    )
+    _exhaust_the_ladder(scheduler, clock)
+    _arm_flaky_terminal_write(monkeypatch)
+    assert scheduler.poll() is None  # the verdict is armed, its record missed
+    # The lock stays held across a schedule point (a long export): the record
+    # that finally lands must not anchor the next cycle in the past — §3's
+    # "never backfilled" rule, applied at the instant the write lands.
+    clock.advance(int((CYCLE_INTERVAL + timedelta(hours=1)).total_seconds()))
+    r = scheduler.poll()
+    assert r.event is CycleEvent.API_FAILED
+    assert r.next_decision_at == clock.now() + CYCLE_INTERVAL
+    assert r.next_decision_at > _T0 + CYCLE_INTERVAL  # not the literal scheduled_at + 4h
+    state = repo.get_scheduler_state(db.conn, "r")
+    assert parse_instant(state["next_decision_at"]) == r.next_decision_at
+    db.close()
+
+
 def test_a_non_retryable_failure_whose_record_misses_logs_the_bug_once(
     tmp_path, monkeypatch, caplog
 ):

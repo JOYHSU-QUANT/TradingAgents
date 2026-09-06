@@ -475,7 +475,9 @@ class PaperScheduler:
         or no poll yet (a fresh run decides immediately, spec §3). Answered
         from what that poll learned rather than by reading the store again
         (issue #181): the loop calls the two back to back, and this daemon is
-        the run's only writer, so nothing changes in between.
+        the run's only writer, so nothing changes in between. That ordering IS
+        the contract — call it after ``poll`` in the same tick; a caller that
+        polls elsewhere, or lets the clock run on, gets that poll's answer.
         """
         if self._pending is not None:
             return None
@@ -695,7 +697,8 @@ class PaperScheduler:
         An armed verdict does not survive a restart: the row is still
         ``in_progress`` and the restart re-judges it from the row alone (a
         spent try counter → ``interrupted``; a spare one → back onto the
-        ladder, which may re-ask the AI).
+        ladder, which re-asks the AI — even for a verdict that was
+        non-retryable in-process, since that classification never landed).
         """
         if self._pending is not None:
             # Every caller fails a try that never became a standing decision;

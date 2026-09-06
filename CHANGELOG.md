@@ -110,7 +110,10 @@ Breaking changes within the 0.x line are called out explicitly.
   ``pending_fail`` lane): a miss returns ``None`` from ``poll()``, the daemon
   stays up, and the next poll retries only that write — never the §3.1
   ladder, never the AI — under the same ten-poll bound the other two persists
-  share (any persist that lands clears the streak). An armed verdict does not
+  share (any persist that lands clears the streak). The restart-time
+  ``interrupted`` verdict (a spent try counter found on the row) rides the
+  same lane, so a store locked at daemon start no longer restarts the daemon
+  either. An armed verdict does not
   survive a restart: the row is still ``in_progress`` and the restart
   re-judges it from the row as before (a spent try counter → ``interrupted``,
   a spare one → back onto the ladder). The RUNBOOK's list of what still

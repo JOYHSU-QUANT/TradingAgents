@@ -16,6 +16,7 @@ import pytest
 from contrib.hyperliquid_perp.common.inflight import (
     NON_RETRYABLE_PREFIX,
     InFlightDecision,
+    PendingFail,
     failed_cycle_next_at,
     inflight_ids,
     non_retryable_message,
@@ -107,7 +108,8 @@ def test_a_registration_is_cached_once():
 def test_a_failure_is_armed_once():
     f = _inflight()
     f.arm_fail(None, "non-retryable: RuntimeError('x')")
-    assert f.pending_fail == (None, "non-retryable: RuntimeError('x')")
+    assert f.pending_fail == PendingFail(None, "non-retryable: RuntimeError('x')")
+    assert f.pending_fail.error_type is None and f.pending_fail.message.startswith("non-")
     with pytest.raises(AssertionError, match="a cycle fails once"):
         f.arm_fail("timeout", "second verdict")
     assert f.pending_fail == (None, "non-retryable: RuntimeError('x')")  # the first stands
@@ -122,6 +124,22 @@ def test_parse_stored_response_settles_the_store_from_the_text():
     assert f.parsed == ("parsed", '{"x": 1}')
     assert f.raw_stored is True  # the SOURCE is the store — settled by definition
     assert f.require_gateable() == ("parsed", '{"x": 1}')  # ... so it may be gated at once
+
+
+@pytest.mark.parametrize("already", ["parsed", "raw_stored", "pending_fail"])
+def test_parse_stored_response_resumes_only_onto_a_fresh_inflight(already):
+    # Like the other rule-carrying transitions: resuming over a collected
+    # answer, a settled store or an armed failure would parse twice or revive
+    # a decided cycle.
+    f = _inflight()
+    if already == "parsed":
+        f.parsed = "decision"
+    elif already == "raw_stored":
+        f.raw_stored = True
+    else:
+        f.arm_fail("timeout", "boom")
+    with pytest.raises(AssertionError, match="fresh in-flight"):
+        parse_stored_response(f, "{}", lambda raw: ("parsed", raw), log=logging.getLogger("t"))
 
 
 def test_parse_stored_response_logs_the_full_text_on_the_callers_logger_then_reraises(caplog):

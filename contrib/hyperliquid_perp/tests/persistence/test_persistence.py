@@ -1410,6 +1410,70 @@ def test_a_terminal_attempt_write_lands_no_resumable_response(tmp_path, caplog, 
     db.close()
 
 
+def test_record_api_failed_lands_the_terminal_pair(tmp_path):
+    """issue #181: the ONE terminal writer both lanes end a failed cycle on —
+    the attempt row goes api_failed and the run's scheduler_state re-anchors,
+    in the caller's single transaction."""
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
+    next_at = _TS + timedelta(hours=4)
+    with db.transaction() as conn:
+        repo.store_pending_response(conn, aid, _RAW, timestamp=_TS)
+        repo.record_api_failed(
+            conn,
+            "r1",
+            aid,
+            error_type=None,
+            error_message="non-retryable: RuntimeError('x')",
+            next_decision_at=next_at,
+            timestamp=_TS + timedelta(minutes=1),
+        )
+    row = repo.get_decision_attempt(db.conn, aid)
+    assert row["status"] == "api_failed"
+    assert row["error_type"] is None
+    assert row["error_message"] == "non-retryable: RuntimeError('x')"
+    assert row["next_decision_at"] == next_at.isoformat()
+    assert row["pending_raw_response"] is None  # a terminal row carries no resumable response
+    state = repo.get_scheduler_state(db.conn, "r1")
+    assert state["next_decision_at"] == next_at.isoformat()
+    assert state["current_attempt_id"] is None
+    db.close()
+
+
+def test_record_api_failed_is_all_or_nothing(tmp_path, monkeypatch):
+    """A fault between the two writes must leave neither: the attempt row stays
+    in_progress (so the lane's retry re-judges it) and the run is not re-anchored
+    to a cycle whose failure was never recorded."""
+    from contrib.hyperliquid_perp.persistence.repository import decisions as decisions_mod
+
+    db = Database(tmp_path / "p.db")
+    aid = _in_progress_attempt(db)
+    before_state = repo.get_scheduler_state(db.conn, "r1")
+
+    def _locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(decisions_mod, "upsert_scheduler_state", _locked)
+    with pytest.raises(sqlite3.OperationalError), db.transaction() as conn:
+        repo.record_api_failed(
+            conn,
+            "r1",
+            aid,
+            error_type="timeout",
+            error_message="boom",
+            next_decision_at=_TS + timedelta(hours=4),
+            timestamp=_TS,
+        )
+    row = repo.get_decision_attempt(db.conn, aid)
+    assert row["status"] == "in_progress"  # the first write rolled back with the second
+    assert row["error_type"] is None
+    after_state = repo.get_scheduler_state(db.conn, "r1")
+    assert (None if after_state is None else dict(after_state)) == (
+        None if before_state is None else dict(before_state)
+    )
+    db.close()
+
+
 def test_insert_funding_event_validates_source(tmp_path):
     db = Database(tmp_path / "p.db")
     base = {

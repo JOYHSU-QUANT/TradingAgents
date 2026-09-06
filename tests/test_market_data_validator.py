@@ -276,6 +276,19 @@ class TestTool:
         assert "x" * (MAX_UNTRUSTED_CHARS + 1) not in out
         assert "'AAPL forged heading cell x" in out
 
+    def test_the_heading_caps_a_symbol_that_grows_under_upper(self, monkeypatch):
+        # The builder uppercases BEFORE it echoes, on purpose: 'ß'.upper() is
+        # 'SS', so echoing first and uppercasing after doubles the length back
+        # past the cap. Nothing pinned that ordering — flipping it left the
+        # whole suite green, because the other heading test's filler is 'x',
+        # whose uppercase is the same length.
+        monkeypatch.setattr(validator, "load_ohlcv", lambda s, d: _sample_ohlcv())
+        out = get_verified_market_snapshot.invoke({"symbol": "ß" * 150, "curr_date": "2026-05-20"})
+        first_line = out.splitlines()[0]
+        prefix = "## Verified market data snapshot for "
+        assert first_line.endswith("...")
+        assert len(first_line) <= len(prefix) + MAX_UNTRUSTED_CHARS + 3
+
     def test_an_edge_marker_symbol_does_not_come_back_stripped(self, monkeypatch):
         # Why the echo passes keep_edges: dropping a leading marker outright
         # would quote '_cof' back as 'COF' — a value that reads as the clean

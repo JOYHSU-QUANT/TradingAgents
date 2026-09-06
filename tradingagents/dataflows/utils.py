@@ -327,11 +327,13 @@ def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bo
     flattening a whole message for its own raise or a log line, where the
     module's own diagnostic carries the meaning.
 
-    ``keep_edges`` is for echoing a REFUSED value back to its author: markers
-    become a space rather than vanishing, and nothing is trimmed off the ends,
-    so ``"_2026-08-18"`` cannot come back as ``2026-08-18`` inside a sentence
-    calling it invalid. A rendered vendor fragment wants the default — there
-    the marker is noise and a boundary space would rebuild a table cell.
+    ``keep_edges`` is for echoing a CALLER'S OWN value back to its author — a
+    refused date, or an argument a report quotes back (see
+    :func:`echo_argument`): markers become a space rather than vanishing, and
+    nothing is trimmed off the ends, so ``"_2026-08-18"`` cannot come back as
+    ``2026-08-18`` inside a sentence calling it invalid. A rendered vendor
+    fragment wants the default — there the marker is noise and a boundary
+    space would rebuild a table cell.
     """
     marker = " " if keep_edges else ""
     flat = EMPHASIS_UNDERSCORE.sub(marker, str(text).translate(MARKDOWN_CONTROL))
@@ -345,12 +347,23 @@ def echo_argument(value: object) -> str:
     """The model's own argument, flattened and capped, for text it reads again.
 
     A tool that quotes one of its arguments back — the symbol it could not
-    verify, the topic nothing matched, the alias it does not know — is putting
-    a fragment the MODEL authored into the prompt, exactly the direction
-    :func:`_echo_untrusted` guards for a refused date. Same treatment, and
-    ``keep_edges`` for the same reason: markers become a space rather than
-    vanishing, so ``_foo`` cannot come back as ``foo`` inside a sentence
-    calling it unusable. A clean value comes through byte for byte.
+    verify, the topic nothing matched, the alias it does not know, or simply
+    the one it names in the report it returns — is putting a fragment the
+    MODEL authored into the prompt, the same direction
+    :func:`_echo_untrusted` guards for a refused date. Same FLATTENING and
+    cap, and ``keep_edges`` for the same reason: markers become a space
+    rather than vanishing, so ``_foo`` cannot come back as ``foo`` inside a
+    sentence calling it unusable.
+
+    Not the whole of that guard, though: the refused date is additionally
+    ``repr``-escaped and quoted (see :func:`_echo_untrusted`), because it is
+    served inside quotes where an unescaped control character would break
+    the sentence. An argument named in running prose is not, so control
+    characters reach the prompt as themselves here.
+
+    A clean value comes through byte for byte apart from whitespace, which
+    collapses to single spaces — a topic typed with two spaces renders with
+    one.
 
     Not for a VENDOR's message — that one is not quoted back at its author and
     wants the default edges (see :func:`sanitize_untrusted`).

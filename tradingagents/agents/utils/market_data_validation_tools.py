@@ -63,7 +63,7 @@ def get_verified_market_snapshot(
         # into the permanent-sounding no-data verdict — the agent would assert
         # that verified data does not exist when the vendor was merely
         # throttling. Say "transient" instead.
-        logger.warning("Verification snapshot for %s rate-limited: %s", symbol, e)
+        logger.warning("Verification snapshot for %r rate-limited: %s", symbol, e)
         return (
             f"DATA_UNAVAILABLE: the market data vendor rate-limited the "
             f"verification snapshot for '{echo_argument(symbol)}' "
@@ -73,7 +73,7 @@ def get_verified_market_snapshot(
             f"cannot verify."
         )
     except VendorError as e:
-        logger.warning("Verification snapshot for %s failed: %s", symbol, e)
+        logger.warning("Verification snapshot for %r failed: %s", symbol, e)
         return (
             f"NO_DATA_AVAILABLE: could not build a verified market snapshot "
             f"for '{echo_argument(symbol)}' "

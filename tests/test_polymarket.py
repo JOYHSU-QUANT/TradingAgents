@@ -276,9 +276,16 @@ class PolymarketOutageTests(unittest.TestCase):
         self.assertIn("- **Q? Verified market data snapshot for AAPL Close 999** —", out)
         self.assertIn("Yes forged 76%", out)
 
-    def test_a_clean_topic_still_reads_byte_for_byte_in_the_header(self):
+    def test_a_clean_topic_reads_back_unchanged_apart_from_whitespace(self):
         # The other half of the claim: the echo must not disturb an ordinary
-        # topic, apostrophes, an em-dash and non-ASCII included.
+        # topic, apostrophes, an em-dash and non-ASCII included. Whitespace is
+        # the one exception the docstring names, so it is pinned here too
+        # rather than left as a caveat no test measures.
+        with mock.patch.object(polymarket, "_request", return_value=copy.deepcopy(_SEARCH)):
+            out = polymarket.get_prediction_markets("Fed  rate\tcut")
+        self.assertEqual(
+            out.splitlines()[0], '## Polymarket prediction markets: "Fed rate cut"'
+        )
         topics = ("Fed rate cut", "Will Trump's tariffs pass?", "US recession — 2026", "美聯儲降息")
         for topic in topics:
             with self.subTest(topic=topic):

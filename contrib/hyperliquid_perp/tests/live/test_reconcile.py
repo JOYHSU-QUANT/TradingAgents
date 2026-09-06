@@ -1918,8 +1918,12 @@ def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_constructio
     # ``None`` stays the no-stream wiring (``env``, and every production site).
     db, seams, _ = env
     two_of_three = SimpleNamespace(backfill_epoch=lambda: 0, backfill_since=lambda: None)
+    # An ABSENT method reads as ``got NoneType``: the guard sees getattr's
+    # default, and the name in front of it is what tells the operator which
+    # method to add.
     with pytest.raises(
-        TypeError, match="stream.mark_backfill_done must be the LiveWsStream fill-leg seam"
+        TypeError,
+        match=r"stream\.mark_backfill_done must be the LiveWsStream fill-leg seam .*, got NoneType",
     ):
         _reconciler_over(db, seams, None, stream=two_of_three)
     all_three = SimpleNamespace(

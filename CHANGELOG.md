@@ -97,9 +97,10 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **hyperliquid_perp: every injected seam is refused the same way at
-  construction, the backfiller's included** (issue #169, follow-ups from
-  PR #168). The reconciler and the venue-identity monitor each carried their
+- **hyperliquid_perp: the exchange-read seams of the reconciler, the
+  venue-identity monitor and the fill backfiller are refused the same way at
+  construction** (issue #169, follow-ups from PR #168). The reconciler and
+  the venue-identity monitor each carried their
   own copy of the "must be the … seam" refusal, and ``FillBackfiller`` had
   none — yet the live loop hands the SAME ``user_fills_by_time`` object to
   both the reconciler's ``fetch_fills`` and the backfiller's ``fetch``, so a
@@ -113,11 +114,14 @@ Breaking changes within the 0.x line are called out explicitly.
   anything else must answer ``backfill_epoch`` / ``backfill_since`` /
   ``mark_backfill_done``, and the refusal names the missing one).
   ``FillBackfiller`` also converges ``lookback_seconds`` to ``float`` at
-  construction — a ``Decimal`` passed ``> 0`` and failed only inside
-  ``timedelta`` — refusing by name what ``float()`` would silently accept
-  (a ``str``, a ``bool``) and what ``> 0`` let through (NaN, an infinity),
-  each of which previously died inside ``timedelta`` with a message naming
-  nothing. ``fill_backfill`` exports
+  construction, refusing by name what the bare ``> 0`` check could not see:
+  a ``Decimal`` or a non-finite number died inside ``timedelta`` with a
+  message naming nothing, a ``bool`` was silently accepted as a one-second
+  window, a ``str`` died at the comparison, and a finite value beyond
+  ``timedelta``'s range still overflowed there. Other injected callables
+  (``refresh_kill_switch`` on both constructors, ``WsReconnector``'s
+  ``connect``) still have no construction-time refusal. ``fill_backfill``
+  exports
   ``DEFAULT_LOOKBACK: timedelta`` beside ``DEFAULT_LOOKBACK_SECONDS`` (an
   addition; the constructor's signature is unchanged), and the reconciler's
   fallback cross-check window names it as its owner

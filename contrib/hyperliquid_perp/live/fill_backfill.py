@@ -166,11 +166,14 @@ class FillBackfiller:
         # reconciler's ``fetch_fills``, which already refused it (issue #169).
         # ``processor`` is an object seam (``.ingest_message``), not a callable,
         # and wirings that never reach a fill pass ``None`` — left unchecked.
-        require_seam("fetch", fetch, kind="REST", shape="(start_ms, end_ms) -> fills list")
-        # Converge on float BEFORE ``timedelta(seconds=...)``: a ``Decimal``
-        # passed ``> 0`` and failed only in there (issue #169). Refused by name
-        # instead: what ``float()`` would silently accept (a str, a bool) and
-        # what ``> 0`` lets through (NaN, an infinity).
+        require_seam("fetch", fetch, kind="exchange", shape="(start_ms, end_ms) -> fills list")
+        # Converge on float BEFORE ``timedelta(seconds=...)`` (issue #169). The
+        # bare ``<= 0`` check let through what it could not see: a ``Decimal``
+        # or a non-finite number died inside ``timedelta`` with a message
+        # naming nothing, a ``bool`` was silently a one-second window, a
+        # ``str`` died at the comparison. Each is refused by name here — and
+        # ``timedelta``'s own range is checked too, so nothing is left for it
+        # to refuse.
         if isinstance(lookback_seconds, bool) or not isinstance(
             lookback_seconds, (numbers.Real, Decimal)
         ):
@@ -180,10 +183,13 @@ class FillBackfiller:
             )
         try:
             seconds = float(lookback_seconds)
-        except OverflowError:  # an int too large for a float is not a lookback either
-            seconds = math.inf
-        if not math.isfinite(seconds) or seconds <= 0:
-            raise ValueError(f"lookback_seconds must be > 0 and finite, got {lookback_seconds}")
+        except (OverflowError, ValueError):  # too large for a float; a signaling NaN
+            seconds = math.nan
+        if not math.isfinite(seconds) or not 0 < seconds < timedelta.max.total_seconds():
+            raise ValueError(
+                "lookback_seconds must be > 0 and finite, within timedelta's range, "
+                f"got {lookback_seconds}"
+            )
         lookback_seconds = seconds
         if max_pages < 1:
             raise ValueError(f"max_pages must be >= 1, got {max_pages}")

@@ -30,7 +30,7 @@ def require_seam(name: str, value: Any, *, kind: str, shape: str) -> None:
     """Raise ``TypeError`` naming ``name`` unless ``value`` is callable.
 
     ``kind`` is the seam family the message names (``"exchange"``,
-    ``"orderStatus"``, ``"REST"``); ``shape`` is the call shape shown to the
+    ``"orderStatus"``); ``shape`` is the call shape shown to the
     operator, e.g. ``"(start_ms, end_ms) -> fills list"``.
     """
     if not callable(value):

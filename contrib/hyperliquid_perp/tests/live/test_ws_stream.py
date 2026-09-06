@@ -820,17 +820,18 @@ def test_the_rest_seam_is_refused_at_construction_like_the_reconcilers_copy():
     # (``tests/common/test_seam_guard.py``), this pins that THIS seam goes
     # through it.
     payload = {"fills": []}
-    with pytest.raises(TypeError, match="fetch must be the REST seam"):
+    with pytest.raises(TypeError, match="fetch must be the exchange seam"):
         FillBackfiller(fetch=payload, processor=None, clock=ManualClock(_NOW))
 
 
 def test_a_decimal_lookback_converges_to_float_at_construction():
     # ``Decimal`` is the shape a config number arrives in; it passed ``> 0`` and
     # failed only inside ``timedelta(seconds=...)`` — at construction since
-    # PR #168, in ``_window_start`` before (issue #169). What ``float()`` would
-    # silently accept (a str, a bool) and what ``> 0`` lets through (NaN, an
-    # infinity, an int too large for a float — each of which died inside
-    # ``timedelta`` with a message naming nothing) are refused by name instead.
+    # PR #168, in ``_window_start`` before (issue #169). What the bare ``> 0``
+    # check could not see is refused by name instead: a bool (silently a
+    # one-second window before), a str (died at the comparison), NaN / an
+    # infinity / a number beyond timedelta's range (died inside ``timedelta``
+    # naming nothing).
     bf = FillBackfiller(
         fetch=lambda s, e: [],
         processor=None,
@@ -847,7 +848,16 @@ def test_a_decimal_lookback_converges_to_float_at_construction():
                 clock=ManualClock(_NOW),
                 lookback_seconds=not_a_number,
             )
-    for not_a_span in (Decimal("NaN"), float("inf"), 10**400, 0, Decimal("-1")):
+    for not_a_span in (
+        Decimal("NaN"),
+        Decimal("sNaN"),  # float() refuses a signaling NaN with its own ValueError
+        float("inf"),
+        10**400,  # too large for a float
+        10**20,  # a float, but beyond timedelta's range
+        Decimal("1e15"),
+        0,
+        Decimal("-1"),
+    ):
         with pytest.raises(ValueError, match="lookback_seconds must be > 0 and finite"):
             FillBackfiller(
                 fetch=lambda s, e: [],

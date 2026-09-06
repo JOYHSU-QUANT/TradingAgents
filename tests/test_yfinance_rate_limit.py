@@ -26,6 +26,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import (
     UnsupportedIndicatorError,
     VendorError,
+    VendorLibraryError,
     VendorRateLimitError,
     VendorUnavailableError,
 )
@@ -934,70 +935,104 @@ def _assert_one_capped_line(out: str, prefix: str) -> None:
 
 
 @pytest.mark.unit
-def test_an_untyped_bulk_failure_renders_one_line_and_fetches_once(monkeypatch):
-    # #137: after the taxonomy (#67) and transport (#116) re-raises, nothing
-    # that reaches the windowed getter's broad handler is transient — the
-    # per-day fallback loop it used to run performed the identical fetch and
+def test_an_untyped_bulk_failure_leaves_typed_and_fetches_once(monkeypatch):
+    # #137: after the taxonomy (#67) and transport (#116) lanes, nothing that
+    # reaches the windowed getter's library lane is transient — the per-day
+    # fallback loop it used to run performed the identical fetch and
     # calculation once per day of the window and rendered a column of blanks
-    # under a successful-looking header. Now: one fetch, one line of prose
-    # (the flatten-and-cap claim for a hostile message is the parametrized
-    # test below).
+    # under a successful-looking header. Now: one fetch, and the failure
+    # leaves as the library type for the router (#187) — the one line of
+    # report text a chain with no other vendor ends as is the router's, and
+    # is pinned through it below.
     fetch = mock.Mock(side_effect=KeyError("volume"))
     monkeypatch.setattr(yfin, "load_ohlcv", fetch)
-    out = yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 30)
-    assert out.startswith("Error retrieving rsi values for AAPL")
-    assert "\n" not in out  # one line, not a 30-day column of blanks
+    with pytest.raises(VendorLibraryError) as info:
+        yfin.get_stock_stats_indicators_window("AAPL", "rsi", "2026-06-01", 30)
+    assert info.value.what == "rsi values for AAPL"
     assert fetch.call_count == 1  # a deterministic failure is not re-run per day
 
 
-# Every yfinance leaf with a broad handler and the prose line it degrades to,
-# checked against the taxonomy table above minus the one leaf without a broad
-# handler (get_stock_data propagates everything), so a newly registered leaf
-# cannot ship without either a row here or a place in that exclusion (if it,
-# too, propagates everything). The seam is the taxonomy table's.
+# Every yfinance leaf that runs under the library lane and the report line
+# the router renders for it when no vendor serves, checked against the
+# taxonomy table above minus the one leaf without the lane, so a newly
+# registered leaf cannot ship without either a row here — and the two tests
+# below then hold it to the lane at its seam — or a place in that exclusion
+# (if it, too, propagates everything). This is what makes forgetting the lane
+# structural (#86): the registry, not a hand-written list, says which leaves
+# must honour it. The seam is the taxonomy table's.
 _PROSE_LEAF_PREFIXES = {
     "get_indicators": "Error retrieving rsi values for AAPL: ",
     "get_fundamentals": "Error retrieving fundamentals for AAPL: ",
     "get_balance_sheet": "Error retrieving balance sheet for AAPL: ",
     "get_cashflow": "Error retrieving cash flow for AAPL: ",
     "get_income_statement": "Error retrieving income statement for AAPL: ",
-    "get_news": "Error fetching news for AAPL: ",
-    "get_global_news": "Error fetching global news: ",
+    "get_news": "Error retrieving news for AAPL: ",
+    "get_global_news": "Error retrieving global news: ",
     "get_insider_transactions": "Error retrieving insider transactions for AAPL: ",
 }
 
 
+# The one yfinance leaf that propagates everything and runs no library lane:
+# it never carried the broad handler the lane replaced (#187).
+_PROPAGATING_LEAVES = frozenset({"get_stock_data"})
+
+
 @pytest.mark.unit
-def test_the_prose_table_covers_every_leaf_but_the_one_without_a_handler():
-    assert set(_PROSE_LEAF_PREFIXES) == set(_YFINANCE_LEAF_CALLS) - {"get_stock_data"}
+def test_the_prose_table_covers_every_leaf_but_the_one_without_the_lane():
+    assert set(_PROSE_LEAF_PREFIXES) == set(_YFINANCE_LEAF_CALLS) - _PROPAGATING_LEAVES
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("method", sorted(_PROSE_LEAF_PREFIXES))
-def test_every_prose_leaf_renders_an_untyped_failure_as_one_capped_line(
-    monkeypatch, tmp_path, method
+def test_every_lane_leaf_raises_the_library_type_and_logs_the_traceback(
+    monkeypatch, tmp_path, caplog, method
 ):
-    # The siblings' broad handlers rendered str(e) raw: a multi-line message
-    # came back as several lines, a hostile one with its markdown intact, a
-    # long one whole. Same flatten-and-cap as the windowed getter (#187).
+    # #187 / #86: the leaves used to hand-copy a broad handler that rendered
+    # str(e) as prose — a string the router reads as a successful answer, so
+    # the chain ended at the vendor that had just failed — and five of them
+    # logged nothing. Now every one leaves the failure as the library type,
+    # subject filled in, message whole (the router caps it), with the
+    # traceback logged under the leaf's own module.
     prefix = _PROSE_LEAF_PREFIXES[method]
     seam, args = _YFINANCE_LEAF_CALLS[method]
     # An empty cache dir, so the OHLCV leaf reaches the seam rather than a
     # frame another test cached (see _check_impl_propagates).
     set_config({"data_cache_dir": str(tmp_path)})
     monkeypatch.setattr(*seam, mock.Mock(side_effect=RuntimeError(_FORGED_MESSAGE)))
-    out = interface.VENDOR_METHODS[method]["yfinance"](*args)
-    _assert_one_capped_line(out, prefix)
+    impl = interface.VENDOR_METHODS[method]["yfinance"]
+    with caplog.at_level(logging.ERROR), pytest.raises(VendorLibraryError) as info:
+        impl(*args)
+    assert f"Error retrieving {info.value.what}: " == prefix
+    assert info.value.detail == _FORGED_MESSAGE
+    assert isinstance(info.value.__cause__, RuntimeError)
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert record.name == impl.__module__
+    assert record.exc_info is not None and record.exc_info[1] is info.value.__cause__
+    assert _FORGED_MESSAGE in record.getMessage()  # the whole of it: the log is the uncapped copy
 
 
 @pytest.mark.unit
-def test_untyped_failures_still_degrade_to_prose(monkeypatch):
-    # The broad handler keeps its job for anything outside the taxonomy AND
-    # outside the transport family below: a vendor-library bug must not abort
-    # a run that another data point could still serve.
-    monkeypatch.setattr(yfin, "yf_fetch_unhidden", mock.Mock(side_effect=RuntimeError("boom")))
-    out = yfin.get_fundamentals("AAPL", "2026-06-01")
-    assert out.startswith("Error retrieving fundamentals")
+@pytest.mark.parametrize("method", sorted(_PROSE_LEAF_PREFIXES))
+def test_every_lane_leaf_ends_as_one_capped_line_when_it_is_the_only_vendor(
+    monkeypatch, tmp_path, method
+):
+    # The report line is the router's now, so it is pinned through the
+    # router: a chain of this vendor alone ends as one flattened, capped
+    # line — a multi-line message used to come back as several lines, a
+    # hostile one with its markdown intact, a long one whole (#187).
+    prefix = _PROSE_LEAF_PREFIXES[method]
+    seam, args = _YFINANCE_LEAF_CALLS[method]
+    set_config(
+        {
+            "data_cache_dir": str(tmp_path),
+            "data_vendors": {interface.get_category_for_method(method): "yfinance"},
+        }
+    )
+    monkeypatch.setattr(*seam, mock.Mock(side_effect=RuntimeError(_FORGED_MESSAGE)))
+    out = interface.route_to_vendor(method, *args)
+    _assert_one_capped_line(out, prefix)
+
+
 
 
 @pytest.mark.unit

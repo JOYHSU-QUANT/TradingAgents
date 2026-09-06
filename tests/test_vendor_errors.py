@@ -20,8 +20,10 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import (
     NoMarketDataError,
     VendorError,
+    VendorLibraryError,
     VendorNotConfiguredError,
     VendorRateLimitError,
+    VendorUnavailableError,
 )
 from tradingagents.dataflows.fred import FredNotConfiguredError
 
@@ -29,8 +31,23 @@ from tradingagents.dataflows.fred import FredNotConfiguredError
 @pytest.mark.unit
 class HierarchyTests(unittest.TestCase):
     def test_all_conditions_derive_from_vendor_error(self):
-        for cls in (NoMarketDataError, VendorRateLimitError, VendorNotConfiguredError):
+        for cls in (
+            NoMarketDataError,
+            VendorRateLimitError,
+            VendorUnavailableError,
+            VendorLibraryError,
+            VendorNotConfiguredError,
+        ):
             self.assertTrue(issubclass(cls, VendorError))
+
+    def test_a_library_failure_carries_its_subject_and_the_librarys_message(self):
+        # The router writes the report line from these two, separately: the
+        # subject is the getter's, the message the library's (capped on its
+        # way into the report, whole in the log).
+        err = VendorLibraryError("rsi values for AAPL", str(KeyError("volume")))
+        self.assertEqual(err.what, "rsi values for AAPL")
+        self.assertEqual(err.detail, "'volume'")
+        self.assertEqual(str(err), "rsi values for AAPL: 'volume'")
 
     def test_not_configured_is_still_a_value_error(self):
         # Back-compat: existing `except ValueError` callers keep working.

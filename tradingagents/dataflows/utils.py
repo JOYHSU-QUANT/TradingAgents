@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -7,7 +8,12 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import requests
 
-from .errors import UnsupportedIndicatorError, VendorError, VendorUnavailableError
+from .errors import (
+    UnsupportedIndicatorError,
+    VendorError,
+    VendorLibraryError,
+    VendorUnavailableError,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -84,14 +90,17 @@ MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
 
 # The description each indicator report ends with — agent-facing prompt text,
 # so the sentence an analyst reads must not depend on which vendor
-# ``data_vendors`` selected. One table for every vendor serving the indicator
-# tools (#137): the yfinance getter serves it whole, and the Alpha Vantage
-# vendor derives its registry from the slice it supports, so editing a
-# description edits BOTH REPORT LANES — but not (yet) the market analyst's
-# prompt menu, which still hard-codes its own verbatim copy (#187); edit
-# that too until it is derived from here. Lives here (stdlib-only) rather
-# than beside either vendor so the pure-requests Alpha Vantage module does
-# not import the yfinance stack for a dict of strings (#70).
+# ``data_vendors`` selected. One table for every reader (#137, #187): the
+# yfinance getter serves it whole, the Alpha Vantage vendor derives its
+# registry from the slice it supports, and the market analyst's selection
+# menu is rendered from it by ``indicator_menu`` below — so editing a
+# description edits both report lanes AND the prompt the analyst chooses
+# from. The section comments below are for the reader only: the menu's
+# grouping and order are ``INDICATOR_MENU``'s, and an indicator added here
+# has to be placed there (or in ``INDICATOR_MENU_OMITS``) to pass the
+# partition test. Lives here (stdlib-only) rather than beside either vendor so the
+# pure-requests Alpha Vantage module does not import the yfinance stack for
+# a dict of strings (#70).
 INDICATOR_DESCRIPTIONS = {
     # Moving Averages
     "close_50_sma": (
@@ -164,6 +173,42 @@ INDICATOR_DESCRIPTIONS = {
         "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
     ),
 }
+
+# The market analyst's selection menu: the table above, grouped and ordered
+# the way that prompt has always listed them. The grouping is the prompt's
+# only fact of its own — the sentences are the table's, so the menu used to
+# be a third verbatim copy of them, editable apart from the two report lanes
+# (#187). ``mfi`` is described (the yfinance vendor computes it) but has never
+# been offered to the analyst, and offering it would change what the analyst
+# is asked to choose from — an input-side change to every run — so the
+# omission is declared, and the test that partitions the table over the menu
+# and this set keeps a newly described indicator from silently joining or
+# missing the menu.
+INDICATOR_MENU = (
+    ("Moving Averages", ("close_50_sma", "close_200_sma", "close_10_ema")),
+    ("MACD Related", ("macd", "macds", "macdh")),
+    ("Momentum Indicators", ("rsi",)),
+    ("Volatility Indicators", ("boll", "boll_ub", "boll_lb", "atr")),
+    ("Volume-Based Indicators", ("vwma",)),
+)
+INDICATOR_MENU_OMITS = frozenset({"mfi"})
+
+
+def indicator_menu() -> str:
+    """The analyst's indicator menu, rendered from ``INDICATOR_DESCRIPTIONS``.
+
+    One block per ``INDICATOR_MENU`` category — its title, a colon, then one
+    ``- name: description`` line per indicator — blocks separated by a blank
+    line. Byte-identical to the menu the market analyst's prompt carried as
+    a literal, which is what keeps this derivation from being an input-side
+    change to the analyst (pinned by a golden test against that literal).
+    Reads the table through the module name at call time, so a test can
+    alter one sentence and watch the menu follow.
+    """
+    return "\n\n".join(
+        f"{title}:\n" + "\n".join(f"- {key}: {INDICATOR_DESCRIPTIONS[key]}" for key in keys)
+        for title, keys in INDICATOR_MENU
+    )
 
 
 def normalize_iso_date(value) -> str | None:
@@ -723,10 +768,63 @@ def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS
     again passes ``None``, so the cause's tail — a sweep verdict's
     ``(last: ...)`` — survives into the boundary's own log line.
     """
+    if isinstance(e, VendorLibraryError):
+        # Two parts, capped apart: the subject carries the caller's symbol,
+        # the detail the library's message, and capped together a long
+        # pandas message would swallow the subject (#187). One rule for both
+        # slots that render this type: the core chain's report line and the
+        # optional category's sentinel.
+        return f"{sanitize_untrusted(e.what, limit=limit)}: {sanitize_untrusted(e.detail, limit=limit)}"
     if isinstance(e, (VendorError, UnsupportedIndicatorError)):
         # A typed error raised with no message would render as "()".
         return sanitize_untrusted(e, limit=limit) or type(e).__name__
     return generic_failure_words(e)
+
+
+@contextlib.contextmanager
+def library_failure_lane(logger: logging.Logger, subject: str):
+    """Run a getter's fetch-and-render under the one handler for untyped failures.
+
+    What a getter meets outside the taxonomy and outside transport — a
+    stockstats or pandas bug on a frame the vendor did serve, a parser
+    tripping over a shape the scraper let through — leaves as
+    ``VendorLibraryError``. This used to be hand-copied at ten leaves as
+    ``except VendorError: raise`` / ``except OSError: raise`` / ``except
+    Exception: return "Error retrieving ..."``: a leaf that forgot the guard
+    rendered a throttle as a report (#85), five of them logged nothing, so an
+    operator never saw the degrade happen, and the returned string read to
+    the router as a successful answer, ending the chain at the vendor that
+    had just failed (#187). A ``with`` block rather than a decorator, so the
+    lane starts where each getter's ``try`` did — after the date refusal,
+    the config reads and the ``cache_clear`` that were placed outside it on
+    purpose, to fail loudly (#111, #200) — and the registry-derived tests
+    hold every registered yfinance leaf, and the Alpha Vantage indicator
+    leaf, to raising this type from their seam.
+
+    Let through untouched: every ``VendorError`` (its router lane is its
+    own), ``UnsupportedIndicatorError`` (a caller mistake, rendered by the
+    tool wrapper, #117), and ``OSError`` — a transport failure is not a
+    report (#116): yfinance 1.4.1 fetches through curl_cffi, and its request
+    exceptions, like ``requests.RequestException``, subclass OSError, while
+    nothing in yfinance's own YFException family does; the clause is wider
+    than the wire on purpose, since the OHLCV cache raises OSError too and a
+    cache the process cannot read or write is no more a report than a reset
+    is. Anything else is logged WITH its traceback under ``logger`` — the
+    getter's own module logger, the whole message, since the report line is
+    capped — and raised as ``VendorLibraryError`` for the router, which is
+    where the report line is written, in one place for every vendor.
+
+    ``subject`` is what the report line names (``rsi values for AAPL``); two
+    vendors serving one routed tool must name it alike, which the routing
+    tests hold them to.
+    """
+    try:
+        yield
+    except (VendorError, UnsupportedIndicatorError, OSError):
+        raise
+    except Exception as e:
+        logger.exception("Vendor library failed retrieving %s: %s", subject, e)
+        raise VendorLibraryError(subject, str(e)) from e
 
 
 def raise_for_http_status(response, vendor: str) -> None:

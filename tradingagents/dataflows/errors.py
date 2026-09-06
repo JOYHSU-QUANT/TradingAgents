@@ -9,6 +9,7 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
     ├── NoMarketDataError          no usable rows (empty result OR stale data)
     ├── VendorRateLimitError       transient throttle -> skip to next vendor
     ├── VendorUnavailableError     down: an outage page, or unreachable -> next vendor, no traceback
+    ├── VendorLibraryError         the vendor's own library failed -> next vendor; prose, not a raise, when none serves
     └── VendorNotConfiguredError   missing API key/config -> vendor unavailable
 
 The number of types is the number of distinct router reactions, not the number
@@ -115,6 +116,38 @@ class VendorUnavailableError(VendorError):
     as unconfirmed by the vendor that was down, not as the symbol being
     invalid.
     """
+
+
+class VendorLibraryError(VendorError):
+    """A vendor's own library failed while computing the answer.
+
+    Everything a getter meets that is neither in this taxonomy nor a
+    transport failure: a stockstats or pandas bug on a frame the vendor did
+    serve, a parser tripping over a shape yfinance's own scraper let
+    through. Raised by ``utils.library_failure_lane``, the one handler every
+    getter that used to render such a failure as prose now runs its fetch
+    under, with the traceback logged there — so the router logs this lane
+    without one.
+
+    Its router reaction is what earns it a type: the chain goes on, since a
+    sibling vendor computes the same routed tool its own way (Alpha Vantage
+    has an RSI endpoint; a local stockstats bug is no reason not to ask it),
+    and when no vendor serves, the router renders ONE line of report text
+    instead of raising — the policy the getters' broad handlers used to
+    apply at the leaf, where returning prose read as a successful answer and
+    ended the chain at the vendor that had just failed (#187). The text is
+    the router's to write, in one place for every vendor: ``what`` is the
+    subject the getter named (``rsi values for AAPL``), ``detail`` the
+    library's message, which the router flattens and caps on its way into
+    the report; the log line at the leaf keeps the whole of it. The library's
+    exception itself travels as ``__cause__`` (the lane raises ``from`` it),
+    not as a field.
+    """
+
+    def __init__(self, what: str, detail: str):
+        self.what = what
+        self.detail = detail
+        super().__init__(f"{what}: {detail}")
 
 
 class VendorNotConfiguredError(VendorError, ValueError):

@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
-from .errors import UnsupportedIndicatorError, VendorError
+from .errors import UnsupportedIndicatorError
 from .stockstats_utils import (
     _assert_ohlcv_not_stale,
     coerce_period_labels,
@@ -22,16 +22,28 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import (
     INDICATOR_DESCRIPTIONS,
     MAX_INSIDER_LAG_DAYS,
-    MAX_UNTRUSTED_CHARS,
     data_lag_note,
     date_range_refusal,
     date_refusal,
+    library_failure_lane,
     live_snapshot_note,
-    sanitize_untrusted,
     statement_lag_bound,
 )
 
 logger = logging.getLogger(__name__)
+
+# Every VENDOR_METHODS impl in this module but get_YFin_data_online runs its
+# fetch and rendering under ``library_failure_lane``, from the point its own
+# ``try`` used to start: a typed vendor failure and a transport failure pass
+# through it to their router lanes, and anything else — a stockstats or
+# pandas bug on a frame yfinance did serve — is logged here with its
+# traceback and raised as ``VendorLibraryError`` for the router to route
+# past and, when no vendor serves, to render as one line of report text.
+# The lane's docstring holds the measured type facts behind the OSError
+# pass-through (#116); the rendering used to happen here, per leaf, and
+# ended the chain at the vendor that had just failed (#187).
+# get_YFin_data_online never carried that handler — a failure there leaves
+# raw, through the router's generic lane — and its ending is unchanged.
 
 
 def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title: str) -> str:
@@ -271,8 +283,13 @@ def get_stock_stats_indicators_window(
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     before = curr_date_dt - relativedelta(days=look_back_days)
 
-    # Optimized: Get stock data once and calculate indicators for all dates
-    try:
+    # One fetch for the whole window. A stockstats or pandas failure here is
+    # deterministic — after the taxonomy (#67) and transport (#116) lanes
+    # nothing that reaches the library lane is transient — so it is not
+    # re-run: this used to fall back to a per-day loop that performed the
+    # identical fetch and calculation once per day of the window and
+    # rendered a column of blanks under a successful-looking header (#137).
+    with library_failure_lane(logger, f"{indicator} values for {symbol}"):
         indicator_data = _get_stock_stats_bulk(symbol, indicator, curr_date)
 
         # Generate the date range we need
@@ -297,40 +314,6 @@ def get_stock_stats_indicators_window(
         ind_string = ""
         for date_str, value in date_values:
             ind_string += f"{date_str}: {value}\n"
-
-    except VendorError:
-        # Caught as the taxonomy's base type, not one leaf at a time (#67):
-        # no-data keeps its sentinel lane, and a rate limit now reaches the
-        # router's rate-limit lane instead of the broad handler below — whose
-        # per-day fallback loop re-runs the same throttled fetch and then
-        # renders prose the router reads as a successful answer.
-        raise
-    except OSError:
-        # A transport failure is not a report, and here it was worse than
-        # prose: the per-day fallback below re-ran the failed fetch once per
-        # day of the window and rendered a column of blanks (#116). See
-        # get_fundamentals for the measured type facts behind OSError.
-        raise
-    except Exception as e:
-        # One line of prose, like every other leaf's broad handler: a
-        # stockstats or pandas bug must not abort a run another data point
-        # could still serve. This used to fall back to a per-day loop that
-        # re-ran the identical fetch and calculation once per day of the
-        # window — after the taxonomy (#67) and transport (#116) re-raises
-        # above, nothing that reaches here is transient, and the bulk path
-        # and the per-day path performed the same operations on the same
-        # cached frame, so the loop could only fail the same way 30 more
-        # times and render a column of blanks under a successful-looking
-        # header (#137).
-        logger.exception("Error getting bulk stockstats data: %s", e)
-        # One line means one line: the library's message is flattened and
-        # capped on its way into the report (a pandas message can carry a
-        # frame repr, newlines and pipes included), and the log line above
-        # keeps the whole of it (#187).
-        return (
-            f"Error retrieving {indicator} values for {symbol}: "
-            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )
 
     result_str = (
         f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
@@ -389,11 +372,11 @@ def get_fundamentals(
 ):
     """Get company fundamentals overview from yfinance."""
     canonical = normalize_symbol(ticker)
-    try:
+    with library_failure_lane(logger, f"fundamentals for {ticker}"):
         ticker_obj = yf.Ticker(canonical)
         # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
-        # None its own parser then trips over, which the broad handler below
-        # rendered as "Error retrieving fundamentals ..." prose (#116). The
+        # None its own parser then trips over, which the library lane would
+        # render as "Error retrieving fundamentals ..." prose (#116). The
         # stub dict is what an unknown symbol's 404 answered before, and the
         # "no fields" check below is what turns it into no-data.
         info = yf_fetch_unhidden(lambda: ticker_obj.info, hidden_answer=dict)
@@ -466,36 +449,6 @@ def get_fundamentals(
 
         return header + "\n".join(lines)
 
-    except VendorError:
-        raise  # Typed vendor failures take their router lanes (#67)
-    except OSError:
-        # A transport failure is not a report. yfinance 1.4.1 fetches through
-        # curl_cffi, and its request exceptions (ConnectionError, Timeout,
-        # DNSError, HTTPError) reach this getter as raised once
-        # yf_fetch_unhidden has switched the scrapers' own swallow off —
-        # measured: a session raising curl_cffi's ConnectionError surfaces
-        # from ``data.py``'s crumb fetch unwrapped, and a 5xx from the
-        # quoteSummary fetch's raise_for_status. Every one of those types,
-        # like ``requests.RequestException``, subclasses OSError,
-        # and nothing in yfinance's own YFException family does, so this one
-        # clause covers both transport libraries without touching the taxonomy
-        # lane above. It is wider than the wire on purpose: the OHLCV cache in
-        # load_ohlcv raises OSError too (a locked or read-only cache dir), and
-        # a cache this process cannot read or write is no more a report than
-        # a reset is. It sits before the broad handler below, which used to
-        # turn a reset or a timeout into "Error retrieving ..." prose
-        # route_to_vendor reads as a successful report: the chain stopped at
-        # the vendor that had just failed and the agent analysed the error
-        # sentence as fundamentals (#116). The broad handler keeps its job for
-        # a vendor-library bug, which must not abort a run another data point
-        # could still serve.
-        raise
-    except Exception as e:
-        return (
-            f"Error retrieving fundamentals for {ticker}: "
-            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )
-
 
 def get_balance_sheet(
     ticker: Annotated[str, "ticker symbol of the company"],
@@ -504,7 +457,7 @@ def get_balance_sheet(
 ):
     """Get balance sheet data from yfinance."""
     canonical = normalize_symbol(ticker)
-    try:
+    with library_failure_lane(logger, f"balance sheet for {ticker}"):
         ticker_obj = yf.Ticker(canonical)
 
         # yf_fetch_statement, not plain yf_retry: the statement properties
@@ -519,16 +472,6 @@ def get_balance_sheet(
             data, ticker, canonical, curr_date, freq, "balance sheet", "Balance Sheet"
         )
 
-    except VendorError:
-        raise  # Typed vendor failures take their router lanes (#67)
-    except OSError:
-        raise  # Transport failures are not reports; see get_fundamentals (#116)
-    except Exception as e:
-        return (
-            f"Error retrieving balance sheet for {ticker}: "
-            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )
-
 
 def get_cashflow(
     ticker: Annotated[str, "ticker symbol of the company"],
@@ -537,7 +480,7 @@ def get_cashflow(
 ):
     """Get cash flow data from yfinance."""
     canonical = normalize_symbol(ticker)
-    try:
+    with library_failure_lane(logger, f"cash flow for {ticker}"):
         ticker_obj = yf.Ticker(canonical)
 
         # See get_balance_sheet for why these go through yf_fetch_statement.
@@ -548,16 +491,6 @@ def get_cashflow(
 
         return _statement_report(data, ticker, canonical, curr_date, freq, "cash flow", "Cash Flow")
 
-    except VendorError:
-        raise  # Typed vendor failures take their router lanes (#67)
-    except OSError:
-        raise  # Transport failures are not reports; see get_fundamentals (#116)
-    except Exception as e:
-        return (
-            f"Error retrieving cash flow for {ticker}: "
-            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )
-
 
 def get_income_statement(
     ticker: Annotated[str, "ticker symbol of the company"],
@@ -566,7 +499,7 @@ def get_income_statement(
 ):
     """Get income statement data from yfinance."""
     canonical = normalize_symbol(ticker)
-    try:
+    with library_failure_lane(logger, f"income statement for {ticker}"):
         ticker_obj = yf.Ticker(canonical)
 
         # See get_balance_sheet for why these go through yf_fetch_statement.
@@ -579,21 +512,11 @@ def get_income_statement(
             data, ticker, canonical, curr_date, freq, "income statement", "Income Statement"
         )
 
-    except VendorError:
-        raise  # Typed vendor failures take their router lanes (#67)
-    except OSError:
-        raise  # Transport failures are not reports; see get_fundamentals (#116)
-    except Exception as e:
-        return (
-            f"Error retrieving income statement for {ticker}: "
-            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )
-
 
 def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the company"]):
     """Get insider transactions data from yfinance."""
     canonical = normalize_symbol(ticker)
-    try:
+    with library_failure_lane(logger, f"insider transactions for {ticker}"):
         ticker_obj = yf.Ticker(canonical)
         # Un-hidden: the holders scraper swallows a non-429 HTTP failure into
         # an empty frame, which the "no filings" sentence below would then
@@ -636,13 +559,3 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
         return header + csv_string
-
-    except VendorError:
-        raise  # Typed vendor failures take their router lanes (#67)
-    except OSError:
-        raise  # Transport failures are not reports; see get_fundamentals (#116)
-    except Exception as e:
-        return (
-            f"Error retrieving insider transactions for {ticker}: "
-            f"{sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )

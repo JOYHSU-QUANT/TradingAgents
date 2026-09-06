@@ -107,8 +107,11 @@ Breaking changes within the 0.x line are called out explicitly.
   integrity and staleness guards (``load_ohlcv``), and the statement-period
   helpers (``coerce_period_labels``, ``filter_financials_by_date``). Someone
   chasing an indicator bug opened the wrong file. The module is renamed
-  after the vendor it serves, beside ``alpha_vantage_common`` and
-  ``sosovalue_common``; every symbol keeps its name and behaviour. Its log
+  after the vendor it serves, at the altitude of ``alpha_vantage_common`` and
+  ``sosovalue_common`` (wider than either: Alpha Vantage keeps its OHLCV and
+  statement helpers in per-lane modules, while yfinance's getters for those
+  lanes share ``y_finance``, so the helpers live here); every symbol keeps
+  its name and behaviour. Its log
   records now carry the new module name
   (``tradingagents.dataflows.yfinance_common``). There is no import shim:
   ``tradingagents.dataflows.stockstats_utils`` no longer exists.
@@ -325,8 +328,8 @@ Breaking changes within the 0.x line are called out explicitly.
   router re-probing the spent quota — one refused request and one WARNING
   — every five minutes. The shared window itself is unchanged, and the
   router's WARNING names the window actually applied.
-  ``stockstats_utils._UNHIDE_LOCK`` (now ``yfinance_common``) stays a
-  whole-fetch lock; the
+  ``stockstats_utils._UNHIDE_LOCK`` (module now ``yfinance_common``) stays
+  a whole-fetch lock; the
   measurement that decided it (about a second per decision cycle, #137) is
   in its comment.
 

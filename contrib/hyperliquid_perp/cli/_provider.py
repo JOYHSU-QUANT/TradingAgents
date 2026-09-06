@@ -8,22 +8,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # annotation-only: this module keeps its imports function-local
+# The one in-package import this module takes at load time: ``common`` sits at
+# the bottom of the graph and imports nothing, so it costs no closure. Every
+# other in-package import here stays function-local. ``PROMPT_VERSION`` is
+# used below AND re-exported through ``cli/__init__`` (issue #197: it moved
+# to ``common``; the ``cli`` spellings are pinned to be the same object).
+from ..common.prompt_regime import PROMPT_VERSION, position_section_omitted, prompt_regime_line
+
+if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function-local
     from ..paper.position_facts import BookFacts, BookSource
 
 logger = logging.getLogger(__name__)
-
-
-# Version stamp for the ai_inputs.prompt_version column: bump whenever the
-# injected context/format CONTRACT changes — its shape, or its wording — i.e.
-# whenever a deploy crosses a measurement boundary (RUNBOOK §4; retired values
-# are never reused, rollbacks included). The payload hash tracks content.
-# History: the CHANGELOG entries for ``phase2-target-v*``. In short —
-# v4 (2026-08-27): the context gains the ``Position:`` section; the format
-# block is unchanged (v4's digest is v3's).
-# v5 (2026-09-01): the FORMAT block no longer renders the three gate
-# thresholds as numbers (marginal-cost plan PR-B); the context is unchanged.
-PROMPT_VERSION = "phase2-target-v5"
 
 
 class _HistoryFundingSource:
@@ -236,14 +231,16 @@ class _EngineDecisionProvider:
         if books is None:
             # Unreachable on the production wirings (initialize_run precedes
             # the first cycle); said in the log anyway, and the driver's audit
-            # prologue will refuse the cycle on the same missing ledger.
-            # Wording pinned by test (issue #161): "no books yet" must read
-            # apart from ``marginal_cost.build_position_context``'s "is not
-            # positive" — same prompt, same context_shape, no store column;
-            # rationale in RUNBOOK §7.
+            # prologue will refuse the cycle on the same missing ledger. Same
+            # prompt and context_shape as the pricer's non-positive-equity
+            # omission, no store column (issue #161): the ``reason=`` handle
+            # on this line is what tells them apart; rationale in RUNBOOK §7.
             logger.warning(
-                "position section omitted: the run has no books yet "
-                "(the audit row will refuse this cycle on the same missing ledger)"
+                position_section_omitted(
+                    "no_books",
+                    "the run has no books yet "
+                    "(the audit row will refuse this cycle on the same missing ledger)",
+                )
             )
         return books
 
@@ -396,8 +393,6 @@ class _EngineDecisionProvider:
         # empty error_type — not a quiet cycle the line could be mistaken for.
         regime = (PROMPT_VERSION, shape, fingerprint)
         if regime != self._logged_regime:
-            from ..common.prompt_regime import prompt_regime_line
-
             logger.info(prompt_regime_line(*regime))
             self._logged_regime = regime
         candle_end = ctx.as_of

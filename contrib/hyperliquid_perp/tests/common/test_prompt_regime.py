@@ -11,7 +11,10 @@ module pins the grammar and the validators' side.
 from __future__ import annotations
 
 from contrib.hyperliquid_perp.common.prompt_regime import (
+    POSITION_SECTION_OMITTED,
     PROMPT_REGIME_PREFIX,
+    PositionOmission,
+    position_section_omitted,
     prompt_regime_line,
 )
 from contrib.hyperliquid_perp.paper import validation as validation_mod
@@ -54,3 +57,26 @@ def test_the_validators_render_their_buckets_through_the_shared_line(monkeypatch
         (repo.PromptRegime("v", "s", "f", 3), repo.PromptRegime("v", None, None, 1))
     )
     assert lines == ["X ('v', 's', 'f') {'cycles': 3}", "X ('v', None, None) {'cycles': 1}"]
+
+
+def test_the_position_omission_line_is_one_template_over_a_closed_reason_vocabulary():
+    # Issue #161 accepted that the two causes of a missing ``Position:``
+    # section render the same prompt and the same ``context_shape`` and get
+    # no store column; issue #197 made the WARNING that records which one
+    # happened a shared template with a ``reason=`` grep handle rather than
+    # two hand-written English lines. Both callers (``cli._provider`` for
+    # ``no_books``, ``domains.perp.marginal_cost`` for ``non_positive_equity``)
+    # are pinned at their sites; this pins the template and the vocabulary
+    # they share.
+    from typing import get_args
+
+    assert get_args(PositionOmission) == ("no_books", "non_positive_equity")
+    lines = {
+        reason: position_section_omitted(reason, "why") for reason in get_args(PositionOmission)
+    }
+    assert lines == {
+        "no_books": "position section omitted (reason=no_books): why",
+        "non_positive_equity": "position section omitted (reason=non_positive_equity): why",
+    }
+    # RUNBOOK §7's grep: the prefix is the constant, the member follows it.
+    assert all(line.startswith(f"{POSITION_SECTION_OMITTED} (reason=") for line in lines.values())

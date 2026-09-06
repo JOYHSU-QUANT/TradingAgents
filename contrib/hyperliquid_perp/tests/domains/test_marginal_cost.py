@@ -201,13 +201,15 @@ def test_non_positive_equity_omits_the_section_with_a_warning(caplog):
     with caplog.at_level(logging.WARNING):
         pos = _build(wallet_balance=D(100), mark=D(40000))
     assert pos is None
-    assert "position section omitted" in caplog.text
-    assert "-25" in caplog.text
     # Issue #161: this omission and the provider's book-less one render the
     # same prompt and the same ``context_shape``; the two WARNING lines are
-    # the only record of which happened, so their wording must stay apart.
-    assert "is not positive" in caplog.text
-    assert "no books yet" not in caplog.text
+    # the only record of which happened, so the ``reason=`` member on the
+    # shared template is what tells them apart (issue #197), not the English.
+    assert "position section omitted (reason=non_positive_equity)" in caplog.text
+    # The detail sentence is free-form, but the numbers in it are the only
+    # record of the equity, mark and wallet this cycle was refused at.
+    assert "account equity -25" in caplog.text
+    assert "at mark 40000 (wallet 100)" in caplog.text
 
 
 def test_zero_equity_is_also_omitted():

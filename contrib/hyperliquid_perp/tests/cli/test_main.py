@@ -708,8 +708,7 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
     # model under THIS config's effective ceiling). ONE line, in the same
     # grammar the daemon logs at its first cycle and ``validate`` prints per
     # bucket (issue #163) — the same grep handle on all three surfaces.
-    from contrib.hyperliquid_perp.cli._provider import PROMPT_VERSION
-    from contrib.hyperliquid_perp.common.prompt_regime import prompt_regime_line
+    from contrib.hyperliquid_perp.common.prompt_regime import PROMPT_VERSION, prompt_regime_line
     from contrib.hyperliquid_perp.domains.perp import risk_gate
     from contrib.hyperliquid_perp.domains.perp.target_decision import (
         decision_format_instructions,

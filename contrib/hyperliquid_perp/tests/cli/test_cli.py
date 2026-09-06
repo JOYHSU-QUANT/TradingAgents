@@ -990,9 +990,13 @@ def test_the_bookless_omission_is_worded_apart_from_the_pricers(caplog):
     # not exist yet (this provider) and the pricer refusing non-positive
     # equity (``marginal_cost``) — that render the same prompt and the same
     # ``context_shape``. No store column tells them apart (a recorded
-    # decision); the two WARNING lines are the only record, so their wording
-    # must stay distinct. The pricer's half is pinned in test_marginal_cost.
+    # decision); the two WARNING lines are the only record, so the handle
+    # that tells them apart is the ``reason=`` member on the shared template
+    # (issue #197), not the English. The pricer's half is pinned in
+    # test_marginal_cost.
     import logging
+
+    from contrib.hyperliquid_perp.common.prompt_regime import position_section_omitted
 
     provider = _stub_provider(_position_source=lambda: None)
     with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli._provider"):
@@ -1000,8 +1004,7 @@ def test_the_bookless_omission_is_worded_apart_from_the_pricers(caplog):
     [message] = [
         r.getMessage() for r in caplog.records if r.getMessage().startswith("position section omitted")
     ]
-    assert "no books yet" in message
-    assert "not positive" not in message
+    assert message.startswith(position_section_omitted("no_books", ""))
 
 
 def test_validate_exit_codes(tmp_path, capsys):
@@ -1210,7 +1213,7 @@ def test_export_backfill_names_a_locked_store_instead_of_a_traceback(tmp_path, c
     path, db = _seed_db(tmp_path)
     db.close()
 
-    def locked(db, *, run_id):
+    def locked(db, *, run_id, payload_root=None):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", locked)
@@ -1231,6 +1234,90 @@ def test_export_backfill_names_a_locked_store_instead_of_a_traceback(tmp_path, c
     err = capsys.readouterr().err
     assert "error: format_fingerprint backfill failed — database is locked" in err
     assert not out.exists()
+
+
+def test_export_payload_root_reads_a_copied_stores_payloads_by_name(tmp_path, capsys):
+    # Issue #197: a store copied off the host that wrote it records absolute
+    # paths that exist nowhere here, so the pass could only count every row
+    # as missing_payload. ``--payload-root DIR`` reads each row's payload by
+    # its recorded FILE NAME under DIR; the remap rules and the hash rule
+    # under a root are pinned in tests/persistence/test_backfill.py — this is
+    # the wiring, plus the two ways the option itself can be misused.
+    from contrib.hyperliquid_perp.domains.perp.target_decision import format_fingerprint
+
+    path, db = _seed_db(tmp_path)
+    insert_decision_attempts(db, ["completed"], start=_T0)
+    # The daemon's own path shape on the Linux host, and the copied file here.
+    copied, digest = write_payload(
+        tmp_path / "copied" / "BTC-20260706T120000_000000Z.json",
+        {"format_instructions": "the block as the model saw it"},
+    )
+    recorded = "/srv/hl/payloads/BTC-20260706T120000_000000Z.json"
+    stamp_prompt_regimes(db, [("phase2-target-v4", "price|market", None, recorded, digest)])
+    db.close()
+    out = tmp_path / "exp"
+    base = ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
+
+    # The option needs the pass it modifies: argparse's usage error (exit 2),
+    # not a silent no-op that read as "nothing to backfill". An empty root is
+    # the same usage error: ``Path("")`` is cwd and would pass the directory
+    # check — an unset shell variable must not quietly become the root.
+    for argv, wording in [
+        ([*base, "--payload-root", str(tmp_path / "copied")], "only applies with"),
+        ([*base, "--backfill-format-fingerprint", "--payload-root", ""], "needs a directory, got ''"),
+    ]:
+        with pytest.raises(SystemExit) as excinfo:
+            cli_main(argv)
+        assert excinfo.value.code == 2
+        assert f"--payload-root {wording}" in capsys.readouterr().err
+
+    # A root that is not a directory is named (exit 1) rather than reported as
+    # N x missing_payload — a typo would otherwise read like a store whose
+    # payloads really are gone. Nothing was exported over it.
+    rc = cli_main(
+        [*base, "--backfill-format-fingerprint", "--payload-root", str(tmp_path / "typo")]
+    )
+    assert rc == 1
+    assert "error: --payload-root" in capsys.readouterr().err
+    assert not out.exists()
+
+    # Without the option on this copied store: the recorded path is what is
+    # read, so nothing is provable — and since EVERY payload is missing, the
+    # count line is followed by a hint naming the option and the candidate
+    # directory beside this store (the layout the daemons write), which is
+    # where a copy that moved db and payloads together lands.
+    candidate = str(path.resolve().parent / "payloads" / "r")
+    assert cli_main([*base, "--backfill-format-fingerprint"]) == 0
+    err = capsys.readouterr().err
+    assert "stamped=0 pre_v10=0 missing_payload=1" in err
+    assert "hint: every payload is missing at its recorded path" in err
+    assert f"--payload-root pointing at that run's payload directory (here: {candidate})" in err
+
+    # A root at the wrong LEVEL (the copied ``payloads/`` parent rather than
+    # the run's own directory under it) is a directory, so it cannot be
+    # refused — but nothing under it matches a recorded name, and that is
+    # far likelier the operator's level than a tree that lost its files, so
+    # the count line is followed by the root-side hint with the same candidate.
+    rc = cli_main([*base, "--backfill-format-fingerprint", "--payload-root", str(tmp_path)])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "stamped=0 pre_v10=0 missing_payload=1" in err
+    assert "hint: no payload under --payload-root" in err
+    assert f"<db dir>/payloads/r/ (here: {candidate})" in err
+
+    rc = cli_main(
+        [*base, "--backfill-format-fingerprint", "--payload-root", str(tmp_path / "copied")]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "stamped=1 pre_v10=0 missing_payload=0 unreadable=0 unverified=0" in err
+    assert "hint:" not in err
+    with (out / "ai_inputs.csv").open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [row["format_fingerprint"] for row in rows] == [
+        format_fingerprint("the block as the model saw it")
+    ]
+    assert [row["input_payload_path"] for row in rows] == [recorded]  # the row itself is untouched
 
 
 def test_paper_refuses_missing_db_without_create(tmp_path, capsys):
@@ -6342,13 +6429,14 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     RUNBOOK §4's A/B exception deliberately lets one run straddle a
     prompt-only deploy and segments the before/after populations on
     ``ai_inputs.prompt_version`` — which makes this stamp the ONLY thing
-    separating them. It lives in ``cli.py`` while the text it versions lives in
-    ``domains/perp/target_decision.py``; ``cli.py`` does import that function,
-    but an import is not a coupling — nothing makes the constant track the
-    text, no assertion relates them, and nothing else in the suite references
-    the constant. So a prompt edit that forgot the bump would merge the two
-    populations into one bucket and the merge would be invisible in the data:
-    the query still returns a clean two-value split.
+    separating them. It lives in ``common/prompt_regime.py`` (issue #197; the
+    ``cli`` names below are re-exports of it) while the text it versions
+    lives in ``domains/perp/target_decision.py``, and nothing makes the
+    constant track the text — no assertion but this one relates them (the
+    suite's other reference, in test_main, only echoes the value). So a
+    prompt edit that forgot the bump would merge the two populations into
+    one bucket and the merge would be invisible in the data: the query still
+    returns a clean two-value split.
 
     The digest covers the block as rendered from ``DecisionConfig()``, so a
     changed config DEFAULT trips it too. That is the intended reading rather
@@ -6360,6 +6448,8 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     included — see the RUNBOOK), then update the digest here.
     """
     from contrib.hyperliquid_perp import cli as _cli
+    from contrib.hyperliquid_perp.cli import _provider
+    from contrib.hyperliquid_perp.common import prompt_regime
     from contrib.hyperliquid_perp.domains.perp.target_decision import (
         DecisionConfig,
         decision_format_instructions,
@@ -6376,7 +6466,12 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # section; the format block itself did not change, so v4's digest was
     # v3's. v5 (2026-09-01) changed the FORMAT block: the three gate
     # thresholds are no longer rendered as numbers (marginal-cost plan PR-B).
-    assert (_cli.PROMPT_VERSION, digest) == ("phase2-target-v5", "947e85a9b7b750f1")
+    assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v5", "947e85a9b7b750f1")
+    # The two ``cli`` spellings are the same object, not a second declaration
+    # that would keep equal today and fork the next time one side moves: the
+    # daemon stamps through ``_provider``, the preview through ``common``.
+    assert _provider.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
+    assert _cli.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
 
 
 def _book(**overrides):
@@ -6493,7 +6588,7 @@ def test_build_input_omits_the_section_when_the_books_do_not_exist_yet(
     # missing source does — one state, not two — and says so in the log, which
     # is the only place the two causes are told apart.
     assert handed["position"] is None
-    assert "no books yet" in caplog.text
+    assert "position section omitted (reason=no_books)" in caplog.text
 
 
 def test_build_input_reads_the_books_once_before_the_fetch_even_if_the_cycle_is_refused(

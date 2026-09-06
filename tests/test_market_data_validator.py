@@ -307,18 +307,25 @@ class TestTool:
         out = get_verified_market_snapshot.invoke({"symbol": "COF", "curr_date": "2026-05-20"})
         assert "for 'COF'" in out
 
-    def test_the_failure_log_line_cannot_forge_a_second_record(self, monkeypatch, caplog):
+    @pytest.mark.parametrize(
+        "error_type",
+        [VendorUnavailableError, VendorRateLimitError],
+    )
+    def test_the_failure_log_lines_cannot_forge_a_second_record(
+        self, monkeypatch, caplog, error_type
+    ):
         # %r, not %s, for the symbol: under the perp daemon's log format
         # ("%(asctime)s %(levelname)s %(name)s: %(message)s") a symbol
         # carrying a newline and a plausible timestamp otherwise renders as a
         # second record that reads to an operator, and to grep, as a genuine
-        # ERROR from another logger.
+        # ERROR from another logger. BOTH lanes log the symbol, so both are
+        # pinned — the first version of this test covered only the broad one.
         import logging
 
         forged = "BTC\n2026-05-20 12:00:00 ERROR tradingagents.perp: liquidation imminent"
 
         def _raise(s, d):
-            raise VendorUnavailableError("boom")
+            raise error_type("boom")
 
         monkeypatch.setattr(validator, "load_ohlcv", _raise)
         logger_name = "tradingagents.agents.utils.market_data_validation_tools"

@@ -10,7 +10,7 @@ Phase 2+).
 | # | Decision | Status |
 |---|---|---|
 | 1 | `network`, `wallet_address`, `coins` are config, not hardcoded. **Phase 1 reads mainnet (read-only)** + single BTC; testnet is reserved for Phase 3 order testing. Rationale: testnet's only benefit (no real money on bad orders) doesn't apply until Phase 3 — Phase 1/2 place no real orders, and mainnet gives realistic funding/OI/candles so the 30-day z-score actually has data. The wallet read is public/read-only, so pointing at a mainnet address is zero-risk. | ✅ confirmed |
-| 2 | Technical indicators computed by `context_builder.py` from HL candles (reuse `stockstats_utils.py`, no new dep). | ✅ confirmed |
+| 2 | Technical indicators computed by `context_builder.py` from HL candles (reuse `yfinance_common.py`, no new dep). | ✅ confirmed |
 | 3 | Funding z-score window = 30 days. | ✅ confirmed |
 | 4 | Indicator set = `rsi_14, ema_20, ema_50, atr_14, macd`. | ✅ confirmed |
 | 5 | Engine via OpenRouter; deep = `anthropic/claude-sonnet-4-6`, quick = `deepseek/deepseek-chat`. | ✅ confirmed |

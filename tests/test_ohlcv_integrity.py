@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 import tradingagents.dataflows.market_data_validator as validator
-from tradingagents.dataflows.stockstats_utils import _clean_dataframe
+from tradingagents.dataflows.yfinance_common import _clean_dataframe
 
 
 def _row(date, o, h, low, c, v=100):
@@ -140,7 +140,7 @@ class TestLoadOhlcvEmptyAfterCleaning:
 
         import tradingagents.dataflows.config as config_module
         import tradingagents.default_config as default_config
-        from tradingagents.dataflows import stockstats_utils as su
+        from tradingagents.dataflows import yfinance_common as su
         from tradingagents.dataflows.config import set_config
         from tradingagents.dataflows.errors import NoMarketDataError
 

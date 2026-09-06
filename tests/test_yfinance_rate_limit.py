@@ -18,8 +18,8 @@ import requests
 from curl_cffi.requests import exceptions as curl_exceptions
 from yfinance.exceptions import YFRateLimitError
 
-import tradingagents.dataflows.stockstats_utils as su
 import tradingagents.dataflows.y_finance as yfin
+import tradingagents.dataflows.yfinance_common as su
 import tradingagents.dataflows.yfinance_news as ynews
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
@@ -36,6 +36,26 @@ from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS
 
 def _throttled(*a, **k):
     raise VendorRateLimitError("Yahoo Finance rate limited the request")
+
+
+# --- the module's name: stockstats_utils is gone, no shim ---
+
+
+@pytest.mark.unit
+def test_the_stockstats_utils_module_name_is_gone():
+    # ``stockstats_utils`` named a class PR #185 removed; what stayed was
+    # yfinance's transport and hardening layer, so the module took the
+    # vendor's name (#187). Pinned here, and only here, because this name
+    # had two lives (class removed, then module renamed) and is the one a
+    # habit or a stale branch is likeliest to bring back; a rename is not
+    # in general owed a test like this (PR #164 removed shims without one).
+    # No import shim: the old name is not served.
+    import importlib
+
+    with pytest.raises(ModuleNotFoundError) as exc:
+        importlib.import_module("tradingagents.dataflows.stockstats_utils")
+    # The old name itself, not a shim whose own import is broken.
+    assert exc.value.name == "tradingagents.dataflows.stockstats_utils"
 
 
 # --- the boundary: yf_retry maps exhaustion into the taxonomy ---

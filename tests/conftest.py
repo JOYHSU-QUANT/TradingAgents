@@ -66,8 +66,8 @@ def _clear_throttle_latch():
     send every later test in the same process down the skip path instead of
     the code it means to exercise.
     """
-    from tradingagents.dataflows.stockstats_utils import reset_yf_throttle_latch
     from tradingagents.dataflows.throttle import VENDOR_THROTTLE_LATCH
+    from tradingagents.dataflows.yfinance_common import reset_yf_throttle_latch
 
     reset_yf_throttle_latch()
     VENDOR_THROTTLE_LATCH.reset()

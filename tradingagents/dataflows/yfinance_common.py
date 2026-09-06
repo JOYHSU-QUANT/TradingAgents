@@ -1,3 +1,18 @@
+"""yfinance's transport, hardening, and shared frame/period helpers.
+
+The retry ladder and throttle latch (:func:`yf_retry`), the unhide seam that
+keeps the scraper from swallowing a throttle (:func:`yf_fetch_unhidden`), the
+OHLCV loader with its integrity and staleness guards (:func:`load_ohlcv`),
+and the statement-period helpers (:func:`coerce_period_labels`,
+:func:`filter_financials_by_date`). Same altitude as ``alpha_vantage_common``
+and ``sosovalue_common`` — the vendor's shared layer under its getters — but
+wider: Alpha Vantage keeps its OHLCV and statement helpers in per-lane
+modules (``alpha_vantage_stock``, ``alpha_vantage_fundamentals``), while
+yfinance's getters for those lanes share ``y_finance``, so the helpers live
+here. Indicator computation is not here: ``y_finance`` runs stockstats over
+the frame :func:`load_ohlcv` serves (#187).
+"""
+
 import contextlib
 import json
 import logging

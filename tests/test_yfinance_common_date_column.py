@@ -1,4 +1,4 @@
-"""Tests for tolerating a non-`Date` index column in stockstats_utils (#890).
+"""Tests for tolerating a non-`Date` index column in yfinance_common (#890).
 
 Guards against a download frame whose date column is `index` or `Datetime`
 instead of `Date`, which would otherwise silently drop every indicator.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from tradingagents.dataflows import stockstats_utils as su
+from tradingagents.dataflows import yfinance_common as su
 
 
 def _ohlcv(date_col: str) -> pd.DataFrame:

@@ -568,7 +568,7 @@ def test_yfinance_stands_off_at_its_own_boundary_not_at_the_router():
     # cache — a different verdict, not a cheaper one. So the router never
     # latches yfinance: its rate-limit type says so, the getter keeps being
     # called, and a cache-served answer does not disturb the standing-off.
-    import tradingagents.dataflows.stockstats_utils as su
+    import tradingagents.dataflows.yfinance_common as su
 
     assert not su.YFinanceRateLimitError.latches_vendor
 

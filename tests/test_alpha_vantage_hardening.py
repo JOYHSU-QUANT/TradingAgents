@@ -1053,7 +1053,7 @@ def test_stock_staleness_bound_is_the_single_shared_definition():
     # value and that the three bounds agree — a re-grown local copy shows up
     # here once it drifts.
     import tradingagents.dataflows.alpha_vantage_stock as avs
-    import tradingagents.dataflows.stockstats_utils as ssu
+    import tradingagents.dataflows.yfinance_common as ssu
     from tradingagents.dataflows import utils
 
     assert utils.MAX_OHLCV_STALE_DAYS == 10

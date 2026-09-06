@@ -97,6 +97,24 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **dataflows: ``stockstats_utils`` is now ``yfinance_common``** (issue
+  #187, item 4; follow-ups from PR #185). Once ``StockstatsUtils`` left
+  (Removed below, issue #137), the module computed no indicator at all — that happens in
+  ``y_finance._get_stock_stats_bulk`` — and held only yfinance's transport and
+  hardening layer: the retry ladder and throttle latch (``yf_retry``,
+  ``reset_yf_throttle_latch``, ``YFinanceRateLimitError``), the unhide seam
+  (``yf_fetch_unhidden``, ``yf_fetch_statement``), the OHLCV loader with its
+  integrity and staleness guards (``load_ohlcv``), and the statement-period
+  helpers (``coerce_period_labels``, ``filter_financials_by_date``). Someone
+  chasing an indicator bug opened the wrong file. The module is renamed
+  after the vendor it serves, at the altitude of ``alpha_vantage_common`` and
+  ``sosovalue_common`` (wider than either: Alpha Vantage keeps its OHLCV and
+  statement helpers in per-lane modules, while yfinance's getters for those
+  lanes share ``y_finance``, so the helpers live here); every symbol keeps
+  its name and behaviour. Its log
+  records now carry the new module name
+  (``tradingagents.dataflows.yfinance_common``). There is no import shim:
+  ``tradingagents.dataflows.stockstats_utils`` no longer exists.
 - **hyperliquid_perp: every vocabulary enum in ``domains/perp/schema``
   refuses an unknown value by naming the vocabulary** (issue #166,
   follow-ups from PR #165). ``CandleInterval("4H")`` has said
@@ -310,7 +328,8 @@ Breaking changes within the 0.x line are called out explicitly.
   router re-probing the spent quota — one refused request and one WARNING
   — every five minutes. The shared window itself is unchanged, and the
   router's WARNING names the window actually applied.
-  ``stockstats_utils._UNHIDE_LOCK`` stays a whole-fetch lock; the
+  ``stockstats_utils._UNHIDE_LOCK`` (module now ``yfinance_common``) stays
+  a whole-fetch lock; the
   measurement that decided it (about a second per decision cycle, #137) is
   in its comment.
 

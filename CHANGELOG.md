@@ -97,6 +97,36 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: every vocabulary enum in ``domains/perp/schema``
+  refuses an unknown value by naming the vocabulary** (issue #166,
+  follow-ups from PR #165). ``CandleInterval("4H")`` has said
+  ``unsupported candle interval '4H'; choose from ['1m', …]`` since PR #165,
+  but the three enums beside it — ``MarketRegime``, ``ProfileShape``,
+  ``PositionSide`` — still fell through to ``Enum``'s own ``'x' is not a
+  valid MarketRegime``, which names neither the vocabulary nor the fix: a
+  context built from a recorded row or a hand-written fixture with a
+  mis-spelt regime, shape or side was refused without being told what
+  would have been accepted, and a reader seeing one enum self-describe and
+  three not had to guess whether that was deliberate. All four now inherit
+  one base, ``common/enum_guard.VocabEnum`` — a ``str`` enum whose noun is
+  a class keyword, ``class ProfileShape(VocabEnum, noun="volume profile
+  shape")`` — and the sentence has one owner: ``unsupported <noun> 'X';
+  choose from [<members in declaration order>]``. ``CandleInterval``'s
+  wording and the tests that pin it are unchanged. Two neighbouring sites
+  keep their own sentences: ``check_enum`` (persistence columns and
+  accounting fields, ``<name> must be one of [...]``) guards values the
+  program itself supplied and is worded as the assertion it is, and the
+  config loaders' key-named refusals (``live.mode must be …``,
+  ``risk.margin_mode must be …``) carry the YAML key and policy notes the
+  enum cannot know. The layering guard's load-time import walk
+  (``tests/common/test_layering.py``) now descends into every module-level
+  suite the interpreter runs on import — ``try`` handlers, ``if``/``else``,
+  ``match`` cases, ``with``, loops and class bodies, all of which cost
+  exactly what a bare top-level import costs and were invisible to every
+  closure check — deferring only function bodies and skipping only ``if
+  TYPE_CHECKING:`` bodies; the real closures do not move (the only such
+  blocks in the package are ``TYPE_CHECKING`` guards) and the shapes are
+  pinned on a synthetic tree.
 - **hyperliquid_perp: the exchange-read seams of the reconciler, the
   venue-identity monitor and the fill backfiller are refused the same way at
   construction** (issue #169, follow-ups from PR #168). The reconciler and

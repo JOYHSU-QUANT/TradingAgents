@@ -20,6 +20,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     CandleInterval,
     FundingPoint,
     MarginalCostRow,
+    MarketRegime,
     MarketSnapshot,
     PerpMarketContext,
     PerpPosition,
@@ -323,6 +324,41 @@ def test_parse_interval_accepts_a_string_or_a_member_and_names_a_bad_one():
         CandleInterval("4H")
 
 
+@pytest.mark.parametrize(
+    ("enum", "sentence"),
+    [
+        (
+            MarketRegime,
+            "unsupported market regime 'nonsense'; choose from ['trending', 'ranging', 'volatile']",
+        ),
+        (
+            ProfileShape,
+            "unsupported volume profile shape 'nonsense'; choose from ['D', 'P', 'b', 'thin']",
+        ),
+        (PositionSide, "unsupported position side 'nonsense'; choose from ['long', 'short']"),
+        (
+            CandleInterval,
+            "unsupported candle interval 'nonsense'; "
+            "choose from ['1m', '5m', '15m', '1h', '4h', '1d']",
+        ),
+    ],
+    ids=["MarketRegime", "ProfileShape", "PositionSide", "CandleInterval"],
+)
+def test_every_vocabulary_enum_names_its_vocabulary_on_an_unknown_value(enum, sentence):
+    # Issue #166: ``CandleInterval`` alone had this sentence (issue #155); the
+    # other three fell through to ``Enum``'s "'nonsense' is not a valid
+    # MarketRegime", which names neither the vocabulary nor the fix — and a
+    # reader seeing one enum self-describe and three not had to guess whether
+    # that was deliberate. All four now inherit ``common.enum_guard.VocabEnum``
+    # (``tests/common/test_enum_guard.py`` pins the mechanism on a synthetic
+    # enum); pinned here per enum is the whole sentence — its noun and its
+    # members in DECLARATION order — so a renamed noun or a re-sorted list
+    # shows up by name.
+    with pytest.raises(ValueError) as caught:
+        enum("nonsense")
+    assert str(caught.value) == sentence
+
+
 def test_perp_market_context_host_reading_must_be_aware_and_paired():
     # Issue #94: the two rules PR #91 added beside the exchange-clock one. The
     # host reading is only ever subtracted from ``exchange_time``, so it must
@@ -355,7 +391,7 @@ def test_perp_market_context_coerces_enum_interval_to_value():
 
 
 def test_perp_market_context_rejects_unknown_interval():
-    # The message is the enum's own (``CandleInterval._missing_``) — one check,
+    # The message is the enum's own (``VocabEnum._missing_``) — one check,
     # one wording — and names the offending value.
     with pytest.raises(ValueError, match="unsupported candle interval '7m'"):
         PerpMarketContext(**_context(candle_interval="7m"))
@@ -583,7 +619,9 @@ def test_volume_profile_coerces_a_plain_shape_string():
 
 
 def test_volume_profile_rejects_an_unknown_shape():
-    with pytest.raises(ValueError, match="nonsense"):
+    # Refused through the enum's own sentence (issue #166; the full sentence is
+    # pinned once, by the vocabulary test above), not a wrapper's re-wording.
+    with pytest.raises(ValueError, match="^unsupported volume profile shape 'nonsense'; "):
         VolumeProfile(**_profile(shape="nonsense"))
 
 
@@ -779,8 +817,10 @@ def test_position_context_accepts_a_consistent_open_and_flat():
 
 def test_position_context_coerces_a_string_side():
     assert PositionContext(**_open(side="long")).side is PositionSide.LONG
-    with pytest.raises(ValueError):
-        PositionContext(**_open(side="flat"))  # a target, not a state
+    # A target word, not a state: refused through the enum's own sentence
+    # (issue #166) — the flat case is ``side=None``, never a third member.
+    with pytest.raises(ValueError, match="^unsupported position side 'flat'; "):
+        PositionContext(**_open(side="flat"))
 
 
 @pytest.mark.parametrize(

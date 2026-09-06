@@ -170,8 +170,9 @@ def test_market_regime_string_is_coerced_to_enum():
 
 def test_unknown_market_regime_raises_at_construction():
     # The point of the enum: an unknown regime fails here, not later at decision
-    # time where it would burn an engine run before raising.
-    with pytest.raises(ValueError, match="nonsense"):
+    # time where it would burn an engine run before raising — through the
+    # enum's own sentence (issue #166; ``test_schema`` pins the full one).
+    with pytest.raises(ValueError, match="^unsupported market regime 'nonsense'; "):
         _ctx(market_regime="nonsense")
 
 

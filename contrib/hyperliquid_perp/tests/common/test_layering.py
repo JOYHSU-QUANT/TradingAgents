@@ -19,6 +19,7 @@ None of these invariants is exercised anywhere else:
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,10 +76,15 @@ def test_the_config_loader_imports_no_compute_module():
     # it silently and nothing would fail. Structural, like the check below.
     #
     # To add an import here, put the value in ``common/`` or a ``*_vocab``
-    # module rather than widening this set. ``market_data_config`` is the one
+    # module rather than widening this set — ``common.enum_guard`` is on it
+    # because ``schema``'s four vocabulary enums inherit their refusal
+    # sentence from it (issue #166). ``market_data_config`` is the one
     # parser on the list — it runs on every load (the block is always
-    # present), so a lazy import would buy nothing — and ``schema`` is the
-    # stdlib-only DTO module it reaches for the candle-interval vocabulary.
+    # present), so a lazy import would buy nothing — and ``schema`` is the DTO
+    # module it reaches for the candle-interval vocabulary. Named module by
+    # module, never by a ``common.*`` prefix: the common-layer check below
+    # only forbids IN-PACKAGE imports, so a prefix would admit a ``common``
+    # helper that grew a numpy import.
     #
     # The set is checked as a CLOSURE, not as config.py's direct imports
     # alone: every admitted module's own in-package imports must stay inside
@@ -86,15 +92,17 @@ def test_the_config_loader_imports_no_compute_module():
     # ``schema`` or to the parser would drag the compute module into every
     # load while both files' direct import lists looked innocent.
     #
-    # TOP-LEVEL statements only, unlike the ``common/`` check below which walks
+    # LOAD-TIME statements only, unlike the ``common/`` check below which walks
     # the whole tree. The invariant here is about what merely IMPORTING
-    # config.py costs, and a lazy import inside a branch is this repo's
+    # config.py costs, and a lazy import inside a FUNCTION is this repo's
     # sanctioned escape hatch — ``load_config`` already uses it for
     # ``live.config``/``risk_gate``, precisely so ``--context-only`` does not
-    # pay for the risk-gate domain unless a ``live:`` block exists.
+    # pay for the risk-gate domain unless a ``live:`` block exists. Nothing
+    # else is deferred — see ``_load_time_statements`` (issue #166).
     allowed = {
         "common.config_coercion",
         "common.constants",
+        "common.enum_guard",
         "domains.perp.indicator_vocab",
         "domains.perp.market_data_config",
         "domains.perp.schema",
@@ -110,7 +118,7 @@ _SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_time_import_closure(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
-    """Every in-package module ``source`` imports at top level, transitively.
+    """Every in-package module ``source`` imports at load time, transitively.
 
     Walks :func:`_in_package_imports` from module to module, resolving each
     dotted tail to its file (:func:`_module_file`). A tail with no file — the
@@ -305,7 +313,10 @@ def test_package_sources_reaches_subpackages_in_path_order(tmp_path):
 
 
 def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
-    """Dotted tails (``domains.perp.x``) of ``source``'s TOP-LEVEL in-package imports.
+    """Dotted tails (``domains.perp.x``) of ``source``'s LOAD-TIME in-package imports.
+
+    The statements walked are :func:`_load_time_statements`'s: everything
+    the interpreter runs on import, which is everything but a function body.
 
     Relative level-1 imports are today's style, but the guard must not depend
     on the style holding: an ABSOLUTE
@@ -348,7 +359,7 @@ def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
         return submodule if _module_file(submodule, root) is not None else base
 
     found: set[str] = set()
-    for node in ast.parse(source.read_text(encoding="utf-8")).body:
+    for node in _load_time_statements(ast.parse(source.read_text(encoding="utf-8"))):
         if isinstance(node, ast.ImportFrom):
             base = tail(node.module, node.level)
             names = [imported(base, alias.name) for alias in node.names]
@@ -358,6 +369,141 @@ def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
             continue
         found.update(n for n in names if n is not None)
     return found
+
+
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """``if TYPE_CHECKING:`` or ``if typing.TYPE_CHECKING:`` — the one suite that never runs.
+
+    Only those two spellings: an attribute of anything but ``typing`` (a
+    settings object that happens to carry the name) is a runtime flag and is
+    walked as a plain ``if``. Any other test that mentions the name
+    (``if not TYPE_CHECKING:``, ``if TYPE_CHECKING or X:``) is walked on
+    both suites too — a loud false positive in a layering test, never a
+    silent miss.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return (
+        isinstance(test, ast.Attribute)
+        and test.attr == "TYPE_CHECKING"
+        and isinstance(test.value, ast.Name)
+        and test.value.id == "typing"
+    )
+
+
+# The only bodies the interpreter defers past import: a function's. A class
+# body, a ``try`` suite, an ``if``/``else``, a ``match`` case, a ``with`` or a
+# loop all run when the module is imported.
+_DEFERRED_BODIES = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _load_time_statements(node: ast.AST) -> Iterator[ast.stmt]:
+    """Every statement under ``node`` the interpreter runs when the module is imported.
+
+    Descends through EVERY child node (``ast.iter_child_nodes``) except a
+    function body — so a ``try``'s handlers, else and finally, an ``if``'s
+    both suites, a ``match`` case, a ``with``, a loop and a CLASS body are all
+    reached without naming their node types, and a statement kind added to
+    the language later is walked by default rather than silently skipped
+    (issue #166: the walk used to read only ``.body``, so an import inside any
+    of these was invisible to every closure guard in this file). ``if
+    TYPE_CHECKING:`` is the one suite that never executes: its body is
+    skipped, its ``else:`` still walked. A lazy import inside a function is
+    the sanctioned escape hatch the loader test's comment describes, and
+    stays invisible on purpose. Expression nodes are descended too, which is
+    harmless: an import is only ever a statement.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.stmt):
+            yield child
+        if isinstance(child, _DEFERRED_BODIES):
+            continue
+        if isinstance(child, ast.If) and _is_type_checking_guard(child.test):
+            for stmt in child.orelse:
+                yield stmt
+                yield from _load_time_statements(stmt)
+            continue
+        yield from _load_time_statements(child)
+
+
+def test_the_walk_reaches_every_suite_that_runs_on_import_but_not_a_function_body(tmp_path):
+    # Issue #166. No real module is written this way today — the only
+    # module-level compound statements holding an import are the nine
+    # ``if TYPE_CHECKING:`` blocks, which correctly never run — so the real
+    # closures do not move, and the shapes are pinned on a synthetic tree.
+    # Reached: every suite of a ``try``, both suites of an ``if``, a ``with``,
+    # a ``for``, a ``match`` case, a ``try`` nested in an ``if``, a CLASS body
+    # (it runs at import, unlike a function's), the ``else:`` of a
+    # TYPE_CHECKING guard, and an ``if`` on a runtime flag that merely shares
+    # the name. Not reached: the body of ``if TYPE_CHECKING:`` in both
+    # spellings, a function body, a method body inside a walked class.
+    # Discriminating: a ``.body``-only walk sees only ``top``; a walk that
+    # names node types drops ``match``/``klass`` — the shapes the first cut
+    # of this walk missed. ``FLAG``/``ctx``/``settings`` are never evaluated:
+    # this is ``ast.parse``, not an import.
+    (tmp_path / "a.py").write_text(
+        "import typing\n"
+        "from typing import TYPE_CHECKING\n"
+        "from .top import t\n"
+        "try:\n"
+        "    from .try_body import a\n"
+        "except ImportError:\n"
+        "    from .handler import b\n"
+        "else:\n"
+        "    from .try_else import c\n"
+        "finally:\n"
+        "    from .finally_ import d\n"
+        "if FLAG:\n"
+        "    from .plain_if import e\n"
+        "else:\n"
+        "    from .plain_else import f\n"
+        "with ctx():\n"
+        "    from .with_ import g\n"
+        "for _ in ():\n"
+        "    from .loop import h\n"
+        "match FLAG:\n"
+        "    case 1:\n"
+        "        from .matched import i\n"
+        "if FLAG:\n"
+        "    try:\n"
+        "        from .nested import j\n"
+        "    except ImportError:\n"
+        "        pass\n"
+        "class C:\n"
+        "    from .klass import k\n"
+        "    def method(self):\n"
+        "        from .method import m\n"
+        "if TYPE_CHECKING:\n"
+        "    from .tc_name import n\n"
+        "else:\n"
+        "    from .tc_else import o\n"
+        "if typing.TYPE_CHECKING:\n"
+        "    from .tc_attr import p\n"
+        "if settings.TYPE_CHECKING:\n"
+        "    from .runtime_flag import q\n"
+        "def lazy():\n"
+        "    from .func import r\n",
+        encoding="utf-8",
+    )
+    reached = {
+        "top",
+        "try_body",
+        "handler",
+        "try_else",
+        "finally_",
+        "plain_if",
+        "plain_else",
+        "with_",
+        "loop",
+        "matched",
+        "nested",
+        "klass",
+        "tc_else",
+        "runtime_flag",
+    }
+    for name in reached | {"method", "tc_name", "tc_attr", "func"}:
+        (tmp_path / f"{name}.py").write_text("", encoding="utf-8")
+    assert _load_time_import_closure(tmp_path / "a.py", root=tmp_path) == reached
 
 
 def test_common_imports_nothing_from_the_rest_of_the_package():

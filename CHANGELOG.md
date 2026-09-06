@@ -97,6 +97,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: every injected seam is refused the same way at
+  construction, the backfiller's included** (issue #169, follow-ups from
+  PR #168). The reconciler and the venue-identity monitor each carried their
+  own copy of the "must be the … seam" refusal, and ``FillBackfiller`` had
+  none — yet the live loop hands the SAME ``user_fills_by_time`` object to
+  both the reconciler's ``fetch_fills`` and the backfiller's ``fetch``, so a
+  payload wired there was refused at boot on one side and read as a failed
+  backfill every sweep on the other. One guard now
+  (``common/seam_guard.require_seam``; still ``callable()`` only, no
+  signature check), used by all three constructors, so the message has one
+  owner: ``<name> must be the <kind> seam (<shape>), got <type>``. The
+  reconciler's ``stream`` goes through the same guard method by method
+  (``None`` allowed — and it is ``None`` on every production wiring today;
+  anything else must answer ``backfill_epoch`` / ``backfill_since`` /
+  ``mark_backfill_done``, and the refusal names the missing one).
+  ``FillBackfiller`` also converges ``lookback_seconds`` to ``float`` at
+  construction — a ``Decimal`` passed ``> 0`` and failed only inside
+  ``timedelta`` — refusing by name what ``float()`` would silently accept
+  (a ``str``, a ``bool``) and what ``> 0`` let through (NaN, an infinity),
+  each of which previously died inside ``timedelta`` with a message naming
+  nothing. ``fill_backfill`` exports
+  ``DEFAULT_LOOKBACK: timedelta`` beside ``DEFAULT_LOOKBACK_SECONDS`` (an
+  addition; the constructor's signature is unchanged), and the reconciler's
+  fallback cross-check window names it as its owner
+  (``fill_backfill.DEFAULT_LOOKBACK`` in the whole-hours refusal).
 - **hyperliquid_perp: the paper lane's terminal `api_failed` record rides the
   same retry lane as its other post-answer persists, and the two decision
   lanes drive one in-flight state machine** (issue #181, items 1, 2 and 5;

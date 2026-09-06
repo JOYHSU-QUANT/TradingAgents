@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.enum_guard import check_enum
+from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
@@ -227,11 +228,12 @@ class VenueIdentityMonitor:
         # enforced here, at construction — not on the first probe, inside a
         # fail-soft ``except`` lane that would read a mis-wiring as a
         # transport failure and carry on (issue #132).
-        if not callable(query_order_by_cloid):
-            raise TypeError(
-                "query_order_by_cloid must be the orderStatus seam (cloid_hex -> payload), "
-                f"got {type(query_order_by_cloid).__name__}"
-            )
+        require_seam(
+            "query_order_by_cloid",
+            query_order_by_cloid,
+            kind="orderStatus",
+            shape="cloid_hex -> payload",
+        )
         self._query = query_order_by_cloid
         self._db = db
         self._run_id = run_id

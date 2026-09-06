@@ -10,7 +10,6 @@ import pytest
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck
 from contrib.hyperliquid_perp.live.config import ExecutionMode, KillSwitchConfig
-from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK_SECONDS
 from contrib.hyperliquid_perp.live.kill_switch import KillSwitchManager
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
@@ -24,6 +23,7 @@ from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 
 from ..conftest import echo_order_status_cloid
+from .conftest import StubBackfiller
 
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
 _HEX_ENTRY = "0x" + "ab" * 16
@@ -631,19 +631,6 @@ def test_a_short_position_cancels_an_ask_side_close_order(env):
 # -- manual evidence is sticky across the two passes --------------------------
 
 
-class _StubBackfiller:
-    """A fully-wired fill leg, so legs_skipped cannot withhold the release."""
-
-    lookback = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)  # the reconciler reads it
-
-    def backfill(self, now, *, since=None):
-        from contrib.hyperliquid_perp.live.fill_backfill import BackfillSummary
-
-        return BackfillSummary(
-            fetched=0, applied=0, duplicate=0, unmapped=0, malformed=0, complete=True
-        )
-
-
 def test_a_manual_fact_seen_only_by_the_first_pass_still_latches_safe_mode(env):
     # Decided 2026-07-17: a non-bot order proves someone else operates this
     # wallet. If its owner pulls it between the two recovery passes, the verdict
@@ -677,7 +664,8 @@ def test_startup_never_attests_ws_restored_from_a_wiring_with_no_ws(env):
     # released by this one-shot recovery, which has no WS stream at all — the
     # same "absent machinery ≠ healthy" stance the §13.4 seam gate takes.
     env.safe_mode.enter("recoverable", "ws_disconnect")
-    env.reconciler._backfiller = _StubBackfiller()
+    # A fully-wired fill leg, so legs_skipped cannot withhold the release.
+    env.reconciler._backfiller = StubBackfiller()
 
     result = env.recover()
 

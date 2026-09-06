@@ -35,6 +35,7 @@ from typing import Any
 
 from ..common.enum_guard import check_enum
 from ..common.instants import epoch_ms, whole_hours_label
+from ..common.seam_guard import require_seam
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,
@@ -50,7 +51,7 @@ from ..persistence.db import Database
 from ..persistence.ids import exchange_fill_key, usable_fill_tid
 from ..persistence.models import DECIMAL_CONTEXT
 from .fill_backfill import (
-    DEFAULT_LOOKBACK_SECONDS,
+    DEFAULT_LOOKBACK,
     DEFAULT_MAX_PAGES,
     RESPONSE_FILL_CAP,
     BackfillSummary,
@@ -115,21 +116,6 @@ EQUITY_TOLERANCE_REL = Decimal("0.01")
 # verdict — a fill booked milliseconds ago (or one at the window's far edge)
 # can be absent from one read without being invalid.
 _FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
-
-
-def _require_seam(name: str, value: Any, shape: str) -> None:
-    """Refuse a non-callable where an exchange read was meant, naming the seam.
-
-    CI runs no type checker, so the seams are checked at construction — not on
-    the first sweep, where each is called inside a fail-soft ``except
-    Exception`` lane (the two account reads in ``run()``, the cross-check
-    fetch) that would read a mis-wiring as "open_orders failed: ... not
-    callable", record an unclean pass, and carry on forever without crashing
-    (issue #159; the same argument ``VenueIdentityMonitor`` makes for the
-    orderStatus seam).
-    """
-    if not callable(value):
-        raise TypeError(f"{name} must be the exchange seam ({shape}), got {type(value).__name__}")
 
 
 # The fail-safe fill-leg fallback: nothing fetched, nothing proven. Shared by
@@ -478,14 +464,44 @@ class LiveReconciler:
         refresh_kill_switch: Callable[[], None] | None = None,
         identity: VenueIdentityMonitor | None = None,
     ) -> None:
-        # See _require_seam. ``fetch_fills`` alone may be None — the reads-only
-        # wiring, reported through ``legs_skipped``.
-        _require_seam("fetch_open_orders", fetch_open_orders, "() -> frontendOpenOrders list")
-        _require_seam(
-            "fetch_clearinghouse", fetch_clearinghouse, "() -> clearinghouseState payload"
+        # Refused at construction, not on the first sweep where each seam is
+        # called inside a fail-soft ``except Exception`` lane — see
+        # ``common.seam_guard`` (issue #159). ``fetch_fills`` alone may be None:
+        # the reads-only wiring, reported through ``legs_skipped``.
+        require_seam(
+            "fetch_open_orders",
+            fetch_open_orders,
+            kind="exchange",
+            shape="() -> frontendOpenOrders list",
+        )
+        require_seam(
+            "fetch_clearinghouse",
+            fetch_clearinghouse,
+            kind="exchange",
+            shape="() -> clearinghouseState payload",
         )
         if fetch_fills is not None:
-            _require_seam("fetch_fills", fetch_fills, "(start_ms, end_ms) -> fills list")
+            require_seam(
+                "fetch_fills", fetch_fills, kind="exchange", shape="(start_ms, end_ms) -> fills list"
+            )
+        # ``stream`` is three seams on one object, each called inside the guarded
+        # fill leg (``_run_fill_backfill``) — checked one by one so the refusal
+        # names the missing method (issue #169). ``None`` is every wiring today:
+        # no production site binds a stream to the reconciler (the v1 loop runs
+        # the REST backfill without a socket — ``cli/live_loop``'s scope note),
+        # so this covers the seam for the wiring that will.
+        if stream is not None:
+            for method, shape in (
+                ("backfill_epoch", "() -> epoch"),
+                ("backfill_since", "() -> datetime | None"),
+                ("mark_backfill_done", "(epoch) -> bool"),
+            ):
+                require_seam(
+                    f"stream.{method}",
+                    getattr(stream, method, None),
+                    kind="LiveWsStream fill-leg",
+                    shape=shape,
+                )
         self._db = db
         self._run_id = run_id
         self._coin = coin
@@ -551,7 +567,7 @@ class LiveReconciler:
         The window and its operator label follow whichever backfiller is bound
         (see ``_crosscheck_window``), so both refusals sit here rather than in
         ``__init__``: a stand-in without a ``lookback`` is named as a mis-wiring
-        (the ``_require_seam`` policy, one seam over) instead of surfacing as
+        (the ``require_seam`` policy, one seam over) instead of surfacing as
         an AttributeError inside a guarded leg, and a fractional-hour lookback
         is refused before the first sweep whether the backfiller arrived at
         construction (both production sites) or was attached afterwards
@@ -573,9 +589,7 @@ class LiveReconciler:
     def _window_of(backfiller: FillBackfiller | None) -> tuple[timedelta, str]:
         """``backfiller``'s cross-check window and the name of what owns it; see ``_crosscheck_window``."""
         if backfiller is None:
-            return timedelta(
-                seconds=DEFAULT_LOOKBACK_SECONDS
-            ), "fill_backfill.DEFAULT_LOOKBACK_SECONDS"
+            return DEFAULT_LOOKBACK, "fill_backfill.DEFAULT_LOOKBACK"
         return backfiller.lookback, "FillBackfiller.lookback"
 
     def _crosscheck_window(self) -> tuple[timedelta, str]:
@@ -1018,7 +1032,7 @@ class LiveReconciler:
             # The skipping site is the reporting site — see
             # ReconciliationReport.legs_skipped.
             legs_skipped.append("invalid_local_fill_crosscheck")
-        if self._fetch_fills is not None:
+        else:
             lookback, _owner = self._crosscheck_window()
             window_start = now - lookback
             logger.debug(

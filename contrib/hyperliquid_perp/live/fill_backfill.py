@@ -33,18 +33,23 @@ closed.
 from __future__ import annotations
 
 import logging
+import math
+import numbers
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from ..common.instants import epoch_ms
+from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..paper.clock import Clock, WallClock
 from .fills import IngestOutcome, LiveFillProcessor
 from .ws_stream import USER_FILLS_CHANNEL
 
 __all__ = [
+    "DEFAULT_LOOKBACK",
     "DEFAULT_LOOKBACK_SECONDS",
     "DEFAULT_MAX_PAGES",
     "RESPONSE_FILL_CAP",
@@ -61,6 +66,11 @@ logger = logging.getLogger(__name__)
 # key absorbs the overlap. Six hours comfortably spans one 4-hour decision cycle plus
 # slack, so a routine pass re-reads recent fills and finds them all already applied.
 DEFAULT_LOOKBACK_SECONDS = 6 * 60 * 60
+# The same width as a span — what the reconciler's cross-check window falls back
+# to and what the test stand-ins declare, so the number is spelled once (issue
+# #169). The constructor keeps taking SECONDS: that is the shape a config value
+# arrives in.
+DEFAULT_LOOKBACK = timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)
 
 # Hyperliquid caps a ``userFillsByTime`` response at 2000 fills. A page that comes
 # back FULL is therefore a truncated view of its window, not the whole of it — the
@@ -146,13 +156,35 @@ class FillBackfiller:
         fetch: Callable[[int, int], Any],
         processor: LiveFillProcessor,
         clock: Clock | None = None,
-        lookback_seconds: float = DEFAULT_LOOKBACK_SECONDS,
+        lookback_seconds: float | Decimal = DEFAULT_LOOKBACK_SECONDS,
         max_pages: int = DEFAULT_MAX_PAGES,
         response_fill_cap: int = RESPONSE_FILL_CAP,
         refresh_kill_switch: Callable[[], None] | None = None,
     ) -> None:
-        if lookback_seconds <= 0:
-            raise ValueError(f"lookback_seconds must be > 0, got {lookback_seconds}")
+        # Refused at construction, not inside the guarded fill leg — see
+        # ``common.seam_guard``. cli/live.py hands this SAME object to the
+        # reconciler's ``fetch_fills``, which already refused it (issue #169).
+        # ``processor`` is an object seam (``.ingest_message``), not a callable,
+        # and wirings that never reach a fill pass ``None`` — left unchecked.
+        require_seam("fetch", fetch, kind="REST", shape="(start_ms, end_ms) -> fills list")
+        # Converge on float BEFORE ``timedelta(seconds=...)``: a ``Decimal``
+        # passed ``> 0`` and failed only in there (issue #169). Refused by name
+        # instead: what ``float()`` would silently accept (a str, a bool) and
+        # what ``> 0`` lets through (NaN, an infinity).
+        if isinstance(lookback_seconds, bool) or not isinstance(
+            lookback_seconds, (numbers.Real, Decimal)
+        ):
+            raise TypeError(
+                "lookback_seconds must be a number of seconds, "
+                f"got {type(lookback_seconds).__name__}"
+            )
+        try:
+            seconds = float(lookback_seconds)
+        except OverflowError:  # an int too large for a float is not a lookback either
+            seconds = math.inf
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError(f"lookback_seconds must be > 0 and finite, got {lookback_seconds}")
+        lookback_seconds = seconds
         if max_pages < 1:
             raise ValueError(f"max_pages must be >= 1, got {max_pages}")
         if response_fill_cap < 1:

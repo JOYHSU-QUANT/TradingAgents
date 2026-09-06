@@ -27,6 +27,7 @@ from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import (
     UnsupportedIndicatorError,
+    VendorLibraryError,
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
@@ -1015,3 +1016,152 @@ class OptionalSentinelTests(unittest.TestCase):
         _assert_one_capped_line(out[out.index(head) + len(head) : out.index(tail)], "")
         # This lane used to log nothing, so the capped tail had no other copy.
         self.assertIn(_FORGED_MESSAGE, "\n".join(cm.output))
+
+
+_library_failed = _raises(VendorLibraryError("stock price data for AAPL", "'volume'"))
+_library_forged = _raises(VendorLibraryError("stock price data for AAPL", _FORGED_MESSAGE))
+_LIBRARY_LINE = "Error retrieving stock price data for AAPL: "
+
+
+@pytest.mark.unit
+class LibraryFailureLaneTests(unittest.TestCase):
+    """A vendor library's failure goes past, and ends as report text (#187).
+
+    The getters used to render such a failure as prose at the leaf — a
+    string the router reads as a successful answer, so the chain stopped at
+    the vendor that had just failed even when a sibling computed the same
+    tool its own way. Now the leaf raises ``VendorLibraryError``, this lane
+    logs it without a traceback (the leaf logged one) and goes on, and the
+    verdict renders ONE line of report text only when no vendor served —
+    never a raise, and never a sibling's no-data sentinel, whatever else the
+    chain met on the way, since the ending the leaf's policy chose ("a
+    library bug must not abort a run", and it ended the call as text) must
+    not depend on the chain order.
+    """
+
+    def setUp(self):
+        _reset_config()
+
+    def tearDown(self):
+        _reset_config()
+
+    def _route(self, vendors, chain):
+        set_config({"data_vendors": {"core_stock_apis": chain}})
+        with (
+            _chain("get_stock_data", vendors),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+        ):
+            out = _stock()
+        return out, cm
+
+    def test_the_chain_reaches_the_sibling_vendor(self):
+        out, cm = self._route(
+            {"yfinance": _library_failed, "alpha_vantage": _returns("AV")}, "yfinance,alpha_vantage"
+        )
+        self.assertEqual(out, "AV")
+        [record] = cm.records
+        self.assertIn("failed in its own library retrieving stock price data", record.getMessage())
+        self.assertNotIn("'volume'", record.getMessage())  # the message is the leaf's log line's
+        self.assertIsNone(record.exc_info)  # and so is the traceback
+
+    def test_a_chain_no_vendor_serves_ends_as_one_capped_line_not_a_raise(self):
+        out, cm = self._route({"yfinance": _library_forged}, "yfinance")
+        _assert_one_capped_line(out, _LIBRARY_LINE)
+        self.assertIn(
+            "reporting the library failure retrieving stock price data for AAPL as text",
+            "\n".join(cm.output),
+        )
+
+    def test_whatever_the_sibling_met_first_the_library_failure_ends_as_text(self):
+        # The default chain lists Alpha Vantage first; whatever it failed
+        # with, the old leaf prose ended the call as text. Moving the prose
+        # to the router must not turn any of those into the raise the
+        # sibling's failure earns on its own — the library failure outranks
+        # every other slot, whatever the chain order. A caller's indicator
+        # typo included: yfinance raises that type before any computation,
+        # so a library failure there means the name WAS one it computes.
+        siblings = {
+            "missing key": _raises(VendorNotConfiguredError("no key")),
+            "outage": _down,
+            "caller's indicator error": _raises(UnsupportedIndicatorError("no vwma")),
+            "throttle met": _throttled,
+            "latch skip": _returns("never asked"),
+        }
+        for name, sibling in siblings.items():
+            with self.subTest(sibling=name):
+                VENDOR_THROTTLE_LATCH.reset()
+                if name == "latch skip":
+                    VENDOR_THROTTLE_LATCH.arm("alpha_vantage", None)
+                out, cm = self._route(
+                    {"alpha_vantage": sibling, "yfinance": _library_failed},
+                    "alpha_vantage,yfinance",
+                )
+                self.assertTrue(out.startswith(_LIBRARY_LINE), (name, out))
+                # The sibling's failure is not hidden behind the text.
+                self.assertTrue(len(cm.records) >= 2, (name, cm.output))
+
+    def test_a_siblings_no_data_verdict_does_not_outrank_it(self):
+        # The vendor that failed DID have the symbol's data — its code failed
+        # on it — so a sentinel saying the symbol "may be invalid" would be a
+        # claim the source that served contradicts; and the old leaf prose
+        # ended the call as text in this order too. The no-data verdict is
+        # kept in the log, not hidden.
+        for chain in ("yfinance,alpha_vantage", "alpha_vantage,yfinance"):
+            with self.subTest(chain=chain):
+                out, cm = self._route(
+                    {"yfinance": _library_failed, "alpha_vantage": _no_data}, chain
+                )
+                self.assertTrue(out.startswith(_LIBRARY_LINE), out)
+                self.assertNotIn("NO_DATA_AVAILABLE", out)
+                self.assertIn("a vendor also reported no data", "\n".join(cm.output))
+
+    def test_an_optional_categorys_no_data_verdict_still_outranks_it(self):
+        # An optional category keeps its own endings: no-data first, then the
+        # DATA_UNAVAILABLE sentinel — the library failure is in the log.
+        set_config({"data_vendors": {"macro_data": "fred,sosovalue"}})
+        failed = _raises(VendorLibraryError("macro series cpi", "'value'"))
+        with (
+            _chain("get_macro_indicators", {"fred": failed, "sosovalue": _no_data}),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
+        ):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-01-01")
+        self.assertTrue(out.startswith("NO_DATA_AVAILABLE"), out)
+        self.assertIn("errored earlier: macro series cpi: 'value'", "\n".join(cm.output))
+
+    def test_an_optional_category_degrades_to_its_sentinel(self):
+        set_config({"data_vendors": {"macro_data": "fred"}})
+        failed = _raises(VendorLibraryError("macro series cpi", "'value'"))
+        with _chain("get_macro_indicators", {"fred": failed}):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-01-01")
+        self.assertTrue(
+            out.startswith(
+                "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+                "(macro series cpi: 'value'). Proceed without it"
+            ),
+            out,
+        )
+
+    def test_the_optional_sentinel_keeps_the_subject_ahead_of_a_long_message(self):
+        # Same rule as the report line: the cap falls on the library's
+        # message alone, so a long pandas message cannot swallow the subject
+        # the way a joint cap on "{what}: {detail}" would.
+        set_config({"data_vendors": {"macro_data": "fred"}})
+        failed = _raises(VendorLibraryError("macro series cpi", _FORGED_MESSAGE))
+        with _chain("get_macro_indicators", {"fred": failed}):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-01-01")
+        head = "DATA_UNAVAILABLE: optional macro_data could not be retrieved (macro series cpi: "
+        tail = "). Proceed without it; do not fabricate values."
+        self.assertTrue(out.startswith(head), out)
+        self.assertTrue(out.endswith(tail), out)
+        _assert_one_capped_line(out[len(head) : -len(tail)], "")
+
+    def test_the_report_line_flattens_and_caps_the_subject_as_well_as_the_message(self):
+        # The subject carries the caller's symbol — the model's own text — so
+        # it is flattened and capped like the message, each on its own.
+        err = VendorLibraryError("stock price data for AA\nPL | #x", _FORGED_MESSAGE)
+        out = interface._library_failure_prose(err)
+        _assert_one_capped_line(out, "Error retrieving stock price data for AA PL x: ")
+        long_symbol = VendorLibraryError("stock price data for " + "S" * 500, "'volume'")
+        out = interface._library_failure_prose(long_symbol)
+        self.assertTrue(out.endswith("...: 'volume'"), out)
+        self.assertLessEqual(len(out), len("Error retrieving ") + MAX_UNTRUSTED_CHARS + 3 + len(": 'volume'"))

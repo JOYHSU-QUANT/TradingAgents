@@ -17,6 +17,7 @@ from .deribit import get_options_market_data as get_deribit_options_market
 from .errors import (
     NoMarketDataError,
     UnsupportedIndicatorError,
+    VendorLibraryError,
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
@@ -262,6 +263,16 @@ def is_category_disabled(category: str, method: str = None) -> bool:
     )
 
 
+def _library_failure_prose(e: VendorLibraryError) -> str:
+    """The one line a core chain ended by a vendor library's failure reports as.
+
+    The words are ``failure_account``'s — the getter's subject and the
+    library's message each flattened and capped on its own — so this slot
+    and the optional category's sentinel render the type by one rule.
+    """
+    return f"Error retrieving {failure_account(e)}"
+
+
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
@@ -335,6 +346,13 @@ def route_to_vendor(method: str, *args, **kwargs):
     # not a source that would normally have answered.
     first_rate_limit: tuple[str, VendorRateLimitError] | None = None
     first_skip: tuple[str, VendorRateLimitError, float] | None = None
+    # The first vendor library failure met (#187): kept apart from
+    # ``first_error`` because it decides a different ending — one line of
+    # report text rather than a raise — and must do so whatever its place in
+    # the chain (a missing key met before it must not surface instead and
+    # abort the call). The vendor's name is on the lane's log line; nothing
+    # after the loop needs it.
+    first_library: VendorLibraryError | None = None
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
@@ -421,6 +439,25 @@ def route_to_vendor(method: str, *args, **kwargs):
             if first_outage is None:
                 first_outage = (vendor, failure_account(e))
             continue
+        except VendorLibraryError as e:
+            # The vendor's own library failed computing the answer — a
+            # stockstats bug on a frame it did serve. The chain goes on: a
+            # sibling vendor computes the same routed tool its own way
+            # (Alpha Vantage has an RSI endpoint), and this used to be
+            # rendered as prose at the leaf, which read here as a successful
+            # answer and ended the chain at the vendor that had just failed
+            # (#187). Logged by subject only: the lane at the leaf already
+            # logged the library's whole message and the traceback under the
+            # vendor's own module, and that message can run to kilobytes.
+            logger.warning(
+                "Vendor %r failed in its own library retrieving %s for %s; trying next vendor.",
+                vendor,
+                e.what,
+                method,
+            )
+            if first_library is None:
+                first_library = e
+            continue
         except UnsupportedIndicatorError as e:
             # A caller typo, not a vendor failure: logged without a traceback,
             # which the clause below reserves for a bug. The chain still goes
@@ -476,14 +513,41 @@ def route_to_vendor(method: str, *args, **kwargs):
     # literal — and do not assert the symbol valid either: a fallback that
     # DID answer (a stale frame, an "Invalid API call") is still quoted in
     # ``reason``, so the wording is "unconfirmed", not "fine".
+    # A core chain in which a vendor's own library failed ends as one line of
+    # report text, ahead of every other ending — a sibling's "no data"
+    # included: the vendor that failed DID have the symbol's data, its code
+    # failed on it, and a sentinel saying the symbol "may be invalid" would
+    # be a claim the source that served contradicts. This is the leaves' old
+    # policy — a library bug must not abort a run another data point could
+    # still serve, and it ended the call as text whatever the chain order —
+    # moved to the one place that knows whether any vendor served (#187).
+    # Placed here rather than at the leaf, it lets the chain reach a sibling
+    # vendor first, and a missing key, an outage or a no-data verdict met on
+    # the way stays in the logs, as it did when the leaf rendered the prose
+    # itself. Written for every vendor, so the sentence does not depend on
+    # which vendor failed (#58): the subject is the getter's, the library's
+    # message is flattened and capped on its way in — a pandas message can
+    # carry a frame repr, newlines and pipes included — and the leaf's log
+    # line keeps the whole of it. An optional category keeps its own
+    # sentinels below: no-data first, then ``DATA_UNAVAILABLE``.
+    if first_library is not None and category not in OPTIONAL_CATEGORIES:
+        logger.warning(
+            "No vendor served %s; reporting the library failure retrieving %s as text%s",
+            method,
+            first_library.what,
+            "" if last_no_data is None else f" (a vendor also reported no data: {last_no_data})",
+        )
+        return _library_failure_prose(first_library)
+
     if last_no_data is not None:
-        if first_error is not None:
+        errored = first_error or first_library
+        if errored is not None:
             # A vendor also hit a real error; surface it in logs so the no-data
             # verdict can't hide a broken primary (network/auth/etc.).
             logger.warning(
                 "Returning NO_DATA for %s, but a vendor errored earlier: %s",
                 method,
-                first_error,
+                errored,
             )
         sym = last_no_data.symbol
         canonical = last_no_data.canonical
@@ -537,9 +601,13 @@ def route_to_vendor(method: str, *args, **kwargs):
             f"for this symbol."
         )
 
-    # The failure that surfaces, decided in one expression. A caller's
-    # mistake — the indicator name, which the tool wrapper renders as one
-    # line of report text — outranks a vendor's failure: a missing key
+    # The failure that surfaces, decided in one expression. A vendor's own
+    # library failing outranks everything below it (an optional category is
+    # the only chain that still reaches here with one, a core chain having
+    # returned above): it ends in that category's sentinel like any other
+    # failure, but its words are the subject's, not a class name. Next, a
+    # caller's mistake — the indicator name, which the tool wrapper renders
+    # as one line of report text — outranks a vendor's failure: a missing key
     # surfacing instead would abort the call and point at the wrong remedy
     # (#137). Unless a vendor was DOWN: then the name may be one that vendor
     # computes, and the outage is the fact to surface — the typo stays in the
@@ -572,7 +640,9 @@ def route_to_vendor(method: str, *args, **kwargs):
         )
     throttle_met = first_rate_limit[1] if first_rate_limit is not None else None
     latch_skip = first_skip[1] if first_skip is not None else None
-    first_error = first_caller_error or first_error or throttle_met or latch_skip
+    first_error = (
+        first_library or first_caller_error or first_error or throttle_met or latch_skip
+    )
 
     # No vendor returned data and none reported clean "no data" — surface the
     # first real error (e.g. the primary vendor's network failure). Optional

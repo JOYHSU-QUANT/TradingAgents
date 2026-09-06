@@ -21,7 +21,11 @@ import tradingagents.dataflows.alpha_vantage_news as avn
 # both vendors serving the routed indicator tool.
 from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_line
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
-from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
+from tradingagents.dataflows.errors import (
+    NoMarketDataError,
+    VendorLibraryError,
+    VendorUnavailableError,
+)
 
 
 class _FakeResponse:
@@ -598,7 +602,8 @@ def test_a_wiring_gap_raises_before_any_request(monkeypatch, registry, expected)
     # the missing-description one a "No description available." placeholder
     # from a function-local dict nothing tested (#117). All are our own wiring
     # bugs, not vendor conditions, so they raise before a request is made
-    # rather than after paying for one.
+    # rather than after paying for one — and outside the library lane (#187),
+    # so they stay the loud failures they are rather than report text.
     monkeypatch.delitem(getattr(avi, registry), "rsi")
     monkeypatch.setattr(
         avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")
@@ -895,29 +900,48 @@ def test_indicator_not_configured_still_propagates(monkeypatch):
 
 
 @pytest.mark.unit
-def test_indicator_untyped_failure_still_degrades_to_an_error_string(monkeypatch):
-    # Only the vendor-error taxonomy propagates; an unexpected failure keeps the
-    # old degrade-to-string behavior so one broken indicator can't abort a run.
+def test_indicator_untyped_failure_leaves_as_the_library_type(monkeypatch):
+    # The vendor-error taxonomy and transport failures propagate to their own
+    # router lanes; an unexpected failure leaves as the library type (#187),
+    # so one broken indicator still cannot abort a run — the router routes
+    # past it and, with no other vendor, renders it as report text — but the
+    # chain no longer ends here on a string that read as a successful answer.
     def _boom(*a, **k):
         raise RuntimeError("socket exploded")
 
     monkeypatch.setattr(avi, "_make_api_request", _boom)
-    out = avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
-    assert out.startswith("Error retrieving rsi data")
+    with pytest.raises(VendorLibraryError) as info:
+        avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
+    assert info.value.what == "rsi values for AAPL"
+    assert info.value.detail == "socket exploded"
+
+
+def _boom_forged(*a, **k):
+    raise RuntimeError(_FORGED_MESSAGE)
 
 
 @pytest.mark.unit
-def test_indicator_untyped_failure_renders_one_capped_line(monkeypatch):
-    # The degrade line is a report the model reads, so the message is
-    # flattened and capped on its way in — the same treatment as the yfinance
-    # sibling serving the same routed tool (#187). A multi-line message used
-    # to come back as several lines, a hostile one with its markdown intact.
-    def _boom(*a, **k):
-        raise RuntimeError(_FORGED_MESSAGE)
+def test_both_indicator_vendors_report_a_library_failure_in_one_sentence(monkeypatch):
+    # The two vendors serving get_indicators used to word the same failure
+    # differently — yfinance "Error retrieving rsi values for AAPL: ...",
+    # this one "Error retrieving rsi data: ..." — so the sentence the analyst
+    # read depended on which vendor ``data_vendors`` selected (#187, #58).
+    # Now the router writes it, from a subject both leaves declare alike:
+    # a chain of either vendor alone ends as the same flattened, capped line
+    # (a multi-line message used to come back as several lines, a hostile
+    # one with its markdown intact).
+    import tradingagents.dataflows.y_finance as yfin
+    from tradingagents.dataflows import interface
+    from tradingagents.dataflows.config import set_config
 
-    monkeypatch.setattr(avi, "_make_api_request", _boom)
-    out = avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
-    _assert_one_capped_line(out, "Error retrieving rsi data: ")
+    monkeypatch.setattr(avi, "_make_api_request", _boom_forged)
+    monkeypatch.setattr(yfin, "_get_stock_stats_bulk", _boom_forged)
+    lines = []
+    for vendor in ("alpha_vantage", "yfinance"):
+        set_config({"data_vendors": {"technical_indicators": vendor}})
+        lines.append(interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30))
+    assert lines[0] == lines[1]
+    _assert_one_capped_line(lines[0], "Error retrieving rsi values for AAPL: ")
 
 
 @pytest.mark.unit
@@ -936,7 +960,7 @@ def test_indicator_http_failure_propagates_instead_of_reading_as_success(
     # request boundary rather than a patched _make_api_request: the swallowing
     # happened to an exception that boundary raises, so the test has to make it
     # raise for real. A 5xx now leaves that boundary as the outage type (#142)
-    # and propagates through the getter's VendorError clause instead.
+    # and propagates through the library lane's pass-through instead.
     monkeypatch.setattr(av, "get_api_key", lambda: "k")
     monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=status))
     with pytest.raises(propagated):

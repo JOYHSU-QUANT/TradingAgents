@@ -75,6 +75,41 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **dataflows: a vendor library's failure inside a getter no longer ends
+  the vendor chain as a report** (issue #187, items 1–3; the #86 decorator).
+  The nine yfinance and Alpha Vantage getters that carried a broad ``except``
+  rendering ``Error retrieving ...`` prose — a string ``route_to_vendor``
+  reads as a successful answer, so the chain stopped at the vendor that had
+  just failed and a sibling with its own endpoint (Alpha Vantage's RSI, for
+  a local stockstats bug) was never asked; seven of them logged nothing — now
+  run their fetch under one handler, ``with utils.library_failure_lane(subject,
+  log=logger)``, from where each getter's ``try`` used to start: typed vendor
+  failures, the caller's indicator mistake and transport failures pass
+  through to their router lanes, and anything else is logged with its
+  traceback under the getter's own module and raised as the new
+  ``VendorLibraryError`` (``errors.py``). The router routes past it and, only
+  when no vendor serves a core category, renders ONE line of report text
+  (``Error retrieving {subject}: {message}``, each part flattened and capped
+  here — superseding the per-leaf cap the #171 entry below describes)
+  — never a raise, and never a sibling's no-data sentinel, whatever the chain
+  order, so a missing key, an outage or a "no data" met before or after the
+  failing vendor no longer changes the ending; optional categories keep
+  their no-data and ``DATA_UNAVAILABLE`` sentinels. The sentence is the
+  router's now, so the two vendors serving ``get_indicators`` name the same
+  subject (``rsi values for AAPL``; Alpha Vantage's said ``rsi data``), and
+  the yfinance news getters' ``Error fetching …`` became ``Error retrieving
+  …``. Everything the getters kept outside their ``try`` — the date
+  refusals, the config reads, Alpha Vantage's wiring-gap checks, the
+  ``cache_clear`` guard of #200 — stays outside the lane and as loud as
+  before. On a two-vendor chain a deterministic local bug now costs the
+  sibling one request per call — the fallback the chain was configured for.
+- **market analyst: the indicator menu in the system prompt is rendered
+  from ``utils.INDICATOR_DESCRIPTIONS``** (issue #187, item 6) instead of
+  carried as a third verbatim copy of the sentences both report lanes end
+  their reports with. ``utils.INDICATOR_MENU`` holds the prompt's grouping
+  and ``INDICATOR_MENU_OMITS`` its one declared omission (``mfi``);
+  ``indicator_menu()`` renders byte-identically to the literal it replaced,
+  pinned by a golden test, so nothing the analyst reads changed.
 - **The interactive CLI never sends an uncapped completion request, and a
   library caller on a gateway provider is warned once** (issue #183; the
   #177 tail). ``cli/main.py`` fills ``DEFAULT_MAX_TOKENS`` (8192 — the perp

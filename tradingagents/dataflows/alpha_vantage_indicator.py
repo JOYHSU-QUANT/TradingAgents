@@ -1,14 +1,15 @@
-import requests
+import logging
 
 from .alpha_vantage_common import _make_api_request
-from .errors import NoMarketDataError, UnsupportedIndicatorError, VendorError
+from .errors import NoMarketDataError, UnsupportedIndicatorError
 from .utils import (
     INDICATOR_DESCRIPTIONS,
-    MAX_UNTRUSTED_CHARS,
     data_lag_note,
     date_refusal,
-    sanitize_untrusted,
+    library_failure_lane,
 )
+
+logger = logging.getLogger(__name__)
 
 # Maximum age (calendar days) of the newest indicator row relative to
 # curr_date before the report carries a data-lag note, keyed by the requested
@@ -151,8 +152,14 @@ def get_indicator(
             ``curr_date`` that will not parse
             is not a raise: it answers the shared ``INVALID_CURR_DATE``
             sentinel, as the yfinance sibling does (#111).
-        VendorError, requests.RequestException: Propagated (see the handlers at
-            the end of this function).
+        VendorLibraryError: When parsing the answer fails outside the cases
+            above. The library lane the request-and-parse runs under logs the
+            traceback, and the router routes past it to the vendor that
+            computes the same indicator from OHLCV, rendering one line of
+            report text only when no vendor serves (#187).
+        VendorError, requests.RequestException: Propagated through the lane
+            to their own router lanes (a throttle, a missing key, an outage,
+            a transport failure are never reports: #60, #87, #142).
 
     The price series is not a parameter: each indicator's entry in
     ``_SUPPORTED_INDICATORS`` names the ``series_type`` its request carries (or
@@ -195,9 +202,9 @@ def get_indicator(
             ),
         )
 
-    # All three wiring checks run before the request and outside the broad
-    # handler at the end: a supported indicator with no request definition, no
-    # CSV column or no description is our bug, not a vendor condition. Raising
+    # All three wiring checks run before the request and outside the library
+    # lane below: a supported indicator with no request definition, no CSV
+    # column or no description is our bug, not a vendor condition. Raising
     # rather than returning prose stops it costing a request and leaves a
     # traceback in the logs; the router no longer records a successful answer,
     # so a multi-vendor chain reaches the next vendor (#106). A single-vendor
@@ -205,8 +212,8 @@ def get_indicator(
     # renders only UnsupportedIndicatorError as report text (#117), and a
     # wiring gap is ours to fix, not the model's to route around. Guessing a
     # column would silently render numbers from the wrong field (#31); the
-    # description check is here rather than at the render because the broad
-    # handler below would turn a KeyError there into prose.
+    # description check is here rather than at the render because the lane
+    # below would turn a KeyError there into report text.
     if indicator not in _INDICATOR_REQUESTS:
         raise ValueError(
             f"Indicator '{indicator}' is registered as supported but has no "
@@ -235,8 +242,20 @@ def get_indicator(
     elif time_period_spec is not None:
         params["time_period"] = time_period_spec
 
-    try:
-        # Get indicator data for the period
+    # Every typed vendor failure from here down propagates through the lane
+    # so the router can react by behavior: a missing key takes the "vendor
+    # unavailable" lane and a 429 the rate-limit lane, both of which hand
+    # the next vendor in the chain its turn, and the NoMarketDataError
+    # raises below take the no-data lane. So does a transport failure — a
+    # 4xx the boundary leaves as HTTPError, a reset, a timeout
+    # (``requests.RequestException`` is an OSError). This getter used to
+    # catch all of those in a broad handler of its own and come back with a
+    # successful-looking "Error retrieving ..." string, so the router saw an
+    # answer and never fell back once Alpha Vantage's daily quota was spent
+    # (#60), or after a 404 or a 503 (#87, #142). The subject is the one the
+    # yfinance sibling names, so the report line does not depend on which
+    # vendor failed (#187).
+    with library_failure_lane(f"{indicator} values for {symbol}", log=logger):
         data = _make_api_request(av_function, params)
 
         # Parse CSV data and extract values for the date range
@@ -337,41 +356,3 @@ def get_indicator(
         )
 
         return result_str
-
-    except VendorError:
-        # Every typed vendor failure propagates so the router can react by
-        # behavior: a missing key takes the "vendor unavailable" lane and a 429
-        # takes the rate-limit lane, both of which hand the next vendor in the
-        # chain its turn, and the NoMarketDataError raises above take the
-        # no-data lane. On a chain with no other vendor the router raises the
-        # first two instead — technical_indicators is a core category, and a
-        # loud failure is the decided outcome there — while no-data ends at the
-        # router's sentinel, which is that lane's own decided outcome. Caught as
-        # the taxonomy's base type, not one leaf at a time: the rate-limit case
-        # used to reach the broad handler below and come back as a
-        # successful-looking "Error retrieving
-        # ..." string, so the router saw a successful answer and never fell
-        # back once Alpha Vantage's daily quota was spent (#60).
-        raise
-    except requests.RequestException:
-        # A transport-layer failure propagates for the same reason, one lane
-        # over. #72 classified only HTTP 429 and #142 the 5xx (the outage
-        # type, which the VendorError clause above lets out), so this clause
-        # is what still keeps every other requests exception — a 4xx the
-        # boundary leaves as HTTPError, a connection reset, a timeout — from
-        # the broad handler below. Swallowed, an Alpha Vantage 404 would come
-        # back as "Error retrieving {indicator} data: 404 Client Error",
-        # which route_to_vendor reads as a successful answer: the chain
-        # stopped at the vendor that had just failed and the agent analysed
-        # the error prose as an indicator report (#87, then a 503). Every
-        # other Alpha Vantage getter (fundamentals, news, stock) carries no
-        # broad except at all, so a requests exception already reaches the
-        # router's generic error lane from those — this getter was the only
-        # one converting it into a success. What the router does with it from
-        # there is described one block up.
-        raise
-    except Exception as e:
-        print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")
-        return (
-            f"Error retrieving {indicator} data: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )

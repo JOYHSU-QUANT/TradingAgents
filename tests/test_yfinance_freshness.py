@@ -691,8 +691,8 @@ class TestInsiderLagNote:
     def test_a_stream_with_no_parseable_date_degrades_to_no_note(self, monkeypatch):
         # A present date column none of whose values parse leaves the parser
         # with nothing to take a newest from. Without the empty check the
-        # annotation raises out of max() and the getter's broad except turns it
-        # into an "Error retrieving ..." string the router reads as a report —
+        # annotation raises out of max() and the getter's library lane turns it
+        # into an "Error retrieving ..." line the router reports in place of data —
         # an annotation must degrade to silence, never replace what it decorates.
         df = pd.DataFrame({"Start Date": ["-", "n/a"], "Shares": [1, 2]})
         _patch_ticker(monkeypatch, insider_transactions=df)

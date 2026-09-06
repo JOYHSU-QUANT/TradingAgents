@@ -1,6 +1,7 @@
 """yfinance-based news data fetching functions."""
 
 import contextlib
+import logging
 from datetime import datetime
 
 import yfinance as yf
@@ -8,13 +9,19 @@ from dateutil.relativedelta import relativedelta
 from yfinance.data import YfData
 
 from .config import get_config
-from .errors import VendorError
 from .stockstats_utils import yf_fetch_unhidden
 from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
 # routed tools shares the single judgement and the single sentence (#111).
-from .utils import MAX_UNTRUSTED_CHARS, date_range_refusal, date_refusal, sanitize_untrusted
+# Both getters run their fetch under ``library_failure_lane``, from where
+# their own ``try`` used to start: typed and transport failures pass through
+# to their router lanes, anything else is logged with its traceback and
+# raised as ``VendorLibraryError`` for the router to route past and, when no
+# vendor serves, render as one line of report text (#187).
+from .utils import date_range_refusal, date_refusal, library_failure_lane
+
+logger = logging.getLogger(__name__)
 
 # Clamp the untrusted article count before it sizes an external yf.Search
 # call (#33): an LLM-supplied or misconfigured value must stay bounded.
@@ -99,8 +106,8 @@ def get_news_yfinance(
     Returns:
         Formatted string containing news articles
     """
-    # Unusable dates are refused before any request and OUTSIDE the broad
-    # except below, in the shared voice (#111).
+    # Unusable dates are refused before any request and OUTSIDE the library
+    # lane below, in the shared voice (#111).
     if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
         return refusal
 
@@ -110,7 +117,7 @@ def get_news_yfinance(
     # returns no news. Keep the user's ticker in the report header.
     canonical = normalize_symbol(ticker)
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
-    try:
+    with library_failure_lane(f"news for {ticker}", log=logger):
         stock = yf.Ticker(canonical)
         # Through the shared un-hidden boundary like every other yfinance leaf
         # (#116); an outage body takes its vendor-unavailable lane rather than
@@ -146,17 +153,6 @@ def get_news_yfinance(
             return f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
 
         return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
-
-    except VendorError:
-        raise  # Typed vendor failures take their router lanes (#67)
-    except OSError:
-        # Transport failures are not reports; the type facts are in
-        # y_finance.get_fundamentals (#116).
-        raise
-    except Exception as e:
-        return (
-            f"Error fetching news for {ticker}: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"
-        )
 
 
 def get_global_news_yfinance(
@@ -208,15 +204,15 @@ def get_global_news_yfinance(
     # so rarely a request); ``get_news`` is an uncached POST. Outside the
     # boundary's lock: ``cache_clear`` is atomic, and the lock serializes the
     # hide-exceptions flag and the wire, not an in-memory forget (#137
-    # measured its cost per cycle). Above the broad handler: a library that
-    # drops the attribute fails loudly here rather than freezing again as
-    # prose.
+    # measured its cost per cycle). Above the library lane: a library that
+    # drops the attribute fails loudly here rather than freezing again
+    # behind a report.
     YfData.cache_get.cache_clear()
 
     all_news = []
     seen_titles = set()
 
-    try:
+    with library_failure_lane("global news", log=logger):
         for query in search_queries:
             # Through the shared un-hidden boundary like every other yfinance
             # leaf (#136): an outage body takes its vendor-unavailable lane
@@ -286,10 +282,3 @@ def get_global_news_yfinance(
             return f"No global news found between {start_date} and {curr_date}"
 
         return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
-
-    except VendorError:
-        raise  # Typed vendor failures take their router lanes (#67)
-    except OSError:
-        raise  # Transport failures are not reports; see y_finance.get_fundamentals (#116)
-    except Exception as e:
-        return f"Error fetching global news: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}"

@@ -399,9 +399,13 @@ class LiveDecisionDriver:
             if self._manual_latched():
                 self._warn_wedged(now)
                 return None
+            # Deliberately does not say "released": no manual latch standing
+            # also covers the case where this wedge's OWN latch write missed,
+            # and nobody released anything. Both reach here, and the honest
+            # line describes the observation rather than guessing the cause.
             logger.info(
-                "decision driver: the manual safe-mode latch for the wedged startup "
-                "adoption is no longer standing — re-attempting adoption"
+                "decision driver: no manual safe-mode latch is standing (released, or "
+                "the wedge's own latch write never landed) — re-attempting adoption"
             )
             self._adoption_wedged = False
             self._wedged_logged_at = None
@@ -528,8 +532,11 @@ class LiveDecisionDriver:
                 f"retrying will not change that ({type(exc).__name__}: {exc}). "
                 "Adoption retries are off and no new decision cycle can start "
                 "while a stranded in-progress attempt owns next_decision_at. "
-                "Inspect the run's in_progress rows in decision_attempts, fix "
-                "them, then restart and `safe-mode --release`"
+                "Fix the run's in_progress rows in decision_attempts, then "
+                "`safe-mode --release` — in that order, and only restart AFTER "
+                "releasing (a standing manual latch fails the §19.1 verdict, so "
+                "a restart exits 4 without entering the loop). See RUNBOOK-live, "
+                "decision_adoption_wedged"
             ) from exc
         self._adopted = True
         return result

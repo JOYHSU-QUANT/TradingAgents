@@ -856,20 +856,47 @@ sqlite3 live_trading.db \
 terminalize；只有一列而 `scheduled_at`／`timestamp` 讀不出來：那列是壞掉的，同樣 terminalize。
 **不要刪列**，稽核軌跡與 §21.4 計數都靠它。
 
-照抄下面這個形狀，不要自己編欄位值——`validate` 的 no-decision streak 與 replay 下一輪就會讀
-這幾欄。`error_type` 留 NULL（非 §6.2 詞彙的失敗一律如此，理由寫在 `error_message`），
-`timestamp` 用 `parse_instant` 讀得懂的 UTC ISO-8601（帶 `+00:00`）：
+照抄下面這個形狀，不要自己編欄位值——`validate` 的 no-decision streak 下一輪就會讀這幾欄
+（`common/no_decision.py` 只數非 `in_progress` 的列）。三個容易漏的點：
+
+- **`error_type` 留 NULL**：非 §6.2 詞彙的失敗一律如此，理由寫在 `error_message`。
+- **`pending_raw_response` 一定要清成 NULL**：終態列不帶回覆是這個 store 的不變量，平常由
+  `update_decision_attempt` 在寫入時保證；手寫 SQL 繞過了它，而終態列之後不可改，沒有任何
+  後續會替你清掉（見上面 §5 結尾那段）。步驟 1 的 SELECT 就是要你先看它是不是 NOT NULL。
+- **`next_decision_at` 要跟 `scheduler_state` 一起推**：終態寫入在程式裡是
+  `repo.record_api_failed` **一對**寫入（attempt 列 ＋ `scheduler_state` 重錨、
+  `current_attempt_id` 清掉），刻意做成單一 writer 好讓「沒有哪條車道只寫一半」。只寫 attempt
+  列的話，adoption 之後找不到東西可收，會直接落到 `_start`，而 `_start` 拿的
+  `scheduled_at` 就是 `scheduler_state.next_decision_at`——它還指著你剛收掉的那個 slot，於是
+  重新推導出**同一個 attempt id** 去 INSERT、每個 tick 撞主鍵，變成另一種永久僵住。
+
+`timestamp`／`next_decision_at` 用 `parse_instant` 讀得懂的 UTC ISO-8601（帶 `+00:00`）；
+`next_decision_at` 取**下一個 4h 邊界**：
 
 ```bash
-# 2. terminalize 不是當前 cycle 的那些列（逐一，別用範圍條件）
-sqlite3 live_trading.db \
-  "UPDATE decision_attempts
-      SET status='api_failed',
-          error_type=NULL,
-          error_message='manually terminalized: 狀態機壞掉留下的重複 in_progress 列（issue #205）',
-          timestamp='2026-09-07T12:00:00+00:00'
-    WHERE decision_attempt_id='<要收掉的那個 id>' AND status='in_progress';"
+# 2. terminalize 不是當前 cycle 的那些列（逐一，別用範圍條件），兩半一起寫
+sqlite3 live_trading.db <<'SQL'
+BEGIN IMMEDIATE;
+UPDATE decision_attempts
+   SET status='api_failed',
+       error_type=NULL,
+       error_message='manually terminalized: 狀態機壞掉留下的重複 in_progress 列（issue #205）',
+       pending_raw_response=NULL,
+       next_decision_at='2026-09-07T16:00:00+00:00',
+       timestamp='2026-09-07T12:00:00+00:00'
+ WHERE decision_attempt_id='<要收掉的那個 id>' AND status='in_progress';
+UPDATE scheduler_state
+   SET next_decision_at='2026-09-07T16:00:00+00:00',
+       current_attempt_id=NULL,
+       updated_at='2026-09-07T12:00:00+00:00'
+ WHERE run_id='live-BTC';
+COMMIT;
+SQL
 ```
+
+**兩列以上**的情形其實只有 attempt 列那一半是必要的（活下來的那列會被 adoption 收掉、由它
+自己重錨），但照上面一起寫也不會錯；**只剩一列**的情形則**一定**要寫 `scheduler_state` 那半，
+否則就是上面說的那個新僵住。
 
 ```bash
 # 3. 先解除 latch（順序重要，見上面的方框）
@@ -878,7 +905,8 @@ python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading
 ```
 
 跑著的 daemon 會在下一個 tick 自己重跑 adoption 並印
-`the manual safe-mode latch for the wedged startup adoption is no longer standing`；
+`no manual safe-mode latch is standing … re-attempting adoption`（同一行也會在「latch 當初
+根本沒寫進去」時出現，不是只有人為 release 才印）；
 daemon 已經停掉的話，這時候才重啟 `live --run-id … --loop`。
 
 解除不等於恢復交易——照 §13.6 rule 3 還要過下一輪對帳。最後用
@@ -985,7 +1013,7 @@ mode 切換都手動改 config（§22／§26）。
 | `validate` exit 5、replay unverifiable | store 帳本對不上；先查（別盲目重啟），必要時 `safe-mode --status`。 |
 | run 反覆進 manual safe mode | 查 `safe-mode --status` 的 open cases；換 coin／改 run 定義是硬錯誤，用新 run-id。 |
 | `validate` 印 `shortfall: stranded_decision_cycle = ...`（exit 4） | 有一列 `in_progress` 的 decision attempt 超過 12h 沒有變過狀態：不是 daemon 沒在跑，就是 §3.1 adoption 一直失敗（多半是開機時 store 被 export／validate 鎖住）。查 journald 的 `startup adoption` 與 `entering recoverable safe mode` 兩組訊息，確認誰握著 SQLite 鎖；鎖放開後那一輪 pump 就會把該 cycle 收成終態，shortfall 自己消失。**這條只是「還沒到 gate」，不是帳本問題**。 |
-| `validate` 印 `in_progress_decision_attempts = N (want <= 1)`（exit 5） | 決策狀態機壞了——同一個 run 不可能有兩列非終態的 attempt。daemon 的 §3.1 adoption 也過不去（`decision_adoption_wedged`，見 §6），照那一節處置：terminalize 多餘的列（**不要刪**）、重啟、再 `safe-mode --release`。 |
+| `validate` 印 `in_progress_decision_attempts = N (want <= 1)`（exit 5） | 決策狀態機壞了——同一個 run 不可能有兩列非終態的 attempt。daemon 的 §3.1 adoption 也過不去（`decision_adoption_wedged`，見 §6），照那一節處置：terminalize 多餘的列（**不要刪**，且要連 `scheduler_state` 一起寫）、**先** `safe-mode --release`、**再**重啟——latch 站著時重啟只會印判定 exit 4，不會進迴圈。 |
 | `answered with cloid ...` ／ `refusing to book another order's ack` ／ `carries coin/interval ... response does not match the request` ／ `userFills envelope carries user ...` | **身分回聲不符**：交易所（或中間的 proxy）拿別的單／別的商品／別的錢包的資料回答我們的請求，也可能是 client 指向了錯的錢包。全部 **fail-closed**——沒有任何一筆被記帳。訂單側走 §8.3 同 cloid 的 orderStatus 恢復（attempt 記 `failed`＝結果未知，不會換新 cloid 重送）；K 線／funding 側該 tick 的 market read 中止、下一根 4h 重來；fills 側留證據後 drain 繼續（見 §6 的 envelope 專節）。**缺少**回聲欄位和不符一樣擋——這是刻意的，venue 格式漂移應該由 testnet live-smoke 先撞到。 |
 
 更多規格細節見 [phase3-spec](./phase3-spec.md)。

@@ -384,10 +384,10 @@ def test_two_in_progress_attempts_are_an_integrity_failure(tmp_path):
 def test_stranded_attempts_rejects_a_count_that_disagrees_with_its_rows():
     """The guard has to be ENFORCED, not written down (issue #205).
 
-    Every verdict this type feeds is gated on ``count``, so a mismatched
-    instance is silently DROPPED rather than misreported — worse than a raise
-    here, because staying quiet about a broken store is the exact failure the
-    type was added to end. A frozen dataclass rather than a ``NamedTuple`` for
+    The three verdicts this type feeds are all gated on ``count``, so a
+    mismatched instance either vanishes from the report or renders its own hole
+    into it — ``count=1`` with no ``oldest_id`` prints
+    ``stranded_decision_cycle = None``. A frozen dataclass rather than a ``NamedTuple`` for
     the reason ``TrailingFailureStreaks`` spells out: ``NamedTuple`` builds
     through ``__new__`` and never calls ``__post_init__``, so the same guard
     written there would be decoration.

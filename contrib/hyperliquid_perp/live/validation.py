@@ -871,12 +871,12 @@ class _StrandedAttempts:
         # A frozen dataclass rather than a NamedTuple for the reason
         # ``TrailingFailureStreaks`` spells out in common/no_decision.py:
         # NamedTuple builds through __new__ and never calls __post_init__, so
-        # the same guard written there is decoration. Both verdicts this type
-        # feeds are gated on ``count``, so a mismatched instance would be
-        # silently DROPPED rather than misreported — which is worse here than a
-        # raise, because staying silent is the exact failure issue #205 exists
-        # to end. The query cannot build one; a hand-built one (a test, a
-        # future caller) is what this catches.
+        # the same guard written there is decoration. The three verdicts this
+        # type feeds are all gated on ``count``, so a mismatched instance
+        # either vanishes from the report or renders its own hole into it:
+        # ``count=1`` with no ``oldest_id`` prints the shortfall as
+        # "stranded_decision_cycle = None". The query cannot build one; a
+        # hand-built one (a test, a future caller) is what this catches.
         if self.count < 0:
             raise ValueError(f"_StrandedAttempts count must be >= 0, got {self.count}")
         if bool(self.count) != (self.oldest_id is not None):

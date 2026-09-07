@@ -435,8 +435,15 @@ def _run_live_loop(
                 # wedge can surface here too: the boot failure was the locked
                 # store, and the read that finally succeeded found a broken
                 # state machine. Same manual latch, same reasoning as the boot
-                # branch above — and the driver stops retrying, so this arrives
-                # at most once per process (issue #205).
+                # branch above.
+                #
+                # NOT once per process. pump re-attempts adoption whenever no
+                # manual latch stands — a human released one, or this very
+                # containment's write missed — so a still-broken row raises
+                # again and lands here once per such episode. That is the
+                # mechanism by which a missed latch write is eventually
+                # written, and it is safe to re-enter: ``enter`` is idempotent
+                # under repetition (issue #205).
                 _contain_wedged_adoption_as_manual_safe_mode(safe_mode, exc)
             except Exception:  # noqa: BLE001 — a tick error must not tear down the loop or strip SL/TP
                 # A single transient tick failure (DB lock, a reconciler read, an

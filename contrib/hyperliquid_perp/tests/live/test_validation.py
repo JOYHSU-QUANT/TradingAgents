@@ -187,6 +187,27 @@ def _healthy(tmp_path, *, mode: str = "testnet_live") -> Database:
     return db
 
 
+def _strand_cycle(db, *, at: datetime, run_id: str = "r") -> str:
+    """Leave one ``in_progress`` attempt behind, as a crashed process would.
+
+    Off the grid ``_add_cycles`` fills, so it cannot collide on the
+    ``(run_id, scheduled_at)`` UNIQUE with the healthy run's cycles.
+    """
+    attempt_id = f"stranded-{at.isoformat()}"
+    with db.transaction() as conn:
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id=attempt_id,
+            timestamp=at,
+            mode="live",
+            run_id=run_id,
+            scheduled_at=at,
+            attempt_count=1,
+            status="in_progress",
+        )
+    return attempt_id
+
+
 # -- happy paths -----------------------------------------------------------
 
 
@@ -275,6 +296,110 @@ def test_testnet_smoke_booleans_render_verdict_in_summary(tmp_path):
 
 
 # -- shortfalls (exit 4) ---------------------------------------------------
+
+
+def test_a_long_stranded_cycle_is_a_shortfall_the_streak_cannot_see(tmp_path):
+    """issue #205: a wedged run stops looking identical to a young one.
+
+    ``trailing_failure_streaks`` skips ``in_progress`` rows — rightly, an
+    unfinished cycle has not said anything yet — so a daemon whose §3.1 startup
+    adoption keeps failing writes NO terminal row and its no-decision streak
+    stays frozen at whatever it was before the wedge. A run stuck like that for
+    days reported the same numbers as a healthy one, while the real position
+    rode its resting SL/TP alone with nothing deciding anything.
+
+    Exit 4, not 5: the commonest cause (an operator's export or validate
+    holding the SQLite lock through boot) clears by itself, so this must not
+    become a permanent verdict. The causes that do NOT clear latch MANUAL safe
+    mode from the daemon, which is a failure on its own line.
+    """
+    db = _healthy(tmp_path)
+    stranded_at = _T0 - timedelta(days=1)
+    attempt_id = _strand_cycle(db, at=stranded_at)
+    with db:
+        report = validate_live_run(db, run_id="r", now=stranded_at + timedelta(hours=13))
+    assert not report.live_ready
+    assert report.failures == ()  # the store is sound; nothing here is permanent
+    line = next(s for s in report.shortfalls if "stranded_decision_cycle" in s)
+    assert attempt_id in line  # names the row, so the operator can go read it
+    assert "~13h" in line
+    # The streak really is blind to it — the point of the new line. Matched on
+    # the PREFIX: the new shortfall's own prose names no_decision_streak (to
+    # tell the operator why the other line is silent), so a substring test here
+    # would match itself and pass no matter what the streak did.
+    assert report.streaks.no_decision == 0
+    assert not any(s.startswith("no_decision_streak") for s in report.shortfalls)
+
+
+def test_a_cycle_in_flight_within_the_threshold_is_not_a_shortfall(tmp_path):
+    """The gate must not fire on a run that is simply mid-cycle.
+
+    An attempt is legitimately ``in_progress`` while its multi-minute LLM call
+    runs, and an overdue-but-healthy cycle can sit there for hours. The
+    threshold is three cycles at the 4h cadence — the same constant source as
+    the no-decision escalation — so the ordinary case is nowhere near it.
+    """
+    db = _healthy(tmp_path)
+    stranded_at = _T0 - timedelta(days=1)
+    _strand_cycle(db, at=stranded_at)
+    with db:
+        report = validate_live_run(db, run_id="r", now=stranded_at + timedelta(hours=11, minutes=59))
+    assert not any("stranded_decision_cycle" in s for s in report.shortfalls)
+    assert report.live_ready
+
+
+def test_two_in_progress_attempts_are_an_integrity_failure(tmp_path):
+    """issue #205: the shape that wedges the daemon is readable without one.
+
+    The scheduler only schedules a new cycle once the previous one is terminal,
+    so two live rows cannot both be legitimate — it is the state machine
+    broken, and ``repo.find_in_progress_attempt`` fails loud on exactly this
+    shape, which is what stops §3.1 adoption for good. A failure (exit 5), not
+    a shortfall: no later state makes the store consistent again.
+
+    Read here with a plain query rather than through that repository helper,
+    precisely because the helper RAISES on this shape — a read-only acceptance
+    validator has to report a broken store, not crash on it, and this run may
+    never have had a daemon get past boot.
+    """
+    db = _healthy(tmp_path)
+    _strand_cycle(db, at=_T0 - timedelta(days=1))
+    _strand_cycle(db, at=_T0 - timedelta(days=2))
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert not report.live_ready
+    line = next(s for s in report.failures if "in_progress_decision_attempts" in s)
+    assert "= 2" in line
+    # The stale-cycle shortfall is for the ONE-row case: two rows is a
+    # different, worse fact and must not be reported as merely "not yet".
+    assert not any("stranded_decision_cycle" in s for s in report.shortfalls)
+
+
+def test_a_stranded_cycle_with_an_unreadable_stamp_is_a_failure(tmp_path):
+    """The unanswerable case must be louder than the answerable one.
+
+    The shortfall above is computed from the row's age, so a ``timestamp`` that
+    will not parse leaves it with no question to answer. Withholding both
+    verdicts was the first version's mistake: nothing ELSE in this report reads
+    ``decision_attempts.timestamp`` (``trailing_failure_streaks`` walks only
+    terminal rows), so a store whose stranded row is also corrupt reported
+    ``live_ready`` — passing a gate that the merely stale store fails.
+    """
+    db = _healthy(tmp_path)
+    attempt_id = "stranded-corrupt"
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO decision_attempts (decision_attempt_id, timestamp, mode, run_id,"
+            " scheduled_at, attempt_count, status) VALUES (?, ?, 'live', 'r', ?, 1,"
+            " 'in_progress')",
+            (attempt_id, "not-a-time", (_T0 - timedelta(days=1)).isoformat()),
+        )
+    with db:
+        report = validate_live_run(db, run_id="r", now=_T0)
+    assert not report.live_ready
+    line = next(s for s in report.failures if attempt_id in s)
+    assert "cannot be read as an instant" in line
+    assert not any("stranded_decision_cycle" in s for s in report.shortfalls)
 
 
 def test_short_cycles_is_a_shortfall_not_failure(tmp_path):

@@ -44,6 +44,7 @@ from ..persistence.db import Database
 from .order_gate import RealOrderGate
 
 __all__ = [
+    "REASON_ADOPTION_WEDGED",
     "REASON_CONSECUTIVE_LOSS",
     "REASON_DAILY_LOSS",
     "REASON_EMERGENCY_CLOSE",
@@ -111,6 +112,19 @@ REASON_EMERGENCY_CLOSE = "emergency_close"  # §13.5 / §17.2: manual
 # PROTECTIVE_ORDER_ROLES are exempt from the manual-safe-mode gate line, so the
 # SL repair and the §17.2 emergency close both stay sendable (order_gate.py).
 REASON_IDENTITY_FAULT = "venue_identity_fault"  # §13.5 / §17: manual
+# §3.1 startup adoption cannot complete and retrying cannot change that (issue
+# #205): two in_progress attempts for one run, an unparseable scheduled_at, a
+# bug on the adoption path. MANUAL for the same reason REASON_IDENTITY_FAULT
+# is — the fault does not heal on its own, so a recoverable latch would
+# auto-release on the next clean reconciliation pass straight back into a wedge
+# that has not changed, and the run would flip between "safe" and "stuck" with
+# nothing durable saying which. While it stands, the driver starts no decision
+# cycle at all (the stranded attempt owns next_decision_at), so this latch is
+# what turns "a run that looks alive and will never decide again" into a state
+# `validate` fails by name and `safe-mode --status` exits 4 on. Protective
+# roles stay exempt from the manual gate line, so SL repair and the §17.2
+# emergency close remain sendable.
+REASON_ADOPTION_WEDGED = "decision_adoption_wedged"  # §3.1 / §13.5: manual
 
 # §13.4 live tick raised an unexpected error: RECOVERABLE. The loop keeps ticking
 # and re-attempts protection; a clean reconciliation pass auto-releases. Keeps a

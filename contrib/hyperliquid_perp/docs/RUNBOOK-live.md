@@ -447,11 +447,20 @@ paper 車道從 issue #181 起有同一條車道（兩車道現在共用同一�
 回 `None`、下一次 poll 只重試那筆寫入；差別是 paper 沒有 safe mode，同一 cycle 連續
 10 次 poll 都寫不進去就讓例外傳播（daemon 退出交監管），見 [RUNBOOK §3](./RUNBOOK.md)。
 
-> **鎖一直不放開時 `validate` 看不到。** 兩條分支在收斂前都不會寫出終端列，而
-> `no_decision_streak` 只數非 `in_progress` 的列，所以一個卡在這裡好幾小時的 run 在
-> `validate` 眼中和「run 還很年輕」沒有差別，期間倉位只靠既有 SL/TP 看管。判斷依據只有
-> journald：上面兩種訊息之一以 tick 頻率重複，並伴隨 `live tick raised — entering
-> recoverable safe mode and continuing`。看到就照 §5 人工介入，先確認誰握著 SQLite 鎖。
+**鎖一直不放開時 `validate` 讀得到（issue #205）。** 兩條分支在收斂前都不會寫出終端列，而
+`no_decision_streak` 只數非 `in_progress` 的列——所以那個數字對這個狀態永遠是瞎的。`validate`
+改看**那列 `in_progress` 本身的年齡**（`decision_attempts.timestamp`，也就是它最後一次變更狀態
+的時間）：超過 12h（＝`NO_DECISION_STREAK_THRESHOLD × CYCLE_INTERVAL`，與 no-decision 升級同一個
+常數來源）就印一行 `shortfall: stranded_decision_cycle = <attempt_id> …` 並給 exit 4。那一行帶
+attempt id，可以直接拿去查 `decision_attempts`。這條**只是 shortfall 不是 failure**：最常見的成因
+（開機當下被 export／validate 鎖住）自己會好，收斂後那列變終態，下一次 `validate` 就不再印。
+journald 佐證仍是上面兩種訊息之一以 tick 頻率重複，並伴隨 `live tick raised — entering
+recoverable safe mode and continuing`。看到就照 §5 人工介入，先確認誰握著 SQLite 鎖。
+
+> **不會自癒的那一類走另一條路，見 §6 的 `decision_adoption_wedged`。** 上面兩條分支的前提是
+> 「等鎖放開就會好」。adoption 也可能因為**這列 row 本身**而失敗（同一個 run 有兩列
+> `in_progress`、`scheduled_at` parse 不出來），那種重試幾次都是同一個答案——driver 判一次就
+> 停止重試、升 manual safe mode，不再以 tick 頻率重複那兩條訊息。
 另外：**parse 失敗的回覆一開始就不會被存**。AI 回答 parse 不出決策（`is_valid=False`）時
 §3.1 store 直接跳過——那不是可以 resume 的決策，而它被保留下來的文字不保證重 parse 得到
 同一個判決（非 str 的回答是以 `repr` 保存，重啟後它就是一個 str，可能被重新萃取出這一輪
@@ -796,6 +805,54 @@ cloid 讀得懂不算——串是按 cloid 記的），之後若再度連續
 跨版沿用同一個 `run_id` resume 的 run，同一個未癒事實會再多一列新 key 的列（去重是精確比對，
 舊列擋不住新 key）；舊列若還沒 stamp，就是兩列都要 stamp。沒有證據遺失。）
 
+### `decision_adoption_wedged`（manual）
+
+**意思**：§3.1 開機 adoption 失敗，而且**重試不會改變結果**（issue #205）。driver 只把
+`sqlite3.OperationalError`（store 被鎖）當可自癒、每個 tick 重試；其餘一律判定為「這列 row 本身
+壞了」——最典型的是 `find_in_progress_attempt` 對同一個 run 讀到**兩列 `in_progress`** 而
+`raise ValueError`（repository 刻意的 fail-loud，代表決策狀態機壞了），其次是 `scheduled_at`
+parse 不出來。判定一次之後 driver 就**不再重試 adoption、也不會開新 cycle**（那個 stranded
+attempt 還握著 `next_decision_at`，硬開新 cycle 會每個 tick 撞主鍵），並升 manual safe mode。
+
+**看到什麼**：
+
+- journald 一行 ERROR：`decision driver startup adoption cannot complete and retrying will not
+  change that — latching MANUAL safe mode and continuing to watch the position`，帶完整
+  traceback。**只出現一次**（不是每個 tick 重複），這是它與上面那兩條可自癒分支最好認的差別。
+- `safe-mode --status` → exit 4，reason `decision_adoption_wedged`，`detail` 寫著原因與
+  `type(exc).__name__`。
+- `validate` → exit 5，failure 行 `the run is in MANUAL safe mode (decision_adoption_wedged) …`；
+  兩列 `in_progress` 的情形另外還有一條 `in_progress_decision_attempts = N (want <= 1)`——那條
+  **不需要 daemon 跑過**就讀得到，一個從沒開機成功的 store 也會印。
+
+**daemon 不會退出**，這是刻意的：這種故障是決定性的，退出等於每次監管重啟都撞同一個例外、
+燒完 systemd 的 `StartLimitBurst` 之後服務永久停掉，屆時真倉位只剩 SL/TP 掛著、**沒有任何
+process** 在對帳、補保護單或 refresh kill switch。留著迴圈至少這些都還在跑；manual latch 負責
+把「不會再有新決策」這件事變成擋單、擋 verdict 的持久狀態（§13.1／§13.6，SL/TP 與 §17.2 緊急
+平倉照 `PROTECTIVE_ORDER_ROLES` 豁免，仍送得出去）。
+
+**處置**：
+
+```bash
+# 1. 先看是哪一種
+sqlite3 live_trading.db \
+  "SELECT decision_attempt_id, scheduled_at, timestamp, pending_raw_response IS NOT NULL
+     FROM decision_attempts WHERE run_id='live-BTC' AND status='in_progress'
+     ORDER BY scheduled_at;"
+```
+
+兩列以上：判斷哪一列才是真正的當前 cycle（`scheduled_at` 最新的那列），把其餘的
+terminalize 成 `api_failed` 並寫明 `error_message`；**不要刪列**，稽核軌跡與 §21.4 計數都靠它。
+只有一列而 `scheduled_at` 讀不出來：那列是壞掉的，同樣 terminalize。改完重啟 daemon，讓它重跑
+一次 adoption，然後才 §13.6 解除：
+
+```bash
+python -m contrib.hyperliquid_perp safe-mode --run-id live-BTC --db live_trading.db \
+  --release --reason "已人工修正 decision_attempts 的 in_progress 列並確認 adoption 通過"
+```
+
+解除不等於恢復交易——照 §13.6 rule 3 還要過下一輪對帳。
+
 ---
 
 ## 7. mainnet_tiny（§21）——真錢，最嚴 gate
@@ -896,6 +953,8 @@ mode 切換都手動改 config（§22／§26）。
 | `live.allow_real_orders is false` | live-smoke／--loop 要真下單；設 `allow_real_orders: true` 並備妥 agent key，或 live-smoke 用 `--dry-run`。 |
 | `validate` exit 5、replay unverifiable | store 帳本對不上；先查（別盲目重啟），必要時 `safe-mode --status`。 |
 | run 反覆進 manual safe mode | 查 `safe-mode --status` 的 open cases；換 coin／改 run 定義是硬錯誤，用新 run-id。 |
+| `validate` 印 `shortfall: stranded_decision_cycle = ...`（exit 4） | 有一列 `in_progress` 的 decision attempt 超過 12h 沒有變過狀態：不是 daemon 沒在跑，就是 §3.1 adoption 一直失敗（多半是開機時 store 被 export／validate 鎖住）。查 journald 的 `startup adoption` 與 `entering recoverable safe mode` 兩組訊息，確認誰握著 SQLite 鎖；鎖放開後那一輪 pump 就會把該 cycle 收成終態，shortfall 自己消失。**這條只是「還沒到 gate」，不是帳本問題**。 |
+| `validate` 印 `in_progress_decision_attempts = N (want <= 1)`（exit 5） | 決策狀態機壞了——同一個 run 不可能有兩列非終態的 attempt。daemon 的 §3.1 adoption 也過不去（`decision_adoption_wedged`，見 §6），照那一節處置：terminalize 多餘的列（**不要刪**）、重啟、再 `safe-mode --release`。 |
 | `answered with cloid ...` ／ `refusing to book another order's ack` ／ `carries coin/interval ... response does not match the request` ／ `userFills envelope carries user ...` | **身分回聲不符**：交易所（或中間的 proxy）拿別的單／別的商品／別的錢包的資料回答我們的請求，也可能是 client 指向了錯的錢包。全部 **fail-closed**——沒有任何一筆被記帳。訂單側走 §8.3 同 cloid 的 orderStatus 恢復（attempt 記 `failed`＝結果未知，不會換新 cloid 重送）；K 線／funding 側該 tick 的 market read 中止、下一根 4h 重來；fills 側留證據後 drain 繼續（見 §6 的 envelope 專節）。**缺少**回聲欄位和不符一樣擋——這是刻意的，venue 格式漂移應該由 testnet live-smoke 先撞到。 |
 
 更多規格細節見 [phase3-spec](./phase3-spec.md)。

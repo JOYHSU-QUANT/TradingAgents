@@ -1185,7 +1185,21 @@ consecutive loss cap 觸發（§10.4）
 account equity / margin abnormal drop
 authentication / permission error
 venue identity fault（連續多次 orderStatus 答非所問，見下）
+decision adoption wedged（§3.1 開機 adoption 以不可自癒的方式失敗，見下）
 ```
+
+**decision adoption wedged**（issue #205，2026-09-07 補）：§3.1 開機 adoption 失敗時，
+driver 只把 `sqlite3.OperationalError`（store 被鎖，會自癒）當可重試——那是 issue #180
+的容納所針對的故障；其餘一律判為「這列 row 本身壞了」（`find_in_progress_attempt` 對同一
+run 讀到兩列 `in_progress` 而 `raise ValueError`、`scheduled_at` parse 不出來），因為
+`_adopt` 每個 tick 重讀的是同一列，答案不會變。判定之後 driver 停止重試 adoption、也不開新
+cycle（stranded attempt 還握著 `next_decision_at`），並升 manual safe mode。列為 manual 的
+理由與上面兩條同：recoverable 會在第一次乾淨對帳自動解除，而那個 wedge 一點也沒變。
+**daemon 不退出**：這種例外是決定性的，退出等於每次監管重啟都撞它、燒完 `StartLimitBurst`
+之後真倉位只剩 SL/TP 掛著而沒有任何 process 在對帳、補保護單或 refresh kill switch。
+`validate` 另有兩條不必 daemon 跑過就讀得到的判準：一列 `in_progress` 超過
+`NO_DECISION_STREAK_THRESHOLD × CYCLE_INTERVAL` 記 shortfall（exit 4，鎖放開後自己消失），
+兩列以上記 failure（exit 5，狀態機壞了）。處置見 RUNBOOK-live `decision_adoption_wedged` 節。
 
 **venue identity fault**（issue #46，2026-08-21 補；issue #80，2026-08-26 擴及全部消費者）：
 交易所對**同一個 cloid** 連續 `venue_identity.UNREADABLE_PROBE_LATCH_THRESHOLD` 次回出讀不出

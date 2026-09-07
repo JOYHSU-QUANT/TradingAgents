@@ -66,6 +66,39 @@ def _contain_as_recoverable_safe_mode(safe_mode, *, log_message: str, detail: st
         logger.exception("failed to enter safe mode after containment (%s)", detail)
 
 
+def _contain_wedged_adoption_as_manual_safe_mode(safe_mode, exc) -> None:
+    """Contain a §3.1 adoption wedge, latching MANUAL instead of recoverable.
+
+    The severity is the whole point (issue #205). ``AdoptionWedgedError`` says
+    the adoption raise will repeat identically on every re-read, so the driver
+    has stopped retrying and will start no decision cycle again: the run is
+    alive, watched and reconciling, but permanently unable to decide. A
+    RECOVERABLE latch auto-releases on the next clean reconciliation pass
+    (§13.4) — which this fault does not affect — so the run would keep flipping
+    between "safe" and "stuck" while nothing durable recorded either. A MANUAL
+    one survives restarts, blocks risk-adding orders until a human releases it
+    (§13.6), and is the trace ``validate`` and ``safe-mode --status`` report.
+
+    Contained, never propagated, for the same reason the recoverable idiom is:
+    ending the loop runs the caller's §18.2 teardown, and the supervisor's
+    restart meets the same deterministic raise until ``StartLimitBurst`` gives
+    up — leaving the position with its resting SL/TP and no process refreshing
+    the kill switch or repairing protection at all (issue #180).
+    """
+    from ..live.safe_mode import REASON_ADOPTION_WEDGED, SAFE_MODE_MANUAL
+
+    logger.exception(
+        "decision driver startup adoption cannot complete and retrying will not "
+        "change that — latching MANUAL safe mode and continuing to watch the "
+        "position; no decision cycle will start until a human clears the run's "
+        "in-progress attempts and releases the latch (`safe-mode --release`)"
+    )
+    try:
+        safe_mode.enter(SAFE_MODE_MANUAL, REASON_ADOPTION_WEDGED, detail=str(exc))
+    except Exception:  # noqa: BLE001 — a safe-mode write miss must not itself end the loop
+        logger.exception("failed to latch manual safe mode after a wedged startup adoption")
+
+
 def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
     """§18.2 lease heartbeat, contained like a tick error.
 
@@ -172,7 +205,7 @@ def _run_live_loop(
     """
 
     from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
-    from ..live.decision import LiveDecisionDriver, LiveDecisionWorker
+    from ..live.decision import AdoptionWedgedError, LiveDecisionDriver, LiveDecisionWorker
     from ..live.engine import LiveExecutionEngine
     from ..live.kill_switch import refresh_across_blocking_work
     from ..live.loss_guards import LossGuards
@@ -304,6 +337,14 @@ def _run_live_loop(
     # attempt id collides every tick and the driver never decides again.
     try:
         adopted = driver.resume_startup()
+    except AdoptionWedgedError as exc:
+        # The SAME containment (the loop must watch the position either way),
+        # at the severity the fault deserves: this one cannot heal by being
+        # retried, so a recoverable latch would auto-release into an unchanged
+        # wedge. The driver has already latched its own retry off — pump idles
+        # from here — and the stranded in_progress row is what `validate`
+        # reports (issue #205).
+        _contain_wedged_adoption_as_manual_safe_mode(safe_mode, exc)
     except Exception:  # noqa: BLE001 — adoption must not exit before the loop watches the position
         # Contained like a tick error rather than propagating (issue #180
         # review). The motivating failure is the fail-closed record's OWN
@@ -368,6 +409,14 @@ def _run_live_loop(
                     )
                 if cycle is not None:
                     logger.info("live decision cycle: %s", cycle)
+            except AdoptionWedgedError as exc:
+                # pump retries adoption when the BOOT call was contained, so a
+                # wedge can surface here too: the boot failure was the locked
+                # store, and the read that finally succeeded found a broken
+                # state machine. Same manual latch, same reasoning as the boot
+                # branch above — and the driver stops retrying, so this arrives
+                # at most once per process (issue #205).
+                _contain_wedged_adoption_as_manual_safe_mode(safe_mode, exc)
             except Exception:  # noqa: BLE001 — a tick error must not tear down the loop or strip SL/TP
                 # A single transient tick failure (DB lock, a reconciler read, an
                 # unexpected raise) must not propagate out to the caller's §18.2

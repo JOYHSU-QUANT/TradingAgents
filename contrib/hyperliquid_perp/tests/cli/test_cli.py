@@ -5961,71 +5961,113 @@ def test_a_venue_identity_fault_latched_at_shutdown_persists_manual_for_the_next
         db.close()
 
 
-def test_a_raising_startup_adoption_is_contained_instead_of_exiting():
-    """issue #180 review: ``resume_startup`` runs BEFORE the loop, so its own
-    fail-closed write meeting a locked store (an operator's export/validate)
-    used to exit the daemon — and the supervisor's restart can meet the same
-    lock, with the real position and its resting SL/TP unwatched in between
-    while systemd's StartLimitBurst counts down. The call must sit in a try
-    whose handler routes to the loop's one containment idiom, so the loop
-    starts anyway and the driver's armed pending_fail lane retries only that
-    write on each pump.
+def test_a_locked_store_at_startup_adoption_still_reaches_the_loop(tmp_path, monkeypatch):
+    """issue #180: a raising ``resume_startup`` must not stop the loop starting.
 
-    Structural, on the AST: the loop BODY needs a whole live session to drive
-    (see ``_drive_live_loop_construction``), and the adoption call is past the
-    point that drive stops at. Same idiom as the blocking-seam pin in
-    live/test_kill_switch.py — parsed, never string-searched.
+    ``resume_startup`` runs BEFORE the loop, so its own fail-closed write
+    meeting a locked store (an operator's export/validate) used to exit the
+    daemon — and the supervisor's restart can meet the same lock, with the real
+    position and its resting SL/TP unwatched in between while systemd's
+    StartLimitBurst counts down.
+
+    Behavioural, not structural (issue #206). The AST pin this replaces proved
+    the call sat in a broad try that reached the containment idiom, and was
+    blind to the mutation that matters most: a ``return`` after that call
+    passes every one of those assertions and reinstates exactly the #180
+    failure — contained, safe mode entered, and no loop. So this drives the
+    real function until the loop BODY runs, and asserts both halves: the run is
+    in safe mode (containment happened) AND the engine's first tick was reached
+    (the loop started anyway).
     """
-    import ast
-    import inspect
-    import textwrap
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_LIVE_TICK_ERROR, SafeModeManager
 
-    from contrib.hyperliquid_perp import cli as cli_mod
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(cli_mod._run_live_loop)))
-
-    def _calls(node):
-        return [n for n in ast.walk(node) if isinstance(n, ast.Call)]
-
-    adopting = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Try)
-        and any(
-            isinstance(call.func, ast.Attribute) and call.func.attr == "resume_startup"
-            for stmt in node.body
-            for call in _calls(stmt)
-        )
-    ]
-    assert len(adopting) == 1, (
-        "driver.resume_startup() is not inside exactly one try — a raise there "
-        "ends the process before the loop ever watches the position"
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        adoption_raises=sqlite3.OperationalError("database is locked"),
     )
-    handlers = adopting[0].handlers
-    assert handlers, "the try around resume_startup catches nothing"
-    for handler in handlers:
-        # Broad on purpose: the motivating failure is a locked store, but ANY
-        # raise here has the same consequence (no loop, no watched position).
-        assert isinstance(handler.type, ast.Name) and handler.type.id == "Exception", (
-            "the startup adoption guard is narrower than Exception — the raises "
-            "it misses still exit before the loop starts"
+    assert built.ticks == 1, "the loop body never ran — the daemon stopped at adoption"
+    db = Database(built.db_path)
+    try:
+        state = SafeModeManager(db=db, run_id="r1", gate=None).current()
+        assert state is not None, "a raising startup adoption paused no new risk"
+        # A LOCKED store heals by itself, so the latch must be the recoverable
+        # one: the next clean reconciliation releases it with no human.
+        assert not state.is_manual
+        assert state.reason == REASON_LIVE_TICK_ERROR
+    finally:
+        db.close()
+
+
+def test_an_unhealable_startup_adoption_latches_manual_safe_mode(tmp_path, monkeypatch):
+    """issue #205: the wedge lane latches MANUAL and keeps watching the position.
+
+    ``find_in_progress_attempt`` raises ``ValueError`` when one run has two
+    ``in_progress`` attempts — the repository's deliberate fail-loud, meaning
+    the decision state machine broke. ``_adopt`` re-reads that same row every
+    tick, so the raise repeats identically forever: containing it as a
+    RECOVERABLE safe mode (the #180 lane) left a run that looked alive, could
+    never decide again, and auto-released its own latch on the next clean
+    reconciliation pass.
+
+    Both halves are asserted here too: MANUAL (no clean pass releases it, and
+    §13.1 blocks risk-adding orders until a human does) AND the loop body still
+    running, because exiting would hand the supervisor a restart that meets the
+    same deterministic raise until StartLimitBurst gives up — leaving the
+    position with resting SL/TP and nothing refreshing the kill switch.
+    """
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_ADOPTION_WEDGED, SafeModeManager
+
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        adoption_raises=ValueError("run 'r1' has 2 in-progress attempts (a, b)"),
+    )
+    assert built.ticks == 1, "the loop body never ran — the position stopped being watched"
+    db = Database(built.db_path)
+    try:
+        state = SafeModeManager(db=db, run_id="r1", gate=None).current()
+        assert state is not None and state.is_manual, (
+            "an adoption failure that cannot heal left a latch a clean reconcile releases"
         )
-        assert not [n for n in ast.walk(handler) if isinstance(n, ast.Raise)], (
-            "the startup adoption guard re-raises — containment means the loop runs"
-        )
-        contained = [call.func.id for call in _calls(handler) if isinstance(call.func, ast.Name)]
-        assert "_contain_as_recoverable_safe_mode" in contained, (
-            "a raising startup adoption does not reach the loop's containment "
-            "idiom, so new risk is not paused while the write keeps failing"
-        )
+        assert state.reason == REASON_ADOPTION_WEDGED
+    finally:
+        db.close()
 
 
 class _StopBeforeTheLoop(Exception):
     """Sentinel: every kwarg the pins below assert is already decided."""
 
 
-def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse):
+class _StopTheLoop(BaseException):
+    """Sentinel raised from the first ``engine.tick()`` to end a loop-body drive.
+
+    A ``BaseException``: the loop's tick guard catches ``Exception`` and keeps
+    ticking (that is the behaviour under test elsewhere), so an ordinary
+    exception here would spin forever instead of ending the drive — and would
+    enter safe mode itself, contaminating the very state the adoption tests
+    read. ``KeyboardInterrupt`` is a BaseException for the same reason, which
+    is why the loop's Ctrl-C handler sits outside that guard; this sentinel is
+    NOT that class, so it passes straight out rather than running the §18.2
+    shutdown path on its way.
+    """
+
+
+def _drive_live_loop_construction(
+    tmp_path, monkeypatch, *, fetch_clearinghouse, adoption_raises=None
+):
     """Build ``_run_live_loop``'s components and stop; return what it built with.
+
+    With ``adoption_raises`` the drive goes FURTHER, into the loop body: the
+    provider stops being the stopping point and becomes a stub, the driver's
+    ``_adopt`` raises the given exception (so the real ``resume_startup``
+    classification and the real containment both run), the run lease is seeded
+    for this pid so the loop's heartbeat does not fatally disown it, and the
+    first ``engine.tick()`` raises :class:`_StopTheLoop` to end the drive.
+    ``built.ticks`` then counts the tick calls the loop actually reached and
+    ``built.db_path`` locates the store for the durable assertions.
 
     The loop BODY needs a whole live session — a real §19.1 pass the offline
     doubles cannot produce — which is why its sibling invariant in
@@ -6074,7 +6116,13 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
             self.ticks += 1
 
     built = SimpleNamespace(
-        protection=None, guards=None, provider=None, kill_switch=_FakeSwitch(), identity=None
+        protection=None,
+        guards=None,
+        provider=None,
+        kill_switch=_FakeSwitch(),
+        identity=None,
+        ticks=0,
+        db_path=None,
     )
 
     def _recorder(module, name, field):
@@ -6097,7 +6145,10 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
             # constructing through the real class.
             inspect.signature(real_provider).bind(*args, **kwargs)
             built.provider = kwargs
-            raise _StopBeforeTheLoop
+            if adoption_raises is None:
+                raise _StopBeforeTheLoop
+            # Loop-body drive: stand in for the provider instead of stopping.
+            # Nothing calls it — the tick sentinel fires before the first pump.
 
     monkeypatch.setattr(md_mod, "HyperliquidMarketData", _FakeMarket)
     monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _RecordingProvider)
@@ -6105,10 +6156,33 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
     _recorder(lg_mod, "LossGuards", "guards")
 
     dbp = tmp_path / "live.db"
+    built.db_path = dbp
     db = Database(dbp)
     accounting.initialize_run(
         db, run_id="r1", mode="live", initial_balance_usdc=D(200), schema_version=SCHEMA_VERSION
     )
+    if adoption_raises is not None:
+        from contrib.hyperliquid_perp.live.decision import LiveDecisionDriver
+        from contrib.hyperliquid_perp.live.engine import LiveExecutionEngine
+
+        def _raising_adopt(self):
+            raise adoption_raises
+
+        def _stop(self, *args, **kwargs):
+            built.ticks += 1
+            raise _StopTheLoop
+
+        # _adopt, not resume_startup: the classification that decides
+        # recoverable-vs-manual containment lives IN resume_startup, so
+        # patching that away would leave the tests asserting the CLI's
+        # dispatch over a verdict the test made up.
+        monkeypatch.setattr(LiveDecisionDriver, "_adopt", _raising_adopt)
+        monkeypatch.setattr(LiveExecutionEngine, "tick", _stop)
+        # The loop heartbeats BEFORE its first tick and treats a lost lease as
+        # fatal, so an unseeded lock_pid would end the drive for an unrelated
+        # reason and read as "the loop body never ran".
+        with db.transaction() as conn:
+            repo.upsert_scheduler_state(conn, "r1", lock_pid=os.getpid())
     live_cfg = LiveConfig.from_dict(
         {
             "mode": "testnet_live",
@@ -6139,8 +6213,9 @@ def _drive_live_loop_construction(tmp_path, monkeypatch, *, fetch_clearinghouse)
         run_id="r1",
         symbol="BTC",
     )
+    stop_at = _StopBeforeTheLoop if adoption_raises is None else _StopTheLoop
     try:
-        with pytest.raises(_StopBeforeTheLoop):
+        with pytest.raises(stop_at):
             cli_mod._run_live_loop(
                 cfgs=(RiskConfig(leverage=D(1), max_target_margin_pct=60), DecisionConfig()),
                 db=db,

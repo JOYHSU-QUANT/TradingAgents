@@ -10,9 +10,22 @@ from typing import Any
 from ...common.enum_guard import check_enum
 from ..models import DECIMAL_CONTEXT
 from ._base import _dec_or_none, _encode, _insert, _iso_utc
-from ._vocab import _FUNDING_SOURCES, _FUNDING_STATUSES, _MODES
+from ._vocab import _FUNDING_SOURCES, _FUNDING_STATUSES, _MODES, FUNDING_BACKFILL_LANES
 
-__all__ = ["get_funding_event", "insert_funding_event", "iter_funding_events", "set_funding_status"]
+__all__ = [
+    "get_funding_event",
+    "insert_funding_event",
+    "iter_funding_events",
+    "set_funding_backfill_outcome",
+    "set_funding_status",
+]
+
+# The longest ``last_backfill_error`` the store keeps. The column exists so an
+# operator can ask WHICH failure, not to archive tracebacks — the full message
+# and its traceback are already in the per-event ERROR line the backfill logs.
+# A bound also keeps one pathological exception (the repr of a huge payload)
+# from growing the store without limit, once per event per pass.
+_MAX_BACKFILL_ERROR = 500
 
 
 def _check_funding_identities(
@@ -270,6 +283,81 @@ def set_funding_status(
     conn.execute(
         f"UPDATE funding_events SET {', '.join(sets)} WHERE funding_event_id = ?",
         params,
+    )
+
+
+def set_funding_backfill_outcome(
+    conn: sqlite3.Connection,
+    funding_event_id: str,
+    *,
+    lane: str | None,
+    error: str | None = None,
+    at: datetime | None = None,
+) -> None:
+    """Record (``lane``) or clear (``lane=None``) why a PENDING event did not post.
+
+    The schema-v12 breadcrumb behind issue #208. ``backfill_pending_funding``
+    contains every per-event failure so the pass can never abort, and names the
+    lane in an ERROR line — but that line is in the daemon's journal, and
+    ``validate`` is a separate read-only process that can only re-derive from
+    the row what the row itself shows. That tells apart exactly one lane (a
+    timestamp it cannot parse); an event stuck by a reader defect looks
+    identical to one whose rate is not published yet. This writes the missing
+    fact where the read-only reader can see it.
+
+    Two rules make a set breadcrumb mean "the LAST attempt failed" rather than
+    "an attempt failed once", and they are deliberately NOT symmetric about the
+    row's status:
+
+    * A SET is scoped to ``status = 'pending'``. A posted event is settled;
+      stamping one would leave a failure marker on a row that succeeded. A row
+      that posted between the caller's read and this write therefore matches
+      nothing, which is the correct outcome, not an error — so no row matching
+      is deliberately silent.
+    * A CLEAR is NOT scoped, because the row it most needs to reach is the one
+      that just stopped being pending. ``set_funding_status`` writes the
+      settlement columns and leaves these three alone, so an event that failed
+      one pass and posted on the next would otherwise carry its old failure
+      verdict for the rest of the store's life — the exact "a failure marker on
+      a row that succeeded" the scoping above exists to prevent, arrived at
+      from the other direction. Nothing reads a posted row's breadcrumb today
+      (``validate`` and the RUNBOOK's query both filter on pending), so this is
+      about the store not holding a false statement, not about a live misread.
+
+    All three columns move together, in BOTH directions — a set needs its
+    message and its stamp, a clear needs neither. Half of either is the shape
+    this guard exists to keep out of the store: a stamp with no verdict beside
+    it, or a verdict the acceptance report says carries a message and does not.
+
+    ``error`` is flattened to one line and truncated (:data:`_MAX_BACKFILL_ERROR`):
+    this column is read back into an acceptance-report line, and the untruncated
+    message with its traceback is already in the log.
+    """
+    if lane is None:
+        if error is not None or at is not None:
+            # Clearing means "no failed attempt on record". Half-clearing would
+            # leave a timestamp or a message with no verdict beside it — a row
+            # that reads as broken to anyone querying the column.
+            raise ValueError("set_funding_backfill_outcome: lane=None clears; pass no error/at")
+        conn.execute(
+            "UPDATE funding_events SET last_backfill_status = NULL,"
+            " last_backfill_error = NULL, last_backfill_at = NULL"
+            " WHERE funding_event_id = ?",
+            (funding_event_id,),
+        )
+        return
+    check_enum(lane, FUNDING_BACKFILL_LANES, name="lane")
+    if error is None or at is None:
+        # The other half of the guard above. A verdict with no message is one
+        # the acceptance report promises a message for and cannot deliver; a
+        # verdict with no stamp cannot be told from an old one.
+        raise ValueError("set_funding_backfill_outcome: a lane requires its error and at")
+    detail = " ".join(error.split())[:_MAX_BACKFILL_ERROR]
+    conn.execute(
+        "UPDATE funding_events SET last_backfill_status = ?,"
+        " last_backfill_error = ?, last_backfill_at = ?"
+        " WHERE funding_event_id = ? AND status = 'pending'",
+        (lane, detail, _iso_utc(at), funding_event_id),
     )
 
 

@@ -611,6 +611,126 @@ def test_stale_pending_funding_warns_not_gates(tmp_path):
     db.close()
 
 
+def _pending_funding_event(db, *, symbol="BTC", at=_T0):
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol=symbol,
+        funding_timestamp=at,
+        position_size=D("0.001"),
+        funding_rate=None,  # no rate yet: stored as a pending event
+        mark_price=_MARK,
+        recorded_at=at,
+    )
+
+
+def _stamp_backfill_status(db, lane, *, symbol="BTC", at=_T0):
+    """Seed one row's breadcrumb. ``at=None`` leaves the stamp NULL on purpose."""
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE funding_events SET last_backfill_status = ?, last_backfill_error = ?,"
+            " last_backfill_at = ? WHERE run_id = 'r' AND symbol = ?",
+            (
+                lane,
+                "rate_at() takes 2 positional arguments but 3 were given",
+                None if at is None else at.isoformat(),
+                symbol,
+            ),
+        )
+
+
+def test_a_defect_stuck_pending_funding_event_is_not_reported_as_a_stale_one(tmp_path):
+    """Issue #208: the report must be able to say a DEFECT is eating funding P&L.
+
+    ``backfill_pending_funding`` contains six per-event failures so the pass can
+    never abort, and names the lane — in the daemon's journal. This reader is a
+    different process and can re-derive exactly one of the six from the row (a
+    timestamp it cannot parse). Everything else looked identical to an event
+    whose rate is not published yet, so a run with a reader defect eating its
+    funding produced a CLEAN report for six hours, and after that the generic
+    staleness line, whose usual cause is the opposite verdict — a settled hour
+    whose rate will never resolve, a delisted coin. The lane word is what makes
+    the two different sentences.
+    """
+    from contrib.hyperliquid_perp.paper.reconcile import STALE_PENDING_FUNDING
+
+    db = _run_one_cycle_with_fill(tmp_path)
+    _pending_funding_event(db)
+    _stamp_backfill_status(db, "reader_failed")
+
+    # Young: the staleness line cannot fire at all, and this one still does.
+    report = validate_run(db, run_id="r", now=_T0 + timedelta(hours=1))
+    stuck = [w for w in report.warnings if "failed their last backfill attempt" in w]
+    assert len(stuck) == 1
+    assert "reader_failed: 1" in stuck[0]
+    assert "defect" in stuck[0]
+    # The stamp of the OLDEST recorded attempt, so the reader can see how fresh
+    # the verdict is. Without it the line asserts the present tense over a store
+    # whose daemon may have been stopped for weeks. Driven with three stuck
+    # rows, not one: with a single row "oldest" is indistinguishable from
+    # "newest" or "whichever row came last", and a row whose stamp is NULL —
+    # reachable on a hand-edited store — must not take the report down or win
+    # the comparison.
+    older = _T0 - timedelta(hours=2)
+    _pending_funding_event(db, symbol="ETH", at=older)
+    _stamp_backfill_status(db, "reader_failed", symbol="ETH", at=older)
+    _pending_funding_event(db, symbol="SOL", at=_T0 + timedelta(hours=1))
+    _stamp_backfill_status(db, "unclaimed", symbol="SOL", at=None)
+
+    report = validate_run(db, run_id="r", now=_T0 + timedelta(hours=2))
+    stuck = [w for w in report.warnings if "failed their last backfill attempt" in w]
+    assert len(stuck) == 1
+    assert "reader_failed: 2" in stuck[0] and "unclaimed: 1" in stuck[0]
+    assert f"oldest attempt {older.isoformat()}" in stuck[0]
+    assert _T0.isoformat() not in stuck[0]
+    assert report.failures == ()  # surface, never gate — the exposure_pct precedent
+
+    # Old enough to be stale, and STILL not reported as stale: one row, one
+    # verdict. Reported as both, the two counts would describe the same event
+    # under two names and send the operator to wait rather than to the code.
+    aged = validate_run(db, run_id="r", now=_T0 + STALE_PENDING_FUNDING + timedelta(hours=1))
+    assert any("failed their last backfill attempt" in w for w in aged.warnings)
+    assert not any("still pending more than" in w for w in aged.warnings)
+    db.close()
+
+
+def test_an_unparseable_timestamp_outranks_a_recorded_backfill_failure(tmp_path):
+    # The other end of the same priority. The corrupt lane writes its word AND
+    # leaves a timestamp this reader cannot parse, so both verdicts are true of
+    # the row — and counting it twice would make the warning counts stop summing
+    # to the pending events they describe. The re-derived verdict wins because
+    # it is the one this reader can prove from the row in front of it.
+    db = _run_one_cycle_with_fill(tmp_path)
+    _pending_funding_event(db)
+    _stamp_backfill_status(db, "corrupt_row")
+    with db.transaction() as conn:
+        conn.execute("UPDATE funding_events SET funding_timestamp = 'junk' WHERE run_id = 'r'")
+
+    report = validate_run(db, run_id="r", now=_T0 + timedelta(hours=1))
+
+    assert len([w for w in report.warnings if "unparseable" in w]) == 1
+    assert not any("failed their last backfill attempt" in w for w in report.warnings)
+    db.close()
+
+
+def test_a_stored_lane_word_this_build_does_not_know_is_counted_not_echoed(tmp_path):
+    # A hand-edited store, or one a later build wrote. It is still a recorded
+    # failure and must not vanish from the report — but the acceptance report
+    # prints its own vocabulary, not whatever a cell happens to hold.
+    db = _run_one_cycle_with_fill(tmp_path)
+    _pending_funding_event(db)
+    _stamp_backfill_status(db, "posted_by_hand_ask_alice")
+
+    report = validate_run(db, run_id="r", now=_T0 + timedelta(hours=1))
+
+    stuck = [w for w in report.warnings if "failed their last backfill attempt" in w]
+    assert len(stuck) == 1
+    assert "unrecognised: 1" in stuck[0]
+    assert "alice" not in stuck[0]
+    db.close()
+
+
 def test_config_drift_breadcrumb_surfaces_as_warning(tmp_path):
     # Same-concept sibling of the pending-funding warning: the drift breadcrumb
     # is store-persisted but was visible only in the dead process's log; the

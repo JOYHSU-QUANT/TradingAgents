@@ -28,8 +28,10 @@ print as ``n/a`` (never fabricated); everything computed before it survives.
 
 Non-gating ``warnings`` also surface store-persisted completeness signals the
 operator would otherwise only find in a dead process's log: funding events
-still pending long past settlement (their P&L is uncounted by design) and a
-config drift recorded at the last resume.
+still pending long past settlement (their P&L is uncounted by design), funding
+events whose last backfill attempt FAILED (a defect, a store failure or a
+corrupt row — a different verdict and a different remedy from mere staleness,
+issue #208), and a config drift recorded at the last resume.
 
 The no-decision escalation policy the gate's last condition rests on (issue
 #50) — threshold, streak query, shortfall wording — is
@@ -39,6 +41,7 @@ The no-decision escalation policy the gate's last condition rests on (issue
 from __future__ import annotations
 
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
@@ -585,6 +588,15 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
         now = datetime.now(timezone.utc)
     stale_pending = 0
     corrupt_pending = 0
+    # Lane word -> how many pending events the backfill's LAST attempt failed on
+    # for that reason (schema v12, issue #208). Each pending row gets exactly
+    # ONE verdict here, in this order: a timestamp this reader cannot parse
+    # (corrupt) beats a recorded failure (stuck), which beats mere age (stale),
+    # which beats youth (silent). One row, one warning line — so the three
+    # counts stay disjoint and sum to the pending events the report speaks
+    # about, rather than describing the same row twice under two names.
+    stuck_pending: Counter[str] = Counter()
+    oldest_attempt: str | None = None
     for event in pending_events:
         try:
             settlement = parse_instant(event["funding_timestamp"])
@@ -600,6 +612,38 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
             # and reports. The two readers of this column must agree.
             corrupt_pending += 1
             continue
+        # The backfill's own verdict on its last attempt, which this reader
+        # cannot re-derive: ``rate_at`` raising, ``record_funding`` hitting the
+        # store, the outer catch-all. The column is NULL unless a pass failed
+        # AND no later pass got past the DEEPEST site that lane is written
+        # from — so a set value says "the last attempt to reach that far ended
+        # here", which is not always "this is what is holding the event now":
+        # a repaired timestamp keeps its ``corrupt_row`` until some pass
+        # actually gets a rate and runs the rest of the loop. That is why the
+        # warning prints the stamp below rather than asserting freshness. Not
+        # defensive about the
+        # column existing: a store behind v12 never reaches this function —
+        # ``validate`` opens with ``migrate=False``, which refuses one by name.
+        lane = event["last_backfill_status"]
+        if lane is not None:
+            # An off-vocabulary word means a hand-edited store, not a lane this
+            # build forgot. It is still a recorded failure, so it counts — under
+            # a fixed name, because the alternative is printing whatever a
+            # stored cell happens to hold into the acceptance report.
+            stuck_pending[lane if lane in repo.FUNDING_BACKFILL_LANES else "unrecognised"] += 1
+            # The oldest of these stamps, printed beside the count. Without it
+            # the warning asserts the present tense ("is holding them") over a
+            # store whose daemon may have been stopped for weeks, and an
+            # operator cannot tell a defect that started five minutes ago from
+            # one that has been failing for days. Stored, so unparseable for
+            # the same reasons the settlement column is: kept as the raw string
+            # and compared lexically, which is exactly what ISO-8601 UTC is for
+            # — a garbled cell sorts somewhere harmless instead of raising in
+            # the reader that exists to survive garbled cells.
+            stamp = event["last_backfill_at"]
+            if isinstance(stamp, str) and (oldest_attempt is None or stamp < oldest_attempt):
+                oldest_attempt = stamp
+            continue
         if now - settlement >= STALE_PENDING_FUNDING:
             stale_pending += 1
     if stale_pending:
@@ -613,6 +657,23 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
             f"{corrupt_pending} pending funding event(s) have an unparseable "
             "funding_timestamp — corrupt stored row(s); their funding P&L stays "
             "uncounted until the store is repaired"
+        )
+    if stuck_pending:
+        # The warning the staleness line above could never be (issue #208). That
+        # one describes an age, whose ordinary cause is a settled hour whose rate
+        # will never resolve — and it took six hours to say even that. This one
+        # says the backfill TRIED and failed, names which lane, and says it at
+        # the first pass rather than the sixth hour. The lane words carry the
+        # remedy: reader_failed and unclaimed are defects in this code,
+        # store_error is the store failing, corrupt_row is the row itself.
+        reasons = ", ".join(f"{lane}: {n}" for lane, n in sorted(stuck_pending.items()))
+        since = "" if oldest_attempt is None else f", oldest attempt {oldest_attempt}"
+        warnings.append(
+            f"{sum(stuck_pending.values())} pending funding event(s) failed their last "
+            f"backfill attempt ({reasons}{since}) — a defect, a store failure or a corrupt "
+            "row is holding them, NOT a rate the exchange has yet to publish; their "
+            "funding P&L stays uncounted until it is fixed "
+            "(funding_events.last_backfill_error holds each message)"
         )
     # The regime buckets are counted through ``decision_attempts.input_id``
     # and must sum to ``cycle_count`` (every decided cycle stamped one). A

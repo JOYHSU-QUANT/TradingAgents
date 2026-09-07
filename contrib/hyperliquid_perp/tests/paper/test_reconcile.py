@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -793,6 +794,235 @@ def test_backfill_names_a_result_status_it_has_no_verdict_for(tmp_path, caplog, 
     assert any("got an unrecognised result 'reversed'" in m for m in messages)
     # Not silently absorbed by the already-posted branch it sits next to.
     assert not any("already posted under another event id" in m for m in messages)
+    db.close()
+
+
+def _pending_breadcrumb(db):
+    """``(last_backfill_status, last_backfill_error)`` of the one pending event."""
+    rows = repo.iter_funding_events(db.conn, "r", status="pending")
+    assert len(rows) == 1
+    return rows[0]["last_backfill_status"], rows[0]["last_backfill_error"]
+
+
+def _raiser(exc):
+    def _raise(*args, **kwargs):
+        raise exc
+
+    return _raise
+
+
+def _pending_event(db, *, timestamp=_T0):
+    accounting.record_funding(
+        db,
+        run_id="r",
+        mode="paper",
+        symbol="BTC",
+        funding_timestamp=timestamp,
+        position_size=D("0.001"),
+        funding_rate=None,  # pending, basis mark stored
+        mark_price=_MARK,
+    )
+
+
+def _null_the_mark(db):
+    with db.transaction() as conn:
+        conn.execute("UPDATE funding_events SET mark_price = NULL")
+
+
+def _garble_the_timestamp(db):
+    with db.transaction() as conn:
+        conn.execute("UPDATE funding_events SET funding_timestamp = ?", ("not-a-timestamp",))
+
+
+class _BrokenReader:
+    def rate_at(self, coin, ts):
+        raise ValueError("funding history window end must be timezone-aware (UTC)")
+
+
+class _GrownVocabulary:
+    status = "reversed"
+
+
+@pytest.mark.parametrize(
+    ("lane", "break_store", "source", "break_call"),
+    [
+        # The two corrupt-row lanes an operator is sent to SQLite for, reached
+        # from opposite ends of the loop: the timestamp parse ahead of the
+        # reader, and ``record_funding``'s own settlement-basis guard. The
+        # second matters most here — that guard raises INSIDE
+        # ``record_funding``'s transaction, so were this breadcrumb unwritable
+        # after a rolled-back one, the lane most worth recording is the one
+        # that would go missing.
+        ("corrupt_row", _garble_the_timestamp, None, None),
+        ("corrupt_row", _null_the_mark, None, None),
+        ("reader_failed", None, _BrokenReader(), None),
+        ("store_error", None, None, sqlite3.OperationalError("database is locked")),
+        ("unclaimed", None, None, RuntimeError("accounting no longer does that")),
+        ("unknown_status", None, None, None),
+    ],
+)
+def test_every_reachable_lane_records_why_the_event_stayed_pending(
+    tmp_path, monkeypatch, lane, break_store, source, break_call
+):
+    """Each contained lane writes ITS word onto the event (issue #208).
+
+    Five of the six lanes, driven end to end. ``no_result`` is the sixth and is
+    absent on purpose: it is unreachable by construction (every path to the
+    tail assigns ``res``), so a parameter for it could only be built by
+    reaching into the loop, which would pin the mock and not the loop.
+
+    The per-event ERROR lines already say which lane claimed the failure — to
+    whoever is reading the daemon's journal. ``validate`` is not: it is a
+    separate, read-only process, and from the row alone it can re-derive
+    exactly one of these six. Every other lane looked, in the store, exactly
+    like an event whose rate is not published yet. This is the fact that tells
+    them apart, so every lane that leaves an event pending must write it —
+    which is why this is parametrized over the lanes rather than testing one.
+    """
+    db = _init(tmp_path)
+    _pending_event(db)
+    if break_store is not None:
+        break_store(db)
+    if break_call is not None:
+        monkeypatch.setattr(accounting, "record_funding", _raiser(break_call))
+    if lane == "unknown_status":
+        monkeypatch.setattr(accounting, "record_funding", lambda *a, **k: _GrownVocabulary())
+
+    posted, still_pending = reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=source or _Rates(D("0.0001"))
+    )
+
+    assert (posted, still_pending) == (0, 1)
+    status, error = _pending_breadcrumb(db)
+    assert status == lane
+    # EVERY lane stores a message, including the two tail guards that have no
+    # exception to quote: the acceptance report tells an operator this column
+    # holds each event's message, and a lane storing NULL would make that
+    # sentence false for exactly the verdicts hardest to act on.
+    assert error
+    db.close()
+
+
+def test_a_later_pass_clears_the_breadcrumb_it_gets_past(tmp_path):
+    """A fixed defect must stop accusing the code on the next pass.
+
+    The breadcrumb says why the LAST attempt failed, not "an attempt failed
+    once". Without the clear, an event whose reader defect was fixed would go
+    on reporting a defect to the acceptance report for as long as its rate
+    stayed unpublished — the same false verdict as before, pointing the other
+    way, and now durable.
+    """
+    db = _init(tmp_path)
+    _pending_event(db)
+
+    reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_BrokenReader()
+    )
+    assert _pending_breadcrumb(db)[0] == "reader_failed"
+
+    # The reader is fixed; the rate is simply not published for that hour yet,
+    # so the event is still pending — but for the ordinary reason now.
+    posted, still_pending = reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_Rates(None)
+    )
+
+    assert (posted, still_pending) == (0, 1)
+    assert _pending_breadcrumb(db) == (None, None)
+    db.close()
+
+
+def test_a_rate_less_pass_keeps_a_verdict_it_never_re_tested(tmp_path):
+    """A pass may only erase a verdict it got PAST, not one it never reached.
+
+    ``rate is None`` returns before the size parse and ``record_funding`` ever
+    run, so it says nothing about a ``corrupt_row`` recorded by either of them.
+    And ``rate_at`` answers a VENUE failure with ``None`` as well as an
+    unpublished hour — so clearing everything here erased a live corrupt-row
+    verdict for the whole length of any exchange outage, handing the acceptance
+    report back the generic staleness line this issue exists to replace, at
+    exactly the moment an operator is reading it.
+    """
+    db = _init(tmp_path)
+    _pending_event(db)
+    _null_the_mark(db)  # record_funding's own basis guard: a corrupt row
+
+    reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+    )
+    assert _pending_breadcrumb(db)[0] == "corrupt_row"
+
+    # The venue goes quiet. The row is still corrupt and nothing about it was
+    # re-tested, so the verdict must survive.
+    reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_Rates(None)
+    )
+    assert _pending_breadcrumb(db)[0] == "corrupt_row"
+    db.close()
+
+
+def test_posting_an_event_clears_the_verdict_of_the_pass_that_failed(tmp_path):
+    """A settled row must not keep a failure marker for the rest of its life.
+
+    ``set_funding_status`` writes the settlement columns and leaves these three
+    alone, and nothing else erases them — so without this clear an event that
+    failed one pass and posted on the next carried its old verdict forever.
+    This is the one clear that has to reach a row that is no longer pending,
+    which is why the writer scopes its SET to pending and its CLEAR to nothing.
+    """
+    db = _init(tmp_path)
+    _pending_event(db)
+    # Seeded as ``corrupt_row``, NOT ``reader_failed``: the latter is a member
+    # of both clear sets, so it could not tell "posting overtakes every lane"
+    # apart from "posting only clears what a rate-less pass clears".
+    with db.transaction() as conn:
+        repo.set_funding_backfill_outcome(
+            conn,
+            repo.iter_funding_events(db.conn, "r", status="pending")[0]["funding_event_id"],
+            lane="corrupt_row",
+            error="a settlement basis an earlier pass could not read",
+            at=_T0,
+        )
+    assert _pending_breadcrumb(db)[0] == "corrupt_row"
+
+    posted, still_pending = reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+    )
+
+    assert (posted, still_pending) == (1, 0)
+    rows = repo.iter_funding_events(db.conn, "r")
+    assert [r["status"] for r in rows] == ["posted"]
+    assert (rows[0]["last_backfill_status"], rows[0]["last_backfill_at"]) == (None, None)
+    db.close()
+
+
+def test_a_breadcrumb_that_cannot_be_written_never_aborts_the_pass(tmp_path, monkeypatch, caplog):
+    """Reporting a failure must never become the failure.
+
+    The store-error lane reaches this writer with the store already failing, so
+    the write failing is its expected case, not an exotic one. Uncontained, it
+    would leave the outer lane counting and re-reporting the same event twice —
+    or, from the tail messages, abort the pass outright, which is the single
+    outcome this loop's whole structure exists to make impossible.
+    """
+    db = _init(tmp_path)
+    _pending_event(db)
+    monkeypatch.setattr(
+        repo,
+        "set_funding_backfill_outcome",
+        _raiser(sqlite3.OperationalError("database is locked")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        posted, still_pending = reconcile_module.backfill_pending_funding(
+            db, run_id="r", now=_T0, funding_source=_BrokenReader()
+        )
+
+    assert (posted, still_pending) == (0, 1)  # the pass finished, verdict unchanged
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("the funding reader failed" in m for m in messages)  # the lane still said it
+    assert any("could not record its reader_failed verdict" in m for m in messages)
+    # Not re-reported by the outer lane as a defect of its own.
+    assert not any("no lane claimed this one" in m for m in messages)
     db.close()
 
 

@@ -863,10 +863,10 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     behind = sorted(MIGRATIONS)[-2]
     with migrations_up_to(behind), Database(path) as built:
         assert stored_schema_version(built.conn) == behind
-        # The LATEST migration's column (v11: ai_inputs.format_fingerprint) is
-        # what a one-behind store must lack — re-point this when a new version
+        # The LATEST migration's column (v12: funding_events.last_backfill_status)
+        # is what a one-behind store must lack — re-point this when a new version
         # lands.
-        assert "format_fingerprint" not in _columns(built.conn, "ai_inputs")
+        assert "last_backfill_status" not in _columns(built.conn, "funding_events")
 
     with pytest.raises(SchemaVersionError, match="will not migrate"):
         Database(path, migrate=False)
@@ -875,7 +875,7 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     # byte-for-byte the version it was, so the daemon that owns it is unharmed.
     conn = connect(path)
     assert stored_schema_version(conn) == behind
-    assert "format_fingerprint" not in _columns(conn, "ai_inputs")
+    assert "last_backfill_status" not in _columns(conn, "funding_events")
     assert (
         conn.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version > ?", (behind,)
@@ -888,7 +888,7 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     # a command that DOES own the run — upgrades it exactly as before.
     with Database(path) as upgraded:
         assert stored_schema_version(upgraded.conn) == SCHEMA_VERSION
-        assert "format_fingerprint" in _columns(upgraded.conn, "ai_inputs")
+        assert "last_backfill_status" in _columns(upgraded.conn, "funding_events")
 
 
 def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_path):

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["LEASE_READABLE_SINCE", "MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # The oldest schema an OWNING command (``paper``, ``live``, a real ``live-smoke``
 # run) can open AS-IS and consult the run lease in before it upgrades the store
@@ -721,5 +721,41 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     11: (
         "ALTER TABLE ai_inputs ADD COLUMN format_fingerprint TEXT",
         "CREATE INDEX idx_fills_run_timestamp ON fills (run_id, timestamp)",
+    ),
+    # v12: why a pending funding event did not post on its LAST backfill
+    # attempt (issue #208) — the breadcrumb that makes a defect-stuck event
+    # visible to the acceptance report.
+    #
+    # ``backfill_pending_funding`` contains every per-event failure so the pass
+    # can never abort, and says which lane claimed it in a per-event ERROR
+    # line. That line lives in the daemon's journal, and ``validate`` is a
+    # SEPARATE, READ-ONLY process over the store: it re-derives what it can
+    # from the row itself, which tells apart exactly ONE of the lanes (a
+    # timestamp it cannot parse). An event stuck by a funding-reader defect, a
+    # store error, or the outer catch-all is indistinguishable in the store
+    # from one whose rate is merely not published yet — so it surfaces only
+    # after six hours, as the generic staleness warning, whose usual cause is
+    # the opposite verdict (a settled hour whose rate will never resolve).
+    # These columns are that missing fact, persisted where the read-only
+    # reader can see it. Same shape and same reason as the v5
+    # ``last_config_drift_*`` breadcrumb: a runtime verdict that was visible
+    # only in the log of a process the acceptance reader never shares.
+    #
+    # ``last_backfill_status`` — the lane word (``FUNDING_BACKFILL_LANES``).
+    # ``last_backfill_error`` — the flattened, truncated exception text.
+    # ``last_backfill_at``    — when that attempt ran.
+    #
+    # SET only on a pending row, and CLEARED by a pass that got strictly past
+    # the point where the recorded lane failed — never by one that simply did
+    # not re-test it. So a set breadcrumb describes the last attempt that
+    # reached that far, not an old one the run has since moved past. The clear
+    # is deliberately not restricted to pending rows: posting is what most
+    # needs to erase one, and nothing else writes these columns.
+    # Internal columns, never exported. Nullable: NULL means "no failed
+    # attempt on record", which is what every pre-v12 row correctly reads as.
+    12: (
+        "ALTER TABLE funding_events ADD COLUMN last_backfill_status TEXT",
+        "ALTER TABLE funding_events ADD COLUMN last_backfill_error TEXT",
+        "ALTER TABLE funding_events ADD COLUMN last_backfill_at TEXT",
     ),
 }

@@ -67,6 +67,16 @@ logger = logging.getLogger(__name__)
 # threshold for its non-gating staleness warning.
 STALE_PENDING_FUNDING = timedelta(hours=6)
 
+# Which recorded verdicts an outcome is entitled to ERASE (issue #208). A
+# breadcrumb may only be cleared by a pass that got strictly past the point
+# where the recorded lane failed — anything less is losing the verdict, not
+# disproving it. The lanes sit at different points along the loop below, so
+# "got past" differs by outcome: a rate-less pass returns before the size parse
+# and ``record_funding`` ever run, while a posted or already-posted result has
+# been through all of them.
+_READER_CLEARED = frozenset({"reader_failed"})
+_ALL_CLEARED = repo.FUNDING_BACKFILL_LANES
+
 
 def _event_label(event: sqlite3.Row) -> str:
     """``"BTC @ 2026-09-04T12:00:00+00:00"``, or a stand-in if the row won't say.
@@ -110,6 +120,94 @@ def _log_corrupt_event(run_id: str, event: sqlite3.Row, exc: Exception) -> None:
     )
 
 
+def _note_backfill_outcome(
+    db: Database,
+    event: sqlite3.Row,
+    *,
+    run_id: str,
+    lane: str | None,
+    clears: frozenset[str] = frozenset(),
+    detail: str | None = None,
+    now: datetime,
+) -> None:
+    """Persist this pass's verdict for one pending event, or clear a stale one.
+
+    The schema-v12 half of the per-event messages below (issue #208). Those
+    messages give an OPERATOR the verdict; this gives it to ``validate``, which
+    runs in a different process and can only re-derive from the row what the
+    row shows — which tells apart one lane out of six. Without it, an event
+    stuck by a defect is indistinguishable in the store from one whose rate is
+    simply not published yet, and surfaces only after six hours as the generic
+    staleness warning, whose usual cause is the opposite verdict.
+
+    ``lane=None`` clears — but only the lanes named in ``clears``, which is the
+    whole subtlety. A breadcrumb may be erased ONLY by an outcome that got
+    strictly PAST the point where the recorded lane failed; otherwise the pass
+    is not disproving that verdict, it is losing it.
+
+    The lanes sit at different points along the loop: the timestamp parse, then
+    the reader, then the rate check, then the size parse, then
+    ``record_funding``, then the tail. So an outcome's ``clears`` is "the lanes
+    this outcome has demonstrably overtaken", not "all of them". Concretely,
+    ``rate is None`` returns before the size parse and ``record_funding`` ever
+    run: it disproves ``reader_failed`` (that call no longer raises) and
+    nothing else. Clearing everything there would wipe a live ``corrupt_row``
+    verdict every time the venue merely went quiet — ``rate_at`` answers a
+    venue failure with ``None`` too — and hand the acceptance report back
+    exactly the generic staleness line issue #208 exists to replace, for as
+    long as the outage lasts.
+
+    The clear is skipped when there is nothing recorded, so an ordinary pass
+    over un-settled events still writes no rows at all.
+
+    ``detail`` is a message, not an exception, because two of the six lanes
+    have no exception to quote — the loop noticing its own hole — and the
+    acceptance report tells an operator this column holds each event's message.
+    A lane that stored NULL there would make that sentence false for exactly
+    the two verdicts hardest to act on.
+
+    Contained like everything else in this loop, and for a stronger reason:
+    this is the reporting of a failure, and a failure to report must never
+    become the failure. A raise here inside an inner lane would fall to the
+    outer one and have the event counted and reported twice; from the tail
+    messages, which run outside the outer ``try``, it would abort the pass. So
+    it swallows, and says what the acceptance report will now be missing. The
+    subscripts sit inside the ``try`` for ``_event_label``'s reason — this
+    row's own shape may be the problem, and ``sqlite3.Row`` answers an unknown
+    column with ``IndexError``.
+    """
+    try:
+        event_id = event["funding_event_id"]
+        if lane is None:
+            recorded = event["last_backfill_status"]
+            # Nothing recorded, or this outcome does not reach the point the
+            # recorded lane failed at — either way there is nothing to write.
+            if recorded is None or recorded not in clears:
+                return
+        with db.transaction() as conn:
+            repo.set_funding_backfill_outcome(
+                conn,
+                event_id,
+                lane=lane,
+                error=detail,
+                at=None if lane is None else now,
+            )
+    except Exception as note_exc:  # noqa: BLE001 — see above
+        # No traceback: the frames are this function and one UPDATE, and the
+        # store-error lane reaches here on every pass while a lock holds — a
+        # traceback per event per pass buys nothing and buries the ERROR above
+        # it, which is the line that actually carries the verdict.
+        logger.warning(
+            "funding backfill for %s could not record its %s verdict for %s: %s — the "
+            "acceptance report will not see this event's reason (the per-event line "
+            "above still carries it)",
+            run_id,
+            "cleared" if lane is None else lane,
+            _event_label(event),
+            note_exc,
+        )
+
+
 def backfill_pending_funding(
     db: Database,
     *,
@@ -139,6 +237,16 @@ def backfill_pending_funding(
     clock, a stamp no ``datetime`` can hold. Sending an operator to the store
     for that costs a diagnosis.
 
+    Every lane also records its verdict ON the event (schema v12, issue #208)
+    and each non-failing outcome clears the verdicts it got PAST (never the
+    ones it never re-tested), so a pending row always carries the reason its
+    last attempt to reach that far did not post. That is what the acceptance
+    report reads: ``validate`` is a separate, read-only process, and from the
+    row alone it can re-derive exactly one of these lanes (a timestamp it
+    cannot parse) — leaving an event stuck by a defect indistinguishable from
+    one whose rate is merely unpublished, and visible only after six hours as
+    the generic staleness warning, whose usual cause is the opposite verdict.
+
     "Never allowed to abort" is enforced by an outer per-event handler, not by
     the inner lanes' exception lists: those lists are what issue #191 got
     through. The lanes exist to give an operator the right verdict, and the
@@ -162,7 +270,11 @@ def backfill_pending_funding(
     # status this loop has no word for). Five of the six are asserted by tests;
     # the sixth — the missing result — is unreachable by construction and is
     # documented as such where it is raised. A counter per reason would only
-    # ever be read as this sum.
+    # ever be read as this sum; where the reasons need telling apart OUTSIDE
+    # this process they are told apart per EVENT, in the schema-v12 breadcrumb
+    # each lane writes (issue #208) — not by splitting this return value, which
+    # is a report of one pass and reaches nobody who is not already reading
+    # these logs.
     not_posted = 0
     for event in repo.iter_funding_events(db.conn, run_id, status="pending"):
         # Rebound per event, and never read across one: ``res`` is
@@ -198,6 +310,9 @@ def backfill_pending_funding(
                 # listed: no ``Decimal`` is parsed here.)
                 not_posted += 1
                 _log_corrupt_event(run_id, event, exc)
+                _note_backfill_outcome(
+                    db, event, run_id=run_id, lane="corrupt_row", detail=str(exc), now=now
+                )
                 continue
             # The READER gets its own lane, apart from the corrupt one (issue
             # #193). ``rate_at`` answers a venue failure with ``None`` and lets
@@ -223,10 +338,22 @@ def backfill_pending_funding(
                     exc,
                     exc_info=True,
                 )
+                _note_backfill_outcome(
+                    db, event, run_id=run_id, lane="reader_failed", detail=str(exc), now=now
+                )
                 continue
             if rate is None:
                 # Outside the post lane below: no rate is not a failure to post,
                 # it is the ordinary "not settled yet" the next pass retries.
+                # This pass got through the READER, and no further: the size
+                # parse and ``record_funding`` below never ran. So it disproves
+                # exactly one recorded verdict — ``reader_failed`` — and must
+                # leave every other one standing. ``rate_at`` answers a venue
+                # failure with ``None`` too, so clearing more here would erase a
+                # live corrupt-row verdict for the whole length of an outage.
+                _note_backfill_outcome(
+                    db, event, run_id=run_id, lane=None, clears=_READER_CLEARED, now=now
+                )
                 if now - settlement >= STALE_PENDING_FUNDING:
                     stale_pending += 1
                 else:
@@ -246,6 +373,9 @@ def backfill_pending_funding(
             except (InvalidOperation, TypeError, ValueError) as exc:
                 not_posted += 1
                 _log_corrupt_event(run_id, event, exc)
+                _note_backfill_outcome(
+                    db, event, run_id=run_id, lane="corrupt_row", detail=str(exc), now=now
+                )
                 continue
             try:
                 res = accounting.record_funding(
@@ -267,6 +397,9 @@ def backfill_pending_funding(
                 # takes those, and says to read the traceback.
                 not_posted += 1
                 _log_corrupt_event(run_id, event, exc)
+                _note_backfill_outcome(
+                    db, event, run_id=run_id, lane="corrupt_row", detail=str(exc), now=now
+                )
                 continue
             except sqlite3.Error as exc:
                 # A STORE failure, not a corrupt row. ``record_funding`` opens its OWN
@@ -281,6 +414,9 @@ def backfill_pending_funding(
                     _event_label(event),
                     exc,
                 )
+                _note_backfill_outcome(
+                    db, event, run_id=run_id, lane="store_error", detail=str(exc), now=now
+                )
                 continue
         except Exception as exc:  # noqa: BLE001 — the pass may never abort; see above
             not_posted += 1
@@ -293,6 +429,7 @@ def backfill_pending_funding(
                 exc,
                 exc_info=True,
             )
+            _note_backfill_outcome(db, event, run_id=run_id, lane="unclaimed", detail=str(exc), now=now)
             continue
         if res is None:
             # Unreachable today — every path to here has assigned ``res`` — so
@@ -306,7 +443,23 @@ def backfill_pending_funding(
                 run_id,
                 _event_label(event),
             )
+            _note_backfill_outcome(
+                db,
+                event,
+                run_id=run_id,
+                lane="no_result",
+                detail="the loop reached its tail with no result for this event",
+                now=now,
+            )
         elif res.status == "posted":
+            # Clear, even though the row has just left ``pending``: nothing
+            # else erases these columns, so an event that failed one pass and
+            # posted on the next would carry its old failure verdict for the
+            # rest of the store's life. This is the one clear that must reach a
+            # non-pending row, which is why the writer scopes only its SET.
+            _note_backfill_outcome(
+                db, event, run_id=run_id, lane=None, clears=_ALL_CLEARED, now=now
+            )
             posted += 1
         elif res.status == "already_posted":
             # The exactly-once key found the settlement already booked, so
@@ -330,6 +483,15 @@ def backfill_pending_funding(
                 run_id,
                 _event_label(event),
             )
+            # A CLEAR, not a lane, and it overtakes every verdict: this pass ran
+            # the whole loop for this row and nothing failed on it — the
+            # settlement behind it is booked. Whether the row should carry a
+            # verdict of its own is a separate question from issue #208 (it
+            # already has its own INFO line and its own "in neither total"
+            # decision), and stamping it with a failure lane would invent one.
+            _note_backfill_outcome(
+                db, event, run_id=run_id, lane=None, clears=_ALL_CLEARED, now=now
+            )
         else:
             # A status this loop has no verdict for. Named rather than folded
             # into the branch above it: announcing an unknown status as
@@ -342,6 +504,17 @@ def backfill_pending_funding(
                 run_id,
                 res.status,
                 _event_label(event),
+            )
+            _note_backfill_outcome(
+                db,
+                event,
+                run_id=run_id,
+                lane="unknown_status",
+                # The unrecognised word IS the message: it is the one fact that
+                # says which vocabulary grew, and the only thing an operator can
+                # act on here.
+                detail=f"record_funding answered with an unrecognised status {res.status!r}",
+                now=now,
             )
     # A stuck-forever pending event (its rate never resolves) resets the fetch
     # source's own consecutive-failure counter on every successful fetch, so only

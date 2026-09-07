@@ -1329,15 +1329,20 @@ def test_a_db_that_exists_but_cannot_be_read_is_refused_by_name(tmp_path, popula
     assert "permission" in message  # the cause both arms can actually have
     assert "not been modified" in message  # nothing here opens the file to write
     # The two arms fail through different machinery, so they are told to check
-    # different things. The probe can meet a lock and a -shm it may not create,
-    # and cannot tell those from a permission, so it lists all four. The plain
-    # read on an empty file waits for nothing and asks SQLite for nothing, so
-    # naming those would send an operator after causes this lane cannot have.
-    assert ("holding it locked" in message) is populated
+    # different things. Only the probe can wait out a SQLite lock or need a -shm,
+    # so only it is told about those; naming them on the plain read would send an
+    # operator after causes that lane cannot have.
+    assert ("past the 5s wait" in message) is populated
     assert ("-shm" in message) is populated
-    # And the errno the plain read gets is quoted without the filename OSError
-    # renders into it — on Windows that is the path again, backslash-escaped.
-    assert "[Errno" in message or populated
+    # OSError renders its own filename into its text, quoted, and on Windows with
+    # every separator doubled — so the plain lane quotes the errno and its text
+    # instead, leaving the path once and unescaped at the head. Pinned on the
+    # quoted clause itself: it has to END at the strerror. Asserting the errno is
+    # present, or counting the unescaped path, passes against the unfixed form
+    # too, because the doubled separators stop the second copy matching.
+    reason = message.split("could not be opened for reading: ", 1)[1]
+    reason = reason.split(". The path is there", 1)[0]
+    assert not reason.endswith("'")  # `[Errno 13] Permission denied: '<path>'`
     assert message.count(str(store)) == 1
 
 

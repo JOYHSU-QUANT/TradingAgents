@@ -457,7 +457,16 @@ Breaking changes within the 0.x line are called out explicitly.
 
   A zero-length file is still accepted as "ours to build in full" without being
   probed, and the readability question is asked there in the one way that opens
-  nothing of SQLite's — a plain read, reaching the same named refusal. Not
+  nothing of SQLite's — a plain read, reaching the same verdict under the same
+  wording. Its checklist is its own, though: that lane waits on nothing SQLite
+  would wait on and needs no sidecar, so it is told nothing about a
+  ``busy_timeout`` or a ``-shm``, and it names instead the thing it CAN meet
+  that the probe folds into a permission — another process holding the file
+  open, which under Windows' mandatory sharing fails the read as ``[Errno 13]
+  Permission denied``, identical in every attribute to a denied ACL (measured).
+  It is also the lane with a readable errno, and the one whose exception renders
+  its own filename into its text, so the errno and its text are quoted in place
+  of that and both lanes print the path once. Not
   probing it is what keeps the refusal's own central claim literally true:
   SQLite reads an empty main file as an empty database and treats a ``-wal``
   beside it as stale, so a single read-only probe of that pair deletes the log

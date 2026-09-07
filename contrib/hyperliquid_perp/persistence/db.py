@@ -232,13 +232,21 @@ def _unreadable_error(file: Path, exc: BaseException, *, probed: bool) -> Schema
     Picking one would be a diagnosis nothing here measured, the class of claim
     this refusal's own history (PR #209's review) says to avoid.
 
-    The plain read cannot meet three of those four. It waits for nothing, asks
-    SQLite for nothing, and needs no sidecar — so it is told to check the
-    permissions and the storage, and nothing about locks or ``-shm``. It is also
-    the lane with a real errno to read — and the one whose exception renders its
-    own filename, as a repr, which on Windows is the path again with every
-    separator doubled; only the errno and its text are quoted, so both lanes
-    print the path once and in the same place.
+    The plain read cannot meet two of those four: it waits for nothing SQLite
+    would wait on, and needs no sidecar, so it is told nothing about a
+    ``busy_timeout`` or a ``-shm``. It CAN meet the other two, and a third the
+    probe lane folds into its first: Windows sharing is mandatory rather than
+    advisory, so another process holding the file open exclusively fails this
+    read as ``[Errno 13] Permission denied`` — every attribute identical to a
+    denied ACL (measured). An operator told to check only the permissions would
+    find them fine and have nowhere left to go, so this lane names that too.
+
+    It is also the lane with a real errno to read — and the one whose exception
+    renders its own filename into its text, quoted, which on Windows is the path
+    again with every separator doubled. The errno and its text are quoted
+    instead whenever the exception carries a ``strerror``, which every open
+    failure measured here does, so both lanes print the path once and in the
+    same place.
     """
     if probed:
         checks = (
@@ -250,10 +258,13 @@ def _unreadable_error(file: Path, exc: BaseException, *, probed: bool) -> Schema
         )
         reason = str(exc)
     else:
-        checks = "Check the file's permissions, and the storage underneath."
-        # ``OSError`` renders its own filename, and as a repr — on Windows that
-        # is the path a second time with every separator doubled. The errno and
-        # its text are the half worth printing; the path is already in front.
+        checks = (
+            "Check the file's permissions, whether another process has it open "
+            "exclusively, and the storage underneath."
+        )
+        # ``OSError`` renders its own filename into its text, quoted — on Windows
+        # that is the path a second time with every separator doubled. The errno
+        # and its text are the half worth printing; the path is already in front.
         errno, strerror = getattr(exc, "errno", None), getattr(exc, "strerror", None)
         reason = f"[Errno {errno}] {strerror}" if strerror else str(exc)
     return SchemaVersionError(
@@ -408,9 +419,11 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # (issue #210). Readability only — a zero-length store that reads but
         # cannot be WRITTEN still dies in ``connect`` — ``attempt to write a
         # readonly database``, unnamed, exactly as it did before this. It is the
-        # zero-length one that dies there and not a populated store of ours,
-        # which is already in WAL, so ``connect``'s ``PRAGMA journal_mode = WAL``
-        # is a read for it and succeeds (measured). Naming that one means asking
+        # zero-length one that dies there and normally not a populated store of
+        # ours, which is already in WAL, so ``connect``'s ``PRAGMA journal_mode =
+        # WAL`` is a read for it and succeeds (measured on a local store; one
+        # whose WAL switch silently fell back — see :func:`connect` — is the
+        # exception, and dies on that PRAGMA too). Naming that one means asking
         # about WRITING, which is a different question from this function's and
         # would have to be asked of every store, not just an empty one.
         try:
@@ -491,10 +504,10 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
             # the --db path") is confident about a file whose bookkeeping table
             # this build could not read. A lock arriving between the two reads
             # lands here too, and that operator wants to know a retry might do
-            # it. The one comparable downgrade in this package
-            # (``persistence.backfill``'s unreadable payload) logs for the same
-            # reason; the silent ``suppress`` calls around this module are all
-            # cleanup that changes no verdict.
+            # it. The comparable downgrades in this package
+            # (``persistence.backfill``'s left-NULL reasons, four of them) log
+            # for the same reason; the silent ``suppress`` calls around this
+            # module are all cleanup that changes no verdict.
             logger.warning(
                 "could not read %s in %s (%s); treating it as not this "
                 "project's bookkeeping.",

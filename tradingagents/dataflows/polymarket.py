@@ -19,9 +19,9 @@ import requests
 from .utils import (
     MAX_UNTRUSTED_CHARS,
     date_refusal,
-    echo_argument,
     json_body_or_outage,
     live_snapshot_note,
+    quote_argument,
     raise_for_http_status,
     sanitize_untrusted,
 )
@@ -140,7 +140,7 @@ def get_prediction_markets(
         return (
             f"Polymarket data is currently unavailable "
             f"(network error: {sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}). "
-            f"Proceed without prediction-market signal for '{echo_argument(topic)}'."
+            f"Proceed without prediction-market signal for {quote_argument(topic)}."
         )
 
     now = datetime.now(timezone.utc)
@@ -153,7 +153,7 @@ def get_prediction_markets(
     candidates.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
 
     header = (
-        f'## Polymarket prediction markets: "{echo_argument(topic)}"\n'
+        f"## Polymarket prediction markets: {quote_argument(topic)}\n"
         f"Live, market-implied probabilities (higher traded volume = deeper, "
         f"more reliable). A probability is the crowd's priced odds of the event, "
         f"not a forecast you should take as certain.\n\n"
@@ -165,7 +165,7 @@ def get_prediction_markets(
 
     if not candidates:
         return header + (
-            f"No open prediction markets matched '{echo_argument(topic)}'. Polymarket coverage "
+            f"No open prediction markets matched {quote_argument(topic)}. Polymarket coverage "
             f"is concentrated in macro, political, geopolitical, and crypto "
             f"events; a specific equity may have none."
         )

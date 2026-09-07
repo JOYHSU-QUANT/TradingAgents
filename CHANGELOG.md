@@ -415,15 +415,17 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
-- **dataflows / agents: the two failure texts that reach the model without
-  passing through the router are flattened and capped too, and a model
+- **dataflows / agents: the two getters that reach the model without
+  passing through the router flatten and cap their failure text too, and a model
   argument quoted back is echoed with the same flattening as a refused
   date** (issues #201 and #231; #230 item 3). PR #202 capped the vendor's
   share of the router's two sentinel slots at ``MAX_UNTRUSTED_CHARS`` (200), but
   ``get_verified_market_snapshot`` calls the builder directly and
   ``get_prediction_markets`` handles its own transport failures, so a Yahoo
-  Finance outage reason (the library's whole decoded error, line breaks and
-  markdown included) and a Gamma 4xx (whose URL carries the model's own
+  Finance outage reason (the library's own exception text, quoted whole with
+  no cap — markdown asterisks on the down-page message, and an unbounded
+  decoded payload on the ``info`` lane that shares this raise) and a Gamma
+  4xx (whose URL carries the model's own
   ``topic``) still entered the prompt verbatim and unbounded — the former on
   a tool the market analyst calls every cycle. All three slots now get the
   same flatten-and-cap; the whole reason goes to the log (the snapshot tool
@@ -433,12 +435,24 @@ Breaking changes within the 0.x line are called out explicitly.
   its deliberately looser pandas parse. FRED's alias rejection and
   Polymarket's report quote the model's ``indicator`` / ``topic`` flattened,
   capped and edge-kept through a shared ``utils.echo_argument``, with the
-  same flattening a refused date gets (not its ``repr`` escaping, which is
-  for a value served inside quotes). So do the verification snapshot's
+  same flattening a refused date gets. So do the verification snapshot's
   heading and the two slots its own failure prose quotes ``symbol`` into —
   a symbol carrying its own ``## `` line can no longer forge a second
   heading in the report the analyst is told to treat as the source of
-  truth. An ordinary value is unchanged apart from whitespace: the echo
+  truth. **Every site that serves the echo in quotes takes those quotes
+  from the value itself**, through ``utils.quote_argument`` (the promoted
+  ``_echo_untrusted``, which the date sentinel already used): flattening
+  stops a value forging a block, but it does nothing about the delimiters,
+  and six of these seven sites wrapped the echo in literal quotes of their
+  own. A ``symbol`` or ``topic`` carrying that quote character closed the
+  span early, and the clause after it read to the model as the tool's own
+  sentence — a crafted one contradicting the sentinel it sat inside. ``repr``
+  escapes the quote or switches to the other style, so the value stays
+  contained. An ordinary value renders identically, quotes included, with
+  one exception: Polymarket's report heading previously used double quotes
+  and now carries the echo's own single quotes. Only the snapshot heading,
+  which names the symbol bare in running prose, still uses
+  ``echo_argument``. An ordinary value is unchanged apart from whitespace: the echo
   touches markdown markers, whitespace (every run, a lone tab or line break
   included, becomes one space) and length, so a topic written with a double
   space renders with one. Polymarket's report body flattens the vendor's own
@@ -450,7 +464,12 @@ Breaking changes within the 0.x line are called out explicitly.
   those two issues name plus the sibling echoes reviewing them turned up,
   NOT every getter: the roughly thirty remaining sites that quote an
   argument or a vendor field back are inventoried in issue #233 and are
-  unchanged here.
+  unchanged here. Known trade-offs, both accepted deliberately: a symbol
+  can now read two ways inside one sentence — ``_ES`` renders as ``' ES'``
+  in the echo slot, which keeps edges, and as ``ES`` in the vendor reason
+  beside it, which gets the default vendor edges — and control characters
+  still reach the prompt as themselves from ``echo_argument``, which does
+  no escaping; only the quoted sites, on ``quote_argument``, escape them.
 
 - **dataflows: the vendors that own their transport handling now raise the
   outage type when they are down, and a throttled or skipped vendor makes

@@ -383,13 +383,13 @@ class TestTheEchoIsFlattenedAndCapped:
         from tradingagents.dataflows import utils as utils_module
 
         calls = []
-        real = utils_module._echo_untrusted
+        real = utils_module.quote_argument
 
         def counting(value):
             calls.append(value)
             return real(value)
 
-        monkeypatch.setattr(utils_module, "_echo_untrusted", counting)
+        monkeypatch.setattr(utils_module, "quote_argument", counting)
         out = utils_module.date_refusal("abc", what="x", kind="point")
         assert out is not None
         assert len(calls) == 1

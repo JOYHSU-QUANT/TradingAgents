@@ -8,7 +8,7 @@ from tradingagents.dataflows.errors import VendorError, VendorRateLimitError
 from tradingagents.dataflows.market_data_validator import build_verified_market_snapshot
 from tradingagents.dataflows.utils import (
     MAX_UNTRUSTED_CHARS,
-    echo_argument,
+    quote_argument,
     refuse_date,
     sanitize_untrusted,
 )
@@ -66,7 +66,7 @@ def get_verified_market_snapshot(
         logger.warning("Verification snapshot for %r rate-limited: %s", symbol, e)
         return (
             f"DATA_UNAVAILABLE: the market data vendor rate-limited the "
-            f"verification snapshot for '{echo_argument(symbol)}' "
+            f"verification snapshot for {quote_argument(symbol)} "
             f"({sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}). This is transient — "
             f"do not report it as proof that data is unavailable, and do not "
             f"estimate or fabricate values; avoid exact numeric claims you "
@@ -76,7 +76,7 @@ def get_verified_market_snapshot(
         logger.warning("Verification snapshot for %r failed: %s", symbol, e)
         return (
             f"NO_DATA_AVAILABLE: could not build a verified market snapshot "
-            f"for '{echo_argument(symbol)}' "
+            f"for {quote_argument(symbol)} "
             f"({sanitize_untrusted(e, limit=MAX_UNTRUSTED_CHARS)}). "
             f"Do not estimate or fabricate values — "
             f"report that verified data is unavailable for this symbol."

@@ -19,8 +19,8 @@ from .errors import VendorError, VendorNotConfiguredError
 from .utils import (
     data_lag_note,
     date_refusal,
-    echo_argument,
     json_body_or_outage,
+    quote_argument,
     raise_for_http_status,
     sanitize_untrusted,
 )
@@ -153,9 +153,9 @@ def _resolve_series_id(indicator: str) -> str:
         # goes through the shared argument echo: flattened, capped, edges kept
         # so ``_foo`` is not quoted back as ``foo`` beside "not a valid ID"
         # (#231).
-        echo = echo_argument(indicator)
+        echo = quote_argument(indicator)
         raise ValueError(
-            f"'{echo}' is not a known macro alias or a valid FRED series ID. "
+            f"{echo} is not a known macro alias or a valid FRED series ID. "
             f"Use an alias (e.g. 'cpi', 'unemployment', '10y_treasury') or a raw "
             f"FRED series ID (e.g. 'CPIAUCSL')."
         )

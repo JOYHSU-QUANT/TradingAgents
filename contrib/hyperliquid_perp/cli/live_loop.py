@@ -84,6 +84,12 @@ def _contain_wedged_adoption_as_manual_safe_mode(safe_mode, exc) -> None:
     restart meets the same deterministic raise until ``StartLimitBurst`` gives
     up — leaving the position with its resting SL/TP and no process refreshing
     the kill switch or repairing protection at all (issue #180).
+
+    That buys THIS process, not every future one: a standing manual latch makes
+    the §19.1 verdict fail, so the next ``live --loop`` never enters this
+    function and exits 4 instead. Which is why the runbook's remedy is fix the
+    rows, RELEASE, then restart — and why ``pump`` re-attempts adoption as soon
+    as the latch stops standing, so a running daemon needs no restart at all.
     """
     from ..live.safe_mode import REASON_ADOPTION_WEDGED, SAFE_MODE_MANUAL
 
@@ -94,8 +100,23 @@ def _contain_wedged_adoption_as_manual_safe_mode(safe_mode, exc) -> None:
         "in-progress attempts and releases the latch (`safe-mode --release`)"
     )
     try:
-        safe_mode.enter(SAFE_MODE_MANUAL, REASON_ADOPTION_WEDGED, detail=str(exc))
+        if not safe_mode.enter(SAFE_MODE_MANUAL, REASON_ADOPTION_WEDGED, detail=str(exc)):
+            # A MANUAL latch for a DIFFERENT reason was already standing, so
+            # the current-state trio keeps that first reason and this one lives
+            # only in safe_mode_events. Say so: `safe-mode --status` and
+            # validate will both name the OTHER reason, and releasing THAT one
+            # clears safe mode while this wedge is still in force.
+            logger.error(
+                "a manual safe-mode latch was already standing, so the wedged adoption "
+                "is recorded only as an added reason (%s) in safe_mode_events — "
+                "`safe-mode --status` will name the earlier reason, and releasing it "
+                "does NOT unwedge the decision driver",
+                REASON_ADOPTION_WEDGED,
+            )
     except Exception:  # noqa: BLE001 — a safe-mode write miss must not itself end the loop
+        # Not the end of it: pump re-checks whether the latch is actually
+        # standing and re-raises until one lands, so a missed write here cannot
+        # leave the wedge with no durable record at all (issue #205).
         logger.exception("failed to latch manual safe mode after a wedged startup adoption")
 
 

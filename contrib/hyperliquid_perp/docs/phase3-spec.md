@@ -1195,8 +1195,11 @@ run 讀到兩列 `in_progress` 而 `raise ValueError`、`scheduled_at` parse 不
 `_adopt` 每個 tick 重讀的是同一列，答案不會變。判定之後 driver 停止重試 adoption、也不開新
 cycle（stranded attempt 還握著 `next_decision_at`），並升 manual safe mode。列為 manual 的
 理由與上面兩條同：recoverable 會在第一次乾淨對帳自動解除，而那個 wedge 一點也沒變。
-**daemon 不退出**：這種例外是決定性的，退出等於每次監管重啟都撞它、燒完 `StartLimitBurst`
-之後真倉位只剩 SL/TP 掛著而沒有任何 process 在對帳、補保護單或 refresh kill switch。
+**撞到的那個 process 不退出**：這種例外是決定性的，當場退出等於每次監管重啟都撞它、燒完
+`StartLimitBurst` 之後真倉位只剩 SL/TP 掛著而沒有任何 process 在對帳、補保護單或 refresh
+kill switch。注意 latch 站著時 §19.1 verdict 不過（含 `not safe_mode_active`），所以之後的
+`live --loop` 重啟**不會進迴圈**、印判定後 exit 4——處置順序是先修列、先 §13.6 解除、再重啟；
+跑著的 daemon 則會在解除後的下一個 tick 自己重跑 adoption。
 `validate` 另有兩條不必 daemon 跑過就讀得到的判準：一列 `in_progress` 超過
 `NO_DECISION_STREAK_THRESHOLD × CYCLE_INTERVAL` 記 shortfall（exit 4，鎖放開後自己消失），
 兩列以上記 failure（exit 5，狀態機壞了）。處置見 RUNBOOK-live `decision_adoption_wedged` 節。

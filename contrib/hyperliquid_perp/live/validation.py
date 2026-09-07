@@ -833,13 +833,16 @@ def _stated_deadline_seconds(detail: str | None) -> Decimal | None:
 # escalation, not chosen beside it: a wedge IS a no-decision run — the driver
 # adopted nothing, so no terminal row is ever written and
 # ``trailing_failure_streaks`` (which skips ``in_progress`` rows, correctly)
-# counts zero — and the two must not be able to drift into disagreeing about
-# how long "cannot decide" is allowed to last. Three cycles at the 4h cadence,
-# so a cycle whose LLM call is legitimately running cannot reach it.
+# counts nothing new, leaving the streak FROZEN at its pre-wedge value however
+# long the wedge lasts — and the two must not be able to drift into disagreeing
+# about how long "cannot decide" is allowed to last. Three cycles at the 4h
+# cadence, so a cycle whose LLM call is legitimately running cannot reach it.
+# The comparison is ``>=``, so exactly this long already counts as wedged.
 _ADOPTION_WEDGE_AFTER = NO_DECISION_STREAK_THRESHOLD * CYCLE_INTERVAL
 
 
-class _StrandedAttempts(NamedTuple):
+@dataclass(frozen=True)
+class _StrandedAttempts:
     """The run's non-terminal decision attempts, as the acceptance report sees them.
 
     Deliberately NOT ``repo.find_in_progress_attempt``: that helper RAISES on
@@ -863,6 +866,26 @@ class _StrandedAttempts(NamedTuple):
     count: int
     oldest_id: str | None
     oldest_at: datetime | None
+
+    def __post_init__(self) -> None:
+        # A frozen dataclass rather than a NamedTuple for the reason
+        # ``TrailingFailureStreaks`` spells out in common/no_decision.py:
+        # NamedTuple builds through __new__ and never calls __post_init__, so
+        # the same guard written there is decoration. Both verdicts this type
+        # feeds are gated on ``count``, so a mismatched instance would be
+        # silently DROPPED rather than misreported — which is worse here than a
+        # raise, because staying silent is the exact failure issue #205 exists
+        # to end. The query cannot build one; a hand-built one (a test, a
+        # future caller) is what this catches.
+        if self.count < 0:
+            raise ValueError(f"_StrandedAttempts count must be >= 0, got {self.count}")
+        if bool(self.count) != (self.oldest_id is not None):
+            raise ValueError(
+                f"_StrandedAttempts count={self.count} disagrees with "
+                f"oldest_id={self.oldest_id!r}: rows exist iff the oldest is named"
+            )
+        if not self.count and self.oldest_at is not None:
+            raise ValueError("_StrandedAttempts has no rows but carries an oldest_at")
 
 
 def _stranded_in_progress(conn, run_id: str) -> _StrandedAttempts:
@@ -1627,9 +1650,10 @@ def validate_live_run(
     # An in-progress row whose stamp will not parse. Its AGE is the only thing
     # separating a cycle in flight from a wedged run, so an unreadable stamp
     # makes the shortfall below unanswerable — and nothing else in this report
-    # parses decision_attempts.timestamp (trailing_failure_streaks reads only
-    # TERMINAL rows), so withholding both verdicts would let this store —
-    # strictly more broken — pass a gate the merely stale one fails.
+    # reads an IN_PROGRESS row's timestamp (trailing_failure_streaks parses the
+    # same column, but only on terminal rows), so withholding both verdicts
+    # would let this store — strictly more broken — pass a gate the merely
+    # stale one fails.
     if stranded.count and stranded.oldest_at is None:
         failures.append(
             f"stranded_decision_cycle = {stranded.oldest_id} carries a timestamp that "

@@ -12,12 +12,14 @@ from contrib.hyperliquid_perp.common.no_decision import TrailingFailureStreaks
 from contrib.hyperliquid_perp.live import smoke
 from contrib.hyperliquid_perp.live.fills import ExchangeFill, post_live_fill
 from contrib.hyperliquid_perp.live.validation import (
+    _ADOPTION_WEDGE_AFTER,
     _REFRESH_BAR,
     MIN_KILL_SWITCH_REFRESH_RATE,
     MIN_KILL_SWITCH_REFRESH_SAMPLES,
     MIN_LIVE_CYCLES,
     MIN_LIVE_ORDERS,
     LiveValidationReport,
+    _StrandedAttempts,
     validate_live_run,
 )
 from contrib.hyperliquid_perp.paper import accounting
@@ -344,8 +346,12 @@ def test_a_cycle_in_flight_within_the_threshold_is_not_a_shortfall(tmp_path):
     _strand_cycle(db, at=stranded_at)
     with db:
         report = validate_live_run(db, run_id="r", now=stranded_at + timedelta(hours=11, minutes=59))
+        # The boundary itself, pinned because the comparison is inclusive and
+        # the prose says so: exactly the threshold already counts as wedged.
+        at_threshold = validate_live_run(db, run_id="r", now=stranded_at + _ADOPTION_WEDGE_AFTER)
     assert not any("stranded_decision_cycle" in s for s in report.shortfalls)
     assert report.live_ready
+    assert any("stranded_decision_cycle" in s for s in at_threshold.shortfalls)
 
 
 def test_two_in_progress_attempts_are_an_integrity_failure(tmp_path):
@@ -373,6 +379,31 @@ def test_two_in_progress_attempts_are_an_integrity_failure(tmp_path):
     # The stale-cycle shortfall is for the ONE-row case: two rows is a
     # different, worse fact and must not be reported as merely "not yet".
     assert not any("stranded_decision_cycle" in s for s in report.shortfalls)
+
+
+def test_stranded_attempts_rejects_a_count_that_disagrees_with_its_rows():
+    """The guard has to be ENFORCED, not written down (issue #205).
+
+    Every verdict this type feeds is gated on ``count``, so a mismatched
+    instance is silently DROPPED rather than misreported — worse than a raise
+    here, because staying quiet about a broken store is the exact failure the
+    type was added to end. A frozen dataclass rather than a ``NamedTuple`` for
+    the reason ``TrailingFailureStreaks`` spells out: ``NamedTuple`` builds
+    through ``__new__`` and never calls ``__post_init__``, so the same guard
+    written there would be decoration.
+    """
+    with pytest.raises(ValueError, match="disagrees with"):
+        _StrandedAttempts(count=1, oldest_id=None, oldest_at=_T0)
+    with pytest.raises(ValueError, match="disagrees with"):
+        _StrandedAttempts(count=0, oldest_id="a", oldest_at=None)
+    with pytest.raises(ValueError, match="no rows but carries"):
+        _StrandedAttempts(count=0, oldest_id=None, oldest_at=_T0)
+    with pytest.raises(ValueError, match="must be >= 0"):
+        _StrandedAttempts(count=-1, oldest_id=None, oldest_at=None)
+    # The two shapes the query really produces stay legal, including the
+    # unreadable-stamp one (rows exist, age unknown).
+    assert _StrandedAttempts(count=0, oldest_id=None, oldest_at=None).count == 0
+    assert _StrandedAttempts(count=2, oldest_id="a", oldest_at=None).oldest_at is None
 
 
 def test_a_stranded_cycle_with_an_unreadable_stamp_is_a_failure(tmp_path):

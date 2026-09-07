@@ -6037,6 +6037,42 @@ def test_an_unhealable_startup_adoption_latches_manual_safe_mode(tmp_path, monke
         db.close()
 
 
+def test_an_unclassified_startup_adoption_raise_still_reaches_the_loop(tmp_path, monkeypatch):
+    """The boot handler must stay as broad as ``Exception`` (issue #206).
+
+    The AST pin these tests replaced asserted the handler's BREADTH, and the
+    two lanes above cannot: one drives ``sqlite3.OperationalError`` and the
+    other drives a ``ValueError`` that ``resume_startup`` converts, so it is
+    caught by the dedicated ``AdoptionWedgedError`` branch. Narrowing the
+    generic handler to ``except sqlite3.OperationalError`` would pass both.
+
+    That narrowing is not hypothetical. ``resume_startup`` deliberately
+    re-raises the ORIGINAL, unclassified exception when ``_adopt`` had already
+    armed a fail record, and that exception comes from a store write — it can
+    be any ``sqlite3`` error or a plain ``RuntimeError``. Under a narrowed
+    handler that lane would exit the daemon at boot: issue #180 exactly, with a
+    real position on resting SL/TP and StartLimitBurst counting down.
+    """
+    from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
+
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        adoption_raises=RuntimeError("the fail record's own write blew up"),
+        arm_pending_fail=True,
+    )
+    assert built.ticks == 1, "an unclassified adoption raise ended the daemon before the loop"
+    db = Database(built.db_path)
+    try:
+        state = SafeModeManager(db=db, run_id="r1", gate=None).current()
+        # Recoverable, not manual: an armed fail record has its own retry lane,
+        # so this is not a wedge however unusual the exception type is.
+        assert state is not None and not state.is_manual
+    finally:
+        db.close()
+
+
 class _StopBeforeTheLoop(Exception):
     """Sentinel: every kwarg the pins below assert is already decided."""
 
@@ -6056,7 +6092,7 @@ class _StopTheLoop(BaseException):
 
 
 def _drive_live_loop_construction(
-    tmp_path, monkeypatch, *, fetch_clearinghouse, adoption_raises=None
+    tmp_path, monkeypatch, *, fetch_clearinghouse, adoption_raises=None, arm_pending_fail=False
 ):
     """Build ``_run_live_loop``'s components and stop; return what it built with.
 
@@ -6166,6 +6202,15 @@ def _drive_live_loop_construction(
         from contrib.hyperliquid_perp.live.engine import LiveExecutionEngine
 
         def _raising_adopt(self):
+            if arm_pending_fail:
+                # The poisoned-response lane: _adopt armed the fail record and
+                # then its WRITE raised, so resume_startup re-raises the
+                # original, unclassified exception. Built through the real
+                # in-flight object so the shape is the production one.
+                from contrib.hyperliquid_perp.live.decision import _InFlight
+
+                self._inflight = _InFlight.for_try("a-1", datetime(2026, 7, 20, tzinfo=timezone.utc), 1)
+                self._inflight.arm_fail(None, "non-retryable: boom")
             raise adoption_raises
 
         def _stop(self, *args, **kwargs):

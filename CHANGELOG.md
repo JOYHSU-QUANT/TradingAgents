@@ -441,18 +441,28 @@ Breaking changes within the 0.x line are called out explicitly.
   mode under the new reason ``decision_adoption_wedged`` rather than the
   recoverable one — a recoverable latch auto-releases on the next clean
   reconciliation pass, straight back into a wedge that has not changed. The
-  daemon deliberately does NOT exit: the raise is deterministic, so every
-  supervised restart would meet it until ``StartLimitBurst`` gives up, leaving
-  the position with its SL/TP and no process reconciling, repairing protection
-  or refreshing the kill switch at all.
+  process that hits the wedge deliberately does NOT exit: the raise is
+  deterministic, so every supervised restart would meet it until
+  ``StartLimitBurst`` gives up, leaving the position with its SL/TP and no
+  process reconciling, repairing protection or refreshing the kill switch at
+  all. A standing manual latch does fail the §19.1 verdict, so a LATER
+  ``live --loop`` exits 4 without entering the loop — hence the runbook's order
+  is fix the rows, release, then restart. A running daemon needs no restart:
+  ``pump`` re-attempts adoption as soon as the latch stops standing, the same
+  release-resumes-decisions contract every other manual reason already has.
+  The wedge is re-announced at ``CYCLE_INTERVAL`` rather than once per process,
+  matching how the sibling no-decision escalation keeps a log scraper informed
+  without a store query.
 
   ``validate`` gained the two readings that make the state visible without a
   daemon running. One attempt ``in_progress`` and unchanged for longer than
   ``NO_DECISION_STREAK_THRESHOLD × CYCLE_INTERVAL`` (12h — derived from the
-  no-decision escalation, not chosen beside it) is a **shortfall** naming the
+  no-decision escalation, not chosen beside it) or exactly that long is a
+  **shortfall** naming the
   attempt id (exit 4): the commonest cause clears by itself, so it must not
   become a permanent verdict, and it goes away as soon as the cycle reaches a
-  terminal status. More than one ``in_progress`` attempt is a **failure**
+  terminal status. The comparison is inclusive, so exactly that long already
+  counts. More than one ``in_progress`` attempt is a **failure**
   (exit 5): no later state makes that store consistent. So is a stranded row
   whose ``timestamp`` will not parse — its age is the only thing separating a
   cycle in flight from a wedged run, and nothing else in the report reads that

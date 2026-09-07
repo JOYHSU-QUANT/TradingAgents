@@ -79,6 +79,20 @@ logger = logging.getLogger(__name__)
 # it is a zombie run that looks alive and will never decide again, which is
 # exactly what issue #205 was raised about.
 #
+# The verdict is DECLARED from the type, not earned from evidence, and that is
+# a deliberate trade with one known cost. ``_adopt`` does not only read: its
+# no-resumable-response branch WRITES a fail record through ``_fail_cycle``,
+# and unlike the poisoned-response branch it arms nothing, so the exemption in
+# ``resume_startup`` cannot cover it. A one-off store error there that is not
+# an ``OperationalError`` (a ``ProgrammingError`` from cross-thread use, say)
+# therefore latches MANUAL on its FIRST occurrence, with no retry. The
+# alternative — wedge only after N consecutive identical failures — was
+# considered and rejected: a counter has to answer "when does it reset", and on
+# a lane whose whole point is that the process never restarts it would never
+# reset (the same objection that settled issue #178). The remedy for a latch
+# taken in error is one ``safe-mode --release``, which a running daemon now
+# acts on (see ``pump``), so the cost of being wrong here is bounded.
+#
 # A frozenset so this reads as a set of TYPES rather than a hand-ordered tuple;
 # the isinstance tuple is derived from it once, here. Membership is by
 # isinstance, so a future sqlite3 subclass of OperationalError inherits the
@@ -92,7 +106,10 @@ class AdoptionWedgedError(RuntimeError):
 
     Raised out of :meth:`LiveDecisionDriver.resume_startup` in place of the
     original exception (chained as ``__cause__``) when that exception is not in
-    :data:`_SELF_HEALING_ADOPTION_ERRORS`. Both callers — the CLI's boot
+    :data:`_SELF_HEALING_ADOPTION_ERRORS` AND ``_adopt`` had not already armed
+    a fail record — an armed record has its own retry lane, so a raise from
+    its write is re-raised unchanged instead (see ``resume_startup``). Both
+    callers — the CLI's boot
     containment and the loop's tick guard — route THIS type to a MANUAL safe
     mode instead of the recoverable one: a recoverable latch auto-releases on
     the next clean reconciliation pass, straight back into a wedge that has not
@@ -306,6 +323,10 @@ class LiveDecisionDriver:
         # still owns next_decision_at) — it returns idle, and the MANUAL safe
         # mode the first raise entered is the durable, operator-visible fact.
         self._adoption_wedged = False
+        # When the wedge was last announced, so it is re-announced on the
+        # cadence a decision WOULD have happened on rather than once per
+        # process (issue #205). None re-announces on the next pump.
+        self._wedged_logged_at: datetime | None = None
         self._paused_for_latch = False  # one log line per manual-latch pause episode
         self._no_decision_streak = 0  # issue #50: consecutive cycles with no decision
 
@@ -353,11 +374,37 @@ class LiveDecisionDriver:
             # Adoption cannot complete and retrying cannot change that (issue
             # #205). Falling through would re-derive the stranded attempt's
             # deterministic id and collide on the primary key every tick — the
-            # C2 wedge — so the driver idles instead. It is NOT silent: the
-            # raise that set this entered a MANUAL safe mode, which no clean
-            # reconciliation releases, and the stranded in_progress row is what
-            # `validate` reports (live/validation.py).
-            return None
+            # C2 wedge — so the driver idles instead.
+            #
+            # Gated on the MANUAL LATCH ACTUALLY STANDING, not on this flag
+            # alone, and that covers two different things:
+            #
+            #  - A human released it. The documented remedy is "terminalize the
+            #    stranded rows, release, restart", so a release is the operator
+            #    asserting the rows are fixed. Every OTHER manual reason lets a
+            #    running daemon resume on release (see the latch branch below);
+            #    keeping this one restart-only would leave `safe-mode --status`
+            #    reporting a healthy run whose driver never decides again —
+            #    issue #205's zombie, one step further along the procedure.
+            #  - The latch write MISSED. ``safe_mode.enter`` can fail on the
+            #    tick the wedge is found (its own store write meeting a lock),
+            #    and the caller swallows that so the loop survives. Without this
+            #    re-check the wedge would then have no durable record anywhere
+            #    AND no further attempt to make one.
+            #
+            # Both want the same thing: drop the in-process latch and re-attempt
+            # adoption below. A store that is still broken wedges again on this
+            # very tick and re-enters the latch, so neither case can spin
+            # silently — the re-entry is what eventually lands a missed write.
+            if self._manual_latched():
+                self._warn_wedged(now)
+                return None
+            logger.info(
+                "decision driver: the manual safe-mode latch for the wedged startup "
+                "adoption is no longer standing — re-attempting adoption"
+            )
+            self._adoption_wedged = False
+            self._wedged_logged_at = None
         if not self._adopted:
             # Startup adoption raised and the caller contained it (the loop
             # must keep watching the position rather than exit). Retry it
@@ -392,6 +439,33 @@ class LiveDecisionDriver:
             logger.info("manual safe-mode latch released — decision cycles resume")
         return self._start(now)
 
+    def _warn_wedged(self, now: datetime) -> None:
+        """Re-announce a standing adoption wedge on the decision cadence (#205).
+
+        Once per process would be quieter, and wrong. This repo's other
+        never-deciding condition escalates on EVERY cycle
+        (``common.no_decision.note_cycle_outcome``) precisely so a log scraper
+        sees it without querying the store; a single line at the moment of the
+        wedge is findable only by someone who already knows to look for it, and
+        an operator reading the last few hundred journal lines a day later
+        would see a quiet, healthy-looking run. So it repeats at
+        ``CYCLE_INTERVAL`` — the cadence a decision would have happened on, and
+        therefore the rate at which this run is now falling behind.
+        """
+        last = self._wedged_logged_at
+        if last is not None and now - last < self._cycle_interval:
+            return
+        self._wedged_logged_at = now
+        logger.error(
+            "decision driver for %s is WEDGED: §3.1 startup adoption cannot complete, "
+            "so no decision cycle has started or will start. The position is still "
+            "watched (reconciliation, protection, kill switch) but is riding SL/TP "
+            "with no new decisions. Fix the run's in_progress rows in "
+            "decision_attempts, then `safe-mode --release` (see RUNBOOK-live, "
+            "decision_adoption_wedged)",
+            self._run_id,
+        )
+
     def resume_startup(self) -> str | None:
         """§3.1 restart adoption of a stranded ``in_progress`` attempt.
 
@@ -416,8 +490,11 @@ class LiveDecisionDriver:
         Safe to re-enter: it re-reads the row, and the branch that leaves
         ``_inflight`` armed is drained by pump's in-flight guard first.
 
-        The retry is for failures that CAN heal
-        (:data:`_SELF_HEALING_ADOPTION_ERRORS` — the locked store). Anything
+        The retry is for failures that CAN heal, and there are two kinds:
+        :data:`_SELF_HEALING_ADOPTION_ERRORS` (the locked store), and a raise
+        from the write of a fail record ``_adopt`` had already ARMED — that one
+        is drained by pump's in-flight branch whatever its type. Both are
+        re-raised unchanged for the caller's recoverable containment. Anything
         else is deterministic over the same row, so it is re-raised as
         :class:`AdoptionWedgedError` and the retry is latched off: both callers
         route that type to a MANUAL safe mode rather than retrying it forever

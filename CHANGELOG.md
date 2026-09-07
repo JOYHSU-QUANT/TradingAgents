@@ -10,6 +10,32 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **hyperliquid_perp: the acceptance report can now see a funding event stuck
+  by a defect, not only one stuck by a bad timestamp** (issue #208, schema
+  v12). ``backfill_pending_funding`` contains six per-event failures so a pass
+  can never abort, and names the lane that claimed each one — in the daemon's
+  journal. ``validate`` is a separate, read-only process, and from a pending
+  row it could re-derive exactly one of those six (a ``funding_timestamp`` it
+  cannot parse). An event stuck by a funding-reader defect, a store error or
+  the outer catch-all was therefore indistinguishable in the store from one
+  whose rate is merely unpublished: the report stayed clean for six hours, and
+  then said only that the event was stale — whose usual cause is the opposite
+  verdict, a settled hour whose rate will never resolve. Each lane now records
+  its verdict on the event itself (``funding_events.last_backfill_status`` /
+  ``last_backfill_error`` / ``last_backfill_at``, one of ``corrupt_row``,
+  ``reader_failed``, ``store_error``, ``unclaimed``, ``no_result``,
+  ``unknown_status``), and every outcome that gets PAST the failure clears it,
+  so a set breadcrumb always describes the last attempt rather than an old one.
+  ``validate`` prints a further non-gating warning naming the count and the
+  lanes, worded at the remedy — a defect, a store failure or a corrupt row,
+  never an unpublished rate. Each pending row still gets exactly ONE verdict:
+  an unparseable timestamp outranks a recorded failure, which outranks age, so
+  the warning counts stay disjoint. Recording the verdict can never become the
+  failure it reports — a write that fails is contained to a WARNING and leaves
+  the pass's own counts and per-event lines untouched. Migration is one
+  ``ALTER TABLE ... ADD COLUMN`` per column; pre-v12 rows read as "no failed
+  attempt on record", which is what they are.
+
 - **hyperliquid_perp: `export --backfill-format-fingerprint` can read a
   copied store's payloads from elsewhere** (issue #197, item 3).
   ``ai_inputs.input_payload_path`` is the absolute path the daemon recorded,

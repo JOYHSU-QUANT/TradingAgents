@@ -369,8 +369,24 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `5` | integrity failure（orphan／mismatch／store 壞掉） | 先調查再相信任何結果 |
 | `1` | 操作錯誤（db／run 不存在，**或 `--db` 指到別的應用程式的資料庫、目錄、不是普通檔案的東西、或一個打不開來讀的檔**） | 檢查 `--db`／`--run-id`；訊息會說是哪一種，各列見 RUNBOOK-live §8。**「打不開來讀」那種以前印成 exit 5**（`store integrity failure`）——讀權限問題被當成帳本問題，現在歸這一列（issue #210）。**注意還有一種沒收進來**：長度 0、讀得到但**寫不進去**的檔仍是 exit 5（`attempt to write a readonly database`），那是 `connect` 的寫入路徑，不在這道守衛的問題範圍內 |
 
-報告中的 `warning:` 行（超時 pending funding、config drift）不影響 exit code，
-但寫結論前要看過。`prompt_regime:` 行（每組 `(prompt_version, context_shape,
+報告中的 `warning:` 行（超時 pending funding、**上次 backfill 失敗的 pending funding**、
+config drift）不影響 exit code，但寫結論前要看過。其中
+`… failed their last backfill attempt (<lane>: N)` 那條（schema v12，issue #208）與
+「超時」那條**互斥**——一列只進一條，優先序是「時間戳解不開＝corrupt ＞ 有記錄到的失敗
+＞ 超過 6 小時＝stale ＞ 年輕＝不印」，所以兩條的數字相加不會重複計同一列。它說的是
+**backfill 真的試過而且失敗了**，不是「交易所還沒公布 rate」：`reader_failed`／`unclaimed`
+去看 code 與 traceback，`store_error` 是 store 在鬧（多半是鎖，下一輪會自己清掉），
+`corrupt_row` 才去翻 SQLite。逐筆訊息在 `funding_events.last_backfill_error`：
+
+```bash
+sqlite3 paper_trading.db "SELECT symbol, funding_timestamp, last_backfill_status,
+  last_backfill_at, last_backfill_error FROM funding_events
+  WHERE run_id = 'paper-BTC-4' AND status = 'pending'
+    AND last_backfill_status IS NOT NULL ORDER BY funding_timestamp;"
+```
+
+這個欄位記的是**最後一次嘗試**的結果：下一輪 pass 只要走過去了就會清空，所以它一直有值
+＝現在還卡著。`prompt_regime:` 行（每組 `(prompt_version, context_shape,
 format_fingerprint)` 的 cycle 數，依首見順序，只數計入 `cycle_count` 的 cycle）同樣不影響
 exit code：**三鍵齊全的行多於一行**＝這個 run 跨過 prompt 制度邊界，跨段指標要分開讀（§4）；
 `n/a` 是該欄在寫入時還不存在（v10 前無 shape、v11 前無 fingerprint），不是另一個制度——
@@ -421,9 +437,9 @@ JSON 裡要有字串 `format_instructions`——不符的列保持 NULL 並計�
 | **每一個** cycle 都 `invalid_output`（fail-closed、零下單），且 log 裡不再出現 `structured-output invocation failed` fallback 警告 | 模型的 structured output 成功了，渲染輸出天生不含 Phase 2 target JSON → 解析必失敗。確認 `engine.structured_output` 沒被設成 `true`（perp 預設 false、強制 free-text 路徑）；若真的被設成 `true`，engine config 建構（provider 啟動）時會在 log＋stderr 雙通道發警告——直接搜 `engine.structured_output: true` 即可確認（兩個通道都含這段；`warning: ` 前綴只在 stderr 那份）。gate 生效的正向訊號是 paper/live log 每次 AI 呼叫三行 `structured output disabled by config; using free-text generation` INFO（Portfolio/Research Manager、Trader 各一；重試的 cycle 每次嘗試都會再印一組），看到它們就代表 free-text 路徑在跑。2026-07-27 paper-BTC 換模事故即此成因。**注意 `phase2-target-v3` 起有第二個成因與此症狀完全同形**（structured output 確實關著、三行 INFO 也都在，但每個 cycle 仍解不開）：schema 區塊改成型別非法佔位符後，模型整段照抄會 fail-closed。分辨方式是看 `ai_outputs.risk_reason`。**先注意這一格裡 `invalid_output` 出現兩次而意思不同**：症狀欄講的是 `decision_attempts.status`，兩種事故都是它；能分辨的是 `risk_reason` 這個同名但不同欄的值。照抄多半記 `invalid_decision_mode`，structured-output 事故記 `invalid_output`。但兩邊都不是唯一成因——照抄若照著區塊的指示把兩個數值欄的引號拿掉，也會記 `invalid_output`，與 structured-output 事故完全同形。此時改看 log：那三行 `structured output disabled by config` INFO 還在，就不是 structured-output 事故。 |
 | cycle `invalid_output`，`ai_outputs.risk_reason` 是 **`truncated_output`**，log 有 ERROR `the decision completion was truncated: … against a cap of …` | completion 上限綁到、target JSON 被砍（issue #182）——**config 數字的問題，不是 prompt 契約**。看同一 cycle 的 INFO `completion usage:` 行與 payload 旁的 `<payload>.usage.json`：決策節點（`Portfolio Manager`）的 `output_tokens` 等於 cap 就是它。調大 `engine.max_completion_tokens`（RUNBOOK §5、SETUP `engine`）；thinking 模型的 reasoning tokens 也算在上限內。分析師／辯論節點被砍只會有 WARNING `completion truncated in <node>`、cycle 照常繼續，那是 prompt 品質下降的訊號，不是契約失敗。 |
 | log 出現 `escalating to the supervisor (daemon exit)`，daemon 隨即退出、由監管拉回 | AI 回答之後的某一筆 scheduler 寫入（§3.1 回覆落地、`ai_outputs` 稽核寫入，或終端 `api_failed` 記錄）**連續 10 次 poll 都失敗**——不是暫時性鎖（那個一兩輪就自癒），而是 SQLite 檔案級的問題：查誰長期握著寫鎖（別的 process、跑很久的 `export`／`validate`）、磁碟是否寫滿、DB 檔或所在目錄是否變成唯讀、WAL 是否卡住；例外類型不是 `sqlite3.*` 的話，是那筆寫入本身的程式缺陷（確定性錯誤同樣會被重試 10 次才逃生）。log 裡同一 cycle 前面會有 9 筆帶 traceback 的 ERROR，看它們的例外類型定位。**重啟後的行為依失敗的是哪一筆而不同，三者都是預期**：落地那筆失敗（回覆從未 durable）→ 該 attempt 走 §3.1 ladder **重問一次 AI**（在 3 次預算內；預算已用完則記 `api_failed`／`interrupted`）；稽核那筆失敗（回覆已 durable、plan 已 commit）→ 重啟 reconciliation 取消那個 plan，resume 後**在新價格重跑一次 gate**；終端 `api_failed` 記錄那筆失敗（判決只在記憶體）→ 該列仍 `in_progress`，重啟依列上狀態重判——try 計數已花完記 `interrupted`，還有剩就回 §3.1 ladder **重問 AI**，即使 in-process 的判決是「非 retryable、不走階梯」。也就是說「絕不重問 AI／絕不重跑 gate」只在 in-process 重試期間成立，逃生之後不成立。這條路徑不會留下 terminal row，所以 `validate` 的 no-decision streak（exit 4）看不到它——訊號是這行 ERROR 與監管的 restart count。 |
-| log 出現 `funding backfill for … could not read the rate for …`，帶 traceback，該小時一直是 `pending` | **funding reader 壞了，不是 store 壞了**——這兩句刻意分開（issue #193）。`rate_at` 對「venue 失敗」是回 `None`（安靜地留 pending），所以會走到這行的只剩我方缺陷：呼叫端與 reader 簽章漂移（`TypeError`）、餵了 naive 時鐘（`ValueError`）之類。看 traceback 修 code，**不要去翻 SQLite**——那是另一句 `… (corrupt stored row; fix it in the store to resolve it)` 的意思。這條**不會中斷 backfill pass、也不會讓 daemon 退出**（該 pass 契約上不准 abort：重啟時 abort 會早於 protection-only fork，倉位就變成沒人看管的 crash-loop），事件留 pending、下個 cycle 邊界或重啟再試；修好之前那筆 funding P&L 不計入總額，也絕不捏造。 |
+| log 出現 `funding backfill for … could not read the rate for …`，帶 traceback，該小時一直是 `pending` | **funding reader 壞了，不是 store 壞了**——這兩句刻意分開（issue #193）。`rate_at` 對「venue 失敗」是回 `None`（安靜地留 pending），所以會走到這行的只剩我方缺陷：呼叫端與 reader 簽章漂移（`TypeError`）、餵了 naive 時鐘（`ValueError`）之類。看 traceback 修 code，**不要去翻 SQLite**——那是另一句 `… (corrupt stored row; fix it in the store to resolve it)` 的意思。這條**不會中斷 backfill pass、也不會讓 daemon 退出**（該 pass 契約上不准 abort：重啟時 abort 會早於 protection-only fork，倉位就變成沒人看管的 crash-loop），事件留 pending、下個 cycle 邊界或重啟再試；修好之前那筆 funding P&L 不計入總額，也絕不捏造。**schema v12 起這個判決也寫進事件本身**（`funding_events.last_backfill_status = 'reader_failed'`），所以不必翻 journal 也能看到——`validate` 會直接印一條 `failed their last backfill attempt (reader_failed: N)`，與「超時」那條分開（issue #208）；下一輪 pass 走過去了就自動清掉。 |
 | market data 一直 `paused_market_data`，且 log 有 `market snapshot fetch for … raised a non-venue error … defect on our side, not an exchange outage`＋traceback | **不是交易所掛了，是我們的 code**。快照 provider 現在把兩種失敗分開記：venue 失敗（`ExchangeError` 家族）走 `error`，其他一律走 `defect` 並印 ERROR＋traceback。行為上兩者相同（三振後 `paused_market_data`、每個 tick 一筆 pending，倉位由既有 SL/TP 看管、不會下新單），**能分辨的只有這行 log**——看到它就不要去查交易所狀態或網路，直接看 traceback 修 code。刻意不讓它拋出去：`try_write_cycle_snapshot` 在 terminal 交易之後、又不在任何 broad handler 裡，拋出去會在該列已經落地之後殺掉 daemon 且不留 halt 痕跡；`cli/paper.py` 也沒有包 `engine.tick()`（live 有），拋出去等於把安靜停擺換成 crash-loop。 |
-| log 出現 `funding backfill for … hit an unexpected failure on …`＋`no lane claimed this one`，帶 traceback | funding backfill 的兜底：三條具名 lane（corrupt row／funding reader／store error）都不認領的例外。這條在的理由就是「不准 abort」不能靠 handler 清單維持——issue #191 正是從清單縫裡穿過去的。**一定是缺陷**，看 traceback 修 code；事件留 pending、pass 照跑完、daemon 不退出。注意 `validate` 目前看不到這種卡住（它只認得出 timestamp 解不開那一種），所以連續幾個 pass 都出現同一句就要當真——`validate` 只會把它算進 6 小時後的泛用 stale pending。 |
+| log 出現 `funding backfill for … hit an unexpected failure on …`＋`no lane claimed this one`，帶 traceback | funding backfill 的兜底：三條具名 lane（corrupt row／funding reader／store error）都不認領的例外。這條在的理由就是「不准 abort」不能靠 handler 清單維持——issue #191 正是從清單縫裡穿過去的。**一定是缺陷**，看 traceback 修 code；事件留 pending、pass 照跑完、daemon 不退出。**schema v12 起 `validate` 看得到這種卡住了**（issue #208）：判決寫進 `funding_events.last_backfill_status = 'unclaimed'`，報告第一輪就印 `failed their last backfill attempt (unclaimed: N)`，而且**不會**再算進 6 小時後的泛用 stale pending——一列只進一條 warning。 |
 | 反覆重啟，且每次 log 都是同一個 `start_plan` traceback | 確定性的引擎缺陷：`start_plan` 的例外刻意不容納（引擎 fail-stop 後拒絕所有呼叫），而已落地的回覆會讓重啟 resume 到同一個 gate → 再爆。監管會一直拉、一直爆，倉位期間由既有 SL/TP 看管但不會有新決策。**這不是自癒模式，照 §5 人工介入**：修掉 traceback 指的缺陷；急救時可停掉 run 後手動清該 attempt 的 `pending_raw_response`（該 cycle 記成失敗、下個 cycle 照排）。 |
 
 更多症狀見 [SETUP §7](./SETUP.md#7-troubleshooting)。

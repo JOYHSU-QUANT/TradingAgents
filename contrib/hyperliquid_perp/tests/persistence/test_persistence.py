@@ -944,6 +944,113 @@ def test_set_funding_status_is_pending_to_posted_only(tmp_path):
     db.close()
 
 
+def _pending_funding_row(db, fid):
+    with db.transaction() as conn:
+        repo.insert_funding_event(
+            conn,
+            funding_event_id=fid,
+            mode="paper",
+            run_id="r1",
+            symbol="BTC",
+            funding_timestamp=_TS,
+            position_size=Decimal("0.05"),
+            status="pending",
+            mark_price=Decimal("60000"),
+        )
+
+
+def _backfill_columns(db, fid):
+    row = repo.get_funding_event(db.conn, fid)
+    return (row["last_backfill_status"], row["last_backfill_error"], row["last_backfill_at"])
+
+
+def test_set_funding_backfill_outcome_writes_then_clears_the_three_columns(tmp_path):
+    # The schema-v12 breadcrumb (issue #208): the three columns move together,
+    # because a timestamp or a message with no verdict beside it reads as a
+    # broken row to anyone querying the column.
+    db = Database(tmp_path / "p.db")
+    fid = funding_event_id("r1", "BTC", _TS)
+    _pending_funding_row(db, fid)
+    assert _backfill_columns(db, fid) == (None, None, None)
+
+    with db.transaction() as conn:
+        repo.set_funding_backfill_outcome(
+            conn, fid, lane="reader_failed", error="rate_at() got a naive datetime", at=_TS
+        )
+    assert _backfill_columns(db, fid) == (
+        "reader_failed",
+        "rate_at() got a naive datetime",
+        _TS.isoformat(),
+    )
+
+    with db.transaction() as conn:
+        repo.set_funding_backfill_outcome(conn, fid, lane=None)
+    assert _backfill_columns(db, fid) == (None, None, None)
+    db.close()
+
+
+def test_set_funding_backfill_outcome_guards_its_own_contract(tmp_path):
+    db = Database(tmp_path / "p.db")
+    fid = funding_event_id("r1", "BTC", _TS)
+    _pending_funding_row(db, fid)
+
+    # A word outside the vocabulary is a typo, and persisting it would put a
+    # verdict in the store that the acceptance report cannot read back.
+    with pytest.raises(ValueError, match="lane"), db.transaction() as conn:
+        repo.set_funding_backfill_outcome(conn, fid, lane="reader_broke", error="x", at=_TS)
+    # Half a clear would leave a stamp with no verdict beside it.
+    with pytest.raises(ValueError, match="clears"), db.transaction() as conn:
+        repo.set_funding_backfill_outcome(conn, fid, lane=None, error="oops")
+    # And half a SET is the same shape from the other side: a verdict the
+    # report promises a message for and cannot deliver, or one with no stamp to
+    # tell it from an older attempt. The guard runs in both directions.
+    with pytest.raises(ValueError, match="requires its error and at"), db.transaction() as conn:
+        repo.set_funding_backfill_outcome(conn, fid, lane="unclaimed", at=_TS)
+    with pytest.raises(ValueError, match="requires its error and at"), db.transaction() as conn:
+        repo.set_funding_backfill_outcome(conn, fid, lane="unclaimed", error="x")
+    assert _backfill_columns(db, fid) == (None, None, None)
+
+    # Flattened and bounded: this column is read back into a report line, and
+    # the untruncated message is already in the log.
+    with db.transaction() as conn:
+        repo.set_funding_backfill_outcome(
+            conn, fid, lane="unclaimed", error="line one\n  line two\n" + "x" * 900, at=_TS
+        )
+    stored = _backfill_columns(db, fid)[1]
+    assert stored.startswith("line one line two x")
+    assert len(stored) == 500
+    db.close()
+
+
+def test_set_funding_backfill_outcome_never_marks_a_posted_event(tmp_path):
+    """A settled event must not end up carrying a failure marker.
+
+    The backfill reads its pending rows, then writes per event — so a row that
+    posted in between (the exactly-once transition, from this pass or another)
+    would be stamped as failed after the fact. The writer filters on the status
+    rather than trusting the caller's snapshot, and matching nothing is the
+    right outcome, not an error: nothing failed, so there is nothing to say.
+    """
+    db = Database(tmp_path / "p.db")
+    fid = funding_event_id("r1", "BTC", _TS)
+    _pending_funding_row(db, fid)
+    with db.transaction() as conn:
+        repo.set_funding_status(
+            conn,
+            fid,
+            status="posted",
+            funding_rate=Decimal("0.0001"),
+            funding_pnl=Decimal("-0.3"),
+            signed_position_notional=Decimal("3000"),
+        )
+
+    with db.transaction() as conn:
+        repo.set_funding_backfill_outcome(conn, fid, lane="unclaimed", error="late", at=_TS)
+
+    assert _backfill_columns(db, fid) == (None, None, None)
+    db.close()
+
+
 def test_set_funding_status_rejects_overriding_stored_mark(tmp_path):
     # The settlement mark is fixed when the pending row is stored; a backfill
     # posting may re-supply mark_price only if it MATCHES — never override it, or a

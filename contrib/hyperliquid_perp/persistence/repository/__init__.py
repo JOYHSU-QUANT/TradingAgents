@@ -26,6 +26,7 @@ from ._vocab import (
     ACCOUNTING_ADJUSTMENT_TYPES,
     ERROR_TYPES,
     EXCHANGE_KNOWN_ATTEMPT_STATUSES,
+    FUNDING_BACKFILL_LANES,
     KILL_SWITCH_EVENT_TYPES,
     LIVE_LIQUIDITY_ROLES,
     LIVE_ORDER_STATUSES,
@@ -91,6 +92,7 @@ from .funding import (
     get_funding_event,
     insert_funding_event,
     iter_funding_events,
+    set_funding_backfill_outcome,
     set_funding_status,
 )
 from .live_attempts import (
@@ -145,6 +147,7 @@ from .smoke import insert_smoke_test_result, iter_smoke_test_results, latest_smo
 __all__ = [
     "ACCOUNTING_ADJUSTMENT_TYPES",
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
+    "FUNDING_BACKFILL_LANES",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
     "LIVE_SMOKE_TEST_STATUSES",
@@ -230,6 +233,7 @@ __all__ = [
     "prompt_regime_counts",
     "require_current_account_state",
     "require_live_fill_basis",
+    "set_funding_backfill_outcome",
     "set_funding_status",
     "set_reconciliation_action",
     "set_position_liquidation_price",

@@ -9,6 +9,7 @@ __all__ = [
     "ACCOUNTING_ADJUSTMENT_TYPES",
     "ERROR_TYPES",
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
+    "FUNDING_BACKFILL_LANES",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
     "LIVE_ORDER_STATUSES",
@@ -45,6 +46,36 @@ LIVE_LIQUIDITY_ROLES = frozenset({"maker", "taker"})
 ACCOUNTING_ADJUSTMENT_TYPES = frozenset({"fee", "funding", "realized_pnl"})
 _FLIP_LEGS = frozenset({"open", "close"})
 _FUNDING_STATUSES = frozenset({"pending", "posted"})
+# Why a pending funding event did not post on its last backfill attempt
+# (schema v12, issue #208) — one word per contained per-event lane in
+# ``paper.reconcile.backfill_pending_funding``, in that function's order:
+#
+#   corrupt_row     the STORE is wrong (an unparseable settlement timestamp, a
+#                   position size no Decimal accepts, a legacy row whose mark
+#                   record_funding's own guard rejects). Fixed in SQLite.
+#   reader_failed   the funding READER raised. ``rate_at`` answers a venue
+#                   failure with None on purpose, so anything raised there is a
+#                   defect in OUR code — a drifted signature, a naive clock, a
+#                   stamp no datetime can hold. Fixed in the code, not the store.
+#   store_error     record_funding hit sqlite3.Error opening its own
+#                   transaction. Usually transient (a lock); the next pass
+#                   retries and clears the breadcrumb.
+#   unclaimed       the outer catch-all: no named lane recognised the failure.
+#                   Read the traceback before suspecting the row.
+#   no_result       the tail guard — a path that neither posted nor claimed the
+#                   event. Unreachable today; if it is ever written, the loop
+#                   itself has grown a hole.
+#   unknown_status  record_funding answered with a status this loop has no
+#                   verdict for; the result vocabulary grew and the loop was
+#                   not taught the new word.
+#
+# Public: ``paper.validation`` reads these back to tell an event stuck by a
+# defect apart from one whose rate is merely unpublished, which is the whole
+# reason they are persisted. A word not listed here is rejected at the write
+# boundary.
+FUNDING_BACKFILL_LANES = frozenset(
+    {"corrupt_row", "reader_failed", "store_error", "unclaimed", "no_result", "unknown_status"}
+)
 # phase2-data §10 funding provenance vocabulary.
 _FUNDING_SOURCES = frozenset(
     {"live_public_data", "funding_history_backfill", "exchange_user_funding"}

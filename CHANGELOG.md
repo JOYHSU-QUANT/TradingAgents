@@ -415,6 +415,90 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: a live run wedged at startup adoption is no longer a
+  zombie that ``validate`` reads as healthy** (issue #205). Containing a
+  raising ``resume_startup`` and retrying it on every pump (issue #180) is
+  right for a locked store, but the lane had no escalation and left no durable
+  trace. ``repo.find_in_progress_attempt`` raises ``ValueError`` when one run
+  has two ``in_progress`` attempts — the repository's deliberate fail-loud,
+  meaning the decision state machine broke — and ``_adopt`` re-reads that same
+  pair every tick, so the raise repeated identically forever: no terminal row
+  was ever written, ``no_decision_streak`` (whose query skips ``in_progress``
+  rows) stayed frozen at whatever it was before the wedge, and a run stuck for
+  days reported exactly what a run that had just started reports, while the
+  real position rode its resting SL/TP alone.
+
+  Adoption failures are now classified. ``sqlite3.OperationalError`` is the
+  store saying "busy" — the motivating #180 failure, which clears when the
+  other reader lets go — and is retried exactly as before. Anything else is a
+  fact about the ROW, not the lock — with one exception: a raise from the write
+  of a fail record ``_adopt`` had already ARMED is left alone, because pump's
+  in-flight branch retries exactly that write and a landed one terminalizes the
+  stranded attempt. Otherwise it is re-raised as
+  ``AdoptionWedgedError``, the retry is latched off (pump idles instead of
+  falling through to ``_start``, whose deterministic id would collide with the
+  stranded attempt every tick), and the loop's containment latches MANUAL safe
+  mode under the new reason ``decision_adoption_wedged`` rather than the
+  recoverable one — a recoverable latch auto-releases on the next clean
+  reconciliation pass, straight back into a wedge that has not changed. The
+  process that hits the wedge deliberately does NOT exit: the raise is
+  deterministic, so every supervised restart would meet it until
+  ``StartLimitBurst`` gives up, leaving the position with its SL/TP and no
+  process reconciling, repairing protection or refreshing the kill switch at
+  all. A standing manual latch does fail the §19.1 verdict, so a LATER
+  ``live --loop`` exits 4 without entering the loop — hence the runbook's order
+  is fix the rows, release, then restart. A running daemon needs no restart:
+  ``pump`` re-attempts adoption as soon as the latch stops standing, the same
+  release-resumes-decisions contract every other manual reason already has.
+  The wedge is re-announced at ``CYCLE_INTERVAL`` rather than once per process,
+  matching how the sibling no-decision escalation keeps a log scraper informed
+  without a store query.
+
+  ``validate`` gained the two readings that make the state visible without a
+  daemon running. One attempt ``in_progress`` and unchanged for longer than
+  ``NO_DECISION_STREAK_THRESHOLD × CYCLE_INTERVAL`` (12h — derived from the
+  no-decision escalation, not chosen beside it) or exactly that long is a
+  **shortfall** naming the
+  attempt id (exit 4): the commonest cause clears by itself, so it must not
+  become a permanent verdict, and it goes away as soon as the cycle reaches a
+  terminal status. The comparison is inclusive, so exactly that long already
+  counts. More than one ``in_progress`` attempt is a **failure**
+  (exit 5): no later state makes that store consistent. So is a stranded row
+  whose ``timestamp`` will not parse — its age is the only thing separating a
+  cycle in flight from a wedged run, and nothing else in the report reads that
+  column, so withholding both verdicts there would have let a strictly more
+  broken store pass the gate a merely stale one fails. Both read the rows
+  with a plain query rather than through ``find_in_progress_attempt``,
+  precisely because that helper raises on the two-row shape and a read-only
+  acceptance validator must report a broken store instead of crashing on it.
+  The shortfall carries no recency window (the no-decision streak beside it
+  does), so a run stopped mid-cycle reports it until a daemon adopts the row —
+  the honest reading, since a window keyed on age would suppress exactly the
+  wedge the line exists to catch. No schema change. RUNBOOK-live documents the wedge's log line, its
+  ``safe-mode --status`` / ``validate`` signatures, and the terminalize →
+  restart → release procedure, and corrects the "``validate`` cannot see a
+  lock that never clears" note it carried.
+
+  Known trade-offs, all accepted deliberately. The wedge verdict is DECLARED
+  from the exception type rather than earned from repetition, so a one-off
+  store error on the no-resumable-response branch (which arms nothing, and so
+  cannot use the armed-record exemption) latches on its first occurrence; a
+  counter was rejected because it would have to answer "when does it reset" on
+  a lane whose whole point is that the process never restarts. ``pump`` now
+  reads ``scheduler_state`` once per tick while wedged, where it previously
+  returned immediately — a rare state, and the read is what lets a release
+  resume the run. And ``_adopted`` / ``_adoption_wedged`` remain two booleans
+  rather than one enum: the fourth combination is unreachable through call-site
+  ordering rather than through the type, but collapsing them would touch every
+  test that pins ``_adopted`` for no behaviour change.
+
+  The structural pin behind the #180 containment was replaced by a behavioural
+  one (issue #206, item 1). It asserted that the call sat in a broad ``try``
+  reaching the containment idiom, which a ``return`` placed after that call
+  passes while reinstating the exact #180 failure; the new tests drive the real
+  function into the loop body and assert both halves — safe mode entered AND
+  the engine's first tick reached — for the recoverable and the manual lane
+  alike.
 - **hyperliquid_perp: a ``--db`` that exists but cannot be READ is refused by
   name instead of borrowing the ledger-integrity verdict** (issue #210). The
   branches that name a path-shaped mistyped ``--db`` decide on ``stat``, and

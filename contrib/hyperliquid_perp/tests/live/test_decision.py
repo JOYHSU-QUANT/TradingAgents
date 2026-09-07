@@ -734,6 +734,287 @@ def test_a_poisoned_adoption_drains_its_armed_record_before_re_adopting(tmp_path
     assert engine.plans == []
 
 
+def _latch_manual(db, *, reason: str = "decision_adoption_wedged", run_id: str = "r") -> None:
+    """Stand a MANUAL safe-mode latch, as the loop's containment does."""
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            run_id,
+            safe_mode_type="manual",
+            safe_mode_reason=reason,
+            safe_mode_entered_at=_T0,
+        )
+
+
+def _release_manual(db, *, run_id: str = "r") -> None:
+    """Clear the latch, as ``safe-mode --release`` does."""
+    with db.transaction() as conn:
+        repo.upsert_scheduler_state(
+            conn,
+            run_id,
+            safe_mode_type=None,
+            safe_mode_reason=None,
+            safe_mode_entered_at=None,
+        )
+
+
+def test_a_broken_state_machine_wedges_adoption_instead_of_retrying_forever(
+    tmp_path, monkeypatch
+):
+    """issue #205: an adoption failure that cannot heal stops being retried.
+
+    Two ``in_progress`` attempts for one run is the repository's deliberate
+    fail-loud — the decision state machine broke — and ``_adopt`` re-reads that
+    same pair on every tick, so the ``ValueError`` repeats identically forever.
+    Before this, the caller contained it and pump retried it every 10s: no
+    terminal row was ever written, ``no_decision_streak`` stayed frozen at
+    whatever it was before the wedge, and the run looked alive while it could
+    never decide again.
+
+    Now the verdict is made once, in ``resume_startup``, and re-raised as
+    :class:`AdoptionWedgedError` so the caller can latch MANUAL safe mode
+    (cli/live_loop.py). pump then idles: it must NOT re-read (the answer cannot
+    change) and it must NOT fall through to ``_start`` — the stranded attempts
+    still own ``next_decision_at``, so a fresh cycle would re-derive one of
+    their deterministic ids and collide on the primary key every tick.
+    """
+    from contrib.hyperliquid_perp.persistence import ids
+
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)
+    # A second live row, at the next slot so the (run_id, scheduled_at) UNIQUE
+    # admits it — the shape find_in_progress_attempt refuses to pick between.
+    second_at = _T0 + CYCLE_INTERVAL
+    with db.transaction() as conn:
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id=ids.decision_attempt_id("r", second_at),
+            timestamp=second_at,
+            mode="live",
+            run_id="r",
+            scheduled_at=second_at,
+            attempt_count=1,
+            status="in_progress",
+            first_attempt_at=second_at,
+            last_attempt_at=second_at,
+        )
+
+    reads = {"n": 0}
+    real_find = repo.find_in_progress_attempt
+
+    def _counting_find(conn, run_id):
+        reads["n"] += 1
+        return real_find(conn, run_id)
+
+    monkeypatch.setattr(decision_mod.repo, "find_in_progress_attempt", _counting_find)
+
+    with pytest.raises(decision_mod.AdoptionWedgedError) as excinfo:
+        driver.resume_startup()
+    assert isinstance(excinfo.value.__cause__, ValueError)  # the fail-loud, not swallowed
+    assert reads["n"] == 1
+    assert driver._adoption_wedged is True
+    assert driver._adopted is False  # the step never completed, and never will
+
+    # The caller's containment latches MANUAL safe mode; that latch STANDING is
+    # what licenses the driver to idle (a bare in-process flag would also idle
+    # when the latch write missed, leaving the wedge with no record anywhere).
+    _latch_manual(db)
+
+    # The loop keeps calling pump (the position is still being watched). Every
+    # one of those is a no-op: no re-read, no raise, no cycle, no LLM spend.
+    clock.advance(CYCLE_INTERVAL.total_seconds() * 2)  # past due, so _start WOULD fire
+    assert driver.pump() is None
+    assert driver.pump() is None
+    assert reads["n"] == 1
+    assert provider.requests == 0
+    assert engine.plans == []
+    # ... and nothing was written: both rows are exactly as the broken state
+    # machine left them, for the operator to inspect.
+    rows = db.conn.execute(
+        "SELECT status FROM decision_attempts WHERE run_id='r' ORDER BY scheduled_at"
+    ).fetchall()
+    assert [r["status"] for r in rows] == ["in_progress", "in_progress"]
+
+
+def test_an_armed_fail_record_is_not_mistaken_for_a_wedge(tmp_path, monkeypatch):
+    """The wedge verdict must not swallow the lane that repairs itself (#205).
+
+    A poisoned re-parse arms ``pending_fail`` BEFORE its write, and pump's
+    in-flight branch — checked ahead of the wedge latch — retries just that
+    write until it lands, which terminalizes the stranded attempt and frees
+    ``next_decision_at``. So a NON-``OperationalError`` raised by that write is
+    still a fault that retrying fixes, and latching the wedge on it would leave
+    a MANUAL safe mode for a human to clear over a run that already healed.
+    Only failures with no armed record are wedges.
+    """
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=_RAW_LONG)
+    poison_stored_parse(monkeypatch, decision_mod)
+    fired = {"n": 0}
+    real_record = repo.record_api_failed
+
+    def _flaky_record(*args, **kwargs):
+        fired["n"] += 1
+        if fired["n"] == 1:
+            raise sqlite3.ProgrammingError("cannot operate on a closed database")
+        return real_record(*args, **kwargs)
+
+    monkeypatch.setattr(decision_mod.repo, "record_api_failed", _flaky_record)
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        driver.resume_startup()  # contained by the caller as recoverable
+    assert driver._adoption_wedged is False, "a self-repairing lane was called a wedge"
+    assert driver._inflight is not None and driver._inflight.pending_fail is not None
+
+    assert driver.pump() == "api_failed"  # the armed record lands this time
+    row = db.conn.execute("SELECT * FROM decision_attempts WHERE run_id='r'").fetchone()
+    assert row["status"] == "api_failed"
+    # ... and the driver goes back to ordinary scheduling rather than idling
+    # behind a latch: the owed adoption runs as a clean no-op, then the cycle
+    # re-anchored by the fail record comes due and starts normally.
+    assert driver.pump() is None
+    assert driver._adopted is True
+    clock.advance(CYCLE_INTERVAL.total_seconds() * 2)
+    assert driver.pump() == "cycle_started"
+
+
+def test_a_wedge_discovered_by_pump_is_raised_once_for_the_tick_guard(tmp_path, monkeypatch):
+    """The wedge can surface on the RETRY, not only at boot (issue #205).
+
+    Boot met the locked store — the self-healing lane, contained as recoverable
+    — so pump owes the adoption. When the lock clears, the read that finally
+    succeeds can find the broken state machine. pump must raise
+    ``AdoptionWedgedError`` THEN, so the loop's tick guard latches manual safe
+    mode; a silent early return would leave the wedge with no durable record at
+    all. Exactly once, though: after the latch, further pumps idle.
+    """
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)
+    locked = {"still": True}
+
+    def _flaky_find(conn, run_id):
+        if locked["still"]:
+            raise sqlite3.OperationalError("database is locked")
+        raise ValueError("run 'r' has 2 in-progress attempts (a, b)")
+
+    monkeypatch.setattr(decision_mod.repo, "find_in_progress_attempt", _flaky_find)
+
+    # Boot: the self-healing lane, re-raised unchanged for the recoverable idiom.
+    with pytest.raises(sqlite3.OperationalError):
+        driver.resume_startup()
+    assert driver._adoption_wedged is False
+    assert driver._adopted is False
+
+    locked["still"] = False
+    with pytest.raises(decision_mod.AdoptionWedgedError):
+        driver.pump()
+    assert driver._adoption_wedged is True
+    _latch_manual(db)  # the tick guard's containment lands the latch
+    assert driver.pump() is None  # ... and the guard is not told twice
+    assert provider.requests == 0
+
+
+def test_a_wedge_with_no_standing_latch_keeps_raising_until_one_lands(tmp_path, monkeypatch):
+    """A missed latch write must not leave the wedge with NO record at all (#205).
+
+    ``safe_mode.enter`` can fail on the very tick the wedge is found — its own
+    store write meeting the lock — and the loop swallows that so nothing ends
+    the loop. If the driver idled on its in-process flag alone from then on,
+    the run would be permanently undecided with no manual latch, no repeating
+    log, and nothing for `safe-mode --status` to show: exactly the invisibility
+    issue #205 exists to end, reintroduced one step later.
+
+    So the idle is gated on the latch ACTUALLY STANDING. While none does, pump
+    keeps raising, which is what drives the caller to try the write again.
+    """
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)
+    monkeypatch.setattr(
+        decision_mod.repo,
+        "find_in_progress_attempt",
+        lambda conn, run_id: (_ for _ in ()).throw(ValueError("2 in-progress attempts")),
+    )
+    with pytest.raises(decision_mod.AdoptionWedgedError):
+        driver.resume_startup()
+    # No latch landed, so the next pump raises again rather than going quiet.
+    with pytest.raises(decision_mod.AdoptionWedgedError):
+        driver.pump()
+    # Once the write lands, the driver settles into the idle it is meant to.
+    _latch_manual(db)
+    assert driver.pump() is None
+    assert provider.requests == 0
+
+
+def test_releasing_the_latch_lets_a_running_daemon_re_attempt_adoption(tmp_path, monkeypatch):
+    """§13.6 release means "I fixed the rows" — and the driver must act on it.
+
+    Every other manual reason lets a RUNNING daemon resume on release (the
+    latch branch further down pump reads ``scheduler_state`` live). Keeping
+    this one restart-only would leave `safe-mode --status` reporting a healthy
+    run whose decision driver never decides again — issue #205's zombie, one
+    step further along the documented procedure.
+    """
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)
+    broken = {"still": True}
+    real_find = repo.find_in_progress_attempt
+
+    def _find(conn, run_id):
+        if broken["still"]:
+            raise ValueError("run 'r' has 2 in-progress attempts (a, b)")
+        return real_find(conn, run_id)
+
+    monkeypatch.setattr(decision_mod.repo, "find_in_progress_attempt", _find)
+    with pytest.raises(decision_mod.AdoptionWedgedError):
+        driver.resume_startup()
+    _latch_manual(db)
+    assert driver.pump() is None  # idle while the latch stands
+
+    # The operator terminalizes the bad rows and releases.
+    broken["still"] = False
+    _release_manual(db)
+    assert driver.pump() == "api_failed"  # adoption ran: the stranded row is closed
+    assert driver._adoption_wedged is False
+    assert driver._adopted is True
+
+
+def test_a_standing_wedge_is_re_announced_on_the_decision_cadence(tmp_path, monkeypatch, caplog):
+    """One line per process would be quiet, and wrong (#205).
+
+    The repo's other never-deciding condition escalates on every cycle
+    (``note_cycle_outcome``) so a log scraper sees it without querying the
+    store. A single line at the moment of the wedge is findable only by someone
+    who already knows to look; an operator reading the last few hundred journal
+    lines a day later would see a quiet, healthy-looking run. It repeats at the
+    cadence a decision would have happened on.
+    """
+    db, clock, driver, engine, worker, provider = _driver(tmp_path)
+    _strand_attempt(db, raw=None)
+    monkeypatch.setattr(
+        decision_mod.repo,
+        "find_in_progress_attempt",
+        lambda conn, run_id: (_ for _ in ()).throw(ValueError("2 in-progress attempts")),
+    )
+    with pytest.raises(decision_mod.AdoptionWedgedError):
+        driver.resume_startup()
+    _latch_manual(db)
+
+    def _wedge_lines() -> int:
+        return sum(1 for r in caplog.records if "is WEDGED" in r.getMessage())
+
+    with caplog.at_level(logging.ERROR, logger=decision_mod.logger.name):
+        assert driver.pump() is None
+        assert _wedge_lines() == 1
+        # Ticks inside the same cycle stay quiet — 10s cadence must not spam.
+        clock.advance(60)
+        assert driver.pump() is None
+        assert _wedge_lines() == 1
+        # A cycle later, the run has fallen another decision behind: say so.
+        clock.advance(CYCLE_INTERVAL.total_seconds())
+        assert driver.pump() is None
+        assert _wedge_lines() == 2
+
+
 def test_resume_startup_with_no_stranded_attempt_is_none(tmp_path):
     db, clock, driver, engine, worker, provider = _driver(tmp_path)
     assert driver.resume_startup() is None

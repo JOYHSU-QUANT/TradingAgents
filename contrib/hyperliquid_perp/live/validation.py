@@ -115,9 +115,11 @@ from operator import itemgetter
 from typing import NamedTuple
 
 from ..common.config_coercion import int_from_yaml
+from ..common.constants import CYCLE_INTERVAL
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..common.instants import parse_instant
 from ..common.no_decision import (
+    NO_DECISION_STREAK_THRESHOLD,
     TrailingFailureStreaks,
     no_decision_shortfall,
     trailing_failure_streaks,
@@ -826,6 +828,83 @@ def _stated_deadline_seconds(detail: str | None) -> Decimal | None:
     return seconds if seconds > 0 else None
 
 
+# How long one attempt may sit ``in_progress`` before the run is treated as
+# wedged rather than mid-cycle (issue #205). Derived from the no-decision
+# escalation, not chosen beside it: a wedge IS a no-decision run — the driver
+# adopted nothing, so no terminal row is ever written and
+# ``trailing_failure_streaks`` (which skips ``in_progress`` rows, correctly)
+# counts nothing new, leaving the streak FROZEN at its pre-wedge value however
+# long the wedge lasts — and the two must not be able to drift into disagreeing
+# about how long "cannot decide" is allowed to last. Three cycles at the 4h
+# cadence, so a cycle whose LLM call is legitimately running cannot reach it.
+# The comparison is ``>=``, so exactly this long already counts as wedged.
+_ADOPTION_WEDGE_AFTER = NO_DECISION_STREAK_THRESHOLD * CYCLE_INTERVAL
+
+
+@dataclass(frozen=True)
+class _StrandedAttempts:
+    """The run's non-terminal decision attempts, as the acceptance report sees them.
+
+    Deliberately NOT ``repo.find_in_progress_attempt``: that helper RAISES on
+    the two-row case (it is the daemon's fail-loud, and it is what wedges
+    adoption in the first place), and a read-only acceptance validator must
+    report a broken store rather than crash on it — the whole point of looking
+    is that this run may never have got a daemon past boot.
+
+    ``oldest_at`` is the oldest row's ``timestamp`` (when it last CHANGED
+    STATE), the same basis ``trailing_failure_streaks`` dates its streak by and
+    for the same reason: ``scheduled_at`` is the cycle's original slot, which a
+    stranded attempt carries unchanged from before the crash, so ages taken
+    from it would count downtime the run cannot be blamed for. ``None`` when
+    the stamp will not parse; the caller reports THAT as its own integrity
+    failure rather than guessing an age — the column is NOT NULL and written
+    only by the repository, so a value this validator cannot read is a corrupt
+    row, and staying silent about it would let a strictly more broken store
+    pass the gate that a merely stale one fails.
+    """
+
+    count: int
+    oldest_id: str | None
+    oldest_at: datetime | None
+
+    def __post_init__(self) -> None:
+        # A frozen dataclass rather than a NamedTuple for the reason
+        # ``TrailingFailureStreaks`` spells out in common/no_decision.py:
+        # NamedTuple builds through __new__ and never calls __post_init__, so
+        # the same guard written there is decoration. The three verdicts this
+        # type feeds are all gated on ``count``, so a mismatched instance
+        # either vanishes from the report or renders its own hole into it:
+        # ``count=1`` with no ``oldest_id`` prints the shortfall as
+        # "stranded_decision_cycle = None". The query cannot build one; a
+        # hand-built one (a test, a future caller) is what this catches.
+        if self.count < 0:
+            raise ValueError(f"_StrandedAttempts count must be >= 0, got {self.count}")
+        if bool(self.count) != (self.oldest_id is not None):
+            raise ValueError(
+                f"_StrandedAttempts count={self.count} disagrees with "
+                f"oldest_id={self.oldest_id!r}: rows exist iff the oldest is named"
+            )
+        if not self.count and self.oldest_at is not None:
+            raise ValueError("_StrandedAttempts has no rows but carries an oldest_at")
+
+
+def _stranded_in_progress(conn, run_id: str) -> _StrandedAttempts:
+    rows = conn.execute(
+        "SELECT decision_attempt_id, timestamp FROM decision_attempts"
+        " WHERE run_id = ? AND status = 'in_progress'"
+        " ORDER BY timestamp, rowid",
+        (run_id,),
+    ).fetchall()
+    if not rows:
+        return _StrandedAttempts(0, None, None)
+    oldest = rows[0]
+    try:
+        oldest_at = parse_instant(oldest["timestamp"])
+    except (ValueError, TypeError):
+        oldest_at = None
+    return _StrandedAttempts(len(rows), str(oldest["decision_attempt_id"]), oldest_at)
+
+
 class _SafeModeState(NamedTuple):
     """The run's CURRENT safe-mode episode, if it is in one."""
 
@@ -1382,6 +1461,7 @@ def validate_live_run(
             (run_id,),
         )
         streaks = trailing_failure_streaks(conn, run_id)
+        stranded = _stranded_in_progress(conn, run_id)
         prompt_regimes = repo.prompt_regime_counts(conn, run_id, statuses=_COMPLETED_CYCLE_STATUSES)
         fill_count = _count(conn, "SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,))
         # Distinct acknowledged live orders: the exchange confirmed it holds
@@ -1548,6 +1628,40 @@ def validate_live_run(
             "cause (an API outage spanning the deadline, or a host clock that jumped "
             "forward past it), then accumulate the acceptance cycles under a NEW run-id"
         )
+    # More than one non-terminal attempt is the decision state machine broken:
+    # a new cycle is only scheduled once the previous one reached a terminal
+    # status, so two live rows cannot both be legitimate. It is also what
+    # WEDGES the daemon — repo.find_in_progress_attempt fails loud on exactly
+    # this shape, so §3.1 startup adoption raises on every re-read and the run
+    # never decides again (issue #205). An integrity failure rather than a
+    # shortfall: no later state makes the store consistent, and unlike a locked
+    # store it will not clear itself. Read here rather than through the
+    # repository helper precisely because that helper raises.
+    if stranded.count > 1:
+        failures.append(
+            f"in_progress_decision_attempts = {stranded.count} (want <= 1): the run has "
+            "more than one non-terminal decision attempt, which the scheduler cannot "
+            "produce — the decision state machine is broken. A live daemon on this "
+            "store cannot adopt past it either (§3.1 startup adoption fails loud on "
+            "this shape and the run latches into MANUAL safe mode without ever "
+            "deciding again). Inspect the rows in decision_attempts and terminalize "
+            "the ones that are not the live cycle before restarting"
+        )
+    # An in-progress row whose stamp will not parse. Its AGE is the only thing
+    # separating a cycle in flight from a wedged run, so an unreadable stamp
+    # makes the shortfall below unanswerable — and nothing else in this report
+    # reads an IN_PROGRESS row's timestamp (trailing_failure_streaks parses the
+    # same column, but only on terminal rows), so withholding both verdicts
+    # would let this store — strictly more broken — pass a gate the merely
+    # stale one fails.
+    if stranded.count and stranded.oldest_at is None:
+        failures.append(
+            f"stranded_decision_cycle = {stranded.oldest_id} carries a timestamp that "
+            "cannot be read as an instant, so how long the run has been unable to "
+            "finish that cycle cannot be computed. The column is NOT NULL and only "
+            "the repository writes it, so this is a corrupt row rather than a young "
+            "one: read it in decision_attempts and terminalize it"
+        )
     # A run sitting in MANUAL safe mode is, by §13.1, locked out of adding risk
     # until a human confirms — it cannot be "ready to trade live" whatever its
     # counts say, and §10.4's consecutive-loss latch reaches this state leaving
@@ -1573,6 +1687,51 @@ def validate_live_run(
     no_decision_line = no_decision_shortfall(streaks, now=now)
     if no_decision_line is not None:
         shortfalls.append(no_decision_line)
+    # One attempt stuck ``in_progress`` far past the cadence: the run is not
+    # mid-cycle, it is wedged, and the no-decision streak above CANNOT say so —
+    # its query skips ``in_progress`` rows (rightly: an unfinished cycle has
+    # not said anything yet), so a daemon whose §3.1 adoption keeps failing
+    # writes no terminal row at all and its streak stays frozen at whatever it
+    # was before the wedge. That is issue #205's blind spot: a run stuck here
+    # for days looked exactly like a run that had just started, while the real
+    # position rode its resting SL/TP alone.
+    #
+    # A shortfall (exit 4), the same bucket and the same constant source as the
+    # streak beside it: the store is sound and the commonest cause — an
+    # operator's export or validate holding the SQLite lock through boot —
+    # clears by itself, so this must not become a permanent verdict. The
+    # causes that do NOT clear latch MANUAL safe mode from the daemon, which is
+    # an exit-5 failure above; this line stays the one that catches the wedge
+    # even when no daemon is running to latch anything.
+    #
+    # Skipped when the stamp will not parse, because there is no age to compare
+    # — that row is reported as an integrity failure above instead, which is
+    # the stronger verdict of the two.
+    #
+    # No recency window, unlike the streak beside it, and that is deliberate. A
+    # stopped run reaches this line too — Ctrl-C during a cycle leaves the row
+    # in_progress on purpose, so ``salvage_shutdown`` can hand the paid-for
+    # answer to the next process — and it stays exit 4 until a daemon adopts
+    # it. That is the honest reading: the cycle is unfinished business either
+    # way, the remedy is one restart, and a window keyed on age would suppress
+    # precisely the wedge this line exists to catch, since a wedge is old by
+    # definition.
+    if stranded.count == 1 and stranded.oldest_at is not None:
+        stuck_for = now - stranded.oldest_at
+        if stuck_for >= _ADOPTION_WEDGE_AFTER:
+            hours = int(stuck_for.total_seconds() // 3600)
+            allowed = int(_ADOPTION_WEDGE_AFTER.total_seconds() // 3600)
+            shortfalls.append(
+                f"stranded_decision_cycle = {stranded.oldest_id} (in_progress and "
+                f"unchanged for ~{hours}h, past the ~{allowed}h this gate allows): "
+                "the daemon has written no terminal row for it, so no_decision_streak "
+                "cannot see it and the accumulated cycle counts describe a run that "
+                "may not have decided anything since. Either no daemon is driving "
+                "this run, or §3.1 startup adoption keeps failing — check the run "
+                "log for `startup adoption` and `safe mode` lines, and see "
+                "RUNBOOK-live. The shortfall clears by itself once the cycle reaches "
+                "a terminal status"
+            )
 
     # The §20.2 smoke suite (and the four §20.3 *_test_passed booleans it feeds)
     # is a TESTNET_LIVE acceptance condition only: §21.4 omits it, and a

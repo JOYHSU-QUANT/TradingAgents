@@ -1079,8 +1079,9 @@ def test_a_db_that_cannot_be_read_is_a_named_exit_1(tmp_path, capsys, paper_seam
     # Issue #210 through the CLI an operator actually types. Exit 5 means "the
     # ledger does not add up — investigate the accounting", which a file
     # permission is not; `validate` reached it because it catches sqlite3.Error
-    # around the open. An owning command was worse: main()'s last resort, exit 2
-    # with no message of its own. Both are the operator-error lane now.
+    # around the open. An owning command was worse: main()'s last resort, whose
+    # `fatal: unexpected error:` line names the exception and nothing about the
+    # --db, at exit 2. Both are the operator-error lane now.
     path, db = _seed_db(tmp_path)
     db.close()
     argv = (

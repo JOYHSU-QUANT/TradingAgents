@@ -431,9 +431,11 @@ Breaking changes within the 0.x line are called out explicitly.
   not be opened for reading: <the underlying error>``, exit 1, the file
   unmodified. The sentence lists what to check instead of naming a cause: that
   one exception type covers a permission, a lock outliving the 5s wait, a
-  ``-shm`` SQLite may not create beside a WAL store, and a failing disk, and
-  SQLite renders every one of those except the lock as the same ``unable to open
-  database file`` (measured), so the quoted error mostly cannot tell them apart.
+  ``-shm`` SQLite may not create beside a WAL store, and a failing disk — and
+  the first and third of those render as the very same ``unable to open database
+  file`` (measured; a lock says so, and an I/O fault has its own ``disk I/O
+  error``, which was not staged), so the quoted error only sometimes tells them
+  apart.
   Only the open and the first read are inside the lane — everything after runs
   against a connection that demonstrably opened, so a failure there is not a
   "could not open it". The one such failure that exists is handled where it
@@ -441,7 +443,12 @@ Breaking changes within the 0.x line are called out explicitly.
   over a module this build does not have raises ``no such module`` from the
   ``PRAGMA table_info`` that inspects it, and a bookkeeping table that cannot be
   read is not provably ours, so it counts as not-ours and the file gets the
-  foreign-store refusal by name rather than escaping as an exit 5.
+  foreign-store refusal by name rather than escaping the refusal altogether for
+  ``validate``'s exit 5 and an owning command's exit 2. That catch is narrowed
+  to ``OperationalError`` for the same reason as the open: a CORRUPT store
+  raises plain ``DatabaseError: database disk image is malformed`` from the same
+  statement, and it must keep reaching the exit 5 that means "investigate the
+  store".
   ``sqlite3.DatabaseError`` is deliberately NOT caught around the open either,
   so "file is not a database" keeps its own wording and its own exit 5;
   ``OperationalError`` is a subclass of it, and only the narrow one is taken.

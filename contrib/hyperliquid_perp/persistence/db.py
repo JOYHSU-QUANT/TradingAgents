@@ -223,9 +223,10 @@ def _unreadable_error(file: Path, exc: BaseException) -> SchemaVersionError:
     The sentence lists what to check rather than naming a cause, because the
     error it quotes mostly cannot tell them apart. ``OperationalError`` covers a
     permission, a lock outliving the wait, a ``-shm`` SQLite may not create
-    beside a WAL store, and a failing disk — and SQLite renders every one of
-    those except the lock as the same ``unable to open database file``
-    (measured). Only the empty-file branch, which asks with a plain read, gets
+    beside a WAL store, and a failing disk — and the first and the third of
+    those render as the very same ``unable to open database file`` (measured;
+    a lock says so, and an I/O fault has its own ``disk I/O error``, which was
+    not staged). Only the empty-file branch, which asks with a plain read, gets
     an errno worth reading. So the message quotes the error and still sends the
     operator through the whole list; picking one would be a diagnosis nothing
     here measured, which is the class of claim this refusal's own history (PR
@@ -371,7 +372,7 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # function is the one that promises the file is untouched, and it says
         # so in the sentences it raises, so it does not spend that promise on a
         # question it can ask another way. It is only this function's invariant:
-        # the caller reaches ``connect`` two lines later, whose ``PRAGMA
+        # the caller reaches ``connect`` on its very next line, whose ``PRAGMA
         # journal_mode = WAL`` destroys the same log — an empty main file is
         # "ours to build in full" and building is a write. What the shortcut
         # buys the operator is nothing; what it buys the reader is that the
@@ -441,13 +442,20 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # exists to name. Left to propagate it would escape this function
         # entirely, for ``validate``'s exit-5 "store integrity failure" and an
         # owning command's exit 2 — the two verdicts issue #210 is about.
+        #
+        # ``OperationalError`` and not its parent, for the same reason as the
+        # lane above and with more at stake here: a CORRUPT store raises plain
+        # ``DatabaseError: database disk image is malformed`` from the last
+        # statement in there, and that must keep reaching ``validate``'s exit 5
+        # — swallowing it would tell an operator whose disk is rotting that they
+        # had merely mistyped ``--db``.
         try:
             bookkeeping_unused = (
                 not carries_our_tables
                 and _BOOKKEEPING_TABLE in objects
                 and _is_our_unused_bookkeeping(probe)
             )
-        except sqlite3.DatabaseError:
+        except sqlite3.OperationalError:
             bookkeeping_unused = False
         ours = (
             not objects  # EMPTY: nothing here to belong to anyone

@@ -1339,7 +1339,7 @@ def test_the_refusal_leaves_a_log_beside_an_empty_file_alone(tmp_path):
     # literally true: SQLite reads a zero-length main file as an empty database
     # and treats a -wal beside it as stale, so one read-only probe of that pair
     # deletes the log. Scoped deliberately to this function — the caller reaches
-    # connect() two lines on, whose `PRAGMA journal_mode = WAL` destroys the
+    # connect() on the very next line, whose `PRAGMA journal_mode = WAL` destroys the
     # same log, because an empty file is "ours to build in full" and building is
     # a write. So this pins an invariant of the refusal, not a promise to the
     # operator; `Database(...)` on this same pair would eat the log.
@@ -1366,6 +1366,10 @@ def test_a_foreign_bookkeeping_table_this_build_cannot_read_is_still_foreign(tmp
     store = tmp_path / "someone-elses.db"
     other = sqlite3.connect(str(store))
     try:
+        # A second object beside it, so the hedge below has something to fire
+        # on: with schema_migrations ALONE, reading it as ours would accept the
+        # file outright and the raises-clause would catch that on its own.
+        other.execute("CREATE TABLE ar_internal_metadata (key, value)")
         other.execute("CREATE TABLE schema_migrations (version, applied_at)")
         other.execute("PRAGMA writable_schema = ON")
         other.execute(
@@ -1383,6 +1387,34 @@ def test_a_foreign_bookkeeping_table_this_build_cannot_read_is_still_foreign(tmp
     # And NOT hedged as "probably an older build of ours" — nothing was read,
     # so nothing licenses that guess.
     assert "left by an OLDER build" not in message
+
+
+def test_a_corrupt_store_keeps_the_integrity_verdict_the_refusal_must_not_borrow(tmp_path):
+    # The other side of that guard, and the reason it catches OperationalError
+    # and not its parent: a file whose schema_migrations page is corrupt raises
+    # plain DatabaseError from the read inside the bookkeeping check. Swallowing
+    # it would tell an operator whose disk is rotting that they had mistyped
+    # --db — a named exit 1 — where `validate` catches sqlite3.Error and calls
+    # it a store integrity failure at exit 5. It has to propagate.
+    store = tmp_path / "corrupt.db"
+    other = sqlite3.connect(str(store))
+    try:
+        other.execute("CREATE TABLE ar_internal_metadata (key, value)")
+        other.execute("CREATE TABLE schema_migrations (version, applied_at)")
+        other.execute("INSERT INTO schema_migrations VALUES ('1', 'x')")
+        other.commit()
+        page_size = other.execute("PRAGMA page_size").fetchone()[0]
+        root = other.execute(
+            "SELECT rootpage FROM sqlite_master WHERE name = 'schema_migrations'"
+        ).fetchone()[0]
+    finally:
+        other.close()
+    with store.open("r+b") as handle:  # scribble over that table's b-tree root
+        handle.seek((root - 1) * page_size)
+        handle.write(bytes(page_size))
+
+    with pytest.raises(sqlite3.DatabaseError, match="malformed|corrupt"):
+        Database(store, migrate=False)
 
 
 def test_a_store_the_probe_cannot_open_is_refused_by_name(tmp_path, monkeypatch):

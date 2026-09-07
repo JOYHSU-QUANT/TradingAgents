@@ -425,34 +425,43 @@ Breaking changes within the 0.x line are called out explicitly.
   ``store integrity failure`` at exit 5, the code whose documented meaning is
   "the ledger does not add up — investigate the accounting", sending an
   operator after books that are fine; an owning command (``paper`` / ``live``)
-  was worse still, reaching ``main()``'s exit-2 last resort with no message of
-  its own. The probe's own ``OperationalError`` is now caught and named —
-  ``<path> could not be opened for reading: <the underlying error>``, exit 1,
-  the file unmodified. The sentence names causes as examples and defers to the
-  error it quotes rather than claiming a closed set, because that one exception
-  type covers a permission, a lock outliving the 5s wait (previously exit 2), a
-  ``-shm`` SQLite may not create beside a WAL store, and a failing disk. Only
-  the open and the first read are inside the lane: everything after them runs
-  against a connection that demonstrably opened, so a foreign database whose
-  lone table is a virtual table this build has no module for keeps the
-  foreign-store refusal it deserves instead of being called unreadable.
-  ``sqlite3.DatabaseError`` is deliberately NOT caught either, so "file is not a
-  database" keeps its own wording and its own exit 5; ``OperationalError`` is a
-  subclass of it, and only the narrow one is taken.
+  was worse still, reaching ``main()``'s exit-2 last resort, whose ``fatal:
+  unexpected error:`` line names the exception and nothing about the ``--db``.
+  The probe's own ``OperationalError`` is now caught and named — ``<path> could
+  not be opened for reading: <the underlying error>``, exit 1, the file
+  unmodified. The sentence lists what to check instead of naming a cause: that
+  one exception type covers a permission, a lock outliving the 5s wait, a
+  ``-shm`` SQLite may not create beside a WAL store, and a failing disk, and
+  SQLite renders every one of those except the lock as the same ``unable to open
+  database file`` (measured), so the quoted error mostly cannot tell them apart.
+  Only the open and the first read are inside the lane — everything after runs
+  against a connection that demonstrably opened, so a failure there is not a
+  "could not open it". The one such failure that exists is handled where it
+  happens: a foreign database whose ``schema_migrations`` is a VIRTUAL table
+  over a module this build does not have raises ``no such module`` from the
+  ``PRAGMA table_info`` that inspects it, and a bookkeeping table that cannot be
+  read is not provably ours, so it counts as not-ours and the file gets the
+  foreign-store refusal by name rather than escaping as an exit 5.
+  ``sqlite3.DatabaseError`` is deliberately NOT caught around the open either,
+  so "file is not a database" keeps its own wording and its own exit 5;
+  ``OperationalError`` is a subclass of it, and only the narrow one is taken.
 
   A zero-length file is still accepted as "ours to build in full" without being
-  probed, and that shortcut turns out to be load-bearing rather than a saved
-  syscall: SQLite reads an empty main file as an empty database and treats a
-  ``-wal`` beside it as stale, so a single read-only probe of that pair DELETES
-  the log — measured, 20KB of it — which is the one act this refusal promises
-  never to commit, and a truncated main file beside a hot log is exactly when
-  the log holds the only copy. The readability question is asked there in the
-  one way that opens nothing of SQLite's, a plain read, and reaches the same
-  named refusal. Two neighbouring holes are closed with it: a ``--db`` naming a
-  FIFO or a device node stats fine, reports zero bytes and is not a directory,
-  so it was taken for an empty store and then read — and opening a FIFO blocks
-  until a writer appears, unbounded, hanging the daemon instead of refusing. A
-  path that is not a regular file is now its own named exit 1.
+  probed, and the readability question is asked there in the one way that opens
+  nothing of SQLite's — a plain read, reaching the same named refusal. Not
+  probing it is what keeps the refusal's own central claim literally true:
+  SQLite reads an empty main file as an empty database and treats a ``-wal``
+  beside it as stale, so a single read-only probe of that pair deletes the log
+  (measured, 20KB of it). That is an invariant of the refusal and not a promise
+  to the operator — the caller reaches ``connect`` immediately afterwards, whose
+  ``PRAGMA journal_mode = WAL`` destroys the same log, because an empty file is
+  ours to build in full and building is a write. A neighbouring hole is closed
+  beside it: a ``--db`` naming a FIFO or a device node stats fine, reports zero
+  bytes and is not a directory, so it was taken for an empty store and then read
+  — on POSIX, opening a FIFO for reading blocks until a writer appears and
+  nothing here bounds that, so a daemon would hang where it should refuse (the
+  same guard catches ``--db NUL`` on Windows). A path that is not a regular file
+  is now its own named exit 1.
 
 - **dataflows / agents: the two getters that reach the model without
   passing through the router flatten and cap their failure text too, and a model

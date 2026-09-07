@@ -1333,14 +1333,16 @@ def test_a_db_that_exists_but_cannot_be_read_is_refused_by_name(tmp_path, popula
     assert "not been modified" in message  # nothing here opens the file to write
 
 
-def test_an_empty_store_is_accepted_without_a_probe_so_a_log_beside_it_survives(tmp_path):
-    # An empty file is taken as ours to build in full WITHOUT opening it in
-    # SQLite, and that is load-bearing rather than a saved syscall: SQLite reads
-    # a zero-length main file as an empty database and treats a -wal beside it
-    # as stale, so one read-only probe of that pair DELETES the log — measured
-    # here. That is the one act this whole refusal promises never to commit, and
-    # a truncated main file beside a hot log is exactly when the log holds the
-    # only copy of the data.
+def test_the_refusal_leaves_a_log_beside_an_empty_file_alone(tmp_path):
+    # The refusal's central claim is that it has not modified the file, and an
+    # empty one is accepted WITHOUT being opened in SQLite so that claim stays
+    # literally true: SQLite reads a zero-length main file as an empty database
+    # and treats a -wal beside it as stale, so one read-only probe of that pair
+    # deletes the log. Scoped deliberately to this function — the caller reaches
+    # connect() two lines on, whose `PRAGMA journal_mode = WAL` destroys the
+    # same log, because an empty file is "ours to build in full" and building is
+    # a write. So this pins an invariant of the refusal, not a promise to the
+    # operator; `Database(...)` on this same pair would eat the log.
     store = tmp_path / "x.db"
     store.touch()
     log = tmp_path / "x.db-wal"
@@ -1350,6 +1352,37 @@ def test_an_empty_store_is_accepted_without_a_probe_so_a_log_beside_it_survives(
 
     assert log.exists() and log.stat().st_size == 20004
     assert store.stat().st_size == 0
+
+
+def test_a_foreign_bookkeeping_table_this_build_cannot_read_is_still_foreign(tmp_path):
+    # `schema_migrations` is a name three migration frameworks use, so a file
+    # carrying one is only OURS if it is provably ours — and a table this build
+    # cannot even read is not provable. A foreign database whose
+    # `schema_migrations` is a VIRTUAL table over a module this build does not
+    # have raises `no such module` from the PRAGMA that inspects it; left to
+    # propagate that escapes the refusal entirely, for validate's exit-5
+    # "store integrity failure" and an owning command's exit 2 — the two
+    # verdicts issue #210 exists to remove. A failure to answer is an answer.
+    store = tmp_path / "someone-elses.db"
+    other = sqlite3.connect(str(store))
+    try:
+        other.execute("CREATE TABLE schema_migrations (version, applied_at)")
+        other.execute("PRAGMA writable_schema = ON")
+        other.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE name = 'schema_migrations'",
+            ("CREATE VIRTUAL TABLE schema_migrations USING nosuchmodule(x)",),
+        )
+        other.commit()
+    finally:
+        other.close()
+
+    with pytest.raises(SchemaVersionError, match="not one of this project's stores") as caught:
+        Database(store, migrate=False)
+    message = str(caught.value)
+    assert "schema_migrations" in message  # named, so the operator knows the file
+    # And NOT hedged as "probably an older build of ours" — nothing was read,
+    # so nothing licenses that guess.
+    assert "left by an OLDER build" not in message
 
 
 def test_a_store_the_probe_cannot_open_is_refused_by_name(tmp_path, monkeypatch):

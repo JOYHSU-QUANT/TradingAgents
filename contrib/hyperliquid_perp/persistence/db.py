@@ -220,19 +220,25 @@ def _unreadable_error(file: Path, exc: BaseException) -> SchemaVersionError:
     that stands in for the probe on an empty file, and the probe's own open —
     and they must not say different things about the same situation.
 
-    The sentence names causes as examples and defers to the error it quotes,
-    rather than claiming a closed set: ``OperationalError`` alone covers a
+    The sentence lists what to check rather than naming a cause, because the
+    error it quotes mostly cannot tell them apart. ``OperationalError`` covers a
     permission, a lock outliving the wait, a ``-shm`` SQLite may not create
-    beside a WAL store, and a failing disk. Naming two of those as THE two
-    would be the kind of exhaustiveness claim this function has already had to
-    walk back once.
+    beside a WAL store, and a failing disk — and SQLite renders every one of
+    those except the lock as the same ``unable to open database file``
+    (measured). Only the empty-file branch, which asks with a plain read, gets
+    an errno worth reading. So the message quotes the error and still sends the
+    operator through the whole list; picking one would be a diagnosis nothing
+    here measured, which is the class of claim this refusal's own history (PR
+    #209's review) says to avoid.
     """
     return SchemaVersionError(
         f"{file} could not be opened for reading: {exc}. The path is there, but "
         "this build could not look inside the file to tell whether it is one of "
-        "its stores; the quoted error says why — a permission on the file, "
-        f"another process holding it locked past the {_BUSY_TIMEOUT_MS / 1000:g}s "
-        "wait, or the storage under it. The database file has not been modified."
+        "its stores. SQLite reports most of these the same way, so check all of: "
+        "the file's permissions, whether another process is holding it locked "
+        f"past the {_BUSY_TIMEOUT_MS / 1000:g}s wait, whether its directory lets "
+        "SQLite create the -shm a WAL store needs, and the storage underneath. "
+        "The database file has not been modified."
     )
 
 
@@ -273,10 +279,12 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     and removes it when the last connection closes, so a probe would have
     performed a crashed foreign application's recovery for it. Under
     ``mode=ro`` the database file is never modified, whatever journal mode or
-    crash state it is in. That is also exactly what the refusal claims, and no
-    more: opening a WAL database read-only materialises SQLite's own empty
-    ``-shm`` / ``-wal`` pair beside one that had none, which its owner reclaims
-    on its next open. Unlinking those again would mean racing the sidecars of a
+    crash state it is in. Its sidecars are another matter, in both directions:
+    opening a WAL database read-only materialises SQLite's own empty ``-shm`` /
+    ``-wal`` pair beside one that had none, which its owner reclaims on its next
+    open — and a ``-wal`` beside a ZERO-LENGTH main file reads as stale and is
+    deleted, which is why an empty file never reaches the probe at all (see the
+    branch that returns above it). Unlinking those again would mean racing the sidecars of a
     process that may be live — worse than leaving them.
 
     ``immutable=1`` would leave even those alone but is unusable here: it
@@ -317,7 +325,8 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # Something about the PATH stops us even asking: on POSIX a parent that
         # is a file (ENOTDIR), or a directory we may not traverse. Not the file
         # itself being unreadable — ``stat`` succeeds on one of those, so it is
-        # named by the probe's own lane below instead. ``connect`` would raise
+        # named further down instead — by the probe's own lane, or by the plain
+        # read the empty-file branch stands on. ``connect`` would raise
         # here too, but as an OperationalError that reaches main()'s last resort
         # as exit 2, and this function exists to make a bad --db a NAMED exit 1.
         raise SchemaVersionError(
@@ -342,10 +351,14 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         )
     if not S_ISREG(info.st_mode):
         # A FIFO or a device node: it stats fine, reports zero bytes, and is
-        # not a directory, so every branch here would take it for an empty
-        # store — and then READ it. Opening a FIFO blocks until a writer
-        # appears, unbounded (``busy_timeout`` bounds statements, not opens),
-        # so the daemon would hang rather than refuse.
+        # not a directory, so every branch below would take it for an empty
+        # store — and then READ it. It is not a store whatever happens next,
+        # which is reason enough; the sharper reason is that on POSIX opening a
+        # FIFO for reading blocks until a writer appears (``open(2)``; not
+        # measured here, this box is Windows) and nothing here bounds that —
+        # ``busy_timeout`` bounds statements, not opens — so a daemon would
+        # hang where it should refuse. On Windows the same guard catches
+        # ``--db NUL`` and ``--db CON``, which stat as character devices.
         raise SchemaVersionError(
             f"{file} is not a regular file. A store is an ordinary file on "
             "disk — check the --db path."
@@ -353,14 +366,23 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     if info.st_size == 0:
         # ``touch``-ed: ours to build in full, and deliberately NOT probed.
         # SQLite reads a zero-length main file as an empty database and treats
-        # a ``-wal`` beside it as stale: a read-only open of that pair DELETES
-        # the log (measured — 20KB of ``-wal`` gone after one probe), which is
-        # the one thing this function promises never to do, and a truncated
-        # main file beside a hot log is exactly when the log is the only copy
-        # of the data left. So the question the probe would have answered is
-        # asked here in the one way that opens nothing of SQLite's — an
-        # unreadable empty file used to fall through to ``connect`` and its
-        # unnamed exit instead (issue #210).
+        # a ``-wal`` beside it as stale, so a read-only open of that pair
+        # DELETES the log — measured, 20KB of it gone after one probe. THIS
+        # function is the one that promises the file is untouched, and it says
+        # so in the sentences it raises, so it does not spend that promise on a
+        # question it can ask another way. It is only this function's invariant:
+        # the caller reaches ``connect`` two lines later, whose ``PRAGMA
+        # journal_mode = WAL`` destroys the same log — an empty main file is
+        # "ours to build in full" and building is a write. What the shortcut
+        # buys the operator is nothing; what it buys the reader is that the
+        # refusal's central claim stays literally true.
+        #
+        # The readability question the probe would have answered is asked here
+        # instead, in the one way that opens nothing of SQLite's: an unreadable
+        # empty file used to fall through to ``connect`` and its unnamed exit
+        # (issue #210). Readability only — a zero-length store that reads but
+        # cannot be WRITTEN still dies in ``connect``, as it did before, and as
+        # a non-empty one does; writability is not this function's question.
         try:
             with file.open("rb"):
                 pass
@@ -393,31 +415,40 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
             # catches ``sqlite3.Error`` and printed a pure permissions problem
             # as `store integrity failure` at exit 5 — the code whose meaning is
             # "the ledger does not add up, investigate the accounting" — while
-            # an owning command reached main()'s exit-2 last resort with no
-            # message of its own (issue #210). NOT ``DatabaseError``: "file is
+            # an owning command reached main()'s exit-2 last resort, whose
+            # ``fatal: unexpected error:`` line names the exception and nothing
+            # about the ``--db`` (issue #210). NOT ``DatabaseError``: "file is
             # not a database" is a different verdict with its own established
             # wording and exit 5, deliberately untouched here as in PR
             # #170/#209. ``OperationalError`` is a subclass of it, so catching
             # the narrow one leaves that lane exactly as it was.
             #
             # Only the open and the first read are guarded. Everything below
-            # runs against a connection that demonstrably opened, so an error
-            # there is not a "could not open it" and must not be dressed as
-            # one — a foreign database whose lone table is a virtual table this
-            # build has no module for raises ``no such module`` from
-            # ``_is_our_unused_bookkeeping``, and that file is readable,
-            # unlocked, and precisely what the foreign-store refusal below
-            # exists to name.
+            # runs against a connection that demonstrably opened, so a failure
+            # there is not a "could not open it" and must not be dressed as one.
             raise _unreadable_error(file, exc) from exc
         carries_our_tables = any(table in objects for table in _STORE_TABLES)
         # Asked once, and never of a store that already proved itself by its
         # tables: the verdict wants it when the bookkeeping table is the file's
         # ONLY object, the message when it sits BESIDE foreign ones.
-        bookkeeping_unused = (
-            not carries_our_tables
-            and _BOOKKEEPING_TABLE in objects
-            and _is_our_unused_bookkeeping(probe)
-        )
+        #
+        # A failure to ANSWER is an answer here: this table is somebody else's
+        # unless it is provably ours, so an unreadable one is not ours. That is
+        # not hypothetical — a foreign database whose ``schema_migrations`` is a
+        # VIRTUAL table over a module this build does not have raises ``no such
+        # module`` from the ``PRAGMA table_info`` below (measured), and such a
+        # file is readable, unlocked, and exactly what the refusal further down
+        # exists to name. Left to propagate it would escape this function
+        # entirely, for ``validate``'s exit-5 "store integrity failure" and an
+        # owning command's exit 2 — the two verdicts issue #210 is about.
+        try:
+            bookkeeping_unused = (
+                not carries_our_tables
+                and _BOOKKEEPING_TABLE in objects
+                and _is_our_unused_bookkeeping(probe)
+            )
+        except sqlite3.DatabaseError:
+            bookkeeping_unused = False
         ours = (
             not objects  # EMPTY: nothing here to belong to anyone
             or carries_our_tables

@@ -479,6 +479,19 @@ Breaking changes within the 0.x line are called out explicitly.
   restart → release procedure, and corrects the "``validate`` cannot see a
   lock that never clears" note it carried.
 
+  Known trade-offs, all accepted deliberately. The wedge verdict is DECLARED
+  from the exception type rather than earned from repetition, so a one-off
+  store error on the no-resumable-response branch (which arms nothing, and so
+  cannot use the armed-record exemption) latches on its first occurrence; a
+  counter was rejected because it would have to answer "when does it reset" on
+  a lane whose whole point is that the process never restarts. ``pump`` now
+  reads ``scheduler_state`` once per tick while wedged, where it previously
+  returned immediately — a rare state, and the read is what lets a release
+  resume the run. And ``_adopted`` / ``_adoption_wedged`` remain two booleans
+  rather than one enum: the fourth combination is unreachable through call-site
+  ordering rather than through the type, but collapsing them would touch every
+  test that pins ``_adopted`` for no behaviour change.
+
   The structural pin behind the #180 containment was replaced by a behavioural
   one (issue #206, item 1). It asserted that the call sat in a broad ``try``
   reaching the containment idiom, which a ``return`` placed after that call

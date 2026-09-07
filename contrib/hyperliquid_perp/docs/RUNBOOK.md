@@ -385,8 +385,12 @@ sqlite3 paper_trading.db "SELECT symbol, funding_timestamp, last_backfill_status
     AND last_backfill_status IS NOT NULL ORDER BY funding_timestamp;"
 ```
 
-這個欄位記的是**最後一次嘗試**的結果：下一輪 pass 走到「比它更後面」就會清空，所以它一直
-有值＝現在還卡著。
+這個欄位記的是**最後一次嘗試**的結果。清空的規則是「這一輪走過了**該車道最深的那個寫入
+點**」——因為 `corrupt_row` 是從三個深度寫的（時間戳解析、size 解析、`record_funding`），
+而欄位只記詞不記深度，所以一律按最深的算。**實務後果**：你照上面修好了一列壞掉的
+`funding_timestamp`，但那個小時的 rate 還沒公布，那麼每一輪都停在「沒有 rate」就返回，
+`corrupt_row` 會**一直留著**，直到某一輪真的拿到 rate 走完整條路才清掉。所以「有值」要讀成
+**「最後一次走到那個深度時是這個判決」**，不是「現在一定還卡著」。
 
 **兩件事這條 warning 說不出來，別讀過頭**：
 

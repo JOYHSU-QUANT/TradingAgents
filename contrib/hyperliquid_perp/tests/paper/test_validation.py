@@ -625,7 +625,8 @@ def _pending_funding_event(db, *, symbol="BTC", at=_T0):
     )
 
 
-def _stamp_backfill_status(db, lane, *, symbol="BTC", at=None):
+def _stamp_backfill_status(db, lane, *, symbol="BTC", at=_T0):
+    """Seed one row's breadcrumb. ``at=None`` leaves the stamp NULL on purpose."""
     with db.transaction() as conn:
         conn.execute(
             "UPDATE funding_events SET last_backfill_status = ?, last_backfill_error = ?,"
@@ -633,7 +634,7 @@ def _stamp_backfill_status(db, lane, *, symbol="BTC", at=None):
             (
                 lane,
                 "rate_at() takes 2 positional arguments but 3 were given",
-                (at or _T0).isoformat(),
+                None if at is None else at.isoformat(),
                 symbol,
             ),
         )
@@ -664,10 +665,25 @@ def test_a_defect_stuck_pending_funding_event_is_not_reported_as_a_stale_one(tmp
     assert len(stuck) == 1
     assert "reader_failed: 1" in stuck[0]
     assert "defect" in stuck[0]
-    # The stamp of the oldest recorded attempt, so the reader can see how fresh
+    # The stamp of the OLDEST recorded attempt, so the reader can see how fresh
     # the verdict is. Without it the line asserts the present tense over a store
-    # whose daemon may have been stopped for weeks.
-    assert f"oldest attempt {_T0.isoformat()}" in stuck[0]
+    # whose daemon may have been stopped for weeks. Driven with three stuck
+    # rows, not one: with a single row "oldest" is indistinguishable from
+    # "newest" or "whichever row came last", and a row whose stamp is NULL —
+    # reachable on a hand-edited store — must not take the report down or win
+    # the comparison.
+    older = _T0 - timedelta(hours=2)
+    _pending_funding_event(db, symbol="ETH", at=older)
+    _stamp_backfill_status(db, "reader_failed", symbol="ETH", at=older)
+    _pending_funding_event(db, symbol="SOL", at=_T0 + timedelta(hours=1))
+    _stamp_backfill_status(db, "unclaimed", symbol="SOL", at=None)
+
+    report = validate_run(db, run_id="r", now=_T0 + timedelta(hours=2))
+    stuck = [w for w in report.warnings if "failed their last backfill attempt" in w]
+    assert len(stuck) == 1
+    assert "reader_failed: 2" in stuck[0] and "unclaimed: 1" in stuck[0]
+    assert f"oldest attempt {older.isoformat()}" in stuck[0]
+    assert _T0.isoformat() not in stuck[0]
     assert report.failures == ()  # surface, never gate — the exposure_pct precedent
 
     # Old enough to be stale, and STILL not reported as stale: one row, one

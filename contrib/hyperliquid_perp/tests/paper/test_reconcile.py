@@ -971,11 +971,18 @@ def test_posting_an_event_clears_the_verdict_of_the_pass_that_failed(tmp_path):
     """
     db = _init(tmp_path)
     _pending_event(db)
-
-    reconcile_module.backfill_pending_funding(
-        db, run_id="r", now=_T0, funding_source=_BrokenReader()
-    )
-    assert _pending_breadcrumb(db)[0] == "reader_failed"
+    # Seeded as ``corrupt_row``, NOT ``reader_failed``: the latter is a member
+    # of both clear sets, so it could not tell "posting overtakes every lane"
+    # apart from "posting only clears what a rate-less pass clears".
+    with db.transaction() as conn:
+        repo.set_funding_backfill_outcome(
+            conn,
+            repo.iter_funding_events(db.conn, "r", status="pending")[0]["funding_event_id"],
+            lane="corrupt_row",
+            error="a settlement basis an earlier pass could not read",
+            at=_T0,
+        )
+    assert _pending_breadcrumb(db)[0] == "corrupt_row"
 
     posted, still_pending = reconcile_module.backfill_pending_funding(
         db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))

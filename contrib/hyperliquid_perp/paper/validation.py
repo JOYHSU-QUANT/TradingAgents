@@ -615,8 +615,13 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
         # The backfill's own verdict on its last attempt, which this reader
         # cannot re-derive: ``rate_at`` raising, ``record_funding`` hitting the
         # store, the outer catch-all. The column is NULL unless a pass failed
-        # AND no later pass got past the failure, so a set value always
-        # describes what is holding the event NOW. Not defensive about the
+        # AND no later pass got past the DEEPEST site that lane is written
+        # from — so a set value says "the last attempt to reach that far ended
+        # here", which is not always "this is what is holding the event now":
+        # a repaired timestamp keeps its ``corrupt_row`` until some pass
+        # actually gets a rate and runs the rest of the loop. That is why the
+        # warning prints the stamp below rather than asserting freshness. Not
+        # defensive about the
         # column existing: a store behind v12 never reaches this function —
         # ``validate`` opens with ``migrate=False``, which refuses one by name.
         lane = event["last_backfill_status"]

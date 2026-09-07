@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -138,9 +140,6 @@ def unreadable(path: Path):
     temp directory outlives the run. The restore is in a ``finally`` and
     asserted, because an ACE left behind poisons every later run.
     """
-    import os
-    import subprocess
-
     def _denied() -> bool:
         try:
             with path.open("rb"):

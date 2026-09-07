@@ -1325,14 +1325,20 @@ def test_a_db_that_exists_but_cannot_be_read_is_refused_by_name(tmp_path, popula
             Database(store, migrate=False)
     message = str(caught.value)
     assert str(store) in message  # which file, for an operator holding several
-    # One sentence has to serve every cause that lands here — no permission, a
-    # writer still holding the file past the bounded wait, a -shm SQLite may not
-    # create, a failing disk — so it diagnoses none of them and lists the lot.
-    # Only this arm is staged with a real permission; the others are pinned
-    # through the probe in the sibling test below.
     assert "could not be opened for reading" in message
-    assert "permission" in message and "holding it locked" in message
+    assert "permission" in message  # the cause both arms can actually have
     assert "not been modified" in message  # nothing here opens the file to write
+    # The two arms fail through different machinery, so they are told to check
+    # different things. The probe can meet a lock and a -shm it may not create,
+    # and cannot tell those from a permission, so it lists all four. The plain
+    # read on an empty file waits for nothing and asks SQLite for nothing, so
+    # naming those would send an operator after causes this lane cannot have.
+    assert ("holding it locked" in message) is populated
+    assert ("-shm" in message) is populated
+    # And the errno the plain read gets is quoted without the filename OSError
+    # renders into it — on Windows that is the path again, backslash-escaped.
+    assert "[Errno" in message or populated
+    assert message.count(str(store)) == 1
 
 
 def test_the_refusal_leaves_a_log_beside_an_empty_file_alone(tmp_path):

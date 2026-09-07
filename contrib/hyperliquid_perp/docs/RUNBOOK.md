@@ -367,7 +367,7 @@ python -m contrib.hyperliquid_perp validate --run-id paper-BTC
 | `0` | `cycle_count >= 30` 且 orphan／snapshot／replay mismatch 全為 0 | **可進 Phase 3**——但 `cycle_count` 含 `invalid_output`（那裡量的是「排程有沒有在跑」），而 paper 報告沒有 live 那個 `invalid_output_count` 欄可以拆。下判斷前先看同一份報告的 `order_count`，必要時到 export 的 `decision_attempts.csv` 數 status 分佈：30 個解不開、一單沒下的 run 一樣會印 exit 0 |
 | `4` | 資料一致但 cycles 未滿 30；**或 `no_decision_streak` ≥ 3**（最近連續 ≥3 個 cycle 都沒出決策——不分成因，報告會印 `shortfall:` 行說明，並另印 `stale_feed_refusal_streak` 讓你分辨是不是 K 線 feed／時鐘問題；下一個決策 cycle 自動歸零，run 停掉超過 2 個 cycle 後也不再套用） | 繼續掛著跑；stale streak 照 §7 `freshness limit` 列處置，其餘看 `decision_attempts.error_type` |
 | `5` | integrity failure（orphan／mismatch／store 壞掉） | 先調查再相信任何結果 |
-| `1` | 操作錯誤（db／run 不存在，**或 `--db` 指到別的應用程式的資料庫、目錄、不是普通檔案的東西、或一個打不開來讀的檔**） | 檢查 `--db`／`--run-id`；訊息會說是哪一種，各列見 RUNBOOK-live §8。**「打不開來讀」那種以前印成 exit 5**（`store integrity failure`）——權限問題被當成帳本問題，現在歸這一列（issue #210） |
+| `1` | 操作錯誤（db／run 不存在，**或 `--db` 指到別的應用程式的資料庫、目錄、不是普通檔案的東西、或一個打不開來讀的檔**） | 檢查 `--db`／`--run-id`；訊息會說是哪一種，各列見 RUNBOOK-live §8。**「打不開來讀」那種以前印成 exit 5**（`store integrity failure`）——讀權限問題被當成帳本問題，現在歸這一列（issue #210）。**注意還有一種沒收進來**：長度 0、讀得到但**寫不進去**的檔仍是 exit 5（`attempt to write a readonly database`），那是 `connect` 的寫入路徑，不在這道守衛的問題範圍內 |
 
 報告中的 `warning:` 行（超時 pending funding、config drift）不影響 exit code，
 但寫結論前要看過。`prompt_regime:` 行（每組 `(prompt_version, context_shape,

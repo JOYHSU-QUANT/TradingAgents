@@ -436,6 +436,7 @@ Breaking changes within the 0.x line are called out explicitly.
   file`` (measured; a lock says so, and an I/O fault has its own ``disk I/O
   error``, which was not staged), so the quoted error only sometimes tells them
   apart.
+
   Only the open and the first read are inside the lane — everything after runs
   against a connection that demonstrably opened, so a failure there is not a
   "could not open it". The one such failure this branch found is handled where
@@ -449,6 +450,7 @@ Breaking changes within the 0.x line are called out explicitly.
   raises plain ``DatabaseError: database disk image is malformed`` from the last
   statement of that same check, and it must keep reaching the exit 5 that means
   "investigate the store".
+
   ``sqlite3.DatabaseError`` is deliberately NOT caught around the open either,
   so "file is not a database" keeps its own wording and its own exit 5;
   ``OperationalError`` is a subclass of it, and only the narrow one is taken.

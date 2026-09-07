@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -119,6 +121,61 @@ def build_store_at(path, version: int, populate=None) -> None:
     with migrations_up_to(version), Database(path) as db:
         if populate is not None:
             populate(db)
+
+
+@contextmanager
+def unreadable(path: Path):
+    """Inside the block, ``path`` exists and stats fine but cannot be READ.
+
+    The staging behind issue #210, which needs the one failure ``stat`` cannot
+    see. Each platform has to be asked in its own vocabulary: POSIX mode bits
+    (which root ignores — every open still succeeds, so the test is skipped
+    rather than passed on a false premise), and on Windows an ``icacls`` deny
+    ACE, since a mode bit there is a fiction ``os.chmod`` writes as the
+    read-only flag, leaving reading wide open.
+
+    The denied right is ``RD`` (read data), not ``R`` (generic read): ``R``
+    takes ``READ_CONTROL`` with it, so ``icacls`` can then no longer read the
+    ACL it needs to remove its own ACE — the file stays denied for good and its
+    temp directory outlives the run. The restore is in a ``finally`` and
+    asserted, because an ACE left behind poisons every later run.
+    """
+    def _denied() -> bool:
+        try:
+            with path.open("rb"):
+                return False
+        except OSError:
+            return True
+
+    if os.name == "nt":
+        user = os.environ.get("USERNAME")
+        if not user:
+            pytest.skip("no USERNAME to hang an icacls deny ACE on")
+        deny = subprocess.run(["icacls", str(path), "/deny", f"{user}:(RD)"], capture_output=True)
+        if deny.returncode != 0:
+            pytest.skip("icacls refused to deny read on this box")
+
+        def restore() -> None:
+            done = subprocess.run(["icacls", str(path), "/remove:d", user], capture_output=True)
+            assert done.returncode == 0, "left a deny ACE behind"
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root reads through any mode bits")
+        was = path.stat().st_mode
+        os.chmod(path, 0o000)
+
+        def restore() -> None:
+            os.chmod(path, was)
+
+    try:
+        if not _denied():
+            # Denied on paper and readable in fact: the test would "pass" against
+            # a premise that never held.
+            pytest.skip("the platform did not honour the denial")
+        yield
+    finally:
+        restore()
+        assert not _denied(), "left the file unreadable"
 
 
 @pytest.fixture

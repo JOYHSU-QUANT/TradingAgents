@@ -56,6 +56,7 @@ from ..conftest import (
     misrouted_order_status,
     record_reconciliation_sweep_wiring,
     stamp_prompt_regimes,
+    unreadable,
     write_payload,
 )
 from ..live.test_startup import _clearinghouse
@@ -1061,13 +1062,40 @@ def test_validate_exit_5_when_replay_raises(tmp_path, capsys):
     assert "realized_pnl: n/a" in out
 
 
-def test_validate_exit_5_on_unreadable_store(tmp_path, capsys):
+def test_validate_exit_5_on_a_file_that_is_not_a_database(tmp_path, capsys):
     # A file that is not SQLite at all takes the same exit-5 "investigate the
     # store" verdict — not exit 2 ("tool bug") and not exit 1 (operator error).
+    # A store this process merely cannot READ is the opposite verdict and is
+    # pinned right below (issue #210); the two used to share both this exit code
+    # and this test's old name.
     bogus = tmp_path / "bogus.db"
     bogus.write_text("this is not a database", encoding="utf-8")
     assert cli_main(["validate", "--run-id", "r", "--db", str(bogus)]) == 5
     assert "store integrity failure" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["validate", "paper"])
+def test_a_db_that_cannot_be_read_is_a_named_exit_1(tmp_path, capsys, paper_seams, command):
+    # Issue #210 through the CLI an operator actually types. Exit 5 means "the
+    # ledger does not add up — investigate the accounting", which a file
+    # permission is not; `validate` reached it because it catches sqlite3.Error
+    # around the open. An owning command was worse: main()'s last resort, whose
+    # `fatal: unexpected error:` line names the exception and nothing about the
+    # --db, at exit 2. Both are the operator-error lane now.
+    path, db = _seed_db(tmp_path)
+    db.close()
+    argv = (
+        ["validate", "--run-id", "r", "--db", str(path)]
+        if command == "validate"
+        else _paper_argv(path, run_id="r", config=paper_seams)
+    )
+    with unreadable(path):
+        rc = cli_main(argv)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "could not be opened for reading" in err
+    assert str(path) in err
+    assert "store integrity failure" not in err  # the code that means something else
 
 
 def test_validate_operator_errors_exit_1(tmp_path, capsys):

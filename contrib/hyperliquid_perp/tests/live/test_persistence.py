@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sqlite3
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -35,7 +36,7 @@ from contrib.hyperliquid_perp.persistence.schema import (
     SCHEMA_VERSION,
 )
 
-from ..conftest import build_store_at, migrations_up_to
+from ..conftest import build_store_at, migrations_up_to, unreadable
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -1300,6 +1301,176 @@ def test_a_db_path_that_is_a_directory_is_refused_by_name(tmp_path):
     a_directory.mkdir()
     with pytest.raises(SchemaVersionError, match="is a directory, not a database file"):
         Database(a_directory, migrate=False)
+
+
+@pytest.mark.parametrize("populated", [True, False], ids=["a store", "a touch-ed file"])
+def test_a_db_that_exists_but_cannot_be_read_is_refused_by_name(tmp_path, populated):
+    # Issue #210: the one bad --db no guard ABOVE the probe can see anything
+    # wrong with. Permissions govern opening the file, not the stat that merely
+    # asks about it, so the OSError lane never fires and this arrived as a bare
+    # OperationalError — which `validate` printed as `store integrity failure`
+    # at exit 5, sending an operator to investigate accounting that is fine.
+    # A zero-length one is here because it took a second fix: it used to return
+    # at the empty-file shortcut, ABOVE the probe, and so kept the old failure.
+    store = tmp_path / "live.db"
+    if populated:
+        Database(store).close()
+    else:
+        store.touch()
+    with unreadable(store):
+        # The premise both arms rest on: stat still answers for the file, which
+        # is why nothing above the probe can tell there is anything wrong here.
+        assert (store.stat().st_size > 0) is populated
+        with pytest.raises(SchemaVersionError) as caught:
+            Database(store, migrate=False)
+    message = str(caught.value)
+    assert str(store) in message  # which file, for an operator holding several
+    assert "could not be opened for reading" in message
+    assert "permission" in message  # the cause both arms can actually have
+    assert "not been modified" in message  # nothing here opens the file to write
+    # The two arms fail through different machinery, so they are told to check
+    # different things. Only the probe can wait out a SQLite lock or need a -shm,
+    # so only it is told about those; naming them on the plain read would send an
+    # operator after causes that lane cannot have.
+    assert ("past the 5s wait" in message) is populated
+    assert ("-shm" in message) is populated
+    # OSError renders its own filename into its text, quoted, and on Windows with
+    # every separator doubled — so the plain lane quotes the errno and its text
+    # instead, leaving the path once and unescaped at the head. Pinned on the
+    # quoted clause itself: it has to END at the strerror. Asserting the errno is
+    # present, or counting the unescaped path, passes against the unfixed form
+    # too, because the doubled separators stop the second copy matching.
+    reason = message.split("could not be opened for reading: ", 1)[1]
+    reason = reason.split(". The path is there", 1)[0]
+    assert not reason.endswith("'")  # `[Errno 13] Permission denied: '<path>'`
+    assert message.count(str(store)) == 1
+
+
+def test_the_refusal_leaves_a_log_beside_an_empty_file_alone(tmp_path):
+    # The refusal's central claim is that it has not modified the file, and an
+    # empty one is accepted WITHOUT being opened in SQLite so that claim stays
+    # literally true: SQLite reads a zero-length main file as an empty database
+    # and treats a -wal beside it as stale, so one read-only probe of that pair
+    # deletes the log. Scoped deliberately to this function — the caller reaches
+    # connect() on the very next line, whose `PRAGMA journal_mode = WAL` destroys the
+    # same log, because an empty file is "ours to build in full" and building is
+    # a write. So this pins an invariant of the refusal, not a promise to the
+    # operator; `Database(...)` on this same pair would eat the log.
+    store = tmp_path / "x.db"
+    store.touch()
+    log = tmp_path / "x.db-wal"
+    log.write_bytes(b"\x37\x7f\x06\x82" + bytes(20000))  # a WAL header and a body
+
+    db_module._refuse_a_foreign_store(store)  # accepted, no raise
+
+    assert log.exists() and log.stat().st_size == 20004
+    assert store.stat().st_size == 0
+
+
+def test_a_foreign_bookkeeping_table_this_build_cannot_read_is_still_foreign(tmp_path):
+    # `schema_migrations` is a name three migration frameworks use, so a file
+    # carrying one is only OURS if it is provably ours — and a table this build
+    # cannot even read is not provable. A foreign database whose
+    # `schema_migrations` is a VIRTUAL table over a module this build does not
+    # have raises `no such module` from the PRAGMA that inspects it; left to
+    # propagate that escapes the refusal entirely, for validate's exit-5
+    # "store integrity failure" and an owning command's exit 2 — the two
+    # verdicts issue #210 exists to remove. A failure to answer is an answer.
+    store = tmp_path / "someone-elses.db"
+    other = sqlite3.connect(str(store))
+    try:
+        # A second object beside it, so the hedge below has something to fire
+        # on: with schema_migrations ALONE, reading it as ours would accept the
+        # file outright and the raises-clause would catch that on its own.
+        other.execute("CREATE TABLE ar_internal_metadata (key, value)")
+        other.execute("CREATE TABLE schema_migrations (version, applied_at)")
+        other.execute("PRAGMA writable_schema = ON")
+        other.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE name = 'schema_migrations'",
+            ("CREATE VIRTUAL TABLE schema_migrations USING nosuchmodule(x)",),
+        )
+        other.commit()
+    finally:
+        other.close()
+
+    with pytest.raises(SchemaVersionError, match="not one of this project's stores") as caught:
+        Database(store, migrate=False)
+    message = str(caught.value)
+    assert "schema_migrations" in message  # named, so the operator knows the file
+    # And NOT hedged as "probably an older build of ours" — nothing was read,
+    # so nothing licenses that guess.
+    assert "left by an OLDER build" not in message
+
+
+def test_a_corrupt_store_keeps_the_integrity_verdict_the_refusal_must_not_borrow(tmp_path):
+    # The other side of that guard, and the reason it catches OperationalError
+    # and not its parent: a file whose schema_migrations page is corrupt raises
+    # plain DatabaseError from the read inside the bookkeeping check. Swallowing
+    # it would tell an operator whose disk is rotting that they had mistyped
+    # --db — a named exit 1 — where `validate` catches sqlite3.Error and calls
+    # it a store integrity failure at exit 5. It has to propagate.
+    store = tmp_path / "corrupt.db"
+    other = sqlite3.connect(str(store))
+    try:
+        other.execute("CREATE TABLE ar_internal_metadata (key, value)")
+        other.execute("CREATE TABLE schema_migrations (version, applied_at)")
+        other.execute("INSERT INTO schema_migrations VALUES ('1', 'x')")
+        other.commit()
+        page_size = other.execute("PRAGMA page_size").fetchone()[0]
+        root = other.execute(
+            "SELECT rootpage FROM sqlite_master WHERE name = 'schema_migrations'"
+        ).fetchone()[0]
+    finally:
+        other.close()
+    with store.open("r+b") as handle:  # scribble over that table's b-tree root
+        handle.seek((root - 1) * page_size)
+        handle.write(bytes(page_size))
+
+    with pytest.raises(sqlite3.DatabaseError, match="malformed|corrupt"):
+        Database(store, migrate=False)
+
+
+def test_a_store_the_probe_cannot_open_is_refused_by_name(tmp_path, monkeypatch):
+    # The lane's other arm, and the one the permission test cannot reach: the
+    # file reads fine but SQLite still cannot open it — a writer holding it past
+    # the bounded wait, a -shm it may not create beside a WAL store, a failing
+    # disk. Staged at the probe's own connect so the mapping OperationalError →
+    # named refusal is pinned on EVERY platform, including the root containers
+    # where the permission arms can only skip.
+    store = tmp_path / "live.db"
+    Database(store).close()
+
+    def refuse(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db_module.sqlite3, "connect", refuse)
+    with pytest.raises(SchemaVersionError) as caught:
+        Database(store, migrate=False)
+    message = str(caught.value)
+    assert "could not be opened for reading" in message
+    assert "database is locked" in message  # the quoted error is what discriminates
+
+
+def test_a_db_that_is_not_a_regular_file_is_refused_by_name(tmp_path, monkeypatch):
+    # A FIFO stats fine, reports zero bytes and is not a directory, so every
+    # branch would take it for an empty store and then READ it — and opening a
+    # FIFO blocks until a writer appears, which nothing here bounds (the probe's
+    # timeout bounds statements, not opens). A daemon would hang instead of
+    # refusing. Staged through stat, because Windows has no mkfifo and the guard
+    # must hold on the box the tests run on as well as the deploy box.
+    store = tmp_path / "pipe.db"
+    store.touch()
+    real_stat = pathlib.Path.stat
+
+    def as_a_fifo(self, *args, **kwargs):
+        info = real_stat(self, *args, **kwargs)
+        if self == store:
+            return os.stat_result((stat.S_IFIFO | 0o644, *tuple(info)[1:]))
+        return info
+
+    monkeypatch.setattr(pathlib.Path, "stat", as_a_fifo)
+    with pytest.raises(SchemaVersionError, match="is not a regular file"):
+        Database(store, migrate=False)
 
 
 @pytest.mark.parametrize("opener", [connect, Database], ids=["connect", "Database"])

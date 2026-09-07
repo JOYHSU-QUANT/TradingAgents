@@ -173,9 +173,13 @@ def _cmd_validate(argv: list[str]) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
-        # The store cannot even be read (malformed file, I/O failure mid-scan):
-        # the strongest possible "investigate the store" signal — the same
-        # exit-5 verdict as a failing report, not a generic tool crash.
+        # The store opened but its CONTENT does not hold up: a malformed file,
+        # an I/O failure mid-scan. The strongest possible "investigate the
+        # store" signal — the same exit-5 verdict as a failing report, not a
+        # generic tool crash. A store that could not be OPENED is a different
+        # verdict and mostly no longer arrives here: the guard in
+        # ``persistence.db`` names it, and the open above turns that into a
+        # named exit 1 (issue #210).
         print(f"error: store integrity failure — {exc}", file=sys.stderr)
         return 5
     for line in report.summary_lines():

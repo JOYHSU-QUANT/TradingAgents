@@ -415,6 +415,73 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: a ``--db`` that exists but cannot be READ is refused by
+  name instead of borrowing the ledger-integrity verdict** (issue #210). The
+  branches that name a path-shaped mistyped ``--db`` decide on ``stat``, and
+  ``stat`` answers perfectly well for a file whose permissions forbid opening
+  it — so the one failure it cannot see fell through to the read-only probe as
+  a bare ``sqlite3.OperationalError: unable to open database file``.
+  ``validate`` catches ``sqlite3.Error`` around the open and printed that as
+  ``store integrity failure`` at exit 5, the code whose documented meaning is
+  "the ledger does not add up — investigate the accounting", sending an
+  operator after books that are fine; an owning command (``paper`` / ``live``)
+  was worse still, reaching ``main()``'s exit-2 last resort, whose ``fatal:
+  unexpected error:`` line names the exception and nothing about the ``--db``.
+  The probe's own ``OperationalError`` is now caught and named — ``<path> could
+  not be opened for reading: <the underlying error>``, exit 1, the file
+  unmodified. The sentence lists what to check instead of naming a cause: that
+  one exception type covers a permission, a lock outliving the 5s wait, a
+  ``-shm`` SQLite may not create beside a WAL store, and a failing disk — and
+  the first and third of those render as the very same ``unable to open database
+  file`` (measured; a lock says so, and an I/O fault has its own ``disk I/O
+  error``, which was not staged), so the quoted error only sometimes tells them
+  apart.
+
+  Only the open and the first read are inside the lane — everything after runs
+  against a connection that demonstrably opened, so a failure there is not a
+  "could not open it". The one such failure this branch found is handled where
+  it happens: a foreign database whose ``schema_migrations`` is a VIRTUAL table
+  over a module this build does not have raises ``no such module`` from the
+  ``PRAGMA table_info`` that inspects it, and a bookkeeping table that cannot be
+  read is not provably ours, so it counts as not-ours and the file gets the
+  foreign-store refusal by name rather than escaping the refusal altogether for
+  ``validate``'s exit 5 and an owning command's exit 2. That catch is narrowed
+  to ``OperationalError`` for the same reason as the open: a CORRUPT store
+  raises plain ``DatabaseError: database disk image is malformed`` from the last
+  statement of that same check, and it must keep reaching the exit 5 that means
+  "investigate the store".
+
+  ``sqlite3.DatabaseError`` is deliberately NOT caught around the open either,
+  so "file is not a database" keeps its own wording and its own exit 5;
+  ``OperationalError`` is a subclass of it, and only the narrow one is taken.
+
+  A zero-length file is still accepted as "ours to build in full" without being
+  probed, and the readability question is asked there in the one way that opens
+  nothing of SQLite's — a plain read, reaching the same verdict under the same
+  wording. Its checklist is its own, though: that lane waits on nothing SQLite
+  would wait on and needs no sidecar, so it is told nothing about a
+  ``busy_timeout`` or a ``-shm``, and it names instead the thing it CAN meet
+  that the probe folds into a permission — another process holding the file
+  open, which under Windows' mandatory sharing fails the read as ``[Errno 13]
+  Permission denied``, identical in every attribute to a denied ACL (measured).
+  It is also the lane with a readable errno, and the one whose exception renders
+  its own filename into its text, so the errno and its text are quoted in place
+  of that and both lanes print the path once. Not
+  probing it is what keeps the refusal's own central claim literally true:
+  SQLite reads an empty main file as an empty database and treats a ``-wal``
+  beside it as stale, so a single read-only probe of that pair deletes the log
+  (measured, 20KB of it). That is an invariant of the refusal and not a promise
+  to the operator — the caller reaches ``connect`` immediately afterwards, whose
+  ``PRAGMA journal_mode = WAL`` destroys the same log, because an empty file is
+  ours to build in full and building is a write. A neighbouring hole is closed
+  beside it: a ``--db`` naming a FIFO or a device node stats fine, reports zero
+  bytes and is not a directory, so it was taken for an empty store and then read
+  — and on POSIX, opening a FIFO for reading blocks until a writer appears
+  (``open(2)``; not staged, the tests run on Windows) with nothing here to bound
+  it, so a daemon would hang where it should refuse. The same guard catches
+  ``--db NUL`` and ``--db CON`` on Windows, which stat as character devices. A
+  path that is not a regular file is now its own named exit 1.
+
 - **dataflows / agents: the two getters that reach the model without
   passing through the router flatten and cap their failure text too, and a model
   argument quoted back is echoed with the same flattening as a refused
@@ -570,9 +637,10 @@ Breaking changes within the 0.x line are called out explicitly.
   ``cannot open …`` on Windows and ``cannot read … to tell whether it is one
   of this project's stores`` on POSIX, which raises ENOTDIR for it). Either
   parent mistype reached that exit 2 only through ``--create``; every other
-  command already refused it by name. A file that exists but cannot be READ is
-  not in this set — ``stat`` succeeds on one, so the guard has nothing to
-  refuse on, and it fails in the probe as it did before: issue #210. The
+  command already refused it by name. A file that exists but cannot be READ was
+  not in this set — ``stat`` succeeds on one, so the guard had nothing to refuse
+  on and it failed in the probe as before; that one is named too now, in its own
+  entry above (issue #210). The
   read-only probe builds its URI itself rather than through
   ``Path.as_uri``, which rejects a relative ``--db`` outright and renders a
   Windows UNC path with an authority SQLite refuses — a store on a share

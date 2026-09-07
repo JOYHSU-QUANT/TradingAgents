@@ -109,9 +109,10 @@ class SchemaVersionError(RuntimeError):
     """The store's schema does not match what this build can safely operate on.
 
     Or there is no store to read a schema from: a mistyped ``--db`` naming
-    another application's database, a directory, or a path or file that cannot
-    be read reaches the same verdict — this build will not operate on this
-    file — and reaches it without reading a version at all (see
+    another application's database, a directory, something that is not a
+    regular file, or a path or file that cannot be read reaches the same
+    verdict — this build will not operate on this file — and reaches it
+    without reading a version at all (see
     :func:`_refuse_a_foreign_store`). One type, because nothing branches on the
     difference: every one of them is the CLI's named exit 1, and the remedy
     that does differ is already in the message.
@@ -258,8 +259,10 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     stats perfectly well, and still cannot be READ — a permission on it, a
     writer holding it past the probe's bounded wait, a failing disk. Nothing
     about the PATH is wrong there, so the branches keyed on ``stat`` have
-    nothing to refuse on, and it used to reach ``connect`` as a bare
-    ``OperationalError`` (issue #210). Both ways in are named now, through
+    nothing to refuse on, and it used to fail unnamed as a bare
+    ``OperationalError`` — from the probe's own open for a file with something
+    in it, and from ``connect`` for a zero-length one, which returned above the
+    probe (issue #210). Both ways in are named now, through
     :func:`_unreadable_error`: the probe's own open, and — for a zero-length
     file, which is accepted without being probed — a plain read that opens
     nothing of SQLite's.
@@ -337,14 +340,16 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         ) from exc
     if S_ISDIR(info.st_mode):
         # Forgetting the filename on --db is an ordinary typo, and a directory
-        # stats perfectly well, so it needs saying out loud — and ahead of
-        # everything below, all of which would misdiagnose it. Its ``st_size``
-        # can satisfy the empty-file branch (NTFS reports 0 while the index
-        # still fits in the MFT record, such as a fresh tmp dir; ext4 reports
-        # 4096, tmpfs and XFS a smaller entry-derived size), and the probe
-        # answers for it with ``unable to open database file`` — which the lane
-        # below would now dress up as a permissions or lock problem on a
-        # directory whose permissions are fine. Before this guard, ``connect``
+        # stats perfectly well, so it needs saying out loud — and first, for its
+        # own sentence. The branch below would now catch a directory (it is not
+        # a regular file either) and say something true but useless about it;
+        # before that branch existed, a directory reached the empty-file
+        # shortcut, whose ``st_size`` test it can satisfy (NTFS reports 0 while
+        # the index still fits in the MFT record, such as a fresh tmp dir; ext4
+        # reports 4096, tmpfs and XFS a smaller entry-derived size), or the
+        # probe, which answers ``unable to open database file`` — the lane below
+        # would dress that up as a permissions or lock problem on a directory
+        # whose permissions are fine. Before any of these guards, ``connect``
         # failed on one as an unnamed exit 2 on every platform.
         raise SchemaVersionError(
             f"{file} is a directory, not a database file. A store is a single "
@@ -437,7 +442,8 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # unless it is provably ours, so an unreadable one is not ours. That is
         # not hypothetical — a foreign database whose ``schema_migrations`` is a
         # VIRTUAL table over a module this build does not have raises ``no such
-        # module`` from the ``PRAGMA table_info`` below (measured), and such a
+        # module`` from the ``PRAGMA table_info`` inside
+        # :func:`_is_our_unused_bookkeeping` (measured), and such a
         # file is readable, unlocked, and exactly what the refusal further down
         # exists to name. Left to propagate it would escape this function
         # entirely, for ``validate``'s exit-5 "store integrity failure" and an

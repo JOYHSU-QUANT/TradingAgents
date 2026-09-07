@@ -417,7 +417,7 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **hyperliquid_perp: a ``--db`` that exists but cannot be READ is refused by
   name instead of borrowing the ledger-integrity verdict** (issue #210). The
-  guard that names every other mistyped ``--db`` decides on ``stat``, and
+  branches that name a path-shaped mistyped ``--db`` decide on ``stat``, and
   ``stat`` answers perfectly well for a file whose permissions forbid opening
   it — so the one failure it cannot see fell through to the read-only probe as
   a bare ``sqlite3.OperationalError: unable to open database file``.
@@ -438,17 +438,17 @@ Breaking changes within the 0.x line are called out explicitly.
   apart.
   Only the open and the first read are inside the lane — everything after runs
   against a connection that demonstrably opened, so a failure there is not a
-  "could not open it". The one such failure that exists is handled where it
-  happens: a foreign database whose ``schema_migrations`` is a VIRTUAL table
+  "could not open it". The one such failure this branch found is handled where
+  it happens: a foreign database whose ``schema_migrations`` is a VIRTUAL table
   over a module this build does not have raises ``no such module`` from the
   ``PRAGMA table_info`` that inspects it, and a bookkeeping table that cannot be
   read is not provably ours, so it counts as not-ours and the file gets the
   foreign-store refusal by name rather than escaping the refusal altogether for
   ``validate``'s exit 5 and an owning command's exit 2. That catch is narrowed
   to ``OperationalError`` for the same reason as the open: a CORRUPT store
-  raises plain ``DatabaseError: database disk image is malformed`` from the same
-  statement, and it must keep reaching the exit 5 that means "investigate the
-  store".
+  raises plain ``DatabaseError: database disk image is malformed`` from the last
+  statement of that same check, and it must keep reaching the exit 5 that means
+  "investigate the store".
   ``sqlite3.DatabaseError`` is deliberately NOT caught around the open either,
   so "file is not a database" keeps its own wording and its own exit 5;
   ``OperationalError`` is a subclass of it, and only the narrow one is taken.
@@ -465,10 +465,11 @@ Breaking changes within the 0.x line are called out explicitly.
   ours to build in full and building is a write. A neighbouring hole is closed
   beside it: a ``--db`` naming a FIFO or a device node stats fine, reports zero
   bytes and is not a directory, so it was taken for an empty store and then read
-  — on POSIX, opening a FIFO for reading blocks until a writer appears and
-  nothing here bounds that, so a daemon would hang where it should refuse (the
-  same guard catches ``--db NUL`` on Windows). A path that is not a regular file
-  is now its own named exit 1.
+  — and on POSIX, opening a FIFO for reading blocks until a writer appears
+  (``open(2)``; not staged, the tests run on Windows) with nothing here to bound
+  it, so a daemon would hang where it should refuse. The same guard catches
+  ``--db NUL`` and ``--db CON`` on Windows, which stat as character devices. A
+  path that is not a regular file is now its own named exit 1.
 
 - **dataflows / agents: the two getters that reach the model without
   passing through the router flatten and cap their failure text too, and a model

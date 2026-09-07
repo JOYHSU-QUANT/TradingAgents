@@ -380,14 +380,15 @@ python -m contrib.hyperliquid_perp live \
 - **長駐建議**同 paper（[RUNBOOK §3](./RUNBOOK.md)）：掛在會自動重啟的監管下，
   working directory 設 repo 根目錄。監管（systemd 等）的重啟策略可依 exit code
   分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、**1**＝
-  config／憑證／環境錯誤——兩者都不該無腦無限重啟。**exit 1 有兩個例外是暫時性的**：
+  config／憑證／環境錯誤——兩者都不該無腦無限重啟。**exit 1 至少有以下三種是暫時性的**：
   (a) 同錢包姊妹 run 還持著新鮮 lease 時的具名拒絕（訊息含 `ACCOUNT-wide`），等對方
   收工或 lease 過期後重跑就會好——但那代表有兩個 run 同時被啟動，該查的是啟動來源；
   (b) store 打不開來讀的具名拒絕（訊息含 `could not be opened for reading`），成因
   若是別的 process 鎖著它或底層儲存不穩，重跑會好；若是權限就不會。**分辨不能只看
   訊息**：「鎖著」會印 `database is locked`，但權限與 `-shm` 建不出來
   SQLite 都印同一句 `unable to open database file`（見 §8 那一列），要自己去查檔案
-  權限與掛載。
+  權限與掛載；(c) 同一個 db 檔裡別的 run 還持著新鮮 lease、擋住這次升級的具名拒絕
+  （訊息含 `is being driven by pid`），對方收工或 lease 過期後重跑就會好。
   另外 `live`／`live-smoke` 收到 SIGTERM 會走與 Ctrl-C 相同的收尾（exit 130）。注意 live 的無人看管空窗風險比
   paper 高——真錢／真倉。
 

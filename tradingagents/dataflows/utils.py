@@ -327,11 +327,13 @@ def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bo
     flattening a whole message for its own raise or a log line, where the
     module's own diagnostic carries the meaning.
 
-    ``keep_edges`` is for echoing a REFUSED value back to its author: markers
-    become a space rather than vanishing, and nothing is trimmed off the ends,
-    so ``"_2026-08-18"`` cannot come back as ``2026-08-18`` inside a sentence
-    calling it invalid. A rendered vendor fragment wants the default — there
-    the marker is noise and a boundary space would rebuild a table cell.
+    ``keep_edges`` is for echoing a CALLER'S OWN value back to its author — a
+    refused date, or an argument a report quotes back (see
+    :func:`echo_argument`): markers become a space rather than vanishing, and
+    nothing is trimmed off the ends, so ``"_2026-08-18"`` cannot come back as
+    ``2026-08-18`` inside a sentence calling it invalid. A rendered vendor
+    fragment wants the default — there the marker is noise and a boundary
+    space would rebuild a table cell.
     """
     marker = " " if keep_edges else ""
     flat = EMPHASIS_UNDERSCORE.sub(marker, str(text).translate(MARKDOWN_CONTROL))
@@ -341,8 +343,52 @@ def sanitize_untrusted(text: object, *, limit: int | None = None, keep_edges: bo
     return flat
 
 
-def _echo_untrusted(value) -> str:
-    """The refused date argument, quoted, flattened and capped, for the sentinel.
+def echo_argument(value: object) -> str:
+    """The model's own argument, flattened and capped, for text it reads again.
+
+    A tool that quotes one of its arguments back — the symbol it could not
+    verify, the topic nothing matched, the alias it does not know, or simply
+    the one it names in the report it returns — is putting a fragment the
+    MODEL authored into the prompt, the same direction
+    :func:`quote_argument` guards for a refused date. Same FLATTENING and
+    cap, and ``keep_edges`` for the same reason: markers become a space
+    rather than vanishing, so ``_foo`` cannot come back as ``foo`` inside a
+    sentence calling it unusable.
+
+    Not the whole of that guard, though: this returns a BARE string, where
+    :func:`quote_argument` returns one already inside ``repr``'s own escaped
+    quotes. So control characters reach the prompt as themselves here, and a
+    caller that wraps this result in quotes of its own supplies them as
+    literal text — a value carrying that same quote character then ends the
+    span early. Only use this where the echo is named bare, as the snapshot
+    report's heading line does; every quoted site wants
+    :func:`quote_argument` (#232). The control characters that reach the
+    prompt as themselves are the NON-whitespace ones: the flattening above
+    collapses every whitespace run, a lone tab or line break included.
+
+    A clean value comes through byte for byte apart from whitespace, which
+    collapses to single spaces — a topic typed with two spaces renders with
+    one.
+
+    Not for a VENDOR's message — that one is not quoted back at its author and
+    wants the default edges (see :func:`sanitize_untrusted`).
+    """
+    return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+
+
+def quote_argument(value) -> str:
+    """A model argument echoed back INSIDE ITS OWN QUOTES, flattened and capped.
+
+    Returns a STRING value already delimited — do not wrap the result in
+    quotes of your own. That is the whole point: the delimiters come from
+    ``repr``, which
+    escapes any quote character in the value and picks the other quote style
+    when it has to, so the value cannot end the quoted span early. A caller
+    that supplies its own literal quotes around :func:`echo_argument` instead
+    gets a span a value containing that quote character can close, and the
+    prose after it reads to the model as the tool's own words rather than the
+    caller's value (#232). Use this wherever the echo is quoted; use
+    :func:`echo_argument` only where it is named bare in running prose.
 
     The value is the model's own text echoed back into a sentence it reads, so
     it gets the vendor flattening with ``keep_edges`` (see there). The cap is
@@ -352,10 +398,16 @@ def _echo_untrusted(value) -> str:
     value far past the promise (#140) — and the re-cap below drops whole
     characters until the quoted form fits, so an escape sequence stays whole
     or vanishes and the quotes stay balanced. A clean value such as ``'abc'``
-    comes through byte for byte.
+    comes through byte for byte, quotes included; one containing whitespace
+    does not, since :func:`echo_argument` collapses every run to a single
+    space.
+
+    A NON-string is ``repr``'d too, so it is delimited only where its own
+    ``repr`` is: a number, ``None`` or a bool comes back bare. The tool
+    schemas send JSON strings, so only a direct caller can reach that lane.
     """
     if isinstance(value, str):
-        flat = sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
+        flat = echo_argument(value)
         quoted = repr(flat)
         if len(quoted) > MAX_UNTRUSTED_CHARS + 2:
             # Whole characters, not repr bytes, and repr is recomputed each
@@ -434,10 +486,10 @@ def invalid_date_sentinel(
     look-ahead filtering off, even where omission is technically legal (the
     statement getters' #73 lane — their ``date_refusal`` gate stays
     ``omitted_ok=True``, their sentence stays a bounding one). ``_echo`` lets
-    :func:`date_refusal` pass the echo it already computed for its log line;
+    :func:`refuse_date` pass the echo it already computed for its log line;
     anyone else leaves it to be computed here.
 
-    The echoed value is flattened and capped (see :func:`_echo_untrusted`):
+    The echoed value is flattened and capped (see :func:`quote_argument`):
     the optional-category getters used to carry that guard in their own
     vendor-error messages (#119 moved them onto this sentinel), and the core
     tools never had it.
@@ -461,7 +513,7 @@ def invalid_date_sentinel(
         # rather than falling into whichever branch is last — which would
         # hand a typo the strongest wrong claim (#140 review).
         raise ValueError(f"unknown DateKind {kind!r}")
-    echo = _echo if _echo is not None else _echo_untrusted(value)
+    echo = _echo if _echo is not None else quote_argument(value)
     return (
         f"{tag}: {param} {echo} is not a valid yyyy-mm-dd date, "
         f"so {consequence}. "
@@ -495,17 +547,40 @@ def date_refusal(
     vendor-local copy would reach that vendor's getters and silently miss the
     other's, which is the drift this whole change exists to close. The three
     inputs that used to be answered differently per vendor are in the CHANGELOG.
+
+    The half that ACTS on the judgement is :func:`refuse_date`, which this
+    delegates to. Prefer this function: reach for that one only where the
+    caller owns a different parse rule on purpose (#112), and read its
+    docstring first — it does not judge.
     """
     if value is None and omitted_ok:
         return None
     if value is not None and normalize_iso_date(value) is not None:
         return None
-    # The refusal is RETURNED, so it never reaches the router's warning lane;
-    # without this line an operator's log shows nothing for a model that keeps
-    # sending a date no tool can use (#119). Info, not warning: the model is
-    # told to retry, and the echo is the flattened one the sentence carries —
-    # computed once here and handed to the sentinel (#140).
-    echo = _echo_untrusted(value)
+    return refuse_date(value, what=what, kind=kind, param=param)
+
+
+def refuse_date(
+    value,
+    *,
+    what: str,
+    kind: DateKind,
+    param: str = "curr_date",
+) -> str:
+    """Refuse a date already judged unusable: log the one operator line, serve the sentinel.
+
+    The refusal is RETURNED, so it never reaches the router's warning lane;
+    without this line an operator's log shows nothing for a model that keeps
+    sending a date no tool can use (#119). Info, not warning: the model is
+    told to retry, and the echo is the flattened one the sentence carries —
+    computed once here and handed to the sentinel (#140).
+
+    Split out of :func:`date_refusal` — which judges the value first — so a
+    tool that keeps its own parse rule (the verification snapshot's looser
+    pandas gate is a decision, #112) can refuse with the same log line and
+    the same sentence rather than a hand-written copy of either (#230).
+    """
+    echo = quote_argument(value)
     logger.info("Refusing unusable %s %s for %s", param, echo, what)
     return invalid_date_sentinel(value, what=what, kind=kind, param=param, _echo=echo)
 

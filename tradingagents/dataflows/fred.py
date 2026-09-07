@@ -20,6 +20,7 @@ from .utils import (
     data_lag_note,
     date_refusal,
     json_body_or_outage,
+    quote_argument,
     raise_for_http_status,
     sanitize_untrusted,
 )
@@ -147,8 +148,14 @@ def _resolve_series_id(indicator: str) -> str:
     # FRED series IDs never contain whitespace and are short; reject anything
     # else (a descriptive phrase the LLM passed) rather than 400ing the API.
     if not candidate or len(candidate) > 30 or any(c.isspace() for c in candidate):
+        # The rejected value is the model's own text echoed back into a
+        # sentence it reads (``get_macro_data`` serves this as prose), so it
+        # goes through the shared argument echo: flattened, capped, edges kept
+        # so ``_foo`` is not quoted back as ``foo`` beside "not a valid ID"
+        # (#231).
+        echo = quote_argument(indicator)
         raise ValueError(
-            f"'{indicator}' is not a known macro alias or a valid FRED series ID. "
+            f"{echo} is not a known macro alias or a valid FRED series ID. "
             f"Use an alias (e.g. 'cpi', 'unemployment', '10y_treasury') or a raw "
             f"FRED series ID (e.g. 'CPIAUCSL')."
         )

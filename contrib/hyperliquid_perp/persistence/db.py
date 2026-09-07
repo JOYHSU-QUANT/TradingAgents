@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from stat import S_ISDIR
+from stat import S_ISDIR, S_ISREG
 from urllib.parse import quote
 
 from .schema import LEASE_READABLE_SINCE, MIGRATIONS, SCHEMA_MIGRATIONS_DDL
@@ -213,6 +213,29 @@ def _is_our_unused_bookkeeping(conn: sqlite3.Connection) -> bool:
     return conn.execute(f"SELECT 1 FROM {_BOOKKEEPING_TABLE} LIMIT 1").fetchone() is None
 
 
+def _unreadable_error(file: Path, exc: BaseException) -> SchemaVersionError:
+    """The one wording of "this build could not read that file at all" (issue #210).
+
+    Two branches of :func:`_refuse_a_foreign_store` reach it — the plain read
+    that stands in for the probe on an empty file, and the probe's own open —
+    and they must not say different things about the same situation.
+
+    The sentence names causes as examples and defers to the error it quotes,
+    rather than claiming a closed set: ``OperationalError`` alone covers a
+    permission, a lock outliving the wait, a ``-shm`` SQLite may not create
+    beside a WAL store, and a failing disk. Naming two of those as THE two
+    would be the kind of exhaustiveness claim this function has already had to
+    walk back once.
+    """
+    return SchemaVersionError(
+        f"{file} could not be opened for reading: {exc}. The path is there, but "
+        "this build could not look inside the file to tell whether it is one of "
+        "its stores; the quoted error says why — a permission on the file, "
+        f"another process holding it locked past the {_BUSY_TIMEOUT_MS / 1000:g}s "
+        "wait, or the storage under it. The database file has not been modified."
+    )
+
+
 def _refuse_a_foreign_store(path: str | Path) -> None:
     """Refuse a ``--db`` this build must not open, by name.
 
@@ -225,13 +248,14 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     ... does not exist`` first (``Path.exists`` is False for both).
 
     And the mistype no guard can see anything wrong with: a file that exists,
-    stats perfectly well, and still cannot be READ — no permission on it, or a
-    writer holding it past the probe's bounded wait. Nothing about the PATH is
-    wrong there, so the branches below have nothing to refuse on; the probe's
-    own ``OperationalError`` is what gets caught and named (issue #210). Every
-    file is probed for that reason, ``touch``-ed ones included: skipping the
-    zero-length ones saved an open and left exactly one unopenable ``--db``
-    still reaching ``connect`` unnamed.
+    stats perfectly well, and still cannot be READ — a permission on it, a
+    writer holding it past the probe's bounded wait, a failing disk. Nothing
+    about the PATH is wrong there, so the branches keyed on ``stat`` have
+    nothing to refuse on, and it used to reach ``connect`` as a bare
+    ``OperationalError`` (issue #210). Both ways in are named now, through
+    :func:`_unreadable_error`: the probe's own open, and — for a zero-length
+    file, which is accepted without being probed — a plain read that opens
+    nothing of SQLite's.
 
     "EMPTY store" used to mean ``MAX(schema_migrations.version) == 0``, which is
     a fact about OUR bookkeeping, not about the file: another application's
@@ -303,38 +327,88 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         ) from exc
     if S_ISDIR(info.st_mode):
         # Forgetting the filename on --db is an ordinary typo, and a directory
-        # stats perfectly well, so it needs saying out loud — and before the
-        # probe, which would otherwise answer for it in SQLite's vocabulary
-        # rather than the operator's. Before this guard existed, ``connect``
-        # failed on a directory as an unnamed exit 2 on every platform.
+        # stats perfectly well, so it needs saying out loud — and ahead of
+        # everything below, all of which would misdiagnose it. Its ``st_size``
+        # can satisfy the empty-file branch (NTFS reports 0 while the index
+        # still fits in the MFT record, such as a fresh tmp dir; ext4 reports
+        # 4096, tmpfs and XFS a smaller entry-derived size), and the probe
+        # answers for it with ``unable to open database file`` — which the lane
+        # below would now dress up as a permissions or lock problem on a
+        # directory whose permissions are fine. Before this guard, ``connect``
+        # failed on one as an unnamed exit 2 on every platform.
         raise SchemaVersionError(
             f"{file} is a directory, not a database file. A store is a single "
             f"file — give --db its name (for example {file / '<name>.db'})."
         )
-    # Every file reaches the probe, ``touch``-ed ones included. A zero-length
-    # file used to return here as "ours to build in full", which is the verdict
-    # the probe reaches for it anyway — SQLite reads an empty file as an empty
-    # database, listing no objects, and leaves it at zero bytes with no sidecar
-    # beside it. The shortcut bought one skipped open and cost the refusal its
-    # only remaining blind spot: an EMPTY file that cannot be read fell through
-    # to ``connect`` and its unnamed exit (issue #210).
-    #
-    # The wait is the same bounded one as :func:`connect`, spelled out so the
-    # two cannot drift: this opens a store a sibling daemon may be writing to
-    # (RUNBOOK-live §7.3 keeps two live runs in one file), and a lock collision
-    # should be a wait rather than an immediate ``OperationalError: database is
-    # locked``. ``timeout`` is sqlite3's own spelling of ``PRAGMA busy_timeout``,
-    # in seconds; its default happens to equal ``_BUSY_TIMEOUT_MS`` today, so
-    # passing it changes nothing until the constant does. What it bounds is what
-    # SQLite makes waitable: an EXCLUSIVE writer on a non-WAL store is waited
-    # out; a RESERVED one never blocks a reader in the first place; and WAL —
-    # what the deploy box runs — never blocks a reader at all.
+    if not S_ISREG(info.st_mode):
+        # A FIFO or a device node: it stats fine, reports zero bytes, and is
+        # not a directory, so every branch here would take it for an empty
+        # store — and then READ it. Opening a FIFO blocks until a writer
+        # appears, unbounded (``busy_timeout`` bounds statements, not opens),
+        # so the daemon would hang rather than refuse.
+        raise SchemaVersionError(
+            f"{file} is not a regular file. A store is an ordinary file on "
+            "disk — check the --db path."
+        )
+    if info.st_size == 0:
+        # ``touch``-ed: ours to build in full, and deliberately NOT probed.
+        # SQLite reads a zero-length main file as an empty database and treats
+        # a ``-wal`` beside it as stale: a read-only open of that pair DELETES
+        # the log (measured — 20KB of ``-wal`` gone after one probe), which is
+        # the one thing this function promises never to do, and a truncated
+        # main file beside a hot log is exactly when the log is the only copy
+        # of the data left. So the question the probe would have answered is
+        # asked here in the one way that opens nothing of SQLite's — an
+        # unreadable empty file used to fall through to ``connect`` and its
+        # unnamed exit instead (issue #210).
+        try:
+            with file.open("rb"):
+                pass
+        except OSError as exc:
+            raise _unreadable_error(file, exc) from exc
+        return
+    # The same bounded wait as :func:`connect`, spelled out so the two cannot
+    # drift: this opens a store a sibling daemon may be writing to (RUNBOOK-live
+    # §7.3 keeps two live runs in one file), and a lock collision should be a
+    # wait rather than an immediate ``OperationalError: database is locked``.
+    # ``timeout`` is sqlite3's own spelling of ``PRAGMA busy_timeout``, in
+    # seconds; its default happens to equal ``_BUSY_TIMEOUT_MS`` today, so
+    # passing it changes nothing until the constant does. What it bounds is
+    # what SQLite makes waitable: an EXCLUSIVE writer on a non-WAL store is
+    # waited out; a RESERVED one never blocks a reader in the first place; and
+    # WAL — what the deploy box runs — never blocks a reader at all.
     probe = None
     try:
-        probe = sqlite3.connect(
-            f"{_sqlite_file_uri(file)}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_MS / 1000
-        )
-        objects = [row[0] for row in probe.execute(_FOREIGN_OBJECTS_SQL)]
+        try:
+            probe = sqlite3.connect(
+                f"{_sqlite_file_uri(file)}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_MS / 1000
+            )
+            objects = [row[0] for row in probe.execute(_FOREIGN_OBJECTS_SQL)]
+        except sqlite3.OperationalError as exc:
+            # The file is there and stats fine, so every guard above had nothing
+            # to refuse on, yet SQLite cannot get at it — no read permission
+            # (permissions govern opening the file, not the ``stat`` that only
+            # asks ABOUT it), a writer still holding it after ``timeout``, or
+            # the storage under it. That used to propagate raw: ``validate``
+            # catches ``sqlite3.Error`` and printed a pure permissions problem
+            # as `store integrity failure` at exit 5 — the code whose meaning is
+            # "the ledger does not add up, investigate the accounting" — while
+            # an owning command reached main()'s exit-2 last resort with no
+            # message of its own (issue #210). NOT ``DatabaseError``: "file is
+            # not a database" is a different verdict with its own established
+            # wording and exit 5, deliberately untouched here as in PR
+            # #170/#209. ``OperationalError`` is a subclass of it, so catching
+            # the narrow one leaves that lane exactly as it was.
+            #
+            # Only the open and the first read are guarded. Everything below
+            # runs against a connection that demonstrably opened, so an error
+            # there is not a "could not open it" and must not be dressed as
+            # one — a foreign database whose lone table is a virtual table this
+            # build has no module for raises ``no such module`` from
+            # ``_is_our_unused_bookkeeping``, and that file is readable,
+            # unlocked, and precisely what the foreign-store refusal below
+            # exists to name.
+            raise _unreadable_error(file, exc) from exc
         carries_our_tables = any(table in objects for table in _STORE_TABLES)
         # Asked once, and never of a store that already proved itself by its
         # tables: the verdict wants it when the bookkeeping table is the file's
@@ -353,28 +427,6 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         )
         # Used in the message and nowhere else.
         stray = not ours and bookkeeping_unused
-    except sqlite3.OperationalError as exc:
-        # The file is there and stats fine, so every guard above had nothing to
-        # refuse on, yet SQLite cannot get at it: no read permission on the file
-        # (permissions govern opening it, not the ``stat`` that only asks ABOUT
-        # it), or a writer still holding it after ``timeout``. Both used to
-        # propagate raw — ``validate`` catches ``sqlite3.Error`` and printed a
-        # pure permissions problem as `store integrity failure` at exit 5, the
-        # code whose meaning is "the ledger does not add up, investigate the
-        # accounting", while an owning command reached main()'s exit-2 last
-        # resort with no message of its own (issue #210). NOT ``DatabaseError``:
-        # "file is not a database" is a different verdict with its own
-        # established wording and exit 5, deliberately untouched here as in PR
-        # #170/#209. ``OperationalError`` is a subclass of it, so catching the
-        # narrow one leaves that lane exactly as it was.
-        raise SchemaVersionError(
-            f"{file} could not be opened for reading: {exc}. The path is there, "
-            "but this build could not look inside the file to tell whether it is "
-            "one of its stores. Check the file's permissions, and whether another "
-            "process is holding it locked (a lock is waited out for "
-            f"{_BUSY_TIMEOUT_MS / 1000:g}s first). The database file has not been "
-            "modified."
-        ) from exc
     finally:
         if probe is not None:
             with suppress(Exception):

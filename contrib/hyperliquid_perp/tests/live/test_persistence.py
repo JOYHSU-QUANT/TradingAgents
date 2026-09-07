@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import pathlib
 import sqlite3
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -1328,8 +1329,70 @@ def test_a_db_that_exists_but_cannot_be_read_is_refused_by_name(tmp_path, popula
     # and a writer still holding the file after the probe's bounded wait — so it
     # names neither as the diagnosis.
     assert "could not be opened for reading" in message
-    assert "permissions" in message and "holding it locked" in message
-    assert "not been modified" in message  # the probe is read-only, as ever
+    assert "permission" in message and "holding it locked" in message
+    assert "not been modified" in message  # nothing here opens the file to write
+
+
+def test_an_empty_store_is_accepted_without_a_probe_so_a_log_beside_it_survives(tmp_path):
+    # An empty file is taken as ours to build in full WITHOUT opening it in
+    # SQLite, and that is load-bearing rather than a saved syscall: SQLite reads
+    # a zero-length main file as an empty database and treats a -wal beside it
+    # as stale, so one read-only probe of that pair DELETES the log — measured
+    # here. That is the one act this whole refusal promises never to commit, and
+    # a truncated main file beside a hot log is exactly when the log holds the
+    # only copy of the data.
+    store = tmp_path / "x.db"
+    store.touch()
+    log = tmp_path / "x.db-wal"
+    log.write_bytes(b"\x37\x7f\x06\x82" + bytes(20000))  # a WAL header and a body
+
+    db_module._refuse_a_foreign_store(store)  # accepted, no raise
+
+    assert log.exists() and log.stat().st_size == 20004
+    assert store.stat().st_size == 0
+
+
+def test_a_store_the_probe_cannot_open_is_refused_by_name(tmp_path, monkeypatch):
+    # The lane's other arm, and the one the permission test cannot reach: the
+    # file reads fine but SQLite still cannot open it — a writer holding it past
+    # the bounded wait, a -shm it may not create beside a WAL store, a failing
+    # disk. Staged at the probe's own connect so the mapping OperationalError →
+    # named refusal is pinned on EVERY platform, including the root containers
+    # where the permission arms can only skip.
+    store = tmp_path / "live.db"
+    Database(store).close()
+
+    def refuse(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db_module.sqlite3, "connect", refuse)
+    with pytest.raises(SchemaVersionError) as caught:
+        Database(store, migrate=False)
+    message = str(caught.value)
+    assert "could not be opened for reading" in message
+    assert "database is locked" in message  # the quoted error is what discriminates
+
+
+def test_a_db_that_is_not_a_regular_file_is_refused_by_name(tmp_path, monkeypatch):
+    # A FIFO stats fine, reports zero bytes and is not a directory, so every
+    # branch would take it for an empty store and then READ it — and opening a
+    # FIFO blocks until a writer appears, which nothing here bounds (the probe's
+    # timeout bounds statements, not opens). A daemon would hang instead of
+    # refusing. Staged through stat, because Windows has no mkfifo and the guard
+    # must hold on the box the tests run on as well as the deploy box.
+    store = tmp_path / "pipe.db"
+    store.touch()
+    real_stat = pathlib.Path.stat
+
+    def as_a_fifo(self, *args, **kwargs):
+        info = real_stat(self, *args, **kwargs)
+        if self == store:
+            return os.stat_result((stat.S_IFIFO | 0o644, *tuple(info)[1:]))
+        return info
+
+    monkeypatch.setattr(pathlib.Path, "stat", as_a_fifo)
+    with pytest.raises(SchemaVersionError, match="is not a regular file"):
+        Database(store, migrate=False)
 
 
 @pytest.mark.parametrize("opener", [connect, Database], ids=["connect", "Database"])

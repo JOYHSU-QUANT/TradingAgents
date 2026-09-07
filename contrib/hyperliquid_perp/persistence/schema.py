@@ -737,7 +737,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # after six hours, as the generic staleness warning, whose usual cause is
     # the opposite verdict (a settled hour whose rate will never resolve).
     # These columns are that missing fact, persisted where the read-only
-    # reader can see it. Same shape and same reason as the v6
+    # reader can see it. Same shape and same reason as the v5
     # ``last_config_drift_*`` breadcrumb: a runtime verdict that was visible
     # only in the log of a process the acceptance reader never shares.
     #
@@ -745,9 +745,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # ``last_backfill_error`` — the flattened, truncated exception text.
     # ``last_backfill_at``    — when that attempt ran.
     #
-    # Written ONLY for a pending row, and cleared by the first pass that walks
-    # the row without failing on it, so a set breadcrumb always describes the
-    # most recent attempt rather than an old one the run has since moved past.
+    # SET only on a pending row, and CLEARED by a pass that got strictly past
+    # the point where the recorded lane failed — never by one that simply did
+    # not re-test it. So a set breadcrumb describes the last attempt that
+    # reached that far, not an old one the run has since moved past. The clear
+    # is deliberately not restricted to pending rows: posting is what most
+    # needs to erase one, and nothing else writes these columns.
     # Internal columns, never exported. Nullable: NULL means "no failed
     # attempt on record", which is what every pre-v12 row correctly reads as.
     12: (

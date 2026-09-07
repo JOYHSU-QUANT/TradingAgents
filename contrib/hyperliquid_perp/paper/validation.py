@@ -596,6 +596,7 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
     # counts stay disjoint and sum to the pending events the report speaks
     # about, rather than describing the same row twice under two names.
     stuck_pending: Counter[str] = Counter()
+    oldest_attempt: str | None = None
     for event in pending_events:
         try:
             settlement = parse_instant(event["funding_timestamp"])
@@ -625,6 +626,18 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
             # a fixed name, because the alternative is printing whatever a
             # stored cell happens to hold into the acceptance report.
             stuck_pending[lane if lane in repo.FUNDING_BACKFILL_LANES else "unrecognised"] += 1
+            # The oldest of these stamps, printed beside the count. Without it
+            # the warning asserts the present tense ("is holding them") over a
+            # store whose daemon may have been stopped for weeks, and an
+            # operator cannot tell a defect that started five minutes ago from
+            # one that has been failing for days. Stored, so unparseable for
+            # the same reasons the settlement column is: kept as the raw string
+            # and compared lexically, which is exactly what ISO-8601 UTC is for
+            # — a garbled cell sorts somewhere harmless instead of raising in
+            # the reader that exists to survive garbled cells.
+            stamp = event["last_backfill_at"]
+            if isinstance(stamp, str) and (oldest_attempt is None or stamp < oldest_attempt):
+                oldest_attempt = stamp
             continue
         if now - settlement >= STALE_PENDING_FUNDING:
             stale_pending += 1
@@ -649,9 +662,10 @@ def validate_run(db: Database, *, run_id: str, now: datetime | None = None) -> V
         # remedy: reader_failed and unclaimed are defects in this code,
         # store_error is the store failing, corrupt_row is the row itself.
         reasons = ", ".join(f"{lane}: {n}" for lane, n in sorted(stuck_pending.items()))
+        since = "" if oldest_attempt is None else f", oldest attempt {oldest_attempt}"
         warnings.append(
             f"{sum(stuck_pending.values())} pending funding event(s) failed their last "
-            f"backfill attempt ({reasons}) — a defect, a store failure or a corrupt "
+            f"backfill attempt ({reasons}{since}) — a defect, a store failure or a corrupt "
             "row is holding them, NOT a rate the exchange has yet to publish; their "
             "funding P&L stays uncounted until it is fixed "
             "(funding_events.last_backfill_error holds each message)"

@@ -625,12 +625,17 @@ def _pending_funding_event(db, *, symbol="BTC", at=_T0):
     )
 
 
-def _stamp_backfill_status(db, lane, *, symbol="BTC"):
+def _stamp_backfill_status(db, lane, *, symbol="BTC", at=None):
     with db.transaction() as conn:
         conn.execute(
-            "UPDATE funding_events SET last_backfill_status = ?, last_backfill_error = ?"
-            " WHERE run_id = 'r' AND symbol = ?",
-            (lane, "rate_at() takes 2 positional arguments but 3 were given", symbol),
+            "UPDATE funding_events SET last_backfill_status = ?, last_backfill_error = ?,"
+            " last_backfill_at = ? WHERE run_id = 'r' AND symbol = ?",
+            (
+                lane,
+                "rate_at() takes 2 positional arguments but 3 were given",
+                (at or _T0).isoformat(),
+                symbol,
+            ),
         )
 
 
@@ -659,6 +664,10 @@ def test_a_defect_stuck_pending_funding_event_is_not_reported_as_a_stale_one(tmp
     assert len(stuck) == 1
     assert "reader_failed: 1" in stuck[0]
     assert "defect" in stuck[0]
+    # The stamp of the oldest recorded attempt, so the reader can see how fresh
+    # the verdict is. Without it the line asserts the present tense over a store
+    # whose daemon may have been stopped for weeks.
+    assert f"oldest attempt {_T0.isoformat()}" in stuck[0]
     assert report.failures == ()  # surface, never gate — the exposure_pct precedent
 
     # Old enough to be stale, and STILL not reported as stale: one row, one

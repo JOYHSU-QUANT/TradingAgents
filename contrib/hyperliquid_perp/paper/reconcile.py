@@ -67,6 +67,16 @@ logger = logging.getLogger(__name__)
 # threshold for its non-gating staleness warning.
 STALE_PENDING_FUNDING = timedelta(hours=6)
 
+# Which recorded verdicts an outcome is entitled to ERASE (issue #208). A
+# breadcrumb may only be cleared by a pass that got strictly past the point
+# where the recorded lane failed — anything less is losing the verdict, not
+# disproving it. The lanes sit at different points along the loop below, so
+# "got past" differs by outcome: a rate-less pass returns before the size parse
+# and ``record_funding`` ever run, while a posted or already-posted result has
+# been through all of them.
+_READER_CLEARED = frozenset({"reader_failed"})
+_ALL_CLEARED = repo.FUNDING_BACKFILL_LANES
+
 
 def _event_label(event: sqlite3.Row) -> str:
     """``"BTC @ 2026-09-04T12:00:00+00:00"``, or a stand-in if the row won't say.
@@ -116,6 +126,7 @@ def _note_backfill_outcome(
     *,
     run_id: str,
     lane: str | None,
+    clears: frozenset[str] = frozenset(),
     detail: str | None = None,
     now: datetime,
 ) -> None:
@@ -129,11 +140,25 @@ def _note_backfill_outcome(
     simply not published yet, and surfaces only after six hours as the generic
     staleness warning, whose usual cause is the opposite verdict.
 
-    ``lane=None`` clears, and every non-failing outcome calls it that way, so a
-    set breadcrumb always describes the LAST attempt: an event whose reader
-    defect was fixed must stop accusing the code the moment a pass gets past
-    it. The clear is skipped when there is nothing recorded, so an ordinary
-    pass over un-settled events still writes no rows at all.
+    ``lane=None`` clears — but only the lanes named in ``clears``, which is the
+    whole subtlety. A breadcrumb may be erased ONLY by an outcome that got
+    strictly PAST the point where the recorded lane failed; otherwise the pass
+    is not disproving that verdict, it is losing it.
+
+    The lanes sit at different points along the loop: the timestamp parse, then
+    the reader, then the rate check, then the size parse, then
+    ``record_funding``, then the tail. So an outcome's ``clears`` is "the lanes
+    this outcome has demonstrably overtaken", not "all of them". Concretely,
+    ``rate is None`` returns before the size parse and ``record_funding`` ever
+    run: it disproves ``reader_failed`` (that call no longer raises) and
+    nothing else. Clearing everything there would wipe a live ``corrupt_row``
+    verdict every time the venue merely went quiet — ``rate_at`` answers a
+    venue failure with ``None`` too — and hand the acceptance report back
+    exactly the generic staleness line issue #208 exists to replace, for as
+    long as the outage lasts.
+
+    The clear is skipped when there is nothing recorded, so an ordinary pass
+    over un-settled events still writes no rows at all.
 
     ``detail`` is a message, not an exception, because two of the six lanes
     have no exception to quote — the loop noticing its own hole — and the
@@ -153,8 +178,12 @@ def _note_backfill_outcome(
     """
     try:
         event_id = event["funding_event_id"]
-        if lane is None and event["last_backfill_status"] is None:
-            return
+        if lane is None:
+            recorded = event["last_backfill_status"]
+            # Nothing recorded, or this outcome does not reach the point the
+            # recorded lane failed at — either way there is nothing to write.
+            if recorded is None or recorded not in clears:
+                return
         with db.transaction() as conn:
             repo.set_funding_backfill_outcome(
                 conn,
@@ -209,8 +238,9 @@ def backfill_pending_funding(
     for that costs a diagnosis.
 
     Every lane also records its verdict ON the event (schema v12, issue #208)
-    and every non-failing outcome clears it, so a pending row always carries
-    the reason its LAST attempt did not post. That is what the acceptance
+    and each non-failing outcome clears the verdicts it got PAST (never the
+    ones it never re-tested), so a pending row always carries the reason its
+    last attempt to reach that far did not post. That is what the acceptance
     report reads: ``validate`` is a separate, read-only process, and from the
     row alone it can re-derive exactly one of these lanes (a timestamp it
     cannot parse) — leaving an event stuck by a defect indistinguishable from
@@ -315,10 +345,15 @@ def backfill_pending_funding(
             if rate is None:
                 # Outside the post lane below: no rate is not a failure to post,
                 # it is the ordinary "not settled yet" the next pass retries.
-                # It is also the outcome that CLEARS a breadcrumb: this pass got
-                # all the way through the reader without failing, so whatever an
-                # earlier pass recorded is no longer what is holding the event.
-                _note_backfill_outcome(db, event, run_id=run_id, lane=None, now=now)
+                # This pass got through the READER, and no further: the size
+                # parse and ``record_funding`` below never ran. So it disproves
+                # exactly one recorded verdict — ``reader_failed`` — and must
+                # leave every other one standing. ``rate_at`` answers a venue
+                # failure with ``None`` too, so clearing more here would erase a
+                # live corrupt-row verdict for the whole length of an outage.
+                _note_backfill_outcome(
+                    db, event, run_id=run_id, lane=None, clears=_READER_CLEARED, now=now
+                )
                 if now - settlement >= STALE_PENDING_FUNDING:
                     stale_pending += 1
                 else:
@@ -417,9 +452,14 @@ def backfill_pending_funding(
                 now=now,
             )
         elif res.status == "posted":
-            # No breadcrumb call: the row is no longer pending, and the
-            # breadcrumb is defined only on pending rows (the writer's own
-            # ``status = 'pending'`` filter would match nothing anyway).
+            # Clear, even though the row has just left ``pending``: nothing
+            # else erases these columns, so an event that failed one pass and
+            # posted on the next would carry its old failure verdict for the
+            # rest of the store's life. This is the one clear that must reach a
+            # non-pending row, which is why the writer scopes only its SET.
+            _note_backfill_outcome(
+                db, event, run_id=run_id, lane=None, clears=_ALL_CLEARED, now=now
+            )
             posted += 1
         elif res.status == "already_posted":
             # The exactly-once key found the settlement already booked, so
@@ -443,13 +483,15 @@ def backfill_pending_funding(
                 run_id,
                 _event_label(event),
             )
-            # A CLEAR, not a lane. This row does stay pending, but nothing
-            # failed on it — the settlement behind it is booked. Whether it
-            # should carry a verdict of its own is a separate question from
-            # issue #208 (it already has its own INFO line and its own
-            # "in neither total" decision), and stamping it with a failure lane
-            # here would be inventing one.
-            _note_backfill_outcome(db, event, run_id=run_id, lane=None, now=now)
+            # A CLEAR, not a lane, and it overtakes every verdict: this pass ran
+            # the whole loop for this row and nothing failed on it — the
+            # settlement behind it is booked. Whether the row should carry a
+            # verdict of its own is a separate question from issue #208 (it
+            # already has its own INFO line and its own "in neither total"
+            # decision), and stamping it with a failure lane would invent one.
+            _note_backfill_outcome(
+                db, event, run_id=run_id, lane=None, clears=_ALL_CLEARED, now=now
+            )
         else:
             # A status this loop has no verdict for. Named rather than folded
             # into the branch above it: announcing an unknown status as

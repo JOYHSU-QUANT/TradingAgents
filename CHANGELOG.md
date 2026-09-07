@@ -24,8 +24,14 @@ Breaking changes within the 0.x line are called out explicitly.
   its verdict on the event itself (``funding_events.last_backfill_status`` /
   ``last_backfill_error`` / ``last_backfill_at``, one of ``corrupt_row``,
   ``reader_failed``, ``store_error``, ``unclaimed``, ``no_result``,
-  ``unknown_status``), and every outcome that gets PAST the failure clears it,
-  so a set breadcrumb always describes the last attempt rather than an old one.
+  ``unknown_status``). A breadcrumb is erased only by an outcome that got
+  strictly PAST the point where the recorded lane failed, so it always
+  describes the last attempt that reached that far rather than an old one — a
+  rate-less pass therefore disproves ``reader_failed`` and leaves every other
+  verdict standing, because ``rate_at`` answers a venue outage with ``None``
+  too and clearing more would erase a live corrupt-row verdict for the length
+  of the outage. Posting clears everything, so a settled row never keeps the
+  failure marker of the pass before it.
   ``validate`` prints a further non-gating warning naming the count and the
   lanes, worded at the remedy — a defect, a store failure or a corrupt row,
   never an unpublished rate. Each pending row still gets exactly ONE verdict:
@@ -35,6 +41,16 @@ Breaking changes within the 0.x line are called out explicitly.
   the pass's own counts and per-event lines untouched. Migration is one
   ``ALTER TABLE ... ADD COLUMN`` per column; pre-v12 rows read as "no failed
   attempt on record", which is what they are.
+
+  Known trade-offs, so the warning is not read for more than it says. A failing
+  lane now takes a brief write lock where the pass used to be read-only apart
+  from the posting itself, including on the restart path. ``store_error: 0`` is
+  not evidence that no store error happened: the breadcrumb is written to the
+  same database that just refused a write, so that lane usually cannot record
+  itself and degrades to a contained WARNING. And a flapping failure is
+  under-reported, because the backfill runs every cycle boundary while
+  ``validate`` reads one instant — the count says what was true at the last
+  attempt, and the journal remains the only place to see a rate.
 
 - **hyperliquid_perp: `export --backfill-format-fingerprint` can read a
   copied store's payloads from elsewhere** (issue #197, item 3).

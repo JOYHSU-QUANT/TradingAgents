@@ -306,17 +306,23 @@ def set_funding_backfill_outcome(
     fact where the read-only reader can see it.
 
     Two rules make a set breadcrumb mean "the LAST attempt failed" rather than
-    "an attempt failed once":
+    "an attempt failed once", and they are deliberately NOT symmetric about the
+    row's status:
 
-    * The update is scoped to ``status = 'pending'``. A posted event is
-      settled; stamping one would leave a failure marker on a row that
-      succeeded. A row that posted between the caller's read and this write
-      therefore matches nothing, which is the correct outcome, not an error —
-      so no row matching is deliberately silent.
-    * ``lane=None`` clears all three columns, and the backfill calls it for
-      every pending row it walks WITHOUT failing on. Without that, an event
-      whose reader defect was fixed would keep accusing the code of a defect
-      for as long as its rate stayed unpublished.
+    * A SET is scoped to ``status = 'pending'``. A posted event is settled;
+      stamping one would leave a failure marker on a row that succeeded. A row
+      that posted between the caller's read and this write therefore matches
+      nothing, which is the correct outcome, not an error — so no row matching
+      is deliberately silent.
+    * A CLEAR is NOT scoped, because the row it most needs to reach is the one
+      that just stopped being pending. ``set_funding_status`` writes the
+      settlement columns and leaves these three alone, so an event that failed
+      one pass and posted on the next would otherwise carry its old failure
+      verdict for the rest of the store's life — the exact "a failure marker on
+      a row that succeeded" the scoping above exists to prevent, arrived at
+      from the other direction. Nothing reads a posted row's breadcrumb today
+      (``validate`` and the RUNBOOK's query both filter on pending), so this is
+      about the store not holding a false statement, not about a live misread.
 
     All three columns move together, in BOTH directions — a set needs its
     message and its stamp, a clear needs neither. Half of either is the shape
@@ -336,7 +342,7 @@ def set_funding_backfill_outcome(
         conn.execute(
             "UPDATE funding_events SET last_backfill_status = NULL,"
             " last_backfill_error = NULL, last_backfill_at = NULL"
-            " WHERE funding_event_id = ? AND status = 'pending'",
+            " WHERE funding_event_id = ?",
             (funding_event_id,),
         )
         return

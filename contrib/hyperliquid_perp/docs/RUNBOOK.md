@@ -385,8 +385,19 @@ sqlite3 paper_trading.db "SELECT symbol, funding_timestamp, last_backfill_status
     AND last_backfill_status IS NOT NULL ORDER BY funding_timestamp;"
 ```
 
-這個欄位記的是**最後一次嘗試**的結果：下一輪 pass 只要走過去了就會清空，所以它一直有值
-＝現在還卡著。`prompt_regime:` 行（每組 `(prompt_version, context_shape,
+這個欄位記的是**最後一次嘗試**的結果：下一輪 pass 走到「比它更後面」就會清空，所以它一直
+有值＝現在還卡著。
+
+**兩件事這條 warning 說不出來，別讀過頭**：
+
+1. **`store_error: 0` 不是「沒發生過 store error」的證據。** 寫 breadcrumb 用的是**同一個
+   剛拒絕寫入的 DB**，所以 store 在鬧的時候，這條車道多半連自己的判決都寫不進去，降級成
+   一條 `could not record its store_error verdict` 的 WARNING。要查 store error 去 journal
+   搜那句，不要看報告的數字。
+2. **flapping 會被低報。** backfill 每個 cycle 邊界都跑，`validate` 只讀某一瞬間；「十輪錯
+   九輪」的缺陷只要 `validate` 剛好採到沒錯那輪，就讀成健康。要看**頻率**一樣去翻 journal
+   的 per-event ERROR 行。warning 裡的 `oldest attempt` 只說最舊那筆判決是什麼時候寫的，
+   不是「連續失敗多久」。`prompt_regime:` 行（每組 `(prompt_version, context_shape,
 format_fingerprint)` 的 cycle 數，依首見順序，只數計入 `cycle_count` 的 cycle）同樣不影響
 exit code：**三鍵齊全的行多於一行**＝這個 run 跨過 prompt 制度邊界，跨段指標要分開讀（§4）；
 `n/a` 是該欄在寫入時還不存在（v10 前無 shape、v11 前無 fingerprint），不是另一個制度——

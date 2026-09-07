@@ -47,8 +47,11 @@ ACCOUNTING_ADJUSTMENT_TYPES = frozenset({"fee", "funding", "realized_pnl"})
 _FLIP_LEGS = frozenset({"open", "close"})
 _FUNDING_STATUSES = frozenset({"pending", "posted"})
 # Why a pending funding event did not post on its last backfill attempt
-# (schema v12, issue #208) — one word per contained per-event lane in
-# ``paper.reconcile.backfill_pending_funding``, in that function's order:
+# (schema v12, issue #208). Each word names WHAT IS WRONG and therefore where
+# the fix is — not a line number: the paper backfill happens to reach them in
+# the order below, but the vocabulary is anchored to the fact recorded, so a
+# second writer (a live funding path) can reuse the word that matches its fact
+# or add its own without making this list a description of one function:
 #
 #   corrupt_row     the STORE is wrong (an unparseable settlement timestamp, a
 #                   position size no Decimal accepts, a legacy row whose mark

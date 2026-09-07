@@ -861,10 +861,15 @@ class _GrownVocabulary:
         ("unknown_status", None, None, None),
     ],
 )
-def test_every_lane_records_why_the_event_stayed_pending(
+def test_every_reachable_lane_records_why_the_event_stayed_pending(
     tmp_path, monkeypatch, lane, break_store, source, break_call
 ):
     """Each contained lane writes ITS word onto the event (issue #208).
+
+    Five of the six lanes, driven end to end. ``no_result`` is the sixth and is
+    absent on purpose: it is unreachable by construction (every path to the
+    tail assigns ``res``), so a parameter for it could only be built by
+    reaching into the loop, which would pin the mock and not the loop.
 
     The per-event ERROR lines already say which lane claimed the failure — to
     whoever is reading the daemon's journal. ``validate`` is not: it is a
@@ -923,6 +928,63 @@ def test_a_later_pass_clears_the_breadcrumb_it_gets_past(tmp_path):
 
     assert (posted, still_pending) == (0, 1)
     assert _pending_breadcrumb(db) == (None, None)
+    db.close()
+
+
+def test_a_rate_less_pass_keeps_a_verdict_it_never_re_tested(tmp_path):
+    """A pass may only erase a verdict it got PAST, not one it never reached.
+
+    ``rate is None`` returns before the size parse and ``record_funding`` ever
+    run, so it says nothing about a ``corrupt_row`` recorded by either of them.
+    And ``rate_at`` answers a VENUE failure with ``None`` as well as an
+    unpublished hour — so clearing everything here erased a live corrupt-row
+    verdict for the whole length of any exchange outage, handing the acceptance
+    report back the generic staleness line this issue exists to replace, at
+    exactly the moment an operator is reading it.
+    """
+    db = _init(tmp_path)
+    _pending_event(db)
+    _null_the_mark(db)  # record_funding's own basis guard: a corrupt row
+
+    reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+    )
+    assert _pending_breadcrumb(db)[0] == "corrupt_row"
+
+    # The venue goes quiet. The row is still corrupt and nothing about it was
+    # re-tested, so the verdict must survive.
+    reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_Rates(None)
+    )
+    assert _pending_breadcrumb(db)[0] == "corrupt_row"
+    db.close()
+
+
+def test_posting_an_event_clears_the_verdict_of_the_pass_that_failed(tmp_path):
+    """A settled row must not keep a failure marker for the rest of its life.
+
+    ``set_funding_status`` writes the settlement columns and leaves these three
+    alone, and nothing else erases them — so without this clear an event that
+    failed one pass and posted on the next carried its old verdict forever.
+    This is the one clear that has to reach a row that is no longer pending,
+    which is why the writer scopes its SET to pending and its CLEAR to nothing.
+    """
+    db = _init(tmp_path)
+    _pending_event(db)
+
+    reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_BrokenReader()
+    )
+    assert _pending_breadcrumb(db)[0] == "reader_failed"
+
+    posted, still_pending = reconcile_module.backfill_pending_funding(
+        db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
+    )
+
+    assert (posted, still_pending) == (1, 0)
+    rows = repo.iter_funding_events(db.conn, "r")
+    assert [r["status"] for r in rows] == ["posted"]
+    assert (rows[0]["last_backfill_status"], rows[0]["last_backfill_at"]) == (None, None)
     db.close()
 
 

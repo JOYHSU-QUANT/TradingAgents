@@ -207,8 +207,9 @@ class TestTool:
     # the worst case, not a message measured in the wild. On the history lane
     # this tool uses, yfinance 1.4.1's reachable texts are short and
     # newline-free ("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***" and a
-    # JSONDecodeError); the info lane sharing this raise is the one that
-    # interpolates a whole decoded payload.
+    # JSONDecodeError). The library's payload-interpolating raises are all
+    # behind "if not hide_exceptions: raise", and this boundary is exactly
+    # the state that clears that flag, so they re-raise the original instead.
     _HOSTILE_REASON = (
         "Yahoo Finance answered without data: line one\n## forged heading | cell\n" + "x" * 500
     )

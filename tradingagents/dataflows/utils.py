@@ -360,8 +360,11 @@ def echo_argument(value: object) -> str:
     quotes. So control characters reach the prompt as themselves here, and a
     caller that wraps this result in quotes of its own supplies them as
     literal text — a value carrying that same quote character then ends the
-    span early. Only use this where the echo is named bare in running prose;
-    every quoted site wants :func:`quote_argument` (#232).
+    span early. Only use this where the echo is named bare, as the snapshot
+    report's heading line does; every quoted site wants
+    :func:`quote_argument` (#232). The control characters that reach the
+    prompt as themselves are the NON-whitespace ones: the flattening above
+    collapses every whitespace run, a lone tab or line break included.
 
     A clean value comes through byte for byte apart from whitespace, which
     collapses to single spaces — a topic typed with two spaces renders with
@@ -376,8 +379,9 @@ def echo_argument(value: object) -> str:
 def quote_argument(value) -> str:
     """A model argument echoed back INSIDE ITS OWN QUOTES, flattened and capped.
 
-    Returns the value already delimited — do not wrap the result in quotes of
-    your own. That is the whole point: the delimiters come from ``repr``, which
+    Returns a STRING value already delimited — do not wrap the result in
+    quotes of your own. That is the whole point: the delimiters come from
+    ``repr``, which
     escapes any quote character in the value and picks the other quote style
     when it has to, so the value cannot end the quoted span early. A caller
     that supplies its own literal quotes around :func:`echo_argument` instead
@@ -397,6 +401,10 @@ def quote_argument(value) -> str:
     comes through byte for byte, quotes included; one containing whitespace
     does not, since :func:`echo_argument` collapses every run to a single
     space.
+
+    A NON-string is ``repr``'d too, so it is delimited only where its own
+    ``repr`` is: a number, ``None`` or a bool comes back bare. The tool
+    schemas send JSON strings, so only a direct caller can reach that lane.
     """
     if isinstance(value, str):
         flat = echo_argument(value)

@@ -423,8 +423,8 @@ Breaking changes within the 0.x line are called out explicitly.
   ``get_verified_market_snapshot`` calls the builder directly and
   ``get_prediction_markets`` handles its own transport failures, so a Yahoo
   Finance outage reason (the library's own exception text, quoted whole with
-  no cap — markdown asterisks on the down-page message, and an unbounded
-  decoded payload on the ``info`` lane that shares this raise) and a Gamma
+  no cap — the down-page message carries markdown asterisks, and nothing
+  bounds the length of whatever else the library raises into it) and a Gamma
   4xx (whose URL carries the model's own
   ``topic``) still entered the prompt verbatim and unbounded — the former on
   a tool the market analyst calls every cycle. All three slots now get the
@@ -439,8 +439,8 @@ Breaking changes within the 0.x line are called out explicitly.
   heading and the two slots its own failure prose quotes ``symbol`` into —
   a symbol carrying its own ``## `` line can no longer forge a second
   heading in the report the analyst is told to treat as the source of
-  truth. **Every site that serves the echo in quotes takes those quotes
-  from the value itself**, through ``utils.quote_argument`` (the promoted
+  truth. **A string echo served in quotes takes those quotes from the value
+  itself**, through ``utils.quote_argument`` (the promoted
   ``_echo_untrusted``, which the date sentinel already used): flattening
   stops a value forging a block, but it does nothing about the delimiters,
   and six of these seven sites wrapped the echo in literal quotes of their
@@ -448,14 +448,17 @@ Breaking changes within the 0.x line are called out explicitly.
   span early, and the clause after it read to the model as the tool's own
   sentence — a crafted one contradicting the sentinel it sat inside. ``repr``
   escapes the quote or switches to the other style, so the value stays
-  contained. An ordinary value renders identically, quotes included, with
-  one exception: Polymarket's report heading previously used double quotes
-  and now carries the echo's own single quotes. Only the snapshot heading,
-  which names the symbol bare in running prose, still uses
-  ``echo_argument``. An ordinary value is unchanged apart from whitespace: the echo
+  contained; a non-string is delimited only where its own ``repr`` is, so a
+  number or ``None`` comes back bare. Only the snapshot heading, which names
+  the symbol bare in its heading line, still uses ``echo_argument``. An
+  ordinary value renders identically, quotes included, and is otherwise
+  unchanged apart from whitespace: the echo
   touches markdown markers, whitespace (every run, a lone tab or line break
   included, becomes one space) and length, so a topic written with a double
-  space renders with one. Polymarket's report body flattens the vendor's own
+  space renders with one. The one visible change for an ordinary value is
+  Polymarket's report heading, which previously used double quotes and now
+  carries the echo's own single quotes. Polymarket's report body flattens
+  the vendor's own
   question text, outcome labels and resolution date for the same reason —
   those are written by whoever created the market, and a successful report
   is served through the router verbatim; the date is flattened BEFORE it is
@@ -467,9 +470,10 @@ Breaking changes within the 0.x line are called out explicitly.
   unchanged here. Known trade-offs, both accepted deliberately: a symbol
   can now read two ways inside one sentence — ``_ES`` renders as ``' ES'``
   in the echo slot, which keeps edges, and as ``ES`` in the vendor reason
-  beside it, which gets the default vendor edges — and control characters
-  still reach the prompt as themselves from ``echo_argument``, which does
-  no escaping; only the quoted sites, on ``quote_argument``, escape them.
+  beside it, which gets the default vendor edges — and non-whitespace
+  control characters still reach the prompt as themselves from
+  ``echo_argument``, which does no escaping (the whitespace ones collapse to
+  a space); only the quoted sites, on ``quote_argument``, escape them.
 
 - **dataflows: the vendors that own their transport handling now raise the
   outage type when they are down, and a throttled or skipped vendor makes

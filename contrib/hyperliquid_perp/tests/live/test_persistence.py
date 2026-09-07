@@ -35,7 +35,7 @@ from contrib.hyperliquid_perp.persistence.schema import (
     SCHEMA_VERSION,
 )
 
-from ..conftest import build_store_at, migrations_up_to
+from ..conftest import build_store_at, migrations_up_to, unreadable
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -1300,6 +1300,36 @@ def test_a_db_path_that_is_a_directory_is_refused_by_name(tmp_path):
     a_directory.mkdir()
     with pytest.raises(SchemaVersionError, match="is a directory, not a database file"):
         Database(a_directory, migrate=False)
+
+
+@pytest.mark.parametrize("populated", [True, False], ids=["a store", "a touch-ed file"])
+def test_a_db_that_exists_but_cannot_be_read_is_refused_by_name(tmp_path, populated):
+    # Issue #210: the one bad --db no guard ABOVE the probe can see anything
+    # wrong with. Permissions govern opening the file, not the stat that merely
+    # asks about it, so the OSError lane never fires and this arrived as a bare
+    # OperationalError — which `validate` printed as `store integrity failure`
+    # at exit 5, sending an operator to investigate accounting that is fine.
+    # A zero-length one is here because it took a second fix: it used to return
+    # at the empty-file shortcut, ABOVE the probe, and so kept the old failure.
+    store = tmp_path / "live.db"
+    if populated:
+        Database(store).close()
+    else:
+        store.touch()
+    with unreadable(store):
+        # The premise both arms rest on: stat still answers for the file, which
+        # is why nothing above the probe can tell there is anything wrong here.
+        assert (store.stat().st_size > 0) is populated
+        with pytest.raises(SchemaVersionError) as caught:
+            Database(store, migrate=False)
+    message = str(caught.value)
+    assert str(store) in message  # which file, for an operator holding several
+    # One sentence has to be true of BOTH causes that land here — no permission,
+    # and a writer still holding the file after the probe's bounded wait — so it
+    # names neither as the diagnosis.
+    assert "could not be opened for reading" in message
+    assert "permissions" in message and "holding it locked" in message
+    assert "not been modified" in message  # the probe is read-only, as ever
 
 
 @pytest.mark.parametrize("opener", [connect, Database], ids=["connect", "Database"])

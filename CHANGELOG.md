@@ -415,6 +415,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **hyperliquid_perp: a ``--db`` that exists but cannot be READ is refused by
+  name instead of borrowing the ledger-integrity verdict** (issue #210). The
+  guard that names every other mistyped ``--db`` decides on ``stat``, and
+  ``stat`` answers perfectly well for a file whose permissions forbid opening
+  it — so the one failure it cannot see fell through to the read-only probe as
+  a bare ``sqlite3.OperationalError: unable to open database file``.
+  ``validate`` catches ``sqlite3.Error`` around the open and printed that as
+  ``store integrity failure`` at exit 5, the code whose documented meaning is
+  "the ledger does not add up — investigate the accounting", sending an
+  operator after books that are fine; an owning command (``paper`` / ``live``)
+  was worse still, reaching ``main()``'s exit-2 last resort with no message of
+  its own. The probe's own ``OperationalError`` is now caught and named —
+  ``<path> could not be opened for reading: <the underlying error>``, exit 1,
+  the file unmodified. Two causes land there, so the wording diagnoses neither
+  and names both to check: no read permission, and a writer still holding the
+  file after the probe's 5s bounded wait (that one used to be exit 2 as well).
+  ``sqlite3.DatabaseError`` is deliberately NOT caught, so "file is not a
+  database" keeps its own wording and its own exit 5; ``OperationalError`` is a
+  subclass of it, and only the narrow one is taken. Every file now reaches the
+  probe, ``touch``-ed ones included: the zero-length shortcut that returned
+  "ours to build in full" above it saved one open and left an unreadable EMPTY
+  file failing the old way, and the probe reaches that same verdict for an
+  empty file anyway — SQLite reads one as an empty database, listing no
+  objects, and leaves it at zero bytes with no sidecar beside it.
+
 - **dataflows / agents: the two getters that reach the model without
   passing through the router flatten and cap their failure text too, and a model
   argument quoted back is echoed with the same flattening as a refused
@@ -570,9 +595,10 @@ Breaking changes within the 0.x line are called out explicitly.
   ``cannot open …`` on Windows and ``cannot read … to tell whether it is one
   of this project's stores`` on POSIX, which raises ENOTDIR for it). Either
   parent mistype reached that exit 2 only through ``--create``; every other
-  command already refused it by name. A file that exists but cannot be READ is
-  not in this set — ``stat`` succeeds on one, so the guard has nothing to
-  refuse on, and it fails in the probe as it did before: issue #210. The
+  command already refused it by name. A file that exists but cannot be READ was
+  not in this set — ``stat`` succeeds on one, so the guard had nothing to refuse
+  on and it failed in the probe as before; that one is named too now, in its own
+  entry above (issue #210). The
   read-only probe builds its URI itself rather than through
   ``Path.as_uri``, which rejects a relative ``--db`` outright and renders a
   Windows UNC path with an authority SQLite refuses — a store on a share

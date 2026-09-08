@@ -58,11 +58,35 @@ class BaseLLMClient(ABC):
         ``reasoning_effort`` off the reasoning families): the client decides
         per model, this helper only applies the decision.
         """
-        return {
-            key: self.kwargs[key]
-            for key in self._passthrough_kwargs
-            if key in self.kwargs and key not in skip
-        }
+        allowlist = self._passthrough_kwargs
+        if isinstance(allowlist, str):
+            # A bare string iterates its characters and forwards nothing, silently.
+            raise TypeError(
+                f"{type(self).__name__}._passthrough_kwargs must be a tuple of key names, not a str"
+            )
+        return {key: self.kwargs[key] for key in allowlist if key in self.kwargs and key not in skip}
+
+    def warn_if_temperature_dropped(self, llm: Any) -> None:
+        """Warn when a forwarded ``temperature`` did not survive the chat class.
+
+        langchain-openai's ``validate_temperature`` nulls the knob on gpt-5
+        reasoning models unless ``reasoning_effort`` is ``"none"``, so an
+        operator's ``TRADINGAGENTS_TEMPERATURE`` would vanish with no signal —
+        the #177 shape for another knob. Judged on the OUTCOME (the attribute
+        after construction), not by re-deriving the library's rule, so it
+        stays true when that rule moves (#212).
+        """
+        sent = self.kwargs.get("temperature")
+        if sent is None or getattr(llm, "temperature", None) is not None:
+            return
+        warnings.warn(
+            f"temperature={sent!r} was set for model '{self.model}' but the chat "
+            "client dropped it: this model only takes a temperature with reasoning "
+            "off. Set openai_reasoning_effort='none' "
+            "(TRADINGAGENTS_OPENAI_REASONING_EFFORT) or unset the temperature.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
     def get_provider_name(self) -> str:
         """Return the provider name used in warning messages."""

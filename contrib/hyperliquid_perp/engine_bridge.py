@@ -360,6 +360,22 @@ class EngineImportError(EngineConfigError):
     """
 
 
+class _EngineBlock(dict):
+    """The ``engine:`` block projected onto ``ENGINE_KEYS``, read by subscript only.
+
+    ``.get`` is refused: on this dict it could only ever hide a key the set
+    lacks behind a default, which is the silent-None hole the projection
+    exists to close (#212). Every declared key is present (None when the
+    YAML omits it), so subscript is always the right spelling.
+    """
+
+    def get(self, key, default=None):  # type: ignore[override]
+        raise TypeError(
+            f"read the engine block by subscript (eng_cfg[{key!r}]); .get would hide "
+            "a key ENGINE_KEYS lacks behind a default"
+        )
+
+
 def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     """Overlay the perp ``engine`` block onto the engine's DEFAULT_CONFIG.
 
@@ -393,11 +409,14 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         ) from exc
 
     # The block projected onto ``ENGINE_KEYS`` (the set ``load_config`` warns
-    # unknown keys against) and read below by SUBSCRIPT, so a key read here
-    # that the set lacks is a KeyError in every bridge test, never a silent
-    # None (#212). ``or {}``: a bare ``engine:`` line loads as None and is the
-    # all-defaults block, as it already is for the loader.
-    eng_cfg = {key: (config.get("engine") or {}).get(key) for key in ENGINE_KEYS}
+    # unknown keys against), as an ``_EngineBlock``: read by SUBSCRIPT, so a
+    # key read here that the set lacks is a KeyError in every bridge test,
+    # never a silent None — and ``.get`` is refused so no future read can
+    # default its way around that (#212). ``or {}``: a bare ``engine:`` line
+    # loads as None and is the all-defaults block, as it is for the loader.
+    eng_cfg = _EngineBlock(
+        {key: (config.get("engine") or {}).get(key) for key in ENGINE_KEYS}
+    )
     engine_config = dict(DEFAULT_CONFIG)
     # ``or`` (not ``.get(k, default)``) so a present-but-null/blank YAML value falls
     # back to the default instead of silently passing None into the LLM client,

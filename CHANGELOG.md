@@ -157,20 +157,31 @@ Breaking changes within the 0.x line are called out explicitly.
   (langchain-openai) then ``OPENAI_BASE_URL`` (the openai SDK) — so a proxy
   configured the way most routers document themselves is seen by the
   Responses-API switch and the warning alike, where before both read it as
-  native. The perp bridge projects the ``engine:`` block onto the loader's
-  ``ENGINE_KEYS`` (public now; two modules depend on it) and reads it by
-  subscript, so a key read there that the set lacks is a KeyError in every
-  bridge test rather than a silent None; the source-walking AST pin is
-  replaced by a table test that feeds every key a distinctive value and
-  asserts each lands. The knobs test
+  native. That flips one observable: with only the env var set, the
+  ``openai`` provider now speaks Chat Completions to the proxy instead of
+  sending a Responses call the proxy cannot serve — the rule #1024 already
+  applies to an explicit ``backend_url``. A base URL ``urlparse`` cannot
+  read is refused naming its source (``backend_url`` or the env var) and
+  the value. The perp bridge projects the ``engine:`` block onto the
+  loader's ``ENGINE_KEYS`` (public now; two modules depend on it) as an
+  ``_EngineBlock`` that refuses ``.get`` and reads it by subscript, so a key
+  read there that the set lacks is a KeyError in every bridge test rather
+  than a silent None; the source-walking AST pin is replaced by a table
+  test that feeds every key a distinctive value and asserts each lands.
+  The knobs test
   module runs with ``RuntimeWarning`` as an error on catalog model IDs; root
   ``tests/`` reads README and CHANGELOG through one ``repo_text``; the CLI
   spells the Portfolio Manager node from ``tradingagents.node_names``.
-  Known trade-off, observed while moving the test table to catalog IDs: every
-  curated ``openai`` model is a gpt-5 reasoning model, and langchain-openai
-  nulls ``temperature`` on those unless ``reasoning_effort`` is ``none`` — an
-  operator's ``TRADINGAGENTS_TEMPERATURE`` is dropped there by the library,
-  not by this codebase; nothing here changes that.
+  Found while moving that table to catalog IDs: every curated ``openai``
+  model is a gpt-5 reasoning model, and langchain-openai nulls
+  ``temperature`` on those unless ``reasoning_effort`` is ``none``, so an
+  operator's ``TRADINGAGENTS_TEMPERATURE`` vanished with no signal. The
+  OpenAI and Azure clients now emit one ``RuntimeWarning`` when a forwarded
+  temperature did not survive construction, naming the model and the
+  ``openai_reasoning_effort='none'`` remedy — judged on the outcome, not by
+  re-deriving the library's rule. ``BaseLLMClient.forwarded_kwargs`` also
+  refuses a string-typed allowlist, which would iterate characters and
+  forward nothing.
 
 - **hyperliquid_perp: the live seam guards cover the reconciler's object
   seams, the two remaining injected callables and the three ``*_seconds``

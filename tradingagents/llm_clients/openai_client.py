@@ -276,13 +276,23 @@ def _is_native_openai_base_url(base_url: str | None) -> bool:
     routers document themselves — is the same proxy, for this switch and
     for the uncapped-request warning that shares the test (#212).
     """
+    source = "backend_url"
     if not base_url:
-        base_url = os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+        for source in ("OPENAI_API_BASE", "OPENAI_BASE_URL"):
+            base_url = os.environ.get(source)
+            if base_url:
+                break
     if not base_url:
         return True
     if "://" not in base_url:
         base_url = "https://" + base_url
-    host = urlparse(base_url).hostname or ""
+    try:
+        host = urlparse(base_url).hostname or ""
+    except ValueError as exc:
+        # urlparse refuses e.g. an unbalanced IPv6 bracket; a bare ValueError
+        # from deep inside graph construction names neither the setting nor
+        # the value, so the operator would have nothing to fix.
+        raise ValueError(f"{source} is not a URL this process can parse: {base_url!r} ({exc})") from None
     return host == "api.openai.com" or host.endswith(".openai.com")
 
 
@@ -363,7 +373,9 @@ class OpenAIClient(BaseLLMClient):
         llm_kwargs.update(self.forwarded_kwargs(skip=skip))
 
         # The subclass (provider quirks) comes from the registry spec.
-        return chat_cls(**llm_kwargs)
+        llm = chat_cls(**llm_kwargs)
+        self.warn_if_temperature_dropped(llm)
+        return llm
 
     def validate_model(self) -> bool:
         """Validate model for the provider."""

@@ -41,7 +41,9 @@ class AzureOpenAIClient(BaseLLMClient):
 
         llm_kwargs.update(self.forwarded_kwargs())
 
-        return NormalizedAzureChatOpenAI(**llm_kwargs)
+        llm = NormalizedAzureChatOpenAI(**llm_kwargs)
+        self.warn_if_temperature_dropped(llm)
+        return llm
 
     def validate_model(self) -> bool:
         """Azure accepts any deployed model name."""

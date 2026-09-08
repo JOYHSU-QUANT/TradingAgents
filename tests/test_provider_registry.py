@@ -80,6 +80,21 @@ def test_openai_reads_the_sdk_base_url_env_when_base_url_is_unset(env_var, monke
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("source", ["backend_url", "OPENAI_API_BASE", "OPENAI_BASE_URL"])
+def test_a_malformed_base_url_is_refused_naming_its_source(source, monkeypatch):
+    # urlparse raises on an unbalanced IPv6 bracket; from deep inside graph
+    # construction a bare ValueError would name neither the setting nor the
+    # value. The env fallback is a new way in, so both routes are pinned.
+    bad = "http://[bad"
+    kwargs = {"base_url": bad} if source == "backend_url" else {}
+    if source != "backend_url":
+        monkeypatch.setenv(source, bad)
+    with pytest.raises(ValueError, match=source) as info:
+        is_gateway_provider("openai", **kwargs)
+    assert bad in str(info.value)
+
+
+@pytest.mark.unit
 def test_the_factory_re_export_forwards_the_base_url():
     # Two definition points (registry + lazy re-export): the graph calls the
     # re-export, so a base_url dropped there would silence the openai path

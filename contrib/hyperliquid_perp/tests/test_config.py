@@ -591,6 +591,18 @@ def test_a_bare_engine_line_is_the_all_defaults_block():
     )
 
 
+def test_the_projected_engine_block_refuses_get():
+    # The projection closes the silent-None hole only while every read is a
+    # subscript; ``.get`` is the one spelling that would reopen it, so the
+    # block refuses it outright rather than trusting a code comment.
+    from contrib.hyperliquid_perp import engine_bridge
+
+    block = engine_bridge._EngineBlock({"llm_provider": None})
+    assert block["llm_provider"] is None
+    with pytest.raises(TypeError, match="subscript"):
+        block.get("llm_provider")
+
+
 @pytest.mark.parametrize(
     "text",
     [

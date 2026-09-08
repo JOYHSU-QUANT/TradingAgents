@@ -98,8 +98,8 @@ PAYLOAD_PROVIDERS = [("openrouter", "qwen/qwen3-235b-a22b-2507"), ("openai", "gp
 # the attribute AND the Responses payload, omitted stays None. So the native
 # OpenAI and Azure rows construct with reasoning off, the one configuration
 # on which a temperature knob is honoured there. An operator on a gpt-5
-# model with reasoning on has TRADINGAGENTS_TEMPERATURE dropped by langchain,
-# not by this codebase.
+# model with reasoning on has it dropped by langchain — which the client
+# now warns about (``test_a_temperature_the_model_drops_is_warned_about``).
 CONSTRUCTION_KWARGS = {
     "openai": {"reasoning_effort": "none"},
     "azure": {"reasoning_effort": "none"},
@@ -174,6 +174,44 @@ class TestKnobForwarding:
 
         for client in (AnthropicClient, AzureOpenAIClient, BedrockClient, GoogleClient, OpenAIClient):
             assert set(_COMMON_PASSTHROUGH_KWARGS) <= set(client._passthrough_kwargs), client.__name__
+
+    def test_a_string_allowlist_fails_at_first_use(self):
+        # ``_passthrough_kwargs = "temperature"`` iterates characters and would
+        # forward nothing, silently; the base helper refuses the shape.
+        from tradingagents.llm_clients.base_client import BaseLLMClient
+
+        class Mistyped(BaseLLMClient):
+            _passthrough_kwargs = "temperature"
+
+            def get_llm(self):
+                return self.forwarded_kwargs()
+
+            def validate_model(self):
+                return True
+
+        with pytest.raises(TypeError, match="tuple of key names"):
+            Mistyped("m", temperature=0.0).get_llm()
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_a_temperature_the_model_drops_is_warned_about(self, provider, monkeypatch):
+        # gpt-5 with reasoning on: langchain-openai nulls the temperature. The
+        # operator's TRADINGAGENTS_TEMPERATURE vanishing silently is the #177
+        # shape for another knob, so the client says so and names the fix.
+        # (Every other row in this module constructs with reasoning off and
+        # runs under RuntimeWarning-as-error, which pins the quiet case.)
+        _azure_env(monkeypatch)
+        with pytest.warns(RuntimeWarning, match="reasoning_effort") as record:
+            llm = create_llm_client(
+                provider=provider,
+                model="gpt-5.4-mini",
+                api_key="placeholder",
+                temperature=0.2,
+                reasoning_effort="medium",
+            ).get_llm()
+        assert llm.temperature is None
+        ours = [w for w in record if issubclass(w.category, RuntimeWarning)]
+        assert len(ours) == 1
+        assert "gpt-5.4-mini" in str(ours[0].message)
 
     def test_api_key_stays_out_of_the_common_set(self):
         # Bedrock's chat class takes no api_key (AWS credential chain) and

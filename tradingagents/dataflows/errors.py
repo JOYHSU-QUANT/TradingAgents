@@ -103,9 +103,9 @@ class VendorUnavailableError(VendorError):
     ``utils.json_body_or_outage``, so one real event — a vendor down — is
     one router reaction across those (#142). The boundaries that own their
     transport handling — Deribit's retry loop, Fear & Greed's, Farside's
-    and SoSoValue's cache lanes, SoSoValue's own status check — raise it
-    themselves for the same events, a request that could not be reached
-    included: the router's generic lane already reads an unreached vendor
+    cache lane, SoSoValue's request itself (#217) — raise it themselves
+    for the same events, a request that could not be reached included:
+    the router's generic lane already reads an unreached vendor
     as down (``utils.is_vendor_outage``), and a boundary that retries or
     serves stale first must not downgrade that verdict to a bug on the way
     out (#172). Deribit's, Fear & Greed's and Farside's are subclasses of

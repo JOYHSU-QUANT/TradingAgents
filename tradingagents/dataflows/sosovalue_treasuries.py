@@ -75,11 +75,9 @@ from datetime import datetime, timedelta
 from typing import NamedTuple
 from urllib.parse import quote
 
-import requests
-
-from .errors import VendorUnavailableError
 from .sosovalue_common import (
     SoSoValueError,
+    SoSoValueUnavailableError,
     _cache_dir,
     _cache_rejecter,
     _concentration_share_str,
@@ -544,8 +542,9 @@ def _fetch_one_company(ticker: str, name: str) -> dict | str | None:
     propagate (config breakage must reach the router; a 429 makes the rest
     of the sweep pointless, so the caller drains it), a structural break
     logs at ERROR with a traceback, a transient stays a warning, and a
-    transport failure or an outage answer (``VendorUnavailableError``, #172)
-    is re-raised after logging so the caller's breaker can count the streak.
+    transport-lane failure (``SoSoValueUnavailableError``: unreached, or an
+    outage answer, #172/#217) is re-raised after logging so the caller's
+    breaker can count the streak.
     """
     try:
         data = _request(
@@ -562,11 +561,12 @@ def _fetch_one_company(ticker: str, name: str) -> dict | str | None:
             return "empty"
         rows = _parse_purchase_rows(data, ticker)
         return {"name": name, "rows": rows}
-    except (requests.RequestException, VendorUnavailableError, SoSoValueError) as e:
+    except (SoSoValueUnavailableError, SoSoValueError) as e:
         if isinstance(e, SoSoValueError):
             logger.error(
                 "SoSoValue treasuries %s history failed structurally (coverage "
-                "disclosed as incomplete) — the client likely needs a fix: %s",
+                "disclosed as incomplete) — the client likely needs a fix, or the "
+                "vendor is refusing it: %s",
                 ticker,
                 e,
                 exc_info=True,

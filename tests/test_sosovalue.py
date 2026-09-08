@@ -24,6 +24,8 @@ import tradingagents.default_config as default_config
 from tradingagents.dataflows import farside, interface, sosovalue, sosovalue_common
 from tradingagents.dataflows.config import set_config
 
+from .conftest import fake_response, sosovalue_unreached
+
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 SOSOVALUE_LOGGER = "tradingagents.dataflows.sosovalue"
@@ -119,17 +121,6 @@ def _at(stamp: str) -> datetime:
     return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
 
 
-class _FakeResponse:
-    def __init__(self, status_code: int, body=None):
-        self.status_code = status_code
-        self._body = body
-
-    def json(self):
-        if self._body is None:
-            raise ValueError("not json")
-        return self._body
-
-
 # --------------------------------------------------------------------------- #
 # _request: the shared per-minute request budget (#189)
 # --------------------------------------------------------------------------- #
@@ -163,7 +154,7 @@ class TestRequestBudget:
     SLACK = sosovalue_common.RATE_LIMIT_SLACK_SECONDS
 
     def _send(self, path="/etfs", response=None):
-        response = response or _FakeResponse(200, {"code": 0, "message": "ok", "data": []})
+        response = response or fake_response(200, json={"code": 0, "message": "ok", "data": []})
         with (
             mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": "test-key"}),
             mock.patch.object(sosovalue_common.requests, "get", return_value=response),
@@ -223,7 +214,7 @@ class TestRequestBudget:
         # The server's verdict outranks the local count: one request, one
         # 429, and the next request 10s later still waits out the window.
         with pytest.raises(sosovalue.SoSoValueRateLimitError):
-            self._send(response=_FakeResponse(429, {"code": 429, "message": "slow down"}))
+            self._send(response=fake_response(429, json={"code": 429, "message": "slow down"}))
         budget_clock.now += 10.0
         self._send()
         assert budget_clock.sleeps == [self.WINDOW - 10.0 + self.SLACK]
@@ -262,14 +253,14 @@ class TestRequest:
     def _get(self, response, path="/etfs/summary-history", params=None):
         with (
             mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": "test-key"}),
-            mock.patch.object(sosovalue.requests, "get", return_value=response) as getter,
+            mock.patch.object(sosovalue_common.requests, "get", return_value=response) as getter,
         ):
             result = sosovalue._request(path, params or {"symbol": "BTC"})
         return result, getter
 
     def test_success_returns_data_and_sends_key_header(self):
         body = {"code": 0, "message": "success", "data": [1, 2], "details": None}
-        result, getter = self._get(_FakeResponse(200, body))
+        result, getter = self._get(fake_response(200, json=body))
         assert result == [1, 2]
         kwargs = getter.call_args.kwargs
         assert kwargs["headers"] == {"x-soso-api-key": "test-key"}
@@ -278,7 +269,7 @@ class TestRequest:
     def test_unset_key_raises_before_any_request(self):
         with (
             mock.patch.dict(os.environ, {}, clear=True),
-            mock.patch.object(sosovalue.requests, "get") as getter,
+            mock.patch.object(sosovalue_common.requests, "get") as getter,
             pytest.raises(sosovalue.SoSoValueNotConfiguredError, match="SOSOVALUE_API_KEY"),
         ):
             sosovalue._request("/etfs", {"symbol": "BTC"})
@@ -288,38 +279,38 @@ class TestRequest:
         # Fixture: the live 401 body. A rejected key is config breakage like an
         # unset one — the router must fall through, never stale-serve it.
         with pytest.raises(sosovalue.SoSoValueNotConfiguredError, match="SOSOVALUE_API_KEY"):
-            self._get(_FakeResponse(401, BAD_KEY_FIX))
+            self._get(fake_response(401, json=BAD_KEY_FIX))
 
     def test_429_raises_rate_limit(self):
         with pytest.raises(sosovalue.SoSoValueRateLimitError):
-            self._get(_FakeResponse(429, {"code": 429, "message": "slow down"}))
+            self._get(fake_response(429, json={"code": 429, "message": "slow down"}))
 
     def test_over_window_403_is_a_vendor_error(self):
         # Fixture: the live HTTP 403 / code 400301 "date range exceeds 30 day
         # limit" body. The client never sends date params, so hitting this is a
         # contract break, not something to retry.
         with pytest.raises(sosovalue.SoSoValueError, match="400301"):
-            self._get(_FakeResponse(403, OVER_WINDOW_FIX))
+            self._get(fake_response(403, json=OVER_WINDOW_FIX))
 
     def test_gateway_error_shape_uses_msg_field(self):
         # Fixture: the live missing-param body carries "msg", not "message".
         with pytest.raises(sosovalue.SoSoValueError, match=r"参数\[symbol\]"):
-            self._get(_FakeResponse(400, MISSING_PARAM_FIX))
+            self._get(fake_response(400, json=MISSING_PARAM_FIX))
 
     def test_bad_ticker_400_is_a_vendor_error(self):
         with pytest.raises(sosovalue.SoSoValueError, match="NOTREAL"):
-            self._get(_FakeResponse(400, BAD_TICKER_FIX))
+            self._get(fake_response(400, json=BAD_TICKER_FIX))
 
     def test_nonzero_envelope_code_on_http_200_is_an_error(self):
         with pytest.raises(sosovalue.SoSoValueError, match="code 500"):
-            self._get(_FakeResponse(200, {"code": 500, "message": "oops"}))
+            self._get(fake_response(200, json={"code": 500, "message": "oops"}))
 
     def test_a_non_json_body_is_the_outage_type(self):
         # A CDN or WAF page at whatever status it came with is not this API
         # answering: the outage type (#172), never the structural one the
         # family logs as "the client likely needs a fix".
         with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="not JSON") as e:
-            self._get(_FakeResponse(200, None))
+            self._get(fake_response(200))
         assert not isinstance(e.value, sosovalue.SoSoValueError)
         assert isinstance(e.value, sosovalue_common.VendorUnavailableError)
         assert "None" not in str(e.value)
@@ -330,7 +321,7 @@ class TestRequest:
         # carrying the status and path only, never the body.
         body = {"message": "<html>upstream error page | ## forged</html>"}
         with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as e:
-            self._get(_FakeResponse(status, body))
+            self._get(fake_response(status, json=body))
         assert str(e.value) == (
             f"SoSoValue answered HTTP {status} without data on /etfs/summary-history"
         )
@@ -343,7 +334,7 @@ class TestRequest:
         # an outage stale-served for the cap — as a 4xx left alone is at the
         # Farside and Fear & Greed boundaries.
         with pytest.raises(sosovalue.SoSoValueError, match=f"HTTP {status}, code no-json") as e:
-            self._get(_FakeResponse(status, None))
+            self._get(fake_response(status))
         assert not isinstance(e.value, sosovalue_common.VendorUnavailableError)
         assert "(non-JSON response body)" in str(e.value)
         assert "None" not in str(e.value)
@@ -352,7 +343,7 @@ class TestRequest:
         # The key verdict comes before the body verdict, and the placeholder
         # for an undecodable body never renders as the literal "None".
         with pytest.raises(sosovalue.SoSoValueNotConfiguredError) as e:
-            self._get(_FakeResponse(401, None))
+            self._get(fake_response(401))
         assert "(non-JSON response body)" in str(e.value)
         assert "None" not in str(e.value)
 
@@ -360,12 +351,12 @@ class TestRequest:
         # Deribit's rule: an envelope with a non-zero code is the vendor
         # answering about this request whatever status it rode in on.
         with pytest.raises(sosovalue.SoSoValueError, match="500001") as e:
-            self._get(_FakeResponse(500, {"code": 500001, "message": "internal"}))
+            self._get(fake_response(500, json={"code": 500001, "message": "internal"}))
         assert not isinstance(e.value, sosovalue_common.VendorUnavailableError)
 
     def test_missing_data_list_is_an_error(self):
         with pytest.raises(sosovalue.SoSoValueError, match="'data' list"):
-            self._get(_FakeResponse(200, {"code": 0, "message": "success", "data": None}))
+            self._get(fake_response(200, json={"code": 0, "message": "success", "data": None}))
 
     def test_not_configured_is_a_value_error(self):
         # Routing relies on this subclassing for "vendor unavailable" handling.
@@ -378,6 +369,111 @@ class TestRequest:
         ):
             sosovalue.get_api_key()
 
+    @pytest.mark.parametrize(
+        "fault",
+        [
+            pytest.param(
+                requests.ConnectionError(
+                    "HTTPSConnectionPool(host='openapi.sosovalue.com'): Max retries "
+                    "exceeded with url: /openapi/v1/etfs/summary-history?symbol=BTC"
+                ),
+                id="ConnectionError",
+            ),
+            pytest.param(requests.Timeout("Read timed out. (read timeout=30)"), id="Timeout"),
+            pytest.param(
+                # As requests raises it: the last 3xx it followed rides along
+                # (sessions.resolve_redirects), so read off its status this
+                # would be "answered HTTP 302" — is_unreached names it (#217).
+                requests.TooManyRedirects("Exceeded 30 redirects.", response=fake_response(302)),
+                id="Redirects",
+            ),
+            pytest.param(
+                requests.exceptions.RetryError("Max retries exceeded", request=object()),
+                id="RetryError",
+            ),
+        ],
+    )
+    def test_an_unreached_vendor_is_the_outage_type_worded_by_class(self, fault):
+        # The transport lane is typed at the boundary (#217): every caller
+        # catches SoSoValueUnavailableError, never a requests exception, and
+        # the message carries the class and path only — a requests message
+        # quotes the request URL (#171).
+        from tradingagents.dataflows.utils import is_unreached
+
+        assert is_unreached(fault)
+        with (
+            mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": "test-key"}),
+            mock.patch.object(sosovalue_common.requests, "get", side_effect=fault),
+            pytest.raises(sosovalue_common.SoSoValueUnavailableError) as e,
+        ):
+            sosovalue._request("/etfs/summary-history", {"symbol": "BTC"})
+        assert str(e.value) == (
+            f"SoSoValue could not be reached: {type(fault).__name__} on /etfs/summary-history"
+        )
+        assert e.value.__cause__ is fault
+        assert not isinstance(e.value, sosovalue.SoSoValueError)
+
+    def test_a_pre_network_requests_failure_is_structural_and_leaks_no_key(self):
+        # A malformed header or URL is raised by requests before any network:
+        # a bug or config breakage, not the vendor down, so the structural
+        # type — never stale-served for the cap — worded by class only, since
+        # requests' own message embeds the offending header value.
+        fault = requests.exceptions.InvalidHeader(
+            "Invalid leading whitespace in header value: 'x-soso-api-key: test-key\\r\\n'"
+        )
+        with (
+            mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": "test-key"}),
+            mock.patch.object(sosovalue_common.requests, "get", side_effect=fault),
+            pytest.raises(sosovalue.SoSoValueError) as e,
+        ):
+            sosovalue._request("/etfs", {})
+        assert str(e.value) == "SoSoValue InvalidHeader on /etfs"
+        assert not isinstance(e.value, sosovalue_common.VendorUnavailableError)
+        assert "test-key" not in str(e.value)
+
+    def test_the_outage_sentences_are_authored_only_in_utils(self):
+        # #217-4: "answered HTTP N with a body that is not JSON" and "answered
+        # HTTP N without data" are the shared helpers' sentences; a boundary
+        # that hand-copies them drifts on its own (#172 found the copies).
+        # Message strings only — f-string parts joined with a placeholder,
+        # docstrings excluded, since prose may quote the sentence.
+        import ast
+        from pathlib import Path
+
+        import tradingagents.dataflows as dataflows
+
+        sentence = re.compile(r"answered HTTP \{\} (with a body that is not JSON|without data)")
+
+        def message_strings(tree):
+            docstrings = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+                    first = node.body[0] if node.body else None
+                    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                        docstrings.add(id(first.value))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.JoinedStr):
+                    yield "".join(
+                        v.value if isinstance(v, ast.Constant) else "{}" for v in node.values
+                    )
+                elif (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and id(node) not in docstrings
+                ):
+                    yield node.value
+
+        authors = {}
+        for source in sorted(Path(dataflows.__file__).parent.glob("*.py")):
+            text = source.read_text(encoding="utf-8")
+            if "answered HTTP" not in text:
+                continue  # parse only the candidates; the suite's time is watched
+            tree = ast.parse(text)
+            found = {m.group(1) for s in message_strings(tree) for m in [sentence.search(s)] if m}
+            if found:
+                authors[source.name] = found
+        assert authors == {"utils.py": {"with a body that is not JSON", "without data"}}
+
     def test_request_sends_the_stripped_key(self):
         # A key deployed through a Windows env file gains a trailing CRLF;
         # unstripped it never reaches the network — requests raises a
@@ -386,7 +482,7 @@ class TestRequest:
         with (
             mock.patch.dict(os.environ, {"SOSOVALUE_API_KEY": " test-key\r\n"}),
             mock.patch.object(
-                sosovalue.requests, "get", return_value=_FakeResponse(200, body)
+                sosovalue_common.requests, "get", return_value=fake_response(200, json=body)
             ) as getter,
         ):
             sosovalue._request("/etfs", {"symbol": "BTC"})
@@ -399,7 +495,7 @@ class TestRequest:
         # echo the submitted credential back.
         body = {"code": 400103, "message": "invalid key: test-key"}
         with pytest.raises(sosovalue.SoSoValueNotConfiguredError) as exc_info:
-            self._get(_FakeResponse(401, body))
+            self._get(fake_response(401, json=body))
         assert "test-key" not in str(exc_info.value)
         assert "[redacted]" in str(exc_info.value)
 
@@ -413,7 +509,7 @@ class TestRequest:
         # the pair half closed.
         body = {"code": "## Reading: | 9.9 |", "msg": "bad\n## Reading: | 9.9 | *buy*"}
         with pytest.raises(sosovalue.SoSoValueError) as exc_info:
-            self._get(_FakeResponse(500, body))
+            self._get(fake_response(500, json=body))
         message = str(exc_info.value)
         assert "##" not in message and "|" not in message and "*" not in message
         assert "Reading:" in message  # flattened, not discarded
@@ -427,7 +523,7 @@ class TestRequest:
         filler = "a" * 270
         body = {"code": 1, "detail": filler + "test-key"}
         with pytest.raises(sosovalue.SoSoValueError) as exc_info:
-            self._get(_FakeResponse(500, body))
+            self._get(fake_response(500, json=body))
         assert "test-k" not in str(exc_info.value)
 
     def test_structured_message_is_truncated_after_redaction(self):
@@ -437,7 +533,7 @@ class TestRequest:
         # unbounded mutant keeps all 400 a's) ...
         body = {"code": 400000, "message": "a" * 400 + "test-key"}
         with pytest.raises(sosovalue.SoSoValueError) as exc_info:
-            self._get(_FakeResponse(500, body))
+            self._get(fake_response(500, json=body))
         msg = str(exc_info.value)
         assert "test-k" not in msg
         assert "a" * 301 not in msg
@@ -446,7 +542,7 @@ class TestRequest:
         # its head ("test-k").
         straddle = {"code": 400000, "message": "a" * 294 + "test-key"}
         with pytest.raises(sosovalue.SoSoValueError) as exc_info:
-            self._get(_FakeResponse(500, straddle))
+            self._get(fake_response(500, json=straddle))
         assert "test-k" not in str(exc_info.value)
 
     def test_oversized_envelope_code_is_bounded(self):
@@ -454,7 +550,7 @@ class TestRequest:
         # value there, and it is interpolated separately from _error_message.
         body = {"code": "c" * 500, "message": "oops"}
         with pytest.raises(sosovalue.SoSoValueError) as exc_info:
-            self._get(_FakeResponse(200, body))
+            self._get(fake_response(200, json=body))
         assert "c" * 41 not in str(exc_info.value)
 
     def test_key_echoed_in_the_code_field_is_redacted(self):
@@ -462,7 +558,7 @@ class TestRequest:
         # must scrub the credential the same way.
         body = {"code": "bad test-key", "message": "oops"}
         with pytest.raises(sosovalue.SoSoValueError) as exc_info:
-            self._get(_FakeResponse(200, body))
+            self._get(fake_response(200, json=body))
         assert "test-key" not in str(exc_info.value)
         assert "[redacted]" in str(exc_info.value)
 
@@ -1631,9 +1727,11 @@ def _stub_requests(
 ):
     """Replace sosovalue._request with an in-memory dispatcher.
 
-    ``fail`` is a set of paths that raise a network error, ``errors`` maps a
-    path to a specific exception instance to raise; ``calls`` collects every
-    requested path for throttle assertions.
+    ``fail`` is a set of paths the vendor could not be reached for — raised
+    as what ``_request`` raises for that, the family's outage type worded
+    by class (#217); ``errors`` maps a path to a specific exception
+    instance to raise; ``calls`` collects every requested path for
+    throttle assertions.
     """
     summary = SUMMARY_API if summary is None else summary
     listing = LISTING_API if listing is None else listing
@@ -1646,7 +1744,7 @@ def _stub_requests(
         if path in errors:
             raise errors[path]
         if path in fail:
-            raise requests.RequestException("boom")
+            raise sosovalue_unreached(path)
         if path == "/etfs/summary-history":
             return summary
         if path == "/etfs":
@@ -1835,15 +1933,66 @@ class TestCacheAndLoad:
         with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap"):
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
 
+    @pytest.mark.parametrize(
+        "now,escalated",
+        [("2026-08-07T00:00:00Z", False), ("2026-08-08T00:00:00Z", True)],
+        ids=["day-7-warning", "day-8-error"],
+    )
+    def test_an_outage_past_half_the_stale_cap_is_one_error_line_without_a_traceback(
+        self, tmp_path, monkeypatch, caplog, now, escalated
+    ):
+        # Half of the 14-day cap is the line (#217): a brownout stays a
+        # warning, but an endpoint that has moved behind a gateway page must
+        # show in the ERROR log before the cap expires the cache — one line,
+        # no traceback (the type says it is not a bug), and the call still
+        # serves the stale snapshot. Judged on the snapshot's age (the cache
+        # was fetched 2026-07-31), never on a count of stale serves.
+        self._setup(tmp_path, monkeypatch, now=now)
+        self._write_cache(tmp_path)
+        down = sosovalue_common.SoSoValueUnavailableError(
+            "SoSoValue answered HTTP 503 without data on /etfs/summary-history"
+        )
+        _stub_requests(monkeypatch, errors={"/etfs/summary-history": down})
+        with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
+            out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "STALE by" in out
+        errors = [
+            r for r in caplog.records if r.name == SOSOVALUE_LOGGER and r.levelno >= logging.ERROR
+        ]
+        assert bool(errors) is escalated
+        if escalated:
+            assert len(errors) == 1
+            assert errors[0].exc_info is None
+            assert "past half the 14-day stale cap" in errors[0].getMessage()
+        assert sosovalue.MAX_STALE_DAYS == 14
+
+    def test_a_throttle_past_half_the_stale_cap_stays_a_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # Only an outage escalates: a 429 is the vendor answering.
+        self._setup(tmp_path, monkeypatch, now="2026-08-08T00:00:00Z")
+        self._write_cache(tmp_path)
+        _stub_requests(
+            monkeypatch,
+            errors={"/etfs/summary-history": sosovalue.SoSoValueRateLimitError("429 slow down")},
+        )
+        with caplog.at_level(logging.DEBUG, logger=SOSOVALUE_LOGGER):
+            out = sosovalue.get_etf_flow_data("BTC", "2026-07-31")
+        assert "STALE by" in out
+        assert not any(
+            r.levelno >= logging.ERROR for r in caplog.records if r.name == SOSOVALUE_LOGGER
+        )
+
     def test_a_transport_failure_message_carries_no_url(self, tmp_path, monkeypatch):
         # The no-cache raise is LLM-visible through the router's sentinel; a
-        # requests message quotes the request URL (#203).
+        # requests message quotes the request URL (#203). Through the real
+        # _request, which is where the lane is typed now (#217).
         self._setup(tmp_path, monkeypatch)
         reset = requests.ConnectionError(
             "HTTPSConnectionPool(host='openapi.sosovalue.com'): Max retries exceeded "
             "with url: /openapi/v1/etfs/summary-history?symbol=BTC"
         )
-        _stub_requests(monkeypatch, errors={"/etfs/summary-history": reset})
+        monkeypatch.setattr(sosovalue_common.requests, "get", mock.Mock(side_effect=reset))
         with pytest.raises(
             sosovalue_common.SoSoValueUnavailableError, match="no usable cache exists"
         ) as e:
@@ -1895,7 +2044,7 @@ class TestCacheAndLoad:
             "HTTPSConnectionPool(host='openapi.sosovalue.com'): Max retries exceeded "
             "with url: /openapi/v1/etfs/summary-history?symbol=BTC"
         )
-        _stub_requests(monkeypatch, errors={"/etfs/summary-history": reset})
+        monkeypatch.setattr(sosovalue_common.requests, "get", mock.Mock(side_effect=reset))
         with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="cap") as e:
             sosovalue.get_etf_flow_data("BTC", "2026-07-31")
         # The past-cap raise quotes the cause the same way as the no-cache one.
@@ -2040,14 +2189,14 @@ class TestCacheAndLoad:
             path = url.removeprefix(sosovalue_common.SOSOVALUE_API_BASE)
             sent.append(path)
             if path == "/etfs/summary-history":
-                return _FakeResponse(200, {"code": 0, "message": "ok", "data": SUMMARY_API})
+                return fake_response(200, json={"code": 0, "message": "ok", "data": SUMMARY_API})
             if path == "/etfs":
                 listing = [{"ticker": t, "name": t} for t in ("AAA", "BBB", "CCC", "DDD")]
-                return _FakeResponse(200, {"code": 0, "message": "ok", "data": listing})
+                return fake_response(200, json={"code": 0, "message": "ok", "data": listing})
             if path == "/etfs/AAA/history":
                 raise requests.ConnectionError("blip")
             if path == "/etfs/BBB/history":
-                return _FakeResponse(429, {"code": 429, "message": "slow down"})
+                return fake_response(429, json={"code": 429, "message": "slow down"})
             raise AssertionError(f"a fund after the 429 was requested: {path}")
 
         monkeypatch.setattr(sosovalue_common.requests, "get", fake_get)

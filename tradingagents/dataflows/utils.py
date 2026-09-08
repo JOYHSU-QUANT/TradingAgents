@@ -767,14 +767,22 @@ def is_unreached(e: BaseException) -> bool:
     none). The ``ValueError``-flavoured requests exceptions (MissingSchema,
     InvalidURL, a JSONDecodeError) are a bug or an answer, and a
     ``requests.HTTPError`` is an answer even with its response missing.
-    ``TooManyRedirects`` and ``RetryError`` read as unreached too —
-    ``RequestException``s with no ``.response`` although the vendor did
-    answer (#172): a loose reading, harmless to every verdict, so no third
-    class is drawn for them. The one definition behind
+    ``TooManyRedirects`` and ``RetryError`` read as unreached too, although
+    the vendor did answer (#172): a redirect loop or a spent retry is an
+    endpoint that has moved or is blocked, closer to down than to an
+    answer about this request, and no third class is drawn for them — so
+    every caller below, the router's verdict included, reads them as
+    down (#217). ``RetryError`` carries no
+    response and reads so on its own; ``TooManyRedirects`` carries the last
+    3xx it followed (measured, requests 2.34), so it is named here — read
+    off its status it would be an answer, and a redirect loop would land
+    on a boundary's structural lane (#217). The one definition behind
     ``is_vendor_outage``'s unreached branch, ``generic_failure_words``'
     "could not be reached", and the boundaries that classify their own
-    transport failures (Farside, Fear & Greed, SoSoValue's cache lane).
+    transport failures (Farside, Fear & Greed, SoSoValue's ``_request``).
     """
+    if isinstance(e, requests.TooManyRedirects):
+        return True
     return (
         isinstance(e, OSError)
         and not isinstance(e, (ValueError, requests.HTTPError))
@@ -787,8 +795,10 @@ def is_vendor_outage(e: BaseException) -> bool:
 
     The one predicate behind the router's no-data verdict — a fallback's
     "no data" is unconfirmed when a vendor in the chain was down (#142).
-    Judged by the status the exception carries, never by its class: an
-    unreached vendor (``is_unreached``) is down, and an answered status can
+    Judged by the status the exception carries, not by its library: an
+    unreached vendor (``is_unreached``, which names the one exception that
+    carries a status yet reads as unreached, a redirect loop's) is down,
+    and an answered status can
     say as much — a 5xx, or a 401/403 refusing this client (what the
     yfinance window lets out raw for exactly that reason). Any other
     status is the vendor answering about this request (the 404 a boundary
@@ -816,20 +826,21 @@ def generic_failure_words(e: BaseException) -> str:
     boundaries that own their transport handling build when a request
     fails below their own taxonomy — so one 503 reads "answered HTTP 503"
     everywhere rather than one site saying ``HTTPError: HTTP 503``. The
-    status first, read off the exception the library-neutral way
+    wire first (``is_unreached``, which also names the one exception that
+    carries a status yet reads as unreached, a redirect loop's), then the
+    status read off the exception the library-neutral way
     (``http_status``): a 401/403 is the vendor refusing this client, any
-    other status is its answer; no status and the wire (``is_unreached``)
-    is the vendor not reached; anything else — a library bug — is its
+    other status is its answer; anything else — a library bug — is its
     class name. Never the message: a ``requests`` message quotes the
     request URL, API key included (#171). Which of these count as an
     OUTAGE is ``is_vendor_outage``'s decision, not this function's.
     """
+    if is_unreached(e):
+        return f"could not be reached: {type(e).__name__}"
     status = http_status(e)
     if status is not None:
         refused = ", refusing this client" if status in (401, 403) else ""
         return f"answered HTTP {status}{refused}"
-    if is_unreached(e):
-        return f"could not be reached: {type(e).__name__}"
     return type(e).__name__
 
 

@@ -82,17 +82,15 @@ from datetime import datetime, timedelta
 from typing import NamedTuple
 from urllib.parse import quote
 
-import requests
-
 # SoSoValueNotConfiguredError and get_api_key are re-exported (redundant-alias
 # form): this module is the family's public face, and its tests and callers
 # address the key check and the config-breakage type through it even though the
 # shared load skeleton is what raises them now.
-from .errors import VendorUnavailableError
 from .sosovalue_common import (
     SoSoValueError,
     SoSoValueNotConfiguredError as SoSoValueNotConfiguredError,
     SoSoValueRateLimitError,
+    SoSoValueUnavailableError,
     _cache_dir,
     _cache_rejecter,
     _concentration_share_str,
@@ -124,8 +122,9 @@ SUPPORTED_ASSETS = {"BTC", "ETH"}
 # Only US-listed spot ETFs; the API also serves HK, out of scope here.
 COUNTRY_CODE = "US"
 
-# Consecutive transport-level failures (requests.RequestException: timeouts,
-# connection errors) in the fund-history loop before the remaining histories
+# Consecutive transport-lane failures (``SoSoValueUnavailableError``: timeouts,
+# connection errors, outage answers — ``_request`` types them all, #217) in
+# the fund-history loop before the remaining histories
 # are skipped into ``funds_failed`` unattempted. Without it, a network that
 # hangs instead of failing fast turns one BTC refresh into up to 13 sequential
 # 30-second timeouts (~7 minutes) inside a single analyst tool call — and the
@@ -634,11 +633,11 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
     absorbed as a fund failure. A structural break is logged at ERROR with
     a traceback — the breakdown would otherwise stay silently incomplete
     refresh after refresh — while a transient failure stays a warning. A
-    transport-level failure, an outage answer (``VendorUnavailableError``,
-    #172) and a 429 are logged here like any other transient, then
-    re-raised: the caller's consecutive-failure breaker counts the
-    transport streak, and the caller drains the sweep on the 429 (see
-    ``_fetch_all``).
+    transport-lane failure (``SoSoValueUnavailableError``: unreached, or an
+    outage answer, #172/#217) and a 429 are logged here like any other
+    transient, then re-raised: the caller's consecutive-failure breaker
+    counts the transport streak, and the caller drains the sweep on the
+    429 (see ``_fetch_all``).
     """
     try:
         rows = _parse_fund_rows(
@@ -646,19 +645,14 @@ def _fetch_one_fund(asset: str, ticker: str, name: str) -> dict | None:
             ticker,
         )
         return {"name": name, "rows": rows}
-    except (
-        requests.RequestException,
-        VendorUnavailableError,
-        SoSoValueRateLimitError,
-        SoSoValueError,
-    ) as e:
+    except (SoSoValueUnavailableError, SoSoValueRateLimitError, SoSoValueError) as e:
         # Neither SoSoValueRateLimitError nor the family's unavailable type
         # is a SoSoValueError, so this branch is the structural break only.
         if isinstance(e, SoSoValueError):
             logger.error(
                 "SoSoValue %s fund %s history failed structurally "
                 "(breakdown disclosed as incomplete) — the client "
-                "likely needs a fix: %s",
+                "likely needs a fix, or the vendor is refusing it: %s",
                 asset,
                 ticker,
                 e,
@@ -714,12 +708,7 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
         listing, funds_unusable = _parse_etf_list(
             _request("/etfs", {"symbol": asset, "country_code": COUNTRY_CODE}), asset
         )
-    except (
-        requests.RequestException,
-        VendorUnavailableError,
-        SoSoValueRateLimitError,
-        SoSoValueError,
-    ) as e:
+    except (SoSoValueUnavailableError, SoSoValueRateLimitError, SoSoValueError) as e:
         # Deliberately NOT the broad VendorError: a rejected key
         # (SoSoValueNotConfiguredError) matches none of these, so config
         # breakage structurally cannot be absorbed as a breakdown failure —
@@ -729,7 +718,7 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
             logger.error(
                 "SoSoValue %s fund list failed structurally (report will omit "
                 "the issuer breakdown; aggregate figures are unaffected) — the "
-                "client likely needs a fix: %s",
+                "client likely needs a fix, or the vendor is refusing it: %s",
                 asset,
                 e,
                 exc_info=True,
@@ -769,11 +758,12 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
                     len(skipped) - 1,
                 )
                 break
-            except (requests.RequestException, VendorUnavailableError):
+            except SoSoValueUnavailableError:
                 # Already logged by _fetch_one_fund, which re-raises so this
                 # loop — the only layer that can see a failure streak — can
-                # count it. An outage answer counts like a transport failure
-                # (#172): a gateway that is down costs the same per fund.
+                # count it. One type for the whole lane (#217): an outage
+                # answer counts like an unreached vendor, since a gateway
+                # that is down costs the same per fund (#172).
                 funds_failed.append(ticker)
                 consecutive_network += 1
                 if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:

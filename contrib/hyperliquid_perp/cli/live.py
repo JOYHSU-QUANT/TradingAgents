@@ -13,6 +13,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..common import store_layout
 from ._common import (
     _migrate_owned_store,
     _open_owned_store,
@@ -466,7 +467,7 @@ def _live_startup_recovery(
     run_id: str = args.run_id
     coin = live_cfg.safety.allowed_symbols[0]
     db_path = Path(args.db)
-    payload_dir = db_path.resolve().parent / "payloads" / run_id
+    payload_dir = store_layout.payload_dir(db_path, run_id)
     now = datetime.now(timezone.utc)
 
     # The runtime gate: config pins the wire conditions; §6.1 passed above.

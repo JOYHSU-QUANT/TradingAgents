@@ -12,6 +12,7 @@ import logging
 import os
 import signal
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from contrib.hyperliquid_perp.cli import (
     _still_owns_run,
     main as cli_main,
 )
+from contrib.hyperliquid_perp.common import store_layout
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
 from contrib.hyperliquid_perp.live.config import ExecutionMode
@@ -1310,16 +1312,20 @@ def test_export_payload_root_reads_a_copied_stores_payloads_by_name(tmp_path, ca
     assert not out.exists()
 
     # Without the option on this copied store: the recorded path is what is
-    # read, so nothing is provable — and since EVERY payload is missing, the
-    # count line is followed by a hint naming the option and the candidate
-    # directory beside this store (the layout the daemons write), which is
-    # where a copy that moved db and payloads together lands.
-    candidate = str(path.resolve().parent / "payloads" / "r")
+    # read, so nothing is provable — and since EVERY payload is missing and
+    # nothing sits beside this store in the daemons' layout (the copy went
+    # elsewhere), the count line is followed by a hint naming the option and
+    # that directory, so the operator knows both where a copy is found
+    # without the flag and that this one was not. The no-flag read of a copy
+    # that DID keep the layout is the sibling test below.
+    candidate = str(store_layout.payload_dir(path, "r"))
     assert cli_main([*base, "--backfill-format-fingerprint"]) == 0
     err = capsys.readouterr().err
     assert "stamped=0 pre_v10=0 missing_payload=1" in err
+    assert "note:" not in err
     assert "hint: every payload is missing at its recorded path" in err
-    assert f"--payload-root pointing at that run's payload directory (here: {candidate})" in err
+    assert f"there is no payload directory beside this store at {candidate}; a store copied" in err
+    assert "--payload-root pointing at that run's payload directory" in err
 
     # A root at the wrong LEVEL (the copied ``payloads/`` parent rather than
     # the run's own directory under it) is a directory, so it cannot be
@@ -1346,6 +1352,176 @@ def test_export_payload_root_reads_a_copied_stores_payloads_by_name(tmp_path, ca
         format_fingerprint("the block as the model saw it")
     ]
     assert [row["input_payload_path"] for row in rows] == [recorded]  # the row itself is untouched
+
+
+def test_export_backfill_reads_the_payloads_beside_a_store_moved_with_them(tmp_path, capsys):
+    """Issue #221: a copy that kept the daemons' layout needs no ``--payload-root``.
+
+    The daemons write ``<db dir>/payloads/<run_id>/`` (one recipe, in
+    ``common.store_layout``), so a backup that moved the db and that directory
+    together has its payloads exactly where the reader can derive from
+    ``--db`` and ``--run-id``. The first pass still reads the recorded paths
+    (a store on its own host must not be second-guessed); only when EVERY one
+    is missing and that directory exists does the pass run again under it —
+    said on stderr so the two count lines read as one story. The sibling test
+    above pins the case where nothing sits beside the store.
+    """
+    from contrib.hyperliquid_perp.domains.perp.target_decision import format_fingerprint
+
+    path, db = _seed_db(tmp_path)
+    insert_decision_attempts(db, ["completed"], start=_T0)
+    beside = store_layout.payload_dir(path, "r")
+    _copied, digest = write_payload(
+        beside / "BTC-20260706T120000_000000Z.json",
+        {"format_instructions": "the block as the model saw it"},
+    )
+    recorded = "/srv/hl/payloads/BTC-20260706T120000_000000Z.json"
+    stamp_prompt_regimes(db, [("phase2-target-v4", "price|market", None, recorded, digest)])
+    db.close()
+    out = tmp_path / "exp"
+    base = ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
+
+    assert cli_main([*base, "--backfill-format-fingerprint"]) == 0
+    err = capsys.readouterr().err
+    lines = [line for line in err.splitlines() if line.startswith(("format_fingerprint", "note:"))]
+    # The recorded-path pass first, then the note, then the pass beside the
+    # store — in that order, so an operator reading top-down sees why the
+    # second count line exists.
+    assert len(lines) == 3, err
+    assert "stamped=0 pre_v10=0 missing_payload=1" in lines[0]
+    assert lines[1] == (
+        "note: every payload is missing at its recorded path; reading them under "
+        f"the directory beside this store instead ({beside})"
+    )
+    assert "stamped=1 pre_v10=0 missing_payload=0 unreadable=0 unverified=0" in lines[2]
+    assert "hint:" not in err
+    with (out / "ai_inputs.csv").open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [row["format_fingerprint"] for row in rows] == [
+        format_fingerprint("the block as the model saw it")
+    ]
+    assert [row["input_payload_path"] for row in rows] == [recorded]  # the row itself is untouched
+
+    # A second run finds the cell already stamped: the recorded-path pass has
+    # nothing left to look for, so it neither retries nor hints — the retry is
+    # gated on missing_payload > 0, not on stamped == 0 alone.
+    assert cli_main([*base, "--backfill-format-fingerprint"]) == 0
+    err = capsys.readouterr().err
+    assert "stamped=0 pre_v10=0 missing_payload=0" in err
+    assert "note:" not in err and "hint:" not in err
+
+
+def test_export_backfill_hints_when_the_directory_beside_the_store_matches_nothing(
+    tmp_path, capsys
+):
+    # The directory exists but holds no file of a recorded name (a different
+    # run's payloads, say): the retry happens, finds nothing, and the hint
+    # says so — naming the flag for a copy that did not keep the layout —
+    # rather than the "no payload directory beside this store" sentence,
+    # which would be false here.
+    path, db = _seed_db(tmp_path)
+    insert_decision_attempts(db, ["completed"], start=_T0)
+    _path, digest = write_payload(tmp_path / "elsewhere.json", {"format_instructions": "the block"})
+    recorded = "/srv/hl/payloads/BTC-20260706T120000_000000Z.json"
+    stamp_prompt_regimes(db, [("phase2-target-v4", "price|market", None, recorded, digest)])
+    db.close()
+    beside = store_layout.payload_dir(path, "r")
+    write_payload(beside / "ETH-20260706T120000_000000Z.json", {"format_instructions": "x"})
+
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(tmp_path / "exp"), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert err.count("stamped=0 pre_v10=0 missing_payload=1") == 2
+    assert "note: every payload is missing at its recorded path" in err
+    assert f"hint: no payload beside this store ({beside}) matched a recorded file name" in err
+    assert "needs --payload-root pointing at that run's payload directory" in err
+
+    # An explicit --payload-root is the operator saying where the files are:
+    # even with that same directory beside the store, a root that matches
+    # nothing is reported as such (one count line, the root-side hint) and
+    # never silently overridden by a read from somewhere they did not point.
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(tmp_path / "exp2"), "--db", str(path)]
+        + ["--backfill-format-fingerprint", "--payload-root", str(tmp_path)]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert err.count("stamped=0 pre_v10=0 missing_payload=1") == 1
+    assert "note:" not in err
+    assert "hint: no payload under --payload-root" in err
+
+
+def test_export_backfill_does_not_retry_beside_the_store_over_a_partly_readable_pass(
+    tmp_path, capsys
+):
+    # One row's payload is missing, another's is where it was recorded but
+    # does not hash to its row (unverified): the files ARE where the pass
+    # looked, and the counts already say what is wrong with them. No retry
+    # under the directory beside the store even though it exists and holds
+    # the missing row's file, and no hint — either would send the operator
+    # after a moved store when the problem is an edited file.
+    path, db = _seed_db(tmp_path)
+    insert_decision_attempts(db, ["completed", "completed"], start=_T0)
+    beside = store_layout.payload_dir(path, "r")
+    _moved, digest_a = write_payload(
+        beside / "BTC-20260706T120000_000000Z.json", {"format_instructions": "block a"}
+    )
+    present, _digest_b = write_payload(tmp_path / "present.json", {"format_instructions": "block b"})
+    stamp_prompt_regimes(
+        db,
+        [
+            ("phase2-target-v4", "price|market", None, "/srv/hl/BTC-20260706T120000_000000Z.json", digest_a),
+            ("phase2-target-v4", "price|market", None, present, "sha256:not-what-is-on-disk"),
+        ],
+    )
+    db.close()
+
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(tmp_path / "exp"), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert err.count("format_fingerprint backfill for") == 1
+    assert "stamped=0 pre_v10=0 missing_payload=1 unreadable=0 unverified=1" in err
+    assert "note:" not in err and "hint:" not in err
+
+
+def test_export_backfill_names_a_lock_hit_by_the_retry_beside_the_store(tmp_path, capsys, monkeypatch):
+    # The second pass takes the write lock like the first; a lock held past
+    # busy_timeout on THAT pass is the same named exit 1 — the retry lives
+    # inside the one sqlite3.Error lane, not after it — and no export runs
+    # over a pass that did not finish.
+    import contrib.hyperliquid_perp.persistence.backfill as backfill_mod
+
+    path, db = _seed_db(tmp_path)
+    db.close()
+    store_layout.payload_dir(path, "r").mkdir(parents=True)
+    roots = []
+
+    def first_finds_nothing_then_locked(db, *, run_id, payload_root=None):
+        roots.append(payload_root)
+        if len(roots) == 1:
+            return backfill_mod.FingerprintBackfill(
+                stamped=0, pre_v10=0, missing_payload=1, unreadable=0, unverified=0
+            )
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", first_finds_nothing_then_locked)
+    out = tmp_path / "exp"
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    assert rc == 1
+    assert roots == [None, store_layout.payload_dir(path, "r")]
+    err = capsys.readouterr().err
+    assert "note: every payload is missing at its recorded path" in err
+    assert "error: format_fingerprint backfill failed — database is locked" in err
+    assert not out.exists()
 
 
 def test_paper_refuses_missing_db_without_create(tmp_path, capsys):
@@ -2737,6 +2913,98 @@ def test_empty_and_flag_style_argv_delegate_to_legacy(monkeypatch):
     assert cli_main([]) == 7
     assert cli_main(["--context-only", "--coin", "BTC"]) == 7
     assert seen == [[], ["--context-only", "--coin", "BTC"]]
+
+
+# The argv shapes the two entries split on, and which side each goes to.
+# One table for both pins below: both entries route through
+# ``common.entry_argv.is_legacy_argv``, and this is what says the two
+# CALL SITES agree — the package entry must not import ``cli`` to borrow its
+# answer (issue #221), so it is the table, not a shared import, that holds
+# them together.
+_ENTRY_ROUTES = [
+    ([], "legacy"),
+    (["--context-only", "--coin", "BTC"], "legacy"),
+    (["-h"], "legacy"),
+    (["export", "--run-id", "r"], "cli"),
+    (["expot"], "cli"),  # a bare unknown word is cli's named error, not legacy usage
+]
+
+
+def test_the_package_entry_routes_every_argv_shape_like_cli_main(monkeypatch):
+    # ``python -m contrib.hyperliquid_perp`` makes the legacy-vs-subcommand
+    # split itself and only THEN imports one of the two; ``cli.main`` keeps the
+    # same split for callers that reach it directly. Same table, same answers.
+    import contrib.hyperliquid_perp.__main__ as entry_mod
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp import main as legacy_mod
+
+    seen = []
+    monkeypatch.setattr(legacy_mod, "main", lambda argv: seen.append(("legacy", argv)) or 7)
+    monkeypatch.setattr(cli_mod, "main", lambda argv: seen.append(("cli", argv)) or 9)
+    for argv, side in _ENTRY_ROUTES:
+        seen.clear()
+        assert entry_mod.main(list(argv)) == {"legacy": 7, "cli": 9}[side], argv
+        assert seen == [(side, argv)], argv
+    # cli.main's own split, against the same table: the legacy rows delegate
+    # (7), the cli rows are handled in place and never reach the stub.
+    monkeypatch.undo()
+    monkeypatch.setattr(legacy_mod, "main", lambda argv: seen.append(("legacy", argv)) or 7)
+    for argv, side in _ENTRY_ROUTES:
+        seen.clear()
+        try:
+            rc = cli_main(list(argv))
+        except SystemExit as exc:  # a subcommand's own argparse exit: handled in place
+            rc = exc.code
+        if side == "legacy":
+            assert (rc, seen) == (7, [("legacy", argv)]), argv
+        else:
+            assert rc != 7 and seen == [], argv
+
+
+def test_the_legacy_lane_leaves_the_cli_package_unimported_from_both_entries(
+    monkeypatch, request
+):
+    """Issue #221 (after #197): ``--context-only`` is the keyless preview.
+
+    ``.main`` stopped importing ``cli`` for one string in PR #220; the package
+    entry then still reached ``.main`` THROUGH ``from .cli import main``, so
+    the lighter lane existed only for operators who typed the longer module
+    name. Pinned by evicting every ``cli`` module and watching the import
+    system: an entry that imports the package puts it back in ``sys.modules``.
+    (The eviction is scoped — monkeypatch restores the real modules after.)
+    """
+    import contrib.hyperliquid_perp.__main__ as entry_mod
+    from contrib import hyperliquid_perp as package
+    from contrib.hyperliquid_perp import main as legacy_mod
+
+    def cli_modules():
+        return sorted(m for m in sys.modules if m.startswith("contrib.hyperliquid_perp.cli"))
+
+    # The positive control at the end re-imports the package, which rebinds
+    # ``package.cli`` to a SECOND module tree; ``import a.b.c as m`` reads
+    # that attribute before ``sys.modules``, so a later test would patch the
+    # new tree while ``cli_main`` (this file's, from the old one) ran the real
+    # thing. monkeypatch puts the ``sys.modules`` entries back; this puts the
+    # attribute back beside them.
+    original_cli = package.cli
+    request.addfinalizer(lambda: setattr(package, "cli", original_cli))
+    for name in cli_modules():
+        monkeypatch.delitem(sys.modules, name)
+    assert cli_modules() == []
+    # The legacy main's own argparse ``--help`` is the cheapest full trip
+    # through that entry — .env load, parse, exit 0 — with no config read.
+    with pytest.raises(SystemExit) as excinfo:
+        legacy_mod.main(["--context-only", "--help"])
+    assert excinfo.value.code == 0
+    assert cli_modules() == [], "the .main entry imported the cli package"
+    with pytest.raises(SystemExit) as excinfo:
+        entry_mod.main(["--context-only", "--help"])
+    assert excinfo.value.code == 0
+    assert cli_modules() == [], "the package entry imported the cli package on the legacy lane"
+    # And the same entry DOES load it for a subcommand — the eviction above
+    # was real, and this is the one lane that needs the package.
+    entry_mod.main(["expot"])
+    assert "contrib.hyperliquid_perp.cli" in cli_modules()
 
 
 def test_cli_main_wrapper_maps_interrupt_and_unexpected_error(monkeypatch, capsys):
@@ -6795,6 +7063,7 @@ def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
             # seeded, the read says None (section omitted), not a crash.
             captured["book"] = kwargs["position_source"]()
             captured["source"] = kwargs["position_source"]
+            captured["payload_dir"] = kwargs["payload_dir"]
             raise _StopBeforeTheLoop
 
     monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _Recording)
@@ -6804,3 +7073,7 @@ def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
     # The binding itself, not only its no-books result: a swapped run_id/coin
     # would ALSO read "no books" here (no ledger is keyed on "BTC" either).
     assert_position_source_binds(captured["source"], run_id="fresh", coin="BTC")
+    # And where this run's AI payloads go: the one layout the backfill reads
+    # back from (issue #221) — the live and smoke writers have the same pin
+    # through assert_payload_dir; the paper writer is this one.
+    assert captured["payload_dir"] == store_layout.payload_dir(tmp_path / "new.db", "fresh")

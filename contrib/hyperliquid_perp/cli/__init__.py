@@ -36,7 +36,11 @@ operator/config/environment errors — including a protection-only ``paper`` run
 that self-terminates after its position closes (final export written; the
 books never re-verified, the API key was never supplied, or the engine could
 not be built — a failed import or a rejected config value; stderr says
-which), ``2`` unexpected error, ``4``
+which), ``2`` unexpected error — and argparse's own usage errors, which it
+exits with the same code (a malformed argv, or a deliberate refusal routed
+through ``parser.error`` such as ``--payload-root`` without the pass it
+modifies; ``1`` is for an argv that parsed but names an environment that is
+wrong), ``4``
 not-yet-at-the-gate outcomes (``validate``: short of the 30-cycle gate or a
 red/missing smoke test — curable by a ``live-smoke`` re-run;
 ``live-smoke``: the §20.2 gate is not satisfied, incl. a pre-flight abort;
@@ -64,6 +68,7 @@ from __future__ import annotations
 import logging
 import sys
 
+from ..common.entry_argv import is_legacy_argv
 from ..config import load_dotenv_files
 from . import _provider, paper_export
 from ._common import (
@@ -133,9 +138,9 @@ def main(argv: list[str] | None = None) -> int:
     # lazily-imported engine package would load the .env files itself.
     load_dotenv_files()
     argv = list(sys.argv[1:]) if argv is None else list(argv)
-    if not argv or argv[0].startswith("-"):
+    if is_legacy_argv(argv):
         # Phase 1/2 compatibility path: identical flags, identical behaviour.
-        # Legacy accepts no positionals, so flag-shaped/empty argv is lossless.
+        # (``__main__`` makes the same split before importing this package.)
         from ..main import main as legacy_main
 
         return legacy_main(argv)

@@ -5,8 +5,10 @@ The provider rows are exercised through the INSTALLED langchain converters
 ``langchain_google_genai._response_to_result``) fed canned API responses —
 the real slot and spelling, no network. A hand-built ``LLMResult`` would only
 prove the reader agrees with the test's own idea of where the key lives, which
-is exactly the drift this module exists to absorb. Bedrock is table-only:
-``langchain-aws`` is an optional extra not installed in this environment.
+is exactly the drift this module exists to absorb. Bedrock's row here is
+hand-built with the key the real converter was observed to file
+(``stopReason``); the real-converter run lives in ``test_bedrock_provider``
+under the ``langchain_aws`` importorskip, since the extra is optional.
 """
 
 from __future__ import annotations
@@ -24,15 +26,7 @@ from tradingagents.llm_clients.completion_metadata import (
     stop_reason_of,
 )
 
-
-def _as_llm_result(chat_result) -> LLMResult:
-    """The shape ``on_llm_end`` receives, minus langchain_core's metadata merge.
-
-    Deliberately WITHOUT the merge: the reader must find the key in whichever
-    slot the provider filed it, not rely on core copying it into
-    ``response_metadata`` first.
-    """
-    return LLMResult(generations=[chat_result.generations], llm_output=chat_result.llm_output)
+from .conftest import llm_result_of
 
 
 def _openai_result(finish_reason: str, *, reasoning: int | None = None) -> LLMResult:
@@ -55,7 +49,7 @@ def _openai_result(finish_reason: str, *, reasoning: int | None = None) -> LLMRe
         ],
         "usage": usage,
     }
-    return _as_llm_result(ChatOpenAI(model="gpt-4.1", api_key="test")._create_chat_result(response))
+    return llm_result_of(ChatOpenAI(model="gpt-4.1", api_key="test")._create_chat_result(response))
 
 
 def _openai_responses_result(*, complete: bool) -> LLMResult:
@@ -95,7 +89,7 @@ def _openai_responses_result(*, complete: bool) -> LLMResult:
             },
         }
     )
-    return _as_llm_result(_construct_lc_result_from_responses_api(response))
+    return llm_result_of(_construct_lc_result_from_responses_api(response))
 
 
 def _anthropic_result(stop_reason: str) -> LLMResult:
@@ -112,7 +106,7 @@ def _anthropic_result(stop_reason: str) -> LLMResult:
         type="message",
         usage=Usage(input_tokens=10, output_tokens=8192),
     )
-    return _as_llm_result(ChatAnthropic(model="claude-sonnet-4-6", api_key="test")._format_output(message))
+    return llm_result_of(ChatAnthropic(model="claude-sonnet-4-6", api_key="test")._format_output(message))
 
 
 def _google_result(finish_reason: str) -> LLMResult:
@@ -131,15 +125,18 @@ def _google_result(finish_reason: str) -> LLMResult:
         ),
         model_version="gemini-2.5-flash",
     )
-    return _as_llm_result(_response_to_result(response))
+    return llm_result_of(_response_to_result(response))
 
 
 def _bedrock_shaped_result(stop_reason: str) -> LLMResult:
-    # ChatBedrockConverse files ``stop_reason`` in response_metadata (langchain-aws
-    # is not installed here, so the shape is transcribed, not produced).
+    # ChatBedrockConverse files the raw Converse dict as response_metadata, so
+    # the key is camelCase ``stopReason`` — observed through the real converter
+    # (test_bedrock_provider), reproduced by hand here where langchain-aws is
+    # absent. The docs-transcribed ``stop_reason`` read a bound cap as a
+    # natural stop (#214).
     message = AIMessage(
         content="cut",
-        response_metadata={"stop_reason": stop_reason, "model_name": "anthropic.claude-x"},
+        response_metadata={"stopReason": stop_reason, "model_name": "anthropic.claude-x"},
         usage_metadata={"input_tokens": 10, "output_tokens": 8192, "total_tokens": 8202},
     )
     return LLMResult(generations=[[ChatGeneration(message=message)]])

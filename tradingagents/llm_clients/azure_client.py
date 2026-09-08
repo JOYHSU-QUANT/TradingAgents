@@ -5,10 +5,6 @@ from langchain_openai import AzureChatOpenAI
 
 from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 
-_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + (
-    "timeout", "api_key", "reasoning_effort", "http_client", "http_async_client",
-)
-
 
 class NormalizedAzureChatOpenAI(AzureChatOpenAI):
     """AzureChatOpenAI with normalized content output."""
@@ -27,6 +23,10 @@ class AzureOpenAIClient(BaseLLMClient):
         OPENAI_API_VERSION: API version (e.g. 2025-03-01-preview)
     """
 
+    _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS + (
+        "timeout", "api_key", "reasoning_effort", "http_client", "http_async_client",
+    )
+
     def __init__(self, model: str, base_url: str | None = None, **kwargs):
         super().__init__(model, base_url, **kwargs)
 
@@ -39,9 +39,7 @@ class AzureOpenAIClient(BaseLLMClient):
             "azure_deployment": os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", self.model),
         }
 
-        for key in _PASSTHROUGH_KWARGS:
-            if key in self.kwargs:
-                llm_kwargs[key] = self.kwargs[key]
+        llm_kwargs.update(self.forwarded_kwargs())
 
         return NormalizedAzureChatOpenAI(**llm_kwargs)
 

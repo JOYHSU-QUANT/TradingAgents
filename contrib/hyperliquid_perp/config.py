@@ -26,11 +26,13 @@ _EXAMPLE = _CONFIG_DIR / "hyperliquid.example.yaml"
 # Sentinel placeholder in the example file — treated as "no wallet configured".
 _WALLET_PLACEHOLDER = "0xYOUR..."
 
-# Every key ``engine_bridge._build_engine_config`` reads. Unknown keys in that
-# block are warned about, not rejected: it is deliberately lenient (see the
-# note beside its validation), and raising would break a local.yaml that loads
-# today.
-_ENGINE_KEYS = frozenset(
+# Every key ``engine_bridge._build_engine_config`` reads — public because the
+# bridge projects the block onto this set before reading it, so the loader's
+# unknown-key warning and the bridge cannot disagree (#212). Unknown keys in
+# that block are warned about, not rejected: it is deliberately lenient (see
+# the note beside its validation), and raising would break a local.yaml that
+# loads today.
+ENGINE_KEYS = frozenset(
     {
         "llm_provider",
         "deep_think_llm",
@@ -312,12 +314,12 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         # most engine keys lands on a working default; on the completion cap
         # it silently reverts an operator's deliberate raise, and a cap that
         # binds truncates the target JSON into a plain invalid_output.
-        unknown_engine_keys = set(eng) - _ENGINE_KEYS
+        unknown_engine_keys = set(eng) - ENGINE_KEYS
         if unknown_engine_keys:
             print(
                 f"warning: unknown engine: config key(s): "
                 f"{', '.join(map(repr, sorted(unknown_engine_keys)))} — ignored. "
-                f"Supported: {', '.join(sorted(_ENGINE_KEYS))}.",
+                f"Supported: {', '.join(sorted(ENGINE_KEYS))}.",
                 file=sys.stderr,
             )
         # Its one *bool* key: a quoted "false" would read truthy and silently

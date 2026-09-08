@@ -139,6 +139,39 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **LLM clients: one passthrough loop, and the ``openai`` provider behind a
+  custom ``backend_url`` warns about an uncapped run the way a gateway does**
+  (issue #212, follow-ups from PR #211; #214 items 5 and 6).
+  ``BaseLLMClient`` declares ``_passthrough_kwargs`` and applies it in one
+  ``forwarded_kwargs(skip=...)`` helper; the five clients declare their
+  allowlist on the class and call it (Anthropic's ``effort`` and OpenAI's
+  ``reasoning_effort`` model gates become ``skip``), so a change to forwarding
+  semantics is one edit — behaviour unchanged, the forwarding suite is the
+  pin. ``is_gateway_provider(provider, base_url=None)`` (registry and lazy
+  re-export) answers True for ``openai`` pointed away from api.openai.com by
+  the same host test that turns the Responses API off there, and
+  ``_get_provider_kwargs`` hands it ``backend_url``: a proxy or router in
+  front of OpenAI with no ``max_tokens`` now gets the #177 warning, and the
+  default host stays quiet. That host test now also honours the transport's
+  own fallback when ``backend_url`` is unset — ``OPENAI_API_BASE``
+  (langchain-openai) then ``OPENAI_BASE_URL`` (the openai SDK) — so a proxy
+  configured the way most routers document themselves is seen by the
+  Responses-API switch and the warning alike, where before both read it as
+  native. The perp bridge projects the ``engine:`` block onto the loader's
+  ``ENGINE_KEYS`` (public now; two modules depend on it) and reads it by
+  subscript, so a key read there that the set lacks is a KeyError in every
+  bridge test rather than a silent None; the source-walking AST pin is
+  replaced by a table test that feeds every key a distinctive value and
+  asserts each lands. The knobs test
+  module runs with ``RuntimeWarning`` as an error on catalog model IDs; root
+  ``tests/`` reads README and CHANGELOG through one ``repo_text``; the CLI
+  spells the Portfolio Manager node from ``tradingagents.node_names``.
+  Known trade-off, observed while moving the test table to catalog IDs: every
+  curated ``openai`` model is a gpt-5 reasoning model, and langchain-openai
+  nulls ``temperature`` on those unless ``reasoning_effort`` is ``none`` — an
+  operator's ``TRADINGAGENTS_TEMPERATURE`` is dropped there by the library,
+  not by this codebase; nothing here changes that.
+
 - **hyperliquid_perp: the live seam guards cover the reconciler's object
   seams, the two remaining injected callables and the three ``*_seconds``
   constructor arguments that become a positive span, and both recovery sites
@@ -645,6 +678,27 @@ Breaking changes within the 0.x line are called out explicitly.
   is unchanged as the one yfinance indicator entry point.
 
 ### Fixed
+
+- **A Bedrock completion that hit its cap was read as a natural stop**
+  (#214 item 6). ``completion_metadata`` transcribed the Converse row from
+  the docs as ``stop_reason``; run through the real langchain-aws 1.7.5
+  converter, the key it files is camelCase ``stopReason`` in
+  ``response_metadata`` — the raw Converse dict (its streaming
+  ``messageStop`` event is filed the same way, by inspection of the
+  converter; the test covers the non-streaming call). The reader now reads
+  that key, so a capped Bedrock decision is labelled ``truncated_output``
+  like every other provider's instead of a plain ``invalid_output``, and
+  the usage sidecar counts it. The defect lived because nothing ran the
+  real converter: ``langchain-aws`` now rides the ``dev`` extra so CI and a
+  dev install run the new real-converter test instead of skipping it.
+
+- **hyperliquid_perp: a bare ``engine:`` line no longer crashes the bridge**.
+  ``load_config`` accepts ``engine:`` with nothing under it (the block
+  commented out) as None, but ``_build_engine_config`` called ``.get`` on
+  that None and died as an exit-2 "unexpected error" traceback on a config
+  the loader had just passed. It now reads the bare line as the all-defaults
+  block, as the loader does. Found while re-reading the block through
+  ``ENGINE_KEYS`` (issue #212).
 
 - **hyperliquid_perp: a live run wedged at startup adoption is no longer a
   zombie that ``validate`` reads as healthy** (issue #205). Containing a

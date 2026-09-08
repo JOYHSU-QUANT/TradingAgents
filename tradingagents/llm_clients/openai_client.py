@@ -162,12 +162,6 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
         return payload
 
 
-# Kwargs forwarded from user config to ChatOpenAI: the cross-provider set plus
-# the OpenAI-specific extras.
-_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + (
-    "timeout", "reasoning_effort", "api_key", "http_client", "http_async_client",
-)
-
 # OpenAI's ``reasoning_effort`` is only accepted by reasoning models — the GPT-5
 # family and the o-series. Non-reasoning models (gpt-4.1, gpt-4o, ...) 400 with
 # "Unsupported parameter: 'reasoning.effort' is not supported with this model".
@@ -248,24 +242,42 @@ def is_openai_compatible(provider: str) -> bool:
     return provider.lower() in OPENAI_COMPATIBLE_PROVIDERS
 
 
-def is_gateway_provider(provider: str) -> bool:
-    """Whether ``provider`` is a gateway routing calls to third-party upstreams.
+def is_gateway_provider(provider: str, base_url: str | None = None) -> bool:
+    """Whether ``provider`` routes calls to an upstream this process cannot see.
 
     Read off ``ProviderSpec.gateway``; providers outside the registry (the
-    native Anthropic / Google clients, unknown names) are not gateways.
+    native Anthropic / Google clients, unknown names) are not gateways. The
+    ``openai`` provider becomes one when ``base_url`` (the config's
+    ``backend_url``, or the SDK's ``OPENAI_API_BASE`` / ``OPENAI_BASE_URL``
+    fallback when that is unset) points away from api.openai.com: a proxy or router in
+    front of an upstream of its own choosing is the #177 shape as much as
+    OpenRouter is, and the host test that already turns the Responses API
+    off there decides it (#212). ``base_url`` is an ``openai``-only
+    refinement: every other single-host provider keeps its own default
+    whatever URL it is pointed at.
     """
-    spec = OPENAI_COMPATIBLE_PROVIDERS.get(provider.lower())
-    return spec is not None and spec.gateway
+    name = provider.lower()
+    spec = OPENAI_COMPATIBLE_PROVIDERS.get(name)
+    return spec is not None and (
+        spec.gateway or (name == "openai" and not _is_native_openai_base_url(base_url))
+    )
 
 
 def _is_native_openai_base_url(base_url: str | None) -> bool:
-    """True when ``base_url`` is unset or points at api.openai.com.
+    """True when the URL requests will leave through points at api.openai.com.
 
     The Responses API (/v1/responses) only exists on native OpenAI. A custom
     base_url on the ``openai`` provider (a proxy, gateway, or local server)
     speaks only Chat Completions, so the Responses API must stay off there even
-    though the provider spec enables it (#1024).
+    though the provider spec enables it (#1024). An unset ``base_url`` is not
+    yet "native": the transport then falls back to ``OPENAI_API_BASE``
+    (langchain-openai) and ``OPENAI_BASE_URL`` (the openai SDK), in that
+    order, and a proxy configured that way — how most OpenAI-compatible
+    routers document themselves — is the same proxy, for this switch and
+    for the uncapped-request warning that shares the test (#212).
     """
+    if not base_url:
+        base_url = os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
     if not base_url:
         return True
     if "://" not in base_url:
@@ -282,6 +294,11 @@ class OpenAIClient(BaseLLMClient):
     (GPT-4.1, GPT-5). Third-party compatible providers (xAI, OpenRouter,
     Ollama) use standard Chat Completions.
     """
+
+    # The cross-provider set plus the OpenAI-specific extras.
+    _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS + (
+        "timeout", "reasoning_effort", "api_key", "http_client", "http_async_client",
+    )
 
     def __init__(
         self,
@@ -342,12 +359,8 @@ class OpenAIClient(BaseLLMClient):
             llm_kwargs["base_url"] = self.base_url
 
         # Forward user-provided kwargs
-        for key in _PASSTHROUGH_KWARGS:
-            if key not in self.kwargs:
-                continue
-            if key == "reasoning_effort" and not _supports_reasoning_effort(self.model):
-                continue
-            llm_kwargs[key] = self.kwargs[key]
+        skip = () if _supports_reasoning_effort(self.model) else ("reasoning_effort",)
+        llm_kwargs.update(self.forwarded_kwargs(skip=skip))
 
         # The subclass (provider quirks) comes from the registry spec.
         return chat_cls(**llm_kwargs)

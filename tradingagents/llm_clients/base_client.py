@@ -1,14 +1,17 @@
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from typing import Any
 
 # Kwargs every provider client forwards from user config to its chat class: the
 # cross-provider knobs (``temperature``, ``max_tokens``) plus the two
 # transport-neutral extras every langchain chat class accepts. Each client
-# builds its allowlist as this tuple plus its own provider-specific keys, so a
-# new cross-provider knob is one edit here rather than one per client — the
-# allowlist loops drop unrecognised keys silently, so a client left out of a
-# five-file edit would simply never forward the knob (#184).
+# declares its ``_passthrough_kwargs`` as this tuple plus its own
+# provider-specific keys, so a new cross-provider knob is one edit here rather
+# than one per client — the allowlist drops unrecognised keys silently, so a
+# client left out of a five-file edit would simply never forward the knob
+# (#184). The loop that applies the allowlist lives once too, in
+# ``BaseLLMClient.forwarded_kwargs`` (#212).
 _COMMON_PASSTHROUGH_KWARGS = ("temperature", "max_tokens", "max_retries", "callbacks")
 
 
@@ -34,10 +37,32 @@ def normalize_content(response):
 class BaseLLMClient(ABC):
     """Abstract base class for LLM clients."""
 
+    # The kwargs this client forwards from user config to its chat class.
+    # Subclasses extend the common tuple with their provider-specific keys;
+    # the loop that applies it is ``forwarded_kwargs`` below, so a change to
+    # forwarding SEMANTICS (treating None as absent, logging what was
+    # forwarded) is one edit, not one per client (#212).
+    _passthrough_kwargs: tuple[str, ...] = _COMMON_PASSTHROUGH_KWARGS
+
     def __init__(self, model: str, base_url: str | None = None, **kwargs):
         self.model = model
         self.base_url = base_url
         self.kwargs = kwargs
+
+    def forwarded_kwargs(self, *, skip: Collection[str] = ()) -> dict[str, Any]:
+        """The subset of ``self.kwargs`` on this client's allowlist, minus ``skip``.
+
+        Keys off the allowlist are dropped silently — the allowlist is the
+        contract. ``skip`` is for a key the allowlist carries but THIS model
+        rejects (Anthropic's ``effort`` below Opus 4.5, OpenAI's
+        ``reasoning_effort`` off the reasoning families): the client decides
+        per model, this helper only applies the decision.
+        """
+        return {
+            key: self.kwargs[key]
+            for key in self._passthrough_kwargs
+            if key in self.kwargs and key not in skip
+        }
 
     def get_provider_name(self) -> str:
         """Return the provider name used in warning messages."""

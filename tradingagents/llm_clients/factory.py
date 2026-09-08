@@ -59,7 +59,7 @@ def create_llm_client(
 _NATIVE_PROVIDERS = frozenset({"anthropic", "google", "azure", "bedrock"})
 
 
-def is_gateway_provider(provider: str) -> bool:
+def is_gateway_provider(provider: str, base_url: str | None = None) -> bool:
     """Lazy re-export of the registry predicate ``openai_client.is_gateway_provider``.
 
     The same import discipline as ``create_llm_client``: native providers are
@@ -67,9 +67,11 @@ def is_gateway_provider(provider: str) -> bool:
     uncapped config, so an Anthropic-only process must not pay a
     ``langchain_openai`` import for a "no"); everything else consults the
     registry, which that provider's own client would import anyway.
+    ``base_url`` is the client's ``backend_url``; only the ``openai``
+    provider's answer depends on it (#212).
     """
     if provider.lower() in _NATIVE_PROVIDERS:
         return False
     from .openai_client import is_gateway_provider as _is_gateway_provider
 
-    return _is_gateway_provider(provider)
+    return _is_gateway_provider(provider, base_url)

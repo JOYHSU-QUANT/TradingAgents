@@ -27,6 +27,8 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorRateLimitError, VendorUnavailableError
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
+from .conftest import repo_text
+
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
@@ -4569,11 +4571,8 @@ class TestProseAgreesWithTheConstants:
         # module had to be swept by hand at least once; this is the guard the
         # tool-docstring test already provides for its own numbers.
         threshold = f"{deribit._WIDE_BRACKET_FRACTION:.0%}"
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for name in ("README.md", "CHANGELOG.md"):
-            with open(os.path.join(root, name), encoding="utf-8") as handle:
-                text = handle.read()
-            assert f"{threshold} of the forward" in text, name
+            assert f"{threshold} of the forward" in repo_text(name), name
 
     def test_the_pin_noise_floor_is_pinned_literally(self):
         # Only bounded to [5, 15] by the derivation assertions, so anything in that

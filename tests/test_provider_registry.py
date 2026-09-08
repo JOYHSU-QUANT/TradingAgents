@@ -31,7 +31,7 @@ def test_registry_membership():
         ("openrouter", True),
         ("OpenRouter", True),  # case-insensitive like every registry lookup
         ("openai_compatible", True),  # user-supplied URL: the upstream is unknown here
-        ("openai", False),  # a single-host API: "no cap" means its own default
+        ("openai", False),  # on its default host: "no cap" means OpenAI's own default
         ("ollama", False),  # a fixed local server, not a router
         ("anthropic", False),  # not in the registry at all
         ("no-such-provider", False),
@@ -41,6 +41,53 @@ def test_gateway_flag_is_read_from_the_registry(provider, expected):
     # The graph's uncapped-request warning (#183) keys off this flag, so which
     # providers carry it is a registry fact pinned here, next to its siblings.
     assert is_gateway_provider(provider) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "base_url,expected",
+    [
+        (None, False),  # the SDK default: api.openai.com
+        ("https://api.openai.com/v1", False),
+        ("https://eu.api.openai.com/v1", False),  # a regional OpenAI host is still native
+        ("http://localhost:8000/v1", True),  # a proxy / router / local server
+        ("https://gateway.example.com/openai/v1", True),
+    ],
+)
+def test_openai_behind_a_custom_base_url_is_a_gateway(base_url, expected):
+    # The host test that turns the Responses API off for a custom base_url
+    # (#1024) also decides the uncapped-request warning (#212): behind a
+    # proxy the upstream is whatever the proxy chooses — the #177 shape.
+    assert is_gateway_provider("openai", base_url=base_url) is expected
+    # An openai-only refinement: a real gateway stays one and a single-host
+    # sibling stays quiet whatever URL either is pointed at.
+    assert is_gateway_provider("openrouter", base_url=base_url) is True
+    assert is_gateway_provider("deepseek", base_url=base_url) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("env_var", ["OPENAI_API_BASE", "OPENAI_BASE_URL"])
+def test_openai_reads_the_sdk_base_url_env_when_base_url_is_unset(env_var, monkeypatch):
+    # langchain-openai falls back to OPENAI_API_BASE and the openai SDK to
+    # OPENAI_BASE_URL when no base_url is passed: a proxy configured that way
+    # is the same proxy, for the Responses-API switch and the warning alike.
+    # (The root conftest clears both; this test sets one.)
+    assert is_gateway_provider("openai") is False
+    monkeypatch.setenv(env_var, "http://localhost:4000/v1")
+    assert is_gateway_provider("openai") is True
+    # An explicit base_url still wins over the env fallback.
+    assert is_gateway_provider("openai", base_url="https://api.openai.com/v1") is False
+
+
+@pytest.mark.unit
+def test_the_factory_re_export_forwards_the_base_url():
+    # Two definition points (registry + lazy re-export): the graph calls the
+    # re-export, so a base_url dropped there would silence the openai path
+    # while the registry test above stays green.
+    from tradingagents.llm_clients.factory import is_gateway_provider as via_factory
+
+    assert via_factory("openai", base_url="http://localhost:8000/v1") is True
+    assert via_factory("openai", base_url=None) is False
 
 
 @pytest.mark.unit

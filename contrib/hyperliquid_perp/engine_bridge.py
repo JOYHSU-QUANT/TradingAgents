@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .common.config_coercion import int_from_yaml
-from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, load_config
+from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, ENGINE_KEYS, load_config
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context
 from .domains.perp.indicator_vocab import indicator_names
@@ -392,17 +392,22 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
             f"init read a repo .env file: {exc} — is the file saved as UTF-8?"
         ) from exc
 
-    eng_cfg = config.get("engine", {})
+    # The block projected onto ``ENGINE_KEYS`` (the set ``load_config`` warns
+    # unknown keys against) and read below by SUBSCRIPT, so a key read here
+    # that the set lacks is a KeyError in every bridge test, never a silent
+    # None (#212). ``or {}``: a bare ``engine:`` line loads as None and is the
+    # all-defaults block, as it already is for the loader.
+    eng_cfg = {key: (config.get("engine") or {}).get(key) for key in ENGINE_KEYS}
     engine_config = dict(DEFAULT_CONFIG)
     # ``or`` (not ``.get(k, default)``) so a present-but-null/blank YAML value falls
     # back to the default instead of silently passing None into the LLM client,
     # where it would fail deep inside the engine with a non-obvious traceback.
-    engine_config["llm_provider"] = eng_cfg.get("llm_provider") or "openrouter"
+    engine_config["llm_provider"] = eng_cfg["llm_provider"] or "openrouter"
     engine_config["deep_think_llm"] = (
-        eng_cfg.get("deep_think_llm") or engine_config["deep_think_llm"]
+        eng_cfg["deep_think_llm"] or engine_config["deep_think_llm"]
     )
     engine_config["quick_think_llm"] = (
-        eng_cfg.get("quick_think_llm") or engine_config["quick_think_llm"]
+        eng_cfg["quick_think_llm"] or engine_config["quick_think_llm"]
     )
     engine_config["backend_url"] = None
     # Cap precedence: YAML > TRADINGAGENTS_MAX_TOKENS (already overlaid onto
@@ -422,7 +427,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
             "(issue #177). Is a stale tradingagents shadowing this checkout?"
         )
     engine_config["max_tokens"], cap_source = _resolve_completion_cap(
-        eng_cfg.get("max_completion_tokens"), engine_config["max_tokens"]
+        eng_cfg["max_completion_tokens"], engine_config["max_tokens"]
     )
     # The effective cap is not derivable from any one file (YAML can shadow an
     # env var set on the host, and both can be absent), and a cap that binds
@@ -443,7 +448,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # true`` stays available as an explicit escape hatch, e.g. once the
     # contract is carried by the structured schema itself. The raw passthrough
     # is type-safe: load_config already rejected any non-bool value.
-    raw_structured = eng_cfg.get("structured_output")
+    raw_structured = eng_cfg["structured_output"]
     engine_config["structured_output"] = raw_structured if raw_structured is not None else False
     if engine_config["structured_output"]:
         # The armed escape hatch must be loud: until the structured schema
@@ -461,7 +466,7 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # deliberate "no analysts" choice rather than silently replaced by the default
     # — matches ``indicator_vocab.indicator_names``. A blank YAML value (None) still
     # falls back to the default.
-    raw_analysts = eng_cfg.get("selected_analysts")
+    raw_analysts = eng_cfg["selected_analysts"]
     selected = list(raw_analysts if raw_analysts is not None else _DEFAULT_ANALYSTS)
     return engine_config, selected
 

@@ -48,6 +48,10 @@ class BedrockClient(BaseLLMClient):
     ``us.anthropic.claude-opus-4-8-v1:0``.
     """
 
+    # ChatBedrockConverse takes no ``timeout``/``api_key`` (auth is the AWS
+    # credential chain), so only the cross-provider set is forwarded.
+    _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS
+
     def get_llm(self) -> Any:
         """Return a configured ChatBedrockConverse instance."""
         self.warn_if_unknown_model()
@@ -59,11 +63,7 @@ class BedrockClient(BaseLLMClient):
             or _DEFAULT_REGION
         )
         llm_kwargs = {"model": self.model, "region_name": region}
-        # ChatBedrockConverse takes no ``timeout``/``api_key`` (auth is the
-        # AWS credential chain), so only the cross-provider set is forwarded.
-        for key in _COMMON_PASSTHROUGH_KWARGS:
-            if key in self.kwargs:
-                llm_kwargs[key] = self.kwargs[key]
+        llm_kwargs.update(self.forwarded_kwargs())
         return chat_cls(**llm_kwargs)
 
     def validate_model(self) -> bool:

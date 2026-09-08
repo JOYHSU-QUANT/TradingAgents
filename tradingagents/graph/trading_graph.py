@@ -199,7 +199,7 @@ class TradingAgentsGraph:
                     f"be a positive integer, got {max_tokens!r}"
                 ) from None
             kwargs["max_tokens"] = parsed
-        elif is_gateway_provider(provider):
+        elif is_gateway_provider(provider, base_url=self.config.get("backend_url")):
             # Uncapped through a gateway is the #177 shape: some upstreams
             # substitute the model's full context for a missing cap and
             # reject every call with HTTP 400. The library default stays
@@ -211,7 +211,8 @@ class TradingAgentsGraph:
             # warning filter also means once per construction site.
             # "routes to an upstream this process cannot see", not "is a
             # gateway": openai_compatible carries the flag too, and for a
-            # local vLLM the second phrasing would be false.
+            # local vLLM the second phrasing would be false. The ``openai``
+            # provider behind a custom backend_url lands here as well (#212).
             warnings.warn(
                 f"llm_provider '{provider}' routes to an upstream this process "
                 "cannot see, and no 'max_tokens' cap is set: some upstreams "

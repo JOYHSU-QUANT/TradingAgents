@@ -29,6 +29,12 @@ from tradingagents.llm_clients.factory import create_llm_client
 
 from .conftest import provider_kwargs_for
 
+# A RuntimeWarning is a failure here, not noise: the model IDs below are
+# catalog entries (``model_catalog.MODEL_OPTIONS``), and the one RuntimeWarning
+# this module expects (#177, uncapped through a gateway) is caught by
+# ``pytest.warns`` where it is asserted (#212).
+pytestmark = pytest.mark.filterwarnings("error::RuntimeWarning")
+
 
 @dataclass(frozen=True)
 class Knob:
@@ -77,13 +83,27 @@ KNOB_IDS = [knob.key for knob in KNOBS]
 # its endpoint/version env first (``_azure_env``); Bedrock is covered separately
 # because langchain-aws is optional.
 PROVIDERS = [
-    ("openai", "gpt-4.1"),
+    ("openai", "gpt-5.4-mini"),
     ("anthropic", "claude-sonnet-4-6"),
-    ("google", "gemini-2.5-flash"),
-    ("deepseek", "deepseek-chat"),
-    ("azure", "gpt-4.1"),
+    ("google", "gemini-3.5-flash"),
+    ("deepseek", "deepseek-v4-flash"),
+    ("azure", "gpt-5.4-mini"),
 ]
-PAYLOAD_PROVIDERS = [("openrouter", "qwen/qwen3-235b-a22b-2507"), ("openai", "gpt-4.1")]
+PAYLOAD_PROVIDERS = [("openrouter", "qwen/qwen3-235b-a22b-2507"), ("openai", "gpt-5.4-mini")]
+
+# Every curated ``openai`` model is a gpt-5 reasoning model, and
+# langchain-openai's ``validate_temperature`` nulls ``temperature`` on those
+# unless reasoning is off (``reasoning_effort="none"``; otherwise only 1 /
+# unset is accepted) — verified on 1.3.3: with reasoning off the value reaches
+# the attribute AND the Responses payload, omitted stays None. So the native
+# OpenAI and Azure rows construct with reasoning off, the one configuration
+# on which a temperature knob is honoured there. An operator on a gpt-5
+# model with reasoning on has TRADINGAGENTS_TEMPERATURE dropped by langchain,
+# not by this codebase.
+CONSTRUCTION_KWARGS = {
+    "openai": {"reasoning_effort": "none"},
+    "azure": {"reasoning_effort": "none"},
+}
 
 
 def _provider_kwargs(provider: str = "openai", **config) -> dict:
@@ -95,11 +115,10 @@ def _azure_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_VERSION", "2025-03-01-preview")
 
 
-def _forwarded(provider: str, model: str, sent: dict) -> dict:
-    """What the constructed client holds for each key in ``sent``."""
-    llm = create_llm_client(provider=provider, model=model, api_key="placeholder", **sent).get_llm()
-    attr_for = {knob.key: knob.attr(provider) for knob in KNOBS}
-    return {key: getattr(llm, attr_for.get(key, key)) for key in sent}
+def _construct(provider: str, model: str, **sent):
+    """The chat client for ``provider``/``model`` with ``sent`` forwarded."""
+    kwargs = {"api_key": "placeholder", **CONSTRUCTION_KWARGS.get(provider, {}), **sent}
+    return create_llm_client(provider=provider, model=model, **kwargs).get_llm()
 
 
 @pytest.mark.unit
@@ -124,7 +143,9 @@ class TestKnobForwarding:
     def test_every_provider_forwards_the_common_set(self, provider, model, monkeypatch):
         _azure_env(monkeypatch)
         sent = self._sent()
-        assert _forwarded(provider, model, sent) == sent
+        llm = _construct(provider, model, **sent)
+        attr_for = {knob.key: knob.attr(provider) for knob in KNOBS}
+        assert {key: getattr(llm, attr_for.get(key, key)) for key in sent} == sent
 
     def test_bedrock_forwards_the_common_set(self, monkeypatch):
         # langchain-aws is an optional extra: capture the constructor call the
@@ -137,10 +158,22 @@ class TestKnobForwarding:
 
         monkeypatch.setattr(bc, "_BEDROCK_CLASS", Capture)
         sent = self._sent()
-        received = create_llm_client(
-            provider="bedrock", model="us.anthropic.claude-sonnet-4-6-v1:0", **sent
-        ).get_llm().kwargs
+        # The placeholder api_key is off Bedrock's allowlist and is dropped.
+        received = _construct("bedrock", "us.anthropic.claude-sonnet-4-6-v1:0", **sent).kwargs
         assert {key: received[key] for key in sent} == sent
+
+    def test_every_client_declares_the_common_set_on_its_allowlist(self):
+        # The loop lives once (``BaseLLMClient.forwarded_kwargs``); what a
+        # client can still get wrong is its declaration. Bedrock's is the
+        # base tuple itself, the rest extend it — none may drop a key (#212).
+        from tradingagents.llm_clients.anthropic_client import AnthropicClient
+        from tradingagents.llm_clients.azure_client import AzureOpenAIClient
+        from tradingagents.llm_clients.bedrock_client import BedrockClient
+        from tradingagents.llm_clients.google_client import GoogleClient
+        from tradingagents.llm_clients.openai_client import OpenAIClient
+
+        for client in (AnthropicClient, AzureOpenAIClient, BedrockClient, GoogleClient, OpenAIClient):
+            assert set(_COMMON_PASSTHROUGH_KWARGS) <= set(client._passthrough_kwargs), client.__name__
 
     def test_api_key_stays_out_of_the_common_set(self):
         # Bedrock's chat class takes no api_key (AWS credential chain) and
@@ -154,9 +187,7 @@ class TestKnobForwarding:
         # Every OpenAI-compatible provider (deepseek, ollama, xai, the local
         # endpoints) shares the Chat Completions payload builder; native
         # OpenAI is the Responses branch.
-        llm = create_llm_client(
-            provider=provider, model=model, api_key="placeholder", **{knob.key: knob.value}
-        ).get_llm()
+        llm = _construct(provider, model, **{knob.key: knob.value})
         payload = llm._get_request_payload([("human", "hi")])
         assert payload[knob.wire_keys[provider]] == knob.value
 
@@ -165,7 +196,7 @@ class TestKnobForwarding:
     def test_knob_omitted_leaves_provider_default(self, knob, provider, model):
         # Not passing the knob must not force it to a value — on the gateway
         # too: the gateway flag is a warning hook, never a client-side default.
-        llm = create_llm_client(provider=provider, model=model, api_key="placeholder").get_llm()
+        llm = _construct(provider, model)
         assert getattr(llm, knob.key) is None
 
 
@@ -286,3 +317,30 @@ class TestGatewayUncappedWarning:
     def test_no_warning_off_the_gateway_or_with_a_cap(self, provider, max_tokens, recwarn):
         _provider_kwargs(provider=provider, max_tokens=max_tokens)
         assert not [w for w in recwarn if "#177" in str(w.message)]
+
+    def test_openai_behind_a_custom_backend_url_warns_like_a_gateway(self):
+        # A proxy / router in front of the openai provider chooses its own
+        # upstream — the #177 shape with the provider name unchanged. The
+        # graph hands the predicate its backend_url so this is not the one
+        # uncapped route that stays silent (#212).
+        with pytest.warns(RuntimeWarning) as record:
+            kwargs = _provider_kwargs(
+                provider="openai", backend_url="http://localhost:8000/v1", max_tokens=None
+            )
+        assert "max_tokens" not in kwargs
+        assert len([w for w in record if "#177" in str(w.message)]) == 1
+
+    @pytest.mark.parametrize("backend_url", [None, "https://api.openai.com/v1"])
+    def test_openai_on_its_native_host_stays_quiet(self, backend_url, recwarn):
+        _provider_kwargs(provider="openai", backend_url=backend_url, max_tokens=None)
+        assert not [w for w in recwarn if "#177" in str(w.message)]
+
+    @pytest.mark.parametrize("env_var", ["OPENAI_API_BASE", "OPENAI_BASE_URL"])
+    def test_openai_behind_an_env_configured_proxy_warns_too(self, env_var, monkeypatch):
+        # With backend_url unset the transport falls back to these env vars —
+        # the way most OpenAI-compatible routers document themselves — so the
+        # request leaves through the proxy and the warning must follow (#212).
+        monkeypatch.setenv(env_var, "http://localhost:4000/v1")
+        with pytest.warns(RuntimeWarning) as record:
+            _provider_kwargs(provider="openai", max_tokens=None)
+        assert len([w for w in record if "#177" in str(w.message)]) == 1

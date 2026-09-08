@@ -11,8 +11,12 @@ under and the string a consumer compares against are one object.
 
 # The node that writes ``final_trade_decision`` — the one LLM call whose
 # completion IS the decision. A routing target in ``graph.conditional_logic``,
-# a registered node in ``graph.setup``, and the ``langgraph_node`` a callback
-# handler sees for that call.
+# a registered node in ``graph.setup``, the ``langgraph_node`` a callback
+# handler sees for that call, and the CLI's ``agent_status`` key for it
+# (``cli/main.py``). NOT the ``bind_structured`` label in
+# ``agents/managers/portfolio_manager.py``: that is the agent's display name
+# for one log line, with no consumer comparing it — and agents importing
+# from the graph layer would invert the dependency (#214).
 PORTFOLIO_MANAGER_NODE = "Portfolio Manager"
 
 __all__ = ["PORTFOLIO_MANAGER_NODE"]

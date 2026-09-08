@@ -48,6 +48,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
 from tradingagents.reporting import write_report_tree
 
 console = Console()
@@ -66,7 +67,7 @@ class MessageBuffer:
         "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
         "Trading Team": ["Trader"],
         "Risk Management": ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"],
-        "Portfolio Management": ["Portfolio Manager"],
+        "Portfolio Management": [PORTFOLIO_MANAGER_NODE],
     }
 
     # Analyst name mapping
@@ -87,7 +88,7 @@ class MessageBuffer:
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
-        "final_trade_decision": (None, "Portfolio Manager"),
+        "final_trade_decision": (None, PORTFOLIO_MANAGER_NODE),
     }
 
     def __init__(self, max_length=100):
@@ -310,7 +311,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
         "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
         "Trading Team": ["Trader"],
         "Risk Management": ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"],
-        "Portfolio Management": ["Portfolio Manager"],
+        "Portfolio Management": [PORTFOLIO_MANAGER_NODE],
     }
 
     # Filter teams to only include agents that are in agent_status
@@ -813,7 +814,7 @@ def display_complete_report(final_state):
         # V. Portfolio Manager Decision
         if risk.get("judge_decision"):
             console.print(Panel("[bold]V. Portfolio Manager Decision[/bold]", border_style="green"))
-            console.print(Panel(Markdown(risk["judge_decision"]), title="Portfolio Manager", border_style="blue", padding=(1, 2)))
+            console.print(Panel(Markdown(risk["judge_decision"]), title=PORTFOLIO_MANAGER_NODE, border_style="blue", padding=(1, 2)))
 
 
 def update_research_team_status(status):
@@ -1233,15 +1234,15 @@ def run_analysis(checkpoint: bool | None = None):
                     message_buffer.update_report_section(
                         "final_trade_decision", f"### Neutral Analyst Analysis\n{neu_hist}"
                     )
-                if judge and message_buffer.agent_status.get("Portfolio Manager") != "completed":
-                    message_buffer.update_agent_status("Portfolio Manager", "in_progress")
+                if judge and message_buffer.agent_status.get(PORTFOLIO_MANAGER_NODE) != "completed":
+                    message_buffer.update_agent_status(PORTFOLIO_MANAGER_NODE, "in_progress")
                     message_buffer.update_report_section(
                         "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
                     )
                     message_buffer.update_agent_status("Aggressive Analyst", "completed")
                     message_buffer.update_agent_status("Conservative Analyst", "completed")
                     message_buffer.update_agent_status("Neutral Analyst", "completed")
-                    message_buffer.update_agent_status("Portfolio Manager", "completed")
+                    message_buffer.update_agent_status(PORTFOLIO_MANAGER_NODE, "completed")
 
             # Update the display
             update_display(layout, stats_handler=stats_handler, start_time=start_time)

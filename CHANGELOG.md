@@ -139,6 +139,67 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **dataflows: the SoSoValue family's transport lane is one type, the Deribit
+  boundary renders through the shared helpers, and an outage stale-served
+  past half its cap says so at ERROR** (issue #217, items 1, 3, 4, 5, 6 and
+  8; follow-ups from PR #216). ``sosovalue_common._request`` now types its
+  own transport failures: a vendor it could not reach — a timeout, a reset,
+  an exhausted redirect or retry — leaves as ``SoSoValueUnavailableError``,
+  worded by the exception's class and the path, never by a ``requests``
+  message (which quotes the request URL); a ``requests`` failure raised
+  before any network (a malformed URL or header) leaves as the structural
+  ``SoSoValueError``, the verdict the cache lane used to reach on its own.
+  The six handlers that caught ``(requests.RequestException,
+  VendorUnavailableError)`` — ``fetch_each``, the ETF fund loop, the three
+  per-item fetches and the ETF listing handler — catch the one type, and
+  the cache lane catches ``VendorError`` alone. The two outage verdicts on
+  an answered request (a 2xx/5xx body that is not JSON, a 5xx the envelope
+  does not explain) are the shared ``json_body_or_outage`` /
+  ``raise_for_http_status`` verdicts re-raised as the family's type with
+  the path appended — judged only outside the 4xx range, where every
+  verdict is the family's own — and a test pins that their two sentences
+  are authored only in ``utils``. ``utils.is_unreached`` now names
+  ``requests.TooManyRedirects`` explicitly: the library raises it with the
+  last 3xx attached (measured, 2.34), so read off its status a redirect
+  loop was "answered HTTP 302" — an answer — for every boundary and the
+  router, where the docstring had always said unreached;
+  ``generic_failure_words`` asks that predicate before it reads a status,
+  the order ``is_vendor_outage`` already had. Deribit's ``_request``
+  decodes and judges a 5xx
+  through the same helpers — its private transient-fault class is gone,
+  and the retry handler catches ``VendorUnavailableError`` beside the
+  library's exception — and ``get_options_market_data`` judges the
+  both-halves-failed verdict through one ``_aggregate_failure_cls``
+  predicate instead of two hand-written ``all(...)`` checks (an empty list
+  is refused: ``all`` over nothing would fabricate the throttle verdict).
+  The family's
+  four "the client likely needs a fix" ERROR lines now end ", or the
+  vendor is refusing it", since a WAF's 403 page lands on that structural
+  lane by design. ``load_rolling_snapshot`` escalates an outage stale serve
+  to one ERROR line (no traceback) once the snapshot's whole-day age (the
+  cap's own measure) exceeds half ``max_stale_days`` — the 8th day of the
+  14-day cap; judged on age, so a daemon restart resets nothing —
+  where an endpoint that had moved behind a gateway page used to stay a
+  WARNING for the whole 14 days. Tests: one ``tests/conftest.fake_response``
+  replaces the three hand-rolled ``requests.Response`` fakes.
+
+  Known trade-offs, accepted deliberately: the Deribit retry log line and
+  the spent-retry message now quote the helper's sentence, so the vendor's
+  name appears twice ("Deribit … request failed (Deribit answered HTTP 503
+  without data)"); a throttle that persists past half the cap is not
+  escalated, since a 429 is the vendor answering; and the per-item
+  handlers' verdict on a pre-network ``requests`` failure moves from the
+  transport lane (a warning, counted by the breaker) to the structural one
+  (ERROR with a traceback) — the cache lane's existing verdict, on a path
+  no validated key or code-built path reaches. Deribit keeps its
+  pre-existing order for a 4xx whose body is not JSON (a WAF's 403 page):
+  the decode helper judges it first, so it is retried once and leaves as
+  the outage type, where SoSoValue's rule reads such a page as an answer;
+  the two rules differ on purpose and a test now pins Deribit's. The
+  Alpha Vantage suite's own ``_FakeResponse`` (shared by the FRED,
+  Polymarket, Farside and routing tests, with a stricter non-``Mock``
+  shape) stays a separate double for now.
+
 - **LLM clients: one passthrough loop, and the ``openai`` provider behind a
   custom ``backend_url`` warns about an uncapped run the way a gateway does**
   (issue #212, follow-ups from PR #211; #214 items 5 and 6).

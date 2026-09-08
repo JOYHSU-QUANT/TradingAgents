@@ -51,7 +51,14 @@ from .errors import (
     VendorRateLimitError,
     VendorUnavailableError,
 )
-from .utils import failure_account, is_unreached, sanitize_untrusted
+from .utils import (
+    failure_account,
+    generic_failure_words,
+    is_unreached,
+    json_body_or_outage,
+    raise_for_http_status,
+    sanitize_untrusted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -225,14 +232,16 @@ class SoSoValueError(VendorError):
     SoSoValue-backed category degrades down the chain instead of aborting.
     The family reads this type as STRUCTURAL — the client likely needs a
     fix — and logs it at ERROR with a traceback, so it is not raised for
-    the vendor being down: that is ``SoSoValueUnavailableError``, which the
-    cache lane also wraps an unreached vendor's ``requests`` exception as.
-    One answer that is not the client's to fix still lands here: a 4xx
-    with a body that is not JSON (a WAF's 403 page, a renamed endpoint's
-    404 page) is the vendor refusing or not knowing this request, kept
-    structural because it is deterministic — retrying and stale-serving it
-    as an outage would hide it for the whole stale cap — so the "needs a
-    fix" in the log may mean the vendor's side, not this client's.
+    the vendor being down: that is ``SoSoValueUnavailableError``, which
+    ``_request`` raises for an unreached vendor too. One answer that is
+    not the client's to fix still lands here: a 4xx with a body that is
+    not JSON (a WAF's 403 page, a renamed endpoint's 404 page) is the
+    vendor refusing or not knowing this request, kept structural because
+    it is deterministic — retrying and stale-serving it as an outage
+    would hide it for the whole stale cap — so the log line says "needs
+    a fix, or the vendor is refusing it" (#217). So does a ``requests``
+    failure raised before any network — a malformed URL or header —
+    which is deterministic for the same reason and no outage.
     """
 
 
@@ -265,15 +274,19 @@ class SoSoValueRateLimitError(VendorRateLimitError):
 class SoSoValueUnavailableError(VendorUnavailableError):
     """SoSoValue was down: a 5xx it did not explain, a non-JSON 2xx/5xx body, or unreached.
 
-    Raised by ``_request`` for the first two (status and path only, never
-    the body — the gateway's error page — since the message travels into a
-    sentinel the model reads), by ``raise_all_failed`` for a sweep that
-    died purely of those and of transport, and by the cache lane for an
-    unreached vendor. Deliberately NOT a ``SoSoValueError``: every per-item
-    handler and cache lane in the family reads that type as structural
-    breakage (ERROR, traceback, "the client likely needs a fix"), and a
-    gateway that is down is none of that — it takes the transport lane
-    instead, like the rate-limit type takes its own.
+    Raised by ``_request`` for all three — the one type the family's
+    transport lane carries, so every per-item handler and the cache lane
+    catch it alone rather than a tuple keyed on the ``requests`` exception
+    (#217) — and by ``raise_all_failed`` for a sweep that died purely of
+    it. The message carries the status and path, or the exception's
+    class, never a body or a ``requests`` message: the former is the
+    gateway's error page, the latter quotes the request URL, and the text
+    travels into a sentinel the model reads. Deliberately NOT a
+    ``SoSoValueError``: every per-item handler and cache lane in the
+    family reads that type as structural breakage (ERROR, traceback,
+    "the client likely needs a fix"), and a gateway that is down is none
+    of that — it takes the transport lane instead, like the rate-limit
+    type takes its own.
     """
 
 
@@ -339,19 +352,37 @@ def _request(path: str, params: dict) -> list:
 
     Raises the vendor taxonomy: 401 -> not-configured (bad key is config
     breakage, not an outage), 429 -> rate-limited, a 5xx the envelope does
-    not explain or a body that is not JSON at a 2xx or 5xx -> unavailable
-    (the vendor is down, #172), anything else that is not a clean
-    ``{"code": 0, "data": [...]}`` -> ``SoSoValueError``. "Explain" is
-    Deribit's rule: an envelope with a non-zero ``code`` is the vendor
-    answering about this request whatever status it rode in on (the live
-    over-window error is an HTTP 403 with code 400301), so it stays the
-    structural type; a 5xx with no such envelope is the gateway, not the
-    API. A 4xx with a body that is not JSON — a renamed endpoint's 404
-    page, a WAF's 403 — is the vendor answering about this request too, and
-    stays structural, as a 4xx the boundary leaves alone does at Farside
-    and Fear & Greed. Network errors propagate as
-    ``requests.RequestException`` for the caller's stale-cache handling,
-    mirroring the Farside vendor.
+    not explain, a body that is not JSON at a 2xx or 5xx, or a vendor that
+    could not be reached -> unavailable (the vendor is down, #172), anything
+    else that is not a clean ``{"code": 0, "data": [...]}`` ->
+    ``SoSoValueError``. "Explain" is Deribit's rule: an envelope with a
+    non-zero ``code`` is the vendor answering about this request whatever
+    status it rode in on (the live over-window error is an HTTP 403 with
+    code 400301), so it stays the structural type; a 5xx with no such
+    envelope is the gateway, not the API. A 4xx with a body that is not
+    JSON — a renamed endpoint's 404 page, a WAF's 403 — is the vendor
+    answering about this request too, and stays structural, as a 4xx the
+    boundary leaves alone does at Farside and Fear & Greed.
+
+    The transport lane is typed HERE, at the one place the family talks to
+    the network, so every per-item handler and the cache lane catch one
+    type — ``SoSoValueUnavailableError`` — instead of a tuple keyed on the
+    library's exception that a new transport verdict would have to visit
+    six times (#217). An unreached vendor (``is_unreached``: a timeout, a
+    reset, and by that predicate's decision a redirect loop or an
+    exhausted retry) is the outage type, worded by class only, never by
+    message, which quotes the request URL (#171). The
+    ``ValueError``-flavoured ``requests`` exceptions — a malformed URL or
+    header, raised before any network — are a bug or config breakage
+    rather than a vendor down and take the structural type, the verdict
+    the cache lane used to reach on its own. The two outage verdicts on
+    an answered request reuse the shared boundary helpers
+    (``json_body_or_outage``, ``raise_for_http_status``) so their words
+    are authored once for every vendor, re-raised as this family's type
+    with the path appended. They judge only an answer outside the 4xx
+    range: a 4xx is the vendor answering about this request whatever its
+    body — the key verdict, the throttle, an error envelope, a WAF's page
+    that is not JSON — and every verdict on one is the family's own.
 
     Every call passes through the shared ``_BUDGET`` first — after the key
     check, so an unset key still fails instantly rather than after a wait —
@@ -359,43 +390,52 @@ def _request(path: str, params: dict) -> list:
     """
     api_key = get_api_key()
     _BUDGET.acquire(path)
-    response = requests.get(
-        f"{SOSOVALUE_API_BASE}{path}",
-        params=params,
-        headers={"x-soso-api-key": api_key},
-        timeout=REQUEST_TIMEOUT,
-    )
     try:
-        body = response.json()
-    except ValueError:
-        body = None
-        decodable = False
+        response = requests.get(
+            f"{SOSOVALUE_API_BASE}{path}",
+            params=params,
+            headers={"x-soso-api-key": api_key},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        failure_cls = SoSoValueUnavailableError if is_unreached(e) else SoSoValueError
+        raise failure_cls(f"SoSoValue {generic_failure_words(e)} on {path}") from e
+    status = response.status_code
+    if 400 <= status < 500:
+        # The vendor answering about this request whatever the body
+        # carries — the key verdict, the throttle, an error envelope, a
+        # WAF's page — so the body is read leniently and every verdict
+        # below is the family's own; none of them is an outage.
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
     else:
-        decodable = True
-    if response.status_code == 401:
+        # The outage verdicts, in the shared helpers' words and carrying no
+        # body text (the body is whatever page the gateway served): a body
+        # that is not JSON, or a 5xx the envelope does not explain — an
+        # envelope with a non-zero code is the API answering, whatever
+        # status it rode in on. Below 400 the status helper is a no-op.
+        try:
+            body = json_body_or_outage(response, "SoSoValue")
+            if not (isinstance(body, dict) and "code" in body and body["code"] != 0):
+                raise_for_http_status(response, "SoSoValue")
+        except VendorUnavailableError as e:
+            raise SoSoValueUnavailableError(f"{e} on {path}") from e
+    if status == 401:
         raise SoSoValueNotConfiguredError(
             f"SoSoValue rejected the API key (HTTP 401): {_error_message(body, api_key)} "
             f"Verify SOSOVALUE_API_KEY; until then the chain falls to the next vendor."
         )
-    if response.status_code == 429:
+    if status == 429:
         _BUDGET.note_rate_limited()
         raise SoSoValueRateLimitError(
             f"SoSoValue rate limit hit (HTTP 429) on {path}: {_error_message(body, api_key)}"
         )
-    # The outage verdicts come before the envelope read, and carry no body
-    # text: the body is whatever page the gateway served.
-    status = response.status_code
-    if not decodable and not 400 <= status < 500:
-        raise SoSoValueUnavailableError(
-            f"SoSoValue answered HTTP {status} with a body that is not JSON on {path}"
-        )
-    explained = isinstance(body, dict) and "code" in body and body["code"] != 0
-    if status >= 500 and not explained:
-        raise SoSoValueUnavailableError(f"SoSoValue answered HTTP {status} without data on {path}")
     # Envelope errors can ride on any HTTP status (a missing-param error is
     # HTTP 400 with code 1; the over-window error is HTTP 403 with code
     # 400301), so judge the body, not just the status.
-    if response.status_code != 200 or not isinstance(body, dict) or body.get("code") != 0:
+    if status != 200 or not isinstance(body, dict) or body.get("code") != 0:
         # `code` is only known to be != 0 — an arbitrary JSON value, not
         # necessarily a small int — so it gets the same redact-then-FLATTEN-
         # then-truncate treatment as the message, at a display-width cap. It
@@ -738,10 +778,11 @@ class FetchSweep(NamedTuple):
       by callers (not just logged) because the drain fills ``failed`` with
       items this client never asked for, and by render time the local that
       knew why is long gone.
-    * ``last_network`` — the last transport failure or outage answer (a
-      ``requests`` exception, or the family's ``VendorUnavailableError``),
-      kept because without it a pure outage could only surface as
-      structural breakage.
+    * ``last_network`` — the last failure on the transport lane, which is
+      one type (``SoSoValueUnavailableError``: an unreached vendor, a 5xx
+      the envelope did not explain, a non-JSON body — ``_request`` types
+      them all, #217), kept because without it a pure outage could only
+      surface as structural breakage.
     * ``structural_failure`` — True when ``fetch_one`` returned None (it
       swallowed a parse/contract break), so the transport classification
       cannot claim a pure outage while a real structural break is in the
@@ -759,7 +800,7 @@ class FetchSweep(NamedTuple):
     failed: list[str]
     flagged: list[str]
     rate_limited: SoSoValueRateLimitError | None
-    last_network: requests.RequestException | VendorUnavailableError | None
+    last_network: SoSoValueUnavailableError | None
     structural_failure: bool
     breaker_skipped: bool
     attempted: int
@@ -816,13 +857,14 @@ def fetch_each(
       network that hangs instead of failing fast would otherwise turn one
       refresh into sequential full timeouts inside a single analyst tool
       call, and the post-breaker outcome (disclosed-incomplete, short TTL)
-      is identical to riding the brownout out. An outage answer — a 5xx
-      the envelope does not explain, a non-JSON body
-      (``SoSoValueUnavailableError``) — takes this lane too: the item goes
-      to ``failed`` and the streak counts it, since a gateway that is down
-      costs the same per remaining item (#172). Any completed request
-      resets the streak — the server answered, so each remaining item is
-      still worth its own try.
+      is identical to riding the brownout out. The lane is one type,
+      ``SoSoValueUnavailableError``, which ``_request`` raises for an
+      unreached vendor and for an outage answer — a 5xx the envelope does
+      not explain, a non-JSON body — alike (#172, #217): the item goes to
+      ``failed`` and the streak counts it, since a gateway that is down
+      costs the same per remaining item as a network that hangs. Any
+      completed request resets the streak — the server answered, so each
+      remaining item is still worth its own try.
 
     ``label``/``failed_bucket``/``noun`` only shape the two log lines;
     ``key`` names an item in the buckets and ``describe`` renders it in logs
@@ -844,7 +886,7 @@ def fetch_each(
     failed: list[str] = []
     flagged: list[str] = []
     rate_limited: SoSoValueRateLimitError | None = None
-    last_network: requests.RequestException | VendorUnavailableError | None = None
+    last_network: SoSoValueUnavailableError | None = None
     structural_failure = False
     consecutive_network = 0
     breaker_skipped = False
@@ -870,7 +912,7 @@ def fetch_each(
                 failed_bucket,
             )
             break
-        except (requests.RequestException, VendorUnavailableError) as e:
+        except SoSoValueUnavailableError as e:
             last_network = e
             failed.append(key(item))
             consecutive_network += 1
@@ -989,8 +1031,19 @@ def load_rolling_snapshot(
     wraps: the router classifies by type (a rate limit is a routine quiet
     fall-through; a plain ``SoSoValueError`` is unexpected breakage, logged
     with a traceback and surfaced as the chain's first error), so the wrap
-    must add context without re-classifying. Only a network error
-    (``requests.RequestException``) becomes the generic ``SoSoValueError``.
+    must add context without re-classifying. Nothing below the taxonomy
+    reaches here: ``_request`` types its own transport failures (#217).
+
+    A stale serve on an outage is a WARNING — a brownout of minutes must
+    not read as an incident — until the snapshot's whole-day age (the
+    cap's own measure, ``_days_stale``) exceeds half of ``max_stale_days``
+    — the 8th day of a 14-day cap — when each refresh logs one ERROR line
+    instead (no traceback: the type says it is not a bug). An endpoint that has moved
+    behind a gateway's error page thereby shows in the ERROR log a week
+    before the cap expires the cache, rather than only when it does.
+    Judged on the snapshot's age, not on a count of stale serves, so
+    there is no counter to reset on a restart and no per-process view of
+    it (#217). A throttle is never escalated: it is the vendor answering.
     """
     get_api_key()
 
@@ -1005,14 +1058,10 @@ def load_rolling_snapshot(
         payload = fetch_all(cached)
     except SoSoValueNotConfiguredError:
         raise
-    except (requests.RequestException, VendorError) as e:
-        # A typed failure keeps its type; an unreached vendor is the outage
-        # type, as in the Farside twin (#172); any other requests exception
-        # — a ValueError-flavoured one, a bug — is structural.
-        if isinstance(e, VendorError):
-            wrap_cls = type(e)
-        else:
-            wrap_cls = SoSoValueUnavailableError if is_unreached(e) else SoSoValueError
+    except VendorError as e:
+        # A typed failure keeps its type. The transport lane arrives typed
+        # too: _request judges an unreached vendor at the boundary (#217).
+        wrap_cls = type(e)
         if cached:
             fetched_at = cached["fetched_at"]
             age = _days_stale(fetched_at)
@@ -1031,16 +1080,28 @@ def load_rolling_snapshot(
                 ) from e
             # A SoSoValueError here is a contract/parse break (a code fix is
             # likely needed) and must not hide among network-blip warnings for
-            # up to the stale cap; an outage or rate-limit stays a warning.
+            # up to the stale cap; a rate limit stays a warning, and so does
+            # an outage until the snapshot has aged past half the cap.
             age_str = _humanize_age(fetched_at)
             if isinstance(e, SoSoValueError):
                 log.error(
                     "SoSoValue %s refresh failed structurally (%s); serving stale "
-                    "cache (%s old) — the client likely needs a fix",
+                    "cache (%s old) — the client likely needs a fix, or the vendor "
+                    "is refusing it",
                     label,
                     e,
                     age_str,
                     exc_info=True,
+                )
+            elif isinstance(e, VendorUnavailableError) and age * 2 > max_stale_days:
+                log.error(
+                    "SoSoValue %s refresh failed (%s); serving stale cache %s old, past "
+                    "half the %d-day stale cap — the endpoint may have moved, not "
+                    "merely be down",
+                    label,
+                    e,
+                    age_str,
+                    max_stale_days,
                 )
             else:
                 log.warning(
@@ -1051,12 +1112,12 @@ def load_rolling_snapshot(
                 )
             return cached, fetched_at, True, False
         # "usable": the file may exist but have failed read-side validation.
-        # The cause is quoted through ``failure_account``: a typed error's
+        # The cause is quoted through ``failure_account``: the typed error's
         # own text, flattened but not capped here — the router caps its
         # slot, and a sweep verdict's ``(last: ...)`` tail must survive into
-        # this module's log line; a requests exception contributes its
-        # status or class only, never its message — that quotes the request
-        # URL, and this line is LLM-visible (#203).
+        # this module's log line. An unreached vendor arrives already worded
+        # by class at _request (#217): never the requests message, which
+        # quotes the request URL, and this line is LLM-visible (#203).
         raise wrap_cls(
             f"SoSoValue {label} unavailable and no usable cache exists: "
             f"{failure_account(e, limit=None)}"

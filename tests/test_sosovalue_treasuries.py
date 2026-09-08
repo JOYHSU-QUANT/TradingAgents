@@ -28,6 +28,8 @@ from tradingagents.dataflows import (
 from tradingagents.dataflows.config import set_config
 from tradingagents.default_config import DEFAULT_CONFIG
 
+from .conftest import sosovalue_unreached
+
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
@@ -314,8 +316,26 @@ def _request_impl(listing=None, history_by_ticker=None, history_error=None, erro
     return impl
 
 
+def _unreached():
+    return sosovalue_unreached("/btc-treasuries/MSTR/purchase-history")
+
+
 @pytest.mark.unit
 class TestFetchAll:
+    def test_an_unreached_vendor_reaches_the_caller_as_the_outage_type(self, monkeypatch):
+        # The macro twin: through the real _request (#217), the lane is typed
+        # at the boundary and worded by class, never by the URL.
+        monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
+
+        def unreached(url, params=None, headers=None, timeout=None):
+            raise requests.ConnectionError(f"Max retries exceeded with url: {url}")
+
+        monkeypatch.setattr(sosovalue_common.requests, "get", unreached)
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as exc:
+            sosovalue_treasuries._fetch_all()
+        assert str(exc.value) == "SoSoValue could not be reached: ConnectionError on /btc-treasuries"
+        assert isinstance(exc.value.__cause__, requests.ConnectionError)
+
     def test_full_success_fetches_every_listed_company_under_the_cap(self, monkeypatch):
         monkeypatch.setattr(sosovalue_treasuries, "_request", _request_impl())
         payload = sosovalue_treasuries._fetch_all()
@@ -406,7 +426,7 @@ class TestFetchAll:
 
     def test_network_streak_trips_the_breaker_then_fails_the_vendor(self, monkeypatch):
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"),
+            history_error=_unreached(),
             error_tickers=set(LIST_TICKERS),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
@@ -609,7 +629,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         monkeypatch.setattr(sosovalue_treasuries, "_request", broken)
         with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="no usable cache"):
@@ -620,7 +640,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch, now="2026-08-13T00:00:00Z")  # 2 days
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         self._write_cache(tmp_path)
         monkeypatch.setattr(sosovalue_treasuries, "_request", broken)
@@ -631,7 +651,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch, now="2026-08-26T01:00:00Z")  # 15 days
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         self._write_cache(tmp_path)
         monkeypatch.setattr(sosovalue_treasuries, "_request", broken)
@@ -1436,7 +1456,7 @@ class TestVerificationAndPrecision:
         # Routine rather than exotic: a 429 on the second company drains the
         # rest, and three transport failures trip the breaker.
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"),
+            history_error=_unreached(),
             error_tickers=set(LIST_TICKERS[1:]),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
@@ -1775,7 +1795,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
 
     def test_the_breaker_records_that_it_skipped_the_rest(self, monkeypatch):
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"),
+            history_error=_unreached(),
             error_tickers=set(LIST_TICKERS[2:5]),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
@@ -1794,7 +1814,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         # The macro twin's boundary: the breaker trips on the FINAL selected
         # company, so there is no remainder to skip and the flag must stay down.
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"),
+            history_error=_unreached(),
             error_tickers=set(LIST_TICKERS[-3:]),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
@@ -1804,7 +1824,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
 
     def test_the_transport_verdict_counts_only_the_requests_it_made(self, monkeypatch):
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"),
+            history_error=_unreached(),
             error_tickers=set(LIST_TICKERS),
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)

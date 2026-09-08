@@ -27,7 +27,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorRateLimitError, VendorUnavailableError
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
-from .conftest import repo_text
+from .conftest import fake_response, repo_text
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -1341,7 +1341,7 @@ class TestDvol:
         with mock.patch.object(
             deribit.requests,
             "get",
-            return_value=_response(payload={"error": None, "result": {"ok": 1}}),
+            return_value=fake_response(json={"error": None, "result": {"ok": 1}}),
         ):
             assert deribit._request(DVOL_ENDPOINT, {}) == {"ok": 1}
 
@@ -1448,24 +1448,11 @@ class TestPercentile:
 # --------------------------------------------------------------------------- #
 # HTTP layer
 # --------------------------------------------------------------------------- #
-def _response(status=200, payload=None, text_body=None):
-    response = mock.Mock()
-    response.status_code = status
-    if text_body is not None:
-        response.json.side_effect = ValueError("not json")
-    else:
-        response.json.return_value = payload
-    response.raise_for_status.side_effect = (
-        requests.HTTPError(f"HTTP {status}") if status >= 400 else None
-    )
-    return response
-
-
 @pytest.mark.unit
 class TestRequest:
     def test_returns_the_result_payload(self):
         with mock.patch.object(
-            deribit.requests, "get", return_value=_response(payload={"result": {"data": []}})
+            deribit.requests, "get", return_value=fake_response(json={"result": {"data": []}})
         ):
             assert deribit._request(DVOL_ENDPOINT, {}) == {"data": []}
 
@@ -1475,7 +1462,7 @@ class TestRequest:
         # dropping `timeout=` (an unbounded hang on every call), dropping `params=`,
         # or pointing DERIBIT_BASE at testnet all pass the whole suite.
         with mock.patch.object(
-            deribit.requests, "get", return_value=_response(payload={"result": 1})
+            deribit.requests, "get", return_value=fake_response(json={"result": 1})
         ) as get:
             deribit._request(DVOL_ENDPOINT, {"currency": "BTC"})
         args, kwargs = get.call_args
@@ -1508,7 +1495,7 @@ class TestRequest:
         # `> 500` boundary would silently drop its retry.
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=status, payload={})
+                deribit.requests, "get", return_value=fake_response(status, json={})
             ) as get,
             mock.patch.object(deribit.time, "sleep") as sleep,
             pytest.raises(deribit.DeribitError, match="did not return a usable response after"),
@@ -1522,7 +1509,7 @@ class TestRequest:
         # to the result-field check and misreport a rejection as a shape change.
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=400, payload={})
+                deribit.requests, "get", return_value=fake_response(400, json={})
             ),
             pytest.raises(deribit.DeribitError, match="HTTP 400"),
         ):
@@ -1538,7 +1525,7 @@ class TestRequest:
         }
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=400, payload=payload)
+                deribit.requests, "get", return_value=fake_response(400, json=payload)
             ) as get,
             mock.patch.object(deribit.time, "sleep") as sleep,
             pytest.raises(deribit.DeribitError, match="start_timestamp"),
@@ -1558,7 +1545,7 @@ class TestRequest:
         payload = {"error": {"code": 10028, "message": "too_many_requests_for_currency"}}
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=503, payload=payload)
+                deribit.requests, "get", return_value=fake_response(503, json=payload)
             ) as get,
             mock.patch.object(deribit.time, "sleep") as sleep,
             pytest.raises(deribit.DeribitError, match="too_many_requests_for_currency"),
@@ -1577,14 +1564,14 @@ class TestRequest:
             mock.patch.object(
                 deribit.requests,
                 "get",
-                side_effect=[_response(status=503, payload={}), _response(payload={"result": 42})],
+                side_effect=[fake_response(503, json={}), fake_response(json={"result": 42})],
             ),
             mock.patch.object(deribit.time, "sleep"),
         ):
             assert deribit._request(DVOL_ENDPOINT, {}) == 42
         assert (
-            "Deribit get_volatility_index_data request failed (answered HTTP 503 without "
-            "data); retrying in 2s"
+            "Deribit get_volatility_index_data request failed (Deribit answered HTTP 503 "
+            "without data); retrying in 2s"
             in caplog.text
         )
 
@@ -1595,7 +1582,7 @@ class TestRequest:
         # purpose and then misreported as "unreachable".
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=403, payload={})
+                deribit.requests, "get", return_value=fake_response(403, json={})
             ) as get,
             mock.patch.object(deribit.time, "sleep") as sleep,
             pytest.raises(deribit.DeribitError, match="HTTP 403"),
@@ -1606,7 +1593,7 @@ class TestRequest:
 
     def test_rate_limit_raises_the_shared_taxonomy_error(self):
         with (
-            mock.patch.object(deribit.requests, "get", return_value=_response(status=429)),
+            mock.patch.object(deribit.requests, "get", return_value=fake_response(429)),
             pytest.raises(VendorRateLimitError),
         ):
             deribit._request(CHAIN_ENDPOINT, {})
@@ -1621,8 +1608,8 @@ class TestRequest:
                 ),
                 id="unreached",
             ),
-            pytest.param(_response(status=503, payload={}), id="5xx"),
-            pytest.param(_response(text_body="<html>WAF</html>"), id="non-json"),
+            pytest.param(fake_response(503, json={}), id="5xx"),
+            pytest.param(fake_response(), id="non-json"),
         ],
     )
     def test_a_spent_retry_raises_the_outage_type(self, fault):
@@ -1647,15 +1634,32 @@ class TestRequest:
         assert "url" not in str(e.value)
         if isinstance(fault, Exception):
             assert "could not be reached: ConnectionError" in str(e.value)
+        else:
+            # The shared helpers' sentence, not a third rendering (#217).
+            assert "attempts: Deribit answered HTTP" in str(e.value)
+
+    def test_a_4xx_page_that_is_not_json_keeps_the_outage_lane(self):
+        # A WAF's 403 HTML page meets the decode helper before the bare-4xx
+        # branch: retried once, then the outage type — the order this
+        # boundary had before the shared helpers, kept and pinned (#217).
+        # SoSoValue reads the same page as an answer; the two rules differ
+        # on purpose and this test is what says so.
+        with (
+            mock.patch.object(deribit.requests, "get", return_value=fake_response(403)) as get,
+            mock.patch.object(deribit.time, "sleep"),
+            pytest.raises(VendorUnavailableError, match="HTTP 403 with a body that is not JSON"),
+        ):
+            deribit._request(CHAIN_ENDPOINT, {})
+        assert get.call_count == 2
 
     def test_a_rejection_is_not_the_outage_type(self):
         # The vendor answered about the request — a bare 4xx, a JSON-RPC
         # error — and the module type says so.
         payload = {"error": {"code": -32602, "message": "Invalid params"}}
         for response in (
-            _response(status=403, payload={}),
-            _response(status=400, payload=payload),
-            _response(status=503, payload=payload),
+            fake_response(403, json={}),
+            fake_response(400, json=payload),
+            fake_response(503, json=payload),
         ):
             with (
                 mock.patch.object(deribit.requests, "get", return_value=response),
@@ -1680,10 +1684,10 @@ class TestRequest:
         sleep.assert_called_once()
 
     def test_server_error_is_retried_then_succeeds(self):
-        good = _response(payload={"result": 42})
+        good = fake_response(json={"result": 42})
         with (
             mock.patch.object(
-                deribit.requests, "get", side_effect=[_response(status=503, payload={}), good]
+                deribit.requests, "get", side_effect=[fake_response(503, json={}), good]
             ),
             mock.patch.object(deribit.time, "sleep"),
         ):
@@ -1692,7 +1696,7 @@ class TestRequest:
     def test_undecodable_body_is_retried(self):
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(text_body="<html>WAF</html>")
+                deribit.requests, "get", return_value=fake_response()
             ) as get,
             mock.patch.object(deribit.time, "sleep"),
             pytest.raises(deribit.DeribitError),
@@ -1705,7 +1709,7 @@ class TestRequest:
 
     def test_missing_result_field_is_fatal(self):
         with (
-            mock.patch.object(deribit.requests, "get", return_value=_response(payload={"ok": 1})),
+            mock.patch.object(deribit.requests, "get", return_value=fake_response(json={"ok": 1})),
             pytest.raises(deribit.DeribitError, match="no 'result' field"),
         ):
             deribit._request(DVOL_ENDPOINT, {})
@@ -3232,6 +3236,50 @@ class TestPartialDegradation:
         assert "**DVOL:** unavailable" in out
         assert "**25Δ call IV:** 29.56%" in out
 
+    @pytest.mark.parametrize(
+        "attempted,expected",
+        [
+            pytest.param([VendorRateLimitError("429")], VendorRateLimitError, id="throttle-alone"),
+            pytest.param(
+                [VendorRateLimitError("429"), VendorRateLimitError("429")],
+                VendorRateLimitError,
+                id="both-throttled",
+            ),
+            pytest.param(
+                [deribit.DeribitUnavailableError("down")],
+                deribit.DeribitUnavailableError,
+                id="outage-alone",
+            ),
+            pytest.param(
+                [VendorRateLimitError("429"), deribit.DeribitUnavailableError("down")],
+                deribit.DeribitUnavailableError,
+                id="throttle-and-outage",
+            ),
+            pytest.param(
+                [deribit.DeribitUnavailableError("down"), deribit.DeribitError("rejected")],
+                deribit.DeribitError,
+                id="outage-and-rejection",
+            ),
+            pytest.param(
+                [VendorRateLimitError("429"), RuntimeError("bug")],
+                deribit.DeribitError,
+                id="throttle-and-bug",
+            ),
+        ],
+    )
+    def test_the_aggregate_verdict_is_judged_over_the_requests_made(self, attempted, expected):
+        # One predicate for both top-level verdicts (#217): the throttle lane
+        # needs every request throttled; the outage lane tolerates a throttle
+        # beside an outage (one vendor not serving); anything the vendor
+        # answered — or a bug — is the module type, traceback and all.
+        assert deribit._aggregate_failure_cls(attempted) is expected
+
+    def test_the_aggregate_verdict_refuses_an_empty_list(self):
+        # all() over nothing is True: judged, an empty list would be the
+        # throttle verdict for a report that saw no 429 at all.
+        with pytest.raises(ValueError, match="at least one failure"):
+            deribit._aggregate_failure_cls([])
+
     def test_both_halves_down_raises_for_the_router(self):
         with pytest.raises(deribit.DeribitError, match="neither DVOL nor an options chain"):
             _report(
@@ -3671,7 +3719,7 @@ class TestUntrustedTextIsNeutralised:
         payload = {"error": {"code": -32602, "message": _FORGERY}}
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=400, payload=payload)
+                deribit.requests, "get", return_value=fake_response(400, json=payload)
             ),
             mock.patch.object(deribit.time, "sleep"),
             pytest.raises(deribit.DeribitError) as excinfo,
@@ -4087,9 +4135,7 @@ class TestBoundariesTheSuiteCouldNotSee:
         # `error: {}` beside a good result must still be read as success.
         payload = {"error": falsy, "result": {"data": [], "continuation": None}}
         with mock.patch.object(deribit.requests, "get") as get:
-            get.return_value = mock.Mock(
-                status_code=200, json=mock.Mock(return_value=payload), raise_for_status=mock.Mock()
-            )
+            get.return_value = fake_response(json=payload)
             assert deribit._request("get_volatility_index_data", {}) == {
                 "data": [],
                 "continuation": None,
@@ -4607,7 +4653,7 @@ class TestRequestSequence:
         payload = {"error": {"code": 11029}}
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=400, payload=payload)
+                deribit.requests, "get", return_value=fake_response(400, json=payload)
             ),
             mock.patch.object(deribit.time, "sleep"),
             pytest.raises(deribit.DeribitError, match="11029"),
@@ -4620,7 +4666,7 @@ class TestRequestSequence:
         # top-level JSON list from a CDN is exactly what reaches it.
         with (
             mock.patch.object(
-                deribit.requests, "get", return_value=_response(status=200, payload=[1, 2])
+                deribit.requests, "get", return_value=fake_response(200, json=[1, 2])
             ),
             mock.patch.object(deribit.time, "sleep"),
             pytest.raises(deribit.DeribitError, match=r"has no 'result' field \(got a JSON list\)"),

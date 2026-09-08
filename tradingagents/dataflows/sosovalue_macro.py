@@ -94,11 +94,9 @@ from datetime import datetime, timedelta
 from typing import NamedTuple
 from urllib.parse import quote
 
-import requests
-
-from .errors import VendorUnavailableError
 from .sosovalue_common import (
     SoSoValueError,
+    SoSoValueUnavailableError,
     _cache_dir,
     _cache_rejecter,
     _coverage_gap_note,
@@ -741,9 +739,10 @@ def _fetch_one_event(name: str) -> list[dict] | str | None:
     breakage must reach the router even mid-batch, the 429 because the
     per-minute quota makes the rest of the sweep pointless (the caller drains
     it). A structural break is logged at ERROR with a traceback, a transient
-    stays a warning, and a transport-level failure or an outage answer
-    (``VendorUnavailableError``, #172) is re-raised after logging so the
-    caller's consecutive-failure breaker can count the streak.
+    stays a warning, and a transport-lane failure
+    (``SoSoValueUnavailableError``: unreached, or an outage answer,
+    #172/#217) is re-raised after logging so the caller's
+    consecutive-failure breaker can count the streak.
     """
     try:
         data = _request(f"/macro/events/{quote(name, safe='')}/history", {"limit": HISTORY_LIMIT})
@@ -756,12 +755,12 @@ def _fetch_one_event(name: str) -> list[dict] | str | None:
             )
             return "unknown"
         return _parse_event_rows(data, name)
-    except (requests.RequestException, VendorUnavailableError, SoSoValueError) as e:
+    except (SoSoValueUnavailableError, SoSoValueError) as e:
         if isinstance(e, SoSoValueError):
             logger.error(
                 "SoSoValue macro event %r history failed structurally (its rows "
                 "will be missing from the report) — the client likely needs a "
-                "fix: %s",
+                "fix, or the vendor is refusing it: %s",
                 name,
                 e,
                 exc_info=True,

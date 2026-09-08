@@ -16,6 +16,8 @@ from tradingagents.dataflows import fear_greed, interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import VendorUnavailableError
 
+from .conftest import fake_response
+
 
 def _ts(date_str: str) -> str:
     """UTC midnight unix seconds (as a string, like the API returns)."""
@@ -208,10 +210,7 @@ class TestRequestWiring:
     these the limit sizing, query params and retry could all be wrong silently."""
 
     def test_sends_limit_and_format_and_returns_payload(self):
-        response = mock.Mock()
-        response.json.return_value = _PAYLOAD
-        response.raise_for_status.return_value = None
-        response.status_code = 200
+        response = fake_response(json=_PAYLOAD)
         with mock.patch.object(fear_greed.requests, "get", return_value=response) as get:
             assert fear_greed._request(75) == _PAYLOAD
         _, kwargs = get.call_args
@@ -246,10 +245,7 @@ class TestRequestWiring:
         assert seen["limit"] == fear_greed.MAX_LOOKBACK_DAYS + fear_greed._FETCH_BUFFER_DAYS
 
     def test_retries_once_then_succeeds(self):
-        response = mock.Mock()
-        response.json.return_value = _PAYLOAD
-        response.raise_for_status.return_value = None
-        response.status_code = 200
+        response = fake_response(json=_PAYLOAD)
         with (
             mock.patch.object(fear_greed.time, "sleep") as sleep,
             mock.patch.object(
@@ -287,8 +283,7 @@ class TestRequestWiring:
 
     @pytest.mark.parametrize("status", [500, 503])
     def test_a_5xx_is_retried_then_raised_as_the_outage_type(self, status):
-        response = mock.Mock()
-        response.status_code = status
+        response = fake_response(status)
         with (
             mock.patch.object(fear_greed.time, "sleep") as sleep,
             mock.patch.object(fear_greed.requests, "get", return_value=response) as get,
@@ -300,10 +295,7 @@ class TestRequestWiring:
         response.json.assert_not_called()
 
     def test_a_non_json_body_is_the_outage_type(self):
-        response = mock.Mock()
-        response.status_code = 200
-        response.raise_for_status.return_value = None
-        response.json.side_effect = ValueError("Expecting value")
+        response = fake_response(200)
         with (
             mock.patch.object(fear_greed.time, "sleep"),
             mock.patch.object(fear_greed.requests, "get", return_value=response),
@@ -317,11 +309,7 @@ class TestRequestWiring:
         # request — a 403 refusal included, as at the Farside boundary: the
         # module type, and the router then treats a fallback's no-data as a
         # verdict on the symbol.
-        response = mock.Mock()
-        response.status_code = status
-        response.raise_for_status.side_effect = requests.HTTPError(
-            f"{status} Client Error", response=mock.Mock(status_code=status)
-        )
+        response = fake_response(status)
         with (
             mock.patch.object(fear_greed.time, "sleep"),
             mock.patch.object(fear_greed.requests, "get", return_value=response),
@@ -333,10 +321,7 @@ class TestRequestWiring:
     def test_non_object_payload_raises_typed_error(self):
         # A CDN/WAF error page can decode as valid JSON that is not an object;
         # without the guard this surfaced as a bare AttributeError.
-        response = mock.Mock()
-        response.json.return_value = [1, 2, 3]
-        response.raise_for_status.return_value = None
-        response.status_code = 200
+        response = fake_response(json=[1, 2, 3])
         with (
             mock.patch.object(fear_greed.requests, "get", return_value=response),
             pytest.raises(fear_greed.FearGreedError, match="expected an object") as e,

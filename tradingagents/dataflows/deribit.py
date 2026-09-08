@@ -73,7 +73,14 @@ import requests
 
 from .errors import VendorError, VendorRateLimitError, VendorUnavailableError
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal, generic_failure_words, sanitize_untrusted
+from .utils import (
+    MAX_UNTRUSTED_CHARS,
+    date_refusal,
+    failure_account,
+    json_body_or_outage,
+    raise_for_http_status,
+    sanitize_untrusted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -387,10 +394,6 @@ class DeribitUnavailableError(DeribitError, VendorUnavailableError):
     """
 
 
-class _TransientDeribitFault(Exception):
-    """Internal marker for a fault worth one retry; never escapes this module."""
-
-
 class Contract(NamedTuple):
     """One parsed option from the chain snapshot."""
 
@@ -635,15 +638,21 @@ def _request(endpoint: str, params: dict) -> object:
     Deribit answers a malformed request with HTTP 400 *and* a JSON-RPC ``error``
     object carrying the actual reason, so the body is decoded and inspected before
     the status is judged — otherwise every parameter mistake would surface as a
-    bare "400 Client Error" with no clue which parameter was wrong. Status codes
-    are handled explicitly here; ``raise_for_status`` is deliberately never called
-    (see the 4xx branch for why).
+    bare "400 Client Error" with no clue which parameter was wrong.
 
     Retries once on a transient fault: a network error, an undecodable body, or a
-    5xx that carries no JSON-RPC error object. Anything Deribit explains — a
-    JSON-RPC error object at any status — is deterministic and raises immediately,
-    as does any other 4xx; an HTTP 429 raises ``VendorRateLimitError`` so the
-    router treats it as a throttle rather than as a broken vendor.
+    5xx that carries no JSON-RPC error object — the last two typed by the shared
+    boundary helpers (``json_body_or_outage``, ``raise_for_http_status``) as the
+    outage type, so their words are the ones every vendor uses and the retry
+    handler catches one type beside the library's (#217). Anything Deribit
+    explains — a JSON-RPC error object at any status — is deterministic and raises
+    immediately, as does a bare 4xx with a JSON body, judged ahead of the status
+    helper (the branch says why the order matters). A 4xx whose body is not JSON
+    — a WAF's 403 page — meets the decode helper first and takes the outage lane:
+    the order this boundary had before the helpers, kept (#217), where SoSoValue's
+    rule reads such a page as an answer. An HTTP 429 raises
+    ``VendorRateLimitError`` so the router treats it as a throttle rather than as
+    a broken vendor.
     """
     url = f"{DERIBIT_BASE}/{endpoint}"
     last_error: Exception | None = None
@@ -652,16 +661,11 @@ def _request(endpoint: str, params: dict) -> object:
             response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
             if response.status_code == 429:
                 raise VendorRateLimitError(f"Deribit rate-limited the {endpoint} request")
-            try:
-                payload = response.json()
-            except ValueError as e:
-                # A CDN/WAF error page rather than the API: transient enough to be
-                # worth the one retry. Worded as the shared boundary helpers word
-                # it, never with the decoder's message: this text ends up in a
-                # raised message the model reads (#203).
-                raise _TransientDeribitFault(
-                    f"answered HTTP {response.status_code} with a body that is not JSON"
-                ) from e
+            # A CDN/WAF error page rather than the API: transient enough to be
+            # worth the one retry. Worded by the shared helper, never with the
+            # decoder's message: this text ends up in a raised message the
+            # model reads (#203).
+            payload = json_body_or_outage(response, "Deribit")
             if isinstance(payload, dict) and payload.get("error"):
                 error = payload["error"]
                 detail = error.get("message", error) if isinstance(error, dict) else error
@@ -676,28 +680,27 @@ def _request(endpoint: str, params: dict) -> object:
                     f"Deribit rejected the {endpoint} request: "
                     f"{_sanitize(detail, limit=MAX_UNTRUSTED_CHARS)}"
                 )
-            if response.status_code >= 500:
-                raise _TransientDeribitFault(
-                    f"answered HTTP {response.status_code} without data"
-                )
-            if response.status_code >= 400:
+            if 400 <= response.status_code < 500:
                 # Deterministic rejection with no JSON-RPC error object to explain
-                # it — a WAF block, a renamed endpoint. Raised here rather than
-                # left to raise_for_status(), whose requests.HTTPError IS a
-                # RequestException and would therefore be caught by the retry
-                # handler below: the request would be slept on and repeated to no
-                # purpose, then reported as "unreachable" when the vendor answered
-                # perfectly clearly the first time.
+                # it — a WAF block, a renamed endpoint. Raised here, ahead of the
+                # status helper: its non-5xx path is raise_for_status(), whose
+                # requests.HTTPError IS a RequestException and would therefore be
+                # caught by the retry handler below — the request would be slept
+                # on and repeated to no purpose, then reported as "unreachable"
+                # when the vendor answered perfectly clearly the first time.
                 raise DeribitError(
                     f"Deribit rejected the {endpoint} request with HTTP {response.status_code}"
                 )
+            # A 5xx with no JSON-RPC error object is the gateway, not the API:
+            # the outage type, worth the one retry. Below 400 this is a no-op.
+            raise_for_http_status(response, "Deribit")
             if not isinstance(payload, dict) or "result" not in payload:
                 raise DeribitError(
                     f"Deribit {endpoint} response has no 'result' field "
                     f"(got a JSON {type(payload).__name__})"
                 )
             return payload["result"]
-        except (requests.RequestException, _TransientDeribitFault) as e:
+        except (requests.RequestException, VendorUnavailableError) as e:
             last_error = e
             if attempt + 1 < _RETRY_ATTEMPTS:
                 logger.warning(
@@ -708,23 +711,19 @@ def _request(endpoint: str, params: dict) -> object:
                 )
                 time.sleep(_RETRY_DELAY_SECONDS)
     # "did not return a usable response", not "unreachable": both retryable faults
-    # can arrive on an answered request — _TransientDeribitFault covers an
+    # can arrive on an answered request — the helpers' outage type covers an
     # undecodable body (only the 429 check precedes it, so an HTTP 200 serving a
     # CDN error page lands here) and a 5xx, where the server plainly responded.
     # Only requests.RequestException is genuinely a reachability failure, and
     # naming it for all three sends an operator hunting an outage that a WAF
     # interception will not explain. All three ARE the vendor being down, so
-    # the raise is the outage type (#172); the cause is quoted as this
-    # module's own fault text, or for a requests exception as its status or
-    # class only — its message carries the request URL (#203).
-    cause = (
-        str(last_error)
-        if isinstance(last_error, _TransientDeribitFault)
-        else generic_failure_words(last_error)
-    )
+    # the raise is the outage type (#172); the cause is quoted through
+    # failure_account — a typed fault's own words, or for a requests exception
+    # its status or class only, since its message carries the request URL
+    # (#203).
     raise DeribitUnavailableError(
         f"Deribit {endpoint} did not return a usable response after {_RETRY_ATTEMPTS} "
-        f"attempts: {cause}"
+        f"attempts: {failure_account(last_error, limit=None)}"
     ) from last_error
 
 
@@ -2543,6 +2542,34 @@ def _try_fetch(
         return None, e
 
 
+def _aggregate_failure_cls(attempted: list[BaseException]) -> type[Exception]:
+    """The type for a report where every request made failed, judged over those alone.
+
+    ``attempted`` holds the failure of each request this report actually
+    made — DVOL's, and the chain's when the date allowed it — never a half
+    withheld by policy, so on a historical date, where the chain is never
+    asked, DVOL's verdict is every request made. Throttled on every one is
+    the router's rate-limit lane: a temporary throttle must not look like a
+    broken vendor to a multi-vendor chain. Down on every one — or down on
+    one and throttled on the other, since a 429 beside a 503 is one vendor
+    not serving, not a bug — is the outage type. Anything else in the mix,
+    a rejection or a parse break, is the module type: the vendor answered,
+    and the frame is the diagnosis. One predicate for both verdicts, so
+    neither can drift from "over the requests made" on its own (#217).
+    An empty list is refused rather than judged: ``all`` over nothing
+    would fabricate the throttle verdict — the worst wrong answer — for a
+    caller invariant (``_try_fetch`` never reports None without an error)
+    this predicate cannot see.
+    """
+    if not attempted:
+        raise ValueError("_aggregate_failure_cls needs at least one failure to judge")
+    if all(isinstance(e, VendorRateLimitError) for e in attempted):
+        return VendorRateLimitError
+    if all(isinstance(e, (VendorUnavailableError, VendorRateLimitError)) for e in attempted):
+        return DeribitUnavailableError
+    return DeribitError
+
+
 def get_options_market_data(asset: str, curr_date: str) -> str:
     """Fetch Deribit DVOL history and 25-delta skew for a crypto asset as markdown.
 
@@ -2760,20 +2787,13 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # (_try_fetch never reports None without an error, so this list is never
         # empty on the path that reaches here.)
         attempted = [e for e in (dvol_error, skew_error) if e is not None]
-        if all(isinstance(e, VendorRateLimitError) for e in attempted):
+        failure_cls = _aggregate_failure_cls(attempted)
+        if failure_cls is VendorRateLimitError:
             raise VendorRateLimitError(f"Deribit rate-limited every request made for {currency}")
-        # The same judgment for an outage: when every request made ended
-        # with the vendor down — or throttled, for a mix of the two, since a
-        # 429 on one half and a 503 on the other is one vendor not serving,
-        # not a bug — the raise below keeps the outage type so the router
-        # logs it without a traceback and counts the vendor as down (#172);
-        # the message stays each branch's own, since a withheld chain is
-        # still the fact worth telling the reader.
-        failure_cls = (
-            DeribitUnavailableError
-            if all(isinstance(e, (VendorUnavailableError, VendorRateLimitError)) for e in attempted)
-            else DeribitError
-        )
+        # An outage verdict keeps the outage type through the branches below,
+        # so the router logs it without a traceback and counts the vendor as
+        # down (#172); the message stays each branch's own, since a withheld
+        # chain is still the fact worth telling the reader.
         # Every message below is handed to the model by route_to_vendor as
         # "DATA_UNAVAILABLE: optional options_data could not be retrieved
         # ({error})", so the cause text is flattened here for the same reason the

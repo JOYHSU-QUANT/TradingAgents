@@ -23,6 +23,8 @@ from tradingagents.dataflows import interface, sosovalue_common, sosovalue_macro
 from tradingagents.dataflows.config import set_config
 from tradingagents.default_config import DEFAULT_CONFIG
 
+from .conftest import sosovalue_unreached
+
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
@@ -683,8 +685,27 @@ def _request_impl(history_by_name=None, history_error=None, error_names=()):
     return impl
 
 
+def _unreached():
+    return sosovalue_unreached("/macro/events/CPI/history")
+
+
 @pytest.mark.unit
 class TestFetchAll:
+    def test_an_unreached_vendor_reaches_the_caller_as_the_outage_type(self, monkeypatch):
+        # Through the real _request (#217): the lane is typed at the boundary,
+        # so neither the sweep nor the cache lane ever sees a requests
+        # exception, and the message carries the class, never the URL.
+        monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
+
+        def unreached(url, params=None, headers=None, timeout=None):
+            raise requests.ConnectionError(f"Max retries exceeded with url: {url}")
+
+        monkeypatch.setattr(sosovalue_common.requests, "get", unreached)
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as exc:
+            sosovalue_macro._fetch_all()
+        assert str(exc.value) == "SoSoValue could not be reached: ConnectionError on /macro/events"
+        assert isinstance(exc.value.__cause__, requests.ConnectionError)
+
     def test_full_success_partitions_all_tracked_events(self, monkeypatch):
         monkeypatch.setattr(sosovalue_macro, "_request", _request_impl())
         payload = sosovalue_macro._fetch_all()
@@ -754,7 +775,7 @@ class TestFetchAll:
             sosovalue_macro,
             "_request",
             _request_impl(
-                history_error=requests.ConnectionError("down"),
+                history_error=_unreached(),
                 error_names={"GDP (QoQ)"},
             ),
         )
@@ -769,7 +790,7 @@ class TestFetchAll:
         # The breaker still bounds the burn: only its worth of history
         # requests is actually sent.
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
+            history_error=_unreached(), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
         # A sweep that died purely of transport is the vendor down: the
@@ -1030,7 +1051,7 @@ class TestCacheAndLoad:
         self._setup(tmp_path, monkeypatch)
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
         with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="no usable cache"):
@@ -1042,7 +1063,7 @@ class TestCacheAndLoad:
         self._write_cache(tmp_path)  # 24h old
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
         snapshot = sosovalue_macro._load_snapshot()
@@ -1053,7 +1074,7 @@ class TestCacheAndLoad:
         self._write_cache(tmp_path)
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
         # An unreached vendor past the cap is the outage type (#172).
@@ -1065,7 +1086,7 @@ class TestCacheAndLoad:
         self._write_cache(tmp_path)
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
         assert sosovalue_macro._load_snapshot().stale is True
@@ -1075,7 +1096,7 @@ class TestCacheAndLoad:
         self._write_cache(tmp_path, fetched_at="2026-08-11T05:00:00Z")  # future stamp
 
         def broken(path, params):
-            raise requests.ConnectionError("down")
+            raise _unreached()
 
         monkeypatch.setattr(sosovalue_macro, "_request", broken)
         with pytest.raises(
@@ -1901,7 +1922,7 @@ class TestBucketsBreakerAndBounds:
         # the only thing keeping the breaker shut: delete it and the sweep is
         # drained at the third failure with the rest never attempted.
         failing = {TRACKED[0], TRACKED[2], TRACKED[4], TRACKED[6]}
-        impl = _request_impl(history_error=requests.ConnectionError("down"), error_names=failing)
+        impl = _request_impl(history_error=_unreached(), error_names=failing)
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
         payload = sosovalue_macro._fetch_all()
         assert set(payload["events_failed"]) == failing
@@ -3180,7 +3201,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         # behind it is never asked for, and the two earlier successes keep the
         # payload writable so the flag actually reaches the cache file.
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"),
+            history_error=_unreached(),
             error_names=set(TRACKED[2:5]),
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
@@ -3203,7 +3224,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         # leans on this — a set flag is supposed to mean "names in the bucket
         # were never requested", and here every name in it was.
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"),
+            history_error=_unreached(),
             error_names=set(TRACKED[-3:]),
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
@@ -3218,7 +3239,7 @@ class TestAnEarlyExitIsAttributedToWhoeverCausedIt:
         # model-visible: it rides a DATA_UNAVAILABLE line once the stale cap
         # is passed.
         impl = _request_impl(
-            history_error=requests.ConnectionError("down"), error_names=set(TRACKED)
+            history_error=_unreached(), error_names=set(TRACKED)
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
         with pytest.raises(sosovalue_common.SoSoValueUnavailableError) as exc:

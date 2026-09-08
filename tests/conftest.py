@@ -1,9 +1,10 @@
 """Shared pytest fixtures that prevent CI hangs when API keys are absent."""
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+import requests
 
 
 def pytest_configure(config):
@@ -123,6 +124,47 @@ def frozen_clock(monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(time, "sleep", lambda s: None)
     return clock
+
+
+_NOT_JSON = object()
+
+
+def fake_response(status: int = 200, *, json=_NOT_JSON):
+    """A ``requests.Response`` stand-in for a vendor boundary's ``requests.get`` seam.
+
+    Models the three things these boundaries read — ``status_code``,
+    ``.json()`` and ``.raise_for_status()`` — in one place, so the suites
+    that used to hand-roll them (Deribit, SoSoValue, Fear & Greed) cannot
+    drift on which of those a status implies (#217). ``json`` left unset
+    is a body that does not decode (a CDN or WAF page): ``.json()`` raises
+    ``ValueError`` as ``requests`` does. Given, it is what ``.json()``
+    returns, ``None`` included — a JSON ``null`` is a decoded answer, not
+    an undecodable one. ``.raise_for_status()`` raises ``requests.HTTPError``
+    carrying this response for any 4xx/5xx, as the library does. A ``Mock``
+    underneath, so a test can still assert what was NOT read
+    (``response.json.assert_not_called()``).
+    """
+    response = Mock()
+    response.status_code = status
+    if json is _NOT_JSON:
+        response.json.side_effect = ValueError("not json")
+    else:
+        response.json.return_value = json
+    response.raise_for_status.side_effect = (
+        requests.HTTPError(f"HTTP {status}", response=response) if status >= 400 else None
+    )
+    return response
+
+
+def sosovalue_unreached(path: str):
+    """What ``sosovalue_common._request`` raises for a vendor it could not reach (#217).
+
+    Authored once for the suites that stub ``_request`` (the sweeps and the
+    cache lane); the tests that drive the real ``_request`` pin the sentence.
+    """
+    from tradingagents.dataflows.sosovalue_common import SoSoValueUnavailableError
+
+    return SoSoValueUnavailableError(f"SoSoValue could not be reached: ConnectionError on {path}")
 
 
 def repo_text(name: str) -> str:

@@ -427,7 +427,8 @@ python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir expo
 ```
 
 回填在 export 之前跑，CSV 直接帶新值；stderr 印一行
-`format_fingerprint backfill for 'paper-BTC-3': stamped=N pre_v10=N missing_payload=N unreadable=N unverified=N`。
+`format_fingerprint backfill for 'paper-BTC-3': stamped=N pre_v10=N missing_payload=N unreadable=N unverified=N`
+（自動改讀 db 旁目錄時是兩行，中間夾一行 `note:`；第一行是記錄路徑那趟、第二行才是最終結果）。
 規則：只寫 NULL 格（daemon 寫過的值永遠不會被重算蓋掉，第二次跑 `stamped=0`）；`pre_v10`＝連
 `context_shape` 都沒有的列，**不填**（三鍵是一組，半組會變成 `validate` 上多出來的新桶）——**這些列永久留在
 `n/a` 桶是接受的現況**（2026-09-03 拍板：不另做 shape 回填工具；paper-BTC-3 自 v10 起跑，只有已封存的

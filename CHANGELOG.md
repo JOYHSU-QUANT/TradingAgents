@@ -173,7 +173,12 @@ Breaking changes within the 0.x line are called out explicitly.
   per-row "try both roots" inside ``persistence/backfill.py``: the layout is
   a ``cli``-level fact and the trust rules per row stay where they are, and
   the double pass only runs on a manual recovery command whose first pass
-  found nothing. And ``cli/__init__`` still imports every subcommand module
+  found nothing. For the same reason, a store on its own host whose payload
+  tree is really gone gets the retry too (the directory beside it IS the
+  recorded one), so it sees two identical count lines and the "copy did not
+  keep the layout" hint — telling that case apart needs the rows' recorded
+  parents, which the report does not carry. And ``cli/__init__`` still
+  imports every subcommand module
   at load — the entry-point split works around that cost rather than making
   those imports lazy, because two dozen tests reach the subcommand internals
   through the package.

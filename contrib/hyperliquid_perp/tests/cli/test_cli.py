@@ -1439,6 +1439,90 @@ def test_export_backfill_hints_when_the_directory_beside_the_store_matches_nothi
     assert f"hint: no payload beside this store ({beside}) matched a recorded file name" in err
     assert "needs --payload-root pointing at that run's payload directory" in err
 
+    # An explicit --payload-root is the operator saying where the files are:
+    # even with that same directory beside the store, a root that matches
+    # nothing is reported as such (one count line, the root-side hint) and
+    # never silently overridden by a read from somewhere they did not point.
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(tmp_path / "exp2"), "--db", str(path)]
+        + ["--backfill-format-fingerprint", "--payload-root", str(tmp_path)]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert err.count("stamped=0 pre_v10=0 missing_payload=1") == 1
+    assert "note:" not in err
+    assert "hint: no payload under --payload-root" in err
+
+
+def test_export_backfill_does_not_retry_beside_the_store_over_a_partly_readable_pass(
+    tmp_path, capsys
+):
+    # One row's payload is missing, another's is where it was recorded but
+    # does not hash to its row (unverified): the files ARE where the pass
+    # looked, and the counts already say what is wrong with them. No retry
+    # under the directory beside the store even though it exists and holds
+    # the missing row's file, and no hint — either would send the operator
+    # after a moved store when the problem is an edited file.
+    path, db = _seed_db(tmp_path)
+    insert_decision_attempts(db, ["completed", "completed"], start=_T0)
+    beside = store_layout.payload_dir(path, "r")
+    _moved, digest_a = write_payload(
+        beside / "BTC-20260706T120000_000000Z.json", {"format_instructions": "block a"}
+    )
+    present, _digest_b = write_payload(tmp_path / "present.json", {"format_instructions": "block b"})
+    stamp_prompt_regimes(
+        db,
+        [
+            ("phase2-target-v4", "price|market", None, "/srv/hl/BTC-20260706T120000_000000Z.json", digest_a),
+            ("phase2-target-v4", "price|market", None, present, "sha256:not-what-is-on-disk"),
+        ],
+    )
+    db.close()
+
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(tmp_path / "exp"), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert err.count("format_fingerprint backfill for") == 1
+    assert "stamped=0 pre_v10=0 missing_payload=1 unreadable=0 unverified=1" in err
+    assert "note:" not in err and "hint:" not in err
+
+
+def test_export_backfill_names_a_lock_hit_by_the_retry_beside_the_store(tmp_path, capsys, monkeypatch):
+    # The second pass takes the write lock like the first; a lock held past
+    # busy_timeout on THAT pass is the same named exit 1 — the retry lives
+    # inside the one sqlite3.Error lane, not after it — and no export runs
+    # over a pass that did not finish.
+    import contrib.hyperliquid_perp.persistence.backfill as backfill_mod
+
+    path, db = _seed_db(tmp_path)
+    db.close()
+    store_layout.payload_dir(path, "r").mkdir(parents=True)
+    roots = []
+
+    def first_finds_nothing_then_locked(db, *, run_id, payload_root=None):
+        roots.append(payload_root)
+        if len(roots) == 1:
+            return backfill_mod.FingerprintBackfill(
+                stamped=0, pre_v10=0, missing_payload=1, unreadable=0, unverified=0
+            )
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(backfill_mod, "backfill_format_fingerprints", first_finds_nothing_then_locked)
+    out = tmp_path / "exp"
+    rc = cli_main(
+        ["export", "--run-id", "r", "--output-dir", str(out), "--db", str(path)]
+        + ["--backfill-format-fingerprint"]
+    )
+    assert rc == 1
+    assert roots == [None, store_layout.payload_dir(path, "r")]
+    err = capsys.readouterr().err
+    assert "note: every payload is missing at its recorded path" in err
+    assert "error: format_fingerprint backfill failed — database is locked" in err
+    assert not out.exists()
+
 
 def test_paper_refuses_missing_db_without_create(tmp_path, capsys):
     # Checked before any key/network work: a typo'd --db must not fork history.
@@ -6979,6 +7063,7 @@ def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
             # seeded, the read says None (section omitted), not a crash.
             captured["book"] = kwargs["position_source"]()
             captured["source"] = kwargs["position_source"]
+            captured["payload_dir"] = kwargs["payload_dir"]
             raise _StopBeforeTheLoop
 
     monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _Recording)
@@ -6988,3 +7073,7 @@ def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
     # The binding itself, not only its no-books result: a swapped run_id/coin
     # would ALSO read "no books" here (no ledger is keyed on "BTC" either).
     assert_position_source_binds(captured["source"], run_id="fresh", coin="BTC")
+    # And where this run's AI payloads go: the one layout the backfill reads
+    # back from (issue #221) — the live and smoke writers have the same pin
+    # through assert_payload_dir; the paper writer is this one.
+    assert captured["payload_dir"] == store_layout.payload_dir(tmp_path / "new.db", "fresh")

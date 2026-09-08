@@ -210,6 +210,15 @@ _SINCE_BEGINNING = "0001-01-01T00:00:00+00:00"
 # that placed nothing would report live_ready / exit 0. That shape is not
 # hypothetical: paper-BTC produced 6/6 invalid_output after a model swap.
 # invalid_output cycles are still surfaced, as a non-gating warning below.
+# One narrow window lands an "answered, unparseably" cycle in api_failed rather
+# than invalid_output (issue #206; accepted in spec §3.1's revision box, (c)):
+# an invalid answer is never stored as resumable (PR #204), so if the gate is
+# then blocked or its persist fails and the process restarts, adoption finds no
+# response to resume and fails the cycle closed. The gate above is untouched
+# (invalid_output never counted here); what moves is that such a cycle counts
+# in api_failed_count, EXTENDS the no-decision streak instead of resetting it,
+# and is missing from the non-gating invalid_output_count — and this report
+# cannot tell it from a cycle the AI never answered, because the row cannot.
 _COMPLETED_CYCLE_STATUSES = ("completed",)
 # The registry stays partitioned into exactly what this file classifies: a NEW
 # terminal attempt status must be counted or explicitly excluded HERE, at

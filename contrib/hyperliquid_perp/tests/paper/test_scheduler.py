@@ -31,6 +31,8 @@ from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngin
 from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
 from contrib.hyperliquid_perp.paper.scheduler import (
     CYCLE_INTERVAL,
+    MAX_DECISION_ATTEMPTS,
+    RETRY_DELAYS_SECONDS,
     CycleEvent,
     DecisionInput,
     PaperScheduler,
@@ -986,12 +988,67 @@ def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
     # A restart therefore cannot resume it. With nothing stored the attempt
     # goes down the §3.1 retry ladder instead — here still between retries, so
     # the poll does nothing at all. Before the skip it resumed, re-parsed the
-    # repr into a live LONG target and gated it. The empty provider script is
-    # part of the assertion: a re-ask would raise IndexError here.
+    # repr into a live LONG target and gated it. The empty provider script
+    # backs the None assertion: a re-ask would exhaust it, and the try contains
+    # that IndexError as a non-retryable failure — a terminal row, not None.
     scheduler2 = _restart(db, clock, engine, _FakeProvider([]))
     assert scheduler2.poll() is None
     row = repo.find_in_progress_attempt(db.conn, "r")
     assert row["status"] == "in_progress"  # never gated, never terminalized
+    assert row["pending_raw_response"] is None
+    db.close()
+
+
+def test_the_reask_window_never_exceeds_the_try_budget(tmp_path):
+    """issue #206: with an invalid answer never stored (above), a restart while
+    its gate is blocked re-enters the §3.1 ladder and asks the AI again — the
+    one place "never re-ask" is relaxed. This pins the exact shape spec §3.1
+    box (c) commits to, not only the cap: each restart in the window adds
+    exactly ONE re-ask (a retryable failure after it would continue the ladder
+    in-process — the ordinary path, not driven here), and once the third try
+    is spent a further restart records the cycle without asking at all. Driven
+    at the worst case the window allows — an invalid answer every time, a gate
+    blocked every time, a restart after each — so the total spend is the
+    ladder's cap and nothing more. A scheduler that stops re-asking (the
+    marker route the CHANGELOG records) must move box (c) and this test
+    together."""
+    invalid = _invalid_decision()
+    # One TIMEOUT per gate (the AI answers, the store is skipped, the gate
+    # blocks), then a fresh mark for the terminal's best-effort snapshot.
+    db, clock, engine, scheduler, provider = _setup(
+        tmp_path, [invalid], [SnapshotOutcome.TIMEOUT] * MAX_DECISION_ATTEMPTS + [_snap()]
+    )
+    assert scheduler.poll().event is CycleEvent.PENDING_MARKET_DATA
+    attempt_id = repo.find_in_progress_attempt(db.conn, "r")["decision_attempt_id"]
+    assert provider.decide_calls == 1
+    for try_no in range(2, MAX_DECISION_ATTEMPTS + 1):
+        # Restart: the row has no response to resume and a spent try, so the
+        # ladder's back-off applies first (no call), then exactly ONE re-ask.
+        provider = _FakeProvider([invalid])
+        scheduler = _restart(db, clock, engine, provider)
+        assert scheduler.poll() is None  # between retries — nothing spent
+        assert provider.decide_calls == 0
+        clock.advance(RETRY_DELAYS_SECONDS[try_no - 2])
+        assert scheduler.poll().event is CycleEvent.PENDING_MARKET_DATA
+        assert provider.decide_calls == 1  # one restart, one more call
+        assert _attempt_row(db, attempt_id)["attempt_count"] == try_no
+    # The budget is spent. A further restart must not ask again, and must close
+    # the row as the §3.1 terminal rather than leave it on the ladder or the
+    # gate. The pins are the call counts and the `interrupted` class, not a
+    # raise: a scheduler that skips the budget check waits out a fourth
+    # back-off and returns None (the event assertion), and one that re-asks
+    # exhausts the empty script — an IndexError the try CONTAINS as a
+    # non-retryable failure, so the row would still read api_failed, with no
+    # class and a fourth build call (the build_calls and error_type assertions).
+    provider = _FakeProvider([])
+    scheduler = _restart(db, clock, engine, provider)
+    result = scheduler.poll()
+    assert result.event is CycleEvent.API_FAILED
+    assert provider.build_calls == 0 and provider.decide_calls == 0
+    row = _attempt_row(db, attempt_id)
+    assert row["status"] == "api_failed"
+    assert row["error_type"] == "interrupted"
+    assert row["attempt_count"] == MAX_DECISION_ATTEMPTS
     assert row["pending_raw_response"] is None
     db.close()
 

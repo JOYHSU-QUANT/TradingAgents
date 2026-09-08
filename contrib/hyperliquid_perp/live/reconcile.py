@@ -35,7 +35,7 @@ from typing import Any
 
 from ..common.enum_guard import check_enum
 from ..common.instants import epoch_ms, whole_hours_label
-from ..common.seam_guard import require_seam
+from ..common.seam_guard import require_object_seam, require_seam
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (
     HL_SIDE_TO_LOCAL,
@@ -484,24 +484,32 @@ class LiveReconciler:
             require_seam(
                 "fetch_fills", fetch_fills, kind="exchange", shape="(start_ms, end_ms) -> fills list"
             )
-        # ``stream`` is three seams on one object, each called inside the guarded
-        # fill leg (``_run_fill_backfill``) — checked one by one so the refusal
-        # names the missing method (issue #169). ``None`` is every wiring today:
-        # no production site binds a stream to the reconciler (the v1 loop runs
-        # the REST backfill without a socket — ``cli/live_loop``'s scope note),
-        # so this covers the seam for the wiring that will.
+        # ``refresh_kill_switch`` is called inside the guarded lanes too (every
+        # sweep's ``_refresh_deadline``); ``None`` is the test wiring — both
+        # production sites pass one — and anything else must be callable
+        # (issue #224).
+        if refresh_kill_switch is not None:
+            require_seam(
+                "refresh_kill_switch",
+                refresh_kill_switch,
+                kind="kill-switch refresh",
+                shape="() -> None",
+            )
+        # ``stream`` is three seams on one object — ``backfill_epoch() ->
+        # epoch``, ``backfill_since() -> datetime | None``,
+        # ``mark_backfill_done(epoch) -> bool`` — each called inside the guarded
+        # fill leg (``_run_fill_backfill``), so the refusal names the missing
+        # method (issue #169). ``None`` is every wiring today: no production
+        # site binds a stream to the reconciler (the v1 loop runs the REST
+        # backfill without a socket — ``cli/live_loop``'s scope note), so this
+        # covers the seam for the wiring that will.
         if stream is not None:
-            for method, shape in (
-                ("backfill_epoch", "() -> epoch"),
-                ("backfill_since", "() -> datetime | None"),
-                ("mark_backfill_done", "(epoch) -> bool"),
-            ):
-                require_seam(
-                    f"stream.{method}",
-                    getattr(stream, method, None),
-                    kind="LiveWsStream fill-leg",
-                    shape=shape,
-                )
+            require_object_seam(
+                "stream",
+                stream,
+                kind="LiveWsStream fill-leg",
+                methods=("backfill_epoch", "backfill_since", "mark_backfill_done"),
+            )
         self._db = db
         self._run_id = run_id
         self._coin = coin
@@ -538,6 +546,14 @@ class LiveReconciler:
                 "LiveReconciler takes EITHER an identity monitor OR query_order_by_cloid — "
                 "the monitor owns the orderStatus seam"
             )
+        else:
+            # An object seam like ``stream``: every ``probe`` below runs inside
+            # a guarded lane that turns any exception into an unproven case,
+            # so a stand-in without one would fail every orderStatus read
+            # softly, forever (issue #224).
+            require_object_seam(
+                "identity", identity, kind="VenueIdentityMonitor", methods=("probe",)
+            )
         self._identity = identity
         # §18.2: a full sweep is the longest wall of REST traffic on the
         # single-threaded live tick — two account reads, a paged fill backfill,
@@ -566,19 +582,22 @@ class LiveReconciler:
 
         The window and its operator label follow whichever backfiller is bound
         (see ``_crosscheck_window``), so both refusals sit here rather than in
-        ``__init__``: a stand-in without a ``lookback`` is named as a mis-wiring
-        (the ``require_seam`` policy, one seam over) instead of surfacing as
-        an AttributeError inside a guarded leg, and a fractional-hour lookback
-        is refused before the first sweep whether the backfiller arrived at
-        construction (both production sites) or was attached afterwards
-        (tests). It refused at import while the window was a module constant.
+        ``__init__``: a stand-in without a ``lookback`` (the cross-check
+        window) or a ``backfill`` (the fill leg) is named as a mis-wiring —
+        the object form of the seam guard, one seam over — instead of
+        surfacing as an AttributeError inside a guarded leg, and a
+        fractional-hour lookback is refused before the first sweep whether the
+        backfiller arrived at construction (both production sites) or was
+        attached afterwards (tests). It refused at import while the window was
+        a module constant.
         """
-        if backfiller is not None and not (
-            hasattr(backfiller, "lookback") and callable(getattr(backfiller, "backfill", None))
-        ):
-            raise TypeError(
-                "backfiller must be a FillBackfiller (its .lookback is the cross-check "
-                f"window, its .backfill() the fill leg), got {type(backfiller).__name__}"
+        if backfiller is not None:
+            require_object_seam(
+                "backfiller",
+                backfiller,
+                kind="FillBackfiller",
+                methods=("backfill",),
+                attrs=("lookback",),
             )
         # Checked BEFORE the slot is written, so a refused binding does not land.
         candidate, owner = self._window_of(backfiller)

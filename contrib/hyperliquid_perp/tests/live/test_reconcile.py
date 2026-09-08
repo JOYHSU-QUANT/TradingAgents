@@ -964,17 +964,46 @@ def test_a_fractional_hour_lookback_is_refused_when_the_backfiller_is_bound(env,
 def test_a_stand_in_backfiller_without_a_lookback_is_refused_by_name(env):
     # The cross-check window is read off the backfiller, so an object without
     # one is a mis-wiring named where it is bound (like the seams), not an
-    # AttributeError inside a guarded leg on the first sweep.
+    # AttributeError inside a guarded leg on the first sweep. The object form
+    # of the shared guard (issue #224): the message's full shape is pinned
+    # where it is owned (``tests/common/test_seam_guard.py``); this pins that
+    # the binding goes through it and names what the stand-in lacks.
     db, seams, reconciler = env
-    with pytest.raises(TypeError, match="backfiller must be a FillBackfiller"):
+    refusal = r"backfiller must be the FillBackfiller seam \(\.backfill\(\), \.lookback\), got "
+    lacks_both = refusal + r"object without \.backfill\(\), \.lookback$"
+    with pytest.raises(TypeError, match=lacks_both):
         _reconciler_over(db, seams, object())
-    with pytest.raises(TypeError, match="backfiller must be a FillBackfiller"):
+    with pytest.raises(TypeError, match=lacks_both):
         reconciler._backfiller = object()
     # ...and one that answers the window question but cannot run the leg is
     # the same mis-wiring (the leg's call sits inside the guarded lane too).
-    with pytest.raises(TypeError, match="backfiller must be a FillBackfiller"):
+    with pytest.raises(TypeError, match=refusal + r"SimpleNamespace without \.backfill\(\)$"):
         reconciler._backfiller = SimpleNamespace(lookback=timedelta(hours=6))
     assert reconciler._backfiller is None
+
+
+def test_an_identity_monitor_that_cannot_probe_is_refused_at_construction(env):
+    # ``identity`` is an object seam like ``stream``: both ``probe`` sites sit
+    # inside guarded lanes that turn any exception into an unproven case, so
+    # a stand-in without one would fail every orderStatus read softly, for
+    # the life of the run (issue #224). ``None`` stays "build a private one".
+    db, seams, _ = env
+    with pytest.raises(
+        TypeError,
+        match=r"identity must be the VenueIdentityMonitor seam \(\.probe\(\)\), "
+        r"got SimpleNamespace without \.probe\(\)$",
+    ):
+        _reconciler_over(db, seams, None, query_order_by_cloid=None, identity=SimpleNamespace())
+
+
+def test_a_non_callable_refresh_hook_is_refused_at_construction(env):
+    # ``refresh_kill_switch`` runs inside every sweep's guarded lanes, so a
+    # switch passed where its refresh closure was meant would surface as a
+    # failed sweep, never a crash — the exchange-seam argument again (issue
+    # #224). ``None`` stays the test wiring (``env``).
+    db, seams, _ = env
+    with pytest.raises(TypeError, match="refresh_kill_switch must be the kill-switch refresh seam"):
+        _reconciler_over(db, seams, None, refresh_kill_switch=SimpleNamespace(refresh=lambda: None))
 
 
 def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog):
@@ -1925,12 +1954,13 @@ def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_constructio
     two_of_three = SimpleNamespace(
         **{m: (lambda *args: None) for m in _STREAM_SEAM_METHODS if m != missing}
     )
-    # An ABSENT method reads as ``got NoneType``: the guard sees getattr's
-    # default, and the name in front of it is what tells the operator which
-    # method to add.
+    # The object form of the shared guard (issue #224): the message states
+    # the whole shape and then the member this stand-in lacks — not the
+    # ``got NoneType`` the callable guard read off ``getattr``'s default.
     with pytest.raises(
         TypeError,
-        match=rf"stream\.{missing} must be the LiveWsStream fill-leg seam .*, got NoneType",
+        match=rf"stream must be the LiveWsStream fill-leg seam \(.*\), "
+        rf"got SimpleNamespace without \.{missing}\(\)$",
     ):
         _reconciler_over(db, seams, None, stream=two_of_three)
     all_three = SimpleNamespace(**{m: (lambda *args: None) for m in _STREAM_SEAM_METHODS})

@@ -306,6 +306,13 @@ def assert_paired_sweep_refreshes(record, *, owner):
     ):
         _assert_sweep_refreshes(record, switch, backfiller, label=f"{owner}'s backfiller")
         _assert_sweep_refreshes(record, switch, reconciler, label=f"{owner}'s reconciler")
+        # One exchange seam, bound once (issue #224): the backfiller reads
+        # fills through the very object the reconciler's cross-check was
+        # given — identity, not equality, because the doubles' (and the real
+        # client's) ``user_fills_by_time`` is a method, a new bound object on
+        # every access. ``live.wiring`` is where that is decided; this is the
+        # pin that both sites go through it rather than naming the seam twice.
+        assert backfiller["fetch"] is reconciler["fetch_fills"], owner
 
 
 def assert_payload_dir(reconciler_kwargs, db_path, *, run_id):

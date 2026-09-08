@@ -33,15 +33,13 @@ closed.
 from __future__ import annotations
 
 import logging
-import math
-import numbers
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from ..common.instants import epoch_ms
+from ..common.instants import epoch_ms, seconds_span
 from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..paper.clock import Clock, WallClock
@@ -162,42 +160,28 @@ class FillBackfiller:
         refresh_kill_switch: Callable[[], None] | None = None,
     ) -> None:
         # Refused at construction, not inside the guarded fill leg — see
-        # ``common.seam_guard``. cli/live.py hands this SAME object to the
+        # ``common.seam_guard``. ``live/wiring`` hands this SAME object to the
         # reconciler's ``fetch_fills``, which already refused it (issue #169).
         # ``processor`` is an object seam (``.ingest_message``), not a callable,
-        # and wirings that never reach a fill pass ``None`` — left unchecked.
+        # and wirings that never reach a fill pass ``None`` — left unchecked
+        # (decided with PR #223). ``refresh_kill_switch`` is called after every
+        # page, inside the same guarded leg; ``None`` is the test wiring, and
+        # anything else must be callable (issue #224).
         require_seam("fetch", fetch, kind="exchange", shape="(start_ms, end_ms) -> fills list")
-        # Converge on float BEFORE ``timedelta(seconds=...)`` (issue #169). The
-        # bare ``<= 0`` check let through what it could not see: a ``Decimal``
-        # or a float NaN / infinity died inside ``timedelta`` with a message
-        # naming nothing, a ``bool`` was silently a one-second window, a
-        # ``str`` (or a Decimal NaN) died at the comparison. Each is refused
-        # by name here, and so is what ``timedelta`` itself would refuse or
-        # quietly round (beyond its range; under its microsecond, which
-        # becomes a zero-width window). A span the datetime arithmetic in
-        # ``_window_start`` cannot honour — thousands of years — is not
-        # refused here; no wiring passes one.
-        if isinstance(lookback_seconds, bool) or not isinstance(
-            lookback_seconds, (numbers.Real, Decimal)
-        ):
-            raise TypeError(
-                "lookback_seconds must be a number of seconds, "
-                f"got {type(lookback_seconds).__name__}"
+        if refresh_kill_switch is not None:
+            require_seam(
+                "refresh_kill_switch",
+                refresh_kill_switch,
+                kind="kill-switch refresh",
+                shape="() -> None",
             )
-        try:
-            seconds = float(lookback_seconds)
-        except (OverflowError, ValueError):  # too large for a float; a signaling NaN
-            seconds = math.nan
-        if (
-            not math.isfinite(seconds)
-            or not 0 < seconds < timedelta.max.total_seconds()
-            or timedelta(seconds=seconds) <= timedelta(0)
-        ):
-            raise ValueError(
-                "lookback_seconds must be > 0 and finite, within timedelta's range, "
-                f"got {lookback_seconds}"
-            )
-        lookback_seconds = seconds
+        # Converged on a span BEFORE ``timedelta(seconds=...)`` runs inside the
+        # leg (issue #169), by the guard every ``*_seconds`` argument shares
+        # (issue #224): a bool, a str, NaN, an infinity, a value beyond
+        # ``timedelta``'s range or under its microsecond are each refused by
+        # name here. A span the datetime arithmetic in ``_window_start`` cannot
+        # honour — thousands of years — is not refused; no wiring passes one.
+        lookback = seconds_span("lookback_seconds", lookback_seconds)
         if max_pages < 1:
             raise ValueError(f"max_pages must be >= 1, got {max_pages}")
         if response_fill_cap < 1:
@@ -205,7 +189,7 @@ class FillBackfiller:
         self._fetch = fetch
         self._processor = processor
         self._clock = clock or WallClock()
-        self._lookback = timedelta(seconds=lookback_seconds)
+        self._lookback = lookback
         self._max_pages = max_pages
         self._response_cap = response_fill_cap
         # §18.2: called after every page. A backfill runs on the single-threaded

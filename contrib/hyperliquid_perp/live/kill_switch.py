@@ -54,6 +54,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from ..common.instants import seconds_span
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
@@ -166,8 +167,18 @@ def kill_switch_timing_violation(
     exit 2 outside the documented 0/4/1 contract, with side effects already
     on disk (decided 2026-07-17).
     """
-    if max_tick_gap_seconds <= 0:
-        return f"max_tick_gap_seconds must be > 0, got {max_tick_gap_seconds}"
+    # The gap is converged first, HERE rather than in the constructor, so the
+    # preflight and the constructor read one number the same way (issue #224):
+    # a bool, NaN or infinity would pass a bare ``<= 0`` and then satisfy or
+    # fail the sum below for no reason the message could state — NaN in
+    # particular sums to NaN, which compares under any deadline. Refused by
+    # name as a violation message, which is what both callers read.
+    try:
+        max_tick_gap_seconds = seconds_span(
+            "max_tick_gap_seconds", max_tick_gap_seconds
+        ).total_seconds()
+    except (TypeError, ValueError) as exc:
+        return str(exc)
     # Every term above, summed in the same order. The failed attempt's own wall
     # time and the second tick wait are NOT refinements — they are the two
     # largest terms after the interval itself, and leaving them out is what made

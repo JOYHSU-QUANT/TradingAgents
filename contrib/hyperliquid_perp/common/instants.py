@@ -19,6 +19,19 @@ and each had grown its own copy of the same guard: a span that is not whole
 hours must refuse at import rather than render truncated, because "5h" over a
 5h30m window understates the bound the message is describing.
 
+:func:`seconds_span` is the ONE convergence of a ``*_seconds`` constructor
+argument onto a span. Four live constructors take one (the backfill lookback,
+the stream's stale and silent thresholds, the kill switch's tick-gap
+promise), and each once guarded it with a bare ``<= 0`` that could not see
+what it let through: a ``bool`` was silently a one-second window, a ``str``
+died at the comparison, a float NaN or infinity died inside ``timedelta``
+with a message naming nothing, and a value beyond ``timedelta``'s range (or
+under its microsecond, which rounds to a zero-width span) overflowed or
+rounded there. The backfiller grew the full check first (issue #169); here
+it is shared, so every such argument is refused by name the same way
+(issue #224). The YAML loaders already coerce their ``*_seconds`` keys, so
+in practice this refuses a caller that constructs directly.
+
 :func:`epoch_ms`, :func:`from_epoch_ms` and :func:`delta_ms` are the ONE
 implementation of the venue's time form. Hyperliquid stamps everything —
 candle closes, funding settlements, fills, the exchange clock, the kill
@@ -36,9 +49,19 @@ and ``epoch_ms(from_epoch_ms(n)) == n`` for any integer ``n``.
 
 from __future__ import annotations
 
+import math
+import numbers
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
-__all__ = ["delta_ms", "epoch_ms", "from_epoch_ms", "parse_instant", "whole_hours_label"]
+__all__ = [
+    "delta_ms",
+    "epoch_ms",
+    "from_epoch_ms",
+    "parse_instant",
+    "seconds_span",
+    "whole_hours_label",
+]
 
 _HOUR = timedelta(hours=1)
 _ONE_MS = timedelta(milliseconds=1)
@@ -67,6 +90,38 @@ def whole_hours_label(span: timedelta, *, what: str) -> str:
             f"renders it as hours (got {span})"
         )
     return f"{span // _HOUR}h"
+
+
+def seconds_span(name: str, value: object) -> timedelta:
+    """``value`` seconds as a positive, finite span; refused by name otherwise.
+
+    ``TypeError`` for anything that is not a number of seconds — a ``bool``
+    (an ``int`` to ``isinstance``, never a duration), a ``str``, ``None`` —
+    and ``ValueError`` for a number that is not a usable span: NaN, an
+    infinity, zero or negative, beyond ``timedelta``'s range, or so small
+    that ``timedelta`` rounds it to nothing. ``numbers.Real`` and ``Decimal``
+    both pass (a numpy scalar is Real; ``Decimal`` is the shape a config
+    number arrives in, and is not Real), converged through ``float`` so a
+    ``Decimal`` NaN or a value too large for a float are refused with the
+    others rather than dying on the conversion. A span the caller's own
+    datetime arithmetic cannot honour — thousands of years — is not refused
+    here; no wiring passes one.
+    """
+    if isinstance(value, bool) or not isinstance(value, (numbers.Real, Decimal)):
+        raise TypeError(f"{name} must be a number of seconds, got {type(value).__name__}")
+    try:
+        seconds = float(value)
+    except (OverflowError, ValueError):  # too large for a float; a signaling NaN
+        seconds = math.nan
+    if (
+        not math.isfinite(seconds)
+        or not 0 < seconds < timedelta.max.total_seconds()
+        or timedelta(seconds=seconds) <= timedelta(0)
+    ):
+        raise ValueError(
+            f"{name} must be > 0 and finite, within timedelta's range, got {value}"
+        )
+    return timedelta(seconds=seconds)
 
 
 def delta_ms(later: datetime, earlier: datetime) -> int:

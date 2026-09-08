@@ -420,6 +420,33 @@ def test_a_nonpositive_tick_gap_is_a_wiring_error():
         _manager_with(KillSwitchConfig(), max_tick_gap_seconds=0)
 
 
+@pytest.mark.parametrize("bad", [True, float("nan"), float("inf")], ids=["bool", "nan", "inf"])
+def test_a_tick_gap_that_is_not_a_span_is_refused_by_name(bad):
+    # The invariant's old ``<= 0`` line could not see these: ``True`` passed
+    # as a one-second gap, NaN made the worst-case sum NaN (which compares
+    # under any deadline, so the manager built), an infinity failed the sum
+    # with a message about the deadline rather than about the number. The
+    # invariant now converges the gap through the guard every ``*_seconds``
+    # argument shares (issue #224) — INSIDE ``kill_switch_timing_violation``,
+    # so the CLI preflight reads the same refusal as a message and the
+    # constructor raises it, one owner for both halves.
+    from contrib.hyperliquid_perp.live.kill_switch import kill_switch_timing_violation
+
+    with pytest.raises(ValueError, match="^max_tick_gap_seconds must be"):
+        _manager_with(KillSwitchConfig(), max_tick_gap_seconds=bad)
+    message = kill_switch_timing_violation(KillSwitchConfig(), bad)
+    assert message is not None and message.startswith("max_tick_gap_seconds must be"), message
+
+
+def test_a_decimal_tick_gap_converges_before_the_invariants_arithmetic():
+    # ``Decimal`` is the shape a config number arrives in and the guard
+    # accepts it; the invariant sums it with floats, so a Decimal that passed
+    # the guard and reached the sum unconverged died there as an unnamed
+    # TypeError (caught in review of this change's first cut). Converged inside
+    # the invariant, it builds exactly as its float twin does.
+    assert _manager_with(KillSwitchConfig(), max_tick_gap_seconds=Decimal("30")) is not None
+
+
 def test_arm_schedules_the_120s_deadline_and_records(env):
     db, client, gate, clock, manager = env
     manager.arm()

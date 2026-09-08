@@ -16,8 +16,27 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from ..common import store_layout
 from ..persistence.db import Database
 from ._common import _existing_run_row, _open_existing_db
+
+
+def _every_payload_missing(report) -> bool:
+    """The pass found NOTHING at the paths it tried (pre_v10 rows aside).
+
+    ``report`` is a ``persistence.backfill.FingerprintBackfill``. Far likelier
+    a store away from its host, or a root at the wrong level, than a tree
+    that lost every file — so this is what makes the reader try the
+    directory beside the store, and what makes a hint true. A pass under
+    which SOME name matched (``unreadable`` / ``unverified`` > 0) is neither:
+    the files are where it looked, and the counts already say what is wrong
+    with them.
+    """
+    return (
+        report.stamped == 0
+        and bool(report.missing_payload)
+        and not (report.unreadable or report.unverified)
+    )
 
 
 def _cmd_export(argv: list[str]) -> int:
@@ -44,10 +63,13 @@ def _cmd_export(argv: list[str]) -> int:
         metavar="DIR",
         help=(
             "With --backfill-format-fingerprint, on a store copied away from "
-            "the host that wrote it: read each row's payload by its recorded "
-            "file name under DIR instead of at the absolute path the daemon "
-            "recorded (which would count every row as missing_payload). The "
-            "files must still hash to the rows' input_payload_hash."
+            "the host that wrote it WITHOUT its payload directory beside it: "
+            "read each row's payload by its recorded file name under DIR "
+            "instead of at the absolute path the daemon recorded (which would "
+            "count every row as missing_payload). A copy that kept the "
+            f"daemon's <db dir>/{store_layout.PAYLOADS_DIRNAME}/<run-id>/ layout "
+            "next to the db is read from there without this flag. The files "
+            "must still hash to the rows' input_payload_hash."
         ),
     )
     args = parser.parse_args(argv)
@@ -77,56 +99,83 @@ def _cmd_export(argv: list[str]) -> int:
             from ..persistence import repository as repo
             from ..persistence.backfill import backfill_format_fingerprints
 
+            # The layout the daemons write (cli/paper.py, cli/live.py,
+            # cli/smoke.py, all through common.store_layout): this run's
+            # payloads beside THIS store. A copy that moved the db and its
+            # payloads together lands there, so it is the reader's second try
+            # without a flag, and the directory every hint below names.
+            beside = store_layout.payload_dir(args.db, args.run_id)
+            retried_beside = False
+
+            def _pass(root: Path | None):
+                report = backfill_format_fingerprints(db, run_id=args.run_id, payload_root=root)
+                print(report.summary(args.run_id), file=sys.stderr)
+                return report
+
             # Skipped silently over an unknown run: export_run below refuses
             # it in the one ``export_failed`` wording this command has always
             # used, and a "stamped=0" line about a typo would only compete
             # with it.
             try:
                 known = repo.get_run(db.conn, args.run_id) is not None
-                report = (
-                    backfill_format_fingerprints(db, run_id=args.run_id, payload_root=payload_root)
-                    if known
-                    else None
-                )
+                report = _pass(payload_root) if known else None
+                if (
+                    report is not None
+                    and payload_root is None
+                    and _every_payload_missing(report)
+                    and beside.is_dir()
+                ):
+                    # Nothing at the recorded paths, and a directory in the
+                    # daemon's layout beside the store: read there before
+                    # asking for --payload-root. Safe to run the pass twice —
+                    # the first stamped nothing, and only NULL cells are ever
+                    # written, so the second sees the same rows. Said on
+                    # stderr, so a stamped line after a missing_payload line
+                    # is not read as a contradiction.
+                    retried_beside = True
+                    print(
+                        "note: every payload is missing at its recorded path; reading "
+                        f"them under the directory beside this store instead ({beside})",
+                        file=sys.stderr,
+                    )
+                    report = _pass(beside)
             except sqlite3.Error as exc:
                 # The pass takes the store's write lock (RUNBOOK §6 says a
                 # running daemon is fine): a lock held past busy_timeout is a
                 # named refusal here, not a traceback exit 2.
                 print(f"error: format_fingerprint backfill failed — {exc}", file=sys.stderr)
                 return 1
-            if report is not None:
-                print(report.summary(args.run_id), file=sys.stderr)
-                if (
-                    report.stamped == 0
-                    and report.missing_payload
-                    and not (report.unreadable or report.unverified)
-                ):
-                    # Every payload the pass looked for was absent (pre_v10
-                    # rows aside): far likelier a store away from its host, or
-                    # a root at the wrong level, than a tree that lost its
-                    # files. The daemons write ``<db dir>/payloads/<run_id>/
-                    # <coin>-<stamp>.json`` (cli/paper.py, cli/live.py,
-                    # cli/smoke.py), so the candidate beside THIS store is
-                    # named — a copy that moved the db and its payloads
-                    # together lands there. Only when the counts make the
-                    # sentence true: a root under which some name matched
-                    # (unverified / unreadable > 0) gets no hint.
-                    candidate = Path(args.db).resolve().parent / "payloads" / args.run_id
-                    if payload_root is None:
-                        print(
-                            "hint: every payload is missing at its recorded path; a store "
-                            "copied off the host that wrote it needs --payload-root pointing "
-                            f"at that run's payload directory (here: {candidate})",
-                            file=sys.stderr,
-                        )
-                    else:
-                        print(
-                            f"hint: no payload under --payload-root {args.payload_root!r} "
-                            "matched a recorded file name; the daemon writes them under "
-                            f"<db dir>/payloads/{args.run_id}/ (here: {candidate}) — point "
-                            "at that run's own directory",
-                            file=sys.stderr,
-                        )
+            if report is not None and _every_payload_missing(report):
+                # Only when the counts make the sentence true (see the
+                # predicate): which sentence depends on where the pass looked.
+                layout = f"<db dir>/{store_layout.PAYLOADS_DIRNAME}/"
+                if args.payload_root is not None:
+                    print(
+                        f"hint: no payload under --payload-root {args.payload_root!r} "
+                        "matched a recorded file name; the daemon writes them under "
+                        f"{layout}{args.run_id}/ (here: {beside}) — point at that run's "
+                        "own directory",
+                        file=sys.stderr,
+                    )
+                elif retried_beside:
+                    print(
+                        f"hint: no payload beside this store ({beside}) matched a recorded "
+                        f"file name either; a copy that did not keep the daemon's "
+                        f"{layout}<run-id>/ layout needs --payload-root pointing at that "
+                        "run's payload directory",
+                        file=sys.stderr,
+                    )
+                else:
+                    # ``is_dir()`` is false for a missing path AND for a file
+                    # of that name, so "no payload directory" is the sentence
+                    # that is true in both cases.
+                    print(
+                        "hint: every payload is missing at its recorded path, and there "
+                        f"is no payload directory beside this store at {beside}; a store "
+                        "copied off the host that wrote it needs --payload-root pointing "
+                        "at that run's payload directory",
+                        file=sys.stderr,
+                    )
         try:
             paths = export_run(db, run_id=args.run_id, output_dir=args.output_dir)
         except ExportError as exc:

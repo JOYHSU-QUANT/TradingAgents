@@ -4,7 +4,10 @@ Home for the pure helpers that several layers (domains, persistence, paper,
 live, audit) import but none owns: the enum guard, the construction-time seam
 guard (:mod:`.seam_guard`; issue #169), the YAML-coercion seam, the
 pinned decimal context, the network vocabulary, the store's timestamp decoder,
-and the atomic text write — plus the three things the paper and live sides
+the on-disk layout beside a store (:mod:`.store_layout`; issue #221), the
+legacy-vs-subcommand argv split the two entry points make
+(:mod:`.entry_argv`; issue #221) and the atomic text write — plus the three
+things the paper and live sides
 share without either owning them: the decision cadence
 (``constants.CYCLE_INTERVAL``), the no-decision escalation policy
 (:mod:`.no_decision`; issue #122), and the in-flight decision state machine

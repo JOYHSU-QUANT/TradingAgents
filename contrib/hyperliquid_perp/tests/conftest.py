@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from contrib.hyperliquid_perp.common import store_layout
 from contrib.hyperliquid_perp.common.inflight import inflight_ids
 from contrib.hyperliquid_perp.common.instants import parse_instant
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -310,18 +311,17 @@ def assert_paired_sweep_refreshes(record, *, owner):
 def assert_payload_dir(reconciler_kwargs, db_path, *, run_id):
     """The reconciler was given somewhere to write its raw payload evidence.
 
-    Segment by segment rather than one path comparison — the same claim either
-    way, but a failure names which part of ``<db parent>/payloads/<run id>``
-    moved. Every segment IS checked: dropping the middle one left a rename of
-    the production literal invisible to both payload-dir pins (2026-08-19
-    mutation probe). The recipe is hand-copied at four cli.py sites and these
-    pins drive two of them; the other two are nobody's here.
+    The place is the ONE layout ``common.store_layout.payload_dir`` derives
+    (``<db parent>/payloads/<run id>``): the four ``cli`` writers call it and
+    the offline backfill reads through it, so this pin asserts identity with
+    that answer rather than re-spelling the segments. The segments themselves
+    are pinned once, beside the helper (``tests/common/test_store_layout.py``);
+    what a writer can still get wrong — and what this catches — is handing the
+    reconciler a directory derived from the wrong store or run.
     """
     payload_dir = reconciler_kwargs.get("payload_dir")
     assert payload_dir is not None, "the reconciler writes no clearinghouse evidence"
-    assert payload_dir.name == run_id, payload_dir
-    assert payload_dir.parent.name == "payloads", payload_dir
-    assert payload_dir.parent.parent == db_path.resolve().parent, payload_dir
+    assert payload_dir == store_layout.payload_dir(db_path, run_id), payload_dir
 
 
 def synthetic_bar(**over):

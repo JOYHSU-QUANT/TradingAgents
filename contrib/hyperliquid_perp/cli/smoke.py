@@ -8,8 +8,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
+from ..common import store_layout
 from ._common import (
     _existing_run_row,
     _migrate_owned_store,
@@ -451,7 +451,7 @@ def _build_smoke_session(args, db):
             run_id=args.run_id,
             coin=coin,
             network=live_cfg.network,
-            payload_dir=Path(args.db).resolve().parent / "payloads" / args.run_id,
+            payload_dir=store_layout.payload_dir(args.db, args.run_id),
             owner_prefix=live_cfg.order_owner_prefix,
             mark_price=_unavailable,
             qty_step=Decimal(1),
@@ -545,7 +545,7 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     def _mark() -> Decimal:
         return market.get_market_snapshot(coin).mark_price
 
-    payload_dir = Path(args.db).resolve().parent / "payloads" / args.run_id
+    payload_dir = store_layout.payload_dir(args.db, args.run_id)
 
     def _run_recovery():
         return _smoke_startup_recovery(

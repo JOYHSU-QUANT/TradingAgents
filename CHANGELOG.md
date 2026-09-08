@@ -139,6 +139,45 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the payload directory beside a store is derived in one
+  place, and ``export --backfill-format-fingerprint`` reads a copy that kept
+  that layout without a flag** (issue #221). The three daemons (``paper``,
+  ``live``, ``live-smoke``) and the backfill's hint each spelled
+  ``<db dir>/payloads/<run_id>`` by hand — four writer sites, one reader
+  hint and a test pin — so a rename at one writer would have left the reader
+  looking in the old place with nothing red. ``common.store_layout.payload_dir``
+  is now the one definition, pinned by a grep over the package's production
+  sources. Building on it, the backfill pass no longer stops at the hint when
+  a store was copied together with its payload directory: when every recorded
+  path is missing (no ``unreadable`` / ``unverified`` — the files are not
+  where it looked, rather than wrong) and that directory exists beside the
+  store, the pass runs again under it and says so on stderr (a ``note:`` line
+  between the two count lines). ``--payload-root`` keeps its meaning and its
+  refusals (usage error without the pass, empty string, not a directory) for
+  a copy that did not keep the layout; the no-flag hint now names which of
+  the two cases it is in. Also: ``python -m contrib.hyperliquid_perp
+  --context-only`` no longer imports the ``cli`` package on its way to the
+  legacy entry — ``__main__`` makes the legacy-vs-subcommand split itself
+  (through ``common.entry_argv.is_legacy_argv``, the one predicate both it
+  and ``cli.main`` call) and imports only the side it needs, so both spellings
+  of the keyless preview are the lighter lane PR #220 made of ``.main``; and
+  the ``cli`` exit-code contract now says that ``2`` also covers argparse's
+  own usage errors.
+
+  Known trade-offs, accepted deliberately: the ``position_section_omitted``
+  WARNING is a pre-formatted string, so ``LogRecord.args`` no longer carries
+  the equity / mark / wallet figures — no handler in the repo reads ``args``
+  and the line fires at most once a cycle; a JSON log handler that wanted
+  those as fields would need the helper to return ``(fmt, args)`` instead.
+  The beside-the-store fallback is a second full backfill pass rather than a
+  per-row "try both roots" inside ``persistence/backfill.py``: the layout is
+  a ``cli``-level fact and the trust rules per row stay where they are, and
+  the double pass only runs on a manual recovery command whose first pass
+  found nothing. And ``cli/__init__`` still imports every subcommand module
+  at load — the entry-point split works around that cost rather than making
+  those imports lazy, because two dozen tests reach the subcommand internals
+  through the package.
+
 - **hyperliquid_perp: the post-answer restart window is documented as an
   accepted statistical split, and its paper-lane re-ask is pinned to the
   3-try budget** (issue #206, items 2–4; follow-ups from PR #204). Since PR

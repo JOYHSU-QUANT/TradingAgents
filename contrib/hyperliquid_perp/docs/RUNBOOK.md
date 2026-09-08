@@ -416,10 +416,13 @@ A→B→A 翻回去仍只印兩行。另有一條自我檢查：各桶總和應�
 # 先備份 DB；在寫 payload 的那台主機上跑（列上記的是絕對路徑）；daemon 在跑也可以
 # （只寫 v11 前那些列的 NULL 格、單一短交易，daemon 不再碰它們；鎖等超過 5 秒會具名 exit 1，重跑即可）
 python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir exports/ --backfill-format-fingerprint
-# 對搬到別台主機的備份 store：把 payload 目錄一起搬來，再用 --payload-root 指過去——
+# 對搬到別台主機的備份 store：把 run 的 payload 目錄照 daemon 的版面一起搬到 db 旁（<db 目錄>/payloads/<run-id>/），
+# 不帶 flag 就會找到——記錄路徑全數 missing_payload（沒有任何 unreadable／unverified）且 db 旁有那個目錄時，
+# 自動改到那裡再讀一遍（stderr 先印一行 note，再印第二行計數；只寫 NULL 格，跑兩趟無害；issue #221）。
+# 只有複本沒照版面擺的時候才用 --payload-root 指過去——
 # 每列只取記錄路徑的「檔名」到這個目錄下找（issue #197）；hash 規則不變，搬來的檔要 bytes 相同才算證據。
-# 指到 run 自己那一層（daemon 寫在 <db 目錄>/payloads/<run-id>/）——指到上一層 payloads/ 會全數 missing_payload。
-# 不帶或帶錯 root 而全數 missing_payload（沒有任何 unreadable／unverified）時，stderr 會多印一行 hint，附上 <db 目錄>/payloads/<run-id> 這個具體候選路徑
+# 指到 run 自己那一層——指到上一層 payloads/ 會全數 missing_payload。
+# 不帶 flag 而 db 旁也沒有／對不上，或帶錯 root 而全數 missing_payload 時，stderr 會多印一行 hint，附上 <db 目錄>/payloads/<run-id> 這個具體路徑
 python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir exports/ --db backup.db --backfill-format-fingerprint --payload-root /path/to/payloads/paper-BTC-3
 ```
 

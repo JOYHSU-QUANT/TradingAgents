@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from ..common import store_layout
 from ..config import dotenv_diagnosis
 from . import _provider, paper_export
 from ._common import (
@@ -210,7 +211,7 @@ def _cmd_paper(argv: list[str]) -> int:
                     config,
                     risk_cfg=risk_cfg,
                     decision_cfg=decision_cfg,
-                    payload_dir=db_path.resolve().parent / "payloads" / run_id,
+                    payload_dir=store_layout.payload_dir(db_path, run_id),
                     # Bound now, read per cycle: the fresh-run provider is
                     # built before initialize_run seeds the books, and the
                     # read degrades to "no section" until they exist.

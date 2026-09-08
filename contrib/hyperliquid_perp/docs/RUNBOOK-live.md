@@ -437,7 +437,9 @@ the loop anyway` 就是這條路。之後兩條分支各自自癒，鎖放開後
 - **存壞的回覆**（re-parse 丟例外）：失敗記錄在寫入前就已武裝，之後每個 pump 只重試
   那一筆寫入。看到的是 `live decision cycle … failed (None): non-retryable: …` 重複出現，
   **不會**有 `startup adoption (retried)`。
-- **AI 從未回答**（`pending_raw_response` 是 NULL）：沒有東西可武裝，改由 pump 每個 tick
+- **AI 從未回答，或回答無效而刻意未存**（`pending_raw_response` 是 NULL——兩者在列上同形，
+  PR #204 起無效回覆不寫進 store，所以「回答無效＋gate 被擋＋重啟」也走這條、記 `api_failed`
+  而不是 `invalid_output`；明文接受，見 phase2-spec §3.1 修訂框 (c)）：沒有東西可武裝，改由 pump 每個 tick
   重試整個 adoption，成功時印 `startup adoption (retried): api_failed`。**adoption 沒跑完
   之前 pump 不會開新 cycle**——那個 stranded attempt 還握著 `next_decision_at`，直接開新
   cycle 會用同一個 attempt id 去 insert 而每 tick 撞主鍵，變成另一種永久僵住。

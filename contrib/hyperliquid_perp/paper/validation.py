@@ -77,6 +77,13 @@ MIN_CYCLES_FOR_PHASE3 = 30
 # "此 cycle 視為已完成" to invalid_output only, and an api_failed cycle never
 # exercised the decision→order→fill chain the 30-cycle run exists to validate.
 # It is reported separately as api_failed_count.
+# One narrow window moves an unparseable answer OUT of this count (issue #206;
+# accepted in spec §3.1's revision box, (c)): an invalid answer is never stored
+# as resumable (PR #204), so a restart while its gate is blocked re-enters the
+# §3.1 ladder — one re-ask per restart, the ladder continuing in-process after
+# a retryable failure, never past the 3-try budget — and a restart that finds
+# the third try already spent records api_failed/interrupted instead. Either
+# way the row is counted as api_failed_count rather than here.
 _COMPLETED_CYCLE_STATUSES = ("completed", "invalid_output")
 
 # Import-time completeness guard: this subset must be exactly "every terminal

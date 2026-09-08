@@ -287,6 +287,12 @@ def update_decision_attempt(
     immutable, nothing could clean it later. Normalized silently, not refused
     — a forgotten clear must never be the bare exception that kills a daemon
     holding a position (the PR #179 lesson).
+
+    No production caller passes ``pending_raw_response`` (issue #206): the
+    normalization above made every explicit ``None`` redundant and PR #204
+    removed them. The keyword exists to refuse a second writer (#181), not to
+    be called — a search that finds no caller is the intended state, not a
+    leftover.
     """
     if not isinstance(status, _Unset):
         check_enum(status, _ATTEMPT_STATUSES, name="status")

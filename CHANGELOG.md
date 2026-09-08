@@ -139,6 +139,44 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the post-answer restart window is documented as an
+  accepted statistical split, and its paper-lane re-ask is pinned to the
+  3-try budget** (issue #206, items 2–4; follow-ups from PR #204). Since PR
+  #204 an answer that did not parse to a decision is never stored as
+  resumable, so a cycle that hits "invalid answer, then a blocked gate or a
+  failed persist, then a restart" ends ``api_failed`` rather than
+  ``invalid_output``: live adoption finds no response to resume and fails the
+  cycle closed (``error_type`` empty, ``error_message`` saying ``no resumable
+  response`` with no ``non-retryable:`` prefix, because the row cannot tell an
+  unanswered cycle from an unparseable one), and the paper scheduler
+  re-enters the §3.1 ladder — the one place "never re-ask" is relaxed: one
+  re-ask per restart, the ladder continuing in-process after a retryable
+  failure, never past the three tries — while a restart that finds the third
+  try already spent records ``api_failed`` with ``error_type=interrupted`` and
+  asks nothing. The split is now written where each side counts: spec §3.1's
+  revision box (c), phase2-data §6.2 (both the ``status`` and the
+  ``error_type`` row), both validators' cycle-status comments and
+  RUNBOOK-live's adoption branch. A new paper test drives three invalid
+  answers through three blocked gates and three restarts and asserts that
+  each restart adds exactly one call, that the third try is the last, and
+  that a fourth restart records ``interrupted`` without a build or a call.
+  ``repository.update_decision_attempt``'s ``pending_raw_response`` keyword
+  now says in its docstring that no production caller passes it — it exists
+  to refuse a second writer (#181), not to be called. No behaviour, schema or
+  agent-visible text changes.
+  Known trade-offs, accepted deliberately: in that window the same
+  "answered, unparseably" cycle lands in ``api_failed_count`` and extends the
+  no-decision streak instead of resetting it (three such windows in a row
+  read as a no-decision shortfall, exit 4), and the paper acceptance count
+  loses a cycle it would otherwise have admitted. The route that would close
+  the split without a new status — stamp an ``error_type`` marker and the
+  ``invalid_reason`` on the in-progress row where the store is skipped, and
+  have both restart paths rebuild the fail-closed verdict and gate it, so the
+  cycle ends ``invalid_output`` with no second call — is production code in
+  both lanes' post-answer persist lanes (``decision_attempts`` carries no
+  CHECK on ``status`` or ``error_type``, so neither a marker nor a status is
+  a migration); it is left unbuilt under the 2026-09-06 rule that this round
+  closes the refactor ledger, and recorded here rather than as an issue.
 - **hyperliquid_perp: the last three hand-built "must be one of" refusals
   speak the shared vocabulary sentences** (issue #226; follow-ups from PR
   #225). PR #225 gave the four ``schema`` enums a refusal that names the

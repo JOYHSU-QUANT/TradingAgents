@@ -133,3 +133,27 @@ def test_the_readme_and_env_example_quote_the_cli_cap_default():
     env_example = repo_text(".env.example")
     assert f"#TRADINGAGENTS_MAX_TOKENS={DEFAULT_MAX_TOKENS}" in env_example
     assert f"CLI applies {DEFAULT_MAX_TOKENS}" in env_example
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("provider", ["openai", "azure"])
+def test_step_8_asks_both_openai_hosted_providers_the_reasoning_effort_question(provider):
+    # The graph forwards openai_reasoning_effort to azure too (#212); the CLI's
+    # Step 8 must read the same knob and env var there, or an Azure operator's
+    # TRADINGAGENTS_OPENAI_REASONING_EFFORT=none is overwritten with None before
+    # the graph sees it and the dropped-temperature warning's remedy cannot be
+    # applied from the CLI.
+    config_key, env_var, *_ = m._THINKING_KNOBS[provider]
+    assert (config_key, env_var) == (
+        "openai_reasoning_effort", "TRADINGAGENTS_OPENAI_REASONING_EFFORT"
+    )
+
+
+@pytest.mark.unit
+def test_every_step_8_row_names_a_selection_key_the_run_config_copies():
+    # The table's config keys must be the keys the CLI actually returns
+    # (``_THINKING_KEYS``, which ``get_user_selections`` builds its knobs from)
+    # and those must be selections ``_build_run_config`` copies; a row naming
+    # anything else would prompt for a value that never reaches the graph.
+    assert {row[0] for row in m._THINKING_KNOBS.values()} <= set(m._THINKING_KEYS)
+    assert set(m._THINKING_KEYS) <= set(SELECTIONS)

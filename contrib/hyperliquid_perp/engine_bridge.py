@@ -369,7 +369,7 @@ class _EngineBlock(dict):
     YAML omits it), so subscript is always the right spelling.
     """
 
-    def get(self, key, default=None):  # type: ignore[override]
+    def get(self, key, default=None):
         raise TypeError(
             f"read the engine block by subscript (eng_cfg[{key!r}]); .get would hide "
             "a key ENGINE_KEYS lacks behind a default"

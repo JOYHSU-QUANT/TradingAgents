@@ -603,6 +603,22 @@ def test_the_projected_engine_block_refuses_get():
         block.get("llm_provider")
 
 
+def test_the_bridge_reads_the_engine_block_through_the_refusing_class(monkeypatch):
+    # The class alone proves nothing if the bridge builds a plain dict; pin
+    # the construction site by swapping the class for one that announces
+    # itself, so a revert to a bare comprehension goes red here.
+    from contrib.hyperliquid_perp import engine_bridge
+
+    class Announce(dict):
+        def __init__(self, projection):
+            raise RuntimeError(f"engine block built with {sorted(projection)}")
+
+    monkeypatch.setattr(engine_bridge, "_EngineBlock", Announce)
+    with pytest.raises(RuntimeError, match="engine block built with") as info:
+        engine_bridge._build_engine_config({})
+    assert str(sorted(ENGINE_KEYS)) in str(info.value)
+
+
 @pytest.mark.parametrize(
     "text",
     [

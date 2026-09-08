@@ -54,10 +54,10 @@ __all__ = [
 ]
 
 # The spellings that mean "the completion cap bound" — see the table above.
-# Deliberately NOT Bedrock's ``model_context_window_exceeded``: that is the
-# INPUT overflowing the context window, not the output cap binding, and its
-# remedy is a shorter prompt, not a higher cap — it stays a plain
-# ``invalid_output`` with the raw stop reason in the sidecar.
+# Deliberately NOT Bedrock's ``model_context_window_exceeded``: the output
+# ran into the context window, so it IS cut short, but the cap did not
+# bind and raising it cannot cure it — the remedy is a shorter prompt. It
+# stays a plain ``invalid_output`` with the raw stop reason in the sidecar.
 TRUNCATED_STOP_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
 
 # ``stopReason`` is Bedrock's: langchain-aws files the Converse dict as-is.

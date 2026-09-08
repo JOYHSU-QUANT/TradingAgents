@@ -60,6 +60,38 @@ app = typer.Typer(
 )
 
 
+# Step 8's provider-specific reasoning/thinking knob, one row per provider:
+# (config key, env var, label, box title, box body, prompt NAME). ``openai``
+# and ``azure`` share the reasoning-effort row — Azure hosts the same gpt-5
+# deployments and the graph forwards ``openai_reasoning_effort`` to both, so
+# the dropped-temperature warning's remedy is reachable from the CLI on
+# Azure too (#212). A provider without a row keeps every knob at None (its
+# own default). The prompt is named, not bound: it is looked up on this
+# module at call time so a test patching ``m.ask_*`` still intercepts it.
+_REASONING_EFFORT_KNOB = (
+    "openai_reasoning_effort", "TRADINGAGENTS_OPENAI_REASONING_EFFORT",
+    "Reasoning effort", "Step 8: Reasoning Effort",
+    "Configure OpenAI reasoning effort level", ask_openai_reasoning_effort.__name__,
+)
+# The selection keys the three knobs travel under — what ``get_user_selections``
+# returns and ``_build_run_config`` copies; every table row names one of them.
+_THINKING_KEYS = ("google_thinking_level", "openai_reasoning_effort", "anthropic_effort")
+_THINKING_KNOBS = {
+    "google": (
+        "google_thinking_level", "TRADINGAGENTS_GOOGLE_THINKING_LEVEL",
+        "Gemini thinking mode", "Step 8: Thinking Mode",
+        "Configure Gemini thinking mode", ask_gemini_thinking_config.__name__,
+    ),
+    "openai": _REASONING_EFFORT_KNOB,
+    "azure": _REASONING_EFFORT_KNOB,
+    "anthropic": (
+        "anthropic_effort", "TRADINGAGENTS_ANTHROPIC_EFFORT",
+        "Claude effort", "Step 8: Effort Level",
+        "Configure Claude effort level", ask_anthropic_effort.__name__,
+    ),
+}
+
+
 # Create a deque to store recent messages with a maximum length
 class MessageBuffer:
     # Fixed teams that always run (not user-selectable)
@@ -679,37 +711,21 @@ def get_user_selections():
         selected_shallow_thinker = select_shallow_thinking_agent(selected_llm_provider)
         selected_deep_thinker = select_deep_thinking_agent(selected_llm_provider)
 
-    # Step 8: Provider-specific reasoning/thinking configuration. Each knob is
-    # settable via its TRADINGAGENTS_* env var; when that var is set (or the
-    # provider itself came from env) the prompt is skipped and the configured
-    # value is used — same env-precedence rule as the steps above. None = each
-    # provider's own default.
-    thinking_level = None
-    reasoning_effort = None
-    anthropic_effort = None
+    # Step 8: Provider-specific reasoning/thinking configuration, one row per
+    # provider in ``_THINKING_KNOBS``. Each knob is settable via its
+    # TRADINGAGENTS_* env var; when that var is set (or the provider itself
+    # came from env) the prompt is skipped and the configured value is used —
+    # same env-precedence rule as the steps above. None = each provider's own
+    # default.
+    knobs = dict.fromkeys(_THINKING_KEYS)
 
     provider_lower = selected_llm_provider.lower()
     if provider_from_env:
-        thinking_level = DEFAULT_CONFIG["google_thinking_level"]
-        reasoning_effort = DEFAULT_CONFIG["openai_reasoning_effort"]
-        anthropic_effort = DEFAULT_CONFIG["anthropic_effort"]
-    elif provider_lower == "google":
-        thinking_level = thinking_value_or_prompt(
-            "TRADINGAGENTS_GOOGLE_THINKING_LEVEL", "google_thinking_level",
-            "Gemini thinking mode", "Step 8: Thinking Mode",
-            "Configure Gemini thinking mode", ask_gemini_thinking_config,
-        )
-    elif provider_lower == "openai":
-        reasoning_effort = thinking_value_or_prompt(
-            "TRADINGAGENTS_OPENAI_REASONING_EFFORT", "openai_reasoning_effort",
-            "Reasoning effort", "Step 8: Reasoning Effort",
-            "Configure OpenAI reasoning effort level", ask_openai_reasoning_effort,
-        )
-    elif provider_lower == "anthropic":
-        anthropic_effort = thinking_value_or_prompt(
-            "TRADINGAGENTS_ANTHROPIC_EFFORT", "anthropic_effort",
-            "Claude effort", "Step 8: Effort Level",
-            "Configure Claude effort level", ask_anthropic_effort,
+        knobs = {key: DEFAULT_CONFIG[key] for key in knobs}
+    elif provider_lower in _THINKING_KNOBS:
+        config_key, env_var, label, box_title, box_body, prompt_name = _THINKING_KNOBS[provider_lower]
+        knobs[config_key] = thinking_value_or_prompt(
+            env_var, config_key, label, box_title, box_body, globals()[prompt_name]
         )
 
     return {
@@ -722,9 +738,7 @@ def get_user_selections():
         "backend_url": backend_url,
         "shallow_thinker": selected_shallow_thinker,
         "deep_thinker": selected_deep_thinker,
-        "google_thinking_level": thinking_level,
-        "openai_reasoning_effort": reasoning_effort,
-        "anthropic_effort": anthropic_effort,
+        **knobs,
         "output_language": output_language,
     }
 

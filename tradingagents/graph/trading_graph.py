@@ -146,7 +146,11 @@ class TradingAgentsGraph:
             if thinking_level:
                 kwargs["thinking_level"] = thinking_level
 
-        elif provider == "openai":
+        elif provider in ("openai", "azure"):
+            # Azure hosts the same gpt-5 deployments and its client allowlist
+            # always carried ``reasoning_effort``; the graph just never sent
+            # it there, which left the dropped-temperature warning's remedy
+            # (``openai_reasoning_effort: none``) unreachable on Azure (#212).
             reasoning_effort = self.config.get("openai_reasoning_effort")
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort

@@ -94,7 +94,8 @@ PAYLOAD_PROVIDERS = [("openrouter", "qwen/qwen3-235b-a22b-2507"), ("openai", "gp
 # Every curated ``openai`` model is a gpt-5 reasoning model, and
 # langchain-openai's ``validate_temperature`` nulls ``temperature`` on those
 # unless reasoning is off (``reasoning_effort="none"``; otherwise only 1 /
-# unset is accepted) — verified on 1.3.3: with reasoning off the value reaches
+# unset is accepted) — verified on the installed langchain-openai: with
+# reasoning off the value reaches
 # the attribute AND the Responses payload, omitted stays None. So the native
 # OpenAI and Azure rows construct with reasoning off, the one configuration
 # on which a temperature knob is honoured there. An operator on a gpt-5
@@ -270,6 +271,16 @@ class TestKnobEnvOverlay:
 @pytest.mark.unit
 class TestProviderKwargs:
     """_get_provider_kwargs coerces and forwards each knob, or omits it."""
+
+    @pytest.mark.parametrize("provider", ["openai", "azure"])
+    def test_reasoning_effort_reaches_both_openai_hosted_providers(self, provider):
+        # The dropped-temperature warning names openai_reasoning_effort='none'
+        # as the remedy on Azure too: Azure hosts the same gpt-5 deployments
+        # and its client allowlist carries reasoning_effort, but the graph
+        # only forwarded the key for openai, so the remedy was unreachable
+        # there (#212).
+        kwargs = _provider_kwargs(provider=provider, openai_reasoning_effort="none")
+        assert kwargs["reasoning_effort"] == "none"
 
     @pytest.mark.parametrize("knob", KNOBS, ids=KNOB_IDS)
     def test_env_string_coerced(self, knob):

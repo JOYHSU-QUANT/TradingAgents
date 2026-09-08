@@ -248,8 +248,9 @@ def is_gateway_provider(provider: str, base_url: str | None = None) -> bool:
     Read off ``ProviderSpec.gateway``; providers outside the registry (the
     native Anthropic / Google clients, unknown names) are not gateways. The
     ``openai`` provider becomes one when ``base_url`` (the config's
-    ``backend_url``, or the SDK's ``OPENAI_API_BASE`` / ``OPENAI_BASE_URL``
-    fallback when that is unset) points away from api.openai.com: a proxy or router in
+    ``backend_url``, or the transport's fallback when that is unset —
+    ``OPENAI_API_BASE`` for langchain-openai, ``OPENAI_BASE_URL`` for the
+    openai SDK) points away from api.openai.com: a proxy or router in
     front of an upstream of its own choosing is the #177 shape as much as
     OpenRouter is, and the host test that already turns the Responses API
     off there decides it (#212). ``base_url`` is an ``openai``-only

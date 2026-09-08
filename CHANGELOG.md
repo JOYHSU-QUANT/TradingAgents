@@ -179,7 +179,12 @@ Breaking changes within the 0.x line are called out explicitly.
   OpenAI and Azure clients now emit one ``RuntimeWarning`` when a forwarded
   temperature did not survive construction, naming the model and the
   ``openai_reasoning_effort='none'`` remedy — judged on the outcome, not by
-  re-deriving the library's rule. ``BaseLLMClient.forwarded_kwargs`` also
+  re-deriving the library's rule. ``_get_provider_kwargs`` now forwards
+  ``openai_reasoning_effort`` for ``azure`` as well (its client allowlist
+  always carried ``reasoning_effort``; the graph never sent it), and the
+  interactive CLI's Step 8 asks Azure the same reasoning-effort question
+  (its env var honoured), so that remedy is reachable on both providers
+  from every entry point. ``BaseLLMClient.forwarded_kwargs`` also
   refuses a string-typed allowlist, which would iterate characters and
   forward nothing.
 

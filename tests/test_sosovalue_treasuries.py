@@ -28,7 +28,7 @@ from tradingagents.dataflows import (
 from tradingagents.dataflows.config import set_config
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from .conftest import sosovalue_unreached
+from .conftest import fake_response, sosovalue_unreached
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -335,6 +335,29 @@ class TestFetchAll:
             sosovalue_treasuries._fetch_all()
         assert str(exc.value) == "SoSoValue could not be reached: ConnectionError on /btc-treasuries"
         assert isinstance(exc.value.__cause__, requests.ConnectionError)
+
+    def test_a_raw_transport_failure_on_a_history_is_counted_by_the_breaker(
+        self, monkeypatch, caplog
+    ):
+        # The macro twin's composite pin, through the real _request. Three
+        # companies keep the sweep inside the budget's window.
+        monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
+        listing = LIST_FIX["data"][:3]
+        broken = f"/btc-treasuries/{quote(LIST_TICKERS[1], safe='')}/purchase-history"
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            path = url.removeprefix(sosovalue_common.SOSOVALUE_API_BASE)
+            if path == broken:
+                raise requests.ConnectionError("blip")
+            data = listing if path == "/btc-treasuries" else MSTR_FIX["data"]
+            return fake_response(200, json={"code": 0, "message": "ok", "data": data})
+
+        monkeypatch.setattr(sosovalue_common.requests, "get", fake_get)
+        with caplog.at_level("DEBUG", logger="tradingagents.dataflows.sosovalue_treasuries"):
+            payload = sosovalue_treasuries._fetch_all()
+        assert payload["companies_failed"] == [LIST_TICKERS[1]]
+        assert set(payload["companies"]) == set(LIST_TICKERS[:3]) - {LIST_TICKERS[1]}
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
 
     def test_full_success_fetches_every_listed_company_under_the_cap(self, monkeypatch):
         monkeypatch.setattr(sosovalue_treasuries, "_request", _request_impl())

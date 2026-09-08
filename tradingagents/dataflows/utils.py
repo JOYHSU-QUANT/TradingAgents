@@ -768,8 +768,11 @@ def is_unreached(e: BaseException) -> bool:
     InvalidURL, a JSONDecodeError) are a bug or an answer, and a
     ``requests.HTTPError`` is an answer even with its response missing.
     ``TooManyRedirects`` and ``RetryError`` read as unreached too, although
-    the vendor did answer (#172): a loose reading, harmless to every
-    verdict, so no third class is drawn for them. ``RetryError`` carries no
+    the vendor did answer (#172): a redirect loop or a spent retry is an
+    endpoint that has moved or is blocked, closer to down than to an
+    answer about this request, and no third class is drawn for them — so
+    every caller below, the router's verdict included, reads them as
+    down (#217). ``RetryError`` carries no
     response and reads so on its own; ``TooManyRedirects`` carries the last
     3xx it followed (measured, requests 2.34), so it is named here — read
     off its status it would be an answer, and a redirect loop would land
@@ -792,8 +795,10 @@ def is_vendor_outage(e: BaseException) -> bool:
 
     The one predicate behind the router's no-data verdict — a fallback's
     "no data" is unconfirmed when a vendor in the chain was down (#142).
-    Judged by the status the exception carries, never by its class: an
-    unreached vendor (``is_unreached``) is down, and an answered status can
+    Judged by the status the exception carries, not by its library: an
+    unreached vendor (``is_unreached``, which names the one exception that
+    carries a status yet reads as unreached, a redirect loop's) is down,
+    and an answered status can
     say as much — a 5xx, or a 401/403 refusing this client (what the
     yfinance window lets out raw for exactly that reason). Any other
     status is the vendor answering about this request (the 404 a boundary

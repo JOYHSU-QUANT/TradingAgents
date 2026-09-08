@@ -142,9 +142,11 @@ def fake_response(status: int = 200, *, json=_NOT_JSON):
     an undecodable one. ``.raise_for_status()`` raises ``requests.HTTPError``
     carrying this response for any 4xx/5xx, as the library does. A ``Mock``
     underneath, so a test can still assert what was NOT read
-    (``response.json.assert_not_called()``).
+    (``response.json.assert_not_called()``), with a ``spec`` of exactly those
+    three names: a boundary that starts reading ``.text`` or ``.headers``
+    fails here instead of passing with a ``Mock`` in an LLM-visible string.
     """
-    response = Mock()
+    response = Mock(spec=["status_code", "json", "raise_for_status"])
     response.status_code = status
     if json is _NOT_JSON:
         response.json.side_effect = ValueError("not json")

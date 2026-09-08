@@ -23,7 +23,7 @@ from tradingagents.dataflows import interface, sosovalue_common, sosovalue_macro
 from tradingagents.dataflows.config import set_config
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from .conftest import sosovalue_unreached
+from .conftest import fake_response, sosovalue_unreached
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -705,6 +705,30 @@ class TestFetchAll:
             sosovalue_macro._fetch_all()
         assert str(exc.value) == "SoSoValue could not be reached: ConnectionError on /macro/events"
         assert isinstance(exc.value.__cause__, requests.ConnectionError)
+
+    def test_a_raw_transport_failure_on_a_history_is_counted_by_the_breaker(
+        self, monkeypatch, caplog
+    ):
+        # The composite pin: a raw requests exception on a HISTORY request,
+        # through the real _request, is typed at the boundary and lands on
+        # the per-item transport lane (WARNING, events_failed) — never the
+        # structural one. Ten requests, exactly the budget's window.
+        monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
+        broken = f"/macro/events/{quote(TRACKED[1], safe='')}/history"
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            path = url.removeprefix(sosovalue_common.SOSOVALUE_API_BASE)
+            if path == broken:
+                raise requests.ConnectionError("blip")
+            data = CAL_FIX["data"] if path == "/macro/events" else CPI_FIX["data"]
+            return fake_response(200, json={"code": 0, "message": "ok", "data": data})
+
+        monkeypatch.setattr(sosovalue_common.requests, "get", fake_get)
+        with caplog.at_level("DEBUG", logger="tradingagents.dataflows.sosovalue_macro"):
+            payload = sosovalue_macro._fetch_all()
+        assert payload["events_failed"] == [TRACKED[1]]
+        assert set(payload["histories"]) == set(TRACKED) - {TRACKED[1]}
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
 
     def test_full_success_partitions_all_tracked_events(self, monkeypatch):
         monkeypatch.setattr(sosovalue_macro, "_request", _request_impl())

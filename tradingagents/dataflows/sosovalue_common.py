@@ -1096,8 +1096,7 @@ def load_rolling_snapshot(
             elif isinstance(e, VendorUnavailableError) and age * 2 > max_stale_days:
                 log.error(
                     "SoSoValue %s refresh failed (%s); serving stale cache %s old, past "
-                    "half the %d-day stale cap — the endpoint may have moved, not "
-                    "merely be down",
+                    "half the %d-day stale cap — a persistent failure, not a brownout",
                     label,
                     e,
                     age_str,

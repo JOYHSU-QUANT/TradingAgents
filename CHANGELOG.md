@@ -162,7 +162,11 @@ Breaking changes within the 0.x line are called out explicitly.
   ``requests.TooManyRedirects`` explicitly: the library raises it with the
   last 3xx attached (measured, 2.34), so read off its status a redirect
   loop was "answered HTTP 302" — an answer — for every boundary and the
-  router, where the docstring had always said unreached;
+  router, where the docstring had always said unreached. That verdict now
+  holds everywhere: the router counts a redirect loop at FRED or Alpha
+  Vantage as the vendor down, and Farside's and Fear & Greed's boundaries
+  wrap it as their outage subclass (a WARNING stale serve) rather than the
+  structural module type;
   ``generic_failure_words`` asks that predicate before it reads a status,
   the order ``is_vendor_outage`` already had. Deribit's ``_request``
   decodes and judges a 5xx
@@ -186,7 +190,9 @@ Breaking changes within the 0.x line are called out explicitly.
   Known trade-offs, accepted deliberately: the Deribit retry log line and
   the spent-retry message now quote the helper's sentence, so the vendor's
   name appears twice ("Deribit … request failed (Deribit answered HTTP 503
-  without data)"); a throttle that persists past half the cap is not
+  without data)"), as does SoSoValue's no-cache raise ("SoSoValue BTC
+  unavailable and no usable cache exists: SoSoValue could not be reached:
+  ConnectionError on /etfs/summary-history"); a throttle that persists past half the cap is not
   escalated, since a 429 is the vendor answering; and the per-item
   handlers' verdict on a pre-network ``requests`` failure moves from the
   transport lane (a warning, counted by the breaker) to the structural one

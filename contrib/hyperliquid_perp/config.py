@@ -15,6 +15,7 @@ import yaml
 
 from .common.config_coercion import bool_from_yaml, int_from_yaml
 from .common.constants import LEGAL_NETWORKS
+from .common.enum_guard import check_enum
 from .domains.perp.indicator_vocab import REGIME_INDICATORS, supported_indicators
 from .domains.perp.market_data_config import MarketDataConfig
 
@@ -285,12 +286,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # network set lives in common.constants (see its comment for why it is
     # not imported from sdk_client).
     network = config.get("network")
-    if network is not None and (
-        not isinstance(network, str) or network.strip().lower() not in LEGAL_NETWORKS
-    ):
-        # Enumerated from the set the line above checks (as live/config.py's
-        # sibling message is), never spelled by hand beside it (issue #102).
-        raise ValueError(f"'network' must be one of {list(LEGAL_NETWORKS)}, got {network!r}")
+    if network is not None:
+        # The shared guard over the shared set, naming the YAML key the way this
+        # loader's other refusals do (issue #226; formerly hand-enumerated, #102).
+        key = network.strip().lower() if isinstance(network, str) else network
+        check_enum(key, LEGAL_NETWORKS, name="'network'")
     timeout = config.get("network_timeout_s")
     if timeout is not None:
         try:

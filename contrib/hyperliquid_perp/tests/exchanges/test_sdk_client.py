@@ -257,16 +257,30 @@ def test_a_status_less_transport_error_falls_back_to_the_message():
 
 
 def test_the_loaders_network_vocabulary_matches_the_sdk_clients():
-    # ``common.constants.LEGAL_NETWORKS`` is a deliberate copy of ``_BASE_URLS``'s
-    # keys, kept so config loading never imports the SDK. Deliberate is not
-    # drift-proof: nothing else tied the two, and the config layer would keep
-    # admitting a network the client cannot resolve (or refusing one it can)
-    # with the suite green. The test may import the SDK; only the loader may
-    # not (issue #102).
+    # ``common.constants.LEGAL_NETWORKS`` owns the network spelling set and the
+    # clients refuse over it BEFORE indexing ``_BASE_URLS`` (issue #226), so a
+    # URL table whose keys drifted from the vocabulary would turn a passed
+    # check into a KeyError — and the config layer would admit a network the
+    # client cannot resolve (or refuse one it can) with the suite green. The
+    # tuple lives in ``common`` so the loader never imports the SDK; the test
+    # may (issue #102).
     from contrib.hyperliquid_perp.common.constants import LEGAL_NETWORKS
     from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import _BASE_URLS
 
     assert set(LEGAL_NETWORKS) == set(_BASE_URLS)
+
+
+def test_a_url_table_drift_surfaces_as_the_bare_key_error(monkeypatch):
+    # The constructor refuses over LEGAL_NETWORKS and then indexes _BASE_URLS;
+    # if the two ever drift, the lookup must fail as the internal defect it is.
+    # With the lookup inside the SDK-construction try, the KeyError was
+    # relabelled ``ExchangeRequestError("Hyperliquid request failed: KeyError
+    # ...")`` — a transient-looking failure an operator would retry (issue #226).
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import sdk_client
+
+    monkeypatch.setattr(sdk_client, "_BASE_URLS", {})
+    with pytest.raises(KeyError):
+        HyperliquidClient("mainnet")
 
 
 def test_digits_inside_a_larger_number_are_not_a_throttle():

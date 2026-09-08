@@ -40,10 +40,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..common.enum_guard import VocabEnum
 from ..exchanges.hyperliquid.errors import (
     ExchangeError,
     MalformedResponseError,
@@ -119,7 +119,7 @@ class LiveOrderPreSubmitError(RuntimeError):
     """
 
 
-class SubmitOutcomeKind(str, Enum):
+class SubmitOutcomeKind(VocabEnum, noun="submit outcome"):
     """The three terminal verdicts of one §8.3 submit call."""
 
     ACKNOWLEDGED = "acknowledged"
@@ -181,7 +181,8 @@ class SubmitOutcome:
     order_status: Any = None
 
     def __post_init__(self) -> None:
-        # Coerce a raw string the way Side.parse does — loud on a typo.
+        # Coerce a raw string (or pass an enum through); a typo is refused by
+        # the enum's own VocabEnum sentence, naming the three verdicts.
         object.__setattr__(self, "outcome", SubmitOutcomeKind(self.outcome))
         if self.cloid_hex != derive_cloid_hex(self.cloid_logical):
             raise ValueError(

@@ -2,25 +2,38 @@
 
 Two sites, two shapes:
 
-- :func:`check_enum` — a plain string against a caller-owned ``frozenset``
-  (persistence columns, accounting result fields). The caller names the
-  field; the sentence is ``<name> must be one of [<sorted>]``.
+- :func:`check_enum` — a plain string against a caller-owned collection of
+  the legal spellings (a persistence column's ``frozenset``, the accounting
+  result fields, the ``LEGAL_NETWORKS`` tuple). The caller names the field;
+  the sentence is ``<name> must be one of [<sorted>]``.
 - :class:`VocabEnum` — the base for the ``str`` enums that ARE a vocabulary
   (:mod:`..domains.perp.schema`'s market regime, profile shape, position side
-  and candle interval). Looking a member up by an unknown value fails with
-  ``unsupported <noun> 'X'; choose from [<members>]`` wherever the lookup is
-  written (issue #166); ``Enum``'s own "'X' is not a valid MarketRegime"
-  names neither the vocabulary nor the fix.
+  and candle interval; the persistence layer's fill :class:`Side`; the live
+  submitter's :class:`SubmitOutcomeKind`). Looking a member up by an unknown
+  value fails with ``unsupported <noun> 'X'; choose from [<members>]``
+  wherever the lookup is written (issue #166); ``Enum``'s own "'X' is not a
+  valid MarketRegime" names neither the vocabulary nor the fix.
 
 The two sentences differ on purpose, by audience: ``check_enum`` guards a
 value the PROGRAM supplied (a column literal, a result-type tag — an
-assertion, worded as one, over a frozenset that has no order to show), while
-a ``VocabEnum`` guards a value an operator wrote or a row recorded, so it
-says what to write instead, in the author's order. A caller that knows more
-than the enum (a YAML key, a phase policy) re-words the ``ValueError`` itself
-(``live/config._coerce_enum``, ``risk_gate.RiskConfig``). Elsewhere the same
-refusal is still hand-built (``network must be one of``, ``fill side must
-be``); those are not this module's callers.
+assertion, worded as one, over a set that has no order to show), while a
+``VocabEnum`` guards a value an operator wrote or a row recorded, so it says
+what to write instead, in the author's order. A caller that knows more than
+the enum (a YAML key, a phase policy) re-words the ``ValueError`` itself
+(``live/config._coerce_enum``, ``risk_gate.RiskConfig``).
+
+One deliberate exception to the audience rule (issue #226): the
+operator-written ``network`` is refused through ``check_enum`` over the flat
+``LEGAL_NETWORKS`` tuple — the two YAML loaders passing their key as ``name``
+(``'network'``, ``live.network``), the clients and the agent-key lookup the
+parameter name — rather than through a ``Network`` enum. Every consumer of
+the accepted spelling (the exchange clients' URL table, the agent-key env-var
+table, the CLI's drift comparisons) reads it as a plain ``str``; an enum
+there would ripple ``.value`` through all of them to buy a sentence that
+already lists the choices. The one refusal of this family still built by
+hand is ``live/fills.py``'s ``fill side must be one of ['A', 'B'] (bid/ask)``:
+that is the VENUE's side vocabulary on a wire payload, raised as a
+``MalformedResponseError``, not a ``ValueError`` over a local table.
 
 Extracted here (a neutral, dependency-free shared module) so the persistence
 write boundary (:mod:`..persistence.repository`), the paper accounting result
@@ -29,7 +42,7 @@ validate the same way — without any of them reaching into another's private
 helpers.
 
 Pure: no I/O, no clock, no domain knowledge of *which* values are allowed
-(each caller owns its own frozenset; each enum declares its own members).
+(each caller owns its own collection; each enum declares its own members).
 """
 
 from __future__ import annotations
@@ -40,9 +53,19 @@ from typing import ClassVar, NoReturn
 __all__ = ["VocabEnum", "check_enum"]
 
 
-def check_enum(value: str, allowed: frozenset[str], *, name: str) -> None:
-    """Raise ``ValueError`` naming ``name`` unless ``value`` is in ``allowed``."""
-    if value not in allowed:
+def check_enum(value: object, allowed: frozenset[str] | tuple[str, ...], *, name: str) -> None:
+    """Raise ``ValueError`` naming ``name`` unless ``value`` is in ``allowed``.
+
+    ``allowed`` is the persistence layer's frozenset or a tuple such as
+    ``LEGAL_NETWORKS`` (not a bare ``str``, whose ``in`` is a substring test);
+    the sentence lists it sorted either way, so the container never shows.
+    ``value`` is typed ``object`` because the YAML loaders hand over whatever
+    the file said: a non-``str`` is refused by the same sentence WITHOUT
+    being looked up, so an unhashable value (a list) cannot turn a frozenset
+    membership test into a ``TypeError`` that escapes the caller's
+    ``ValueError`` lane.
+    """
+    if not isinstance(value, str) or value not in allowed:
         raise ValueError(f"{name} must be one of {sorted(allowed)}, got {value!r}")
 
 

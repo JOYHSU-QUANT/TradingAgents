@@ -16,11 +16,15 @@ from typing import TYPE_CHECKING, Any
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
+from ...common.constants import LEGAL_NETWORKS
+from ...common.enum_guard import check_enum
 from .errors import ExchangeError, ExchangeRequestError, ExchangeThrottledError
 
 if TYPE_CHECKING:
     from eth_account.signers.local import LocalAccount
 
+# Keyed by ``common.constants.LEGAL_NETWORKS`` (the owner; tests pin the key
+# sets equal) — the constructors refuse over it, then index here (issue #226).
 _BASE_URLS = {
     "mainnet": constants.MAINNET_API_URL,
     "testnet": constants.TESTNET_API_URL,
@@ -160,8 +164,7 @@ class HyperliquidClient:
         self, network: str = "mainnet", *, timeout: float | None = DEFAULT_NETWORK_TIMEOUT_S
     ) -> None:
         key = network.strip().lower()
-        if key not in _BASE_URLS:
-            raise ValueError(f"network must be one of {sorted(_BASE_URLS)}, got {network!r}")
+        check_enum(key, LEGAL_NETWORKS, name="network")
         self.network = key
         # Exposed so callers building a second transport (the signed client)
         # can reuse the exact timeout this client resolved.
@@ -171,9 +174,16 @@ class HyperliquidClient:
         # crashes in 0.22.0 (IndexError on spot_meta["tokens"]). We only trade
         # perps, so stub spot meta out; perp meta still auto-fetches and
         # populates the name->coin map that candle/funding calls need.
+        #
+        # The URL lookup sits OUTSIDE the try: the table is keyed by the
+        # vocabulary the check above accepted, so a key it lacks is a drift
+        # between the two — an internal defect that must surface as the bare
+        # KeyError, not be relabelled by the except below as a "request failed"
+        # the operator would retry (issue #226).
+        base_url = _BASE_URLS[key]
         try:
             self.info = Info(
-                base_url=_BASE_URLS[key],
+                base_url=base_url,
                 skip_ws=True,
                 spot_meta={"tokens": [], "universe": []},
                 timeout=timeout,

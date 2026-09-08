@@ -197,6 +197,17 @@ def test_unknown_network_raises_before_construction():
         _client("prod")
 
 
+def test_a_url_table_drift_surfaces_as_the_bare_key_error(monkeypatch):
+    # Same contract as sdk_client's: a network the shared vocabulary accepts
+    # but the URL table lacks is an internal drift, and must not come out of
+    # the Exchange-construction try relabelled as a request failure (issue #226).
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import signed_client
+
+    monkeypatch.setattr(signed_client, "_BASE_URLS", {})
+    with pytest.raises(KeyError):
+        _client("mainnet")
+
+
 def test_construction_pins_base_url_to_live_network(fake_exchange):
     testnet = _client(timeout=7.0)
     mainnet = _client("mainnet")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from contrib.hyperliquid_perp.common.constants import LEGAL_NETWORKS
 from contrib.hyperliquid_perp.live.secrets import (
     AGENT_KEY_ENV_VARS,
     agent_key_env_var,
@@ -57,4 +58,8 @@ def test_value_is_stripped(monkeypatch):
 
 
 def test_env_var_map_covers_exactly_the_legal_networks():
-    assert set(AGENT_KEY_ENV_VARS) == {"mainnet", "testnet"}
+    # Against the owner, not a hand-typed copy: ``agent_key_env_var`` refuses
+    # over ``LEGAL_NETWORKS`` and then indexes this table, so a key set that
+    # drifted from the vocabulary would turn a passed check into a KeyError
+    # (issue #226).
+    assert set(AGENT_KEY_ENV_VARS) == set(LEGAL_NETWORKS)

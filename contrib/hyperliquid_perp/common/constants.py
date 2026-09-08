@@ -115,10 +115,15 @@ EXCHANGE_MIN_ORDER_NOTIONAL_USDC = Decimal("10")
 # path (issue #122). ``paper.scheduler`` re-exports it for its own callers.
 CYCLE_INTERVAL = timedelta(hours=4)
 
-# The legal network vocabulary, shared by config.py's ``network`` validation
-# and live/config.py's ``live.network`` validation. Deliberately duplicated
-# from sdk_client._BASE_URLS (not imported) to keep config loading free of the
-# heavy SDK import that --context-only relies on being cheap.
+# The legal network vocabulary — the ONE owner of the spelling set (issue
+# #226). config.py's ``network`` and live/config.py's ``live.network``
+# validation, both exchange clients' constructors and live/secrets' agent-key
+# lookup all refuse an unknown network through ``check_enum`` over this tuple,
+# and the two tables keyed by network (``sdk_client._BASE_URLS``,
+# ``secrets.AGENT_KEY_ENV_VARS``) are pinned equal to it by their own tests.
+# It lives here rather than beside the URL table so config loading stays free
+# of the heavy SDK import that --context-only relies on being cheap: the SDK
+# modules import THIS, never the reverse.
 LEGAL_NETWORKS = ("mainnet", "testnet")
 
 # The §6.2 ``decision_attempts.error_type`` the freshness guard writes when a

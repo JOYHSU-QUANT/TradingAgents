@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import os
 
+from ..common.constants import LEGAL_NETWORKS
+from ..common.enum_guard import check_enum
+
 __all__ = [
     "AGENT_KEY_ENV_VARS",
     "agent_key_env_var",
     "load_agent_key",
 ]
 
+# Keyed by ``common.constants.LEGAL_NETWORKS`` (the owner; tests pin the key
+# sets equal) — the lookup below refuses over it, then indexes here (issue #226).
 AGENT_KEY_ENV_VARS = {
     "testnet": "HYPERLIQUID_AGENT_KEY_TESTNET",
     "mainnet": "HYPERLIQUID_AGENT_KEY_MAINNET",
@@ -26,12 +31,8 @@ AGENT_KEY_ENV_VARS = {
 
 def agent_key_env_var(network: str) -> str:
     """The env var name holding the agent key for ``network`` (for messages)."""
-    try:
-        return AGENT_KEY_ENV_VARS[network]
-    except KeyError:
-        raise ValueError(
-            f"network must be one of {sorted(AGENT_KEY_ENV_VARS)}, got {network!r}"
-        ) from None
+    check_enum(network, LEGAL_NETWORKS, name="network")
+    return AGENT_KEY_ENV_VARS[network]
 
 
 def load_agent_key(network: str) -> str | None:

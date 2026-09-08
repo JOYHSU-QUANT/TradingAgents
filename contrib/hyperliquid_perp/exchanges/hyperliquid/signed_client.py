@@ -40,6 +40,8 @@ from typing import Any
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils.types import Cloid
 
+from ...common.constants import LEGAL_NETWORKS
+from ...common.enum_guard import check_enum
 from ...common.instants import epoch_ms, from_epoch_ms
 from ...ports import OrderGate
 from .errors import ExchangeError, ExchangeRequestError, MalformedResponseError
@@ -338,8 +340,7 @@ class HyperliquidSignedClient:
         timeout: float | None = DEFAULT_NETWORK_TIMEOUT_S,
     ) -> None:
         key = network.strip().lower()
-        if key not in _BASE_URLS:
-            raise ValueError(f"network must be one of {sorted(_BASE_URLS)}, got {network!r}")
+        check_enum(key, LEGAL_NETWORKS, name="network")
         self.network = key
         self.wallet_address = wallet_address
         # Exposed for the same reason HyperliquidClient exposes it (sdk_client),
@@ -358,10 +359,13 @@ class HyperliquidSignedClient:
         # spot_meta stub: same 0.22.0 mainnet-spot-meta crash defense as
         # sdk_client — Exchange builds its own Info internally and we only
         # trade perps. Perp meta still auto-fetches.
+        # URL lookup outside the try, as in sdk_client: a vocabulary/table drift
+        # is an internal defect, not a request failure (issue #226).
+        base_url = _BASE_URLS[key]
         try:
             self._exchange = Exchange(
                 account,
-                base_url=_BASE_URLS[key],
+                base_url=base_url,
                 account_address=wallet_address,
                 spot_meta={"tokens": [], "universe": []},
                 timeout=timeout,

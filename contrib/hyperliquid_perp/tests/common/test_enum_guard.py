@@ -10,7 +10,19 @@ from __future__ import annotations
 
 import pytest
 
-from contrib.hyperliquid_perp.common.enum_guard import VocabEnum
+from contrib.hyperliquid_perp.common.enum_guard import VocabEnum, check_enum
+
+
+@pytest.mark.parametrize(
+    "value", [5, None, ["a"], {"a": 1}], ids=["int", "none", "list", "dict"]
+)
+def test_check_enum_refuses_a_non_string_without_looking_it_up(value):
+    # A YAML value of the wrong type is refused by the same sentence as a wrong
+    # spelling. An UNHASHABLE one must not escape as a ``TypeError`` from a
+    # frozenset membership test — the callers' ``except ValueError`` lanes
+    # (config load errors) would let a raw traceback through (issue #226).
+    with pytest.raises(ValueError, match=r"^k must be one of \['a', 'b'\], got "):
+        check_enum(value, frozenset({"a", "b"}), name="k")
 
 
 class _Colour(VocabEnum, noun="paint colour"):

@@ -2542,7 +2542,9 @@ def _try_fetch(
         return None, e
 
 
-def _aggregate_failure_cls(attempted: list[BaseException]) -> type[Exception]:
+def _aggregate_failure_cls(
+    attempted: list[BaseException],
+) -> type[VendorRateLimitError] | type[DeribitUnavailableError] | type[DeribitError]:
     """The type for a report where every request made failed, judged over those alone.
 
     ``attempted`` holds the failure of each request this report actually

@@ -32,6 +32,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
+from ..common.instants import Seconds, seconds_span
+from ..common.seam_guard import require_seam
 from ..paper.clock import Clock, WallClock
 
 __all__ = [
@@ -85,16 +87,18 @@ class LiveWsStream:
     def __init__(
         self,
         *,
-        stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
-        silent_after_seconds: float = DEFAULT_SILENT_AFTER_SECONDS,
+        stale_after_seconds: Seconds = DEFAULT_STALE_AFTER_SECONDS,
+        silent_after_seconds: Seconds = DEFAULT_SILENT_AFTER_SECONDS,
         clock: Clock | None = None,
     ) -> None:
-        if stale_after_seconds <= 0:
-            raise ValueError(f"stale_after_seconds must be > 0, got {stale_after_seconds}")
-        if silent_after_seconds <= 0:
-            raise ValueError(f"silent_after_seconds must be > 0, got {silent_after_seconds}")
-        self._stale_after = stale_after_seconds
-        self._silent_after = silent_after_seconds
+        # Both thresholds are compared against ``total_seconds()`` readings
+        # below, so they are kept as seconds — converged through the guard every
+        # ``*_seconds`` argument shares (issue #224), which refuses by name what
+        # a bare ``<= 0`` let through (a bool, NaN, an infinity).
+        self._stale_after = seconds_span("stale_after_seconds", stale_after_seconds).total_seconds()
+        self._silent_after = seconds_span(
+            "silent_after_seconds", silent_after_seconds
+        ).total_seconds()
         self._clock = clock or WallClock()
         self._lock = threading.Lock()
         self._events: deque[Any] = deque()
@@ -493,6 +497,10 @@ class WsConnectionSupervisor:
     ) -> None:
         if reconnect_min_interval_seconds < 0:
             raise ValueError("reconnect_min_interval_seconds must be >= 0")
+        # Called inside ``ensure_connected``'s ``except Exception`` lane, so a
+        # mis-wired seam would otherwise surface as "websocket connect failed:
+        # ... not callable" on every tick, never as a crash (issue #224).
+        require_seam("connect", connect, kind="websocket", shape="() -> WsConnection")
         self._connect = connect
         self._stream = stream
         self._clock = clock or WallClock()

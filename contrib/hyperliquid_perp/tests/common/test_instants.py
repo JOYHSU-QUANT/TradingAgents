@@ -1,8 +1,9 @@
-"""``common.instants`` — the store's timestamp decoder, the whole-hours label, epoch ms."""
+"""``common.instants`` — the store's timestamp decoder, the span guards, epoch ms."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -12,6 +13,7 @@ from contrib.hyperliquid_perp.common.instants import (
     epoch_ms,
     from_epoch_ms,
     parse_instant,
+    seconds_span,
     whole_hours_label,
 )
 
@@ -45,6 +47,40 @@ def test_whole_hours_label_refuses_a_fractional_hour_naming_the_constant():
     # refuses — and names WHICH constant, since the raise lands at import.
     with pytest.raises(ValueError, match="my.CONSTANT must be a whole number of hours"):
         whole_hours_label(timedelta(hours=5, minutes=30), what="my.CONSTANT")
+
+
+def test_seconds_span_converges_a_number_of_seconds_onto_a_span():
+    # Every numeric shape a ``*_seconds`` argument arrives in — an int, a
+    # float, the ``Decimal`` a config number is — lands on the same span.
+    assert seconds_span("x", 3600) == timedelta(hours=1)
+    assert seconds_span("x", 0.5) == timedelta(milliseconds=500)
+    assert seconds_span("x", Decimal("3600")) == timedelta(hours=1)
+
+
+def test_seconds_span_refuses_by_name_what_a_bare_comparison_let_through():
+    # The table the four live constructors used to guard on their own with a
+    # bare ``<= 0`` (issue #224; the backfiller had grown this check first,
+    # issue #169): what is not a number of seconds at all is a TypeError, and
+    # a number that is not a usable span — NaN, an infinity, non-positive,
+    # beyond ``timedelta``'s range, under its microsecond — a ValueError, each
+    # naming the argument the caller handed in.
+    for not_a_number in ("3600", True, None):
+        with pytest.raises(TypeError, match="^lookback_seconds must be a number of seconds, got"):
+            seconds_span("lookback_seconds", not_a_number)
+    for not_a_span in (
+        Decimal("NaN"),
+        Decimal("sNaN"),  # float() refuses a signaling NaN with its own ValueError
+        float("nan"),
+        float("inf"),
+        10**400,  # too large for a float
+        10**20,  # a float, but beyond timedelta's range
+        Decimal("1e15"),
+        1e-7,  # positive, but timedelta rounds it to a zero-width window
+        0,
+        Decimal("-1"),
+    ):
+        with pytest.raises(ValueError, match="^lookback_seconds must be > 0 and finite"):
+            seconds_span("lookback_seconds", not_a_span)
 
 
 # ---------------------------------------------------------------------------

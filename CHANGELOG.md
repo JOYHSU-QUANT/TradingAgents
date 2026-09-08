@@ -139,6 +139,70 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the live seam guards cover the reconciler's object
+  seams, the two remaining injected callables and the three ``*_seconds``
+  constructor arguments that become a positive span, and both recovery sites
+  build their reconciliation sweep from one factory**
+  (issue #224, follow-ups from PR #223). ``common/seam_guard`` gains
+  ``require_object_seam``, the object form of the callable guard: the
+  reconciler's ``backfiller`` binding (``.backfill()``, ``.lookback``), its
+  ``stream`` (the three fill-leg methods) and its ``identity`` monitor
+  (``.probe()``, called inside guarded lanes at two sites, plus the
+  ``latched`` / ``latched_site`` the post-pass escalation reads) are refused
+  through it, with the same template as the callable refusal and a tail
+  naming what the stand-in lacks — ``backfiller must be the FillBackfiller
+  seam (.backfill(), .lookback), got SimpleNamespace without .backfill()`` —
+  instead of the hand-written ``must be a FillBackfiller`` sentence and the
+  ``got NoneType`` a missing stream method produced when ``getattr``'s
+  default was fed to the callable guard. The object form also refuses the
+  CLASS passed where an instance was meant (``got the class LiveWsStream,
+  not an instance``): a class answers every member and would fail on the
+  first call inside the lane instead; and a call that names no member at
+  all is refused as a caller bug rather than honoured as a guard that
+  accepts everything. ``common/instants.Seconds`` (``float | Decimal``) is
+  the declared shape of every such argument, stated once beside the guard.
+  ``refresh_kill_switch`` (both ``FillBackfiller`` and
+  ``LiveReconciler``) and ``WsConnectionSupervisor``'s ``connect`` are now
+  refused at construction when not callable, like the exchange seams: each
+  is called inside a guarded lane, so a mis-wiring surfaced as a failed sweep
+  or a "websocket connect failed: ... not callable" warning every tick, never
+  as a crash. ``common/instants.seconds_span`` is the one convergence of a
+  seconds argument onto a span — the check ``FillBackfiller`` grew for
+  ``lookback_seconds`` under issue #169, shared — and ``LiveWsStream``'s
+  ``stale_after_seconds`` / ``silent_after_seconds`` and
+  ``KillSwitchManager``'s ``max_tick_gap_seconds`` go through it: the
+  stream's bare ``<= 0`` accepted ``True`` as one second, NaN as a threshold
+  nothing ever exceeds (a run that could never go stale) and an infinity
+  outright; the kill switch's accepted ``True`` and NaN (a NaN worst-case
+  sum compares under any deadline, so the manager built) and refused an
+  infinity with a message about the deadline rather than the number. For the
+  kill switch the convergence lives INSIDE ``kill_switch_timing_violation``,
+  which returns the refusal as its violation text: the CLI preflight and the
+  constructor keep reading one definition, and a ``Decimal`` gap (the shape
+  a config number arrives in) reaches the invariant's float arithmetic
+  converged rather than dying in it. The refusal
+  wording the existing tests pinned (``lookback_seconds must be a number of
+  seconds`` / ``must be > 0 and finite``) is unchanged, now under every
+  argument's own name. ``live/wiring.build_reconciliation`` builds the
+  ``FillBackfiller`` + ``LiveReconciler`` pair both ``live --run-id`` and
+  the ``live-smoke`` restart recovery used to assemble by hand: the signed
+  client's ``user_fills_by_time`` is read once and handed to both (a bound
+  method is a new object per access, which is how issue #169's "guarded on
+  one side only" copy came about), and the §18.2 refresh closure exists once.
+  The two CLI wiring pins now also assert that identity. Known trade-offs,
+  accepted deliberately: ``processor`` stays unguarded (PR #223's decision;
+  the test wirings pass ``None``), and so do the ``identity`` monitors the
+  kill switch and the protection manager take (outside this change's files);
+  ``WsConnectionSupervisor``'s ``reconnect_min_interval_seconds`` (zero is a
+  legal value, and no production wiring builds a supervisor yet) and the
+  live engine's ``timeout_seconds`` keep their bare comparisons, as does
+  ``paper/market_feed``'s own ``_timeout_timedelta`` — none of the three is
+  a positive-span argument on a live constructor; ``FillBackfiller`` keeps taking seconds
+  rather than a ``timedelta`` until ``lookback_seconds:`` actually reaches
+  the YAML (issue #224 item 4, closed with that trigger); and
+  ``tests/live/conftest.py`` still imports ``live.fill_backfill`` at
+  collection, costing a single-file run of an unrelated live test some tens
+  of milliseconds and a full run nothing (issue #224 item 6, not taken).
 - **hyperliquid_perp: the payload directory beside a store is derived in one
   place, and ``export --backfill-format-fingerprint`` reads a copy that kept
   that layout without a flag** (issue #221). The three daemons (``paper``,
@@ -334,10 +398,11 @@ Breaking changes within the 0.x line are called out explicitly.
   comparison itself, a ``bool`` was silently accepted as a one-second
   window, and a finite value beyond ``timedelta``'s range still overflowed
   there (a positive one under its microsecond quietly became a zero-width
-  window). Other injected callables
-  (``refresh_kill_switch`` on both constructors, ``WsReconnector``'s
-  ``connect``) still have no construction-time refusal. ``fill_backfill``
-  exports
+  window). Two other injected callables
+  (``refresh_kill_switch`` on both constructors, ``WsConnectionSupervisor``'s
+  ``connect``) were left without a construction-time refusal by this change;
+  the "seam guards" entry under Changed (issue #224) closes that.
+  ``fill_backfill`` exports
   ``DEFAULT_LOOKBACK: timedelta`` beside ``DEFAULT_LOOKBACK_SECONDS`` (an
   addition; the constructor's signature is unchanged), and the reconciler's
   fallback cross-check window names it as its owner

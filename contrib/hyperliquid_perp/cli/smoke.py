@@ -626,13 +626,12 @@ def _smoke_startup_recovery(
     tests assert is clean given the operator-staged preconditions.
     """
     from ..exchanges.hyperliquid.sdk_client import call_sdk
-    from ..live.fill_backfill import FillBackfiller
     from ..live.fills import LiveFillProcessor
-    from ..live.kill_switch import KillSwitchManager, refresh_across_blocking_work
-    from ..live.reconcile import LiveReconciler
+    from ..live.kill_switch import KillSwitchManager
     from ..live.safe_mode import SafeModeManager
     from ..live.startup import run_startup_recovery
     from ..live.venue_identity import VenueIdentityMonitor
+    from ..live.wiring import build_reconciliation
 
     def fetch_clearinghouse():
         return call_sdk(client.info.user_state, wallet)
@@ -672,32 +671,24 @@ def _smoke_startup_recovery(
         wallet_address=signed.wallet_address,
     )
 
-    # §18.2: the same wiring as the live loop's, and for the same reason — this
-    # path ARMS the switch (it is handed to run_startup_recovery below) under the
-    # same _RECOVERY_MAX_TICK_GAP_SECONDS, so its sweep can lapse the deadline
-    # and cancel the wallet mid-recovery exactly as the live one can. Wiring only
-    # the live lane would have left the smoke restart tests (15–17) running the
-    # unrefreshed version of the very sweep they exist to exercise
-    # (2026-07-31 deadline review).
-    def _refresh_across_sweep() -> None:
-        refresh_across_blocking_work(kill_switch, what="reconciliation")
-
-    backfiller = FillBackfiller(
-        fetch=signed.user_fills_by_time,
-        processor=processor,
-        refresh_kill_switch=_refresh_across_sweep,
-    )
-    reconciler = LiveReconciler(
+    # The same sweep pair the live lane builds, from the same factory
+    # (``live.wiring``; issue #224) — this path ARMS the switch (it is handed to
+    # run_startup_recovery below) under the same _RECOVERY_MAX_TICK_GAP_SECONDS,
+    # so its sweep can lapse the deadline and cancel the wallet mid-recovery
+    # exactly as the live one can. Wiring only the live lane once left the smoke
+    # restart tests (15–17) running the unrefreshed version of the very sweep
+    # they exist to exercise (2026-07-31 deadline review); one factory is what
+    # keeps the two sites from drifting apart again.
+    _backfiller, reconciler = build_reconciliation(
+        signed=signed,
         db=db,
         run_id=run_id,
         coin=coin,
-        fetch_open_orders=signed.open_orders,
         fetch_clearinghouse=fetch_clearinghouse,
-        fetch_fills=signed.user_fills_by_time,
-        backfiller=backfiller,
+        identity=identity,
+        processor=processor,
+        kill_switch=kill_switch,
         payload_dir=payload_dir,
-        refresh_kill_switch=_refresh_across_sweep,
-        identity=identity,  # owns the orderStatus seam (§13.5)
     )
     return run_startup_recovery(
         db=db,

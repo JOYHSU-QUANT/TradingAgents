@@ -180,6 +180,28 @@ def test_supervisor_connects_and_marks_stream():
     assert not sup.connected
 
 
+def test_a_non_callable_connect_seam_is_refused_at_construction():
+    # ``connect`` is called inside ``ensure_connected``'s ``except Exception``
+    # lane: a handle passed where the factory was meant would log "websocket
+    # connect failed: ... not callable" on every tick and never crash (issue
+    # #224). Refused at construction through the shared guard instead.
+    clock = ManualClock(_NOW)
+    with pytest.raises(TypeError, match="connect must be the websocket seam"):
+        WsConnectionSupervisor(connect=_FakeHandle(), stream=LiveWsStream(clock=clock), clock=clock)
+
+
+@pytest.mark.parametrize("threshold", ["stale_after_seconds", "silent_after_seconds"])
+@pytest.mark.parametrize("bad", [True, float("nan"), float("inf")], ids=["bool", "nan", "inf"])
+def test_a_stream_threshold_that_is_not_a_span_is_refused_by_name(threshold, bad):
+    # The bare ``<= 0`` these two carried let all three through: ``True`` was
+    # a one-second threshold, NaN never compared greater than anything (so
+    # the run was never stale), an infinity likewise. Converged through the
+    # guard every ``*_seconds`` argument shares (issue #224), whose table is
+    # pinned in ``tests/common/test_instants.py``.
+    with pytest.raises((TypeError, ValueError), match=f"^{threshold} must be"):
+        LiveWsStream(**{threshold: bad}, clock=ManualClock(_NOW))
+
+
 def test_supervisor_connect_failure_marks_disconnected_and_backs_off():
     clock = ManualClock(_NOW)
     stream = LiveWsStream(clock=clock)
@@ -824,14 +846,28 @@ def test_the_fetch_seam_is_refused_at_construction_like_the_reconcilers_copy():
         FillBackfiller(fetch=payload, processor=None, clock=ManualClock(_NOW))
 
 
-def test_a_decimal_lookback_converges_to_float_at_construction():
+def test_a_non_callable_refresh_hook_is_refused_at_construction():
+    # ``refresh_kill_switch`` runs after every page, inside the guarded fill
+    # leg, so a switch passed where its refresh closure was meant would read
+    # as a failed backfill every sweep (issue #224). ``None`` stays the test
+    # wiring, as everywhere else in this file.
+    with pytest.raises(TypeError, match="refresh_kill_switch must be the kill-switch refresh seam"):
+        FillBackfiller(
+            fetch=lambda s, e: [],
+            processor=None,
+            clock=ManualClock(_NOW),
+            refresh_kill_switch=object(),
+        )
+
+
+def test_a_decimal_lookback_converges_to_a_span_at_construction():
     # ``Decimal`` is the shape a config number arrives in; it passed ``> 0`` and
     # failed only inside ``timedelta(seconds=...)`` — at construction since
     # PR #168, in ``_window_start`` before (issue #169). What the bare ``> 0``
-    # check could not see is refused by name instead: a bool (silently a
-    # one-second window before), a str or a Decimal NaN (died at the
-    # comparison), a float NaN / an infinity / a number beyond timedelta's
-    # range (died inside ``timedelta`` naming nothing).
+    # check could not see is refused by name instead, through the guard every
+    # ``*_seconds`` argument now shares (issue #224): the full table of what
+    # it refuses is pinned in ``tests/common/test_instants.py``; this pins
+    # that THIS argument goes through it, one case per refusal.
     bf = FillBackfiller(
         fetch=lambda s, e: [],
         processor=None,
@@ -840,32 +876,17 @@ def test_a_decimal_lookback_converges_to_float_at_construction():
     )
     assert bf.lookback == timedelta(hours=1)
     assert bf.backfill(_NOW).complete  # the window was computed, not exploded on
-    for not_a_number in ("3600", True):
-        with pytest.raises(TypeError, match="lookback_seconds must be a number of seconds"):
-            FillBackfiller(
-                fetch=lambda s, e: [],
-                processor=None,
-                clock=ManualClock(_NOW),
-                lookback_seconds=not_a_number,
-            )
-    for not_a_span in (
-        Decimal("NaN"),
-        Decimal("sNaN"),  # float() refuses a signaling NaN with its own ValueError
-        float("inf"),
-        10**400,  # too large for a float
-        10**20,  # a float, but beyond timedelta's range
-        Decimal("1e15"),
-        1e-7,  # positive, but timedelta rounds it to a zero-width window
-        0,
-        Decimal("-1"),
-    ):
-        with pytest.raises(ValueError, match="lookback_seconds must be > 0 and finite"):
-            FillBackfiller(
-                fetch=lambda s, e: [],
-                processor=None,
-                clock=ManualClock(_NOW),
-                lookback_seconds=not_a_span,
-            )
+    with pytest.raises(TypeError, match="^lookback_seconds must be a number of seconds"):
+        FillBackfiller(
+            fetch=lambda s, e: [], processor=None, clock=ManualClock(_NOW), lookback_seconds=True
+        )
+    with pytest.raises(ValueError, match="^lookback_seconds must be > 0 and finite"):
+        FillBackfiller(
+            fetch=lambda s, e: [],
+            processor=None,
+            clock=ManualClock(_NOW),
+            lookback_seconds=Decimal("NaN"),
+        )
 
 
 def test_last_live_fill_time_is_the_startup_backfill_floor(db, tmp_path):

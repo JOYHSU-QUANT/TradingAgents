@@ -420,11 +420,9 @@ def _live_startup_recovery(
     from ..exchanges.hyperliquid.mapper import map_account_snapshot
     from ..exchanges.hyperliquid.sdk_client import call_sdk
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-    from ..live.fill_backfill import FillBackfiller
     from ..live.fills import LiveFillProcessor
-    from ..live.kill_switch import KillSwitchManager, refresh_across_blocking_work
+    from ..live.kill_switch import KillSwitchManager
     from ..live.order_gate import RealOrderGate
-    from ..live.reconcile import LiveReconciler
     from ..live.safe_mode import SafeModeManager
     from ..live.startup import run_startup_recovery
     from ..live.venue_identity import (
@@ -432,6 +430,7 @@ def _live_startup_recovery(
         VenueIdentityMonitor,
         escalate_identity_fault,
     )
+    from ..live.wiring import build_reconciliation
     from ..paper import accounting
     from ..paper.run_lock import (
         RunLockError,
@@ -795,29 +794,19 @@ def _live_startup_recovery(
                 wallet_address=signed.wallet_address,
             )
 
-            # §18.2: both of these block the single-threaded tick for far longer
-            # than one round-trip (a paged backfill, a per-order orderStatus
-            # sweep), and the tick's own refresh happens before either runs — so
-            # they refresh across their own work (2026-07-31 deadline review).
-            def _refresh_across_sweep() -> None:
-                refresh_across_blocking_work(kill_switch, what="reconciliation")
-
-            backfiller = FillBackfiller(
-                fetch=signed.user_fills_by_time,
-                processor=processor,
-                refresh_kill_switch=_refresh_across_sweep,
-            )
-            reconciler = LiveReconciler(
+            # The sweep pair, wired the one way both recovery sites wire it
+            # (``live.wiring``; issue #224): the exchange seam bound once, the
+            # §18.2 refresh across each sweep, the §13.5 monitor shared.
+            _backfiller, reconciler = build_reconciliation(
+                signed=signed,
                 db=db,
                 run_id=run_id,
                 coin=coin,
-                fetch_open_orders=signed.open_orders,
                 fetch_clearinghouse=fetch_clearinghouse,
-                fetch_fills=signed.user_fills_by_time,
-                backfiller=backfiller,
+                identity=identity,
+                processor=processor,
+                kill_switch=kill_switch,
                 payload_dir=payload_dir,
-                refresh_kill_switch=_refresh_across_sweep,
-                identity=identity,  # owns the orderStatus seam (§13.5)
             )
             shutdown_problem: str | None = None
             superseded = False

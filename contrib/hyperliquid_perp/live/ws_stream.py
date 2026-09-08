@@ -32,7 +32,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
-from ..common.instants import seconds_span
+from ..common.instants import Seconds, seconds_span
 from ..common.seam_guard import require_seam
 from ..paper.clock import Clock, WallClock
 
@@ -87,8 +87,8 @@ class LiveWsStream:
     def __init__(
         self,
         *,
-        stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
-        silent_after_seconds: float = DEFAULT_SILENT_AFTER_SECONDS,
+        stale_after_seconds: Seconds = DEFAULT_STALE_AFTER_SECONDS,
+        silent_after_seconds: Seconds = DEFAULT_SILENT_AFTER_SECONDS,
         clock: Clock | None = None,
     ) -> None:
         # Both thresholds are compared against ``total_seconds()`` readings

@@ -24,9 +24,19 @@ appends ``without <members>``.
 
 Deliberately ``callable()`` / ``hasattr()`` and nothing more — no arity or
 signature check (decided with PR #168): the shape in the message is
-documentation for the operator, not a contract this module enforces. Whether
-``None`` is a legal "no seam" wiring is the caller's call, made before
-calling either guard; both refuse it.
+documentation for the operator, not a contract this module enforces. The one
+extra the object form makes is refusing a CLASS passed where an instance was
+meant: a class answers ``hasattr`` for every member and its methods are
+callable, so it would pass and then fail on the first call inside the guarded
+lane (a missing ``self``) — the exact soft failure the guard exists to
+refuse. Whether ``None`` is a legal "no seam" wiring is the caller's call,
+made before calling either guard; both refuse it.
+
+``kind`` names the seam family. The rule is: a callable seam is named by its
+ROLE (``"exchange"``, ``"websocket"``, ``"kill-switch refresh"``), an object
+seam by the CLASS the operator should construct (``"FillBackfiller"``,
+``"VenueIdentityMonitor"``) — the refusal for an object points at what to
+build, the refusal for a callable at what it does.
 
 Pure: no I/O, no clock, no knowledge of which seams exist.
 """
@@ -70,18 +80,16 @@ def require_object_seam(
     methods, attrs = tuple(methods), tuple(attrs)
     if not methods and not attrs:  # a guard that names nothing would refuse nothing
         raise ValueError(f"{name}: an object seam must name at least one method or attr")
-    lacking: list[str] = []
-    shape: list[str] = []
-    for method in methods:
-        shape.append(f".{method}()")
-        if not callable(getattr(value, method, None)):
-            lacking.append(shape[-1])
-    for attr in attrs:
-        shape.append(f".{attr}")
-        if not hasattr(value, attr):
-            lacking.append(shape[-1])
+    shape = ", ".join([f".{m}()" for m in methods] + [f".{a}" for a in attrs])
+    if isinstance(value, type):  # would answer every member and fail on the first call
+        raise TypeError(
+            f"{name} must be the {kind} seam ({shape}), "
+            f"got the class {value.__name__}, not an instance"
+        )
+    lacking = [f".{m}()" for m in methods if not callable(getattr(value, m, None))]
+    lacking += [f".{a}" for a in attrs if not hasattr(value, a)]
     if lacking:
         raise TypeError(
-            f"{name} must be the {kind} seam ({', '.join(shape)}), "
+            f"{name} must be the {kind} seam ({shape}), "
             f"got {type(value).__name__} without {', '.join(lacking)}"
         )

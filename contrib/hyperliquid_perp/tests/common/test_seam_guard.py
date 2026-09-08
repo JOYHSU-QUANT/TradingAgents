@@ -54,12 +54,26 @@ def test_a_non_callable_is_refused_naming_seam_kind_shape_and_type(value, type_n
     )
 
 
-@pytest.mark.parametrize("value", [_Leg(), _Leg], ids=["instance", "class"])
-def test_an_object_answering_every_member_passes(value):
+def test_an_object_answering_every_member_passes():
     # Presence and callability, nothing more: the attr is not read and the
-    # method is not called, so a class answers as well as an instance.
+    # method is not called.
     require_object_seam(
-        "backfiller", value, kind="FillBackfiller", methods=("backfill",), attrs=("lookback",)
+        "backfiller", _Leg(), kind="FillBackfiller", methods=("backfill",), attrs=("lookback",)
+    )
+
+
+def test_the_class_itself_is_refused_where_an_instance_was_meant():
+    # A class answers ``hasattr`` for every member and its functions are
+    # callable, so presence alone would let ``stream=LiveWsStream`` (no
+    # parentheses) through — and it would then fail on the first call inside
+    # the guarded lane, missing ``self``: the soft failure the guard is for.
+    with pytest.raises(TypeError) as excinfo:
+        require_object_seam(
+            "backfiller", _Leg, kind="FillBackfiller", methods=("backfill",), attrs=("lookback",)
+        )
+    assert str(excinfo.value) == (
+        "backfiller must be the FillBackfiller seam (.backfill(), .lookback), "
+        "got the class _Leg, not an instance"
     )
 
 

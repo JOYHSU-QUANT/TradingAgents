@@ -986,12 +986,14 @@ def test_an_identity_monitor_that_cannot_probe_is_refused_at_construction(env):
     # ``identity`` is an object seam like ``stream``: both ``probe`` sites sit
     # inside guarded lanes that turn any exception into an unproven case, so
     # a stand-in without one would fail every orderStatus read softly, for
-    # the life of the run (issue #224). ``None`` stays "build a private one".
+    # the life of the run (issue #224); ``latched`` / ``latched_site`` are
+    # what the post-pass escalation reads. ``None`` stays "build a private one".
     db, seams, _ = env
     with pytest.raises(
         TypeError,
-        match=r"identity must be the VenueIdentityMonitor seam \(\.probe\(\)\), "
-        r"got SimpleNamespace without \.probe\(\)$",
+        match=r"identity must be the VenueIdentityMonitor seam "
+        r"\(\.probe\(\), \.latched, \.latched_site\), "
+        r"got SimpleNamespace without \.probe\(\), \.latched, \.latched_site$",
     ):
         _reconciler_over(db, seams, None, query_order_by_cloid=None, identity=SimpleNamespace())
 

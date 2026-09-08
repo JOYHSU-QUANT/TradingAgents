@@ -41,7 +41,8 @@ def _build(tmp_path, **over):
         "run_id": "r",
         "coin": "BTC",
         "fetch_clearinghouse": lambda: {},
-        "identity": SimpleNamespace(probe=lambda *a, **k: None),  # stored, never probed here
+        # Stored, never probed here; shaped like the monitor so the guard passes.
+        "identity": SimpleNamespace(probe=lambda *a, **k: None, latched=False, latched_site=None),
         "processor": None,
         "kill_switch": SimpleNamespace(),
         "payload_dir": tmp_path / "payloads",

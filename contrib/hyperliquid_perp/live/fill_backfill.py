@@ -36,10 +36,9 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
 from typing import Any
 
-from ..common.instants import epoch_ms, seconds_span
+from ..common.instants import Seconds, epoch_ms, seconds_span
 from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
 from ..paper.clock import Clock, WallClock
@@ -154,7 +153,7 @@ class FillBackfiller:
         fetch: Callable[[int, int], Any],
         processor: LiveFillProcessor,
         clock: Clock | None = None,
-        lookback_seconds: float | Decimal = DEFAULT_LOOKBACK_SECONDS,
+        lookback_seconds: Seconds = DEFAULT_LOOKBACK_SECONDS,
         max_pages: int = DEFAULT_MAX_PAGES,
         response_fill_cap: int = RESPONSE_FILL_CAP,
         refresh_kill_switch: Callable[[], None] | None = None,

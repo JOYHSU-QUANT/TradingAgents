@@ -54,7 +54,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from ..common.instants import seconds_span
+from ..common.instants import Seconds, seconds_span
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
@@ -119,7 +119,7 @@ _MAX_CLOCK_SKEW_S = 5.0
 
 def kill_switch_timing_violation(
     config: KillSwitchConfig,
-    max_tick_gap_seconds: float,
+    max_tick_gap_seconds: Seconds,
     network_timeout_s: float | None = None,
 ) -> str | None:
     """The constructor's refresh-timing invariant as a checkable message.
@@ -498,7 +498,7 @@ class KillSwitchManager:
         db: Database,
         run_id: str,
         config: KillSwitchConfig,
-        max_tick_gap_seconds: float,
+        max_tick_gap_seconds: Seconds,
         network_timeout_s: float | None,
         payload_dir: Path,
         clock: Clock | None = None,

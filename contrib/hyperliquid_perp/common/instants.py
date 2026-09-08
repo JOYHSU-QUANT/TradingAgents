@@ -55,6 +55,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 __all__ = [
+    "Seconds",
     "delta_ms",
     "epoch_ms",
     "from_epoch_ms",
@@ -62,6 +63,12 @@ __all__ = [
     "seconds_span",
     "whole_hours_label",
 ]
+
+# The shape a ``*_seconds`` constructor argument is declared in: what
+# :func:`seconds_span` accepts, stated once beside it so no constructor's
+# signature admits less than the guard does (``Decimal`` is the shape a
+# config number arrives in; a numpy scalar is a ``Real`` and passes too).
+Seconds = float | Decimal
 
 _HOUR = timedelta(hours=1)
 _ONE_MS = timedelta(milliseconds=1)

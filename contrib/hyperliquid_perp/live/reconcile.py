@@ -550,9 +550,14 @@ class LiveReconciler:
             # An object seam like ``stream``: every ``probe`` below runs inside
             # a guarded lane that turns any exception into an unproven case,
             # so a stand-in without one would fail every orderStatus read
-            # softly, forever (issue #224).
+            # softly, forever (issue #224). ``latched`` / ``latched_site`` are
+            # what ``escalate_identity_fault`` reads off it after each pass.
             require_object_seam(
-                "identity", identity, kind="VenueIdentityMonitor", methods=("probe",)
+                "identity",
+                identity,
+                kind="VenueIdentityMonitor",
+                methods=("probe",),
+                attrs=("latched", "latched_site"),
             )
         self._identity = identity
         # §18.2: a full sweep is the longest wall of REST traffic on the

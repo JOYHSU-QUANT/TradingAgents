@@ -147,15 +147,21 @@ Breaking changes within the 0.x line are called out explicitly.
   ``require_object_seam``, the object form of the callable guard: the
   reconciler's ``backfiller`` binding (``.backfill()``, ``.lookback``), its
   ``stream`` (the three fill-leg methods) and its ``identity`` monitor
-  (``.probe()``, called inside guarded lanes at two sites) are refused
+  (``.probe()``, called inside guarded lanes at two sites, plus the
+  ``latched`` / ``latched_site`` the post-pass escalation reads) are refused
   through it, with the same template as the callable refusal and a tail
   naming what the stand-in lacks — ``backfiller must be the FillBackfiller
   seam (.backfill(), .lookback), got SimpleNamespace without .backfill()`` —
   instead of the hand-written ``must be a FillBackfiller`` sentence and the
   ``got NoneType`` a missing stream method produced when ``getattr``'s
-  default was fed to the callable guard (a call that names no member at all
-  is refused as a caller bug rather than honoured as a guard that accepts
-  everything). ``refresh_kill_switch`` (both ``FillBackfiller`` and
+  default was fed to the callable guard. The object form also refuses the
+  CLASS passed where an instance was meant (``got the class LiveWsStream,
+  not an instance``): a class answers every member and would fail on the
+  first call inside the lane instead; and a call that names no member at
+  all is refused as a caller bug rather than honoured as a guard that
+  accepts everything. ``common/instants.Seconds`` (``float | Decimal``) is
+  the declared shape of every such argument, stated once beside the guard.
+  ``refresh_kill_switch`` (both ``FillBackfiller`` and
   ``LiveReconciler``) and ``WsConnectionSupervisor``'s ``connect`` are now
   refused at construction when not callable, like the exchange seams: each
   is called inside a guarded lane, so a mis-wiring surfaced as a failed sweep

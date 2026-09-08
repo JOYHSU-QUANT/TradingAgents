@@ -17,13 +17,31 @@ from contrib.hyperliquid_perp.persistence.ids import (
     funding_event_id,
     slice_id,
 )
-from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
+from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState, Side
 from contrib.hyperliquid_perp.persistence.repository._vocab import TERMINAL_ATTEMPT_STATUSES
 from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE, SCHEMA_VERSION
 
 from ..conftest import build_store_at, insert_decision_attempts
 
 _TS = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+
+def test_an_unknown_fill_side_names_the_vocabulary_at_both_lookups():
+    # ``Side`` is a VocabEnum (issue #226): the sentence is the enum's own, so
+    # ``Side.parse`` (the write-boundary callers' typed seam) and a direct
+    # ``Side(...)`` refuse identically. Before, ``parse`` translated to "fill
+    # side must be 'buy' or 'sell'" and a direct lookup fell through to
+    # ``Enum``'s "'bid' is not a valid Side" — two sentences, neither naming
+    # the vocabulary the way the schema enums do.
+    sentence = r"^unsupported fill side 'bid'; choose from \['buy', 'sell'\]$"
+    with pytest.raises(ValueError, match=sentence):
+        Side("bid")
+    with pytest.raises(ValueError, match=sentence):
+        Side.parse("bid")
+    # The pass-through still passes: an enum member and its spelling both land
+    # on the member.
+    assert Side.parse(Side.BUY) is Side.BUY
+    assert Side.parse("sell") is Side.SELL
 
 
 def _fill_kwargs(fill_id="f1", slice_id_=None):

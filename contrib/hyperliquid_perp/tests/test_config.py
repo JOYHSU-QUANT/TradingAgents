@@ -333,14 +333,68 @@ def test_load_config_rejects_bad_phase1_values(tmp_path, text, match):
 
 def test_the_network_refusal_names_every_legal_network(tmp_path):
     # The message enumerates the set the check reads, so it cannot lag a new
-    # member the way a hand-typed "'mainnet' or 'testnet'" did (issue #102).
+    # member the way a hand-typed "'mainnet' or 'testnet'" did (issue #102);
+    # ``check_enum`` lists it sorted (issue #226).
     from contrib.hyperliquid_perp.common.constants import LEGAL_NETWORKS
 
     bad = tmp_path / "value.yaml"
     bad.write_text("network: mainet\n", encoding="utf-8")
     with pytest.raises(ValueError) as caught:
         load_config(bad)
-    assert f"must be one of {list(LEGAL_NETWORKS)}" in str(caught.value)
+    assert f"must be one of {sorted(LEGAL_NETWORKS)}" in str(caught.value)
+
+
+@pytest.mark.parametrize("site", ["config", "live_config", "sdk_client", "signed_client", "secrets"])
+def test_every_network_refusal_speaks_one_sentence_over_one_vocabulary(site, tmp_path, monkeypatch):
+    # Five entry points each spelled ``network must be one of …`` by hand,
+    # enumerating THREE different tables between them (issue #226). All five
+    # now refuse through ``check_enum`` over ``LEGAL_NETWORKS``, so the list
+    # named is the same at every site; the two YAML loaders name their key
+    # (``'network'``, ``live.network``) the way their other refusals do.
+    #
+    # The three tables happen to hold the same two keys, so the five old
+    # sentences were already textually identical and a text assertion alone
+    # cannot tell one owner from three. The second half therefore rebinds the
+    # SHARED name in the site's own module to a vocabulary no local table has
+    # and asks what the refusal lists: a site still enumerating its own table
+    # (the URL table, the env-var table) would keep listing mainnet/testnet.
+    from contrib.hyperliquid_perp import config as config_module
+    from contrib.hyperliquid_perp.common.constants import LEGAL_NETWORKS
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import sdk_client, signed_client
+    from contrib.hyperliquid_perp.live import config as live_config, secrets
+
+    def via_config():
+        bad = tmp_path / "value.yaml"
+        bad.write_text("network: prod\n", encoding="utf-8")
+        load_config(bad)
+
+    def via_live_config():
+        live_config.LiveConfig.from_dict(
+            {"mode": "testnet_live", "network": "prod", "allow_real_orders": False}
+        )
+
+    def via_signed_client():
+        # The network check is the constructor's first statement; the key and
+        # gate never get looked at.
+        signed_client.HyperliquidSignedClient(
+            "prod", "0x" + "11" * 32, wallet_address="0x" + "22" * 20, gate=None
+        )
+
+    module, call, name = {
+        "config": (config_module, via_config, "'network'"),
+        "live_config": (live_config, via_live_config, "live.network"),
+        "sdk_client": (sdk_client, lambda: sdk_client.HyperliquidClient("prod"), "network"),
+        "signed_client": (signed_client, via_signed_client, "network"),
+        "secrets": (secrets, lambda: secrets.agent_key_env_var("prod"), "network"),
+    }[site]
+    with pytest.raises(ValueError) as caught:
+        call()
+    assert str(caught.value) == f"{name} must be one of {sorted(LEGAL_NETWORKS)}, got 'prod'"
+
+    monkeypatch.setattr(module, "LEGAL_NETWORKS", ("alpha",))
+    with pytest.raises(ValueError) as caught:
+        call()
+    assert str(caught.value) == f"{name} must be one of ['alpha'], got 'prod'"
 
 
 def test_load_config_accepts_phase1_value_spellings_the_client_accepts(tmp_path):

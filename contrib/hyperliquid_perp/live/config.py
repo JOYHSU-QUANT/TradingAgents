@@ -25,6 +25,7 @@ from ..common.config_coercion import (
 )
 from ..common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LEGAL_NETWORKS
 from ..common.decimal_context import DECIMAL_CONTEXT
+from ..common.enum_guard import check_enum
 from ..domains.perp.risk_gate import MarginMode, RiskConfig
 
 __all__ = [
@@ -549,10 +550,8 @@ class LiveConfig:
                 "use testnet_live or mainnet_tiny"
             )
         network = self.network.strip().lower() if isinstance(self.network, str) else self.network
-        if network not in LEGAL_NETWORKS:
-            raise ValueError(
-                f"live.network must be one of {list(LEGAL_NETWORKS)}, got {self.network!r}"
-            )
+        # The shared guard over the shared set, naming the YAML key (issue #226).
+        check_enum(network, LEGAL_NETWORKS, name="live.network")
         object.__setattr__(self, "network", network)
         # §3.1: each live mode is pinned to its network. A testnet_live run
         # pointed at mainnet (or vice versa) is the exact
@@ -650,7 +649,7 @@ class LiveConfig:
             raise ValueError(f"live.mode is required — {_ENABLED_MODES_EXPECTED}")
         if "network" not in overrides:
             raise ValueError(
-                f"live.network is required — one of {list(LEGAL_NETWORKS)} "
+                f"live.network is required — one of {sorted(LEGAL_NETWORKS)} "
                 "(each live mode is pinned to its network, §3.1)"
             )
         return cls(**overrides)

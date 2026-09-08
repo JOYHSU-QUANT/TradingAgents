@@ -257,12 +257,13 @@ def test_a_status_less_transport_error_falls_back_to_the_message():
 
 
 def test_the_loaders_network_vocabulary_matches_the_sdk_clients():
-    # ``common.constants.LEGAL_NETWORKS`` is a deliberate copy of ``_BASE_URLS``'s
-    # keys, kept so config loading never imports the SDK. Deliberate is not
-    # drift-proof: nothing else tied the two, and the config layer would keep
-    # admitting a network the client cannot resolve (or refusing one it can)
-    # with the suite green. The test may import the SDK; only the loader may
-    # not (issue #102).
+    # ``common.constants.LEGAL_NETWORKS`` owns the network spelling set and the
+    # clients refuse over it BEFORE indexing ``_BASE_URLS`` (issue #226), so a
+    # URL table whose keys drifted from the vocabulary would turn a passed
+    # check into a KeyError — and the config layer would admit a network the
+    # client cannot resolve (or refuse one it can) with the suite green. The
+    # tuple lives in ``common`` so the loader never imports the SDK; the test
+    # may (issue #102).
     from contrib.hyperliquid_perp.common.constants import LEGAL_NETWORKS
     from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import _BASE_URLS
 

@@ -29,6 +29,7 @@ from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, Real
 from contrib.hyperliquid_perp.live.orders import (
     LiveOrderSubmitter,
     SubmitOutcome,
+    SubmitOutcomeKind,
     local_status_for_exchange_status,
     parse_order_status,
 )
@@ -721,6 +722,12 @@ def test_evidence_is_durable_before_the_wire_and_failure_is_patched(env):
     assert [a["status"] for a in attempts] == ["failed"]
 
 
+_SUBMIT_OUTCOME_TYPO_SENTENCE = (
+    r"^unsupported submit outcome 'acknowleged'; choose from "
+    r"\['acknowledged', 'recovered_existing', 'rejected'\]$"
+)
+
+
 def test_submit_outcome_enforces_its_evidence_contract():
     # A verdict whose evidence fields disagree with it cannot be constructed.
     with pytest.raises(ValueError, match="acknowledged"):
@@ -745,9 +752,18 @@ def test_submit_outcome_enforces_its_evidence_contract():
             error="x",
             ack=_REJECT_ACK,
         )
-    # A typo'd verdict is not silently a fourth state.
-    with pytest.raises(ValueError):
+    # A typo'd verdict is not silently a fourth state — and the refusal names
+    # the three verdicts, not ``Enum``'s "'acknowleged' is not a valid
+    # SubmitOutcomeKind" (issue #226).
+    with pytest.raises(ValueError, match=_SUBMIT_OUTCOME_TYPO_SENTENCE):
         SubmitOutcome(outcome="acknowleged", order_id="o1", cloid_logical=_LOGICAL, cloid_hex=_HEX)
+
+
+def test_a_direct_submit_outcome_kind_lookup_names_the_vocabulary():
+    # The sentence is the enum's own (``VocabEnum._missing_``), so a direct
+    # lookup and the dataclass coercion above say the same thing (issue #226).
+    with pytest.raises(ValueError, match=_SUBMIT_OUTCOME_TYPO_SENTENCE):
+        SubmitOutcomeKind("acknowleged")
 
 
 # ---- review round 7: the rule-5 resend must not leave a terminal orders row ----

@@ -40,6 +40,8 @@ from typing import Any
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils.types import Cloid
 
+from ...common.constants import LEGAL_NETWORKS
+from ...common.enum_guard import check_enum
 from ...common.instants import epoch_ms, from_epoch_ms
 from ...ports import OrderGate
 from .errors import ExchangeError, ExchangeRequestError, MalformedResponseError
@@ -338,8 +340,7 @@ class HyperliquidSignedClient:
         timeout: float | None = DEFAULT_NETWORK_TIMEOUT_S,
     ) -> None:
         key = network.strip().lower()
-        if key not in _BASE_URLS:
-            raise ValueError(f"network must be one of {sorted(_BASE_URLS)}, got {network!r}")
+        check_enum(key, LEGAL_NETWORKS, name="network")
         self.network = key
         self.wallet_address = wallet_address
         # Exposed for the same reason HyperliquidClient exposes it (sdk_client),

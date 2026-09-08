@@ -11,14 +11,15 @@ snapshot time from these ledgers plus a mark, never stored raw here.
 :class:`Side` is the persistence layer's fill/order direction vocabulary — the
 storage form of the ``fills.side`` / ``orders.side`` columns. It mirrors the
 codebase's enum convention (``TargetSide``, ``DecisionMode``, ...) so a typo like
-``"Buy"`` is rejected at the write boundary, not deep inside the fill math.
+``"Buy"`` is rejected at the write boundary, not deep inside the fill math — and,
+as a :class:`~..common.enum_guard.VocabEnum`, refused with a sentence that names
+the two legal spellings wherever the lookup is written (issue #226).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from enum import Enum
 
 # The persistence layer's import path for the ONE decimal context — the
 # canonical definition (and rationale) lives in common/decimal_context.py.
@@ -27,11 +28,12 @@ from enum import Enum
 # persistence layer read it from here, and tests/common/test_layering.py
 # pins it to the common object.
 from ..common.decimal_context import DECIMAL_CONTEXT
+from ..common.enum_guard import VocabEnum
 
 __all__ = ["AccountLedger", "DECIMAL_CONTEXT", "PositionState", "Side"]
 
 
-class Side(str, Enum):
+class Side(VocabEnum, noun="fill side"):
     """A fill/order direction as stored in SQLite (``"buy"`` / ``"sell"``)."""
 
     BUY = "buy"
@@ -39,11 +41,13 @@ class Side(str, Enum):
 
     @classmethod
     def parse(cls, value: str | Side) -> Side:
-        """Coerce a raw string (or pass an enum through), failing loud on a typo."""
-        try:
-            return cls(value)
-        except ValueError:
-            raise ValueError(f"fill side must be 'buy' or 'sell', got {value!r}") from None
+        """Coerce a raw string (or pass an enum through) — the typed seam.
+
+        A pass-through: the refusal of an unknown value is the enum's own, so a
+        caller that writes ``Side(value)`` instead is told the same thing
+        (issue #226).
+        """
+        return cls(value)
 
 
 @dataclass(frozen=True)

@@ -16,11 +16,15 @@ from typing import TYPE_CHECKING, Any
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
+from ...common.constants import LEGAL_NETWORKS
+from ...common.enum_guard import check_enum
 from .errors import ExchangeError, ExchangeRequestError, ExchangeThrottledError
 
 if TYPE_CHECKING:
     from eth_account.signers.local import LocalAccount
 
+# Keyed by ``common.constants.LEGAL_NETWORKS`` (the owner; tests pin the key
+# sets equal) — the constructors refuse over it, then index here (issue #226).
 _BASE_URLS = {
     "mainnet": constants.MAINNET_API_URL,
     "testnet": constants.TESTNET_API_URL,
@@ -160,8 +164,7 @@ class HyperliquidClient:
         self, network: str = "mainnet", *, timeout: float | None = DEFAULT_NETWORK_TIMEOUT_S
     ) -> None:
         key = network.strip().lower()
-        if key not in _BASE_URLS:
-            raise ValueError(f"network must be one of {sorted(_BASE_URLS)}, got {network!r}")
+        check_enum(key, LEGAL_NETWORKS, name="network")
         self.network = key
         # Exposed so callers building a second transport (the signed client)
         # can reuse the exact timeout this client resolved.

@@ -139,6 +139,39 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **hyperliquid_perp: the last three hand-built "must be one of" refusals
+  speak the shared vocabulary sentences** (issue #226; follow-ups from PR
+  #225). PR #225 gave the four ``schema`` enums a refusal that names the
+  vocabulary and the fix; three sites of the same defect class were outside
+  its scope. ``persistence.models.Side`` translated the ``ValueError`` at
+  its own ``parse`` lookup ("fill side must be 'buy' or 'sell'") while a
+  direct ``Side(...)`` fell through to ``Enum``'s "'bid' is not a valid
+  Side"; ``live.orders.SubmitOutcomeKind`` never translated at all, so a
+  typo'd verdict read "'acknowleged' is not a valid SubmitOutcomeKind". Both
+  are now ``VocabEnum`` subclasses (nouns ``fill side`` / ``submit
+  outcome``): ``Side("bid")`` and ``Side.parse("bid")`` both say
+  ``unsupported fill side 'bid'; choose from ['buy', 'sell']``, and ``parse``
+  stays as a pass-through for its twelve callers. Five sites spelled
+  ``network must be one of …`` by hand over THREE different tables
+  (``LEGAL_NETWORKS``, the SDK client's URL table, the agent-key env-var
+  table); all five now refuse through ``check_enum`` over ``LEGAL_NETWORKS``
+  — ``common.constants`` is the one owner of the spelling set, the two
+  tables keyed by network are pinned equal to it by their own tests, and
+  the two YAML loaders keep naming their key (``'network'``,
+  ``live.network``) as the ``name``, the way their other refusals do; the
+  ``live.network is required`` sentence lists the same sorted set.
+  ``check_enum`` accepts a tuple as well as a ``frozenset``, and refuses a
+  non-string value without looking it up, so an unhashable YAML value can no
+  longer turn a frozenset membership test into a ``TypeError`` outside the
+  caller's ``ValueError`` lane. No agent-visible text, schema or config
+  semantics change.
+  Known trade-offs, accepted deliberately: the four sites that normalise
+  case and whitespace before the check now report the normalised spelling
+  (``got 'prod'`` for ``"Prod "``) rather than the raw one, since the guard
+  takes one value; and ``live/fills.py``'s ``fill side must be one of ['A',
+  'B'] (bid/ask)`` stays hand-built — it is the VENUE's side vocabulary on a
+  wire payload, raised as ``MalformedResponseError``, not a ``ValueError``
+  over a local table.
 - **dataflows: ``stockstats_utils`` is now ``yfinance_common``** (issue
   #187, item 4; follow-ups from PR #185). Once ``StockstatsUtils`` left
   (Removed below, issue #137), the module computed no indicator at all — that happens in

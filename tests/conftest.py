@@ -38,6 +38,16 @@ def _dummy_api_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_openai_base_url_env(monkeypatch):
+    # ``openai_client._is_native_openai_base_url`` falls back to the SDK's
+    # base-URL env vars when no backend_url is set (#212); a developer's
+    # shell pointing at a proxy must not turn every "native host" row into
+    # a proxy row. Tests that want the fallback set the var themselves.
+    for env_var in ("OPENAI_API_BASE", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(env_var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config():
     """Reset the global dataflows config before and after each test.
 
@@ -116,14 +126,26 @@ def frozen_clock(monkeypatch):
 
 
 def repo_text(name: str) -> str:
-    """Text of a file at the repository root (``README.md``, ``.env.example``).
+    """Text of a file addressed from the repository root (``README.md``, ``cli/main.py``).
 
-    For pins that assert a rendered constant is quoted in a root document;
-    anchored here so no pin re-derives its own ``parents[N]`` index.
+    For pins that assert on a document or source file's text; anchored here
+    so no pin re-derives its own ``parents[N]`` index.
     """
     from pathlib import Path
 
     return (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
+
+
+def llm_result_of(chat_result):
+    """The ``LLMResult`` ``on_llm_end`` receives, minus langchain_core's metadata merge.
+
+    Deliberately WITHOUT the merge: a stop-reason reader must find the key in
+    whichever slot the provider filed it, not rely on core copying it into
+    ``response_metadata`` first.
+    """
+    from langchain_core.outputs import LLMResult
+
+    return LLMResult(generations=[chat_result.generations], llm_output=chat_result.llm_output)
 
 
 def provider_kwargs_for(config: dict) -> dict:

@@ -333,7 +333,7 @@ structured-output 事故。
 completion 上限（`engine.max_completion_tokens`，預設 8192）綁到時供應商回 HTTP 200
 加一個「停在上限」的 stop reason（OpenAI Chat Completions 系（OpenRouter 等）`length`、
 **native `openai` 走 Responses API 是 `max_output_tokens`**、Anthropic `max_tokens`、Google
-`MAX_TOKENS`；sidecar 的 `stop_reason` 欄記的就是這些原字），target JSON 在尾端被砍掉。這種 cycle 的 `decision_attempts.status` 一樣是
+`MAX_TOKENS`、Bedrock Converse `max_tokens`；sidecar 的 `stop_reason` 欄記的就是這些原字），target JSON 在尾端被砍掉。這種 cycle 的 `decision_attempts.status` 一樣是
 `invalid_output`（fail-closed、計入 30 輪、不重問），但 `ai_outputs.risk_reason` 記
 `truncated_output` 而不是 `invalid_output`，log 同時有一行 ERROR
 `the decision completion was truncated: N output tokens against a cap of C`——處置是調大

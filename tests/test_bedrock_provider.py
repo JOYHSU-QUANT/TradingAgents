@@ -44,3 +44,41 @@ def test_construction_when_extra_installed(monkeypatch):
     llm = create_llm_client("bedrock", "us.anthropic.claude-sonnet-4-6-v1:0").get_llm()
     assert type(llm).__name__ == "NormalizedChatBedrockConverse"
     assert llm.region_name == "eu-west-1"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stop_reason", "truncated"), [("max_tokens", True), ("end_turn", False)]
+)
+def test_the_converse_stop_reason_is_read_through_the_real_converter(stop_reason, truncated):
+    # ``completion_metadata``'s Bedrock row was transcribed from the Converse
+    # docs, not produced. Feed the REAL converter a canned response and read
+    # it back through the reader: the key it files is camelCase ``stopReason``
+    # (the raw Converse dict), which the transcribed ``stop_reason`` row read
+    # as "not truncated" (#214). The extra rides the ``dev`` extra so the
+    # suite runs this; importorskip keeps a bare install honest.
+    pytest.importorskip("langchain_aws")
+    from langchain_aws import ChatBedrockConverse
+    from langchain_core.messages import HumanMessage
+
+    from tradingagents.llm_clients.completion_metadata import completion_metadata_of
+
+    from .conftest import llm_result_of
+
+    class CannedConverse:
+        def converse(self, **_request):
+            return {
+                "ResponseMetadata": {"HTTPStatusCode": 200},
+                "output": {"message": {"role": "assistant", "content": [{"text": "cut"}]}},
+                "stopReason": stop_reason,
+                "usage": {"inputTokens": 10, "outputTokens": 8192, "totalTokens": 8202},
+                "metrics": {"latencyMs": 5},
+            }
+
+    llm = ChatBedrockConverse(
+        model="anthropic.claude-x", region_name="us-east-1", client=CannedConverse()
+    )
+    read = completion_metadata_of(llm_result_of(llm._generate([HumanMessage(content="hi")])))
+    assert read.stop_reason == stop_reason
+    assert read.truncated is truncated
+    assert read.output_tokens == 8192

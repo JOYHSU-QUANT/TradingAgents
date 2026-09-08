@@ -4,9 +4,12 @@ Every provider answers HTTP 200 when the completion cap binds; the only signal
 is the stop reason, and each langchain integration spells it and files it
 differently. Rows verified against the installed packages on 2026-09-05
 (langchain-openai 1.3.3, langchain-anthropic 1.4.8, langchain-google-genai
-4.2.6) EXCEPT Bedrock: ``langchain-aws`` is an optional extra not installed
-here, so that row is transcribed from its documented Converse response shape
-and pinned only by a hand-built result in the tests.
+4.2.6) and, for the Bedrock row, langchain-aws 1.7.5 on 2026-09-08 (the
+``[bedrock]`` extra; carried by the ``dev`` extra so the suite runs that
+row's real-converter test). The Converse converter files the RAW response
+dict as ``response_metadata``, so Bedrock's key is camelCase ``stopReason``;
+its streaming path files the ``messageStop`` event the same way (read from
+``_parse_stream_event``, not exercised by the tests).
 
 | provider (langchain package)                 | key                          | slot on the LLMResult                                   | truncated value       |
 |----------------------------------------------|------------------------------|---------------------------------------------------------|-----------------------|
@@ -15,14 +18,14 @@ and pinned only by a hand-built result in the tests.
 | openai Responses API (native ``openai``)     | ``status`` + ``incomplete_details.reason`` | ``response_metadata``; NO finish_reason at all | ``max_output_tokens`` |
 | anthropic                                    | ``stop_reason``              | ``llm_output`` (merged into ``response_metadata``)      | ``max_tokens``        |
 | google (Gemini)                              | ``finish_reason``            | ``generation_info``, the enum NAME                      | ``MAX_TOKENS``        |
-| bedrock (Converse)                           | ``stop_reason``              | ``response_metadata``                                   | ``max_tokens``        |
+| bedrock (Converse)                           | ``stopReason`` (camelCase)   | ``response_metadata`` (the raw Converse dict)           | ``max_tokens``        |
 
 The native ``openai`` provider takes the Responses branch
 (``openai_client.py``: ``use_responses_api=True`` on the native base URL),
 whose converter files no stop reason key — a bound cap is
 ``status: "incomplete"`` with ``incomplete_details: {"reason":
 "max_output_tokens"}``. :func:`stop_reason_of` reads that pair as the stop
-reason when no ``finish_reason``/``stop_reason`` is present, so the reader
+reason when no stop-reason key is present, so the reader
 does not go blind on the busiest provider's default path.
 
 langchain_core merges ``generation_info`` and ``llm_output`` into the
@@ -51,9 +54,14 @@ __all__ = [
 ]
 
 # The spellings that mean "the completion cap bound" — see the table above.
+# Deliberately NOT Bedrock's ``model_context_window_exceeded``: the output
+# ran into the context window, so it IS cut short, but the cap did not
+# bind and raising it cannot cure it — the remedy is a shorter prompt. It
+# stays a plain ``invalid_output`` with the raw stop reason in the sidecar.
 TRUNCATED_STOP_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
 
-_STOP_REASON_KEYS = ("finish_reason", "stop_reason")
+# ``stopReason`` is Bedrock's: langchain-aws files the Converse dict as-is.
+_STOP_REASON_KEYS = ("finish_reason", "stop_reason", "stopReason")
 
 
 def is_truncated(stop_reason: object) -> bool:
@@ -116,7 +124,7 @@ def _stop_reason(slots: list[dict[str, Any]]) -> str | None:
 def stop_reason_of(result: LLMResult) -> str | None:
     """The provider's stop reason for the first generation, or ``None`` if absent.
 
-    A ``finish_reason``/``stop_reason`` key wins; failing that, the Responses
+    A ``finish_reason``/``stop_reason``/``stopReason`` key wins; failing that, the Responses
     API's ``incomplete_details.reason`` (only ever present on an incomplete
     completion) is the stop reason — a completed Responses call reports none.
     """

@@ -12,9 +12,9 @@ import os
 import pytest
 
 from contrib.hyperliquid_perp.config import (
-    _ENGINE_KEYS,
     _EXAMPLE,
     _WALLET_PLACEHOLDER,
+    ENGINE_KEYS,
     dotenv_diagnosis,
     load_config,
     load_dotenv_files,
@@ -544,60 +544,79 @@ def test_the_perp_default_cap_equals_the_cli_default_cap():
     assert _DEFAULT_MAX_COMPLETION_TOKENS == DEFAULT_MAX_TOKENS
 
 
-def test_engine_keys_are_exactly_the_keys_the_bridge_reads():
-    """``_ENGINE_KEYS`` derived from ``_build_engine_config``'s source, not retyped.
+def test_every_engine_key_the_loader_accepts_lands_in_the_bridge_output():
+    """``ENGINE_KEYS`` is the set the bridge consumes, pinned by behaviour.
 
-    The unknown-key warning is only as honest as this set: a key the bridge
-    reads but the set lacks would hand every operator who sets it a false
-    "not supported, ignored" warning while the value silently applied; a key
-    the set carries but the bridge no longer reads would load without a word
-    and do nothing (#184). Walk the function's AST for every
-    ``eng_cfg.get("<literal>")`` and demand equality in both directions.
+    The unknown-key warning is only as honest as this set. The bridge projects
+    the block onto it and reads by subscript, so a key read there that the
+    set lacks is a KeyError in every bridge test. The other direction — a key
+    the set carries but nothing consumes, which would load without a word and
+    do nothing (#184) — is what this table pins: one distinctive value per
+    key, each asserted to reach the bridge's output. The table's keys are
+    asserted equal to the set, so a key added to one place has to be added
+    to the other (#212; replaces a source-walking AST pin).
     """
-    import ast
-    import inspect
-    import textwrap
-
     from contrib.hyperliquid_perp import engine_bridge
 
-    # dedent so the pin survives the function moving into a class or a nest.
-    tree = ast.parse(textwrap.dedent(inspect.getsource(engine_bridge._build_engine_config)))
-    def is_eng_cfg(node: ast.AST) -> bool:
-        return isinstance(node, ast.Name) and node.id == "eng_cfg"
-
-    read: set[str] = set()
-    receivers: list[ast.AST] = []  # the ``eng_cfg`` Name node of each ``eng_cfg.get(...)``
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-            and is_eng_cfg(node.func.value)
-        ):
-            continue
-        receivers.append(node.func.value)
-        # A computed key could not be checked here — refuse rather than
-        # silently under-count.
-        assert node.args and isinstance(node.args[0], ast.Constant), ast.dump(node)
-        assert isinstance(node.args[0].value, str), ast.dump(node)
-        read.add(node.args[0].value)
-    # Every other use of the name (``eng_cfg["k"]``, ``"k" in eng_cfg``,
-    # ``eng_cfg.pop(...)``, ``eng_cfg.items()``, ``helper(cfg=eng_cfg)``,
-    # ``**eng_cfg``) is a read this lock cannot see and would re-open the
-    # false-warning hole — refuse them all, so a new read has to be spelled
-    # the one way the lock checks. The assignment target is the only store.
-    stray = [
-        node
-        for node in ast.walk(tree)
-        if is_eng_cfg(node)
-        and isinstance(node.ctx, ast.Load)
-        and not any(node is r for r in receivers)
-    ]
-    assert not stray, "spell every eng_cfg read as eng_cfg.get('<literal>'): " + ", ".join(
-        f"line {n.lineno}" for n in stray
+    # key -> (value fed in, the engine_config key it lands on)
+    landing = {
+        "llm_provider": ("anthropic", "llm_provider"),
+        "deep_think_llm": ("deep-x", "deep_think_llm"),
+        "quick_think_llm": ("quick-x", "quick_think_llm"),
+        # True, not False: False is also the perp default, so only the armed
+        # value proves the key was read (its warning is expected here).
+        "structured_output": (True, "structured_output"),
+        "max_completion_tokens": (4321, "max_tokens"),
+    }
+    # ``selected_analysts`` lands in the second return value, not engine_config.
+    assert set(landing) | {"selected_analysts"} == set(ENGINE_KEYS)
+    block = {key: value for key, (value, _) in landing.items()}
+    engine_config, selected = engine_bridge._build_engine_config(
+        {"engine": {**block, "selected_analysts": ["news"]}}
     )
-    assert read, "no eng_cfg.get(...) reads found — was the local renamed?"
-    assert read == set(_ENGINE_KEYS)
+    assert selected == ["news"]
+    for key, (value, lands_on) in landing.items():
+        assert engine_config[lands_on] == value, key
+
+
+def test_a_bare_engine_line_is_the_all_defaults_block():
+    # ``engine:`` with nothing under it (the block commented out — a common
+    # edit) loads as None, which load_config accepts; the bridge must read it
+    # as {} rather than crash into the exit-2 "unexpected error" bucket on a
+    # config the loader just called fine.
+    from contrib.hyperliquid_perp import engine_bridge
+
+    assert engine_bridge._build_engine_config({"engine": None}) == (
+        engine_bridge._build_engine_config({})
+    )
+
+
+def test_the_projected_engine_block_refuses_get():
+    # The projection closes the silent-None hole only while every read is a
+    # subscript; ``.get`` is the one spelling that would reopen it, so the
+    # block refuses it outright rather than trusting a code comment.
+    from contrib.hyperliquid_perp import engine_bridge
+
+    block = engine_bridge._EngineBlock({"llm_provider": None})
+    assert block["llm_provider"] is None
+    with pytest.raises(TypeError, match="subscript"):
+        block.get("llm_provider")
+
+
+def test_the_bridge_reads_the_engine_block_through_the_refusing_class(monkeypatch):
+    # The class alone proves nothing if the bridge builds a plain dict; pin
+    # the construction site by swapping the class for one that announces
+    # itself, so a revert to a bare comprehension goes red here.
+    from contrib.hyperliquid_perp import engine_bridge
+
+    class Announce(dict):
+        def __init__(self, projection):
+            raise RuntimeError(f"engine block built with {sorted(projection)}")
+
+    monkeypatch.setattr(engine_bridge, "_EngineBlock", Announce)
+    with pytest.raises(RuntimeError, match="engine block built with") as info:
+        engine_bridge._build_engine_config({})
+    assert str(sorted(ENGINE_KEYS)) in str(info.value)
 
 
 @pytest.mark.parametrize(

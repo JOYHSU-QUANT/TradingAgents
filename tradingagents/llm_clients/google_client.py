@@ -5,11 +5,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 from .validators import validate_model
 
-# ``max_tokens`` is ChatGoogleGenerativeAI's declared alias for its
-# ``max_output_tokens`` field, so the unified spelling works here too.
-# ``api_key`` is deliberately absent: it maps to ``google_api_key`` in get_llm.
-_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + ("timeout", "http_client", "http_async_client")
-
 
 class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
     """ChatGoogleGenerativeAI with normalized content output.
@@ -25,6 +20,11 @@ class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
 class GoogleClient(BaseLLMClient):
     """Client for Google Gemini models."""
 
+    # ``max_tokens`` is ChatGoogleGenerativeAI's declared alias for its
+    # ``max_output_tokens`` field, so the unified spelling works here too.
+    # ``api_key`` is deliberately absent: it maps to ``google_api_key`` in get_llm.
+    _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS + ("timeout", "http_client", "http_async_client")
+
     def __init__(self, model: str, base_url: str | None = None, **kwargs):
         super().__init__(model, base_url, **kwargs)
 
@@ -36,9 +36,7 @@ class GoogleClient(BaseLLMClient):
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        for key in _PASSTHROUGH_KWARGS:
-            if key in self.kwargs:
-                llm_kwargs[key] = self.kwargs[key]
+        llm_kwargs.update(self.forwarded_kwargs())
 
         # Unified api_key maps to provider-specific google_api_key
         google_api_key = self.kwargs.get("api_key") or self.kwargs.get("google_api_key")

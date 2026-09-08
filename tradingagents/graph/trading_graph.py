@@ -146,7 +146,11 @@ class TradingAgentsGraph:
             if thinking_level:
                 kwargs["thinking_level"] = thinking_level
 
-        elif provider == "openai":
+        elif provider in ("openai", "azure"):
+            # Azure hosts the same gpt-5 deployments and its client allowlist
+            # always carried ``reasoning_effort``; the graph just never sent
+            # it there, which left the dropped-temperature warning's remedy
+            # (``openai_reasoning_effort: none``) unreachable on Azure (#212).
             reasoning_effort = self.config.get("openai_reasoning_effort")
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
@@ -199,7 +203,7 @@ class TradingAgentsGraph:
                     f"be a positive integer, got {max_tokens!r}"
                 ) from None
             kwargs["max_tokens"] = parsed
-        elif is_gateway_provider(provider):
+        elif is_gateway_provider(provider, base_url=self.config.get("backend_url")):
             # Uncapped through a gateway is the #177 shape: some upstreams
             # substitute the model's full context for a missing cap and
             # reject every call with HTTP 400. The library default stays
@@ -211,7 +215,8 @@ class TradingAgentsGraph:
             # warning filter also means once per construction site.
             # "routes to an upstream this process cannot see", not "is a
             # gateway": openai_compatible carries the flag too, and for a
-            # local vLLM the second phrasing would be false.
+            # local vLLM the second phrasing would be false. The ``openai``
+            # provider behind a custom backend_url lands here as well (#212).
             warnings.warn(
                 f"llm_provider '{provider}' routes to an upstream this process "
                 "cannot see, and no 'max_tokens' cap is set: some upstreams "

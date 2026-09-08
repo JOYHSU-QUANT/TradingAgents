@@ -6,10 +6,6 @@ from langchain_anthropic import ChatAnthropic
 from .base_client import _COMMON_PASSTHROUGH_KWARGS, BaseLLMClient, normalize_content
 from .validators import validate_model
 
-_PASSTHROUGH_KWARGS = _COMMON_PASSTHROUGH_KWARGS + (
-    "timeout", "api_key", "http_client", "http_async_client", "effort",
-)
-
 # Anthropic's extended-thinking ``effort`` parameter is accepted by Opus 4.5+
 # and Sonnet 4.6+ only. Sonnet 4.5 and any Haiku version 400 with
 # ``"This model does not support the effort parameter"`` (#831). The per-family
@@ -49,6 +45,10 @@ class NormalizedChatAnthropic(ChatAnthropic):
 class AnthropicClient(BaseLLMClient):
     """Client for Anthropic Claude models."""
 
+    _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS + (
+        "timeout", "api_key", "http_client", "http_async_client", "effort",
+    )
+
     def __init__(self, model: str, base_url: str | None = None, **kwargs):
         super().__init__(model, base_url, **kwargs)
 
@@ -60,12 +60,8 @@ class AnthropicClient(BaseLLMClient):
         if self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        for key in _PASSTHROUGH_KWARGS:
-            if key not in self.kwargs:
-                continue
-            if key == "effort" and not _supports_effort(self.model):
-                continue
-            llm_kwargs[key] = self.kwargs[key]
+        skip = () if _supports_effort(self.model) else ("effort",)
+        llm_kwargs.update(self.forwarded_kwargs(skip=skip))
 
         return NormalizedChatAnthropic(**llm_kwargs)
 

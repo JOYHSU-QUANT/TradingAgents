@@ -359,10 +359,13 @@ class HyperliquidSignedClient:
         # spot_meta stub: same 0.22.0 mainnet-spot-meta crash defense as
         # sdk_client — Exchange builds its own Info internally and we only
         # trade perps. Perp meta still auto-fetches.
+        # URL lookup outside the try, as in sdk_client: a vocabulary/table drift
+        # is an internal defect, not a request failure (issue #226).
+        base_url = _BASE_URLS[key]
         try:
             self._exchange = Exchange(
                 account,
-                base_url=_BASE_URLS[key],
+                base_url=base_url,
                 account_address=wallet_address,
                 spot_meta={"tokens": [], "universe": []},
                 timeout=timeout,

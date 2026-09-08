@@ -270,6 +270,19 @@ def test_the_loaders_network_vocabulary_matches_the_sdk_clients():
     assert set(LEGAL_NETWORKS) == set(_BASE_URLS)
 
 
+def test_a_url_table_drift_surfaces_as_the_bare_key_error(monkeypatch):
+    # The constructor refuses over LEGAL_NETWORKS and then indexes _BASE_URLS;
+    # if the two ever drift, the lookup must fail as the internal defect it is.
+    # With the lookup inside the SDK-construction try, the KeyError was
+    # relabelled ``ExchangeRequestError("Hyperliquid request failed: KeyError
+    # ...")`` — a transient-looking failure an operator would retry (issue #226).
+    from contrib.hyperliquid_perp.exchanges.hyperliquid import sdk_client
+
+    monkeypatch.setattr(sdk_client, "_BASE_URLS", {})
+    with pytest.raises(KeyError):
+        HyperliquidClient("mainnet")
+
+
 def test_digits_inside_a_larger_number_are_not_a_throttle():
     # The first draft matched a bare "429" substring, so an oid, an epoch-ms
     # timestamp or a price containing those digits read as a rate limit.

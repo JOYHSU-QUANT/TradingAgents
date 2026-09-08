@@ -174,9 +174,16 @@ class HyperliquidClient:
         # crashes in 0.22.0 (IndexError on spot_meta["tokens"]). We only trade
         # perps, so stub spot meta out; perp meta still auto-fetches and
         # populates the name->coin map that candle/funding calls need.
+        #
+        # The URL lookup sits OUTSIDE the try: the table is keyed by the
+        # vocabulary the check above accepted, so a key it lacks is a drift
+        # between the two — an internal defect that must surface as the bare
+        # KeyError, not be relabelled by the except below as a "request failed"
+        # the operator would retry (issue #226).
+        base_url = _BASE_URLS[key]
         try:
             self.info = Info(
-                base_url=_BASE_URLS[key],
+                base_url=base_url,
                 skip_ws=True,
                 spot_meta={"tokens": [], "universe": []},
                 timeout=timeout,

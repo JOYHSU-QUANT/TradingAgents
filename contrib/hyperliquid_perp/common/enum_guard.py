@@ -24,8 +24,9 @@ the enum (a YAML key, a phase policy) re-words the ``ValueError`` itself
 
 One deliberate exception to the audience rule (issue #226): the
 operator-written ``network`` is refused through ``check_enum`` over the flat
-``LEGAL_NETWORKS`` tuple, with its YAML key as ``name`` (``'network'``,
-``live.network``), rather than through a ``Network`` enum. Every consumer of
+``LEGAL_NETWORKS`` tuple — the two YAML loaders passing their key as ``name``
+(``'network'``, ``live.network``), the clients and the agent-key lookup the
+parameter name — rather than through a ``Network`` enum. Every consumer of
 the accepted spelling (the exchange clients' URL table, the agent-key env-var
 table, the CLI's drift comparisons) reads it as a plain ``str``; an enum
 there would ripple ``.value`` through all of them to buy a sentence that
@@ -52,15 +53,17 @@ from typing import ClassVar, NoReturn
 __all__ = ["VocabEnum", "check_enum"]
 
 
-def check_enum(value: str, allowed: frozenset[str] | tuple[str, ...], *, name: str) -> None:
+def check_enum(value: object, allowed: frozenset[str] | tuple[str, ...], *, name: str) -> None:
     """Raise ``ValueError`` naming ``name`` unless ``value`` is in ``allowed``.
 
     ``allowed`` is the persistence layer's frozenset or a tuple such as
     ``LEGAL_NETWORKS`` (not a bare ``str``, whose ``in`` is a substring test);
-    the sentence lists it sorted either way, so the container never shows. A
-    non-``str`` value is refused by the same sentence WITHOUT being looked up,
-    so an unhashable YAML value (a list) cannot turn a frozenset membership
-    test into a ``TypeError`` that escapes the caller's ``ValueError`` lane.
+    the sentence lists it sorted either way, so the container never shows.
+    ``value`` is typed ``object`` because the YAML loaders hand over whatever
+    the file said: a non-``str`` is refused by the same sentence WITHOUT
+    being looked up, so an unhashable value (a list) cannot turn a frozenset
+    membership test into a ``TypeError`` that escapes the caller's
+    ``ValueError`` lane.
     """
     if not isinstance(value, str) or value not in allowed:
         raise ValueError(f"{name} must be one of {sorted(allowed)}, got {value!r}")

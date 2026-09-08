@@ -167,11 +167,17 @@ Breaking changes within the 0.x line are called out explicitly.
   semantics change.
   Known trade-offs, accepted deliberately: the four sites that normalise
   case and whitespace before the check now report the normalised spelling
-  (``got 'prod'`` for ``"Prod "``) rather than the raw one, since the guard
-  takes one value; and ``live/fills.py``'s ``fill side must be one of ['A',
-  'B'] (bid/ask)`` stays hand-built — it is the VENUE's side vocabulary on a
-  wire payload, raised as ``MalformedResponseError``, not a ``ValueError``
-  over a local table.
+  (``got 'prod'`` for ``"Prod "``, ``got ''`` for a blank) rather than the
+  raw one, since the guard takes one value, and that normalisation stays
+  written at each site (plus the CLI's two drift comparisons) rather than in
+  a shared helper; on Python 3.10 ``Enum.__new__`` attaches its own "'bid' is
+  not a valid Side" to the refusal as ``__context__`` (3.11+ does not), so a
+  3.10 traceback for ``Side.parse`` shows the old sentence as context where
+  the removed ``from None`` used to hide it — the same shape the ``schema``
+  enums have had since PR #225, cosmetic only; and ``live/fills.py``'s ``fill
+  side must be one of ['A', 'B'] (bid/ask)`` stays hand-built — it is the
+  VENUE's side vocabulary on a wire payload, raised as
+  ``MalformedResponseError``, not a ``ValueError`` over a local table.
 - **dataflows: ``stockstats_utils`` is now ``yfinance_common``** (issue
   #187, item 4; follow-ups from PR #185). Once ``StockstatsUtils`` left
   (Removed below, issue #137), the module computed no indicator at all — that happens in

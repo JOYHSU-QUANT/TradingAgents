@@ -81,9 +81,9 @@ MIN_CYCLES_FOR_PHASE3 = 30
 # accepted in spec §3.1's revision box, (c)): an invalid answer is never stored
 # as resumable (PR #204), so a restart while its gate is blocked re-enters the
 # §3.1 ladder — one re-ask per restart, the ladder continuing in-process after
-# a retryable failure, never past the 3-try budget — and a restart that finds
-# the third try already spent records api_failed/interrupted instead. Either
-# way the row is counted as api_failed_count rather than here.
+# a retryable failure, never past the 3-try budget — so the re-ask decides the
+# terminal status; a restart that finds the third try already spent records
+# api_failed/interrupted instead, counted as api_failed_count rather than here.
 _COMPLETED_CYCLE_STATUSES = ("completed", "invalid_output")
 
 # Import-time completeness guard: this subset must be exactly "every terminal

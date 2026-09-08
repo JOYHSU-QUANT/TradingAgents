@@ -1002,13 +1002,16 @@ def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
 def test_the_reask_window_never_exceeds_the_try_budget(tmp_path):
     """issue #206: with an invalid answer never stored (above), a restart while
     its gate is blocked re-enters the §3.1 ladder and asks the AI again — the
-    one place "never re-ask" is relaxed. The relaxation is bounded by the same
-    3-try budget an outage gets: each restart in the window adds ONE re-ask (a
-    retryable failure after it continues the ladder in-process, as ever), and
-    once the third try is spent a further restart records the cycle without
-    asking at all. Driven at the worst case the window allows — an invalid
-    answer every time, a gate blocked every time, a restart after each — so
-    the total spend is the ladder's cap and nothing more."""
+    one place "never re-ask" is relaxed. This pins the exact shape spec §3.1
+    box (c) commits to, not only the cap: each restart in the window adds
+    exactly ONE re-ask (a retryable failure after it would continue the ladder
+    in-process — the ordinary path, not driven here), and once the third try
+    is spent a further restart records the cycle without asking at all. Driven
+    at the worst case the window allows — an invalid answer every time, a gate
+    blocked every time, a restart after each — so the total spend is the
+    ladder's cap and nothing more. A scheduler that stops re-asking (the
+    marker route the CHANGELOG records) must move box (c) and this test
+    together."""
     invalid = _invalid_decision()
     # One TIMEOUT per gate (the AI answers, the store is skipped, the gate
     # blocks), then a fresh mark for the terminal's best-effort snapshot.

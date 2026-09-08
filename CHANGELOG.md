@@ -175,8 +175,10 @@ Breaking changes within the 0.x line are called out explicitly.
   cycle ends ``invalid_output`` with no second call — is production code in
   both lanes' post-answer persist lanes (``decision_attempts`` carries no
   CHECK on ``status`` or ``error_type``, so neither a marker nor a status is
-  a migration); it is left unbuilt under the 2026-09-06 rule that this round
-  closes the refactor ledger, and recorded here rather than as an issue.
+  a migration); it is left unbuilt under the decision to close the refactor
+  ledger with this round, and recorded here rather than tracked as an issue.
+  Whoever builds it moves spec §3.1 box (c) and the new test together, since
+  both pin the one-re-ask-per-restart shape rather than only the cap.
 - **hyperliquid_perp: the last three hand-built "must be one of" refusals
   speak the shared vocabulary sentences** (issue #226; follow-ups from PR
   #225). PR #225 gave the four ``schema`` enums a refusal that names the

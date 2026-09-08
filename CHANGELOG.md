@@ -157,9 +157,10 @@ Breaking changes within the 0.x line are called out explicitly.
   revision box (c), phase2-data §6.2 (both the ``status`` and the
   ``error_type`` row), both validators' cycle-status comments and
   RUNBOOK-live's adoption branch. A new paper test drives three invalid
-  answers through three blocked gates and three restarts and asserts that
-  each restart adds exactly one call, that the third try is the last, and
-  that a fourth restart records ``interrupted`` without a build or a call.
+  answers through three blocked gates with a restart after each, and asserts
+  that the first two restarts add exactly one call apiece, that the third try
+  is the last, and that the third restart, finding the budget spent, records
+  ``interrupted`` without a build or a call.
   ``repository.update_decision_attempt``'s ``pending_raw_response`` keyword
   now says in its docstring that no production caller passes it — it exists
   to refuse a second writer (#181), not to be called. No behaviour, schema or

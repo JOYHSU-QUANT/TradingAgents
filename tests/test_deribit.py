@@ -2735,10 +2735,12 @@ class TestHistoricalDate:
         # at all REQUIRES that fetch to have burned its full retry envelope, so of
         # every site in that sweep this is the likeliest to have crossed midnight —
         # and it was the one the sweep missed.
+        # The withheld-chain clause leads and the DVOL cause trails (#203):
+        # the router caps the whole message, and the cause alone can fill it.
         assert str(excinfo.value) == (
-            "Deribit DVOL is unavailable for BTC (dvol down), and the options chain is not "
-            "served for 2026-08-07 (which was 2 days ahead of the UTC clock (2026-08-05) when "
-            "this report was built)"
+            "Deribit's options chain is not served for 2026-08-07 (which was 2 days ahead of "
+            "the UTC clock (2026-08-05) when this report was built); DVOL is unavailable for "
+            "BTC (dvol down)"
         )
         assert "which is 2 days ahead" not in str(excinfo.value)
 

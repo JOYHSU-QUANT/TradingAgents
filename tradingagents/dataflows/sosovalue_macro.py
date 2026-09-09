@@ -115,7 +115,7 @@ from .sosovalue_common import (
     load_rolling_snapshot,
     raise_all_failed,
 )
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal, failure_account
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -828,11 +828,13 @@ def _fetch_all() -> dict:
                 f"SoSoValue macro: rate limited before any tracked event "
                 f"history could be fetched: {sweep.rate_limited}"
             ),
+            # The counted verdict leads (#217): the router caps this text at
+            # 200 for the model, and behind the cache lane's wrap the old
+            # tail — the tally, the last failure's words — fell past it.
             on_transport=lambda: (
-                f"SoSoValue macro: no usable history for any of the "
-                f"{len(TRACKED_EVENTS)} tracked events; every request this sweep made "
-                f"({sweep.attempted} of {len(TRACKED_EVENTS)}) failed to reach the vendor or "
-                f"was answered without data (last: {failure_account(sweep.last_network)})"
+                f"SoSoValue macro: every request this sweep made ({sweep.attempted} of "
+                f"{len(TRACKED_EVENTS)}) failed ({sweep.transport_tally()}); no usable "
+                f"history for any of the {len(TRACKED_EVENTS)} tracked events"
             ),
             on_structural=lambda: (
                 f"SoSoValue macro: no usable history for any of the "

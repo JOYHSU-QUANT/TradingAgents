@@ -823,12 +823,16 @@ class TestFetchAll:
         # likely needs a fix" — a structural verdict on something no code
         # change can heal. The cause is quoted as the exception's class,
         # never its text (#203).
+        # The counted verdict leads (#217) — three unreached, none answered
+        # — so it sits inside the router's cap; the last one's words follow.
         with pytest.raises(
-            sosovalue_common.SoSoValueUnavailableError, match="failed to reach the vendor"
+            sosovalue_common.SoSoValueUnavailableError,
+            match=r"^SoSoValue macro: every request this sweep made \(3 of \d+\) failed "
+            r"\(3 unreached, 0 answered without data; last: SoSoValue could not be reached: "
+            r"ConnectionError on ",
         ) as exc:
             sosovalue_macro._fetch_all()
         assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
-        assert "could not be reached: ConnectionError" in str(exc.value)
         history_calls = [c for c in impl.calls if c != "/macro/events"]
         # Literal 3, not the constant: comparing against the value under test
         # makes the assertion true for every breaker setting, including a 9
@@ -871,7 +875,8 @@ class TestFetchAll:
         )
         monkeypatch.setattr(sosovalue_macro, "_request", impl)
         with pytest.raises(
-            sosovalue_common.SoSoValueUnavailableError, match="was answered without data"
+            sosovalue_common.SoSoValueUnavailableError,
+            match=r"failed \(0 unreached, 3 answered without data; last: ",
         ) as exc:
             sosovalue_macro._fetch_all()
         assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
@@ -2974,6 +2979,41 @@ class TestArgumentGuards:
                 max_consecutive_network=3,
                 log=sosovalue_macro.logger,
             )
+
+    def test_fetch_each_tallies_the_two_transport_flavours(self):
+        # ``(last: ...)`` quoted one failure for a sweep that may have mixed
+        # a gateway 5xx with a timeout, so only one flavour was ever visible
+        # (#217): the sweep counts each, and the tally the all-failed
+        # messages quote names both, the last one's words riding along.
+        # Flavour by type: the unreached subclass counts on one side, the
+        # parent (an answered outage) on the other.
+        answered = sosovalue_common.SoSoValueUnavailableError(
+            "SoSoValue answered HTTP 503 without data on /macro/events/NFP/history"
+        )
+        flavours = iter([_unreached(), answered, _unreached()])
+
+        def fetch_one(item):
+            raise next(flavours)
+
+        sweep = sosovalue_common.fetch_each(
+            ["CPI", "NFP", "GDP"],
+            fetch_one,
+            key=str,
+            describe=repr,
+            label="macro calendar",
+            failed_bucket="events_failed",
+            noun="event histories",
+            max_consecutive_network=3,
+            log=sosovalue_macro.logger,
+        )
+        assert (sweep.unreached, sweep.answered_without_data) == (2, 1)
+        assert sweep.transport_tally() == (
+            "2 unreached, 1 answered without data; last: SoSoValue could not be reached: "
+            "ConnectionError on /macro/events/CPI/history"
+        )
+        # A sweep with no transport failure has no last one to quote.
+        clean = sweep._replace(last_network=None, unreached=0, answered_without_data=0)
+        assert clean.transport_tally() == "0 unreached, 0 answered without data"
 
     def test_is_safe_text_defaults_are_the_strict_end(self):
         # A call site that forgets the keywords must fail closed: empty and

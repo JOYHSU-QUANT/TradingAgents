@@ -164,9 +164,27 @@ def sosovalue_unreached(path: str):
     Authored once for the suites that stub ``_request`` (the sweeps and the
     cache lane); the tests that drive the real ``_request`` pin the sentence.
     """
-    from tradingagents.dataflows.sosovalue_common import SoSoValueUnavailableError
+    from tradingagents.dataflows.sosovalue_common import SoSoValueUnreachedError
 
-    return SoSoValueUnavailableError(f"SoSoValue could not be reached: ConnectionError on {path}")
+    return SoSoValueUnreachedError(f"SoSoValue could not be reached: ConnectionError on {path}")
+
+
+def dataflows_module_trees(*, containing: str):
+    """``(path, tree)`` for each ``tradingagents/dataflows/*.py`` whose text contains ``containing``.
+
+    For the structural pins that read the package's source: the text filter
+    keeps each pin parsing only its candidates (the suite's time is
+    watched), and the glob, the encoding and the sort live here once.
+    """
+    import ast
+    from pathlib import Path
+
+    from tradingagents import dataflows
+
+    for path in sorted(Path(dataflows.__file__).parent.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if containing in text:
+            yield path, ast.parse(text, filename=str(path))
 
 
 def repo_text(name: str) -> str:

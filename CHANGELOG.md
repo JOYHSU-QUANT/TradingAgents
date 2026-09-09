@@ -139,6 +139,45 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **dataflows: the optional sentinel names the vendor that failed, a missing
+  key reads as one fixed phrase, and the remedy leads the vendor's text at
+  two boundaries** (issue #203, items 2, 3, 4 and 6; issue #217, items 7
+  and 9; follow-ups from PRs #202 and #216). ``DATA_UNAVAILABLE: optional
+  <category> could not be retrieved (...)`` now opens its parenthesis with
+  the vendor that failed — ``(sosovalue: could not be reached:
+  ConnectionError)`` — whichever lane the failure surfaced from, so a
+  multi-vendor category's report artifacts say which source failed without
+  the journal. A ``VendorNotConfiguredError`` contributes the fixed phrase
+  ``vendor not configured`` to that slot instead of its message: the
+  message is the operator's remedy — the variable to set, a URL to get a
+  key at — which a deployment without the key wrote into every cycle's
+  report, and the router's not-configured lane now logs it whole (it named
+  the vendor only). At the SoSoValue 401 the ``verify SOSOVALUE_API_KEY``
+  remedy now leads the vendor's capped body text, and at the three Deribit
+  withheld-chain raises the chain clause leads the DVOL cause, so a reader
+  capping the message keeps the fact that is not temporary (the DVOL cause
+  is what a cap drops now, by choice). Internally, ``route_to_vendor``'s
+  three first-seen slots (``first_outage`` / ``first_rate_limit`` /
+  ``first_skip``) are one ranked ``_Unconfirmed`` slot — outage over
+  throttle met over latch skip, whatever the chain order, with the order
+  pinned — and the four first-seen failure slots keep the vendor that met
+  them (the no-data verdict still names only the unconfirmed vendor); a
+  structural test pins that no optional category registers a getter from a
+  module raising ``UnsupportedIndicatorError``, the fact that makes the
+  lane's optional branch a defence. The SoSoValue sweep's two all-failed
+  messages now lead with the transport failures counted by flavour —
+  ``every request this sweep made (3 of 9) failed (3 unreached, 0 answered
+  without data; last: ...)`` — where they quoted only the last one, at a
+  tail the router's cap dropped; the unreached flavour is
+  ``SoSoValueUnreachedError``, a subclass every handler still catches as
+  the parent. Wording changes on the failure path only: no prompt-regime
+  key moves. Closed without a change: item 5 of
+  #203 (the two leaf tests it named were removed with their handler in
+  PR #218), and item 2 of #217 — in the 18 cycles after PR #216's deploy,
+  12 waited on the SoSoValue request budget (at most two waits of about a
+  minute each per cycle), every cycle completed, and no tool-call time
+  limit exists in the code to be stepped on.
+
 - **dataflows: the SoSoValue family's transport lane is one type, the Deribit
   boundary renders through the shared helpers, and an outage stale-served
   past half its cap says so at ERROR** (issue #217, items 1, 3, 4, 5, 6 and

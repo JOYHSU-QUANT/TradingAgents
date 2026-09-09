@@ -848,9 +848,12 @@ def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS
     """The words a failed vendor call contributes to a sentinel the model reads.
 
     Written into two slots of ``route_to_vendor`` — the optional category's
-    ``DATA_UNAVAILABLE`` parenthesis and the no-data sentinel's unconfirmed
-    clause — and by the boundaries that wrap a lower failure into a typed
-    message of their own (#203). A typed vendor error's message was
+    ``DATA_UNAVAILABLE`` parenthesis (where the router substitutes one fixed
+    phrase for a ``VendorNotConfiguredError``, whose message is the
+    operator's remedy: ``interface._optional_failure_words``) and the
+    no-data sentinel's unconfirmed clause — and by the boundaries that wrap
+    a lower failure into a typed message of their own (#203), where a
+    not-configured cause keeps its text for the log. A typed vendor error's message was
     authored at the boundary, so it rides along — flattened and capped,
     because not every boundary caps what it quotes (yfinance quotes the
     library's exception, decoded error body included, #172); a remedy a
@@ -863,7 +866,7 @@ def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS
     the cap on a typed message: the router's slots take the default; a
     boundary wrapping a typed cause into a message the router will cap
     again passes ``None``, so the cause's tail — a sweep verdict's
-    ``(last: ...)`` — survives into the boundary's own log line.
+    ``(...; last: ...)`` tally — survives into the boundary's own log line.
     """
     if isinstance(e, VendorLibraryError):
         # Two parts, capped apart: the subject carries the caller's symbol,

@@ -456,9 +456,13 @@ class TestFetchAll:
         # A sweep that died purely of transport is the vendor down: the OUTAGE
         # type — see the macro twin for why the structural class would
         # misclassify it.
+        # The counted verdict leads (#217); the selected count still closes
+        # the sentence, so the claim stays bounded to this sweep.
         with pytest.raises(
             sosovalue_common.SoSoValueUnavailableError,
-            match=r"12 selected .*failed to reach the vendor",
+            match=r"^SoSoValue treasuries: every request this sweep made \(3 of 12\) failed "
+            r"\(3 unreached, 0 answered without data; last: .*; no usable history for any of "
+            r"the 12 selected companies$",
         ) as exc:
             sosovalue_treasuries._fetch_all()
         assert not isinstance(exc.value, sosovalue_common.SoSoValueError)
@@ -506,7 +510,8 @@ class TestFetchAll:
         )
         monkeypatch.setattr(sosovalue_treasuries, "_request", impl)
         with pytest.raises(
-            sosovalue_common.SoSoValueUnavailableError, match="was answered without data"
+            sosovalue_common.SoSoValueUnavailableError,
+            match=r"failed \(0 unreached, 3 answered without data; last: ",
         ) as exc:
             sosovalue_treasuries._fetch_all()
         assert not isinstance(exc.value, sosovalue_common.SoSoValueError)

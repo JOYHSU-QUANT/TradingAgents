@@ -100,7 +100,7 @@ from .sosovalue_common import (
     raise_all_failed,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal, failure_account
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -632,11 +632,11 @@ def _fetch_all() -> dict:
                 f"SoSoValue treasuries: rate limited before any company "
                 f"history could be fetched: {sweep.rate_limited}"
             ),
+            # The counted verdict leads (#217) — see the macro twin.
             on_transport=lambda: (
-                f"SoSoValue treasuries returned no usable history for any of the "
-                f"{len(selected)} selected companies; every request this sweep made "
-                f"({sweep.attempted} of {len(selected)}) failed to reach the vendor or "
-                f"was answered without data (last: {failure_account(sweep.last_network)})"
+                f"SoSoValue treasuries: every request this sweep made ({sweep.attempted} of "
+                f"{len(selected)}) failed ({sweep.transport_tally()}); no usable history "
+                f"for any of the {len(selected)} selected companies"
             ),
             on_structural=lambda: (
                 f"SoSoValue treasuries returned no usable history for any of the "

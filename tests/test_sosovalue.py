@@ -23,8 +23,9 @@ import requests
 import tradingagents.default_config as default_config
 from tradingagents.dataflows import farside, interface, sosovalue, sosovalue_common
 from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS, sanitize_untrusted
 
-from .conftest import fake_response, sosovalue_unreached
+from .conftest import dataflows_module_trees, fake_response, sosovalue_unreached
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -281,6 +282,19 @@ class TestRequest:
         with pytest.raises(sosovalue.SoSoValueNotConfiguredError, match="SOSOVALUE_API_KEY"):
             self._get(fake_response(401, json=BAD_KEY_FIX))
 
+    def test_a_401s_remedy_leads_the_vendors_text_so_a_capped_reader_keeps_it(self):
+        # The body is capped at 300 and the router caps a whole message at
+        # 200, so a remedy appended after the body was the first thing a cap
+        # dropped (#203). The router now renders this type by a fixed phrase
+        # for the model (its own test, through the router, below) and logs
+        # the message whole, so the order serves a reader that caps the text
+        # and no production one today — kept for the shape's own sake.
+        with pytest.raises(sosovalue.SoSoValueNotConfiguredError) as exc:
+            self._get(fake_response(401, json={"code": 1, "msg": "x" * 300}))
+        message = str(exc.value)
+        assert "SOSOVALUE_API_KEY" in sanitize_untrusted(message, limit=MAX_UNTRUSTED_CHARS)
+        assert message.index("SOSOVALUE_API_KEY") < message.index("x" * 50)
+
     def test_429_raises_rate_limit(self):
         with pytest.raises(sosovalue.SoSoValueRateLimitError):
             self._get(fake_response(429, json={"code": 429, "message": "slow down"}))
@@ -438,9 +452,7 @@ class TestRequest:
         # Message strings only — f-string parts joined with a placeholder,
         # docstrings excluded, since prose may quote the sentence.
         import ast
-        from pathlib import Path
 
-        import tradingagents.dataflows as dataflows
 
         sentence = re.compile(r"answered HTTP \{\} (with a body that is not JSON|without data)")
 
@@ -464,11 +476,7 @@ class TestRequest:
                     yield node.value
 
         authors = {}
-        for source in sorted(Path(dataflows.__file__).parent.glob("*.py")):
-            text = source.read_text(encoding="utf-8")
-            if "answered HTTP" not in text:
-                continue  # parse only the candidates; the suite's time is watched
-            tree = ast.parse(text)
+        for source, tree in dataflows_module_trees(containing="answered HTTP"):
             found = {m.group(1) for s in message_strings(tree) for m in [sentence.search(s)] if m}
             if found:
                 authors[source.name] = found
@@ -2817,6 +2825,10 @@ class TestEndToEndFixture:
 # Router integration: the sosovalue,farside chain
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
+def _farside_boom(*a, **k):
+    raise farside.FarsideError("Cloudflare challenge (403)")
+
+
 class TestRouting:
     def test_default_chain_is_sosovalue_then_farside(self):
         assert (
@@ -2863,6 +2875,36 @@ class TestRouting:
             out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-31", 30)
         assert out == "FARSIDE_OK"
 
+    def test_a_rejected_key_reaches_the_model_as_not_configured(self, monkeypatch, caplog):
+        # The live 401 body through the real ``_request`` and the router: the
+        # sentinel names the vendor and the fixed phrase, never the remedy or
+        # the vendor's text (#203); the router's lane logs the message whole.
+        set_config({"data_vendors": {"crypto_etf_flows": "sosovalue,farside"}})
+        monkeypatch.setenv("SOSOVALUE_API_KEY", "test-key")
+        monkeypatch.setattr(
+            sosovalue_common.requests, "get", lambda *a, **k: fake_response(401, json=BAD_KEY_FIX)
+        )
+        with (
+            mock.patch.dict(
+                interface.VENDOR_METHODS,
+                {
+                    "get_etf_flows": {
+                        "sosovalue": lambda *a, **k: sosovalue._request("/etfs", {"symbol": "BTC"}),
+                        "farside": _farside_boom,
+                    }
+                },
+                clear=False,
+            ),
+            caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.interface"),
+        ):
+            out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-31", 30)
+        assert out == (
+            "DATA_UNAVAILABLE: optional crypto_etf_flows could not be retrieved "
+            "(sosovalue: vendor not configured). Proceed without it; do not fabricate values."
+        )
+        assert "Vendor 'sosovalue' not configured for get_etf_flows" in caplog.text
+        assert "verify SOSOVALUE_API_KEY" in caplog.text
+
     def test_whole_chain_failing_degrades_to_the_sentinel(self):
         # sosovalue down + farside Cloudflare-blocked = today's worst case with
         # no key: the optional category degrades, the run continues.
@@ -2870,9 +2912,6 @@ class TestRouting:
 
         def _soso_boom(*a, **k):
             raise sosovalue.SoSoValueError("SoSoValue unavailable")
-
-        def _farside_boom(*a, **k):
-            raise farside.FarsideError("Cloudflare challenge (403)")
 
         with mock.patch.dict(
             interface.VENDOR_METHODS,
@@ -2932,9 +2971,6 @@ class TestRouting:
 
         def _throttled(*a, **k):
             raise sosovalue.SoSoValueRateLimitError("429: too many requests")
-
-        def _farside_boom(*a, **k):
-            raise farside.FarsideError("Cloudflare challenge (403)")
 
         with mock.patch.dict(
             interface.VENDOR_METHODS,

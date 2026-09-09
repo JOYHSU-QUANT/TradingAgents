@@ -19,6 +19,7 @@ import tradingagents.dataflows.alpha_vantage_news as avn
 # The forged message and the one-capped-line assertions are the yfinance
 # siblings' — one definition of the hostile shape, so tightening it reaches
 # both vendors serving the routed indicator tool.
+from tests._date_refusal_table import patch_av_request
 from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_line
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
 from tradingagents.dataflows.errors import (
@@ -1107,10 +1108,6 @@ def test_stock_staleness_bound_is_the_single_shared_definition():
 _OVERVIEW = json.dumps({"Symbol": "AAPL", "MarketCapitalization": "3000000000"})
 
 
-def _patch_av_request(monkeypatch, body):
-    monkeypatch.setattr(avf, "_make_api_request", lambda function_name, params: body)
-
-
 def _note_of(out: str) -> str:
     """The freshness note carried by a rendered Alpha Vantage payload, or ""."""
     return json.loads(out).get(avf._FRESHNESS_NOTE_KEY, "")
@@ -1122,7 +1119,7 @@ def test_overview_backtest_date_discloses_live_values(monkeypatch):
     # like yfinance `info`: rendered for a past analysis date it must say the
     # numbers are live as of the fetch, or the agent reads today's market cap
     # as that date's.
-    _patch_av_request(monkeypatch, _OVERVIEW)
+    patch_av_request(monkeypatch, _OVERVIEW)
     out = avf.get_fundamentals("AAPL", "2020-01-01")
     assert "live values" in _note_of(out)
     assert json.loads(out)["MarketCapitalization"] == "3000000000"  # data still rendered
@@ -1132,14 +1129,14 @@ def test_overview_backtest_date_discloses_live_values(monkeypatch):
 def test_overview_current_date_carries_no_note(monkeypatch):
     from datetime import date
 
-    _patch_av_request(monkeypatch, _OVERVIEW)
+    patch_av_request(monkeypatch, _OVERVIEW)
     out = avf.get_fundamentals("AAPL", date.today().strftime("%Y-%m-%d"))
     assert out == _OVERVIEW  # untouched, not re-serialized
 
 
 @pytest.mark.unit
 def test_overview_without_curr_date_is_untouched(monkeypatch):
-    _patch_av_request(monkeypatch, _OVERVIEW)
+    patch_av_request(monkeypatch, _OVERVIEW)
     assert avf.get_fundamentals("AAPL") == _OVERVIEW
 
 
@@ -1148,7 +1145,7 @@ def test_overview_non_json_body_is_untouched(monkeypatch):
     # An error/notice page has nowhere to put a key; annotating must degrade to
     # returning the body rather than raising inside a disclosure helper.
     body = "Thank you for using Alpha Vantage!"
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     assert avf.get_fundamentals("AAPL", "2020-01-01") == body
 
 
@@ -1161,7 +1158,7 @@ def test_overview_empty_payload_raises_no_market_data(monkeypatch, curr_date):
     # router's no-data lane.
     from tradingagents.dataflows.errors import NoMarketDataError
 
-    _patch_av_request(monkeypatch, "{}")
+    patch_av_request(monkeypatch, "{}")
     with pytest.raises(NoMarketDataError):
         avf.get_fundamentals("AAPL", curr_date)
 
@@ -1171,7 +1168,7 @@ def test_overview_unparseable_curr_date_returns_the_shared_sentinel(monkeypatch)
     # The statement tools already answer INVALID_CURR_DATE here. Staying silent
     # on this path would serve today's ratios with no disclosure, because
     # live_snapshot_note degrades to "" on a date it cannot parse.
-    _patch_av_request(monkeypatch, _OVERVIEW)
+    patch_av_request(monkeypatch, _OVERVIEW)
     out = avf.get_fundamentals("AAPL", "not-a-date")
     assert out.startswith("INVALID_CURR_DATE")
     assert "MarketCapitalization" not in out
@@ -1185,7 +1182,7 @@ def test_overview_error_envelope_is_not_dressed_with_a_note(monkeypatch, key):
     # and "these fundamentals are live values as of the fetch" beside an error
     # message asserts a fetch that never returned anything.
     body = json.dumps({key: "Invalid API call."})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     assert avf.get_fundamentals("AAPL", "2020-01-01") == body
 
 
@@ -1194,7 +1191,7 @@ def test_overview_notice_beside_real_fields_is_still_disclosed(monkeypatch):
     # The envelope guard keys on "nothing BUT notice keys": a payload that also
     # carries fundamentals must keep its disclosure.
     body = json.dumps({"Note": "delayed", "Symbol": "AAPL", "MarketCapitalization": "1"})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     assert "live values" in _note_of(avf.get_fundamentals("AAPL", "2020-01-01"))
 
 
@@ -1209,7 +1206,7 @@ def test_a_vendor_supplied_note_key_cannot_shadow_the_real_disclosure(monkeypatc
             "quarterlyReports": [{"fiscalDateEnding": "2020-03-31"}],
         }
     )
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     note = _note_of(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"))
     assert "Data lag" in note
     assert "vendor supplied text" not in note
@@ -1235,7 +1232,7 @@ def test_a_vendor_note_key_is_dropped_even_when_we_add_no_note(monkeypatch, call
             "quarterlyReports": [{"fiscalDateEnding": "2026-06-30"}],
         }
     )
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     assert "vendor supplied text" not in call()
 
 
@@ -1246,7 +1243,7 @@ def test_overview_vendor_note_key_is_dropped_when_no_disclosure_is_due(monkeypat
     from datetime import date
 
     body = json.dumps({"_freshness_note": "vendor supplied text", "Symbol": "AAPL"})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     out = avf.get_fundamentals("AAPL", date.today().strftime("%Y-%m-%d"))
     assert avf._FRESHNESS_NOTE_KEY not in json.loads(out)
     assert json.loads(out)["Symbol"] == "AAPL"
@@ -1273,7 +1270,7 @@ _STATEMENT_GETTERS = [
 @pytest.mark.parametrize("getter,phrase", _STATEMENT_GETTERS)
 def test_statement_stale_quarterly_carries_note(monkeypatch, getter, phrase):
     # Newest surviving period 2025-01-31 vs analysis date 2026-08-18 (> 180d).
-    _patch_av_request(monkeypatch, _statement_body(quarterly=["2025-01-31"]))
+    patch_av_request(monkeypatch, _statement_body(quarterly=["2025-01-31"]))
     note = _note_of(getattr(avf, getter)("AAPL", "quarterly", "2026-08-18"))
     assert phrase in note
     assert "2025-01-31" in note
@@ -1282,7 +1279,7 @@ def test_statement_stale_quarterly_carries_note(monkeypatch, getter, phrase):
 @pytest.mark.unit
 def test_statement_normal_cadence_has_no_note(monkeypatch):
     # 49 days behind is a freshly filed quarter, not a stall.
-    _patch_av_request(monkeypatch, _statement_body(quarterly=["2026-06-30"]))
+    patch_av_request(monkeypatch, _statement_body(quarterly=["2026-06-30"]))
     assert _note_of(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")) == ""
 
 
@@ -1290,7 +1287,7 @@ def test_statement_normal_cadence_has_no_note(monkeypatch):
 def test_statement_annual_bound_tolerates_a_year_old_filing(monkeypatch):
     # An annual statement is ~a year old by definition; the quarterly bound
     # would flag every annual call.
-    _patch_av_request(monkeypatch, _statement_body(annual=["2025-09-27"]))
+    patch_av_request(monkeypatch, _statement_body(annual=["2025-09-27"]))
     assert _note_of(avf.get_balance_sheet("AAPL", "annual", "2026-08-18")) == ""
 
 
@@ -1298,7 +1295,7 @@ def test_statement_annual_bound_tolerates_a_year_old_filing(monkeypatch):
 def test_statement_note_reflects_newest_surviving_period(monkeypatch):
     # The look-ahead filter drops the future report first; the note must
     # describe the newest period the agent actually sees, not the raw newest.
-    _patch_av_request(monkeypatch, _statement_body(quarterly=["2025-01-31", "2027-01-31"]))
+    patch_av_request(monkeypatch, _statement_body(quarterly=["2025-01-31", "2027-01-31"]))
     note = _note_of(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"))
     assert "2025-01-31" in note
     assert "2027-01-31" not in note
@@ -1311,7 +1308,7 @@ def test_statement_serves_only_the_requested_cadence(monkeypatch):
     # hand the agent a 2.6-year-old annual balance sheet with no disclosure
     # attached to it (the yfinance path fetches one frame and has no such gap).
     body = _statement_body(quarterly=["2026-06-30"], annual=["2023-12-31"])
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
 
     quarterly = json.loads(avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18"))
     assert [r["fiscalDateEnding"] for r in quarterly["quarterlyReports"]] == ["2026-06-30"]
@@ -1332,7 +1329,7 @@ def test_statement_with_nothing_left_after_filtering_raises_no_market_data(monke
     # empty frame, and only a raise opens the router's no-data lane.
     from tradingagents.dataflows.errors import NoMarketDataError
 
-    _patch_av_request(monkeypatch, _statement_body(quarterly=["not-a-date"]))
+    patch_av_request(monkeypatch, _statement_body(quarterly=["not-a-date"]))
     with pytest.raises(NoMarketDataError) as exc:
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
     # "rows arrived but none were usable" must not read as "this symbol has no
@@ -1347,7 +1344,7 @@ def test_statement_with_nothing_left_after_filtering_raises_no_market_data(monke
 def test_statement_with_no_reports_at_all_says_so_distinctly(monkeypatch):
     from tradingagents.dataflows.errors import NoMarketDataError
 
-    _patch_av_request(monkeypatch, _statement_body(annual=["2025-12-31"]))
+    patch_av_request(monkeypatch, _statement_body(annual=["2025-12-31"]))
     with pytest.raises(NoMarketDataError) as exc:
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
     assert "no quarterly balance sheet reports on or before" in str(exc.value)
@@ -1368,7 +1365,7 @@ def test_an_empty_curr_date_is_treated_as_supplied_and_unusable(monkeypatch, get
     # lane: unfiltered reports, no disclosure, no sentinel — silently the most
     # permissive answer of the three.
     body = json.dumps({"symbol": "AAPL", "quarterlyReports": [{"fiscalDateEnding": "2099-03-31"}]})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     out = getter()
     assert out.startswith("INVALID_CURR_DATE")
     assert "2099-03-31" not in out
@@ -1380,7 +1377,7 @@ def test_a_vendor_note_key_does_not_make_an_envelope_look_like_data(monkeypatch)
     # vendor-supplied `_freshness_note` is an extra key, so counting it as
     # content dresses a rate-limit notice in our own live-snapshot disclosure.
     body = json.dumps({"Information": "rate limit reached", "_freshness_note": "vendor text"})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     out = avf.get_fundamentals("AAPL", "2020-01-01")
     assert "live values" not in out
     assert "vendor text" not in out
@@ -1396,7 +1393,7 @@ def test_statement_reports_that_only_postdate_curr_date_are_not_reported_as_a_fa
     # for it — would page an operator on every ticker of every early backtest.
     from tradingagents.dataflows.errors import NoMarketDataError
 
-    _patch_av_request(monkeypatch, _statement_body(quarterly=["2019-03-31", "2019-06-30"]))
+    patch_av_request(monkeypatch, _statement_body(quarterly=["2019-03-31", "2019-06-30"]))
     with (
         caplog.at_level(logging.WARNING, logger=avf.__name__),
         pytest.raises(NoMarketDataError) as exc,
@@ -1417,7 +1414,7 @@ def test_statement_undatable_rows_are_reported_and_logged_as_a_fault(monkeypatch
     body = json.dumps(
         {"symbol": "AAPL", "quarterlyReports": [{"fiscal_date_ending": "2026-06-30"}]}
     )
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     with (
         caplog.at_level(logging.WARNING, logger=avf.__name__),
         pytest.raises(NoMarketDataError) as exc,
@@ -1451,7 +1448,7 @@ def test_statement_no_data_reason_carries_a_vendor_notice_when_one_rode_along(mo
             "quarterlyReports": reports,
         }
     )
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     with pytest.raises(NoMarketDataError) as exc:
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
     assert "Information" in str(exc.value)
@@ -1464,7 +1461,7 @@ def test_statement_with_only_the_other_cadence_raises_instead_of_serving_it(monk
     # balance sheet reached the agent undisclosed.
     from tradingagents.dataflows.errors import NoMarketDataError
 
-    _patch_av_request(monkeypatch, _statement_body(annual=["2019-12-31"]))
+    patch_av_request(monkeypatch, _statement_body(annual=["2019-12-31"]))
     with pytest.raises(NoMarketDataError):
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
 
@@ -1476,7 +1473,7 @@ def test_statement_malformed_report_rows_are_dropped_not_crashed(monkeypatch):
     from tradingagents.dataflows.errors import NoMarketDataError
 
     body = json.dumps({"symbol": "AAPL", "quarterlyReports": ["2025-01-31", {"x": 1}]})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     with pytest.raises(NoMarketDataError):
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
 
@@ -1488,7 +1485,7 @@ def test_statement_wrong_shaped_report_list_is_named_as_a_schema_break(monkeypat
     from tradingagents.dataflows.errors import NoMarketDataError
 
     body = json.dumps({"symbol": "AAPL", "quarterlyReports": {"fiscalDateEnding": "2026-06-30"}})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     with pytest.raises(NoMarketDataError) as exc:
         avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
     assert "not a list of reports" in str(exc.value)
@@ -1502,7 +1499,7 @@ def test_statement_error_envelope_is_served_unchanged(monkeypatch):
     # this path must still not mistake it for a payload to filter, narrow, or
     # annotate.
     body = json.dumps({"Error Message": "Invalid API call."})
-    _patch_av_request(monkeypatch, body)
+    patch_av_request(monkeypatch, body)
     assert avf.get_balance_sheet("AAPL", "quarterly", "2026-08-18") == body
 
 

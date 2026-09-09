@@ -40,6 +40,7 @@ from unittest import mock
 
 import pytest
 
+from tests._date_refusal_table import DATE_CALLS
 from tradingagents.agents.utils import (
     core_stock_tools,
     crypto_data_tools,
@@ -51,6 +52,7 @@ from tradingagents.agents.utils import (
     technical_indicators_tools,
 )
 from tradingagents.dataflows.errors import UnsupportedIndicatorError, VendorNotConfiguredError
+from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS
 
 DATE = "2026-08-05"
 
@@ -89,7 +91,9 @@ def _recorder():
     return calls, fake
 
 
-_DATE_PARAMS = ("curr_date", "start_date", "end_date")
+# The tags' own order, so a tool's note lists its parameters as the sentinel
+# vocabulary does rather than as a hand-copy here.
+_DATE_PARAMS = tuple(_DATE_ARGUMENT_TAGS)
 
 
 def _date_taking_tools():
@@ -110,12 +114,15 @@ class TestDateSentinelDescriptions:
     so this iterates the runtime tool objects rather than trusting each file —
     dropping the decorator from any one wrapper turns this red."""
 
-    _DISCLOSURE = {"get_fundamentals", "get_prediction_markets"}
-    _OMITTED_OK = _DISCLOSURE | {"get_balance_sheet", "get_cashflow", "get_income_statement"}
+    # Read off the table the getters themselves are held to, not a fourth
+    # hand-copy of the per-tool contract (#230): a getter that flips its
+    # ``omitted_ok`` or its kind moves the description's remedy with it, so
+    # a description advertising "or omit it" over a getter that refuses
+    # omission cannot stay green.
+    _DISCLOSURE = {m for (m, _v), row in DATE_CALLS.items() if row and row.kind == "disclosure"}
+    _OMITTED_OK = {m for (m, _v), row in DATE_CALLS.items() if row and row.omitted_ok}
 
     def test_every_date_taking_tool_describes_its_sentinel(self):
-        from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS
-
         seen = set()
         for tool_obj, date_params in _date_taking_tools():
             # Each tag appears exactly when the tool has that parameter: a

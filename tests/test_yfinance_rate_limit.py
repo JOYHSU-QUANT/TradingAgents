@@ -1029,7 +1029,11 @@ def test_the_loud_category_is_ohlcv_and_the_mirror_follows_it():
         interface, "LOUD_LIBRARY_CATEGORIES", frozenset({"core_stock_apis", "news_data"})
     ):
         loud = _propagating_leaves()
-    assert "get_news" in loud and "get_news" in _PROSE_LEAF_PREFIXES
+        # The partition the test above asserts stops holding: the leaf the
+        # second declaration claims is still in the prose table, so a
+        # category added without revisiting that table fails there.
+        assert set(_PROSE_LEAF_PREFIXES) != set(_YFINANCE_LEAF_CALLS) - loud
+    assert "get_news" in loud
 
 
 @pytest.mark.unit

@@ -147,7 +147,7 @@ class VendorLibraryError(VendorError):
     the router's to write, in one place for every vendor: ``what`` is the
     subject the getter named (``rsi values for AAPL``), ``detail`` the
     library's message, which the router flattens and caps on its way into
-    the report; the warning the untyped lane logs keeps the whole of it. The
+    the report; the ERROR the untyped lane logs keeps the whole of it. The
     library's exception itself travels as ``__cause__``, not as a field.
     """
 
@@ -195,10 +195,14 @@ class WiringGapError(RuntimeError):
     for the same reason (#106). With the conversion moved to the router
     (#219) the guards are no longer told apart by where they sit, so they
     say so by type, and the router's untyped lane lets this one through to
-    the ending it has always had: a core category's call raises, an optional
-    category's degrades to its own sentinel with this message inside it. The
-    one ending it never takes is the library failure's report line, which
-    would hand the analyst our bug as the answer it asked for.
+    the ending it has always had. A core category's chain raises it, ahead
+    of the report line a vendor's library failure would otherwise end on —
+    ours is the one someone can fix — though a sibling that answered with a
+    clean no-data verdict still ends the chain in that sentinel, as it did
+    before this type existed. An optional category's degrades to its own
+    sentinel with this message inside it. The one ending it never takes is
+    the library failure's report line, which would hand the analyst our bug
+    as the answer it asked for.
 
     Not a ``VendorError``: every type in that tree names something the
     vendor did, and the router would route past this one to a sibling that

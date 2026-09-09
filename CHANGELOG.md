@@ -233,6 +233,17 @@ Breaking changes within the 0.x line are called out explicitly.
   inner block already named — as the lane it replaced did, so a statement
   added to one of those blocks cannot relabel a rate limit as our wiring.
 
+  A core category's chain that met both a wiring gap and some vendor's
+  library failing now ends on ours. Before the conversion moved to the
+  router only the nine getters carrying a handler could fill the
+  library slot, so which chains buried a wiring gap behind a report line
+  depended on which vendor happened to be one of the nine; with every vendor
+  able to fill it, a missing key met at the first vendor would have come back
+  as the second vendor's parser bug for the analyst to read as an answer.
+  Ours is the half somebody can fix, so it is raised ahead of the report
+  line, whichever was met first. An optional category is unchanged: both
+  reach its sentinel, named by whichever was met first.
+
   Two second copies are gone with it. ``market_data_validator``'s snapshot
   indicator set — the values the analyst is told to treat as the source of
   truth — is now held to the menu it is checked against by a partition test
@@ -783,7 +794,9 @@ Breaking changes within the 0.x line are called out explicitly.
   just failed and a sibling with its own endpoint (Alpha Vantage's RSI, for
   a local stockstats bug) was never asked; seven of them logged nothing — now
   run their fetch under one handler, ``with utils.library_failure_lane(subject,
-  log=logger)``, from where each getter's ``try`` used to start: typed vendor
+  log=logger)``, from where each getter's ``try`` used to start (the handler
+  moved to the router in #219, above: which categories end that way is a
+  declaration now, not the nine getters that happened to carry one): typed vendor
   failures, the caller's indicator mistake and transport failures pass
   through to their router lanes, and anything else is logged with its
   traceback under the getter's own module and raised as the new
@@ -809,7 +822,9 @@ Breaking changes within the 0.x line are called out explicitly.
   their reports with. ``utils.INDICATOR_MENU`` holds the prompt's grouping
   and ``INDICATOR_MENU_OMITS`` its one declared omission (``mfi``);
   ``indicator_menu()`` renders byte-identically to the literal it replaced,
-  pinned by a golden test, so nothing the analyst reads changed.
+  pinned by a golden test, so nothing the analyst reads changed. (All three
+  moved to ``agents/utils/indicator_menu`` in #219, above; the text and the
+  golden test moved with them unchanged.)
 - **The interactive CLI never sends an uncapped completion request, and a
   library caller on a gateway provider is warned once** (issue #183; the
   #177 tail). ``cli/main.py`` fills ``DEFAULT_MAX_TOKENS`` (8192 — the perp

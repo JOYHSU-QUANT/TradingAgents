@@ -693,17 +693,19 @@ def _stale_caveat(
 def _cache_dir() -> str:
     """The snapshot cache directory, shared by every vendor cached this way.
 
-    The key read under ``wiring_gap``, the directory work outside it, as at
-    the yfinance counterpart: a missing key is this project's wiring and must
-    not come back as a line of report text (#219), while ``makedirs``' own
-    OSError is a cache the process cannot write, which the router already
-    reads as transport rather than as a report (#116). Farside imports this
-    rather than keeping its own copy — the key, the guard's wording and which
-    half sits inside it were three things to keep in step.
+    Both statements under ``wiring_gap``: a missing key is this project's
+    wiring and must not come back as a line of report text (#219), and so is
+    a key set to something that is not a path — ``makedirs`` answers that
+    with a ``TypeError``, which outside the guard would read as the vendor's
+    library. ``makedirs``' own OSError is a different thing, a cache the
+    process cannot write, and passes through the guard untouched to the
+    lane the router already reads as transport (#116). Farside imports this
+    rather than keeping its own copy — the key, the guard's wording and what
+    sits inside it were three things to keep in step.
     """
     with wiring_gap("cache configuration"):
         cache_dir = get_config()["data_cache_dir"]
-    os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
 
 

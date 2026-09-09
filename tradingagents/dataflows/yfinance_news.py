@@ -8,7 +8,6 @@ from dateutil.relativedelta import relativedelta
 from yfinance.data import YfData
 
 from .config import get_config
-from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
 # routed tools shares the single judgement and the single sentence (#111).
@@ -18,6 +17,8 @@ from .symbol_utils import normalize_symbol
 # (#187, #219). What each getter does before it asks Yahoo anything — the
 # config reads, the cache forget — is not that, and wears ``wiring_gap`` to
 # say so (#111, #200).
+from .errors import WiringGapError
+from .symbol_utils import normalize_symbol
 from .utils import date_range_refusal, date_refusal, wiring_gap
 from .yfinance_common import yf_fetch_unhidden
 
@@ -109,8 +110,13 @@ def get_news_yfinance(
     if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
         return refusal
 
+    # Coerced inside the guard, as the Alpha Vantage sibling does with the
+    # same key: sent on as it was read, a value that is not a number reaches
+    # Yahoo as the article count and comes back as "No news found" — a
+    # coverage claim over a call that never asked properly (#136), where the
+    # sibling raises. One routed tool's two vendors must end alike (#219).
     with wiring_gap("news configuration"):
-        article_limit = get_config()["news_article_limit"]
+        article_limit = int(get_config()["news_article_limit"])
     # Query Yahoo with the canonical symbol, like every other yfinance path —
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently
     # returns no news. Keep the user's ticker in the report header.
@@ -188,10 +194,15 @@ def get_global_news_yfinance(
     with wiring_gap("global news configuration"):
         config = get_config()
         if look_back_days is None:
-            look_back_days = int(config["global_news_lookback_days"])
+            look_back_days = config["global_news_lookback_days"]
         if limit is None:
             limit = config["global_news_article_limit"]
         search_queries = config["global_news_queries"]
+        if isinstance(search_queries, str):
+            # A bare string is iterable too — the loop below would run one
+            # Yahoo search per character (``fetch_each`` refuses the same
+            # shape for the same reason).
+            raise WiringGapError("global_news_queries must be a list of queries, not a string")
 
     # Each coercion below takes whichever value won above — the configured
     # default or the one this call passed — so each is guarded under a name

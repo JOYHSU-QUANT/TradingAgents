@@ -871,9 +871,10 @@ def wiring_gap(what: str) -> Iterator[None]:
     conversion is the router's now, for every vendor of every routed tool
     rather than the nine getters that happened to carry a broad handler
     (#219) — and the router cannot see where in a getter a failure came
-    from. So the prologue says it by type: this one is never read as the
-    vendor's library, never becomes a line of report text, and ends a core
-    category's call the way it always did.
+    from. So the block says it by type: this one is never read as the
+    vendor's library and never becomes a line of report text — in a core
+    category it is raised ahead of one, since our breakage is the half
+    somebody can fix (``WiringGapError`` says which endings remain).
 
     ``what`` names the block in the raise (``global news configuration``),
     since the getter's own subject describes vendor work this failure is not

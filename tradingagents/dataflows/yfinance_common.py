@@ -469,14 +469,16 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     # the curr_date filter below.
     end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # The key read under ``wiring_gap``, the directory work outside it: a
-    # missing key is this project's wiring and must not come back as a line
-    # of report text (#219), while ``makedirs``' own OSError is a cache the
-    # process cannot write, which the router already reads as transport
-    # rather than as a report (#116).
+    # Both statements under ``wiring_gap``: a missing key is this project's
+    # wiring and must not come back as a line of report text (#219), and so
+    # is a key set to something that is not a path — ``makedirs`` answers
+    # that with a TypeError, which outside the guard would read as the
+    # vendor's library. ``makedirs``' own OSError is a different thing, a
+    # cache the process cannot write, and passes through the guard untouched
+    # to the lane the router already reads as transport (#116).
     with wiring_gap("OHLCV cache configuration"):
         cache_dir = config["data_cache_dir"]
-    os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
     data_file = os.path.join(cache_dir, f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv")
 
     # A cached file may be empty if a prior fetch failed (unknown symbol,

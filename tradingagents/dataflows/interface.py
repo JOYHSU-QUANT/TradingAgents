@@ -612,6 +612,15 @@ def route_to_vendor(method: str, *args, **kwargs):
     # the chain (a missing key met before it must not surface instead and
     # abort the call).
     first_library: _VendorFailure | None = None
+    # The first wiring gap met, kept apart for the mirror-image reason: it is
+    # this project's own breakage, so it must not be the thing a vendor's
+    # library failure stands in front of. Before the conversion moved to the
+    # router only nine getters could fill ``first_library``, so which chains
+    # buried a wiring gap behind a report line depended on which vendor was
+    # one of the nine; now every vendor can fill it, and a missing key met at
+    # the first vendor would come back as the second vendor's parser bug for
+    # the analyst to read as an answer (#219).
+    first_wiring: _VendorFailure | None = None
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
@@ -806,8 +815,11 @@ def route_to_vendor(method: str, *args, **kwargs):
                     first_error, unconfirmed = _met_outage(
                         first_error, unconfirmed, vendor, e, generic_failure_words(e)
                     )
-                elif first_error is None:
-                    first_error = _VendorFailure(vendor, e)
+                else:
+                    if isinstance(e, WiringGapError) and first_wiring is None:
+                        first_wiring = _VendorFailure(vendor, e)
+                    if first_error is None:
+                        first_error = _VendorFailure(vendor, e)
             continue
         # The vendor returned: drop a deadline that predates this request (a
         # lapsed one), keep the one a sibling thread armed while it was in
@@ -847,9 +859,18 @@ def route_to_vendor(method: str, *args, **kwargs):
     # itself. Written for every vendor, so the sentence does not depend on
     # which vendor failed (#58): the subject is the getter's, the library's
     # message is flattened and capped on its way in — a pandas message can
-    # carry a frame repr, newlines and pipes included — and the leaf's log
-    # line keeps the whole of it. An optional category keeps its own
+    # carry a frame repr, newlines and pipes included — and the ERROR the
+    # lane logged keeps the whole of it, where the leaf's own log line used
+    # to (#219). An optional category keeps its own
     # sentinels below: no-data first, then ``DATA_UNAVAILABLE``.
+    # Ahead of the report line, and only there: a core category's chain that
+    # met both our wiring gap and some vendor's library failing must end on
+    # ours, which someone can fix, rather than hand the analyst the other as
+    # its answer. An optional category keeps its sentinel, where both are
+    # named the same way by whichever was met first (#219).
+    if first_wiring is not None and category not in OPTIONAL_CATEGORIES:
+        raise first_wiring.error
+
     if first_library is not None and category not in OPTIONAL_CATEGORIES:
         logger.warning(
             "No vendor served %s; reporting the library failure retrieving %s as text%s",

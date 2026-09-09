@@ -134,7 +134,26 @@ def test_the_traceback_is_logged_by_the_router_with_the_whole_message(caplog):
     [record] = [r for r in caplog.records if r.exc_info is not None]
     assert record.name == "tradingagents.dataflows.interface"
     assert record.exc_info[1] is cause
+    # ERROR and named by subject: the degrade the leaf logs existed to make
+    # visible (#187) must not read like the routine vendor fallbacks this
+    # lane's other endings are.
+    assert record.levelno == logging.ERROR
+    assert _SUBJECT in record.getMessage()
     assert "boom" in record.getMessage()
+
+
+@pytest.mark.unit
+def test_the_lane_reserves_that_level_for_the_library(caplog):
+    # The other half of the rule: an untyped failure this lane does NOT read
+    # as the library keeps the WARNING every vendor's routine bad day has,
+    # so ERROR stays the level an operator can grep for a degrade.
+    with (
+        caplog.at_level(logging.WARNING, logger="tradingagents.dataflows.interface"),
+        pytest.raises(WiringGapError),
+    ):
+        _route(_raises(WiringGapError("news configuration: 'global_news_queries'")))
+    [record] = [r for r in caplog.records if r.exc_info is not None]
+    assert record.levelno == logging.WARNING
 
 
 @pytest.mark.unit
@@ -222,6 +241,75 @@ def test_the_prologue_guard_passes_a_verdict_and_a_transport_failure_through(pas
     with pytest.raises(type(passed_through)) as info, wiring_gap("some prologue"):
         raise passed_through
     assert info.value is passed_through
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("vendor", ["yfinance", "alpha_vantage"])
+def test_both_global_news_vendors_name_an_unusable_window_alike(vendor, monkeypatch):
+    # The property this whole change is about, at the one value both vendors
+    # coerce: an unusable window names the same guard whichever serves, so
+    # the operator is sent to the same place. It used to name the yfinance
+    # side's configuration guard and the Alpha Vantage side's window guard,
+    # which is the sibling divergence in miniature (#219).
+    import tradingagents.dataflows.alpha_vantage_news as avn
+    import tradingagents.dataflows.yfinance_news as ynews
+
+    set_config(
+        {
+            "global_news_lookback_days": "ten",
+            "global_news_article_limit": 5,
+            "global_news_queries": ["macro"],
+            "alpha_vantage_api_key": "k",
+        }
+    )
+    monkeypatch.setattr(ynews.yf, "Search", lambda *a, **k: pytest.fail("no fetch may be made"))
+    monkeypatch.setattr(avn, "_make_api_request", lambda *a, **k: pytest.fail("no fetch"))
+    getter = {
+        "yfinance": ynews.get_global_news_yfinance,
+        "alpha_vantage": avn.get_global_news,
+    }[vendor]
+    with pytest.raises(WiringGapError, match="global news lookback window"):
+        getter("2026-06-01")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("order", ["gap first", "library first"])
+def test_a_wiring_gap_outranks_a_sibling_library_failure_in_a_core_chain(order):
+    # Whichever met first: our own breakage is the one someone can fix, and
+    # handing the analyst the other vendor's parser bug as the answer would
+    # leave the missing key unmentioned in everything but a WARNING (#219).
+    gap = _raises(WiringGapError("news configuration: 'news_article_limit'"))
+    library = _raises(RuntimeError("pandas exploded"))
+    chain = {"yfinance": gap, "alpha_vantage": library}
+    if order == "library first":
+        chain = {"yfinance": library, "alpha_vantage": gap}
+    set_config({"data_vendors": {"news_data": "yfinance,alpha_vantage"}})
+    with (
+        mock.patch.dict(interface.VENDOR_METHODS, {"get_news": chain}),
+        pytest.raises(WiringGapError, match="news_article_limit"),
+    ):
+        interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+
+
+@pytest.mark.unit
+def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeypatch):
+    # The readers of ``data_cache_dir`` the entry names. Farside has no copy
+    # of its own any more — it imports SoSoValue's — so the identity is what
+    # keeps the two from drifting apart again, and there is one guard to
+    # exercise rather than two.
+    import tradingagents.dataflows.farside as farside
+    import tradingagents.dataflows.sosovalue_common as soso
+    import tradingagents.dataflows.yfinance_common as yfc
+
+    assert farside._cache_dir is soso._cache_dir
+
+    monkeypatch.setattr(soso, "get_config", dict)
+    with pytest.raises(WiringGapError, match="cache configuration"):
+        soso._cache_dir()
+
+    monkeypatch.setattr(yfc, "get_config", dict)
+    with pytest.raises(WiringGapError, match="OHLCV cache configuration"):
+        yfc.load_ohlcv("AAPL", "2026-06-01")
 
 
 @pytest.mark.unit

@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import tradingagents.dataflows.market_data_validator as validator
+from tradingagents.agents.utils.indicator_menu import INDICATOR_MENU
 from tradingagents.agents.utils.market_data_validation_tools import (
     get_verified_market_snapshot,
 )
@@ -391,3 +392,18 @@ class TestTool:
         assert [
             r.getMessage() for r in caplog.records if r.name == "tradingagents.dataflows.utils"
         ] == ["Refusing unusable curr_date 'not-a-date' for verification snapshot data"]
+
+
+@pytest.mark.unit
+def test_the_snapshot_verifies_every_indicator_the_menu_offers():
+    # The analyst is offered the menu AND told to treat this snapshot as the
+    # source of truth for indicator values, so an indicator that joined the
+    # menu without joining this set would leave "flag the discrepancy" with
+    # nothing to compare against (#219). A partition, not a derivation: the
+    # tuple order is the order the snapshot table renders in.
+    listed = {key for _, keys in INDICATOR_MENU for key in keys}
+    verified = set(validator.DEFAULT_SNAPSHOT_INDICATORS)
+    assert verified | validator.SNAPSHOT_OMITS == listed
+    assert not verified & validator.SNAPSHOT_OMITS
+    assert {"vwma"} == validator.SNAPSHOT_OMITS  # the one offered but not verified
+    assert len(validator.DEFAULT_SNAPSHOT_INDICATORS) == len(verified)  # no duplicate rows

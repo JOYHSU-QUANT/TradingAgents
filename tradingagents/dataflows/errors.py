@@ -23,6 +23,11 @@ lane reserves for a bug, which is what earns it a type of its own.
 indicator no vendor computes is a caller mistake, not a vendor condition. The
 router moves on to the next vendor without logging a traceback, and the
 indicator tool wrapper tells it apart from every other ``ValueError``.
+
+``WiringGapError`` sits outside it for the opposite reason: it is this
+project's own breakage, not the vendor's, and the router's rule for an
+untyped failure — read it as the vendor's library and report it as text
+(#219) — must not cover it.
 """
 
 from __future__ import annotations
@@ -95,8 +100,8 @@ class VendorUnavailableError(VendorError):
     Neither a throttle nor "no data": the router reacts as it does to a
     transport failure — the chain goes on and this surfaces when nothing else
     serves — but logs it without the traceback that lane reserves for a bug,
-    and ``library_failure_lane``'s pass-through lets it out without the
-    getters needing a clause of their own. Not yfinance's alone: the vendors whose boundary
+    and a getter needs no clause of its own to send it there: its lane at the
+    router precedes the untyped one. Not yfinance's alone: the vendors whose boundary
     is a bare ``requests.get`` — FRED, Polymarket, Farside, Alpha Vantage —
     map a 5xx (and, where every data answer is JSON, a non-JSON body) to
     this type through the shared ``utils.raise_for_http_status`` /
@@ -124,10 +129,13 @@ class VendorLibraryError(VendorError):
     Everything a getter meets that is neither in this taxonomy nor a
     transport failure: a stockstats or pandas bug on a frame the vendor did
     serve, a parser tripping over a shape yfinance's own scraper let
-    through. Raised by ``utils.library_failure_lane``, the one handler every
-    getter that used to render such a failure as prose now runs its fetch
-    under, with the traceback logged there — so the router logs this lane
-    without one.
+    through. The router raises it, in its untyped lane, for any getter whose
+    category is not declared loud (#219) — nine getters used to wear a
+    ``with`` block that did the same, and their siblings at the same routed
+    tool, having never worn one, aborted the run over the identical bug. A
+    boundary may still raise it itself where it knows the failure is its
+    library's; the router's lane for this type then logs it without a
+    traceback, the raiser having logged one.
 
     Its router reaction is what earns it a type: the chain goes on, since a
     sibling vendor computes the same routed tool its own way (Alpha Vantage
@@ -139,9 +147,8 @@ class VendorLibraryError(VendorError):
     the router's to write, in one place for every vendor: ``what`` is the
     subject the getter named (``rsi values for AAPL``), ``detail`` the
     library's message, which the router flattens and caps on its way into
-    the report; the log line at the leaf keeps the whole of it. The library's
-    exception itself travels as ``__cause__`` (the lane raises ``from`` it),
-    not as a field.
+    the report; the warning the untyped lane logs keeps the whole of it. The
+    library's exception itself travels as ``__cause__``, not as a field.
     """
 
     def __init__(self, what: str, detail: str):
@@ -170,4 +177,26 @@ class UnsupportedIndicatorError(ValueError):
     (#117). ``route_to_vendor`` logs it without a traceback and keeps the
     chain going, since another vendor may compute the name. Still a
     ``ValueError`` so callers that catch that keep working.
+    """
+
+
+class WiringGapError(RuntimeError):
+    """A guard a getter runs before its vendor work found this project's wiring broken.
+
+    The config key a deployment did not set, the library attribute a version
+    bump moved: not the vendor's library failing on data it served, so the
+    router's untyped lane — which reads an untyped failure as exactly that
+    and reports it as one line of text — must not cover it. It never did:
+    those guards were placed ahead of the nine getters' ``with`` blocks on
+    purpose, so a yfinance that drops ``cache_get.cache_clear`` fails the
+    call rather than freezing global news behind a report again (#111,
+    #200). With the conversion moved to the router (#219) the guards are no
+    longer told apart by where they sit, so they say so by type, and the
+    router's untyped lane lets this one through to the ending a core
+    category's failure has always had: a raise.
+
+    Not a ``VendorError``: every type in that tree names something the
+    vendor did, and the router would route past this one to a sibling that
+    is wired the same way. ``RuntimeError`` rather than a bare ``Exception``
+    so a caller that means to catch a bug can.
     """

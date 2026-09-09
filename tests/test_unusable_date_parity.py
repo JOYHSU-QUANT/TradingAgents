@@ -33,7 +33,6 @@ import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_news as yfnews
 import tradingagents.default_config as default_config
 from tradingagents.dataflows import interface
-from tradingagents.dataflows.errors import VendorLibraryError
 from tradingagents.dataflows.utils import (
     date_range_refusal,
     date_refusal,
@@ -55,10 +54,10 @@ class _VendorReached(Exception):
 def _no_network(monkeypatch, reached=None):
     """Every seam a getter under test could reach the vendor through.
 
-    Returns the list the seams append to before raising: the getters that
-    wear the library lane re-raise the seam's error as ``VendorLibraryError``
-    (#187), so "was the vendor asked?" is read from this list, not from the
-    outcome. ``reached`` lets a caller hand in that list, so seams armed by
+    Returns the list the seams append to before raising: what becomes of the
+    seam's error on the way out is the router's business, not this suite's
+    (#187, #219), so "was the vendor asked?" is read from this list, not from
+    the outcome. ``reached`` lets a caller hand in that list, so seams armed by
     another suite's helper report into the same one (test_date_refusal_coverage).
     """
     if reached is None:
@@ -85,7 +84,7 @@ def _no_network(monkeypatch, reached=None):
 def _asked(reached, call, *args):
     """Whether ``call(*args)`` reached a vendor seam, however the getter reported it."""
     del reached[:]
-    with contextlib.suppress(_VendorReached, VendorLibraryError):
+    with contextlib.suppress(_VendorReached):
         call(*args)
     return bool(reached)
 
@@ -214,7 +213,7 @@ class TestWindowToolsRefuseInOneVoice:
     def test_the_yfinance_news_error_string_lane_is_closed(self, monkeypatch):
         # Before: parsed inside the broad except, so the answer began "Error
         # fetching news" — a string the router serves as a successful report.
-        # The refusal now sits outside the library lane too (#187): the
+        # The refusal is a return, not a raise, so nothing classifies it (#187): the
         # sentinel is the whole answer, not a wrapped parse failure.
         _no_network(monkeypatch)
         out = yfnews.get_news_yfinance("AAPL", "abc", _GOOD)

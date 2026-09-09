@@ -1163,9 +1163,9 @@ class OptionalSentinelTests(unittest.TestCase):
         self.assertIn(_FORGED_MESSAGE, "\n".join(cm.output))
 
 
-_library_failed = _raises(VendorLibraryError("stock price data for AAPL", "'volume'"))
-_library_forged = _raises(VendorLibraryError("stock price data for AAPL", _FORGED_MESSAGE))
-_LIBRARY_LINE = "Error retrieving stock price data for AAPL: "
+_library_failed = _raises(VendorLibraryError("rsi values for AAPL", "'volume'"))
+_library_forged = _raises(VendorLibraryError("rsi values for AAPL", _FORGED_MESSAGE))
+_LIBRARY_LINE = "Error retrieving rsi values for AAPL: "
 
 
 @pytest.mark.unit
@@ -1175,13 +1175,17 @@ class LibraryFailureLaneTests(unittest.TestCase):
     The getters used to render such a failure as prose at the leaf — a
     string the router reads as a successful answer, so the chain stopped at
     the vendor that had just failed even when a sibling computed the same
-    tool its own way. Now the leaf raises ``VendorLibraryError``, this lane
-    logs it without a traceback (the leaf logged one) and goes on, and the
-    verdict renders ONE line of report text only when no vendor served —
-    never a raise, and never a sibling's no-data sentinel, whatever else the
-    chain met on the way, since the ending the leaf's policy chose ("a
-    library bug must not abort a run", and it ended the call as text) must
-    not depend on the chain order.
+    tool its own way. Now the router decides it, and the verdict renders ONE
+    line of report text only when no vendor served — never a raise, and
+    never a sibling's no-data sentinel, whatever else the chain met on the
+    way, since the ending that policy chose ("a library bug must not abort a
+    run", and it ended the call as text) must not depend on the chain order.
+
+    Driven through ``get_indicators``: a boundary may raise the type itself
+    (this lane logs it without the traceback its raiser logged), and
+    technical_indicators is not one of the categories declared loud, where
+    the answer is a raise whoever raised the type (#219). The untyped path
+    into this same lane is test_library_failure_policy's.
     """
 
     def setUp(self):
@@ -1191,12 +1195,12 @@ class LibraryFailureLaneTests(unittest.TestCase):
         _reset_config()
 
     def _route(self, vendors, chain):
-        set_config({"data_vendors": {"core_stock_apis": chain}})
+        set_config({"data_vendors": {"technical_indicators": chain}})
         with (
-            _chain("get_stock_data", vendors),
+            _chain("get_indicators", vendors),
             self.assertLogs("tradingagents.dataflows.interface", level="WARNING") as cm,
         ):
-            out = _stock()
+            out = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 5)
         return out, cm
 
     def test_the_chain_reaches_the_sibling_vendor(self):
@@ -1205,7 +1209,7 @@ class LibraryFailureLaneTests(unittest.TestCase):
         )
         self.assertEqual(out, "AV")
         [record] = cm.records
-        self.assertIn("failed in its own library retrieving stock price data", record.getMessage())
+        self.assertIn("failed in its own library retrieving rsi values for AAPL", record.getMessage())
         self.assertNotIn("'volume'", record.getMessage())  # the message is the leaf's log line's
         self.assertIsNone(record.exc_info)  # and so is the traceback
 
@@ -1213,7 +1217,7 @@ class LibraryFailureLaneTests(unittest.TestCase):
         out, cm = self._route({"yfinance": _library_forged}, "yfinance")
         _assert_one_capped_line(out, _LIBRARY_LINE)
         self.assertIn(
-            "reporting the library failure retrieving stock price data for AAPL as text",
+            "reporting the library failure retrieving rsi values for AAPL as text",
             "\n".join(cm.output),
         )
 
@@ -1310,3 +1314,71 @@ class LibraryFailureLaneTests(unittest.TestCase):
         out = interface._library_failure_prose(long_symbol)
         self.assertTrue(out.endswith("...: 'volume'"), out)
         self.assertLessEqual(len(out), len("Error retrieving ") + MAX_UNTRUSTED_CHARS + 3 + len(": 'volume'"))
+
+
+@pytest.mark.unit
+def test_every_registered_tool_declares_the_subject_its_library_failure_names():
+    # Structural, the way the yfinance leaf coverage check is: a newly
+    # registered tool cannot ship without a subject, so the naming is never
+    # invented on the day some vendor's parser first trips (#219).
+    # Hand-enumerating the tools is what shipped a leaf with no lane at all
+    # and nothing to catch it (#86).
+    assert set(interface._LIBRARY_SUBJECTS) == set(interface.VENDOR_METHODS)
+
+
+@pytest.mark.unit
+def test_naming_a_library_failure_never_raises_over_the_failure_it_names():
+    # The subject is built while a failure is being classified, so a call
+    # shape its row did not expect must cost the NAME, not the verdict: a
+    # TypeError from the naming would replace the vendor's failure with one
+    # of the router's own. The registry check above is what keeps this
+    # fallback out of the everyday path.
+    with mock.patch.dict(interface._LIBRARY_SUBJECTS, {"get_fundamentals": lambda a, b, c: "x"}):
+        set_config({"data_vendors": {"fundamental_data": "yfinance"}})
+        with _chain("get_fundamentals", {"yfinance": _raises(KeyError("Close"))}):
+            out = interface.route_to_vendor("get_fundamentals", "AAPL", "2026-06-01")
+    assert out == "Error retrieving get_fundamentals: 'Close'"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "chain, named",
+    [
+        ("fred,sosovalue", "fred: vendor not configured"),
+        ("sosovalue,fred", "sosovalue: ETF flows for BTC: 'rows'"),
+    ],
+)
+def test_an_optional_chain_names_the_failure_it_met_first(chain, named):
+    # A converted library failure is one of the vendors' own failures, so it
+    # takes its place in the chain rather than jumping the queue: an
+    # operator's missing key ahead of a scraper's bug is the standing
+    # misconfiguration they have to fix either way, and it used to be hidden
+    # behind the bug (#219). Both orders, so the rule is the chain's and not
+    # the slot's.
+    set_config({"data_vendors": {"crypto_etf_flows": chain}})
+    vendors = {
+        "fred": _raises(VendorNotConfiguredError("no key")),
+        "sosovalue": _raises(KeyError("rows")),
+    }
+    with _chain("get_etf_flows", vendors):
+        out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-06-01", 30)
+    assert out.startswith(
+        f"DATA_UNAVAILABLE: optional crypto_etf_flows could not be retrieved ({named})"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("vendor", ["yfinance", "alpha_vantage"])
+def test_both_fundamentals_vendors_end_a_library_bug_the_same_way(vendor):
+    # #219's acceptance condition: one routed tool, the same bug on a frame
+    # the vendor did serve, either vendor — one line of report text, naming
+    # the same subject. It used to depend on which vendor ``data_vendors``
+    # selected: only the yfinance side had ever carried a broad handler for
+    # PR #218's lane to replace, so the Alpha Vantage side aborted the run
+    # over the identical failure. The literal is written out rather than
+    # compared across the two runs, so a change of wording is a change to
+    # this line and not to a helper.
+    set_config({"data_vendors": {"fundamental_data": vendor}})
+    with _chain("get_fundamentals", {vendor: _raises(KeyError("Close"))}):
+        out = interface.route_to_vendor("get_fundamentals", "AAPL", "2026-06-01")
+    assert out == "Error retrieving fundamentals for AAPL: 'Close'"

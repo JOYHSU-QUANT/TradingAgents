@@ -18,10 +18,12 @@ from .deribit import get_options_market_data as get_deribit_options_market
 from .errors import (
     NoMarketDataError,
     UnsupportedIndicatorError,
+    VendorError,
     VendorLibraryError,
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
+    WiringGapError,
 )
 from .farside import get_etf_flow_data as get_farside_etf_flows
 from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
@@ -155,6 +157,20 @@ OPTIONAL_CATEGORIES = {
     "btc_treasuries",
 }
 
+# Categories whose vendor's own library failing must still abort the call.
+# Everywhere else an untyped failure below a vendor is read as its library's
+# and reported as one line of text, so a stockstats bug costs one indicator
+# rather than the run (#187). OHLCV is the exception: it is the market
+# analyst's primary input and the frame every other price claim is checked
+# against, so a report line where the prices should be would leave the run
+# reasoning from nothing while looking answered. Which categories are loud
+# used to be decided by which nine getters happened to carry a broad handler
+# — the OHLCV getter's silence on the matter was inherited, not chosen, and
+# its Alpha Vantage sibling aborted where the yfinance one reported (#219).
+# Declared here so it is one auditable line, and mirrored by the test that
+# holds each yfinance leaf to its ending.
+LOUD_LIBRARY_CATEGORIES = frozenset({"core_stock_apis"})
+
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
     # core_stock_apis
@@ -227,6 +243,101 @@ VENDOR_METHODS = {
         "sosovalue": get_sosovalue_btc_treasuries,
     },
 }
+
+
+# What a routed tool's library failure names, per method, read off the call's
+# own arguments — "rsi values for AAPL", not "get_indicators failed". The
+# subject used to be written at each getter that wrapped its fetch, which is
+# why two vendors serving one routed tool had to be held to naming it alike
+# by a test (#187); with the conversion here there is one row per tool and
+# the vendor cannot enter into it. Every registered method has a row (a test
+# derives the requirement from VENDOR_METHODS, so a new tool cannot ship
+# without one), including the loud categories that never reach the
+# conversion — a category's loudness is a decision that can be revisited,
+# and the subject should not have to be invented on the day it is.
+#
+# Templates rather than code, and positional: every caller of route_to_vendor
+# passes positionally, the parameter names differ between a tool's two vendors
+# (symbol / ticker), and ``str.format`` ignores the surplus arguments — the
+# trailing look_back_days and limit are optional at several tools and name
+# nothing.
+_LIBRARY_SUBJECTS = {
+    "get_stock_data": "stock price data for {0}",
+    "get_indicators": "{1} values for {0}",
+    "get_fundamentals": "fundamentals for {0}",
+    "get_balance_sheet": "balance sheet for {0}",
+    "get_cashflow": "cash flow for {0}",
+    "get_income_statement": "income statement for {0}",
+    "get_news": "news for {0}",
+    "get_global_news": "global news",
+    "get_insider_transactions": "insider transactions for {0}",
+    "get_macro_indicators": "macro series {0}",
+    "get_prediction_markets": "prediction markets for {0}",
+    "get_etf_flows": "ETF flows for {0}",
+    "get_fear_greed": "fear and greed index",
+    "get_options_market": "options market for {0}",
+    "get_economic_calendar": "economic calendar",
+    "get_btc_treasuries": "BTC treasuries for {0}",
+}
+
+
+def _library_subject(method: str, args: tuple) -> str:
+    """The subject a library failure at ``method`` names, or the method itself.
+
+    The fallback is the point: this runs while a failure is being classified,
+    so a missing row or a call shape the row did not expect must not replace
+    the vendor's failure with an ``IndexError`` from the naming of it. The
+    method name is a poorer subject, not a wrong one, and the registry-derived
+    test is what keeps the fallback from being reached in practice.
+    """
+    try:
+        return _LIBRARY_SUBJECTS[method].format(*args)
+    except Exception:  # noqa: BLE001 - naming a failure must not raise over it
+        logger.warning("No usable library-failure subject for %s; naming the method", method)
+        return method
+
+
+def _as_library_failure(
+    category: str, method: str, args: tuple, e: Exception
+) -> VendorLibraryError | None:
+    """The vendor's library failing, if that is what this untyped failure is.
+
+    Read after the outage question, so what is left is a failure the vendor
+    did not answer with and the wire did not cause. Four things are not the
+    vendor's library and return None:
+
+    * a loud category's failure (``LOUD_LIBRARY_CATEGORIES``) — it keeps the
+      ending it has always had, a raise;
+    * a ``VendorError`` — the taxonomy said what it was at the boundary. The
+      lanes above name the five types the router reacts to individually, and
+      a vendor-named subclass raised directly (``DeribitError``,
+      ``SoSoValueError``) reaches this one instead — but it is still the
+      vendor's own verdict, not its library tripping, and rewriting it here
+      would break the promise that a thin subclass needs no new ``except``
+      clause (#170 declined a bare ``VendorError`` lane for the same reason:
+      a lane is a reaction, and this type has none of its own);
+    * an ``OSError`` — a transport failure is not a report (#116): yfinance
+      fetches through curl_cffi, and its request exceptions, like
+      ``requests``', subclass it, while nothing in yfinance's own exception
+      family does; the clause is wider than the wire on purpose, since the
+      OHLCV cache raises ``OSError`` too and a cache the process cannot read
+      is no more a report than a reset is;
+    * a ``WiringGapError`` — this project's own breakage, raised by the
+      prologue guards that used to sit above each getter's ``with`` block
+      (#111, #200).
+
+    Everything else is the library: a stockstats or pandas bug on a frame
+    the vendor did serve, a parser tripping over a shape a scraper let
+    through. The cause is attached rather than wrapped by a ``raise``,
+    since the router is classifying the failure here, not raising it.
+    """
+    if category in LOUD_LIBRARY_CATEGORIES or isinstance(
+        e, (VendorError, OSError, WiringGapError)
+    ):
+        return None
+    failure = VendorLibraryError(_library_subject(method, args), str(e))
+    failure.__cause__ = e
+    return failure
 
 
 def get_category_for_method(method: str) -> str:
@@ -334,6 +445,33 @@ def _met_outage(
     """
     outage = _Unconfirmed(_OUTAGE, vendor, f"was unavailable ({words})", error)
     return first_error or _VendorFailure(vendor, error), _note_unconfirmed(unconfirmed, outage)
+
+
+def _met_library_failure(
+    first_library: _VendorFailure | None,
+    first_error: _VendorFailure | None,
+    category: str,
+    vendor: str,
+    error: VendorLibraryError,
+) -> tuple[_VendorFailure | None, _VendorFailure | None]:
+    """Both slots a vendor library's failure fills, together.
+
+    ``first_library`` decides a core chain's ending, which must not depend on
+    the chain order, so a loud category never fills it — the ending that
+    declaration refuses is the report line, whoever named the failure
+    (``_as_library_failure`` refuses the untyped half; this refuses a
+    boundary that raised the type itself). ``first_error`` is the vendors'
+    own slot, where first met wins: an optional category ends in one sentinel
+    either way, and there a missing key ahead of a library bug is the
+    standing misconfiguration the operator has to fix.
+
+    One helper for both, as ``_met_outage`` is for the outage lane's pair, so
+    a lane that records one fact cannot forget the other.
+    """
+    failed = _VendorFailure(vendor, error)
+    if first_library is None and category not in LOUD_LIBRARY_CATEGORIES:
+        first_library = failed
+    return first_library, first_error or failed
 
 
 def _note_unconfirmed(held: _Unconfirmed | None, met: _Unconfirmed) -> _Unconfirmed:
@@ -563,8 +701,9 @@ def route_to_vendor(method: str, *args, **kwargs):
                 e.what,
                 method,
             )
-            if first_library is None:
-                first_library = _VendorFailure(vendor, e)
+            first_library, first_error = _met_library_failure(
+                first_library, first_error, category, vendor, e
+            )
             continue
         except UnsupportedIndicatorError as e:
             # A caller typo, not a vendor failure: logged without a traceback,
@@ -592,9 +731,26 @@ def route_to_vendor(method: str, *args, **kwargs):
             # not requests'). The words are ``generic_failure_words``' — the
             # status or the class only, never the text: a requests message
             # quotes the request URL, API key included.
+            #
+            # What the vendor was not down for, and did not fail to reach, is
+            # its library failing on data it did serve — the ending nine
+            # getters used to choose for themselves by wrapping their fetch,
+            # and their siblings at the same routed tool did not, so one
+            # pandas bug was a line of prose through yfinance and an aborted
+            # run through Alpha Vantage (#219). Decided here, once, for every
+            # vendor of every tool: what ``_as_library_failure`` returns joins
+            # the lane the typed raisers take, which is where the ending is
+            # written. The message travels as the failure's ``detail`` — the
+            # cap and the flatten are the report line's, and this warning is
+            # the uncapped copy, with the traceback the lane at the getter
+            # used to log.
             if is_vendor_outage(e):
                 first_error, unconfirmed = _met_outage(
                     first_error, unconfirmed, vendor, e, generic_failure_words(e)
+                )
+            elif (library := _as_library_failure(category, method, args, e)) is not None:
+                first_library, first_error = _met_library_failure(
+                    first_library, first_error, category, vendor, library
                 )
             elif first_error is None:
                 first_error = _VendorFailure(vendor, e)
@@ -650,14 +806,15 @@ def route_to_vendor(method: str, *args, **kwargs):
         return _library_failure_prose(first_library.error)
 
     if last_no_data is not None:
-        errored = first_error or first_library
-        if errored is not None:
+        if first_error is not None:
             # A vendor also hit a real error; surface it in logs so the no-data
-            # verdict can't hide a broken primary (network/auth/etc.).
+            # verdict can't hide a broken primary (network/auth/etc.). One slot
+            # is enough: a library failure fills this one too (#219), so it
+            # cannot be the only failure the chain met.
             logger.warning(
                 "Returning NO_DATA for %s, but a vendor errored earlier: %s",
                 method,
-                errored.error,
+                first_error.error,
             )
         sym = last_no_data.symbol
         canonical = last_no_data.canonical
@@ -695,11 +852,12 @@ def route_to_vendor(method: str, *args, **kwargs):
             f"for this symbol."
         )
 
-    # The failure that surfaces, decided in one expression. A vendor's own
-    # library failing outranks everything below it (an optional category is
-    # the only chain that still reaches here with one, a core chain having
-    # returned above): it ends in that category's sentinel like any other
-    # failure, but its words are the subject's, not a class name. Next, a
+    # The failure that surfaces, decided in one expression. Only an optional
+    # category still reaches here having met a library failure, a core chain
+    # having returned above, and there it is one of the vendors' own
+    # failures like any other — held in the slot below, where first met
+    # wins; its words are the subject's rather than a class name, which is
+    # the whole of what it earns here (#219). First, a
     # caller's mistake — the indicator name, which the tool wrapper renders
     # as one line of report text — outranks a vendor's failure: a missing key
     # surfacing instead would abort the call and point at the wrong remedy
@@ -740,7 +898,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     unconfirmed_by = (
         _VendorFailure(unconfirmed.vendor, unconfirmed.error) if unconfirmed is not None else None
     )
-    failed = first_library or first_caller_error or first_error or unconfirmed_by
+    failed = first_caller_error or first_error or unconfirmed_by
 
     # No vendor returned data and none reported clean "no data" — surface the
     # first real error (e.g. the primary vendor's network failure). Optional

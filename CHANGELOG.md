@@ -139,6 +139,89 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **dataflows: whether a vendor library's failure aborts the run is a
+  category's decision, not each getter's** (issue #219, items 1, 2, 5, 6 and
+  7; follow-ups from PR #218). PR #218 gave nine getters one handler for what
+  they meet outside the vendor-error taxonomy and outside transport — a
+  stockstats or pandas bug on a frame the vendor did serve — which leaves as
+  ``VendorLibraryError`` for the router to route past and, when no vendor
+  serves, render as one line of report text. The nine were the ones that had
+  carried a broad handler to replace, so the same routed tool ended
+  differently depending on the vendor ``data_vendors`` selected: the identical
+  bug came back as ``Error retrieving fundamentals for AAPL: ...`` through
+  yfinance and aborted the run through Alpha Vantage, whose getters had never
+  carried one. ``get_YFin_data_online``'s own absence from the list read as a
+  decision and was an inheritance.
+
+  The conversion is the router's now. Its untyped lane asks the outage
+  question first, lets an ``OSError`` through (a transport failure is not a
+  report, #116) and reads everything else as the vendor's library, naming it
+  from a per-tool subject table keyed on the routed method and read off the
+  call's own arguments — so both vendors of a tool name a failure alike by
+  construction rather than by two getters agreeing on a string. Every
+  registered method has a row, checked against ``VENDOR_METHODS``, so a new
+  tool cannot ship without one. The report line, its flatten and its 200-char
+  cap are unchanged. Which categories still abort is one declaration,
+  ``LOUD_LIBRARY_CATEGORIES``: OHLCV, and only OHLCV — the analyst's primary
+  input and the frame every other price claim is checked against, where a
+  report line would leave the run reasoning from nothing while looking
+  answered. The suite that holds each yfinance leaf to its ending now mirrors
+  that declaration instead of a hand-written exclusion with no stated reason.
+
+  Two consequences worth stating. An optional category's
+  ``DATA_UNAVAILABLE`` parenthesis now quotes an untyped failure as
+  ``subject: message`` (flattened, capped) rather than a bare class name; the
+  ``requests`` messages that quote a URL with the API key in it (#171) stay
+  out, being ``OSError``s. And among the vendors' own failures an optional
+  chain now names the FIRST met, a library failure included — a missing key
+  ahead of a scraper's bug is the standing misconfiguration the operator has
+  to fix, and it used to be hidden behind the bug.
+
+  What a getter runs BEFORE it asks the vendor anything — the config reads,
+  the ``cache_get.cache_clear`` that stops global news freezing behind a
+  report (#111, #200) — used to say "this is not the vendor's library" by
+  sitting above the ``with`` block. The router cannot see where in a getter a
+  failure came from, so those guards now say it by type: ``wiring_gap`` raises
+  ``WiringGapError``, which the untyped lane never converts, so a key a
+  deployment did not set still fails the call instead of coming back as a
+  vendor's bad day. It wears that type at all four config reads a core
+  category's getters make — both news vendors and the OHLCV cache — so the
+  two vendors of one routed tool end a missing key alike, which is the same
+  guarantee the rest of this entry is about.
+
+  Two second copies are gone with it. ``market_data_validator``'s snapshot
+  indicator set — the values the analyst is told to treat as the source of
+  truth — is now held to the menu it is checked against by a partition test
+  and a declared omission (``vwma``), so an indicator added to the menu cannot
+  quietly go unverified; the tuple stays hand-ordered, because its order is
+  the order the snapshot's table renders in. And ``INDICATOR_MENU`` /
+  ``INDICATOR_MENU_OMITS`` / ``indicator_menu()`` moved from
+  ``dataflows/utils`` to ``agents/utils/indicator_menu``: the grouping is a
+  fact about one prompt, not about the data. The menu text is byte-identical
+  and the golden test moved with it; ``INDICATOR_DESCRIPTIONS``, which both
+  report lanes share, stays in ``dataflows``.
+
+  Known trade-offs. Items 3 and 4 of the issue — a per-process memory of
+  "this vendor already failed in its library for this method", and printing
+  one traceback per process rather than per cycle — are not done: both only
+  bite a deployment that configures two vendors for one tool AND meets a
+  deterministic local bug, which the shipped single-vendor defaults cannot
+  produce. They are worth doing when a journal shows the repeat. Three more,
+  each a depth this change stopped short of. ``wiring_gap`` is still a
+  hand-placed block, so the guarantee holds where someone remembered it: a
+  ``get_config()`` that raised ``WiringGapError`` on a missing key would give
+  every reader in the repo the same ending with no block at all, and the
+  optional vendors' unguarded reads (Farside, SoSoValue) would stop being a
+  latent divergence — they are harmless only because those categories are
+  single-vendor and never raise. Loudness is applied when the failure is
+  classified rather than when the ending is chosen, so the declaration is
+  read at two sites and the tests have to prove they agree. And the subject
+  table is a third registry over the same method keys as ``TOOLS_CATEGORIES``
+  and ``VENDOR_METHODS``: putting the subject on the tool's existing row
+  would make "a new tool has a subject" true by construction rather than by
+  a key-set test, and would retire the fallback that exists because a
+  positional template can mismatch a call.
+
 - **dataflows: the optional sentinel names the vendor that failed, a missing
   key reads as one fixed phrase, and the remedy leads the vendor's text at
   two boundaries** (issue #203, items 2, 3, 4 and 6; issue #217, items 7

@@ -31,7 +31,13 @@ from .throttle import ThrottleLatch
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
 # Vantage vendor shares the same single definition (#70).
-from .utils import MAX_OHLCV_STALE_DAYS, http_status, normalize_iso_date, safe_ticker_component
+from .utils import (
+    MAX_OHLCV_STALE_DAYS,
+    http_status,
+    normalize_iso_date,
+    safe_ticker_component,
+    wiring_gap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -463,11 +469,15 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     # the curr_date filter below.
     end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-    os.makedirs(config["data_cache_dir"], exist_ok=True)
-    data_file = os.path.join(
-        config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
-    )
+    # The key read under ``wiring_gap``, the directory work outside it: a
+    # missing key is this project's wiring and must not come back as a line
+    # of report text (#219), while ``makedirs``' own OSError is a cache the
+    # process cannot write, which the router already reads as transport
+    # rather than as a report (#116).
+    with wiring_gap("OHLCV cache configuration"):
+        cache_dir = config["data_cache_dir"]
+    os.makedirs(cache_dir, exist_ok=True)
+    data_file = os.path.join(cache_dir, f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv")
 
     # A cached file may be empty if a prior fetch failed (unknown symbol,
     # transient rate limit). Treat an empty/columnless cache as a miss and

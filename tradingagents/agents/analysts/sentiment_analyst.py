@@ -75,9 +75,9 @@ def create_sentiment_analyst(llm):
         # single-vendor yfinance default does not have. Two lanes still answer
         # a string even on a chain that can reach that raise: a vendor
         # that reported no data returns the router's NO_DATA_AVAILABLE sentinel
-        # before that raise, and the shipped default vendor's (yfinance) own
-        # library bugs leave through the library lane, which the router
-        # renders as "Error retrieving news for ..." (#187). A dead network is not in that lane any more:
+        # before that raise, and a vendor's own library bugs are read as
+        # such by the router, which renders "Error retrieving news for ..."
+        # (#187, #219). A dead network is not in that lane any more:
         # yfinance re-raises OSError, so it aborts this node like any other
         # core failure (#116). Aborting on a core failure is the decided
         # outcome; what this comment used to claim — that nothing here can

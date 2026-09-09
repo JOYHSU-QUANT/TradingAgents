@@ -285,7 +285,8 @@ def _not_refused(monkeypatch, reached, row, **dates):
     # Only what a vendor lane reports counts as "asked, then failed": a
     # mis-wired row's TypeError must surface as itself. Deribit's per-half
     # helper swallows the seam's raise and reports its own DeribitError, a
-    # VendorError; the yfinance leaves re-raise it as VendorLibraryError.
+    # VendorError; every other getter lets the seam's raise out as itself,
+    # for the router to classify (#219).
     out = None
     with contextlib.suppress(_VendorReached, VendorError):
         out = _call(row, **dates)

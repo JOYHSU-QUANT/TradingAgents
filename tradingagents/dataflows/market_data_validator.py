@@ -20,6 +20,13 @@ from tradingagents.dataflows.utils import echo_argument
 from tradingagents.dataflows.yfinance_common import load_ohlcv
 
 # A fixed, common indicator set so the snapshot is the same shape every run.
+# The analyst is offered ``INDICATOR_MENU`` and told to treat this snapshot as
+# the source of truth for any indicator value, so the two have to be one
+# decision: an indicator added to the menu but not verified here leaves the
+# analyst asked to "flag the discrepancy" with nothing to compare against
+# (#219). Held to that by a partition test rather than derived, because this
+# tuple's ORDER is the order the snapshot's table renders in — deriving it
+# would rewrite what every run reads to no purpose.
 DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
     "close_10_ema",
     "close_50_sma",
@@ -33,6 +40,12 @@ DEFAULT_SNAPSHOT_INDICATORS: tuple[str, ...] = (
     "macdh",
     "atr",
 )
+
+# The offered indicators this snapshot deliberately does not verify. ``vwma``
+# is the one the menu offers and this set leaves out; declaring it is what
+# lets the partition test tell "left out on purpose" from "forgotten when the
+# menu grew".
+SNAPSHOT_OMITS = frozenset({"vwma"})
 
 
 def _verified_rows(symbol: str, curr_date: str) -> pd.DataFrame:

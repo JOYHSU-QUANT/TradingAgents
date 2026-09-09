@@ -624,12 +624,17 @@ def test_the_unconfirmed_ranks_read_outage_then_throttle_then_skip():
     assert (interface._OUTAGE, interface._THROTTLE_MET, interface._LATCH_SKIP) == (0, 1, 2)
     assert set(interface._WHY) == {0, 1, 2}
     skip = interface._Unconfirmed(interface._LATCH_SKIP, "a", "was skipped", VendorRateLimitError())
-    outage = interface._outage("b", VendorUnavailableError("503"), "answered HTTP 503")
-    later_outage = interface._outage("c", VendorUnavailableError("502"), "answered HTTP 502")
     assert interface._note_unconfirmed(None, skip) is skip
-    assert interface._note_unconfirmed(skip, outage) is outage
+    # An outage lane records both facts through one helper: the failure
+    # joins first_error (first met stays) and the outage rank takes the slot.
+    down = VendorUnavailableError("503")
+    first_error, outage = interface._met_outage(None, skip, "b", down, "answered HTTP 503")
+    assert first_error == interface._VendorFailure("b", down)
+    assert outage.rank == interface._OUTAGE and outage.error is down
     assert interface._note_unconfirmed(outage, skip) is outage
-    assert interface._note_unconfirmed(outage, later_outage) is outage
+    later = VendorUnavailableError("502")
+    kept, held = interface._met_outage(first_error, outage, "c", later, "answered HTTP 502")
+    assert kept is first_error and held is outage
 
 
 @pytest.mark.unit

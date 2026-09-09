@@ -310,14 +310,30 @@ class _Unconfirmed(NamedTuple):
     # sentinel swaps in ahead of ``_WHY[rank]``.
     state: str
     # The failure met. A throttle or a skip stands as the failure surfaced
-    # when nothing else raised; an outage's is in ``first_error`` already,
-    # which precedes this slot there, so it never surfaces from here.
+    # when nothing else raised; an outage's is in ``first_error`` already
+    # (``_met_outage`` records both), which precedes this slot there, so it
+    # never surfaces from here.
     error: Exception
 
 
-def _outage(vendor: str, error: Exception, words: str) -> _Unconfirmed:
-    """The outage rank: what the down vendor said rides along, in the lane's words."""
-    return _Unconfirmed(_OUTAGE, vendor, f"was unavailable ({words})", error)
+def _met_outage(
+    first_error: _VendorFailure | None,
+    unconfirmed: _Unconfirmed | None,
+    vendor: str,
+    error: Exception,
+    words: str,
+) -> tuple[_VendorFailure | None, _Unconfirmed | None]:
+    """Both facts an outage lane records, together: the failure and the unconfirmed verdict.
+
+    The failure joins ``first_error`` (first met stays), and the outage rank
+    joins the slot with what the down vendor said, in the lane's words. One
+    helper for both, so the guarantee the verdict relies on — an outage held
+    in the slot has its failure in ``first_error`` already, and so never
+    surfaces from the slot — cannot be broken by a lane that records one
+    fact and forgets the other.
+    """
+    outage = _Unconfirmed(_OUTAGE, vendor, f"was unavailable ({words})", error)
+    return first_error or _VendorFailure(vendor, error), _note_unconfirmed(unconfirmed, outage)
 
 
 def _note_unconfirmed(held: _Unconfirmed | None, met: _Unconfirmed) -> _Unconfirmed:
@@ -527,9 +543,9 @@ def route_to_vendor(method: str, *args, **kwargs):
             # transport failure, but logged without a traceback — the clause
             # below reserves that for a bug, and a vendor being down is not one.
             logger.warning("Vendor %r answered without data for %s: %s", vendor, method, e)
-            if first_error is None:
-                first_error = _VendorFailure(vendor, e)
-            unconfirmed = _note_unconfirmed(unconfirmed, _outage(vendor, e, failure_account(e)))
+            first_error, unconfirmed = _met_outage(
+                first_error, unconfirmed, vendor, e, failure_account(e)
+            )
             continue
         except VendorLibraryError as e:
             # The vendor's own library failed computing the answer — a
@@ -570,8 +586,6 @@ def route_to_vendor(method: str, *args, **kwargs):
             # exc_info so a real bug (e.g. in an HTML-scraping vendor) leaves a
             # traceback instead of looking identical to a network outage.
             logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
-            if first_error is None:
-                first_error = _VendorFailure(vendor, e)
             # The same fact as the outage lane above, for the verdict below,
             # read off the exception by ``is_vendor_outage`` — the status it
             # carries, never its class (yfinance's HTTPError is curl_cffi's,
@@ -579,9 +593,11 @@ def route_to_vendor(method: str, *args, **kwargs):
             # status or the class only, never the text: a requests message
             # quotes the request URL, API key included.
             if is_vendor_outage(e):
-                unconfirmed = _note_unconfirmed(
-                    unconfirmed, _outage(vendor, e, generic_failure_words(e))
+                first_error, unconfirmed = _met_outage(
+                    first_error, unconfirmed, vendor, e, generic_failure_words(e)
                 )
+            elif first_error is None:
+                first_error = _VendorFailure(vendor, e)
             continue
         # The vendor returned: drop a deadline that predates this request (a
         # lapsed one), keep the one a sibling thread armed while it was in

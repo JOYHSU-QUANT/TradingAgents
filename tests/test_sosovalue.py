@@ -2824,11 +2824,11 @@ class TestEndToEndFixture:
 # --------------------------------------------------------------------------- #
 # Router integration: the sosovalue,farside chain
 # --------------------------------------------------------------------------- #
-@pytest.mark.unit
 def _farside_boom(*a, **k):
     raise farside.FarsideError("Cloudflare challenge (403)")
 
 
+@pytest.mark.unit
 class TestRouting:
     def test_default_chain_is_sosovalue_then_farside(self):
         assert (

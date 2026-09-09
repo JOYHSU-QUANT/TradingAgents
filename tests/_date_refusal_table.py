@@ -41,7 +41,6 @@ import tradingagents.dataflows.sosovalue_macro as sosovalue_macro
 import tradingagents.dataflows.sosovalue_treasuries as sosovalue_treasuries
 import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_news as yfnews
-from tradingagents.dataflows import interface
 from tradingagents.dataflows.errors import VendorError
 from tradingagents.dataflows.utils import DateKind
 
@@ -135,6 +134,15 @@ class Row:
     # then require to be non-empty, so the ordering the row claims is
     # measured rather than labelled.
     serve: Callable[[pytest.MonkeyPatch], list] | None = None
+
+    def __post_init__(self):
+        # A date-less tool is a ``None`` entry, never an empty row: an empty
+        # ``params`` would sweep nothing and still read as a covered row. And
+        # the omitted lane is a claim about one parameter; a window has two.
+        if not self.params:
+            raise ValueError("a row names at least one date parameter; a date-less tool is None")
+        if self.omitted_ok and self.kind == "window":
+            raise ValueError("omitted_ok is a point/disclosure lane; a window has none")
 
     @property
     def judged_after_fetch(self) -> bool:
@@ -269,12 +277,19 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
 }
 
 
-def rows(*, dated: bool):
-    """The table as pytest params, all rows or only the ones that take a date."""
+def rows(*, dated: bool, where: Callable[[Row], bool] | None = None):
+    """The table as pytest params: every entry, only the dated rows, or only
+    the dated rows ``where`` accepts."""
+
+    def keep(row):
+        if row is None:
+            return not dated and where is None
+        return where is None or where(row)
+
     return [
         pytest.param(key, row, id=f"{key[0]}/{key[1]}")
         for key, row in DATE_CALLS.items()
-        if row is not None or not dated
+        if keep(row)
     ]
 
 
@@ -339,16 +354,6 @@ def args_for(row, **dates):
 def call(row, **dates):
     """``row.impl`` over its dates, with the other date arguments usable."""
     return row.impl(*args_for(row, **dates))
-
-
-def route(monkeypatch, method, row, **dates):
-    """``route_to_vendor(method, ...)`` over the row's dates, every seam
-    raising and the row's own vendor served if it judges after the fetch —
-    which vendor the router picks is the caller's configuration to set."""
-    no_network(monkeypatch)
-    if row.judged_after_fetch:
-        row.serve(monkeypatch)
-    return interface.route_to_vendor(method, *args_for(row, **dates))
 
 
 def not_refused(monkeypatch, reached, row, **dates):

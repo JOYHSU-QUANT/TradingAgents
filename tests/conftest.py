@@ -174,19 +174,17 @@ def registry_pairs(registry) -> set[tuple[str, str]]:
 
     The one reading of the registry's membership for the two locks that must
     equal it — the yfinance throttle call table (#113) and the date-refusal
-    table (#140) — so that if ``vendor_impl`` stops being a ``{vendor: impl}``
-    mapping, the two locks follow it from here (#230). The routing suite walks
-    the impls themselves and is not served by this.
+    table (#140) — so that if ``VENDOR_METHODS[method]`` stops being a
+    ``{vendor: impl}`` mapping, the two locks follow it from here (#230). The
+    routing suite walks the impls themselves and is not served by this.
     """
     return {(method, vendor) for method, vendors in registry.items() for vendor in vendors}
 
 
+# The (method, vendor) entry added, each of the two ways a registry grows.
 _REGISTRY_GROWTH = [
-    pytest.param({"get_unlisted_thing": {"yfinance": lambda: None}}, id="new_method"),
-    pytest.param(
-        {"get_fear_greed": {"alternative_me": lambda: None, "yfinance": lambda: None}},
-        id="new_vendor_of_a_listed_method",
-    ),
+    pytest.param(("get_unlisted_thing", "yfinance"), id="new_method"),
+    pytest.param(("get_fear_greed", "yfinance"), id="new_vendor_of_a_listed_method"),
 ]
 
 
@@ -198,11 +196,16 @@ def grown_registry(request):
     one vendor's methods discriminates on both cases as well as a lock over
     every pair. For the discrimination tests of the registry locks: whichever
     way the registry grows, an entry without a row must fail — that is the
-    whole point of deriving the list. A copy, since the locks read the
-    registry they are handed and nothing else needs the live one changed."""
+    whole point of deriving the list. Grown beside the method's real vendors,
+    not in place of them, so a vendor the registry gains later cannot fall
+    out of this case unnoticed; a copy, since the locks read the registry
+    they are handed and nothing else needs the live one changed."""
     from tradingagents.dataflows import interface
 
-    return {**interface.VENDOR_METHODS, **request.param}
+    method, vendor = request.param
+    grown = dict(interface.VENDOR_METHODS)
+    grown[method] = {**grown.get(method, {}), vendor: lambda: None}
+    return grown
 
 
 def package_module_trees(subpackage: str, *, containing: str):

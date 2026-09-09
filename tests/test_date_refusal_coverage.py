@@ -31,11 +31,11 @@ from tests._date_refusal_table import (
     GOOD,
     PERIOD,
     SUPPLIED_UNUSABLE,
+    args_for,
     call,
     dated_params,
     no_network,
     not_refused,
-    route,
     rows,
 )
 from tests.conftest import registry_pairs
@@ -124,7 +124,7 @@ class TestEveryRowRefuses:
         if row.judged_after_fetch:
             assert served, key
 
-    @pytest.mark.parametrize("key,row", [p for p in rows(dated=True) if len(p.values[1].params) > 1])
+    @pytest.mark.parametrize("key,row", rows(dated=True, where=lambda row: len(row.params) > 1))
     def test_with_every_date_unusable_the_first_judged_is_named(self, monkeypatch, key, row):
         # One sentence asks for one fix, and which one is the tool's to say,
         # not the vendor's: two vendors naming different parameters would be
@@ -162,13 +162,29 @@ class TestEveryRowRefuses:
         not_refused(monkeypatch, no_network(monkeypatch), row, **dict.fromkeys(row.params, date))
 
 
+def _configure_chain(method, *vendors):
+    """The category-level vendor chain production runs on (``tool_vendors``
+    ships empty and the perp engine pipes neither through), so the router
+    resolves the pair under test the way it does in a deployment."""
+    set_config({"data_vendors": {interface.get_category_for_method(method): ",".join(vendors)}})
+
+
 def _assert_routed_refusal(monkeypatch, method, row):
     """Through the router as configured, the row's first date unusable is the
-    whole answer."""
+    whole answer — from the vendor the row names, not a later one in the
+    chain. Every vendor of a tool renders the same sentence (pinned above),
+    so the string alone cannot tell a first vendor that refused from one that
+    was asked, failed, and was passed over (the router logs and moves on);
+    the seam lists can: no raising seam was reached on any path, and an
+    after-fetch vendor's served one was."""
+    reached = no_network(monkeypatch)
+    served = row.serve(monkeypatch) if row.judged_after_fetch else None
     first = row.params[0]
-    assert route(monkeypatch, method, row, **{first: "abc"}) == invalid_date_sentinel(
-        "abc", what=row.what, kind=row.kind, param=first
-    ), method
+    out = interface.route_to_vendor(method, *args_for(row, **{first: "abc"}))
+    assert out == invalid_date_sentinel("abc", what=row.what, kind=row.kind, param=first), method
+    assert not reached, method
+    if row.judged_after_fetch:
+        assert served, method
 
 
 def _vendors_of(method):
@@ -189,12 +205,11 @@ class TestEveryRowRefusesThroughTheRouter:
 
     @pytest.mark.parametrize("key,row", rows(dated=True))
     def test_each_registered_vendor_serves_the_refusal(self, monkeypatch, key, row):
-        # The vendor is selected through ``tool_vendors``, so the pair under
-        # test is the one that answers rather than whichever the default
-        # chain tries first — the Alpha Vantage vendors of the core tools,
-        # and farside, are reached only this way.
+        # The pair under test is the one configured, rather than whichever
+        # the shipped chain tries first — the Alpha Vantage vendors of the
+        # core tools, and farside, are reached only this way.
         method, vendor = key
-        set_config({"tool_vendors": {method: vendor}})
+        _configure_chain(method, vendor)
         _assert_routed_refusal(monkeypatch, method, row)
 
     @pytest.mark.parametrize(
@@ -213,7 +228,7 @@ class TestEveryRowRefusesThroughTheRouter:
         # refusal rather than move on to the next, and — since the model
         # cannot see which vendor answered (#89) — the sentence must not
         # depend on which one is configured first.
-        set_config({"tool_vendors": {method: ",".join(chain)}})
+        _configure_chain(method, *chain)
         _assert_routed_refusal(monkeypatch, method, DATE_CALLS[(method, chain[0])])
 
     def test_the_shipped_default_chain_starts_at_a_registered_vendor(self):

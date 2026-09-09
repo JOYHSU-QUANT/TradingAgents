@@ -2961,8 +2961,10 @@ class TestRouting:
             clear=False,
         ):
             out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-07-31", 30)
-        assert "DATA_UNAVAILABLE" in out
-        assert "429" in out
+        # The throttle surfaces as the failure, and the vendor leads it (#203).
+        assert out.startswith(
+            "DATA_UNAVAILABLE: optional crypto_etf_flows could not be retrieved (sosovalue: 429"
+        ), out
 
     def test_a_real_error_outranks_the_rate_limit_in_the_sentinel(self):
         # The rate-limit is recorded only as a fallback: with a real error in

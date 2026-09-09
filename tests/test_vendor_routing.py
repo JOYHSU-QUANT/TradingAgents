@@ -1055,6 +1055,33 @@ class OptionalSentinelTests(unittest.TestCase):
             logged,
         )
 
+    def test_a_throttle_met_and_a_latch_skip_name_the_vendor_too(self):
+        # The two failures that surface only when nothing else raised — a
+        # throttle actually met, and a request never sent on the latch — come
+        # from the ranked slot rather than ``first_error``, and open with the
+        # vendor all the same (#203).
+        class _NonLatching(VendorRateLimitError):
+            latches_vendor = False
+
+        out, _ = self._macro(_raises(_NonLatching("rate limit hit (HTTP 429)")))
+        self.assertTrue(
+            out.startswith(
+                "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+                "(fred: rate limit hit (HTTP 429))."
+            ),
+            out,
+        )
+        VENDOR_THROTTLE_LATCH.arm("fred")
+        out, _ = self._macro(mock.Mock())
+        self.assertTrue(
+            out.startswith(
+                "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+                "(fred: Vendor 'fred' rate limited a recent request; skipped without "
+                "contacting it for another "
+            ),
+            out,
+        )
+
     def test_a_status_the_failure_carries_rides_along_without_its_text(self):
         # A 4xx the boundary left alone is the vendor answering about this
         # request, and the status is the one fact worth the model's while —

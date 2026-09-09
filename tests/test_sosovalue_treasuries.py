@@ -335,6 +335,9 @@ class TestFetchAll:
             sosovalue_treasuries._fetch_all()
         assert str(exc.value) == "SoSoValue could not be reached: ConnectionError on /btc-treasuries"
         assert isinstance(exc.value.__cause__, requests.ConnectionError)
+        # The exact type off the real boundary: the unreached flavour the
+        # sweep's tally counts by (#217), not merely its parent.
+        assert type(exc.value) is sosovalue_common.SoSoValueUnreachedError
 
     def test_a_raw_transport_failure_on_a_history_is_counted_by_the_breaker(
         self, monkeypatch, caplog

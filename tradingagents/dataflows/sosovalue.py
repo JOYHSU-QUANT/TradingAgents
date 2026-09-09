@@ -761,9 +761,10 @@ def _fetch_all(asset: str, cached: dict | None) -> dict:
             except SoSoValueUnavailableError:
                 # Already logged by _fetch_one_fund, which re-raises so this
                 # loop — the only layer that can see a failure streak — can
-                # count it. One type for the whole lane (#217): an outage
-                # answer counts like an unreached vendor, since a gateway
-                # that is down costs the same per fund (#172).
+                # count it. One catch for the whole lane (#217) — the
+                # unreached flavour is a subclass, caught here as its parent:
+                # an outage answer counts like an unreached vendor, since a
+                # gateway that is down costs the same per fund (#172).
                 funds_failed.append(ticker)
                 consecutive_network += 1
                 if consecutive_network >= MAX_CONSECUTIVE_NETWORK_FAILURES:

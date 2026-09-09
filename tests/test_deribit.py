@@ -2564,7 +2564,12 @@ class TestHistoricalDate:
     def test_a_proxied_asset_losing_dvol_names_the_proxy_reason(self):
         # Both halves absent must not be reported as "the chain request failed":
         # for a proxied asset the chain was never attempted.
-        with pytest.raises(deribit.DeribitError, match="no Deribit chain of its own"):
+        # Order-sensitive (#203): the chain clause leads, the DVOL cause trails.
+        with pytest.raises(
+            deribit.DeribitError,
+            match=r"^Deribit's options chain is not served for 'SOL', which has no Deribit "
+            r"chain of its own; DVOL is unavailable for BTC \(",
+        ):
             _report(asset="SOL", dvol=requests.ConnectionError("down"))
 
     def test_a_date_ahead_of_the_utc_clock_still_serves_the_chain(self):
@@ -2650,7 +2655,12 @@ class TestHistoricalDate:
 
     def test_dvol_failure_on_a_historical_date_raises(self):
         # Nothing left to report: the chain is withheld by design, not by failure.
-        with pytest.raises(deribit.DeribitError, match="not served for the historical date"):
+        # Order-sensitive (#203): the chain clause leads, the DVOL cause trails.
+        with pytest.raises(
+            deribit.DeribitError,
+            match=r"^Deribit's options chain is not served for the historical date 2026-07-20; "
+            r"DVOL is unavailable for BTC \(dvol down\)$",
+        ):
             _report(curr_date="2026-07-20", dvol=deribit.DeribitError("dvol down"))
 
     @pytest.mark.parametrize("curr_date,days_ahead", [("2026-08-07", 2), ("2026-09-01", 27)])
@@ -2755,6 +2765,9 @@ class TestHistoricalDate:
         message = str(excinfo.value)
         assert "the historical date 2026-06-10" in message
         assert "this vendor reads no options chain for 'SOL' on any date" in message
+        # The proxy note stays inside the leading chain clause; the DVOL cause
+        # trails it (#203), joined by ";" so the note keeps the one ", and".
+        assert message.endswith(" on any date; DVOL is unavailable for BTC (dvol down)")
 
     def test_a_far_future_proxied_asset_keeps_the_never_served_fact_too(self):
         # The sibling branch. far_future also outranks proxy, and fixing only the
@@ -2764,6 +2777,7 @@ class TestHistoricalDate:
         message = str(excinfo.value)
         assert "was 2 days ahead of the UTC clock" in message
         assert "this vendor reads no options chain for 'SOL' on any date" in message
+        assert message.endswith(" on any date; DVOL is unavailable for BTC (dvol down)")
 
     def test_a_mid_run_midnight_raise_does_not_call_today_a_historical_date(self):
         # The raise reads withheld_mid_run rather than re-deciding "historical" by

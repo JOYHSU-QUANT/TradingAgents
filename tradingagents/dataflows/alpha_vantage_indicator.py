@@ -1,15 +1,10 @@
-import logging
-
 from .alpha_vantage_common import _make_api_request
-from .errors import NoMarketDataError, UnsupportedIndicatorError
+from .errors import NoMarketDataError, UnsupportedIndicatorError, WiringGapError
 from .utils import (
     INDICATOR_DESCRIPTIONS,
     data_lag_note,
     date_refusal,
-    library_failure_lane,
 )
-
-logger = logging.getLogger(__name__)
 
 # Maximum age (calendar days) of the newest indicator row relative to
 # curr_date before the report carries a data-lag note, keyed by the requested
@@ -152,14 +147,14 @@ def get_indicator(
             ``curr_date`` that will not parse
             is not a raise: it answers the shared ``INVALID_CURR_DATE``
             sentinel, as the yfinance sibling does (#111).
-        VendorLibraryError: When parsing the answer fails outside the cases
-            above. The library lane the request-and-parse runs under logs the
-            traceback, and the router routes past it to the vendor that
-            computes the same indicator from OHLCV, rendering one line of
-            report text only when no vendor serves (#187).
-        VendorError, requests.RequestException: Propagated through the lane
-            to their own router lanes (a throttle, a missing key, an outage,
-            a transport failure are never reports: #60, #87, #142).
+        Anything untyped: when parsing the answer fails outside the cases
+            above, it leaves raw. The router reads it as this vendor's
+            library failing — it logs the traceback, routes past to the
+            vendor that computes the same indicator from OHLCV, and renders
+            one line of report text only when no vendor serves (#187, #219).
+        VendorError, requests.RequestException: Propagated to their own
+            router lanes (a throttle, a missing key, an outage, a transport
+            failure are never reports: #60, #87, #142).
 
     The price series is not a parameter: each indicator's entry in
     ``_SUPPORTED_INDICATORS`` names the ``series_type`` its request carries (or
@@ -202,32 +197,39 @@ def get_indicator(
             ),
         )
 
-    # All three wiring checks run before the request and outside the library
-    # lane below: a supported indicator with no request definition, no CSV
-    # column or no description is our bug, not a vendor condition. Raising
-    # rather than returning prose stops it costing a request and leaves a
-    # traceback in the logs; the router no longer records a successful answer,
-    # so a multi-vendor chain reaches the next vendor (#106). A single-vendor
-    # chain surfaces it to the ToolNode as the failure it is: the tool wrapper
-    # renders only UnsupportedIndicatorError as report text (#117), and a
-    # wiring gap is ours to fix, not the model's to route around. Guessing a
-    # column would silently render numbers from the wrong field (#31); the
-    # description check is here rather than at the render because the lane
-    # below would turn a KeyError there into report text.
+    # All three wiring checks run before the request: a supported indicator
+    # with no request definition, no CSV column or no description is our bug,
+    # not a vendor condition. Raising rather than returning prose stops it
+    # costing a request and leaves a traceback in the logs; the router no
+    # longer records a successful answer, so a multi-vendor chain reaches the
+    # next vendor (#106). A single-vendor chain surfaces it to the ToolNode as
+    # the failure it is: the tool wrapper renders only UnsupportedIndicatorError
+    # as report text (#117), and a wiring gap is ours to fix, not the model's
+    # to route around. Guessing a column would silently render numbers from
+    # the wrong field (#31); the description check is here rather than at the
+    # render because a KeyError there is a failure the router cannot tell from
+    # the vendor's library breaking.
+    #
+    # WiringGapError, not the bare ValueError these used to raise: what kept
+    # them loud was sitting above the getter's ``with library_failure_lane``
+    # block, and with the conversion moved to the router (#219) placement says
+    # nothing — a bare ValueError from here would come back as
+    # "Error retrieving rsi values for AAPL: ..." for the analyst to read as
+    # its indicator report, since technical_indicators is not a loud category.
     if indicator not in _INDICATOR_REQUESTS:
-        raise ValueError(
+        raise WiringGapError(
             f"Indicator '{indicator}' is registered as supported but has no "
             f"Alpha Vantage request defined"
         )
     if indicator not in _CSV_COLUMN_MAP:
-        raise ValueError(
+        raise WiringGapError(
             f"Indicator '{indicator}' is registered as supported but has no CSV column mapping"
         )
     # A real table gap now fails at import (the derivation above raises
     # KeyError), so at runtime this is the drift-lock for the other failure:
     # the derivation being replaced by a literal copy that then loses a key.
     if indicator not in _INDICATOR_DESCRIPTIONS:
-        raise ValueError(
+        raise WiringGapError(
             f"Indicator '{indicator}' is registered as supported but has no description"
         )
 
@@ -242,8 +244,8 @@ def get_indicator(
     elif time_period_spec is not None:
         params["time_period"] = time_period_spec
 
-    # Every typed vendor failure from here down propagates through the lane
-    # so the router can react by behavior: a missing key takes the "vendor
+    # Every failure from here down leaves this getter unhandled so the
+    # router can react by behavior: a missing key takes the "vendor
     # unavailable" lane and a 429 the rate-limit lane, both of which hand
     # the next vendor in the chain its turn, and the NoMarketDataError
     # raises below take the no-data lane. So does a transport failure — a
@@ -252,107 +254,107 @@ def get_indicator(
     # catch all of those in a broad handler of its own and come back with a
     # successful-looking "Error retrieving ..." string, so the router saw an
     # answer and never fell back once Alpha Vantage's daily quota was spent
-    # (#60), or after a 404 or a 503 (#87, #142). The subject is the one the
-    # yfinance sibling names, so the report line does not depend on which
-    # vendor failed (#187).
-    with library_failure_lane(f"{indicator} values for {symbol}", log=logger):
-        data = _make_api_request(av_function, params)
+    # (#60), or after a 404 or a 503 (#87, #142). What is left — the parse
+    # tripping over a shape this vendor did serve — the router names with
+    # the subject the yfinance sibling's failure gets, since the row it
+    # reads is the routed tool's and not the vendor's (#187, #219).
+    data = _make_api_request(av_function, params)
 
-        # Parse CSV data and extract values for the date range
-        lines = data.strip().split("\n")
-        if len(lines) < 2:
-            raise NoMarketDataError(
-                symbol,
-                detail=(
-                    f"Alpha Vantage returned no {indicator} rows "
-                    f"(the CSV carried no data beyond its header)"
-                ),
-            )
-
-        # Parse header and data
-        header = [col.strip() for col in lines[0].split(",")]
-        if "time" not in header:
-            # A shape the parser cannot read at all. Worded as the schema break
-            # it is, not as an uncovered symbol: the router splices this detail
-            # into what the agent reads (#106).
-            raise NoMarketDataError(
-                symbol,
-                detail=(
-                    f"Alpha Vantage's {indicator} CSV has no 'time' column (columns: {header})"
-                ),
-            )
-        date_col_idx = header.index("time")
-
-        target_col_name = _CSV_COLUMN_MAP[indicator]
-        if target_col_name not in header:
-            raise NoMarketDataError(
-                symbol,
-                detail=(
-                    f"Alpha Vantage's {indicator} CSV has no '{target_col_name}' "
-                    f"column (columns: {header})"
-                ),
-            )
-        value_col_idx = header.index(target_col_name)
-
-        result_data = []
-        for line in lines[1:]:
-            if not line.strip():
-                continue
-            values = line.split(",")
-            if len(values) > value_col_idx:
-                try:
-                    date_str = values[date_col_idx].strip()
-                    # Parse the date
-                    date_dt = datetime.strptime(date_str, "%Y-%m-%d")
-
-                    # Check if date is in our range
-                    if before <= date_dt <= curr_date_dt:
-                        value = values[value_col_idx].strip()
-                        result_data.append((date_dt, value))
-                except (ValueError, IndexError):
-                    continue
-
-        if not result_data:
-            # Every fetched row fell outside the window. This used to embed
-            # "No data available for the specified date range." inside a
-            # well-formed "## RSI values from ... to ..." report — the most
-            # concealed of this getter's prose exits, since it carried no error
-            # wording at all. Raising instead matches what the same vendor's
-            # daily-bars getter does with a header-only CSV (#30/#106): the
-            # chain can fall back, and a chain with no other vendor emits the
-            # router's no-data sentinel.
-            raise NoMarketDataError(
-                symbol,
-                detail=(
-                    f"no {indicator} rows between {before.strftime('%Y-%m-%d')} and {curr_date}"
-                ),
-            )
-
-        # Sort by date and format output
-        result_data.sort(key=lambda x: x[0])
-
-        ind_string = ""
-        for date_dt, value in result_data:
-            ind_string += f"{date_dt.strftime('%Y-%m-%d')}: {value}\n"
-
-        # Freshness: the header above claims coverage "to {curr_date}" but the
-        # rows are whatever survived the range filter — a stalled upstream can
-        # leave the newest value behind the date being analysed. The bound is
-        # keyed by the requested interval so a normal bar gap (weekend,
-        # month-boundary) is not flagged, only a genuinely behind series (#30).
-        lag_note = ""
-        max_lag = _MAX_LAG_DAYS_BY_INTERVAL.get(interval)
-        if max_lag is not None:
-            note = data_lag_note(result_data[-1][0], curr_date, max_lag, f"{indicator} value")
-            if note:
-                lag_note = "\n" + note + "\n"
-
-        result_str = (
-            f"## {indicator.upper()} values from {before.strftime('%Y-%m-%d')} to {curr_date}:\n\n"
-            + ind_string
-            + lag_note
-            + "\n\n"
-            + _INDICATOR_DESCRIPTIONS[indicator]
+    # Parse CSV data and extract values for the date range
+    lines = data.strip().split("\n")
+    if len(lines) < 2:
+        raise NoMarketDataError(
+            symbol,
+            detail=(
+                f"Alpha Vantage returned no {indicator} rows "
+                f"(the CSV carried no data beyond its header)"
+            ),
         )
 
-        return result_str
+    # Parse header and data
+    header = [col.strip() for col in lines[0].split(",")]
+    if "time" not in header:
+        # A shape the parser cannot read at all. Worded as the schema break
+        # it is, not as an uncovered symbol: the router splices this detail
+        # into what the agent reads (#106).
+        raise NoMarketDataError(
+            symbol,
+            detail=(
+                f"Alpha Vantage's {indicator} CSV has no 'time' column (columns: {header})"
+            ),
+        )
+    date_col_idx = header.index("time")
+
+    target_col_name = _CSV_COLUMN_MAP[indicator]
+    if target_col_name not in header:
+        raise NoMarketDataError(
+            symbol,
+            detail=(
+                f"Alpha Vantage's {indicator} CSV has no '{target_col_name}' "
+                f"column (columns: {header})"
+            ),
+        )
+    value_col_idx = header.index(target_col_name)
+
+    result_data = []
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        values = line.split(",")
+        if len(values) > value_col_idx:
+            try:
+                date_str = values[date_col_idx].strip()
+                # Parse the date
+                date_dt = datetime.strptime(date_str, "%Y-%m-%d")
+
+                # Check if date is in our range
+                if before <= date_dt <= curr_date_dt:
+                    value = values[value_col_idx].strip()
+                    result_data.append((date_dt, value))
+            except (ValueError, IndexError):
+                continue
+
+    if not result_data:
+        # Every fetched row fell outside the window. This used to embed
+        # "No data available for the specified date range." inside a
+        # well-formed "## RSI values from ... to ..." report — the most
+        # concealed of this getter's prose exits, since it carried no error
+        # wording at all. Raising instead matches what the same vendor's
+        # daily-bars getter does with a header-only CSV (#30/#106): the
+        # chain can fall back, and a chain with no other vendor emits the
+        # router's no-data sentinel.
+        raise NoMarketDataError(
+            symbol,
+            detail=(
+                f"no {indicator} rows between {before.strftime('%Y-%m-%d')} and {curr_date}"
+            ),
+        )
+
+    # Sort by date and format output
+    result_data.sort(key=lambda x: x[0])
+
+    ind_string = ""
+    for date_dt, value in result_data:
+        ind_string += f"{date_dt.strftime('%Y-%m-%d')}: {value}\n"
+
+    # Freshness: the header above claims coverage "to {curr_date}" but the
+    # rows are whatever survived the range filter — a stalled upstream can
+    # leave the newest value behind the date being analysed. The bound is
+    # keyed by the requested interval so a normal bar gap (weekend,
+    # month-boundary) is not flagged, only a genuinely behind series (#30).
+    lag_note = ""
+    max_lag = _MAX_LAG_DAYS_BY_INTERVAL.get(interval)
+    if max_lag is not None:
+        note = data_lag_note(result_data[-1][0], curr_date, max_lag, f"{indicator} value")
+        if note:
+            lag_note = "\n" + note + "\n"
+
+    result_str = (
+        f"## {indicator.upper()} values from {before.strftime('%Y-%m-%d')} to {curr_date}:\n\n"
+        + ind_string
+        + lag_note
+        + "\n\n"
+        + _INDICATOR_DESCRIPTIONS[indicator]
+    )
+
+    return result_str

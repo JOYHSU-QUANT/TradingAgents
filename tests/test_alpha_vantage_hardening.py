@@ -23,8 +23,8 @@ from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_l
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
 from tradingagents.dataflows.errors import (
     NoMarketDataError,
-    VendorLibraryError,
     VendorUnavailableError,
+    WiringGapError,
 )
 
 
@@ -370,7 +370,7 @@ def test_lookahead_filter_raises_on_unparseable_curr_date():
             {"fiscalDateEnding": "2099-01-01"},
         ]
     }
-    with pytest.raises(ValueError, match="look-ahead guard"):
+    with pytest.raises(WiringGapError, match="look-ahead guard"):
         _filter_reports_by_date(result, "2026-13-45")
 
 
@@ -602,14 +602,49 @@ def test_a_wiring_gap_raises_before_any_request(monkeypatch, registry, expected)
     # the missing-description one a "No description available." placeholder
     # from a function-local dict nothing tested (#117). All are our own wiring
     # bugs, not vendor conditions, so they raise before a request is made
-    # rather than after paying for one — and outside the library lane (#187),
-    # so they stay the loud failures they are rather than report text.
+    # rather than after paying for one, and they say so by type: what used to
+    # keep them loud was sitting above the getter's library lane, and the
+    # router reads an untyped failure from anywhere in the getter as the
+    # vendor's library (#219). The router-level ending is pinned below —
+    # calling the getter directly cannot see it, which is how a bare
+    # ValueError here went on passing this test while degrading in production.
     monkeypatch.delitem(getattr(avi, registry), "rsi")
     monkeypatch.setattr(
         avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")
     )
-    with pytest.raises(ValueError, match=expected):
+    with pytest.raises(WiringGapError, match=expected):
         avi.get_indicator("AAPL", "rsi", "2026-01-05", look_back_days=10)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "registry,expected",
+    [
+        ("_CSV_COLUMN_MAP", "no CSV column mapping"),
+        ("_INDICATOR_REQUESTS", "no Alpha Vantage request"),
+        ("_INDICATOR_DESCRIPTIONS", "no description"),
+    ],
+)
+def test_a_wiring_gap_reaches_the_caller_through_the_router(monkeypatch, registry, expected):
+    from tradingagents.dataflows import interface
+    from tradingagents.dataflows.config import set_config
+
+    # The ending the test above cannot see. technical_indicators is not a loud
+    # category, so anything the router reads as Alpha Vantage's library comes
+    # back as "Error retrieving rsi values for AAPL: ..." for the analyst to
+    # read as its indicator report. A registry gap is ours, so it must reach
+    # the caller as the failure it is instead (#106, #219).
+    monkeypatch.delitem(getattr(avi, registry), "rsi")
+    monkeypatch.setattr(
+        avi, "_make_api_request", lambda *a, **k: pytest.fail("no request may be made")
+    )
+    # The registered implementation, reached the way production reaches it:
+    # ``VENDOR_METHODS`` already holds this getter, and the chain is chosen
+    # through ``set_config`` so the call goes through the same coercion a
+    # deployment's does.
+    set_config({"data_vendors": {"technical_indicators": "alpha_vantage"}})
+    with pytest.raises(WiringGapError, match=expected):
+        interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-01-05", 10)
 
 
 @pytest.mark.unit
@@ -900,20 +935,25 @@ def test_indicator_not_configured_still_propagates(monkeypatch):
 
 
 @pytest.mark.unit
-def test_indicator_untyped_failure_leaves_as_the_library_type(monkeypatch):
+def test_indicator_untyped_failure_leaves_unhandled_for_the_router(monkeypatch):
     # The vendor-error taxonomy and transport failures propagate to their own
-    # router lanes; an unexpected failure leaves as the library type (#187),
-    # so one broken indicator still cannot abort a run — the router routes
-    # past it and, with no other vendor, renders it as report text — but the
-    # chain no longer ends here on a string that read as a successful answer.
+    # router lanes; an unexpected failure leaves this getter unhandled, and
+    # the router reads it as this vendor's library (#187, #219), so one
+    # broken indicator still cannot abort a run — the router routes past it
+    # and, with no other vendor, renders it as report text — but the chain no
+    # longer ends here on a string that read as a successful answer.
+    from tradingagents.dataflows import interface
+    from tradingagents.dataflows.config import set_config
+
     def _boom(*a, **k):
         raise RuntimeError("socket exploded")
 
     monkeypatch.setattr(avi, "_make_api_request", _boom)
-    with pytest.raises(VendorLibraryError) as info:
+    with pytest.raises(RuntimeError, match="socket exploded"):
         avi.get_indicator("AAPL", "rsi", "2026-06-01", 30)
-    assert info.value.what == "rsi values for AAPL"
-    assert info.value.detail == "socket exploded"
+    set_config({"data_vendors": {"technical_indicators": "alpha_vantage"}})
+    out = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "2026-06-01", 30)
+    assert out == "Error retrieving rsi values for AAPL: socket exploded"
 
 
 def _boom_forged(*a, **k):
@@ -960,7 +1000,7 @@ def test_indicator_http_failure_propagates_instead_of_reading_as_success(
     # request boundary rather than a patched _make_api_request: the swallowing
     # happened to an exception that boundary raises, so the test has to make it
     # raise for real. A 5xx now leaves that boundary as the outage type (#142)
-    # and propagates through the library lane's pass-through instead.
+    # and propagates to its own router lane instead.
     monkeypatch.setattr(av, "get_api_key", lambda: "k")
     monkeypatch.setattr(av.requests, "get", _patched_get("", status_code=status))
     with pytest.raises(propagated):

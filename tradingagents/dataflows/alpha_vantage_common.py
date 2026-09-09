@@ -5,7 +5,12 @@ from io import StringIO
 import pandas as pd
 import requests
 
-from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimitError
+from .errors import (
+    NoMarketDataError,
+    VendorNotConfiguredError,
+    VendorRateLimitError,
+    WiringGapError,
+)
 from .utils import _parse_day, normalize_iso_date, raise_for_http_status
 
 API_BASE_URL = "https://www.alphavantage.co/query"
@@ -44,12 +49,14 @@ def format_datetime_for_api(date_input) -> str:
     string through, read ``"%Y-%m-%d %H:%M"`` and accept a ``datetime`` — three
     branches no caller could reach once the two news getters refused anything
     but a ``yyyy-mm-dd`` string up front (#120), yet which read as the module's
-    date contract. Raises ValueError for anything else, the way the old
-    fallthrough did.
+    date contract. Anything else raises a ``WiringGapError``: the refusal
+    above is what makes this unreachable, so a value arriving here is our
+    breakage, and the router's untyped lane would otherwise read it as Alpha
+    Vantage's library failing and report it as text (#219).
     """
     day = normalize_iso_date(date_input)
     if day is None:
-        raise ValueError(f"Unsupported date format: {date_input!r}")
+        raise WiringGapError(f"Unsupported date format: {date_input!r}")
     return day.replace("-", "") + "T0000"
 
 

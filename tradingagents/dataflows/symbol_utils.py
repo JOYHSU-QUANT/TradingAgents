@@ -26,7 +26,7 @@ from collections.abc import Collection
 
 # NoMarketDataError lives in the vendor-error taxonomy (errors.py); re-exported
 # here for the many call sites that import it alongside normalize_symbol.
-from .errors import NoMarketDataError as NoMarketDataError
+from .errors import NoMarketDataError as NoMarketDataError, WiringGapError
 
 logger = logging.getLogger(__name__)
 
@@ -171,8 +171,11 @@ def classify_crypto_asset(
     """
     if isinstance(native, str):
         # A str satisfies Collection[str] — membership would silently degrade
-        # to substring matching ("TC" in "BTC" is True).
-        raise TypeError("native must be a collection of base symbols, not a bare string")
+        # to substring matching ("TC" in "BTC" is True). ``native`` is the
+        # calling vendor's own module constant, so a bare string here is our
+        # breakage and says so by type: the router would otherwise read it as
+        # that vendor's library failing and report it as text (#219).
+        raise WiringGapError("native must be a collection of base symbols, not a bare string")
     base = normalize_symbol((asset or "").replace("/", "-")).split("-")[0]
     if base in native:
         return base, False

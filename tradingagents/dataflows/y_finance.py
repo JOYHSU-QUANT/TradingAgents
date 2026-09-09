@@ -17,7 +17,6 @@ from .utils import (
     data_lag_note,
     date_range_refusal,
     date_refusal,
-    library_failure_lane,
     live_snapshot_note,
     statement_lag_bound,
 )
@@ -32,18 +31,23 @@ from .yfinance_common import (
 
 logger = logging.getLogger(__name__)
 
-# Every VENDOR_METHODS impl in this module but get_YFin_data_online runs its
-# fetch and rendering under ``library_failure_lane``, from the point its own
-# ``try`` used to start: a typed vendor failure and a transport failure pass
-# through it to their router lanes, and anything else — a stockstats or
-# pandas bug on a frame yfinance did serve — is logged here with its
-# traceback and raised as ``VendorLibraryError`` for the router to route
-# past and, when no vendor serves, to render as one line of report text.
-# The lane's docstring holds the measured type facts behind the OSError
-# pass-through (#116); the rendering used to happen here, per leaf, and
-# ended the chain at the vendor that had just failed (#187).
-# get_YFin_data_online never carried that handler — a failure there leaves
-# raw, through the router's generic lane — and its ending is unchanged.
+# No impl in this module handles what it meets outside the vendor-error
+# taxonomy and outside transport: a stockstats or pandas bug on a frame
+# yfinance did serve leaves raw, and the router reads it as this vendor's
+# library failing, routes past it and, when no vendor serves, renders one
+# line of report text (#187, #219). Six of the getters here — every
+# registered impl but get_YFin_data_online — used to wrap their fetch in a
+# ``with`` block that did the conversion at the getter (nine across the
+# repo), a per-getter decision that left their Alpha Vantage siblings
+# aborting the run over the identical bug, and left get_YFin_data_online's
+# own silence looking like a choice when it was an omission. It is a
+# category's decision now (``interface.LOUD_LIBRARY_CATEGORIES``), and
+# OHLCV — this module's get_YFin_data_online — is the category whose
+# library failure is never rendered as text.
+#
+# What a getter runs BEFORE it asks yfinance anything is not the vendor's
+# library, and says so with ``wiring_gap`` rather than by sitting above the
+# block that used to be here (#111, #200).
 
 
 def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title: str) -> str:
@@ -99,16 +103,19 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         # frame used to reach here (#110); a label whose TYPE the parser refuses
         # outright still raises, and both statements above are inside this guard
         # so it leaves as a typed vendor failure the router can fall back from
-        # rather than reaching the getters' library lane and coming back as an
-        # "Error retrieving ..." string the router reads as a successful report.
+        # rather than reaching the router's untyped lane and coming back as an
+        # "Error retrieving ..." report line for a vendor that answered.
         # BOTH exception types, because pandas picks by label type and the two
         # families are equally reachable: an iterator or nested tuple raises
         # TypeError, a dict-like raises ValueError, and a column label need not
         # be hashable — ``df.columns = pd.Index([...], dtype=object)`` takes
-        # either (measured, pandas 2.3.3). The filter's own ValueError, for an
-        # unusable curr_date, is not a second meaning to worry about here: the
-        # shared sentinel above answered that case before anything was filtered
-        # (#89), and this is the only production caller of that filter.
+        # either (measured, pandas 2.3.3). The filter's own two guards — an
+        # unusable curr_date, labels coerced from another frame — are not a
+        # second meaning to worry about here: they raise WiringGapError, which
+        # this clause does not catch, so our own breakage is not filed as
+        # something the vendor did (#219). The shared sentinel above answers
+        # the curr_date case before anything is filtered anyway (#89), and
+        # this is the only production caller of that filter.
         raise NoMarketDataError(
             ticker,
             canonical,
@@ -147,7 +154,7 @@ def _dates_lag_note(values, curr_date: str | None, max_lag_days: int, what: str)
     index also put the ``max()`` OUTSIDE the guard, so a set that coerced to
     mixed offsets without raising failed there instead ("Cannot compare tz-naive
     and tz-aware timestamps", measured on ``[naive str, aware Timestamp]``,
-    pandas 2.3.3) and reached the getter's library lane; per label, every value
+    pandas 2.3.3) and reached the router's untyped lane; per label, every value
     handed to ``max`` is zone-free. The remaining guard is for a label whose
     TYPE the parser refuses outright, which stays a silent no-note here because
     an annotation must not be the thing that fails a report.
@@ -285,35 +292,34 @@ def get_stock_stats_indicators_window(
 
     # One fetch for the whole window. A stockstats or pandas failure here is
     # deterministic — after the taxonomy (#67) and transport (#116) lanes
-    # nothing that reaches the library lane is transient — so it is not
+    # nothing the router reads as a library failure is transient — so it is not
     # re-run: this used to fall back to a per-day loop that performed the
     # identical fetch and calculation once per day of the window and
     # rendered a column of blanks under a successful-looking header (#137).
-    with library_failure_lane(f"{indicator} values for {symbol}", log=logger):
-        indicator_data = _get_stock_stats_bulk(symbol, indicator, curr_date)
+    indicator_data = _get_stock_stats_bulk(symbol, indicator, curr_date)
 
-        # Generate the date range we need
-        current_dt = curr_date_dt
-        date_values = []
+    # Generate the date range we need
+    current_dt = curr_date_dt
+    date_values = []
 
-        while current_dt >= before:
-            date_str = current_dt.strftime("%Y-%m-%d")
+    while current_dt >= before:
+        date_str = current_dt.strftime("%Y-%m-%d")
 
-            # Look up the indicator value for this date
-            if date_str in indicator_data:
-                indicator_value = indicator_data[date_str]
-            else:
-                # Honest wording: a missing date may be a weekend/holiday OR a
-                # trading day whose row failed integrity cleaning (#38).
-                indicator_value = "N/A: no usable OHLCV row for this date (non-trading day, or the vendor row failed integrity checks)"
+        # Look up the indicator value for this date
+        if date_str in indicator_data:
+            indicator_value = indicator_data[date_str]
+        else:
+            # Honest wording: a missing date may be a weekend/holiday OR a
+            # trading day whose row failed integrity cleaning (#38).
+            indicator_value = "N/A: no usable OHLCV row for this date (non-trading day, or the vendor row failed integrity checks)"
 
-            date_values.append((date_str, indicator_value))
-            current_dt = current_dt - relativedelta(days=1)
+        date_values.append((date_str, indicator_value))
+        current_dt = current_dt - relativedelta(days=1)
 
-        # Build the result string
-        ind_string = ""
-        for date_str, value in date_values:
-            ind_string += f"{date_str}: {value}\n"
+    # Build the result string
+    ind_string = ""
+    for date_str, value in date_values:
+        ind_string += f"{date_str}: {value}\n"
 
     result_str = (
         f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
@@ -372,82 +378,81 @@ def get_fundamentals(
 ):
     """Get company fundamentals overview from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(f"fundamentals for {ticker}", log=logger):
-        ticker_obj = yf.Ticker(canonical)
-        # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
-        # None its own parser then trips over, which the library lane would
-        # render as "Error retrieving fundamentals ..." prose (#116). The
-        # stub dict is what an unknown symbol's 404 answered before, and the
-        # "no fields" check below is what turns it into no-data.
-        info = yf_fetch_unhidden(lambda: ticker_obj.info, hidden_answer=dict)
+    ticker_obj = yf.Ticker(canonical)
+    # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
+    # None its own parser then trips over, which the router would render
+    # as "Error retrieving fundamentals ..." report text (#116). The
+    # stub dict is what an unknown symbol's 404 answered before, and the
+    # "no fields" check below is what turns it into no-data.
+    info = yf_fetch_unhidden(lambda: ticker_obj.info, hidden_answer=dict)
 
-        if not info:
-            raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
+    if not info:
+        raise NoMarketDataError(ticker, canonical, "no fundamentals returned")
 
-        fields = [
-            ("Name", info.get("longName")),
-            ("Sector", info.get("sector")),
-            ("Industry", info.get("industry")),
-            ("Market Cap", info.get("marketCap")),
-            ("PE Ratio (TTM)", info.get("trailingPE")),
-            ("Forward PE", info.get("forwardPE")),
-            ("PEG Ratio", info.get("pegRatio")),
-            ("Price to Book", info.get("priceToBook")),
-            ("EPS (TTM)", info.get("trailingEps")),
-            ("Forward EPS", info.get("forwardEps")),
-            ("Dividend Yield", info.get("dividendYield")),
-            ("Beta", info.get("beta")),
-            ("52 Week High", info.get("fiftyTwoWeekHigh")),
-            ("52 Week Low", info.get("fiftyTwoWeekLow")),
-            ("50 Day Average", info.get("fiftyDayAverage")),
-            ("200 Day Average", info.get("twoHundredDayAverage")),
-            ("Revenue (TTM)", info.get("totalRevenue")),
-            ("Gross Profit", info.get("grossProfits")),
-            ("EBITDA", info.get("ebitda")),
-            ("Net Income", info.get("netIncomeToCommon")),
-            ("Profit Margin", info.get("profitMargins")),
-            ("Operating Margin", info.get("operatingMargins")),
-            ("Return on Equity", info.get("returnOnEquity")),
-            ("Return on Assets", info.get("returnOnAssets")),
-            ("Debt to Equity", info.get("debtToEquity")),
-            ("Current Ratio", info.get("currentRatio")),
-            ("Book Value", info.get("bookValue")),
-            ("Free Cash Flow", info.get("freeCashflow")),
-        ]
+    fields = [
+        ("Name", info.get("longName")),
+        ("Sector", info.get("sector")),
+        ("Industry", info.get("industry")),
+        ("Market Cap", info.get("marketCap")),
+        ("PE Ratio (TTM)", info.get("trailingPE")),
+        ("Forward PE", info.get("forwardPE")),
+        ("PEG Ratio", info.get("pegRatio")),
+        ("Price to Book", info.get("priceToBook")),
+        ("EPS (TTM)", info.get("trailingEps")),
+        ("Forward EPS", info.get("forwardEps")),
+        ("Dividend Yield", info.get("dividendYield")),
+        ("Beta", info.get("beta")),
+        ("52 Week High", info.get("fiftyTwoWeekHigh")),
+        ("52 Week Low", info.get("fiftyTwoWeekLow")),
+        ("50 Day Average", info.get("fiftyDayAverage")),
+        ("200 Day Average", info.get("twoHundredDayAverage")),
+        ("Revenue (TTM)", info.get("totalRevenue")),
+        ("Gross Profit", info.get("grossProfits")),
+        ("EBITDA", info.get("ebitda")),
+        ("Net Income", info.get("netIncomeToCommon")),
+        ("Profit Margin", info.get("profitMargins")),
+        ("Operating Margin", info.get("operatingMargins")),
+        ("Return on Equity", info.get("returnOnEquity")),
+        ("Return on Assets", info.get("returnOnAssets")),
+        ("Debt to Equity", info.get("debtToEquity")),
+        ("Current Ratio", info.get("currentRatio")),
+        ("Book Value", info.get("bookValue")),
+        ("Free Cash Flow", info.get("freeCashflow")),
+    ]
 
-        lines = []
-        for label, value in fields:
-            if value is not None:
-                lines.append(f"{label}: {value}")
+    lines = []
+    for label, value in fields:
+        if value is not None:
+            lines.append(f"{label}: {value}")
 
-        # yfinance returns a stub dict (e.g. {"trailingPegRatio": None}) for
-        # unknown symbols, so `info` is truthy but every field is empty. Treat
-        # "no usable fields" as no data rather than emitting a bare header the
-        # agent might fabricate around.
-        if not lines:
-            raise NoMarketDataError(ticker, canonical, "no fundamental fields returned")
+    # yfinance returns a stub dict (e.g. {"trailingPegRatio": None}) for
+    # unknown symbols, so `info` is truthy but every field is empty. Treat
+    # "no usable fields" as no data rather than emitting a bare header the
+    # agent might fabricate around.
+    if not lines:
+        raise NoMarketDataError(ticker, canonical, "no fundamental fields returned")
 
-        # Refused at the same depth as the Alpha Vantage overview path, whose
-        # docstring gives the reasoning: with no usable analysis date neither
-        # vendor can tell a backtest from live trading (#89).
-        if (
-            refusal := date_refusal(
-                curr_date, what="fundamentals", kind="disclosure", omitted_ok=True
-            )
-        ) is not None:
-            return refusal
+    # Refused at the same depth as the Alpha Vantage overview path, whose
+    # docstring gives the reasoning: with no usable analysis date neither
+    # vendor can tell a backtest from live trading (#89).
+    if (
+        refusal := date_refusal(
+            curr_date, what="fundamentals", kind="disclosure", omitted_ok=True
+        )
+    ) is not None:
+        return refusal
 
-        header = f"# Company Fundamentals for {canonical}\n"
-        # yfinance ``info`` is a live current-state snapshot with no
-        # historical form; when the analysis date sits behind the wall clock
-        # (a backtest), say so or today's ratios read as that date's (#30).
-        if curr_date is not None:
-            snapshot_note = live_snapshot_note(curr_date, "these fundamentals are")
-            if snapshot_note:
-                header += f"# {snapshot_note}\n"
-        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    header = f"# Company Fundamentals for {canonical}\n"
+    # yfinance ``info`` is a live current-state snapshot with no
+    # historical form; when the analysis date sits behind the wall clock
+    # (a backtest), say so or today's ratios read as that date's (#30).
+    if curr_date is not None:
+        snapshot_note = live_snapshot_note(curr_date, "these fundamentals are")
+        if snapshot_note:
+            header += f"# {snapshot_note}\n"
+    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
-        return header + "\n".join(lines)
+    return header + "\n".join(lines)
 
 
 def get_balance_sheet(
@@ -457,20 +462,19 @@ def get_balance_sheet(
 ):
     """Get balance sheet data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(f"balance sheet for {ticker}", log=logger):
-        ticker_obj = yf.Ticker(canonical)
+    ticker_obj = yf.Ticker(canonical)
 
-        # yf_fetch_statement, not plain yf_retry: the statement properties
-        # swallow a 429 into an empty frame under yfinance's default hidden-
-        # exception mode, and "no data" must not be the verdict for a throttle (#67).
-        if freq.lower() == "quarterly":
-            data = yf_fetch_statement(lambda: ticker_obj.quarterly_balance_sheet)
-        else:
-            data = yf_fetch_statement(lambda: ticker_obj.balance_sheet)
+    # yf_fetch_statement, not plain yf_retry: the statement properties
+    # swallow a 429 into an empty frame under yfinance's default hidden-
+    # exception mode, and "no data" must not be the verdict for a throttle (#67).
+    if freq.lower() == "quarterly":
+        data = yf_fetch_statement(lambda: ticker_obj.quarterly_balance_sheet)
+    else:
+        data = yf_fetch_statement(lambda: ticker_obj.balance_sheet)
 
-        return _statement_report(
-            data, ticker, canonical, curr_date, freq, "balance sheet", "Balance Sheet"
-        )
+    return _statement_report(
+        data, ticker, canonical, curr_date, freq, "balance sheet", "Balance Sheet"
+    )
 
 
 def get_cashflow(
@@ -480,16 +484,15 @@ def get_cashflow(
 ):
     """Get cash flow data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(f"cash flow for {ticker}", log=logger):
-        ticker_obj = yf.Ticker(canonical)
+    ticker_obj = yf.Ticker(canonical)
 
-        # See get_balance_sheet for why these go through yf_fetch_statement.
-        if freq.lower() == "quarterly":
-            data = yf_fetch_statement(lambda: ticker_obj.quarterly_cashflow)
-        else:
-            data = yf_fetch_statement(lambda: ticker_obj.cashflow)
+    # See get_balance_sheet for why these go through yf_fetch_statement.
+    if freq.lower() == "quarterly":
+        data = yf_fetch_statement(lambda: ticker_obj.quarterly_cashflow)
+    else:
+        data = yf_fetch_statement(lambda: ticker_obj.cashflow)
 
-        return _statement_report(data, ticker, canonical, curr_date, freq, "cash flow", "Cash Flow")
+    return _statement_report(data, ticker, canonical, curr_date, freq, "cash flow", "Cash Flow")
 
 
 def get_income_statement(
@@ -499,63 +502,61 @@ def get_income_statement(
 ):
     """Get income statement data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(f"income statement for {ticker}", log=logger):
-        ticker_obj = yf.Ticker(canonical)
+    ticker_obj = yf.Ticker(canonical)
 
-        # See get_balance_sheet for why these go through yf_fetch_statement.
-        if freq.lower() == "quarterly":
-            data = yf_fetch_statement(lambda: ticker_obj.quarterly_income_stmt)
-        else:
-            data = yf_fetch_statement(lambda: ticker_obj.income_stmt)
+    # See get_balance_sheet for why these go through yf_fetch_statement.
+    if freq.lower() == "quarterly":
+        data = yf_fetch_statement(lambda: ticker_obj.quarterly_income_stmt)
+    else:
+        data = yf_fetch_statement(lambda: ticker_obj.income_stmt)
 
-        return _statement_report(
-            data, ticker, canonical, curr_date, freq, "income statement", "Income Statement"
-        )
+    return _statement_report(
+        data, ticker, canonical, curr_date, freq, "income statement", "Income Statement"
+    )
 
 
 def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the company"]):
     """Get insider transactions data from yfinance."""
     canonical = normalize_symbol(ticker)
-    with library_failure_lane(f"insider transactions for {ticker}", log=logger):
-        ticker_obj = yf.Ticker(canonical)
-        # Un-hidden: the holders scraper swallows a non-429 HTTP failure into
-        # an empty frame, which the "no filings" sentence below would then
-        # claim as coverage (#116).
-        data = yf_fetch_unhidden(
-            lambda: ticker_obj.insider_transactions, hidden_answer=pd.DataFrame
-        )
+    ticker_obj = yf.Ticker(canonical)
+    # Un-hidden: the holders scraper swallows a non-429 HTTP failure into
+    # an empty frame, which the "no filings" sentence below would then
+    # claim as coverage (#116).
+    data = yf_fetch_unhidden(
+        lambda: ticker_obj.insider_transactions, hidden_answer=pd.DataFrame
+    )
 
-        # Empty is normal here (many valid symbols have no insider filings),
-        # so report it plainly rather than treating the symbol as invalid.
-        if data is None or data.empty:
-            return f"No insider transactions reported for symbol '{canonical}'"
+    # Empty is normal here (many valid symbols have no insider filings),
+    # so report it plainly rather than treating the symbol as invalid.
+    if data is None or data.empty:
+        return f"No insider transactions reported for symbol '{canonical}'"
 
-        # Convert to CSV string for consistency with other functions
-        csv_string = data.to_csv()
+    # Convert to CSV string for consistency with other functions
+    csv_string = data.to_csv()
 
-        # Freshness: relative to the wall clock (no curr_date reaches this
-        # path). The bound is generous because sparse filings are normal —
-        # this flags a long-dead stream, not a quiet quarter (#30). No
-        # recognizable date column just skips the note (degrade, never raise);
-        # a duplicated column label would select a DataFrame, so only a
-        # genuine Series is inspected.
-        lag_line = ""
-        date_col = next(
-            (c for c in data.columns if isinstance(c, str) and "date" in c.lower()), None
-        )
-        if date_col is not None:
-            col = data[date_col]
-            if isinstance(col, pd.Series):
-                lag_line = _dates_lag_note(
-                    col,
-                    datetime.now().strftime("%Y-%m-%d"),
-                    MAX_INSIDER_LAG_DAYS,
-                    "insider filing",
-                )
+    # Freshness: relative to the wall clock (no curr_date reaches this
+    # path). The bound is generous because sparse filings are normal —
+    # this flags a long-dead stream, not a quiet quarter (#30). No
+    # recognizable date column just skips the note (degrade, never raise);
+    # a duplicated column label would select a DataFrame, so only a
+    # genuine Series is inspected.
+    lag_line = ""
+    date_col = next(
+        (c for c in data.columns if isinstance(c, str) and "date" in c.lower()), None
+    )
+    if date_col is not None:
+        col = data[date_col]
+        if isinstance(col, pd.Series):
+            lag_line = _dates_lag_note(
+                col,
+                datetime.now().strftime("%Y-%m-%d"),
+                MAX_INSIDER_LAG_DAYS,
+                "insider filing",
+            )
 
-        # Add header information
-        header = f"# Insider Transactions data for {canonical}\n"
-        header += lag_line
-        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    # Add header information
+    header = f"# Insider Transactions data for {canonical}\n"
+    header += lag_line
+    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
-        return header + csv_string
+    return header + csv_string

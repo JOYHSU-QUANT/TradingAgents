@@ -4,19 +4,20 @@ The system prompt used to carry the indicator descriptions as a third verbatim
 copy of ``utils.INDICATOR_DESCRIPTIONS`` (the two report lanes were the first
 two, #137), editable apart from them. The prompt is the analyst's INPUT, and a
 changed input is a segmentation point for every running paper run, so the
-derivation is held to the literal it replaced byte for byte.
+derivation is held to the literal it replaced byte for byte — through the move
+of the grouping up to the agent layer, which changed no text (#219).
 """
 
 import pytest
 
 import tradingagents.dataflows.utils as utils
 from tradingagents.agents.analysts.market_analyst import _system_message_head
-from tradingagents.dataflows.utils import (
-    INDICATOR_DESCRIPTIONS,
+from tradingagents.agents.utils.indicator_menu import (
     INDICATOR_MENU,
     INDICATOR_MENU_OMITS,
     indicator_menu,
 )
+from tradingagents.dataflows.utils import INDICATOR_DESCRIPTIONS
 
 # The system message head as market_analyst.py carried it, verbatim, before
 # the menu was derived (the literal at PR #216's HEAD). This is the pin: it is

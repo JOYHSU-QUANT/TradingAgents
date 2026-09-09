@@ -11,7 +11,13 @@ from .alpha_vantage_common import (
     format_datetime_for_api,
 )
 from .config import get_config
-from .utils import MAX_INSIDER_LAG_DAYS, data_lag_note, date_range_refusal, date_refusal
+from .utils import (
+    MAX_INSIDER_LAG_DAYS,
+    data_lag_note,
+    date_range_refusal,
+    date_refusal,
+    wiring_gap,
+)
 
 # Clamp untrusted request sizes before they parameterize an external call
 # (#33): an LLM-supplied or misconfigured value must not turn into an
@@ -91,7 +97,11 @@ def get_news(ticker, start_date, end_date) -> str:
     if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
         return refusal
 
-    limit = max(1, min(int(get_config()["news_article_limit"]), MAX_NEWS_LIMIT))
+    # Under ``wiring_gap`` like the yfinance sibling's read of the same key:
+    # a key this deployment does not carry is not this vendor's library, and
+    # the two vendors of one routed tool must end alike (#219).
+    with wiring_gap("news configuration"):
+        limit = max(1, min(int(get_config()["news_article_limit"]), MAX_NEWS_LIMIT))
     params = {
         "tickers": ticker,
         "time_from": format_datetime_for_api(start_date),
@@ -148,13 +158,21 @@ def get_global_news(curr_date, look_back_days: int | None = None, limit: int | N
     # router (see news_data_tools), so resolve them to the configured defaults
     # BEFORE the int() clamp — mirroring the yfinance sibling. Without this,
     # int(None) raises a bare TypeError outside the vendor-error taxonomy.
-    config = get_config()
-    if look_back_days is None:
-        look_back_days = config["global_news_lookback_days"]
-    if limit is None:
-        limit = config["global_news_article_limit"]
-    look_back_days = max(1, min(int(look_back_days), MAX_NEWS_LOOKBACK_DAYS))
-    limit = max(1, min(int(limit), MAX_NEWS_LIMIT))
+    with wiring_gap("global news configuration"):
+        config = get_config()
+        if look_back_days is None:
+            look_back_days = config["global_news_lookback_days"]
+        if limit is None:
+            limit = config["global_news_article_limit"]
+
+    # The clamps coerce whichever value won above — the configured default or
+    # the one this call passed — so each is guarded under a name that claims
+    # neither source. Naming the config keys would send an operator to a
+    # value config never supplied when it was the caller's that was unusable.
+    with wiring_gap("global news lookback window"):
+        look_back_days = max(1, min(int(look_back_days), MAX_NEWS_LOOKBACK_DAYS))
+    with wiring_gap("global news article limit"):
+        limit = max(1, min(int(limit), MAX_NEWS_LIMIT))
 
     # Calculate start date
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")

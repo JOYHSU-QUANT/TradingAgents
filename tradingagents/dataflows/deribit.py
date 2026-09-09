@@ -71,7 +71,7 @@ from typing import Literal, NamedTuple, TypeVar
 
 import requests
 
-from .errors import VendorError, VendorRateLimitError, VendorUnavailableError
+from .errors import VendorError, VendorRateLimitError, VendorUnavailableError, WiringGapError
 from .symbol_utils import classify_crypto_asset
 from .utils import (
     MAX_UNTRUSTED_CHARS,
@@ -80,6 +80,7 @@ from .utils import (
     json_body_or_outage,
     raise_for_http_status,
     sanitize_untrusted,
+    wiring_gap,
 )
 
 logger = logging.getLogger(__name__)
@@ -1764,7 +1765,15 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         start = (curr_dt - timedelta(days=days)).strftime("%Y-%m-%d")
         # strict=True: the two lists are built together in _fetch_dvol, so a length
         # mismatch would mean dates and readings had drifted out of correspondence.
-        return [c for d, c in zip(series.dates, series.closes, strict=True) if d > start]
+        # Under wiring_gap because the correspondence is ours to keep across
+        # those two functions, and zip's own message ("argument 2 is shorter
+        # than argument 1") says nothing to a reader who would otherwise meet
+        # it as this vendor's library failing (#219). The guard covers the
+        # pairing only, so it cannot claim the correspondence over a failure
+        # in the comparison below.
+        with wiring_gap("DVOL series correspondence"):
+            paired = list(zip(series.dates, series.closes, strict=True))
+        return [c for d, c in paired if d > start]
 
     window = _window(DVOL_WINDOW_DAYS)
     pct_window = _window(DVOL_PERCENTILE_WINDOW_DAYS)
@@ -2564,7 +2573,7 @@ def _aggregate_failure_cls(
     this predicate cannot see.
     """
     if not attempted:
-        raise ValueError("_aggregate_failure_cls needs at least one failure to judge")
+        raise WiringGapError("_aggregate_failure_cls needs at least one failure to judge")
     if all(isinstance(e, VendorRateLimitError) for e in attempted):
         return VendorRateLimitError
     if all(isinstance(e, (VendorUnavailableError, VendorRateLimitError)) for e in attempted):

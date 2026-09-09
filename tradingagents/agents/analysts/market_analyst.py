@@ -8,8 +8,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
     get_verified_market_snapshot,
 )
+from tradingagents.agents.utils.indicator_menu import indicator_menu
 from tradingagents.dataflows.interface import is_category_disabled
-from tradingagents.dataflows.utils import indicator_menu
 
 
 def _system_message_head() -> str:

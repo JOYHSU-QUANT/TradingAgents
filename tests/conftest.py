@@ -169,22 +169,29 @@ def sosovalue_unreached(path: str):
     return SoSoValueUnreachedError(f"SoSoValue could not be reached: ConnectionError on {path}")
 
 
-def dataflows_module_trees(*, containing: str):
-    """``(path, tree)`` for each ``tradingagents/dataflows/*.py`` whose text contains ``containing``.
+def package_module_trees(subpackage: str, *, containing: str):
+    """``(path, tree)`` for each ``tradingagents/<subpackage>/*.py`` whose text has ``containing``.
 
     For the structural pins that read the package's source: the text filter
     keeps each pin parsing only its candidates (the suite's time is
-    watched), and the glob, the encoding and the sort live here once.
+    watched), and the glob, the encoding, the sort and the anchor live here
+    once — no pin re-derives its own path to a package.
     """
     import ast
     from pathlib import Path
 
-    from tradingagents import dataflows
+    import tradingagents
 
-    for path in sorted(Path(dataflows.__file__).parent.glob("*.py")):
+    root = Path(tradingagents.__file__).parent
+    for path in sorted((root / subpackage).glob("*.py")):
         text = path.read_text(encoding="utf-8")
         if containing in text:
             yield path, ast.parse(text, filename=str(path))
+
+
+def dataflows_module_trees(*, containing: str):
+    """``package_module_trees`` for the vendor package, which most pins read."""
+    yield from package_module_trees("dataflows", containing=containing)
 
 
 def repo_text(name: str) -> str:

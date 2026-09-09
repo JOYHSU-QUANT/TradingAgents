@@ -139,6 +139,161 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **dataflows: whether a vendor library's failure aborts the run is a
+  category's decision, not each getter's** (issue #219, items 1, 2, 5, 6 and
+  7; follow-ups from PR #218). PR #218 gave nine getters one handler for what
+  they meet outside the vendor-error taxonomy and outside transport — a
+  stockstats or pandas bug on a frame the vendor did serve — which leaves as
+  ``VendorLibraryError`` for the router to route past and, when no vendor
+  serves, render as one line of report text. The nine were the ones that had
+  carried a broad handler to replace, so the same routed tool ended
+  differently depending on the vendor ``data_vendors`` selected: the identical
+  bug came back as ``Error retrieving fundamentals for AAPL: ...`` through
+  yfinance and aborted the run through Alpha Vantage, whose getters had never
+  carried one. ``get_YFin_data_online``'s own absence from the list read as a
+  decision and was an inheritance.
+
+  The conversion is the router's now. Its untyped lane asks the outage
+  question first, lets an ``OSError`` through (a transport failure is not a
+  report, #116) and reads everything else as the vendor's library, naming it
+  from a per-tool subject table keyed on the routed method and read off the
+  call's own arguments — so both vendors of a tool name a failure alike by
+  construction rather than by two getters agreeing on a string. Every
+  registered method has a row, checked against ``VENDOR_METHODS``, so a new
+  tool cannot ship without one. The report line, its flatten and its 200-char
+  cap are unchanged. Which categories never get that report line is one
+  declaration, ``LOUD_LIBRARY_CATEGORIES``: OHLCV, and only OHLCV — the
+  analyst's primary input and the frame every other price claim is checked
+  against, where a report line would leave the run reasoning from nothing
+  while looking answered. The other three core categories keep the line, and
+  that is now a choice rather than an inheritance: fundamentals and news
+  reach the analyst as prose either way, so a line saying the vendor's parser
+  broke reads as the absence it is, and making them loud would let one
+  vendor's parser bug abort a cycle the sibling vendor could have served. The
+  declaration says "never rendered as text" rather than "always raises",
+  because a chain where another vendor reported clean no-data still ends in
+  that sentinel, which outranks the raise and did so before the declaration
+  existed; a two-vendor test pins that ending rather than leaving the
+  stronger reading to be assumed. The suite that holds each yfinance leaf to
+  its ending now mirrors the declaration instead of a hand-written exclusion
+  with no stated reason.
+
+  A converted library failure is logged at ERROR, naming the subject, where
+  every other ending in that lane keeps the WARNING it always had. #187 added
+  the leaf logs because seven getters logged nothing and an operator never
+  saw a degrade happen; moving the conversion to the router had quietly filed
+  those degrades among the routine vendor fallbacks, one level down and named
+  by method rather than by subject.
+
+  Two consequences worth stating. An optional category's
+  ``DATA_UNAVAILABLE`` parenthesis now quotes an untyped failure as
+  ``subject: message`` (flattened, capped) rather than a bare class name; the
+  ``requests`` messages that quote a URL with the API key in it (#171) stay
+  out, being ``OSError``s. And among the vendors' own failures an optional
+  chain now names the FIRST met, a library failure included — a missing key
+  ahead of a scraper's bug is the standing misconfiguration the operator has
+  to fix, and it used to be hidden behind the bug.
+
+  What a getter runs BEFORE it asks the vendor anything — the config reads,
+  the ``cache_get.cache_clear`` that stops global news freezing behind a
+  report (#111, #200) — used to say "this is not the vendor's library" by
+  sitting above the ``with`` block. The router cannot see where in a getter a
+  failure came from, so those guards now say it by type: ``wiring_gap`` raises
+  ``WiringGapError``, which the untyped lane never converts, so a key a
+  deployment did not set still fails the call instead of coming back as a
+  vendor's bad day.
+
+  The type covers every guard of that kind a routed getter can reach, not the
+  config reads alone — the distinction the router can act on is "ours or the
+  vendor's", and a guard that kept its bare ``ValueError`` was one the router
+  read as the vendor's library. Alpha Vantage's three "registered as
+  supported but has no request / CSV column / description" checks are the
+  clearest case: ``technical_indicators`` is not loud, so a drifted registry
+  came back as ``Error retrieving rsi values for AAPL: ...`` for the analyst
+  to read as its indicator report (#106's shape, and the getter-level test
+  could not see it because it never went through the router — a router-level
+  one now does). With them: the Alpha Vantage fundamentals and yfinance
+  statements look-ahead guards, whose docstrings already said they must fail
+  loud; the positional-mask check in the statement filter; the date-refusal
+  argument-tag and ``DateKind`` tables; ``classify_crypto_asset``'s and
+  ``fetch_each``'s bare-string guards; the Deribit empty-failure-list
+  contract and its DVOL series correspondence; and the Farside and SoSoValue
+  cache-directory config reads, which had been left unguarded where their
+  yfinance counterpart was not — Farside's copy of that reader is gone with
+  the guard, importing SoSoValue's rather than keeping the key, the guard's
+  wording and which half sits inside it in step by hand. The two global-news
+  clamps moved out of the configuration guard into guards named for the
+  value they coerce, so an unusable one no longer points an operator at a
+  config key the call never read, and yfinance's window is coerced there
+  rather than at the arithmetic two hundred lines down, where it was outside
+  every guard and came back as the news report while its Alpha Vantage
+  sibling raised. ``wiring_gap`` itself now passes through untouched
+  everything the router tells apart from an untyped failure — a taxonomy
+  verdict, the caller's own indicator mistake, a transport failure, a gap an
+  inner block already named — as the lane it replaced did, so a statement
+  added to one of those blocks cannot relabel a rate limit as our wiring.
+
+  A core category's chain that met both a wiring gap and some vendor's
+  library failing now ends on ours. Before the conversion moved to the
+  router only the nine getters carrying a handler could fill the
+  library slot, so which chains buried a wiring gap behind a report line
+  depended on which vendor happened to be one of the nine; with every vendor
+  able to fill it, a missing key met at the first vendor would have come back
+  as the second vendor's parser bug for the analyst to read as an answer.
+  Ours is the half somebody can fix, so it is raised ahead of the report
+  line, whichever was met first. An optional category is unchanged: both
+  reach its sentinel, named by whichever was met first.
+
+  Two second copies are gone with it. ``market_data_validator``'s snapshot
+  indicator set — the values the analyst is told to treat as the source of
+  truth — is now held to the menu it is checked against by a partition test
+  and a declared omission (``vwma``), so an indicator added to the menu cannot
+  quietly go unverified; the tuple stays hand-ordered, because its order is
+  the order the snapshot's table renders in. And ``INDICATOR_MENU`` /
+  ``INDICATOR_MENU_OMITS`` / ``indicator_menu()`` moved from
+  ``dataflows/utils`` to ``agents/utils/indicator_menu``: the grouping is a
+  fact about one prompt, not about the data. The menu text is byte-identical
+  and the golden test moved with it; ``INDICATOR_DESCRIPTIONS``, which both
+  report lanes share, stays in ``dataflows``.
+
+  Known trade-offs. Items 3 and 4 of the issue — a per-process memory of
+  "this vendor already failed in its library for this method", and printing
+  one traceback per process rather than per cycle — are not done: both only
+  bite a deployment that configures two vendors for one tool AND meets a
+  deterministic local bug, which the shipped single-vendor defaults cannot
+  produce. They are worth doing when a journal shows the repeat. Three more,
+  each a depth this change stopped short of. ``wiring_gap`` and
+  ``WiringGapError`` are still hand-placed, so the guarantee holds where
+  someone remembered them: a ``get_config()`` that raised ``WiringGapError``
+  on a missing key would give every reader in the repo the same ending with
+  no block at all — it would reproduce the key half of today's message
+  exactly, a ``KeyError``'s own string being already the quoted key, and
+  lose only the prologue naming which read it was — and a repo-wide
+  rule, rather than a swept list, is what would keep the next guard from
+  shipping bare. Inverting the router's default instead — read only known
+  library exception types as the library, raise everything else — was
+  weighed and declined rather than deferred: the failures the policy exists
+  for are builtin types raised from third-party frames (a ``KeyError`` from
+  a missing column, a ``ValueError`` from a date parse), so the allowlist
+  and the denylist would hold the same types. The only discriminator with
+  real information is the frame the exception came from, which re-raises,
+  library wrappers and packaging all move. Two guards stay bare
+  deliberately: the ``zip(strict=True)`` in the Farside issuer parse and the
+  one after the statement filter's length check are each established a few
+  lines above their use, so no edit reaches them without touching what
+  proves them. ``vwma`` stays offered by the menu and unverified by the
+  snapshot — the partition test declares the omission rather than closing it,
+  because adding it to the snapshot changes every cycle's input and dropping
+  it from the menu changes the prompt; worth doing the day a journal shows
+  an analyst citing a vwma value. Loudness is applied when the failure is
+  classified rather than when the ending is chosen, so the declaration is
+  read at two sites and the tests have to prove they agree. And the subject
+  table is a third registry over the same method keys as ``TOOLS_CATEGORIES``
+  and ``VENDOR_METHODS``: putting the subject on the tool's existing row
+  would make "a new tool has a subject" true by construction rather than by
+  a key-set test, and would retire the fallback that exists because a
+  positional template can mismatch a call.
+
 - **dataflows: the optional sentinel names the vendor that failed, a missing
   key reads as one fixed phrase, and the remedy leads the vendor's text at
   two boundaries** (issue #203, items 2, 3, 4 and 6; issue #217, items 7
@@ -639,7 +794,9 @@ Breaking changes within the 0.x line are called out explicitly.
   just failed and a sibling with its own endpoint (Alpha Vantage's RSI, for
   a local stockstats bug) was never asked; seven of them logged nothing — now
   run their fetch under one handler, ``with utils.library_failure_lane(subject,
-  log=logger)``, from where each getter's ``try`` used to start: typed vendor
+  log=logger)``, from where each getter's ``try`` used to start (the handler
+  moved to the router in #219, above: which categories end that way is a
+  declaration now, not the nine getters that happened to carry one): typed vendor
   failures, the caller's indicator mistake and transport failures pass
   through to their router lanes, and anything else is logged with its
   traceback under the getter's own module and raised as the new
@@ -665,7 +822,9 @@ Breaking changes within the 0.x line are called out explicitly.
   their reports with. ``utils.INDICATOR_MENU`` holds the prompt's grouping
   and ``INDICATOR_MENU_OMITS`` its one declared omission (``mfi``);
   ``indicator_menu()`` renders byte-identically to the literal it replaced,
-  pinned by a golden test, so nothing the analyst reads changed.
+  pinned by a golden test, so nothing the analyst reads changed. (All three
+  moved to ``agents/utils/indicator_menu`` in #219, above; the text and the
+  golden test moved with them unchanged.)
 - **The interactive CLI never sends an uncapped completion request, and a
   library caller on a gateway provider is warned once** (issue #183; the
   #177 tail). ``cli/main.py`` fills ``DEFAULT_MAX_TOKENS`` (8192 — the perp

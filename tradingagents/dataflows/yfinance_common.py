@@ -25,13 +25,19 @@ import yfinance as yf
 from yfinance.exceptions import YFDataException, YFException, YFRateLimitError
 
 from .config import get_config
-from .errors import VendorRateLimitError, VendorUnavailableError
+from .errors import VendorRateLimitError, VendorUnavailableError, WiringGapError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .throttle import ThrottleLatch
 
 # The staleness bound lives in utils (stdlib-only) so the pure-requests Alpha
 # Vantage vendor shares the same single definition (#70).
-from .utils import MAX_OHLCV_STALE_DAYS, http_status, normalize_iso_date, safe_ticker_component
+from .utils import (
+    MAX_OHLCV_STALE_DAYS,
+    http_status,
+    normalize_iso_date,
+    safe_ticker_component,
+    wiring_gap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -463,11 +469,17 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     # the curr_date filter below.
     end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-    os.makedirs(config["data_cache_dir"], exist_ok=True)
-    data_file = os.path.join(
-        config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
-    )
+    # Both statements under ``wiring_gap``: a missing key is this project's
+    # wiring and must not come back as a line of report text (#219), and so
+    # is a key set to something that is not a path — ``makedirs`` answers
+    # that with a TypeError, which outside the guard would read as the
+    # vendor's library. ``makedirs``' own OSError is a different thing, a
+    # cache the process cannot write, and passes through the guard untouched
+    # to the lane the router already reads as transport (#116).
+    with wiring_gap("OHLCV cache configuration"):
+        cache_dir = config["data_cache_dir"]
+        os.makedirs(cache_dir, exist_ok=True)
+    data_file = os.path.join(cache_dir, f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv")
 
     # A cached file may be empty if a prior fetch failed (unknown symbol,
     # transient rate limit). Treat an empty/columnless cache as a miss and
@@ -638,7 +650,12 @@ def filter_financials_by_date(
         return data
     normalized = normalize_iso_date(curr_date)
     if normalized is None:
-        raise ValueError(
+        # WiringGapError, not the bare ValueError this used to raise: the
+        # getter refuses an unparseable curr_date up front, so one arriving
+        # here is our own breakage, and the caller's ``except (TypeError,
+        # ValueError)`` — there for a label pandas cannot parse, a vendor
+        # condition — would otherwise file it as one (#219).
+        raise WiringGapError(
             f"yfinance financials: curr_date {curr_date!r} is not a valid "
             f"YYYY-MM-DD date; refusing to serve statements unfiltered (look-ahead guard)"
         )
@@ -648,8 +665,11 @@ def filter_financials_by_date(
     periods, dropped_a_zone = coerced if coerced is not None else coerce_period_labels(data.columns)
     if len(periods) != len(data.columns):
         # The mask below is applied positionally, so labels coerced from a
-        # different frame would silently keep the wrong columns.
-        raise ValueError(
+        # different frame would silently keep the wrong columns. Handing in
+        # the wrong frame's labels is a call this project makes, so it is a
+        # wiring gap: neither the caller's vendor-error lane nor the router's
+        # untyped one may file it as something yfinance did (#219).
+        raise WiringGapError(
             f"yfinance financials: {len(periods)} coerced labels handed in for "
             f"{len(data.columns)} columns; coerce the frame being filtered"
         )

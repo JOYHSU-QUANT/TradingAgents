@@ -50,6 +50,7 @@ from .errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
+    WiringGapError,
 )
 from .utils import (
     failure_account,
@@ -58,6 +59,7 @@ from .utils import (
     json_body_or_outage,
     raise_for_http_status,
     sanitize_untrusted,
+    wiring_gap,
 )
 
 logger = logging.getLogger(__name__)
@@ -689,8 +691,21 @@ def _stale_caveat(
 
 
 def _cache_dir() -> str:
-    cache_dir = get_config()["data_cache_dir"]
-    os.makedirs(cache_dir, exist_ok=True)
+    """The snapshot cache directory, shared by every vendor cached this way.
+
+    Both statements under ``wiring_gap``: a missing key is this project's
+    wiring and must not come back as a line of report text (#219), and so is
+    a key set to something that is not a path — ``makedirs`` answers that
+    with a ``TypeError``, which outside the guard would read as the vendor's
+    library. ``makedirs``' own OSError is a different thing, a cache the
+    process cannot write, and passes through the guard untouched to the
+    lane the router already reads as transport (#116). Farside imports this
+    rather than keeping its own copy — the key, the guard's wording and what
+    sits inside it were three things to keep in step.
+    """
+    with wiring_gap("cache configuration"):
+        cache_dir = get_config()["data_cache_dir"]
+        os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
 
 
@@ -925,8 +940,10 @@ def fetch_each(
     """
     if isinstance(items, str):
         # A bare string is iterable too — it would silently sweep one HTTP
-        # request per character instead of failing loudly.
-        raise TypeError("fetch_each items must be a collection of items, not a bare string")
+        # request per character instead of failing loudly. The list is the
+        # caller's to build, so this is our breakage and takes the type that
+        # keeps the router from reading it as SoSoValue's library (#219).
+        raise WiringGapError("fetch_each items must be a collection of items, not a bare string")
     results: dict = {}
     failed: list[str] = []
     flagged: list[str] = []

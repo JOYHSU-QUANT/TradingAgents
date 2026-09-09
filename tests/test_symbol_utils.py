@@ -4,6 +4,7 @@ import unittest
 
 import pytest
 
+from tradingagents.dataflows.errors import WiringGapError
 from tradingagents.dataflows.symbol_utils import (
     NoMarketDataError,
     classify_crypto_asset,
@@ -72,7 +73,7 @@ class TestClassifyCryptoAsset(unittest.TestCase):
     def test_bare_string_native_raises(self):
         # str satisfies Collection[str]; membership would silently become
         # substring matching ("TC" in "BTC"), so a bare string must fail loud.
-        with self.assertRaises(TypeError):
+        with self.assertRaises(WiringGapError):
             classify_crypto_asset("TC", "BTC")
 
     def test_collection_native_still_classifies(self):

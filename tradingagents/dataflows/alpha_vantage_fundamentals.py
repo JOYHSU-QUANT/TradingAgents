@@ -12,7 +12,7 @@ from .alpha_vantage_common import (
     _served_body,
     _with_freshness_note,
 )
-from .errors import NoMarketDataError
+from .errors import NoMarketDataError, WiringGapError
 from .utils import (
     data_lag_note,
     date_refusal,
@@ -93,11 +93,16 @@ def _filter_reports_by_date(result: dict, curr_date: str) -> dict:
     future data. In production that raise is unreachable — ``_filter_response_json``
     validates curr_date and answers ``INVALID_CURR_DATE`` before delegating here,
     and it also handles ``None``-curr_date and non-JSON bodies — so the raise
-    stands as the invariant for anything calling this helper directly.
+    stands as the invariant for anything calling this helper directly. It is a
+    ``WiringGapError`` for that reason: a bound this getter's own validation
+    was supposed to have settled is our breakage, and the router's untyped
+    lane would otherwise read it as Alpha Vantage's library failing and hand
+    the analyst a line of text where the look-ahead guard should have
+    stopped the call (#219).
     """
     cutoff = normalize_iso_date(curr_date)
     if cutoff is None:
-        raise ValueError(
+        raise WiringGapError(
             f"Alpha Vantage fundamentals: curr_date {curr_date!r} is not a valid "
             f"YYYY-MM-DD date; refusing to serve reports unfiltered (look-ahead guard)"
         )

@@ -14,6 +14,7 @@ from .errors import (
     VendorError,
     VendorLibraryError,
     VendorUnavailableError,
+    WiringGapError,
 )
 
 if TYPE_CHECKING:
@@ -94,12 +95,14 @@ MAX_STATEMENT_LAG_DAYS = {"quarterly": 180, "annual": 550}
 # ``data_vendors`` selected. One table for every reader (#137, #187): the
 # yfinance getter serves it whole, the Alpha Vantage vendor derives its
 # registry from the slice it supports, and the market analyst's selection
-# menu is rendered from it by ``indicator_menu`` below — so editing a
+# menu is rendered from it by ``agents.utils.indicator_menu`` — so editing a
 # description edits both report lanes AND the prompt the analyst chooses
 # from. The section comments below are for the reader only: the menu's
 # grouping and order are ``INDICATOR_MENU``'s, and an indicator added here
-# has to be placed there (or in ``INDICATOR_MENU_OMITS``) to pass the
-# partition test. Lives here (stdlib-only) rather than beside either vendor so the
+# has to be placed there (or in ``INDICATOR_MENU_OMITS``) to pass that
+# module's import-time partition check. The grouping lives up in the agent
+# layer because it is a fact about one prompt, not about the data (#219);
+# the sentences stay here (stdlib-only) rather than beside either vendor so the
 # pure-requests Alpha Vantage module does not import the yfinance stack for
 # a dict of strings (#70).
 INDICATOR_DESCRIPTIONS = {
@@ -174,53 +177,6 @@ INDICATOR_DESCRIPTIONS = {
         "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
     ),
 }
-
-# The market analyst's selection menu: the table above, grouped and ordered
-# the way that prompt has always listed them. The grouping is the prompt's
-# only fact of its own — the sentences are the table's, so the menu used to
-# be a third verbatim copy of them, editable apart from the two report lanes
-# (#187). ``mfi`` is described (the yfinance vendor computes it) but has never
-# been offered to the analyst, and offering it would change what the analyst
-# is asked to choose from — an input-side change to every run — so the
-# omission is declared, and the test that partitions the table over the menu
-# and this set keeps a newly described indicator from silently joining or
-# missing the menu.
-INDICATOR_MENU = (
-    ("Moving Averages", ("close_50_sma", "close_200_sma", "close_10_ema")),
-    ("MACD Related", ("macd", "macds", "macdh")),
-    ("Momentum Indicators", ("rsi",)),
-    ("Volatility Indicators", ("boll", "boll_ub", "boll_lb", "atr")),
-    ("Volume-Based Indicators", ("vwma",)),
-)
-INDICATOR_MENU_OMITS = frozenset({"mfi"})
-
-# Checked at import, not only by the partition test: a described indicator
-# placed in neither the menu nor the omissions would otherwise drop out of
-# the prompt silently in an environment that never ran the tests.
-_MENU_KEYS = [key for _, keys in INDICATOR_MENU for key in keys]
-assert len(_MENU_KEYS) == len(set(_MENU_KEYS)), "INDICATOR_MENU lists an indicator twice"
-assert set(_MENU_KEYS).isdisjoint(INDICATOR_MENU_OMITS), "INDICATOR_MENU lists an omitted indicator"
-assert set(_MENU_KEYS) | INDICATOR_MENU_OMITS == set(INDICATOR_DESCRIPTIONS), (
-    "every described indicator must be placed in INDICATOR_MENU or INDICATOR_MENU_OMITS"
-)
-
-
-def indicator_menu() -> str:
-    """The analyst's indicator menu, rendered from ``INDICATOR_DESCRIPTIONS``.
-
-    One block per ``INDICATOR_MENU`` category — its title, a colon, then one
-    ``- name: description`` line per indicator — blocks separated by a blank
-    line. Byte-identical to the menu the market analyst's prompt carried as
-    a literal, which is what keeps this derivation from being an input-side
-    change to the analyst (pinned by a golden test against that literal).
-    Reads the table through the module name at call time, so a test can
-    alter one sentence and watch the menu follow.
-    """
-    return "\n\n".join(
-        f"{title}:\n" + "\n".join(f"- {key}: {INDICATOR_DESCRIPTIONS[key]}" for key in keys)
-        for title, keys in INDICATOR_MENU
-    )
-
 
 def normalize_iso_date(value) -> str | None:
     """Canonical ``YYYY-MM-DD`` for a date string, or None if it is not a date.
@@ -494,7 +450,15 @@ def invalid_date_sentinel(
     vendor-error messages (#119 moved them onto this sentinel), and the core
     tools never had it.
     """
-    tag = _DATE_ARGUMENT_TAGS[param]
+    # Both of this module's own tables below — the tag lookup here and the
+    # ``kind`` branch under it — are keyed by literals the getters write, so
+    # a miss is a typo or a parameter added without a row —
+    # ours, and reachable only on a call the model already spoiled with a bad
+    # date. Said by type, since the router cannot otherwise tell it from the
+    # vendor's library failing and would hand the analyst the miss as its
+    # report (#219).
+    with wiring_gap("date-refusal argument tag"):
+        tag = _DATE_ARGUMENT_TAGS[param]
     retry = "retry with a valid yyyy-mm-dd date"
     if kind == "point":
         consequence = f"{what} cannot be bounded to a point in time"
@@ -512,7 +476,7 @@ def invalid_date_sentinel(
         # Mirror _DATE_ARGUMENT_TAGS: an unknown kind fails at the call
         # rather than falling into whichever branch is last — which would
         # hand a typo the strongest wrong claim (#140 review).
-        raise ValueError(f"unknown DateKind {kind!r}")
+        raise WiringGapError(f"unknown DateKind {kind!r}")
     echo = _echo if _echo is not None else quote_argument(value)
     return (
         f"{tag}: {param} {echo} is not a valid yyyy-mm-dd date, "
@@ -595,7 +559,11 @@ def date_sentinel_note(*params: str, omitted_ok: bool = False, disclosure: bool 
     answers a bad date with :func:`invalid_date_sentinel` (#140: eleven
     wrappers did exactly that, and the model reads the description when
     CHOOSING arguments). ``params`` are the tool's date arguments (a typo
-    raises through :data:`_DATE_ARGUMENT_TAGS`, same as the sentinel).
+    raises through :data:`_DATE_ARGUMENT_TAGS` as a bare ``KeyError``: this
+    runs while a tool description is built, never inside the router's call,
+    so it has no ending to be told apart from a vendor's — which is why the
+    sentinel's own lookup of that table wears ``WiringGapError`` and this
+    one does not).
 
     Two knobs because they answer different questions: ``omitted_ok`` matches
     the getter's None-gate and shapes the trigger ("is supplied but ..."),
@@ -875,56 +843,60 @@ def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS
         # slots that render this type: the core chain's report line and the
         # optional category's sentinel.
         return f"{sanitize_untrusted(e.what, limit=limit)}: {sanitize_untrusted(e.detail, limit=limit)}"
-    if isinstance(e, (VendorError, UnsupportedIndicatorError)):
+    if isinstance(e, (VendorError, UnsupportedIndicatorError, WiringGapError)):
         # A typed error raised with no message would render as "()".
+        # ``WiringGapError`` for the same reason as the two above: its text is
+        # ours — the prologue's name and the key or table that was missing —
+        # and an optional category that degrades over one should say which,
+        # not "WiringGapError". Flattened and capped like the rest, since the
+        # value it echoes can be the caller's (#219).
         return sanitize_untrusted(e, limit=limit) or type(e).__name__
     return generic_failure_words(e)
 
 
 @contextlib.contextmanager
-def library_failure_lane(subject: str, *, log: logging.Logger) -> Iterator[None]:
-    """Run a getter's fetch-and-render under the one handler for untyped failures.
+def wiring_gap(what: str) -> Iterator[None]:
+    """Run a block whose failure is this project's own and not the vendor's.
 
-    What a getter meets outside the taxonomy and outside transport — a
-    stockstats or pandas bug on a frame the vendor did serve, a parser
-    tripping over a shape the scraper let through — leaves as
-    ``VendorLibraryError``. This used to be hand-copied at ten leaves as
-    ``except VendorError: raise`` / ``except OSError: raise`` / ``except
-    Exception: return "Error retrieving ..."``: a leaf that forgot the guard
-    rendered a throttle as a report (#85), seven of them logged nothing (one
-    printed), so an operator never saw the degrade happen, and the returned string read to
-    the router as a successful answer, ending the chain at the vendor that
-    had just failed (#187). A ``with`` block rather than a decorator, so the
-    lane starts where each getter's ``try`` did — after the date refusal,
-    the config reads and the ``cache_clear`` that were placed outside it on
-    purpose, to fail loudly (#111, #200) — and the registry-derived tests
-    hold every registered yfinance leaf, and the Alpha Vantage indicator
-    leaf, to raising this type from their seam.
+    The config a deployment did not set, the library attribute a version
+    bump moved, a correspondence we keep across two of our own functions
+    (Deribit's DVOL dates and readings): usually a getter's prologue, the
+    statements it runs before asking the vendor anything, but the test is
+    whose breakage it is rather than where it sits. Nine getters used to
+    say this by placement — their
+    fetch ran inside a ``with library_failure_lane(...)`` and the prologue
+    above it, so a yfinance that drops ``cache_get.cache_clear`` failed the
+    call rather than freezing global news behind a report (#111, #200),
+    while everything under the block left as ``VendorLibraryError``. The
+    conversion is the router's now, for every vendor of every routed tool
+    rather than the nine getters that happened to carry a broad handler
+    (#219) — and the router cannot see where in a getter a failure came
+    from. So the block says it by type: this one is never read as the
+    vendor's library and never becomes a line of report text — in a core
+    category it is raised ahead of one, since our breakage is the half
+    somebody can fix (``WiringGapError`` says which endings remain).
 
-    Let through untouched: every ``VendorError`` (its router lane is its
-    own), ``UnsupportedIndicatorError`` (a caller mistake, rendered by the
-    tool wrapper, #117), and ``OSError`` — a transport failure is not a
-    report (#116): yfinance 1.4.1 fetches through curl_cffi, and its request
-    exceptions, like ``requests.RequestException``, subclass OSError, while
-    nothing in yfinance's own YFException family does; the clause is wider
-    than the wire on purpose, since the OHLCV cache raises OSError too and a
-    cache the process cannot read or write is no more a report than a reset
-    is. Anything else is logged WITH its traceback under ``log`` — the
-    getter's own module logger, the whole message, since the report line is
-    capped — and raised as ``VendorLibraryError`` for the router, which is
-    where the report line is written, in one place for every vendor.
+    ``what`` names the block in the raise (``global news configuration``),
+    since the getter's own subject describes vendor work this failure is not
+    about.
 
-    ``subject`` is what the report line names (``rsi values for AAPL``); two
-    vendors serving one routed tool must name it alike, which the routing
-    tests hold them to.
+    Everything the router tells apart from an untyped failure passes through
+    untouched, as it did through the lane this replaces: a taxonomy verdict,
+    a transport failure, the caller's own indicator mistake, and a
+    ``WiringGapError`` a nested block already named. Nothing inside today's
+    blocks can raise any of them — they read dicts, coerce a configured
+    number, pair two lists and forget a cache — but this is the kind of
+    block that grows a statement, and relabelling a rate
+    limit as our wiring would abort the run where the next vendor was owed
+    its turn, while relabelling a bad indicator name would cost the whole
+    call what should cost one indicator (#117).
     """
     try:
         yield
-    except (VendorError, UnsupportedIndicatorError, OSError):
+    except (VendorError, UnsupportedIndicatorError, WiringGapError, OSError):
         raise
     except Exception as e:
-        log.exception("Vendor library failed retrieving %s: %s", subject, e)
-        raise VendorLibraryError(subject, str(e)) from e
+        raise WiringGapError(f"{what}: {e}") from e
 
 
 def raise_for_http_status(response, vendor: str) -> None:

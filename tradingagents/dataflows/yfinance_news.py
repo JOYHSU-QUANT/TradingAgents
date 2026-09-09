@@ -1,7 +1,6 @@
 """yfinance-based news data fetching functions."""
 
 import contextlib
-import logging
 from datetime import datetime
 
 import yfinance as yf
@@ -9,19 +8,18 @@ from dateutil.relativedelta import relativedelta
 from yfinance.data import YfData
 
 from .config import get_config
-from .symbol_utils import normalize_symbol
 
 # The date refusals live in utils so the Alpha Vantage vendor serving the same
 # routed tools shares the single judgement and the single sentence (#111).
-# Both getters run their fetch under ``library_failure_lane``, from where
-# their own ``try`` used to start: typed and transport failures pass through
-# to their router lanes, anything else is logged with its traceback and
-# raised as ``VendorLibraryError`` for the router to route past and, when no
-# vendor serves, render as one line of report text (#187).
-from .utils import date_range_refusal, date_refusal, library_failure_lane
+# Neither getter handles what it meets outside the taxonomy and outside
+# transport: it leaves raw for the router, which reads it as this vendor's
+# library failing and renders one line of report text when no vendor serves
+# (#187, #219). What each getter does before it asks Yahoo anything — the
+# config reads, the cache forget — is not that, and wears ``wiring_gap`` to
+# say so (#111, #200).
+from .symbol_utils import normalize_symbol
+from .utils import date_range_refusal, date_refusal, wiring_gap
 from .yfinance_common import yf_fetch_unhidden
-
-logger = logging.getLogger(__name__)
 
 # Clamp the untrusted article count before it sizes an external yf.Search
 # call (#33): an LLM-supplied or misconfigured value must stay bounded.
@@ -106,53 +104,61 @@ def get_news_yfinance(
     Returns:
         Formatted string containing news articles
     """
-    # Unusable dates are refused before any request and OUTSIDE the library
-    # lane below, in the shared voice (#111).
+    # Unusable dates are refused before any request, in the shared voice
+    # (#111) — a return, so nothing below classifies it.
     if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
         return refusal
 
-    article_limit = get_config()["news_article_limit"]
+    # Coerced and floored inside the guard, as the Alpha Vantage sibling does
+    # with the same key: sent on as it was read, a value that is not a number
+    # reaches Yahoo as the article count and comes back as "No news found",
+    # and so does a zero or a negative — a coverage claim over a call that
+    # never asked properly (#136), where the sibling raises or serves. One
+    # routed tool's two vendors must end alike (#219). Only the floor is
+    # shared: Alpha Vantage also caps at a vendor maximum this path has never
+    # had, and inventing one here would change what a large limit returns.
+    with wiring_gap("news configuration"):
+        article_limit = max(1, int(get_config()["news_article_limit"]))
     # Query Yahoo with the canonical symbol, like every other yfinance path —
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently
     # returns no news. Keep the user's ticker in the report header.
     canonical = normalize_symbol(ticker)
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
-    with library_failure_lane(f"news for {ticker}", log=logger):
-        stock = yf.Ticker(canonical)
-        # Through the shared un-hidden boundary like every other yfinance leaf
-        # (#116); an outage body takes its vendor-unavailable lane rather than
-        # the empty list "No news found" below would claim as coverage (#136).
-        news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
+    stock = yf.Ticker(canonical)
+    # Through the shared un-hidden boundary like every other yfinance leaf
+    # (#116); an outage body takes its vendor-unavailable lane rather than
+    # the empty list "No news found" below would claim as coverage (#136).
+    news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
 
-        if not news:
-            return f"No news found for {ticker}{resolved}"
+    if not news:
+        return f"No news found for {ticker}{resolved}"
 
-        # Parse date range for filtering
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    # Parse date range for filtering
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
-        news_str = ""
-        filtered_count = 0
+    news_str = ""
+    filtered_count = 0
 
-        for article in news:
-            data = _extract_article_data(article)
+    for article in news:
+        data = _extract_article_data(article)
 
-            # Keep only articles within the requested window (look-ahead safe).
-            if not _in_news_window(data["pub_date"], start_dt, end_dt):
-                continue
+        # Keep only articles within the requested window (look-ahead safe).
+        if not _in_news_window(data["pub_date"], start_dt, end_dt):
+            continue
 
-            news_str += f"### {data['title']} (source: {data['publisher']})\n"
-            if data["summary"]:
-                news_str += f"{data['summary']}\n"
-            if data["link"]:
-                news_str += f"Link: {data['link']}\n"
-            news_str += "\n"
-            filtered_count += 1
+        news_str += f"### {data['title']} (source: {data['publisher']})\n"
+        if data["summary"]:
+            news_str += f"{data['summary']}\n"
+        if data["link"]:
+            news_str += f"Link: {data['link']}\n"
+        news_str += "\n"
+        filtered_count += 1
 
-        if filtered_count == 0:
-            return f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
+    if filtered_count == 0:
+        return f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
 
-        return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
+    return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
 
 def get_global_news_yfinance(
@@ -181,13 +187,42 @@ def get_global_news_yfinance(
     if refusal is not None:
         return refusal
 
-    config = get_config()
-    if look_back_days is None:
-        look_back_days = config["global_news_lookback_days"]
-    if limit is None:
-        limit = config["global_news_article_limit"]
-    limit = max(1, min(int(limit), MAX_SEARCH_NEWS_COUNT))
-    search_queries = config["global_news_queries"]
+    # A key this deployment does not carry is this project's wiring, not
+    # Yahoo's library, and must not come back as a line of report text
+    # (#219). The reads themselves are inside the guard; what each value
+    # feeds is coerced under a guard of its own below, so a malformed one
+    # fails the call rather than reaching the window arithmetic two hundred
+    # lines later and coming back as the news report.
+    with wiring_gap("global news configuration"):
+        config = get_config()
+        if look_back_days is None:
+            look_back_days = config["global_news_lookback_days"]
+        if limit is None:
+            limit = config["global_news_article_limit"]
+        search_queries = config["global_news_queries"]
+        if isinstance(search_queries, str):
+            # A bare string is iterable too — the loop below would run one
+            # Yahoo search per character (``fetch_each`` refuses the same
+            # shape for the same reason). Raised untyped inside the guard so
+            # it takes the block's name like every other failure here; the
+            # guard is what makes it a WiringGapError.
+            raise TypeError("global_news_queries must be a list of queries, not a string")
+
+    # Each coercion below takes whichever value won above — the configured
+    # default or the one this call passed — so each is guarded under a name
+    # that claims neither source. Naming the config keys would send an
+    # operator to a value config never supplied when it was the caller's
+    # that was unusable. The window is coerced here rather than left to
+    # ``relativedelta`` two hundred lines down, where an unusable one is
+    # outside every guard and comes back as the news report: the Alpha
+    # Vantage sibling ends such a call by raising, and one routed tool's two
+    # vendors must end alike (#219). Only the ending is shared — Alpha
+    # Vantage also clamps its window to a vendor maximum this one has never
+    # had, and inventing one here would change what a long window returns.
+    with wiring_gap("global news lookback window"):
+        look_back_days = int(look_back_days)
+    with wiring_gap("global news article limit"):
+        limit = max(1, min(int(limit), MAX_SEARCH_NEWS_COUNT))
 
     # yfinance memoizes every Search fetch for the life of the process:
     # ``Search.search`` reads through ``YfData.cache_get``, an ``lru_cache``
@@ -204,81 +239,82 @@ def get_global_news_yfinance(
     # so rarely a request); ``get_news`` is an uncached POST. Outside the
     # boundary's lock: ``cache_clear`` is atomic, and the lock serializes the
     # hide-exceptions flag and the wire, not an in-memory forget (#137
-    # measured its cost per cycle). Above the library lane: a library that
-    # drops the attribute fails loudly here rather than freezing again
-    # behind a report.
-    YfData.cache_get.cache_clear()
+    # measured its cost per cycle). Under ``wiring_gap``: a library that
+    # drops the attribute fails loudly rather than freezing again behind a
+    # report, which is what placing it above the old ``with`` block bought
+    # and what the type buys now the conversion is the router's (#219).
+    with wiring_gap("global news cache forget"):
+        YfData.cache_get.cache_clear()
 
     all_news = []
     seen_titles = set()
 
-    with library_failure_lane("global news", log=logger):
-        for query in search_queries:
-            # Through the shared un-hidden boundary like every other yfinance
-            # leaf (#136): an outage body takes its vendor-unavailable lane
-            # rather than the news=[] that "No global news found" below would
-            # claim as coverage. Search fetches in its constructor, so the
-            # attribute is read inside the boundary and the hidden answer is
-            # the library's own empty list. One outage anywhere in the loop is
-            # the verdict on the whole call — articles gathered by an earlier
-            # query are not served as a report with an unmarked gap. This
-            # also puts the call under the boundary's lock, which serializes
-            # it with every other yfinance fetch.
-            news = yf_fetch_unhidden(
-                lambda q=query: (
-                    yf.Search(
-                        query=q,
-                        news_count=limit,
-                        enable_fuzzy_query=True,
-                    ).news
-                ),
-                hidden_answer=list,
-            )
+    for query in search_queries:
+        # Through the shared un-hidden boundary like every other yfinance
+        # leaf (#136): an outage body takes its vendor-unavailable lane
+        # rather than the news=[] that "No global news found" below would
+        # claim as coverage. Search fetches in its constructor, so the
+        # attribute is read inside the boundary and the hidden answer is
+        # the library's own empty list. One outage anywhere in the loop is
+        # the verdict on the whole call — articles gathered by an earlier
+        # query are not served as a report with an unmarked gap. This
+        # also puts the call under the boundary's lock, which serializes
+        # it with every other yfinance fetch.
+        news = yf_fetch_unhidden(
+            lambda q=query: (
+                yf.Search(
+                    query=q,
+                    news_count=limit,
+                    enable_fuzzy_query=True,
+                ).news
+            ),
+            hidden_answer=list,
+        )
 
-            if news:
-                for article in news:
-                    # Handle both flat and nested structures
-                    if "content" in article:
-                        data = _extract_article_data(article)
-                        title = data["title"]
-                    else:
-                        title = article.get("title", "")
+        if news:
+            for article in news:
+                # Handle both flat and nested structures
+                if "content" in article:
+                    data = _extract_article_data(article)
+                    title = data["title"]
+                else:
+                    title = article.get("title", "")
 
-                    # Deduplicate by title
-                    if title and title not in seen_titles:
-                        seen_titles.add(title)
-                        all_news.append(article)
+                # Deduplicate by title
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_news.append(article)
 
-            if len(all_news) >= limit:
-                break
+        if len(all_news) >= limit:
+            break
 
-        if not all_news:
-            return f"No global news found for {curr_date}"
+    if not all_news:
+        return f"No global news found for {curr_date}"
 
-        # Calculate date range
-        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-        start_dt = curr_dt - relativedelta(days=look_back_days)
-        start_date = start_dt.strftime("%Y-%m-%d")
+    # Calculate date range
+    curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+    start_dt = curr_dt - relativedelta(days=look_back_days)
+    start_date = start_dt.strftime("%Y-%m-%d")
 
-        news_str = ""
-        kept = 0
-        for article in all_news[:limit]:
-            # Extract uniformly (flat + nested) and apply the same look-ahead-safe
-            # window filter, so flat articles can't leak future news (#1007).
-            data = _extract_article_data(article)
-            if not _in_news_window(data["pub_date"], start_dt, curr_dt):
-                continue
-            news_str += f"### {data['title']} (source: {data['publisher']})\n"
-            if data["summary"]:
-                news_str += f"{data['summary']}\n"
-            if data["link"]:
-                news_str += f"Link: {data['link']}\n"
-            news_str += "\n"
-            kept += 1
+    news_str = ""
+    kept = 0
+    for article in all_news[:limit]:
+        # Extract uniformly (flat + nested) and apply the same look-ahead-safe
+        # window filter, so flat articles can't leak future news (#1007).
+        data = _extract_article_data(article)
+        if not _in_news_window(data["pub_date"], start_dt, curr_dt):
+            continue
+        news_str += f"### {data['title']} (source: {data['publisher']})\n"
+        if data["summary"]:
+            news_str += f"{data['summary']}\n"
+        if data["link"]:
+            news_str += f"Link: {data['link']}\n"
+        news_str += "\n"
+        kept += 1
 
-        # All candidates fell outside the window -> say so rather than return an
-        # empty-bodied report (#993).
-        if kept == 0:
-            return f"No global news found between {start_date} and {curr_date}"
+    # All candidates fell outside the window -> say so rather than return an
+    # empty-bodied report (#993).
+    if kept == 0:
+        return f"No global news found between {start_date} and {curr_date}"
 
-        return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"
+    return f"## Global Market News, from {start_date} to {curr_date}:\n\n{news_str}"

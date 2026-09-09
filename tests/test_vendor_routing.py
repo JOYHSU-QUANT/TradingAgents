@@ -6,6 +6,7 @@ Regressions for #988 (explicit single-vendor config still fell back to others),
 were swallowed without a trace).
 """
 
+import ast
 import copy
 import json
 import logging
@@ -22,6 +23,7 @@ import tradingagents.default_config as default_config
 
 # The hostile message shape the leaves' prose tests use: one definition, so the
 # forgery the router's slots have to neutralise is the one the leaves do.
+from tests.conftest import dataflows_module_trees
 from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_line
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
@@ -613,6 +615,29 @@ _down = _raises(VendorUnavailableError("Yahoo Finance answered without data: HTT
 
 
 @pytest.mark.unit
+def test_the_unconfirmed_ranks_read_outage_then_throttle_then_skip():
+    # The one slot behind the no-data verdict keeps the lowest rank met
+    # (#217): an outage outranks a throttle met, which outranks a latch skip,
+    # whatever the chain order. The behavioural pins below hold each pair
+    # through the sentinel; this holds the order itself, and that the first
+    # of a rank stays — among two outages the one met first is named.
+    assert (interface._OUTAGE, interface._THROTTLE_MET, interface._LATCH_SKIP) == (0, 1, 2)
+    assert set(interface._WHY) == {0, 1, 2}
+    skip = interface._Unconfirmed(interface._LATCH_SKIP, "a", "was skipped", VendorRateLimitError())
+    assert interface._note_unconfirmed(None, skip) is skip
+    # An outage lane records both facts through one helper: the failure
+    # joins first_error (first met stays) and the outage rank takes the slot.
+    down = VendorUnavailableError("503")
+    first_error, outage = interface._met_outage(None, skip, "b", down, "answered HTTP 503")
+    assert first_error == interface._VendorFailure("b", down)
+    assert outage.rank == interface._OUTAGE and outage.error is down
+    assert interface._note_unconfirmed(outage, skip) is outage
+    later = VendorUnavailableError("502")
+    kept, held = interface._met_outage(first_error, outage, "c", later, "answered HTTP 502")
+    assert kept is first_error and held is outage
+
+
+@pytest.mark.unit
 class OutageVerdictTests(unittest.TestCase):
     """A vendor that was DOWN changes what a fallback's "no data" means.
 
@@ -894,6 +919,50 @@ class CallerErrorPrecedenceTests(unittest.TestCase):
         self.assertIn("no indicator named 'x'", "\n".join(cm.output))
 
 
+def _modules_raising_unsupported_indicator() -> set[str]:
+    """The dataflows modules with a ``raise UnsupportedIndicatorError(...)`` anywhere in them.
+
+    Any ``Raise`` in the module tree — a method, a nested function, a helper
+    — whose callee is the class by bare name or by attribute. A raise of an
+    instance built earlier (``raise err``) is the one shape this cannot see;
+    none exists today.
+    """
+    found = set()
+    for path, tree in dataflows_module_trees(containing="UnsupportedIndicatorError"):
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)):
+                continue
+            callee = node.exc.func
+            name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
+            if name == "UnsupportedIndicatorError":
+                found.add(f"tradingagents.dataflows.{path.stem}")
+    return found
+
+
+@pytest.mark.unit
+def test_no_optional_category_registers_a_getter_from_a_module_raising_the_indicator_error():
+    # ``route_to_vendor``'s lane for the caller's indicator error keeps a
+    # branch for an optional category — "should an optional category ever
+    # compute one" — that no chain reaches today: only the two indicator
+    # getters' modules raise the type, and every getter registered from them
+    # serves a core category (#203). The branch stays as a defence; this pins
+    # the fact that makes it one, read off the source and the registry rather
+    # than asserted by hand, at module granularity: a raise anywhere in a
+    # module that also registers an optional getter fails here, as does a
+    # raise appearing in a third module, which the exact set below catches.
+    raising = _modules_raising_unsupported_indicator()
+    assert raising == {
+        "tradingagents.dataflows.alpha_vantage_indicator",
+        "tradingagents.dataflows.y_finance",
+    }
+    for method, impls in interface.VENDOR_METHODS.items():
+        for impl in impls.values():
+            func = impl[0] if isinstance(impl, list) else impl
+            if func.__module__ in raising:
+                category = interface.get_category_for_method(method)
+                assert category not in interface.OPTIONAL_CATEGORIES, (method, category)
+
+
 @pytest.mark.unit
 class OptionalSentinelTests(unittest.TestCase):
     """What an optional category's failure may write into its sentinel.
@@ -937,11 +1006,86 @@ class OptionalSentinelTests(unittest.TestCase):
         self.assertEqual(
             out,
             "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
-            "(could not be reached: ConnectionError). Proceed without it; do not "
+            "(fred: could not be reached: ConnectionError). Proceed without it; do not "
             "fabricate values.",
         )
         # The operator still gets the whole message, where it always was.
         self.assertIn("api_key=SECRET-KEY", logged)
+
+    def test_the_sentinel_names_the_vendor_that_failed(self):
+        # A multi-vendor optional category (ETF flows: sosovalue, farside)
+        # used to write "(could not be reached: ConnectionError)" with no
+        # vendor — which source failed was in the log only (#203). The
+        # vendor leads the words, whichever slot the failure surfaced from:
+        # here the generic lane's, met at the primary, ahead of a fallback's
+        # typed outage.
+        set_config({"data_vendors": {"macro_data": "fred,other"}})
+        reset = _raises(requests.ConnectionError("Max retries exceeded with url: /x?api_key=K"))
+        with (
+            _chain("get_macro_indicators", {"fred": reset, "other": _down}),
+            self.assertLogs("tradingagents.dataflows.interface", level="WARNING"),
+        ):
+            out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-01-01")
+        self.assertEqual(
+            out,
+            "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+            "(fred: could not be reached: ConnectionError). Proceed without it; do not "
+            "fabricate values.",
+        )
+
+    def test_a_missing_key_reads_as_not_configured_and_keeps_its_remedy_in_the_log(self):
+        # The message is the operator's remedy — the variable to set, a URL
+        # to get a key at — and a deployment without the key wrote that URL
+        # into every cycle's report artifacts (#203). The model has no action
+        # to take on it: one fixed phrase, the way a category switched off
+        # reads "disabled by configuration". The lane's log line keeps the
+        # whole message, where it was not before (it named the vendor only);
+        # the lane trusts the boundary to have redacted a key from it.
+        unset = _raises(
+            VendorNotConfiguredError(
+                "FRED_API_KEY environment variable is not set. Get a free key at "
+                "https://fred.stlouisfed.org/docs/api/api_key.html."
+            )
+        )
+        out, logged = self._macro(unset)
+        self.assertEqual(
+            out,
+            "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+            "(fred: vendor not configured). Proceed without it; do not fabricate values.",
+        )
+        self.assertNotIn("FRED_API_KEY", out)
+        self.assertIn(
+            "Vendor 'fred' not configured for get_macro_indicators; trying next vendor: "
+            "FRED_API_KEY environment variable is not set. Get a free key at https://",
+            logged,
+        )
+
+    def test_a_throttle_met_and_a_latch_skip_name_the_vendor_too(self):
+        # The two failures that surface only when nothing else raised — a
+        # throttle actually met, and a request never sent on the latch — come
+        # from the ranked slot rather than ``first_error``, and open with the
+        # vendor all the same (#203).
+        class _NonLatching(VendorRateLimitError):
+            latches_vendor = False
+
+        out, _ = self._macro(_raises(_NonLatching("rate limit hit (HTTP 429)")))
+        self.assertTrue(
+            out.startswith(
+                "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+                "(fred: rate limit hit (HTTP 429))."
+            ),
+            out,
+        )
+        VENDOR_THROTTLE_LATCH.arm("fred")
+        out, _ = self._macro(mock.Mock())
+        self.assertTrue(
+            out.startswith(
+                "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
+                "(fred: Vendor 'fred' rate limited a recent request; skipped without "
+                "contacting it for another "
+            ),
+            out,
+        )
 
     def test_a_status_the_failure_carries_rides_along_without_its_text(self):
         # A 4xx the boundary left alone is the vendor answering about this
@@ -957,21 +1101,22 @@ class OptionalSentinelTests(unittest.TestCase):
         out, _ = self._macro(refused)
         # The outage clause's vocabulary, by the same rule, though a 400 is
         # never an outage and that clause never quotes one itself.
-        self.assertIn("could not be retrieved (answered HTTP 400).", out)
+        self.assertIn("could not be retrieved (fred: answered HTTP 400).", out)
         self.assertNotIn("SECRET-KEY", out)
 
     def test_a_typed_error_with_no_message_contributes_its_class(self):
         out, _ = self._macro(_raises(VendorUnavailableError()))
-        self.assertIn("could not be retrieved (VendorUnavailableError).", out)
+        self.assertIn("could not be retrieved (fred: VendorUnavailableError).", out)
 
     def test_a_vendor_errors_message_is_flattened_and_capped(self):
         # A typed error's message was authored at the boundary, so it stays —
         # flattened, since what the boundary quoted may be the vendor's, and
         # capped, since not every boundary caps what it quotes. What the cap
         # drops (a remedy a boundary appends after the vendor's text) is the
-        # operator's, in the warning log.
-        out, _ = self._macro(_raises(VendorNotConfiguredError(_FORGED_MESSAGE)))
-        head = "DATA_UNAVAILABLE: optional macro_data could not be retrieved ("
+        # operator's, in the warning log. (A missing key is the one typed
+        # error that does NOT ride along — its own test above.)
+        out, _ = self._macro(_raises(VendorUnavailableError(_FORGED_MESSAGE)))
+        head = "DATA_UNAVAILABLE: optional macro_data could not be retrieved (fred: "
         tail = "). Proceed without it; do not fabricate values."
         self.assertTrue(out.startswith(head) and out.endswith(tail))
         _assert_one_capped_line(out[len(head) : -len(tail)], "")
@@ -1136,7 +1281,7 @@ class LibraryFailureLaneTests(unittest.TestCase):
         self.assertTrue(
             out.startswith(
                 "DATA_UNAVAILABLE: optional macro_data could not be retrieved "
-                "(macro series cpi: 'value'). Proceed without it"
+                "(fred: macro series cpi: 'value'). Proceed without it"
             ),
             out,
         )
@@ -1149,7 +1294,7 @@ class LibraryFailureLaneTests(unittest.TestCase):
         failed = _raises(VendorLibraryError("macro series cpi", _FORGED_MESSAGE))
         with _chain("get_macro_indicators", {"fred": failed}):
             out = interface.route_to_vendor("get_macro_indicators", "cpi", "2026-01-01")
-        head = "DATA_UNAVAILABLE: optional macro_data could not be retrieved (macro series cpi: "
+        head = "DATA_UNAVAILABLE: optional macro_data could not be retrieved (fred: macro series cpi: "
         tail = "). Proceed without it; do not fabricate values."
         self.assertTrue(out.startswith(head), out)
         self.assertTrue(out.endswith(tail), out)

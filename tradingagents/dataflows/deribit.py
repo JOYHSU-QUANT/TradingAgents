@@ -2802,6 +2802,15 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # rendered branches flatten it. Not every exception reaching this point
         # was authored by this module: a requests failure carries the URL and
         # query string, and an unforeseen bug carries whatever repr it has.
+        # In the three withheld-chain branches the chain clause LEADS and the
+        # DVOL cause trails (#203): the router caps the whole message at 200,
+        # and the cause — a boundary's own sentence naming the endpoint, the
+        # attempts and the fault — can run past that alone, so trailing it the
+        # fact that the chain is withheld by policy, not by outage, was the
+        # part the cap dropped. The order chooses which fact a capped reader
+        # keeps: the policy one, which no retry changes. Joined by ";" so a
+        # proxied asset's ", and this vendor reads no options chain ..." note
+        # stays the sentence's one ", and".
         dvol_reason = _sanitize(dvol_error)
         # A proxied asset's chain is never served on ANY date, and the two
         # withholding reasons that OUTRANK "proxy" say nothing about that. On the
@@ -2829,8 +2838,8 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 else f"the historical date {curr_date}"
             )
             raise failure_cls(
-                f"Deribit DVOL is unavailable for {currency} ({dvol_reason}), and the options "
-                f"chain is not served for {basis}{proxy_note}"
+                f"Deribit's options chain is not served for {basis}{proxy_note}; DVOL is "
+                f"unavailable for {currency} ({dvol_reason})"
             )
         if chain_withheld == "far_future":
             # Past tense and naming the clock — the eighth site of a sweep that
@@ -2847,14 +2856,14 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 # misreading proxy_note exists to prevent. Both far-future sites
                 # carry the suffix and both needed the brackets; only one of them
                 # was found first.
-                f"Deribit DVOL is unavailable for {currency} ({dvol_reason}), and the options "
-                f"chain is not served for {curr_date} (which was {days_ahead} days ahead of "
-                f"the UTC clock ({today}) when this report was built){proxy_note}"
+                f"Deribit's options chain is not served for {curr_date} (which was {days_ahead} "
+                f"days ahead of the UTC clock ({today}) when this report was built)"
+                f"{proxy_note}; DVOL is unavailable for {currency} ({dvol_reason})"
             )
         if chain_withheld == "proxy":
             raise failure_cls(
-                f"Deribit DVOL is unavailable for {currency} ({dvol_reason}), and the options "
-                f"chain is not served for '{asset}', which has no Deribit chain of its own"
+                f"Deribit's options chain is not served for '{asset}', which has no Deribit "
+                f"chain of its own; DVOL is unavailable for {currency} ({dvol_reason})"
             )
         raise failure_cls(
             f"Deribit returned neither DVOL nor an options chain for {currency} "

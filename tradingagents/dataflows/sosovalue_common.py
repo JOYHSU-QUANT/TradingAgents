@@ -287,6 +287,22 @@ class SoSoValueUnavailableError(VendorUnavailableError):
     "the client likely needs a fix"), and a gateway that is down is none
     of that — it takes the transport lane instead, like the rate-limit
     type takes its own.
+
+    The unreached flavour is the subclass below, so a sweep can tally the
+    two apart while every handler still catches this one type (#217).
+    """
+
+
+class SoSoValueUnreachedError(SoSoValueUnavailableError):
+    """SoSoValue could not be reached at all: a timeout, a reset, a redirect loop.
+
+    The one flavour of the transport lane ``_request`` can tell apart, kept
+    as a subclass — the family's way of typing a flavour (Farside, Fear &
+    Greed) — so every handler still catches the parent alone, and the fact
+    survives the cache lane's re-wrap by ``type(e)`` without a flag to
+    forward (#217). Read only by ``fetch_each``'s tally. A sweep verdict
+    (``raise_all_failed``) is the parent whatever the sweep counted: it
+    carries the tally in its text, not one flavour in its type.
     """
 
 
@@ -398,8 +414,10 @@ def _request(path: str, params: dict) -> list:
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as e:
-        failure_cls = SoSoValueUnavailableError if is_unreached(e) else SoSoValueError
-        raise failure_cls(f"SoSoValue {generic_failure_words(e)} on {path}") from e
+        words = f"SoSoValue {generic_failure_words(e)} on {path}"
+        if is_unreached(e):
+            raise SoSoValueUnreachedError(words) from e
+        raise SoSoValueError(words) from e
     status = response.status_code
     if 400 <= status < 500:
         # The vendor answering about this request whatever the body
@@ -423,9 +441,14 @@ def _request(path: str, params: dict) -> list:
         except VendorUnavailableError as e:
             raise SoSoValueUnavailableError(f"{e} on {path}") from e
     if status == 401:
+        # The remedy ahead of the vendor's text: the body is capped at 300
+        # and the router caps a whole message at 200, so a remedy appended
+        # after the body was the first thing a cap dropped (#203). The router
+        # renders this type by a fixed phrase for the model, and its lane
+        # logs the message whole; the order is for any reader that caps it.
         raise SoSoValueNotConfiguredError(
-            f"SoSoValue rejected the API key (HTTP 401): {_error_message(body, api_key)} "
-            f"Verify SOSOVALUE_API_KEY; until then the chain falls to the next vendor."
+            f"SoSoValue rejected the API key (HTTP 401); verify SOSOVALUE_API_KEY — until "
+            f"then the chain falls to the next vendor. Body: {_error_message(body, api_key)}"
         )
     if status == 429:
         _BUDGET.note_rate_limited()
@@ -794,6 +817,10 @@ class FetchSweep(NamedTuple):
     * ``attempted`` — only the requests this sweep actually made, so an
       all-failed message cannot turn a breaker-length streak of observed
       failures into a whole-list claim.
+    * ``unreached`` / ``answered_without_data`` — the transport lane's two
+      flavours counted, by type (``SoSoValueUnreachedError`` or not, #217),
+      for the all-failed message that used to quote only ``last_network``:
+      a sweep that mixed a gateway 502 with a timeout showed one of them.
     """
 
     results: dict
@@ -804,6 +831,24 @@ class FetchSweep(NamedTuple):
     structural_failure: bool
     breaker_skipped: bool
     attempted: int
+    unreached: int
+    answered_without_data: int
+
+    def transport_tally(self) -> str:
+        """The transport failures counted by flavour, for an all-failed message (#217).
+
+        ``(last: ...)`` quoted one failure for a sweep that may have mixed a
+        gateway 5xx with a timeout; the counts say how many of each the
+        sweep met, and the last one's words still ride along — in
+        ``failure_account``'s words, which ``_request`` authored by status
+        or class, never from a ``requests`` message. A sweep that met no
+        transport failure has no last one to quote and says so by the
+        counts alone.
+        """
+        counts = f"{self.unreached} unreached, {self.answered_without_data} answered without data"
+        if self.last_network is None:
+            return counts
+        return f"{counts}; last: {failure_account(self.last_network)}"
 
     def persisted_flags(self) -> dict:
         """The sweep-outcome flags every cache payload persists, not just logs.
@@ -887,6 +932,7 @@ def fetch_each(
     flagged: list[str] = []
     rate_limited: SoSoValueRateLimitError | None = None
     last_network: SoSoValueUnavailableError | None = None
+    unreached = answered_without_data = 0
     structural_failure = False
     consecutive_network = 0
     breaker_skipped = False
@@ -914,6 +960,10 @@ def fetch_each(
             break
         except SoSoValueUnavailableError as e:
             last_network = e
+            if isinstance(e, SoSoValueUnreachedError):
+                unreached += 1
+            else:
+                answered_without_data += 1
             failed.append(key(item))
             consecutive_network += 1
             if consecutive_network >= max_consecutive_network:
@@ -949,6 +999,8 @@ def fetch_each(
         structural_failure=structural_failure,
         breaker_skipped=breaker_skipped,
         attempted=attempted,
+        unreached=unreached,
+        answered_without_data=answered_without_data,
     )
 
 
@@ -1113,8 +1165,8 @@ def load_rolling_snapshot(
         # "usable": the file may exist but have failed read-side validation.
         # The cause is quoted through ``failure_account``: the typed error's
         # own text, flattened but not capped here — the router caps its
-        # slot, and a sweep verdict's ``(last: ...)`` tail must survive into
-        # this module's log line. An unreached vendor arrives already worded
+        # slot, and a sweep verdict's ``(...; last: ...)`` tally must survive
+        # into this module's log line. An unreached vendor arrives already worded
         # by class at _request (#217): never the requests message, which
         # quotes the request URL, and this line is LLM-visible (#203).
         raise wrap_cls(

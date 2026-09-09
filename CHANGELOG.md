@@ -219,10 +219,19 @@ Breaking changes within the 0.x line are called out explicitly.
   ``fetch_each``'s bare-string guards; the Deribit empty-failure-list
   contract and its DVOL series correspondence; and the Farside and SoSoValue
   cache-directory config reads, which had been left unguarded where their
-  yfinance counterpart was not. ``wiring_gap`` itself now passes a taxonomy
-  verdict and an ``OSError`` through untouched, as the lane it replaced did,
-  so a statement added to one of those blocks cannot relabel a rate limit as
-  our wiring.
+  yfinance counterpart was not — Farside's copy of that reader is gone with
+  the guard, importing SoSoValue's rather than keeping the key, the guard's
+  wording and which half sits inside it in step by hand. The two global-news
+  clamps moved out of the configuration guard into guards named for the
+  value they coerce, so an unusable one no longer points an operator at a
+  config key the call never read, and yfinance's window is coerced there
+  rather than at the arithmetic two hundred lines down, where it was outside
+  every guard and came back as the news report while its Alpha Vantage
+  sibling raised. ``wiring_gap`` itself now passes through untouched
+  everything the router tells apart from an untyped failure — a taxonomy
+  verdict, the caller's own indicator mistake, a transport failure, a gap an
+  inner block already named — as the lane it replaced did, so a statement
+  added to one of those blocks cannot relabel a rate limit as our wiring.
 
   Two second copies are gone with it. ``market_data_validator``'s snapshot
   indicator set — the values the analyst is told to treat as the source of
@@ -246,8 +255,9 @@ Breaking changes within the 0.x line are called out explicitly.
   ``WiringGapError`` are still hand-placed, so the guarantee holds where
   someone remembered them: a ``get_config()`` that raised ``WiringGapError``
   on a missing key would give every reader in the repo the same ending with
-  no block at all — its message would reproduce today's text exactly, since
-  a ``KeyError``'s own string is already the quoted key — and a repo-wide
+  no block at all — it would reproduce the key half of today's message
+  exactly, a ``KeyError``'s own string being already the quoted key, and
+  lose only the prologue naming which read it was — and a repo-wide
   rule, rather than a swept list, is what would keep the next guard from
   shipping bare. Inverting the router's default instead — read only known
   library exception types as the library, raise everything else — was

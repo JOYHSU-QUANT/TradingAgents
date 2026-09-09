@@ -9,7 +9,7 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
     ├── NoMarketDataError          no usable rows (empty result OR stale data)
     ├── VendorRateLimitError       transient throttle -> skip to next vendor
     ├── VendorUnavailableError     down: an outage page, or unreachable -> next vendor, no traceback
-    ├── VendorLibraryError         the vendor's own library failed -> next vendor; prose when none serves, except in a loud category
+    ├── VendorLibraryError         the vendor's own library failed -> next vendor; when none serves: prose, a raise in a loud category, the sentinel in an optional one
     └── VendorNotConfiguredError   missing API key/config -> vendor unavailable
 
 The number of types is the number of distinct router reactions, not the number
@@ -195,7 +195,10 @@ class WiringGapError(RuntimeError):
     for the same reason (#106). With the conversion moved to the router
     (#219) the guards are no longer told apart by where they sit, so they
     say so by type, and the router's untyped lane lets this one through to
-    the ending it has always had: not report text.
+    the ending it has always had: a core category's call raises, an optional
+    category's degrades to its own sentinel with this message inside it. The
+    one ending it never takes is the library failure's report line, which
+    would hand the analyst our bug as the answer it asked for.
 
     Not a ``VendorError``: every type in that tree names something the
     vendor did, and the router would route past this one to a sibling that

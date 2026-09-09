@@ -186,11 +186,17 @@ def test_an_optional_category_degrading_over_a_wiring_gap_says_which_one():
     # to the class name the untyped rule reserves for a vendor's message
     # (#171, #219).
     set_config({"data_vendors": {"crypto_etf_flows": "farside"}})
-    gap = WiringGapError("cache configuration: 'data_cache_dir'")
+    gap = WiringGapError("cache configuration: 'data_cache_dir'\n" + "x" * 500)
     with mock.patch.dict(interface.VENDOR_METHODS, {"get_etf_flows": {"farside": _raises(gap)}}):
         out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-06-01", 7)
     assert out.startswith("DATA_UNAVAILABLE")
     assert "cache configuration: 'data_cache_dir'" in out
+    # Flattened and capped, which the value it echoes can make necessary: a
+    # bad date reaches this text as the caller wrote it. Asserted with a
+    # message that is long and multi-line, so dropping the sanitize would
+    # fail here rather than pass on a short one.
+    assert "\n" not in out
+    assert len(out) < len(str(gap))
 
 
 @pytest.mark.unit

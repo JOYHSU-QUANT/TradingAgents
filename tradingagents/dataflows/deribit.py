@@ -1768,9 +1768,12 @@ def _dvol_section(series: DvolSeries, curr_dt: datetime, today: str) -> DvolRepo
         # Under wiring_gap because the correspondence is ours to keep across
         # those two functions, and zip's own message ("argument 2 is shorter
         # than argument 1") says nothing to a reader who would otherwise meet
-        # it as this vendor's library failing (#219).
+        # it as this vendor's library failing (#219). The guard covers the
+        # pairing only, so it cannot claim the correspondence over a failure
+        # in the comparison below.
         with wiring_gap("DVOL series correspondence"):
-            return [c for d, c in zip(series.dates, series.closes, strict=True) if d > start]
+            paired = list(zip(series.dates, series.closes, strict=True))
+        return [c for d, c in paired if d > start]
 
     window = _window(DVOL_WINDOW_DAYS)
     pct_window = _window(DVOL_PERCENTILE_WINDOW_DAYS)

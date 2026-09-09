@@ -181,11 +181,10 @@ def get_global_news_yfinance(
 
     # A key this deployment does not carry is this project's wiring, not
     # Yahoo's library, and must not come back as a line of report text
-    # (#219). What each key feeds is read inside the guard too: on the
-    # everyday call both arguments are None, so it is the config's own value
-    # that the window arithmetic below consumes, and a malformed one leaving
-    # as a bare ValueError two hundred lines later would come back as the
-    # news report rather than failing the call.
+    # (#219). The reads themselves are inside the guard; what each value
+    # feeds is coerced under a guard of its own below, so a malformed one
+    # fails the call rather than reaching the window arithmetic two hundred
+    # lines later and coming back as the news report.
     with wiring_gap("global news configuration"):
         config = get_config()
         if look_back_days is None:
@@ -194,10 +193,19 @@ def get_global_news_yfinance(
             limit = config["global_news_article_limit"]
         search_queries = config["global_news_queries"]
 
-    # The clamp coerces whichever value won above — the configured default or
-    # the one this call passed — so it is guarded under a name that claims
-    # neither source. Naming the config keys would send an operator to a
-    # value config never supplied when it was the caller's that was unusable.
+    # Each coercion below takes whichever value won above — the configured
+    # default or the one this call passed — so each is guarded under a name
+    # that claims neither source. Naming the config keys would send an
+    # operator to a value config never supplied when it was the caller's
+    # that was unusable. The window is coerced here rather than left to
+    # ``relativedelta`` two hundred lines down, where an unusable one is
+    # outside every guard and comes back as the news report: the Alpha
+    # Vantage sibling ends such a call by raising, and one routed tool's two
+    # vendors must end alike (#219). Only the ending is shared — Alpha
+    # Vantage also clamps its window to a vendor maximum this one has never
+    # had, and inventing one here would change what a long window returns.
+    with wiring_gap("global news lookback window"):
+        look_back_days = int(look_back_days)
     with wiring_gap("global news article limit"):
         limit = max(1, min(int(limit), MAX_SEARCH_NEWS_COUNT))
 

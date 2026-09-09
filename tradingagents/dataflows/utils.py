@@ -450,8 +450,9 @@ def invalid_date_sentinel(
     vendor-error messages (#119 moved them onto this sentinel), and the core
     tools never had it.
     """
-    # Both lookups below are this module's own tables keyed by literals the
-    # getters write, so a miss is a typo or a parameter added without a row —
+    # Both of this module's own tables below — the tag lookup here and the
+    # ``kind`` branch under it — are keyed by literals the getters write, so
+    # a miss is a typo or a parameter added without a row —
     # ours, and reachable only on a call the model already spoiled with a bad
     # date. Said by type, since the router cannot otherwise tell it from the
     # vendor's library failing and would hand the analyst the miss as its
@@ -855,11 +856,14 @@ def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS
 
 @contextlib.contextmanager
 def wiring_gap(what: str) -> Iterator[None]:
-    """Run a getter's own prologue, where a failure is this project's and not the vendor's.
+    """Run a block whose failure is this project's own and not the vendor's.
 
     The config a deployment did not set, the library attribute a version
-    bump moved: the handful of statements a getter runs before it asks the
-    vendor anything. Nine getters used to say this by placement — their
+    bump moved, a correspondence we keep across two of our own functions
+    (Deribit's DVOL dates and readings): usually a getter's prologue, the
+    statements it runs before asking the vendor anything, but the test is
+    whose breakage it is rather than where it sits. Nine getters used to
+    say this by placement — their
     fetch ran inside a ``with library_failure_lane(...)`` and the prologue
     above it, so a yfinance that drops ``cache_get.cache_clear`` failed the
     call rather than freezing global news behind a report (#111, #200),
@@ -871,16 +875,17 @@ def wiring_gap(what: str) -> Iterator[None]:
     vendor's library, never becomes a line of report text, and ends a core
     category's call the way it always did.
 
-    ``what`` names the prologue in the raise (``global news configuration``),
-    since the getter's own subject describes the vendor work that never
-    started.
+    ``what`` names the block in the raise (``global news configuration``),
+    since the getter's own subject describes vendor work this failure is not
+    about.
 
     Everything the router tells apart from an untyped failure passes through
     untouched, as it did through the lane this replaces: a taxonomy verdict,
     a transport failure, the caller's own indicator mistake, and a
     ``WiringGapError`` a nested block already named. Nothing inside today's
-    blocks can raise any of them — they read dicts and forget a cache — but
-    this is the kind of block that grows a statement, and relabelling a rate
+    blocks can raise any of them — they read dicts, coerce a configured
+    number, pair two lists and forget a cache — but this is the kind of
+    block that grows a statement, and relabelling a rate
     limit as our wiring would abort the run where the next vendor was owed
     its turn, while relabelling a bad indicator name would cost the whole
     call what should cost one indicator (#117).

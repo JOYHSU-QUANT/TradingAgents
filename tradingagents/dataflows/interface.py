@@ -157,8 +157,9 @@ OPTIONAL_CATEGORIES = {
     "btc_treasuries",
 }
 
-# Categories whose vendor's own library failing is never rendered as report
-# text. Everywhere else an untyped failure below a vendor is read as its
+# Categories whose vendor's own library failing is never rendered as the
+# library-failure report line. Everywhere else an untyped failure below a
+# vendor is read as its
 # library's and reported as one line of text, so a stockstats bug costs one
 # indicator rather than the run (#187). OHLCV is the exception: it is the
 # market analyst's primary input and the frame every other price claim is
@@ -177,9 +178,10 @@ OPTIONAL_CATEGORIES = {
 # them loud would also let one vendor's parser bug abort a paper cycle the
 # sibling vendor could have served.
 #
-# "Never rendered as text" rather than "always raises": a chain where another
-# vendor reported clean no-data ends in that sentinel, which is ranked ahead
-# of the raise and was this ending before the declaration existed.
+# "Never rendered as that line" rather than "always raises": a chain where
+# another vendor reported clean no-data ends in the no-data sentinel, which
+# is ranked ahead of the raise and was this ending before the declaration
+# existed.
 LOUD_LIBRARY_CATEGORIES = frozenset({"core_stock_apis"})
 
 # A loud category must not also be optional. The optional ending is a
@@ -772,8 +774,12 @@ def route_to_vendor(method: str, *args, **kwargs):
             # cap and the flatten are the report line's, and the log line each
             # branch below writes is the uncapped copy, with the traceback the
             # lane at the getter used to log. One line per failure, whichever
-            # branch takes it, so the levels stay readable: WARNING for a
-            # vendor's routine bad day, ERROR for its library breaking.
+            # branch takes it, so the levels stay readable: ERROR where a
+            # library failure is about to be reported as text, WARNING for
+            # everything else. A loud category takes the WARNING too — the
+            # conversion refuses it, so the failure reaches the caller as
+            # itself, with its own traceback, which is louder than a log
+            # line and is the whole point of the declaration.
             outage = is_vendor_outage(e)
             library = None if outage else _as_library_failure(category, method, args, e)
             if library is not None:

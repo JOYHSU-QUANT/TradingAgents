@@ -1113,6 +1113,20 @@ def test_a_wiring_gap_aborts_the_call_instead_of_becoming_report_text(monkeypatc
         interface.route_to_vendor("get_global_news", "2026-06-01", None, None)
 
 
+@pytest.mark.unit
+def test_an_unusable_window_ends_this_vendor_the_way_its_sibling_ends(monkeypatch):
+    # One routed tool's two vendors must end alike (#219). Alpha Vantage
+    # coerces the window where it reads it; this one used to carry an
+    # unusable value two hundred lines to ``relativedelta``, outside every
+    # guard, where the router read the TypeError as Yahoo's library and
+    # rendered it as the news report. Pinned through the router, since that
+    # is where the two endings differed.
+    monkeypatch.setattr(ynews.yf, "Search", lambda *a, **k: pytest.fail("no fetch may be made"))
+    set_config({"data_vendors": {"news_data": "yfinance"}})
+    with pytest.raises(WiringGapError, match="global news lookback window"):
+        interface.route_to_vendor("get_global_news", "2026-06-01", "ten", None)
+
+
 
 
 @pytest.mark.unit

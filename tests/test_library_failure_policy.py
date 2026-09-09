@@ -362,7 +362,7 @@ def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeyp
         ({"global_news_queries": "macro"}, "global news configuration"),
     ],
 )
-def test_a_configured_value_of_the_wrong_shape_fails_the_call(config_value, guard, monkeypatch):
+def test_a_configured_value_of_the_wrong_shape_names_its_own_guard(config_value, guard, monkeypatch):
     # Sent on as read, the first reaches Yahoo as the article count and comes
     # back as "No news found" — a coverage claim over a call that never asked
     # properly (#136) — and the second runs one search per character. Both
@@ -372,11 +372,41 @@ def test_a_configured_value_of_the_wrong_shape_fails_the_call(config_value, guar
     monkeypatch.setattr(ynews.yf, "Ticker", lambda *a, **k: pytest.fail("no fetch may be made"))
     monkeypatch.setattr(ynews.yf, "Search", lambda *a, **k: pytest.fail("no fetch may be made"))
     set_config(config_value)
-    with pytest.raises(WiringGapError, match=guard):
+    # Anchored: "news configuration" is a substring of "global news
+    # configuration", so an unanchored match would pass with the two guards
+    # collapsed into one name and send an operator to the wrong key.
+    with pytest.raises(WiringGapError) as info:
         if "news_article_limit" in config_value:
             ynews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05")
         else:
             ynews.get_global_news_yfinance("2026-06-01")
+    assert str(info.value).startswith(f"{guard}: ")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("configured", [0, -5])
+def test_a_configured_article_count_below_one_asks_for_one(configured, monkeypatch):
+    # The floor the Alpha Vantage sibling has always had. Sent on as read, a
+    # zero reaches Yahoo as the article count and comes back as "No news
+    # found" — a coverage claim over a call that never asked for an article
+    # (#136). Measured at the count Yahoo is handed, since the value is not
+    # visible anywhere else.
+    import tradingagents.dataflows.yfinance_news as ynews
+
+    asked: dict = {}
+
+    class _Ticker:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_news(self, count):
+            asked["count"] = count
+            return []
+
+    monkeypatch.setattr(ynews.yf, "Ticker", _Ticker)
+    set_config({"news_article_limit": configured})
+    ynews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05")
+    assert asked["count"] == 1
 
 
 @pytest.mark.unit

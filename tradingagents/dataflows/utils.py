@@ -450,7 +450,14 @@ def invalid_date_sentinel(
     vendor-error messages (#119 moved them onto this sentinel), and the core
     tools never had it.
     """
-    tag = _DATE_ARGUMENT_TAGS[param]
+    # Both lookups below are this module's own tables keyed by literals the
+    # getters write, so a miss is a typo or a parameter added without a row —
+    # ours, and reachable only on a call the model already spoiled with a bad
+    # date. Said by type, since the router cannot otherwise tell it from the
+    # vendor's library failing and would hand the analyst the miss as its
+    # report (#219).
+    with wiring_gap("date-refusal argument tag"):
+        tag = _DATE_ARGUMENT_TAGS[param]
     retry = "retry with a valid yyyy-mm-dd date"
     if kind == "point":
         consequence = f"{what} cannot be bounded to a point in time"
@@ -468,7 +475,7 @@ def invalid_date_sentinel(
         # Mirror _DATE_ARGUMENT_TAGS: an unknown kind fails at the call
         # rather than falling into whichever branch is last — which would
         # hand a typo the strongest wrong claim (#140 review).
-        raise ValueError(f"unknown DateKind {kind!r}")
+        raise WiringGapError(f"unknown DateKind {kind!r}")
     echo = _echo if _echo is not None else quote_argument(value)
     return (
         f"{tag}: {param} {echo} is not a valid yyyy-mm-dd date, "
@@ -551,7 +558,11 @@ def date_sentinel_note(*params: str, omitted_ok: bool = False, disclosure: bool 
     answers a bad date with :func:`invalid_date_sentinel` (#140: eleven
     wrappers did exactly that, and the model reads the description when
     CHOOSING arguments). ``params`` are the tool's date arguments (a typo
-    raises through :data:`_DATE_ARGUMENT_TAGS`, same as the sentinel).
+    raises through :data:`_DATE_ARGUMENT_TAGS` as a bare ``KeyError``: this
+    runs while a tool description is built, never inside the router's call,
+    so it has no ending to be told apart from a vendor's — which is why the
+    sentinel's own lookup of that table wears ``WiringGapError`` and this
+    one does not).
 
     Two knobs because they answer different questions: ``omitted_ok`` matches
     the getter's None-gate and shapes the trigger ("is supplied but ..."),
@@ -831,8 +842,13 @@ def failure_account(e: BaseException, *, limit: int | None = MAX_UNTRUSTED_CHARS
         # slots that render this type: the core chain's report line and the
         # optional category's sentinel.
         return f"{sanitize_untrusted(e.what, limit=limit)}: {sanitize_untrusted(e.detail, limit=limit)}"
-    if isinstance(e, (VendorError, UnsupportedIndicatorError)):
+    if isinstance(e, (VendorError, UnsupportedIndicatorError, WiringGapError)):
         # A typed error raised with no message would render as "()".
+        # ``WiringGapError`` for the same reason as the two above: its text is
+        # ours — the prologue's name and the key or table that was missing —
+        # and an optional category that degrades over one should say which,
+        # not "WiringGapError". Flattened and capped like the rest, since the
+        # value it echoes can be the caller's (#219).
         return sanitize_untrusted(e, limit=limit) or type(e).__name__
     return generic_failure_words(e)
 
@@ -858,9 +874,21 @@ def wiring_gap(what: str) -> Iterator[None]:
     ``what`` names the prologue in the raise (``global news configuration``),
     since the getter's own subject describes the vendor work that never
     started.
+
+    Everything the router tells apart from an untyped failure passes through
+    untouched, as it did through the lane this replaces: a taxonomy verdict,
+    a transport failure, the caller's own indicator mistake, and a
+    ``WiringGapError`` a nested block already named. Nothing inside today's
+    blocks can raise any of them — they read dicts and forget a cache — but
+    this is the kind of block that grows a statement, and relabelling a rate
+    limit as our wiring would abort the run where the next vendor was owed
+    its turn, while relabelling a bad indicator name would cost the whole
+    call what should cost one indicator (#117).
     """
     try:
         yield
+    except (VendorError, UnsupportedIndicatorError, WiringGapError, OSError):
+        raise
     except Exception as e:
         raise WiringGapError(f"{what}: {e}") from e
 

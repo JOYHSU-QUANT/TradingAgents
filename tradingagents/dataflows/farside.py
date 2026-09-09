@@ -46,9 +46,8 @@ from typing import NamedTuple
 import requests
 from parsel import Selector
 
-from .config import get_config
 from .errors import VendorError, VendorUnavailableError
-from .sosovalue_common import _cache_rejecter, _read_cache_preamble, _stale_caveat
+from .sosovalue_common import _cache_dir, _cache_rejecter, _read_cache_preamble, _stale_caveat
 from .symbol_utils import classify_crypto_asset
 from .utils import date_refusal, failure_account, is_unreached, raise_for_http_status
 
@@ -506,12 +505,6 @@ def _humanize_age(fetched_at: str) -> str:
         return f"{hours:.1f} hours"
     days = int(hours // 24)
     return f"{days} {_plural_days(days)}"
-
-
-def _cache_dir() -> str:
-    cache_dir = get_config()["data_cache_dir"]
-    os.makedirs(cache_dir, exist_ok=True)
-    return cache_dir
 
 
 def _cache_path(asset: str) -> str:

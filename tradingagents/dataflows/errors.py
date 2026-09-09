@@ -9,7 +9,7 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
     ├── NoMarketDataError          no usable rows (empty result OR stale data)
     ├── VendorRateLimitError       transient throttle -> skip to next vendor
     ├── VendorUnavailableError     down: an outage page, or unreachable -> next vendor, no traceback
-    ├── VendorLibraryError         the vendor's own library failed -> next vendor; prose, not a raise, when none serves
+    ├── VendorLibraryError         the vendor's own library failed -> next vendor; prose when none serves, except in a loud category
     └── VendorNotConfiguredError   missing API key/config -> vendor unavailable
 
 The number of types is the number of distinct router reactions, not the number
@@ -181,19 +181,21 @@ class UnsupportedIndicatorError(ValueError):
 
 
 class WiringGapError(RuntimeError):
-    """A guard a getter runs before its vendor work found this project's wiring broken.
+    """A guard a getter runs found this project's own wiring broken.
 
     The config key a deployment did not set, the library attribute a version
-    bump moved: not the vendor's library failing on data it served, so the
-    router's untyped lane — which reads an untyped failure as exactly that
-    and reports it as one line of text — must not cover it. It never did:
-    those guards were placed ahead of the nine getters' ``with`` blocks on
-    purpose, so a yfinance that drops ``cache_get.cache_clear`` fails the
-    call rather than freezing global news behind a report again (#111,
-    #200). With the conversion moved to the router (#219) the guards are no
-    longer told apart by where they sit, so they say so by type, and the
-    router's untyped lane lets this one through to the ending a core
-    category's failure has always had: a raise.
+    bump moved, the indicator a table registers as supported and another
+    table has no row for: not the vendor's library failing on data it
+    served, so the router's untyped lane — which reads an untyped failure as
+    exactly that and reports it as one line of text — must not cover it. It
+    never did: those guards were placed ahead of the nine getters' ``with``
+    blocks on purpose, so a yfinance that drops ``cache_get.cache_clear``
+    fails the call rather than freezing global news behind a report again
+    (#111, #200), and Alpha Vantage's registry checks ran before the request
+    for the same reason (#106). With the conversion moved to the router
+    (#219) the guards are no longer told apart by where they sit, so they
+    say so by type, and the router's untyped lane lets this one through to
+    the ending it has always had: not report text.
 
     Not a ``VendorError``: every type in that tree names something the
     vendor did, and the router would route past this one to a sibling that

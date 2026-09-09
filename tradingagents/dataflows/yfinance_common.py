@@ -25,7 +25,7 @@ import yfinance as yf
 from yfinance.exceptions import YFDataException, YFException, YFRateLimitError
 
 from .config import get_config
-from .errors import VendorRateLimitError, VendorUnavailableError
+from .errors import VendorRateLimitError, VendorUnavailableError, WiringGapError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 from .throttle import ThrottleLatch
 
@@ -648,7 +648,12 @@ def filter_financials_by_date(
         return data
     normalized = normalize_iso_date(curr_date)
     if normalized is None:
-        raise ValueError(
+        # WiringGapError, not the bare ValueError this used to raise: the
+        # getter refuses an unparseable curr_date up front, so one arriving
+        # here is our own breakage, and the caller's ``except (TypeError,
+        # ValueError)`` — there for a label pandas cannot parse, a vendor
+        # condition — would otherwise file it as one (#219).
+        raise WiringGapError(
             f"yfinance financials: curr_date {curr_date!r} is not a valid "
             f"YYYY-MM-DD date; refusing to serve statements unfiltered (look-ahead guard)"
         )
@@ -658,8 +663,11 @@ def filter_financials_by_date(
     periods, dropped_a_zone = coerced if coerced is not None else coerce_period_labels(data.columns)
     if len(periods) != len(data.columns):
         # The mask below is applied positionally, so labels coerced from a
-        # different frame would silently keep the wrong columns.
-        raise ValueError(
+        # different frame would silently keep the wrong columns. Handing in
+        # the wrong frame's labels is a call this project makes, so it is a
+        # wiring gap: neither the caller's vendor-error lane nor the router's
+        # untyped one may file it as something yfinance did (#219).
+        raise WiringGapError(
             f"yfinance financials: {len(periods)} coerced labels handed in for "
             f"{len(data.columns)} columns; coerce the frame being filtered"
         )

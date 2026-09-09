@@ -155,5 +155,69 @@ def test_a_loud_category_raises_whoever_named_the_library_failure(failure):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("failure", [KeyError("volume"), VendorLibraryError("x", "y")])
+def test_a_loud_category_still_yields_to_a_sibling_that_reported_no_data(failure):
+    # What "loud" promises is that the failure is never rendered as report
+    # text — not that the call always raises. A sibling vendor that answered
+    # with a clean no-data verdict still ends the chain in its sentinel,
+    # which outranks the raise, and did so before the declaration existed.
+    # Pinned because the declaration reads like the stronger promise and the
+    # single-vendor test above cannot tell the two apart (#219).
+    set_config({"data_vendors": {"core_stock_apis": "yfinance,alpha_vantage"}})
+    with mock.patch.dict(
+        interface.VENDOR_METHODS,
+        {
+            "get_stock_data": {
+                "yfinance": _raises(failure),
+                "alpha_vantage": _raises(NoMarketDataError("AAPL", "AAPL", "no rows")),
+            }
+        },
+    ):
+        out = interface.route_to_vendor("get_stock_data", "AAPL", "2026-06-01", "2026-06-05")
+    assert out.startswith("NO_DATA_AVAILABLE")
+    assert "Error retrieving" not in out
+
+
+@pytest.mark.unit
+def test_an_optional_category_degrading_over_a_wiring_gap_says_which_one():
+    # The sentinel is what the report artifacts keep, and the text of a
+    # WiringGapError is ours — the prologue's name and the key that was
+    # missing — so it rides along flattened and capped rather than degrading
+    # to the class name the untyped rule reserves for a vendor's message
+    # (#171, #219).
+    set_config({"data_vendors": {"crypto_etf_flows": "farside"}})
+    gap = WiringGapError("cache configuration: 'data_cache_dir'")
+    with mock.patch.dict(interface.VENDOR_METHODS, {"get_etf_flows": {"farside": _raises(gap)}}):
+        out = interface.route_to_vendor("get_etf_flows", "BTC", "2026-06-01", 7)
+    assert out.startswith("DATA_UNAVAILABLE")
+    assert "cache configuration: 'data_cache_dir'" in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "passed_through",
+    [
+        VendorRateLimitError("slow down"),
+        UnsupportedIndicatorError("no vendor computes 'mfi'"),
+        WiringGapError("an inner prologue already named this"),
+        *_PROPAGATED_OSERRORS.values(),
+    ],
+)
+def test_the_prologue_guard_passes_a_verdict_and_a_transport_failure_through(passed_through):
+    # ``wiring_gap`` says "this is ours", so it must not relabel anything the
+    # router tells apart from an untyped failure: a taxonomy verdict, the
+    # transports that suite documents, the caller's own indicator mistake, or
+    # a gap an inner block already named. Nothing in today's blocks can raise
+    # any of them — they read dicts and forget a cache — but the block is the
+    # kind that grows a statement, and a rate limit relabelled as our wiring
+    # would abort the run where the next vendor was owed its turn (#219).
+    from tradingagents.dataflows.utils import wiring_gap
+
+    with pytest.raises(type(passed_through)) as info, wiring_gap("some prologue"):
+        raise passed_through
+    assert info.value is passed_through
+
+
+@pytest.mark.unit
 def test_the_success_path_is_untouched():
     assert _route(lambda *a, **k: "the report") == "the report"

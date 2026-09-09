@@ -1,5 +1,5 @@
 from .alpha_vantage_common import _make_api_request
-from .errors import NoMarketDataError, UnsupportedIndicatorError
+from .errors import NoMarketDataError, UnsupportedIndicatorError, WiringGapError
 from .utils import (
     INDICATOR_DESCRIPTIONS,
     data_lag_note,
@@ -197,32 +197,39 @@ def get_indicator(
             ),
         )
 
-    # All three wiring checks run before the request and outside the library
-    # lane below: a supported indicator with no request definition, no CSV
-    # column or no description is our bug, not a vendor condition. Raising
-    # rather than returning prose stops it costing a request and leaves a
-    # traceback in the logs; the router no longer records a successful answer,
-    # so a multi-vendor chain reaches the next vendor (#106). A single-vendor
-    # chain surfaces it to the ToolNode as the failure it is: the tool wrapper
-    # renders only UnsupportedIndicatorError as report text (#117), and a
-    # wiring gap is ours to fix, not the model's to route around. Guessing a
-    # column would silently render numbers from the wrong field (#31); the
-    # description check is here rather than at the render because the lane
-    # below would turn a KeyError there into report text.
+    # All three wiring checks run before the request: a supported indicator
+    # with no request definition, no CSV column or no description is our bug,
+    # not a vendor condition. Raising rather than returning prose stops it
+    # costing a request and leaves a traceback in the logs; the router no
+    # longer records a successful answer, so a multi-vendor chain reaches the
+    # next vendor (#106). A single-vendor chain surfaces it to the ToolNode as
+    # the failure it is: the tool wrapper renders only UnsupportedIndicatorError
+    # as report text (#117), and a wiring gap is ours to fix, not the model's
+    # to route around. Guessing a column would silently render numbers from
+    # the wrong field (#31); the description check is here rather than at the
+    # render because a KeyError there is a failure the router cannot tell from
+    # the vendor's library breaking.
+    #
+    # WiringGapError, not the bare ValueError these used to raise: what kept
+    # them loud was sitting above the getter's ``with library_failure_lane``
+    # block, and with the conversion moved to the router (#219) placement says
+    # nothing — a bare ValueError from here would come back as
+    # "Error retrieving rsi values for AAPL: ..." for the analyst to read as
+    # its indicator report, since technical_indicators is not a loud category.
     if indicator not in _INDICATOR_REQUESTS:
-        raise ValueError(
+        raise WiringGapError(
             f"Indicator '{indicator}' is registered as supported but has no "
             f"Alpha Vantage request defined"
         )
     if indicator not in _CSV_COLUMN_MAP:
-        raise ValueError(
+        raise WiringGapError(
             f"Indicator '{indicator}' is registered as supported but has no CSV column mapping"
         )
     # A real table gap now fails at import (the derivation above raises
     # KeyError), so at runtime this is the drift-lock for the other failure:
     # the derivation being replaced by a literal copy that then loses a key.
     if indicator not in _INDICATOR_DESCRIPTIONS:
-        raise ValueError(
+        raise WiringGapError(
             f"Indicator '{indicator}' is registered as supported but has no description"
         )
 

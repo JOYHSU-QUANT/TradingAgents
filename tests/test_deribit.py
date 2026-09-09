@@ -24,7 +24,11 @@ from tradingagents.agents.analysts.market_analyst import create_market_analyst
 from tradingagents.agents.utils import crypto_data_tools
 from tradingagents.dataflows import deribit, interface
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.errors import VendorRateLimitError, VendorUnavailableError
+from tradingagents.dataflows.errors import (
+    VendorRateLimitError,
+    VendorUnavailableError,
+    WiringGapError,
+)
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 from .conftest import fake_response, repo_text
@@ -1278,9 +1282,11 @@ class TestDvol:
 
     def test_mismatched_series_lengths_fail_loud(self):
         # dates and closes are built together; drifting apart would silently
-        # mis-window the statistics, so the zip is strict.
+        # mis-window the statistics, so the zip is strict — and under
+        # wiring_gap, since the correspondence is ours to keep and zip's own
+        # message would otherwise reach a reader as Deribit's library (#219).
         broken = deribit.DvolSeries(dates=["2026-08-04", "2026-08-05"], closes=[40.0])
-        with pytest.raises(ValueError):
+        with pytest.raises(WiringGapError):
             deribit._dvol_section(broken, datetime(2026, 8, 5), TODAY)
 
     @pytest.mark.parametrize("bad_close", [0.0, -12.5])
@@ -3293,7 +3299,7 @@ class TestPartialDegradation:
     def test_the_aggregate_verdict_refuses_an_empty_list(self):
         # all() over nothing is True: judged, an empty list would be the
         # throttle verdict for a report that saw no 429 at all.
-        with pytest.raises(ValueError, match="at least one failure"):
+        with pytest.raises(WiringGapError, match="at least one failure"):
             deribit._aggregate_failure_cls([])
 
     def test_both_halves_down_raises_for_the_router(self):

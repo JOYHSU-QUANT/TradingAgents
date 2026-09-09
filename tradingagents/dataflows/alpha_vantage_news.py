@@ -164,7 +164,14 @@ def get_global_news(curr_date, look_back_days: int | None = None, limit: int | N
             look_back_days = config["global_news_lookback_days"]
         if limit is None:
             limit = config["global_news_article_limit"]
+
+    # The clamps coerce whichever value won above — the configured default or
+    # the one this call passed — so each is guarded under a name that claims
+    # neither source. Naming the config keys would send an operator to a
+    # value config never supplied when it was the caller's that was unusable.
+    with wiring_gap("global news lookback window"):
         look_back_days = max(1, min(int(look_back_days), MAX_NEWS_LOOKBACK_DAYS))
+    with wiring_gap("global news article limit"):
         limit = max(1, min(int(limit), MAX_NEWS_LIMIT))
 
     # Calculate start date

@@ -405,6 +405,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         assert not [r for r in caplog.records if r.name == yfin.__name__]
 
     def test_the_shared_filter_refuses_an_unusable_bound_rather_than_dropping_it(self):
+        from tradingagents.dataflows.errors import WiringGapError
         from tradingagents.dataflows.yfinance_common import filter_financials_by_date
 
         # The getters answer the sentinel before reaching here, so this raise is
@@ -413,11 +414,12 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # frame whole — which is what falsiness used to do with "", leaking the
         # unfiltered frame rather than emptying it.
         frame = _statement("2099-03-31")
-        with pytest.raises(ValueError, match="look-ahead guard"):
+        with pytest.raises(WiringGapError, match="look-ahead guard"):
             filter_financials_by_date(frame, "")
         assert filter_financials_by_date(frame, None) is frame
 
     def test_the_shared_filter_refuses_an_unusable_bound_even_on_an_empty_frame(self):
+        from tradingagents.dataflows.errors import WiringGapError
         from tradingagents.dataflows.yfinance_common import filter_financials_by_date
 
         # "A present-but-unusable curr_date RAISES" used to hold only for a
@@ -427,7 +429,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # now the one stated (#117). A usable bound still serves the empty
         # frame untouched.
         empty = pd.DataFrame()
-        with pytest.raises(ValueError, match="look-ahead guard"):
+        with pytest.raises(WiringGapError, match="look-ahead guard"):
             filter_financials_by_date(empty, "")
         assert filter_financials_by_date(empty, "2026-08-18") is empty
 

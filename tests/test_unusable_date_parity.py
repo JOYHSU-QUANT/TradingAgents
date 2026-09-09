@@ -33,6 +33,7 @@ import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_news as yfnews
 import tradingagents.default_config as default_config
 from tradingagents.dataflows import interface
+from tradingagents.dataflows.errors import WiringGapError
 from tradingagents.dataflows.utils import (
     date_range_refusal,
     date_refusal,
@@ -162,7 +163,10 @@ class TestTheSharedSentence:
         from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS
 
         assert set(_DATE_ARGUMENT_TAGS) == {"curr_date", "start_date", "end_date"}
-        with pytest.raises(KeyError):
+        # As a WiringGapError, not the bare KeyError the lookup raises: the
+        # miss is ours, and the router reads an untyped failure from a getter
+        # as the vendor's library and reports it as text (#219).
+        with pytest.raises(WiringGapError):
             invalid_date_sentinel("abc", what="x", kind="point", param="as_of_date")
 
     def test_the_kind_is_stated_not_inferred_from_the_name(self):

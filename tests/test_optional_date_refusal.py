@@ -46,6 +46,7 @@ import tradingagents.dataflows.sosovalue_treasuries as sosovalue_treasuries
 import tradingagents.default_config as default_config
 from tests.test_unusable_date_parity import _GOOD, _UNUSABLE, _VendorReached
 from tradingagents.dataflows import interface
+from tradingagents.dataflows.errors import WiringGapError
 from tradingagents.dataflows.utils import (
     MAX_UNTRUSTED_CHARS,
     date_refusal,
@@ -364,8 +365,10 @@ class TestTheEchoIsFlattenedAndCapped:
 
     def test_an_unknown_kind_fails_at_the_call(self):
         # DateKind is a closed vocabulary; a typo must not fall into whichever
-        # branch is last and ship the strongest wrong claim (#140 review).
-        with pytest.raises(ValueError, match="unknown DateKind"):
+        # branch is last and ship the strongest wrong claim (#140 review). The
+        # typo is ours, so it is a WiringGapError: the router would otherwise
+        # read it as the vendor's library and report it as text (#219).
+        with pytest.raises(WiringGapError, match="unknown DateKind"):
             invalid_date_sentinel("abc", what="x", kind="pont")
 
     def test_a_truncated_non_string_echo_recloses_its_outer_delimiter(self):
@@ -431,10 +434,10 @@ class TestAlphaVantageDateStampHasOneRule:
         # A passthrough stamp, a datetime-with-time string and a datetime
         # object were each accepted before; none reaches this function any
         # more, and accepting them read as a second date contract.
-        with pytest.raises(ValueError, match="Unsupported date format"):
+        with pytest.raises(WiringGapError, match="Unsupported date format"):
             avc.format_datetime_for_api(dead_branch)
 
     @pytest.mark.parametrize("bad", ["", "abc", "2026/08/18", None])
     def test_an_unusable_value_still_raises(self, bad):
-        with pytest.raises(ValueError, match="Unsupported date format"):
+        with pytest.raises(WiringGapError, match="Unsupported date format"):
             avc.format_datetime_for_api(bad)

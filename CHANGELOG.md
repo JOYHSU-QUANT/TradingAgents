@@ -161,12 +161,29 @@ Breaking changes within the 0.x line are called out explicitly.
   construction rather than by two getters agreeing on a string. Every
   registered method has a row, checked against ``VENDOR_METHODS``, so a new
   tool cannot ship without one. The report line, its flatten and its 200-char
-  cap are unchanged. Which categories still abort is one declaration,
-  ``LOUD_LIBRARY_CATEGORIES``: OHLCV, and only OHLCV — the analyst's primary
-  input and the frame every other price claim is checked against, where a
-  report line would leave the run reasoning from nothing while looking
-  answered. The suite that holds each yfinance leaf to its ending now mirrors
-  that declaration instead of a hand-written exclusion with no stated reason.
+  cap are unchanged. Which categories never get that report line is one
+  declaration, ``LOUD_LIBRARY_CATEGORIES``: OHLCV, and only OHLCV — the
+  analyst's primary input and the frame every other price claim is checked
+  against, where a report line would leave the run reasoning from nothing
+  while looking answered. The other three core categories keep the line, and
+  that is now a choice rather than an inheritance: fundamentals and news
+  reach the analyst as prose either way, so a line saying the vendor's parser
+  broke reads as the absence it is, and making them loud would let one
+  vendor's parser bug abort a cycle the sibling vendor could have served. The
+  declaration says "never rendered as text" rather than "always raises",
+  because a chain where another vendor reported clean no-data still ends in
+  that sentinel, which outranks the raise and did so before the declaration
+  existed; a two-vendor test pins that ending rather than leaving the
+  stronger reading to be assumed. The suite that holds each yfinance leaf to
+  its ending now mirrors the declaration instead of a hand-written exclusion
+  with no stated reason.
+
+  A converted library failure is logged at ERROR, naming the subject, where
+  every other ending in that lane keeps the WARNING it always had. #187 added
+  the leaf logs because seven getters logged nothing and an operator never
+  saw a degrade happen; moving the conversion to the router had quietly filed
+  those degrades among the routine vendor fallbacks, one level down and named
+  by method rather than by subject.
 
   Two consequences worth stating. An optional category's
   ``DATA_UNAVAILABLE`` parenthesis now quotes an untyped failure as
@@ -184,10 +201,28 @@ Breaking changes within the 0.x line are called out explicitly.
   failure came from, so those guards now say it by type: ``wiring_gap`` raises
   ``WiringGapError``, which the untyped lane never converts, so a key a
   deployment did not set still fails the call instead of coming back as a
-  vendor's bad day. It wears that type at all four config reads a core
-  category's getters make — both news vendors and the OHLCV cache — so the
-  two vendors of one routed tool end a missing key alike, which is the same
-  guarantee the rest of this entry is about.
+  vendor's bad day.
+
+  The type covers every guard of that kind a routed getter can reach, not the
+  config reads alone — the distinction the router can act on is "ours or the
+  vendor's", and a guard that kept its bare ``ValueError`` was one the router
+  read as the vendor's library. Alpha Vantage's three "registered as
+  supported but has no request / CSV column / description" checks are the
+  clearest case: ``technical_indicators`` is not loud, so a drifted registry
+  came back as ``Error retrieving rsi values for AAPL: ...`` for the analyst
+  to read as its indicator report (#106's shape, and the getter-level test
+  could not see it because it never went through the router — a router-level
+  one now does). With them: the Alpha Vantage fundamentals and yfinance
+  statements look-ahead guards, whose docstrings already said they must fail
+  loud; the positional-mask check in the statement filter; the date-refusal
+  argument-tag and ``DateKind`` tables; ``classify_crypto_asset``'s and
+  ``fetch_each``'s bare-string guards; the Deribit empty-failure-list
+  contract and its DVOL series correspondence; and the Farside and SoSoValue
+  cache-directory config reads, which had been left unguarded where their
+  yfinance counterpart was not. ``wiring_gap`` itself now passes a taxonomy
+  verdict and an ``OSError`` through untouched, as the lane it replaced did,
+  so a statement added to one of those blocks cannot relabel a rate limit as
+  our wiring.
 
   Two second copies are gone with it. ``market_data_validator``'s snapshot
   indicator set — the values the analyst is told to treat as the source of
@@ -207,13 +242,29 @@ Breaking changes within the 0.x line are called out explicitly.
   bite a deployment that configures two vendors for one tool AND meets a
   deterministic local bug, which the shipped single-vendor defaults cannot
   produce. They are worth doing when a journal shows the repeat. Three more,
-  each a depth this change stopped short of. ``wiring_gap`` is still a
-  hand-placed block, so the guarantee holds where someone remembered it: a
-  ``get_config()`` that raised ``WiringGapError`` on a missing key would give
-  every reader in the repo the same ending with no block at all, and the
-  optional vendors' unguarded reads (Farside, SoSoValue) would stop being a
-  latent divergence — they are harmless only because those categories are
-  single-vendor and never raise. Loudness is applied when the failure is
+  each a depth this change stopped short of. ``wiring_gap`` and
+  ``WiringGapError`` are still hand-placed, so the guarantee holds where
+  someone remembered them: a ``get_config()`` that raised ``WiringGapError``
+  on a missing key would give every reader in the repo the same ending with
+  no block at all — its message would reproduce today's text exactly, since
+  a ``KeyError``'s own string is already the quoted key — and a repo-wide
+  rule, rather than a swept list, is what would keep the next guard from
+  shipping bare. Inverting the router's default instead — read only known
+  library exception types as the library, raise everything else — was
+  weighed and declined rather than deferred: the failures the policy exists
+  for are builtin types raised from third-party frames (a ``KeyError`` from
+  a missing column, a ``ValueError`` from a date parse), so the allowlist
+  and the denylist would hold the same types. The only discriminator with
+  real information is the frame the exception came from, which re-raises,
+  library wrappers and packaging all move. Two guards stay bare
+  deliberately: the ``zip(strict=True)`` in the Farside issuer parse and the
+  one after the statement filter's length check are each established a few
+  lines above their use, so no edit reaches them without touching what
+  proves them. ``vwma`` stays offered by the menu and unverified by the
+  snapshot — the partition test declares the omission rather than closing it,
+  because adding it to the snapshot changes every cycle's input and dropping
+  it from the menu changes the prompt; worth doing the day a journal shows
+  an analyst citing a vwma value. Loudness is applied when the failure is
   classified rather than when the ending is chosen, so the declaration is
   read at two sites and the tests have to prove they agree. And the subject
   table is a third registry over the same method keys as ``TOOLS_CATEGORIES``

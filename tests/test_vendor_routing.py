@@ -23,7 +23,7 @@ import tradingagents.default_config as default_config
 
 # The hostile message shape the leaves' prose tests use: one definition, so the
 # forgery the router's slots have to neutralise is the one the leaves do.
-from tests.conftest import dataflows_module_trees
+from tests.conftest import dataflows_module_trees, package_module_trees
 from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_line
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
@@ -1210,8 +1210,12 @@ class LibraryFailureLaneTests(unittest.TestCase):
         self.assertEqual(out, "AV")
         [record] = cm.records
         self.assertIn("failed in its own library retrieving rsi values for AAPL", record.getMessage())
-        self.assertNotIn("'volume'", record.getMessage())  # the message is the leaf's log line's
-        self.assertIsNone(record.exc_info)  # and so is the traceback
+        # The whole message, at ERROR: there is no leaf lane left to have
+        # logged it, and a library failure is the one ending in this chain
+        # that hands the analyst text in place of the data (#219).
+        self.assertIn("'volume'", record.getMessage())
+        self.assertEqual(record.levelno, logging.ERROR)
+        self.assertIsNotNone(record.exc_info)  # with the traceback, for the same reason
 
     def test_a_chain_no_vendor_serves_ends_as_one_capped_line_not_a_raise(self):
         out, cm = self._route({"yfinance": _library_forged}, "yfinance")
@@ -1324,6 +1328,71 @@ def test_every_registered_tool_declares_the_subject_its_library_failure_names():
     # Hand-enumerating the tools is what shipped a leaf with no lane at all
     # and nothing to catch it (#86).
     assert set(interface._LIBRARY_SUBJECTS) == set(interface.VENDOR_METHODS)
+
+
+# Each subject template rendered with the NAMES of the arguments its routed
+# call passes, in the order the wrapper writes them. The table above pins that
+# a row exists for every tool; this pins that the row reads the argument it
+# claims — the property the templates state and the one a reordered wrapper,
+# or a template with its placeholders swapped, would break silently: the
+# naming falls back to the method name only when the format RAISES, and
+# "2026-06-01 values for rsi" raises nothing.
+_SUBJECT_WITH_ARGUMENT_NAMES = {
+    "get_stock_data": "stock price data for symbol",
+    "get_indicators": "ind values for symbol",
+    "get_fundamentals": "fundamentals for ticker",
+    "get_balance_sheet": "balance sheet for ticker",
+    "get_cashflow": "cash flow for ticker",
+    "get_income_statement": "income statement for ticker",
+    "get_news": "news for ticker",
+    "get_global_news": "global news",
+    "get_insider_transactions": "insider transactions for ticker",
+    "get_macro_indicators": "macro series indicator",
+    "get_prediction_markets": "prediction markets for topic",
+    "get_etf_flows": "ETF flows for asset",
+    "get_fear_greed": "fear and greed index",
+    "get_options_market": "options market for asset",
+    "get_economic_calendar": "economic calendar",
+    "get_btc_treasuries": "BTC treasuries for asset",
+}
+
+
+def _routed_call_arguments():
+    """The argument names each tool wrapper passes to ``route_to_vendor``, by method.
+
+    Read from the source rather than by calling: the wrappers are langchain
+    tools, and what matters here is the ORDER the arguments are written in,
+    which is what the subject templates index into. The completeness check
+    against ``VENDOR_METHODS`` is what catches a call shape this misses — a
+    wrapper that reached the router through a module attribute, say.
+    """
+    calls: dict[str, list[str]] = {}
+    for _, tree in package_module_trees("agents/utils", containing="route_to_vendor"):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            method = node.args[0]
+            if name != "route_to_vendor" or not isinstance(method, ast.Constant):
+                continue
+            assert method.value not in calls, f"{method.value} is routed from two call sites"
+            calls[method.value] = [
+                a.id if isinstance(a, ast.Name) else "<expression>" for a in node.args[1:]
+            ]
+    return calls
+
+
+@pytest.mark.unit
+def test_every_subject_template_reads_the_argument_it_claims():
+    calls = _routed_call_arguments()
+    assert set(_SUBJECT_WITH_ARGUMENT_NAMES) == set(interface.VENDOR_METHODS)
+    assert set(calls) == set(interface.VENDOR_METHODS)
+    for method, template in interface._LIBRARY_SUBJECTS.items():
+        # ``_library_subject``'s own call, with the argument names standing in
+        # for the values, so what is compared is the reading rather than the
+        # row: an index past the call's arguments raises here instead of
+        # costing a subject in production.
+        assert template.format(*calls[method]) == _SUBJECT_WITH_ARGUMENT_NAMES[method], method
 
 
 @pytest.mark.unit

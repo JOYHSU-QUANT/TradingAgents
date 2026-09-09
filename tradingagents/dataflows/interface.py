@@ -157,19 +157,48 @@ OPTIONAL_CATEGORIES = {
     "btc_treasuries",
 }
 
-# Categories whose vendor's own library failing must still abort the call.
-# Everywhere else an untyped failure below a vendor is read as its library's
-# and reported as one line of text, so a stockstats bug costs one indicator
-# rather than the run (#187). OHLCV is the exception: it is the market
-# analyst's primary input and the frame every other price claim is checked
-# against, so a report line where the prices should be would leave the run
-# reasoning from nothing while looking answered. Which categories are loud
-# used to be decided by which nine getters happened to carry a broad handler
-# — the OHLCV getter's silence on the matter was inherited, not chosen, and
-# its Alpha Vantage sibling aborted where the yfinance one reported (#219).
-# Declared here so it is one auditable line, and mirrored by the test that
-# holds each yfinance leaf to its ending.
+# Categories whose vendor's own library failing is never rendered as report
+# text. Everywhere else an untyped failure below a vendor is read as its
+# library's and reported as one line of text, so a stockstats bug costs one
+# indicator rather than the run (#187). OHLCV is the exception: it is the
+# market analyst's primary input and the frame every other price claim is
+# checked against, so a report line where the prices should be would leave
+# the run reasoning from nothing while looking answered. Which categories are
+# loud used to be decided by which nine getters happened to carry a broad
+# handler — the OHLCV getter's silence on the matter was inherited, not
+# chosen, and its Alpha Vantage sibling aborted where the yfinance one
+# reported (#219). Declared here so it is one auditable line, and mirrored by
+# the test that holds each yfinance leaf to its ending.
+#
+# The other three core categories keep the report line, and that is a choice
+# now rather than an inheritance: fundamentals and news reach the analyst as
+# prose either way, so a line saying the vendor's parser broke reads as the
+# absence it is, where a report line standing in for prices does not. Making
+# them loud would also let one vendor's parser bug abort a paper cycle the
+# sibling vendor could have served.
+#
+# "Never rendered as text" rather than "always raises": a chain where another
+# vendor reported clean no-data ends in that sentinel, which is ranked ahead
+# of the raise and was this ending before the declaration existed.
 LOUD_LIBRARY_CATEGORIES = frozenset({"core_stock_apis"})
+
+# A loud category must not also be optional. The optional ending is a
+# sentinel, which outranks the raise below, so the two declarations would
+# contradict each other silently: no exception, no log line, and no test
+# failure for as long as the one loud category happens to be core. The
+# behaviour itself is pinned over every member of the declaration, so this
+# is the early word rather than the only guard — it fails at import, before
+# a cycle runs, and it is stripped under ``python -O``.
+assert LOUD_LIBRARY_CATEGORIES.isdisjoint(OPTIONAL_CATEGORIES), (
+    f"categories cannot be both loud and optional: "
+    f"{sorted(LOUD_LIBRARY_CATEGORIES & OPTIONAL_CATEGORIES)}"
+)
+
+# How a vendor's library failing is logged, shared by the two lanes that meet
+# one: the boundary that raised the type itself and the conversion of an
+# untyped failure. The same event either way, so the same sentence — the
+# vendor, the subject, the tool and the whole uncapped message.
+_LIBRARY_FAILURE_LOG = "Vendor %r failed in its own library retrieving %s for %s: %s"
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -692,15 +721,15 @@ def route_to_vendor(method: str, *args, **kwargs):
             # (Alpha Vantage has an RSI endpoint), and this used to be
             # rendered as prose at the leaf, which read here as a successful
             # answer and ended the chain at the vendor that had just failed
-            # (#187). Logged by subject only: the lane at the leaf already
-            # logged the library's whole message and the traceback under the
-            # vendor's own module, and that message can run to kilobytes.
-            logger.warning(
-                "Vendor %r failed in its own library retrieving %s for %s; trying next vendor.",
-                vendor,
-                e.what,
-                method,
-            )
+            # (#187). No production boundary raises the type today — the
+            # conversion below is where every library failure now enters — so
+            # this lane exists for a boundary that knows the failure is its
+            # library's and says so. It therefore logs the whole thing itself,
+            # at the same level and in the same words as the conversion —
+            # one shared format string, so neither can drift into its own
+            # wording — since there is no leaf lane left to have logged it
+            # first (#219).
+            logger.error(_LIBRARY_FAILURE_LOG, vendor, e.what, method, e.detail, exc_info=True)
             first_library, first_error = _met_library_failure(
                 first_library, first_error, category, vendor, e
             )
@@ -724,7 +753,6 @@ def route_to_vendor(method: str, *args, **kwargs):
             # visible in the logs (#989), not hidden behind a fallback's verdict.
             # exc_info so a real bug (e.g. in an HTML-scraping vendor) leaves a
             # traceback instead of looking identical to a network outage.
-            logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
             # The same fact as the outage lane above, for the verdict below,
             # read off the exception by ``is_vendor_outage`` — the status it
             # carries, never its class (yfinance's HTTPError is curl_cffi's,
@@ -741,19 +769,39 @@ def route_to_vendor(method: str, *args, **kwargs):
             # vendor of every tool: what ``_as_library_failure`` returns joins
             # the lane the typed raisers take, which is where the ending is
             # written. The message travels as the failure's ``detail`` — the
-            # cap and the flatten are the report line's, and this warning is
-            # the uncapped copy, with the traceback the lane at the getter
-            # used to log.
-            if is_vendor_outage(e):
-                first_error, unconfirmed = _met_outage(
-                    first_error, unconfirmed, vendor, e, generic_failure_words(e)
+            # cap and the flatten are the report line's, and the log line each
+            # branch below writes is the uncapped copy, with the traceback the
+            # lane at the getter used to log. One line per failure, whichever
+            # branch takes it, so the levels stay readable: WARNING for a
+            # vendor's routine bad day, ERROR for its library breaking.
+            outage = is_vendor_outage(e)
+            library = None if outage else _as_library_failure(category, method, args, e)
+            if library is not None:
+                # ERROR, where every other ending in this lane keeps the
+                # WARNING, and naming the subject rather than the method:
+                # this is the degrade the leaf lanes were added to make
+                # visible (#187 — seven of them logged nothing, so an
+                # operator never saw one happen), and it is the one ending
+                # here that hands the analyst a line of text in place of the
+                # data it asked for. A vendor being down or handing back a
+                # verdict is routine; its library breaking on data it did
+                # serve is a bug someone has to fix. Same words and level as
+                # the typed lane above, which a boundary naming its own
+                # library bug takes.
+                logger.error(
+                    _LIBRARY_FAILURE_LOG, vendor, library.what, method, e, exc_info=True
                 )
-            elif (library := _as_library_failure(category, method, args, e)) is not None:
                 first_library, first_error = _met_library_failure(
                     first_library, first_error, category, vendor, library
                 )
-            elif first_error is None:
-                first_error = _VendorFailure(vendor, e)
+            else:
+                logger.warning("Vendor %r failed for %s: %s", vendor, method, e, exc_info=True)
+                if outage:
+                    first_error, unconfirmed = _met_outage(
+                        first_error, unconfirmed, vendor, e, generic_failure_words(e)
+                    )
+                elif first_error is None:
+                    first_error = _VendorFailure(vendor, e)
             continue
         # The vendor returned: drop a deadline that predates this request (a
         # lapsed one), keep the one a sibling thread armed while it was in

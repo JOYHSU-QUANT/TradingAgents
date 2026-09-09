@@ -2967,7 +2967,7 @@ class TestArgumentGuards:
     def test_fetch_each_rejects_a_bare_string_item_list(self):
         # A string is iterable too — without the guard it would sweep one
         # HTTP request per character with single-character bucket keys.
-        with pytest.raises(TypeError, match="bare string"):
+        with pytest.raises(sosovalue_common.WiringGapError, match="bare string"):
             sosovalue_common.fetch_each(
                 "Nonfarm Payrolls",
                 lambda item: None,

@@ -35,13 +35,15 @@ logger = logging.getLogger(__name__)
 # taxonomy and outside transport: a stockstats or pandas bug on a frame
 # yfinance did serve leaves raw, and the router reads it as this vendor's
 # library failing, routes past it and, when no vendor serves, renders one
-# line of report text (#187, #219). Eight of these getters used to wrap
-# their fetch in a ``with`` block that did the conversion here — a
-# per-getter decision that left their Alpha Vantage siblings aborting the
-# run over the identical bug, and left get_YFin_data_online's own silence
-# looking like a choice when it was an omission. It is a category's
-# decision now (``interface.LOUD_LIBRARY_CATEGORIES``), and OHLCV — this
-# module's get_YFin_data_online — is the category that still aborts.
+# line of report text (#187, #219). Six of the getters here — every
+# registered impl but get_YFin_data_online — used to wrap their fetch in a
+# ``with`` block that did the conversion at the getter (nine across the
+# repo), a per-getter decision that left their Alpha Vantage siblings
+# aborting the run over the identical bug, and left get_YFin_data_online's
+# own silence looking like a choice when it was an omission. It is a
+# category's decision now (``interface.LOUD_LIBRARY_CATEGORIES``), and
+# OHLCV — this module's get_YFin_data_online — is the category whose
+# library failure is never rendered as text.
 #
 # What a getter runs BEFORE it asks yfinance anything is not the vendor's
 # library, and says so with ``wiring_gap`` rather than by sitting above the
@@ -107,10 +109,13 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
         # families are equally reachable: an iterator or nested tuple raises
         # TypeError, a dict-like raises ValueError, and a column label need not
         # be hashable — ``df.columns = pd.Index([...], dtype=object)`` takes
-        # either (measured, pandas 2.3.3). The filter's own ValueError, for an
-        # unusable curr_date, is not a second meaning to worry about here: the
-        # shared sentinel above answered that case before anything was filtered
-        # (#89), and this is the only production caller of that filter.
+        # either (measured, pandas 2.3.3). The filter's own two guards — an
+        # unusable curr_date, labels coerced from another frame — are not a
+        # second meaning to worry about here: they raise WiringGapError, which
+        # this clause does not catch, so our own breakage is not filed as
+        # something the vendor did (#219). The shared sentinel above answers
+        # the curr_date case before anything is filtered anyway (#89), and
+        # this is the only production caller of that filter.
         raise NoMarketDataError(
             ticker,
             canonical,

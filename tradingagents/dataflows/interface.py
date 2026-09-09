@@ -322,7 +322,7 @@ def _met_outage(
     vendor: str,
     error: Exception,
     words: str,
-) -> tuple[_VendorFailure | None, _Unconfirmed | None]:
+) -> tuple[_VendorFailure, _Unconfirmed]:
     """Both facts an outage lane records, together: the failure and the unconfirmed verdict.
 
     The failure joins ``first_error`` (first met stays), and the outage rank

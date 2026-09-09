@@ -21,6 +21,7 @@ from yfinance.exceptions import YFRateLimitError
 import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_common as su
 import tradingagents.dataflows.yfinance_news as ynews
+from tests.conftest import registry_pairs
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import (
@@ -860,7 +861,7 @@ _YFINANCE_LEAF_CALLS = {
 
 
 def _registered_yfinance_methods(registry):
-    return {method for method, vendors in registry.items() if "yfinance" in vendors}
+    return {method for method, vendor in registry_pairs(registry) if vendor == "yfinance"}
 
 
 def _check_call_table_covers(registry):
@@ -884,19 +885,10 @@ def test_every_registered_yfinance_impl_has_a_row_in_the_call_table():
 
 
 @pytest.mark.unit
-def test_the_coverage_check_catches_an_unlisted_registry_entry():
-    # Discrimination: register a yfinance impl the table does not know about
-    # and the coverage check must fail — that is the whole point of deriving
-    # the leaf list from the registry.
-    with (
-        mock.patch.dict(
-            interface.VENDOR_METHODS,
-            {"get_unlisted_thing": {"yfinance": lambda: None}},
-            clear=False,
-        ),
-        pytest.raises(AssertionError),
-    ):
-        _check_call_table_covers(interface.VENDOR_METHODS)
+def test_the_coverage_check_catches_an_unlisted_registry_entry(grown_registry):
+    # Discrimination, per yfinance method: see the fixture.
+    with pytest.raises(AssertionError):
+        _check_call_table_covers(grown_registry)
 
 
 @pytest.mark.unit

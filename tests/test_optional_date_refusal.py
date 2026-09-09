@@ -12,10 +12,6 @@ agent turn ``get_stock_data`` answered the same string with ``INVALID_END_DATE
 would write down "positioning / sentiment unavailable this session" and decide
 on price alone, over an argument that was its own to fix.
 
-Every network seam here raises, so each refusal test also pins that the vendor
-was never asked; the usable-date tests pin the opposite, so a gate that refused
-everything could not pass.
-
 The eighth optional getter, Polymarket's, is the one #119 left out: its
 ``curr_date`` is a disclosure input rather than a bound, and was read only by
 ``live_snapshot_note``, which degrades to ``""`` on a date it cannot parse — so
@@ -23,29 +19,24 @@ the string every getter above refuses drew a full, undisclosed live report
 (#139). It refuses in the same voice now, with two differences the disclosure
 lane carries: ``None`` means the argument was omitted and stays the
 no-disclosure lane (#73), and the sentence is the disclosure one with the
-omission remedy (#144) — so it has its own class below rather than a row in
-the table.
+omission remedy (#144).
+
+The refusal matrix over these getters — every value, direct and through the
+router's optional lane (the two-vendor ETF-flow chain in either order
+included), ``None`` refused or kept as the omitted lane per getter — is the
+table-driven sweep in ``test_date_refusal_coverage`` (#230). What stays here:
+the one ordering claim the table cannot express (the date is judged before the
+getter's own clock-reading rules) and the shape of the echo every refusal
+carries.
 """
 
-import contextlib
-import copy
 from datetime import datetime
 
 import pytest
 
 import tradingagents.dataflows.alpha_vantage_common as avc
-import tradingagents.dataflows.config as config_module
 import tradingagents.dataflows.deribit as deribit
-import tradingagents.dataflows.farside as farside
-import tradingagents.dataflows.fear_greed as fear_greed
-import tradingagents.dataflows.fred as fred
-import tradingagents.dataflows.polymarket as polymarket
-import tradingagents.dataflows.sosovalue as sosovalue
-import tradingagents.dataflows.sosovalue_macro as sosovalue_macro
-import tradingagents.dataflows.sosovalue_treasuries as sosovalue_treasuries
-import tradingagents.default_config as default_config
-from tests.test_unusable_date_parity import _GOOD, _UNUSABLE, _VendorReached
-from tradingagents.dataflows import interface
+from tests._date_refusal_table import no_network
 from tradingagents.dataflows.errors import WiringGapError
 from tradingagents.dataflows.utils import (
     MAX_UNTRUSTED_CHARS,
@@ -53,209 +44,21 @@ from tradingagents.dataflows.utils import (
     invalid_date_sentinel,
 )
 
-# ``_UNUSABLE`` is the core tools' list (#89's three plus None): none of these
-# getters has a date-less lane either, and on the old code None was a bare
-# TypeError from strptime (or, for the three typed twins, a vendor error).
-
-
-def _no_network(monkeypatch, reached=None):
-    """The first network-touching seam behind each optional getter.
-
-    ``reached`` lets a caller hand in the list to report into, so a suite that
-    composes this with the parity suite's seams reads one list
-    (test_date_refusal_coverage).
-    """
-    if reached is None:
-        reached = []
-
-    def _reached(*a, **k):
-        reached.append(a)
-        raise _VendorReached("the vendor was asked before the date was judged")
-
-    monkeypatch.setattr(fear_greed, "_request", _reached)
-    monkeypatch.setattr(farside, "_load_flows", _reached)
-    monkeypatch.setattr(sosovalue, "_load_snapshot", _reached)
-    monkeypatch.setattr(sosovalue_macro, "_load_snapshot", _reached)
-    monkeypatch.setattr(sosovalue_treasuries, "_load_snapshot", _reached)
-    monkeypatch.setattr(deribit, "_request", _reached)
-    monkeypatch.setattr(fred, "_request", _reached)
-    monkeypatch.setattr(polymarket, "_request", _reached)
-    return reached
-
-
-def _asked(reached, call, *args):
-    """Whether ``call(*args)`` reached a vendor seam, however the getter reported it.
-
-    Not the parity file's ``_asked``: Deribit's per-half fetch helper swallows
-    the seam's raise and the report then raises its own DeribitError for
-    "both halves failed", so the outcome is suppressed wholesale here and the
-    seam list is what is read.
-    """
-    del reached[:]
-    with contextlib.suppress(Exception):
-        call(*args)
-    return bool(reached)
-
-
-# (getter called as (curr_date), what, router method + args builder). ``what``
-# is the noun the sentence names — article-free, since the window template
-# supplies "the" itself; the two ETF-flow vendors say the same one because the
-# model cannot see which of them answered (#89's reasoning).
-_GETTERS = [
-    pytest.param(
-        lambda d: fear_greed.get_fear_greed_data(d, 30),
-        "Fear & Greed readings",
-        ("get_fear_greed", lambda d: (d, 30)),
-        id="fear_greed",
-    ),
-    pytest.param(
-        lambda d: farside.get_etf_flow_data("BTC", d, 30),
-        "ETF flows",
-        None,
-        id="farside_etf_flows",
-    ),
-    pytest.param(
-        lambda d: sosovalue.get_etf_flow_data("BTC", d, 30),
-        "ETF flows",
-        ("get_etf_flows", lambda d: ("BTC", d, 30)),
-        id="sosovalue_etf_flows",
-    ),
-    pytest.param(
-        lambda d: fred.get_macro_data("cpi", d, 90),
-        "macro data",
-        ("get_macro_indicators", lambda d: ("cpi", d, 90)),
-        id="fred_macro",
-    ),
-    pytest.param(
-        lambda d: deribit.get_options_market_data("BTC", d),
-        "options market data",
-        ("get_options_market", lambda d: ("BTC", d)),
-        id="deribit_options",
-    ),
-    pytest.param(
-        lambda d: sosovalue_macro.get_economic_calendar_data(d, 30),
-        "economic calendar data",
-        ("get_economic_calendar", lambda d: (d, 30)),
-        id="sosovalue_calendar",
-    ),
-    pytest.param(
-        lambda d: sosovalue_treasuries.get_btc_treasury_data("BTC", d, 90),
-        "BTC treasury holdings",
-        ("get_btc_treasuries", lambda d: ("BTC", d, 90)),
-        id="sosovalue_treasuries",
-    ),
-]
-
 
 @pytest.mark.unit
-class TestOptionalGettersRefuseInOneVoice:
-    @pytest.mark.parametrize("value", _UNUSABLE)
-    @pytest.mark.parametrize("call,what,_routed", _GETTERS)
-    def test_curr_date(self, monkeypatch, value, call, what, _routed):
-        _no_network(monkeypatch)
-        # Whole-answer equality: the refusal IS the answer and nothing rides
-        # behind it; the seam raising proves no request was made first.
-        assert call(value) == invalid_date_sentinel(value, what=what, kind="point")
-
-    @pytest.mark.parametrize("call,what,_routed", _GETTERS)
-    def test_a_usable_date_still_reaches_the_vendor(self, monkeypatch, call, what, _routed):
-        reached = _no_network(monkeypatch)
-        assert _asked(reached, call, _GOOD), call
-
-    @pytest.mark.parametrize("call,what,_routed", _GETTERS)
-    def test_a_non_zero_padded_date_is_still_usable(self, monkeypatch, call, what, _routed):
-        # strptime accepts "2026-6-5" and every getter goes on to normalise it
-        # for its lexical comparisons; the refusal must not be stricter than
-        # the parser behind it (#89 kept this too).
-        reached = _no_network(monkeypatch)
-        assert _asked(reached, call, "2026-6-5"), call
-
+class TestTheDateIsJudgedFirst:
     def test_the_date_is_judged_before_the_getters_own_curr_date_rules(self, monkeypatch):
         # Deribit withholds the chain for a curr_date earlier than today and
         # sosovalue_macro projects AHEAD_DAYS past it; both rules need a date
         # to reason about, so an unparseable one is refused before either
         # runs — i.e. before the clock is even read.
-        _no_network(monkeypatch)
+        no_network(monkeypatch)
 
         def _no_clock():
             raise AssertionError("the clock was read for a date that does not parse")
 
         monkeypatch.setattr(deribit, "_utc_now", _no_clock)
         assert deribit.get_options_market_data("BTC", "2026/08/18").startswith("INVALID_CURR_DATE")
-
-
-def _prediction_markets(d):
-    return polymarket.get_prediction_markets("Fed", None, d)
-
-
-_PM_WHAT = "prediction-market probabilities"
-
-
-@pytest.mark.unit
-class TestPredictionMarketsRefuseInTheSameVoice:
-    """See the module docstring: the same refusal template and tag as the
-    table above, but with the DISCLOSURE sentence and its omission remedy
-    (#144 — this curr_date never bounds the data), and ``None`` kept as the
-    omitted lane."""
-
-    @pytest.mark.parametrize("value", [v for v in _UNUSABLE if v is not None])
-    def test_a_supplied_unusable_date_is_refused_before_the_fetch(self, monkeypatch, value):
-        reached = _no_network(monkeypatch)
-        assert _prediction_markets(value) == invalid_date_sentinel(
-            value, what=_PM_WHAT, kind="disclosure"
-        )
-        assert not reached
-
-    @pytest.mark.parametrize("value", [None, _GOOD, "2026-6-5"])
-    def test_omitted_and_usable_dates_still_reach_the_vendor(self, monkeypatch, value):
-        reached = _no_network(monkeypatch)
-        assert _asked(reached, _prediction_markets, value), value
-
-    def test_the_refusal_is_served_through_the_router(self, monkeypatch):
-        # prediction_markets is an optional category: a raise here would be
-        # rendered as "this source is down", the verdict #119 closed.
-        _no_network(monkeypatch)
-        monkeypatch.setattr(config_module, "_config", copy.deepcopy(default_config.DEFAULT_CONFIG))
-        out = interface.route_to_vendor("get_prediction_markets", "Fed", None, "abc")
-        assert out == invalid_date_sentinel("abc", what=_PM_WHAT, kind="disclosure")
-
-
-@pytest.mark.unit
-class TestThroughTheRouter:
-    """The optional lane: a raise leaving one of these getters is rendered as
-    ``DATA_UNAVAILABLE: optional <category> could not be retrieved`` — the
-    "this source is down, proceed without it" verdict. A returned refusal is
-    served as the answer instead, exactly as it is for a core category, because
-    the router serves any returned string as the tool's answer."""
-
-    @pytest.fixture(autouse=True)
-    def _every_optional_vendor_on(self, monkeypatch):
-        _no_network(monkeypatch)
-        cfg = copy.deepcopy(default_config.DEFAULT_CONFIG)
-        # Pin the two SoSoValue-only categories on explicitly (their default
-        # since the 2026-09-02 cutover): a disabled category answers its own
-        # sentinel before any getter runs, which is not the lane under test,
-        # and the pin keeps this fixture independent of the shipping default.
-        cfg["data_vendors"]["economic_calendar"] = "sosovalue"
-        cfg["data_vendors"]["btc_treasuries"] = "sosovalue"
-        monkeypatch.setattr(config_module, "_config", cfg)
-
-    @pytest.mark.parametrize("call,what,routed", [p for p in _GETTERS if p.values[2] is not None])
-    def test_the_refusal_is_served_not_data_unavailable(self, call, what, routed):
-        method, args = routed
-        out = interface.route_to_vendor(method, *args("abc"))
-        assert out == invalid_date_sentinel("abc", what=what, kind="point")
-        assert not out.startswith("DATA_UNAVAILABLE")
-
-    def test_the_etf_flow_chain_answers_the_same_sentence_from_either_vendor(self, monkeypatch):
-        # crypto_etf_flows is a two-vendor chain (sosovalue, farside): the
-        # sentence must not depend on which one is configured first.
-        cfg = copy.deepcopy(config_module._config)
-        for chain in ("sosovalue,farside", "farside,sosovalue", "farside"):
-            cfg["data_vendors"]["crypto_etf_flows"] = chain
-            monkeypatch.setattr(config_module, "_config", cfg)
-            out = interface.route_to_vendor("get_etf_flows", "BTC", "abc", 30)
-            assert out == invalid_date_sentinel("abc", what="ETF flows", kind="point"), chain
 
 
 @pytest.mark.unit
@@ -266,8 +69,8 @@ class TestTheEchoIsFlattenedAndCapped:
     tools too."""
 
     def test_a_clean_value_is_echoed_byte_for_byte(self):
-        # The parity tests pin the fundamentals sentence by equality; the
-        # flattening must be invisible for the inputs they use.
+        # The coverage sweep pins the fundamentals sentence by equality; the
+        # flattening must be invisible for the inputs it uses.
         assert "curr_date 'abc' is not" in invalid_date_sentinel("abc", what="x", kind="point")
         assert "curr_date '' is not" in invalid_date_sentinel("", what="x", kind="point")
         assert "curr_date None is not" in invalid_date_sentinel(None, what="x", kind="point")

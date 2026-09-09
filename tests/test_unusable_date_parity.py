@@ -13,26 +13,22 @@ because pandas reads a slash-separated date) and ``get_indicators`` (both: the
 raw ``strptime`` message, served by the tool wrapper with no retry
 instruction). ``None`` is refused too: none of these tools has a date-less
 lane, and on the pre-PR code it was a bare ``TypeError`` from ``strptime``
-reachable only by a direct caller (the tool schemas require a string). All
-network access
-is mocked to fail loudly, so every test here also pins that the refusal happens
-before any vendor is asked.
-"""
+reachable only by a direct caller (the tool schemas require a string).
 
-import contextlib
-import copy
+The refusal matrix itself — every value, every date parameter, both vendors,
+direct and through the router, with every vendor seam raising — is the
+table-driven sweep in ``test_date_refusal_coverage`` (#230), and each of the
+old answers above is one cell of it. What stays here is the shared sentence's
+shape and the two claims the sweep cannot express: a feed that really answers
+nothing, and a verdict that outranks the date.
+"""
 
 import pytest
 
-import tests.test_yfinance_freshness as freshness
 import tradingagents.dataflows.alpha_vantage_indicator as avi
-import tradingagents.dataflows.alpha_vantage_news as avn
-import tradingagents.dataflows.alpha_vantage_stock as avs
-import tradingagents.dataflows.config as config_module
 import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_news as yfnews
-import tradingagents.default_config as default_config
-from tradingagents.dataflows import interface
+from tests._date_refusal_table import GOOD, no_network
 from tradingagents.dataflows.errors import WiringGapError
 from tradingagents.dataflows.utils import (
     date_range_refusal,
@@ -40,87 +36,15 @@ from tradingagents.dataflows.utils import (
     invalid_date_sentinel,
 )
 
-# The canonical "inputs the vendors used to disagree on" list is the #89 one
-# (read as a module attribute, not imported by name, so pytest does not collect
-# that class a second time here); these tools add None, which the fundamentals
-# getters keep as a lane (#73).
-_UNUSABLE = [*freshness.TestUnusableCurrDateIsVendorAgnostic._UNUSABLE, None]
-_GOOD = "2026-06-05"
-
-
-class _VendorReached(Exception):
-    """Raised by every mocked network seam: reaching it is the failure."""
-
-
-def _no_network(monkeypatch, reached=None):
-    """Every seam a getter under test could reach the vendor through.
-
-    Returns the list the seams append to before raising: what becomes of the
-    seam's error on the way out is the router's business, not this suite's
-    (#187, #219), so "was the vendor asked?" is read from this list, not from
-    the outcome. ``reached`` lets a caller hand in that list, so seams armed by
-    another suite's helper report into the same one (test_date_refusal_coverage).
-    """
-    if reached is None:
-        reached = []
-
-    def _reached(*a, **k):
-        reached.append(a)
-        raise _VendorReached("the vendor was asked before the date was judged")
-
-    monkeypatch.setattr(yfnews.yf, "Ticker", _reached)
-    monkeypatch.setattr(yfnews.yf, "Search", _reached)
-    monkeypatch.setattr(yfin.yf, "Ticker", _reached)
-    monkeypatch.setattr(yfin, "_get_stock_stats_bulk", _reached)
-    monkeypatch.setattr(avn, "_make_api_request", _reached)
-    monkeypatch.setattr(avs, "_make_api_request", _reached)
-    monkeypatch.setattr(avi, "_make_api_request", _reached)
-    # The fetch boundary wraps the call; make it transparent so the seam
-    # above is what fires.
-    monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
-    monkeypatch.setattr(yfin, "yf_fetch_unhidden", lambda fn, **kw: fn())
-    return reached
-
-
-def _asked(reached, call, *args):
-    """Whether ``call(*args)`` reached a vendor seam, however the getter reported it."""
-    del reached[:]
-    with contextlib.suppress(_VendorReached):
-        call(*args)
-    return bool(reached)
-
-
-# (yfinance getter, Alpha Vantage getter, what) for the two window-bounded tools.
-_WINDOW_TOOLS = [
-    pytest.param(yfnews.get_news_yfinance, avn.get_news, "news", id="get_news"),
-    pytest.param(yfin.get_YFin_data_online, avs.get_stock, "stock price data", id="get_stock_data"),
-]
-
-# The same for the two curr_date tools; each vendor called as (curr_date).
-_POINT_TOOLS = [
-    pytest.param(
-        lambda d: yfnews.get_global_news_yfinance(d, look_back_days=7),
-        lambda d: avn.get_global_news(d, look_back_days=7),
-        "global news",
-        id="get_global_news",
-    ),
-    pytest.param(
-        lambda d: yfin.get_stock_stats_indicators_window("AAPL", "rsi", d, 30),
-        lambda d: avi.get_indicator("AAPL", "rsi", d, 30),
-        "indicator values",
-        id="get_indicators",
-    ),
-]
-
 
 @pytest.mark.unit
 class TestTheSharedSentence:
     def test_the_fundamentals_sentence_is_unchanged_byte_for_byte(self):
         # The STATEMENT getters (balance/cashflow/income, both vendors) pass
-        # what="fundamentals", kind="point"; the cross-vendor tests in
-        # test_yfinance_freshness pin their answers by equality against this
-        # template. The overview/prediction lanes moved to kind="disclosure"
-        # (#144), whose byte-pin lives in test_optional_date_refusal.
+        # what="fundamentals", kind="point"; the coverage sweep pins their
+        # answers by equality against this template. The overview/prediction
+        # lanes moved to kind="disclosure" (#144), whose byte-pin lives in
+        # test_optional_date_refusal.
         assert invalid_date_sentinel("abc", what="fundamentals", kind="point") == (
             "INVALID_CURR_DATE: curr_date 'abc' is not a valid yyyy-mm-dd date, so "
             "fundamentals cannot be bounded to a point in time. No data returned; "
@@ -141,10 +65,10 @@ class TestTheSharedSentence:
         assert date_range_refusal("abc", "", what="x") == invalid_date_sentinel(
             "abc", what="x", kind="window", param="start_date"
         )
-        assert date_range_refusal(_GOOD, "", what="x") == invalid_date_sentinel(
+        assert date_range_refusal(GOOD, "", what="x") == invalid_date_sentinel(
             "", what="x", kind="window", param="end_date"
         )
-        assert date_range_refusal(_GOOD, _GOOD, what="x") is None
+        assert date_range_refusal(GOOD, GOOD, what="x") is None
 
     def test_none_is_a_lane_only_where_the_caller_says_so(self):
         # None is refused by default; the fundamentals getters opt INTO the
@@ -152,8 +76,8 @@ class TestTheSharedSentence:
         # the one that has to say so. A window has no lane at all.
         assert date_refusal(None, what="x", kind="point", omitted_ok=True) is None
         assert date_refusal(None, what="x", kind="point") is not None
-        assert date_range_refusal(None, _GOOD, what="x") is not None
-        assert date_range_refusal(_GOOD, None, what="x") is not None
+        assert date_range_refusal(None, GOOD, what="x") is not None
+        assert date_range_refusal(GOOD, None, what="x") is not None
 
     def test_the_argument_tags_are_a_closed_set(self):
         # The tags are read by the model, so a new one is a decision made in
@@ -186,90 +110,7 @@ class TestTheSharedSentence:
 
 
 @pytest.mark.unit
-class TestWindowToolsRefuseInOneVoice:
-    @pytest.mark.parametrize("value", _UNUSABLE)
-    @pytest.mark.parametrize("param", ["start_date", "end_date"])
-    @pytest.mark.parametrize("yf_getter,av_getter,what", _WINDOW_TOOLS)
-    def test_either_date(self, monkeypatch, value, param, yf_getter, av_getter, what):
-        _no_network(monkeypatch)
-        args = {"start_date": _GOOD, "end_date": _GOOD, param: value}
-
-        yf_out = yf_getter("AAPL", args["start_date"], args["end_date"])
-        av_out = av_getter("AAPL", args["start_date"], args["end_date"])
-
-        # Whole-answer equality: the refusal IS the answer, nothing rides behind
-        # it, and neither vendor was reached (the seams raise if they were).
-        assert (
-            yf_out == av_out == invalid_date_sentinel(value, what=what, kind="window", param=param)
-        )
-        assert repr(value) in av_out
-
-    @pytest.mark.parametrize("yf_getter,av_getter,what", _WINDOW_TOOLS)
-    def test_a_usable_range_still_reaches_both_vendors(
-        self, monkeypatch, yf_getter, av_getter, what
-    ):
-        # The gate must let a good date through — otherwise a passing refusal
-        # test could be a gate that refuses everything.
-        reached = _no_network(monkeypatch)
-        for getter in (yf_getter, av_getter):
-            assert _asked(reached, getter, "AAPL", _GOOD, _GOOD), getter
-
-    def test_the_yfinance_news_error_string_lane_is_closed(self, monkeypatch):
-        # Before: parsed inside the broad except, so the answer began "Error
-        # fetching news" — a string the router serves as a successful report.
-        # The refusal is a return, not a raise, so nothing classifies it (#187): the
-        # sentinel is the whole answer, not a wrapped parse failure.
-        _no_network(monkeypatch)
-        out = yfnews.get_news_yfinance("AAPL", "abc", _GOOD)
-        assert out.startswith("INVALID_START_DATE")
-
-    def test_alpha_vantage_no_longer_serves_rows_for_a_slash_date(self, monkeypatch):
-        # The one silent case: pandas parses "2026/08/18", so the range filter
-        # accepted it and real OHLCV came back as if the model had sent the
-        # ISO date. The seam raising proves no request was made.
-        _no_network(monkeypatch)
-        out = avs.get_stock("AAPL", _GOOD, "2026/08/18")
-        assert out.startswith("INVALID_END_DATE")
-        assert "timestamp,open" not in out
-
-    def test_yfinance_no_longer_fetches_an_unbounded_window_for_none(self, monkeypatch):
-        # The strptime this PR deleted was also the None guard (a bare
-        # TypeError, on the pre-PR code). Without a gate in its place, None
-        # reaches ticker.history(start=None), which yfinance answers with its
-        # default trailing month — today's bars under a header naming the
-        # requested historical end_date (measured on an intermediate draft of
-        # this change). The refusal is what stands between the two.
-        _no_network(monkeypatch)
-        out = yfin.get_YFin_data_online("AAPL", None, "2020-06-05")
-        assert out == invalid_date_sentinel(
-            None, what="stock price data", kind="window", param="start_date"
-        )
-
-    def test_a_non_zero_padded_date_is_still_usable(self, monkeypatch):
-        # strptime accepts "2026-6-5"; the refusal must not be stricter than
-        # the parser the getters go on to use (#89 kept this too).
-        reached = _no_network(monkeypatch)
-        assert _asked(reached, avn.get_news, "AAPL", "2026-6-5", _GOOD)
-
-
-@pytest.mark.unit
-class TestPointToolsRefuseInOneVoice:
-    @pytest.mark.parametrize("value", _UNUSABLE)
-    @pytest.mark.parametrize("yf_call,av_call,what", _POINT_TOOLS)
-    def test_curr_date(self, monkeypatch, value, yf_call, av_call, what):
-        _no_network(monkeypatch)
-        assert (
-            yf_call(value)
-            == av_call(value)
-            == invalid_date_sentinel(value, what=what, kind="point")
-        )
-
-    @pytest.mark.parametrize("yf_call,av_call,what", _POINT_TOOLS)
-    def test_a_usable_date_still_reaches_both_vendors(self, monkeypatch, yf_call, av_call, what):
-        reached = _no_network(monkeypatch)
-        for call in (yf_call, av_call):
-            assert _asked(reached, call, _GOOD), call
-
+class TestWhatTheSweepCannotSay:
     @pytest.mark.parametrize("value", ["abc", None])
     def test_a_quiet_feed_no_longer_answers_nothing_that_day(self, monkeypatch, value):
         # The specific leak: yfinance's "No global news found for {curr_date}"
@@ -287,54 +128,11 @@ class TestPointToolsRefuseInOneVoice:
         assert out != f"No global news found for {value}"
         assert out.startswith("INVALID_CURR_DATE")
 
-    def test_indicators_no_longer_answer_the_raw_strptime_message(self, monkeypatch):
-        # Before: both vendors raised strptime's ValueError and the tool wrapper
-        # served its message — the same on both, but no tag and no retry
-        # instruction, unlike the sibling tools called in the same turn.
-        _no_network(monkeypatch)
-        out = avi.get_indicator("AAPL", "rsi", "2026/08/18", 30)
-        assert "does not match format" not in out
-        assert out.startswith("INVALID_CURR_DATE")
-
     def test_an_unsupported_indicator_still_outranks_the_date(self, monkeypatch):
         # Both vendors judge the indicator name first, as before: that verdict
         # is true regardless of the date, and the wrapper serves it.
-        _no_network(monkeypatch)
+        no_network(monkeypatch)
         with pytest.raises(ValueError, match="not supported"):
             yfin.get_stock_stats_indicators_window("AAPL", "bogus", "abc", 30)
         with pytest.raises(ValueError, match="not supported"):
             avi.get_indicator("AAPL", "bogus", "abc", 30)
-
-
-@pytest.mark.unit
-class TestThroughTheRouter:
-    """None of these categories is optional, so a raise leaving a getter used to
-    be ``raise first_error`` — a crash of the ToolNode-wrapped run. A returned
-    refusal is served as the tool's answer instead. The chain is pinned to
-    yfinance alone so the test exercises the vendor whose bare raise this was,
-    rather than whichever vendor the default chain happens to try first."""
-
-    @pytest.fixture(autouse=True)
-    def _yfinance_only(self, monkeypatch):
-        _no_network(monkeypatch)
-        cfg = copy.deepcopy(default_config.DEFAULT_CONFIG)
-        cfg["data_vendors"] = dict.fromkeys(cfg["data_vendors"], "yfinance")
-        monkeypatch.setattr(config_module, "_config", cfg)
-
-    def test_stock_data(self):
-        out = interface.route_to_vendor("get_stock_data", "AAPL", "abc", _GOOD)
-        assert out == invalid_date_sentinel(
-            "abc", what="stock price data", kind="window", param="start_date"
-        )
-
-    def test_news(self):
-        out = interface.route_to_vendor("get_news", "AAPL", _GOOD, "abc")
-        assert out == invalid_date_sentinel("abc", what="news", kind="window", param="end_date")
-
-    def test_global_news(self):
-        out = interface.route_to_vendor("get_global_news", "abc", None, None)
-        assert out == invalid_date_sentinel("abc", what="global news", kind="point")
-
-    def test_indicators(self):
-        out = interface.route_to_vendor("get_indicators", "AAPL", "rsi", "abc", 30)
-        assert out == invalid_date_sentinel("abc", what="indicator values", kind="point")

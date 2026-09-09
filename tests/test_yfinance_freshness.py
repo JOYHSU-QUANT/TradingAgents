@@ -14,61 +14,13 @@ import pandas as pd
 import pytest
 
 import tradingagents.dataflows.y_finance as yfin
-
-
-class _FakeTicker:
-    def __init__(self, **attrs):
-        for k, v in attrs.items():
-            setattr(self, k, v)
-
-
-def _patch_ticker(monkeypatch, **attrs):
-    """A yfinance ``Ticker`` with the given attributes behind a transparent
-    ``yf_fetch_unhidden``. Returns the list each fetch is appended to — at the
-    fetch boundaries (``yf_fetch_unhidden`` and ``yf_fetch_statement``), not
-    at ``Ticker`` construction, which is lazy and asks the vendor nothing —
-    for a caller that has to know the vendor WAS asked
-    (test_date_refusal_coverage). The statement boundary keeps its real
-    wrapper underneath, so nothing here changes what the tests below drive."""
-    reached = []
-    fetch_statement = yfin.yf_fetch_statement
-
-    def _unhidden(fn, **kw):
-        reached.append(fn)
-        return fn()
-
-    def _statement_fetch(fn, **kw):
-        reached.append(fn)
-        return fetch_statement(fn, **kw)
-
-    monkeypatch.setattr(yfin.yf, "Ticker", lambda symbol: _FakeTicker(**attrs))
-    monkeypatch.setattr(yfin, "yf_fetch_unhidden", _unhidden)
-    monkeypatch.setattr(yfin, "yf_fetch_statement", _statement_fetch)
-    return reached
-
-
-def _statement(*cols):
-    """One-row statement frame with the given fiscal-period end columns."""
-    return pd.DataFrame({pd.Timestamp(c): [100.0] for c in cols}, index=["Total Assets"])
-
-
-def _patch_av_request(monkeypatch, body, reached=None):
-    """Serve ``body`` as the Alpha Vantage response, and hand back the module.
-
-    The cross-vendor classes below all drive the real Alpha Vantage getters, so
-    the mock shape is defined once here rather than restated at each site.
-    ``reached``, when given, has each requested function name appended to it
-    (test_date_refusal_coverage has to know the vendor WAS asked).
-    """
-    import tradingagents.dataflows.alpha_vantage_fundamentals as avf
-
-    def _request(function_name, params):
-        if reached is not None:
-            reached.append(function_name)
-        return body
-
-    monkeypatch.setattr(avf, "_make_api_request", _request)
-    return avf
+from tests._date_refusal_table import (
+    FakeTicker,
+    av_statement,
+    patch_av_request,
+    patch_ticker,
+    statement,
+)
 
 
 def _av_freshness_note(av_out):
@@ -92,7 +44,7 @@ class TestStatementLagNote:
     )
     def test_stale_statement_carries_note(self, monkeypatch, method, attr, phrase):
         # Newest period 2025-01-31 vs analysis date 2026-08-18 (> 180 days).
-        _patch_ticker(monkeypatch, **{attr: _statement("2025-01-31")})
+        patch_ticker(monkeypatch, **{attr: statement("2025-01-31")})
         out = method("AAPL", "quarterly", "2026-08-18")
         # Pin the date inside the note line itself — the CSV header also
         # contains it, so a bare substring check could pass vacuously.
@@ -103,29 +55,29 @@ class TestStatementLagNote:
 
     def test_normal_cadence_has_no_note(self, monkeypatch):
         # 49 days behind is a freshly filed quarter, not a stall.
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2026-06-30"))
         out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "Data lag" not in out
 
     def test_annual_bound_tolerates_a_year_old_statement(self, monkeypatch):
         # An annual statement is ~a year old by definition; the quarterly
         # bound would flag every annual call as stale (#30 review round).
-        _patch_ticker(monkeypatch, balance_sheet=_statement("2025-09-27"))
+        patch_ticker(monkeypatch, balance_sheet=statement("2025-09-27"))
         out = yfin.get_balance_sheet("AAPL", "annual", "2026-08-18")
         assert "Data lag" not in out
 
     def test_annual_statement_still_notes_when_genuinely_dead(self, monkeypatch):
         # Beyond a year plus a filing window even an annual filer is stalled.
-        _patch_ticker(monkeypatch, balance_sheet=_statement("2024-06-30"))
+        patch_ticker(monkeypatch, balance_sheet=statement("2024-06-30"))
         out = yfin.get_balance_sheet("AAPL", "annual", "2026-08-18")
         assert "Data lag" in out
 
     def test_note_reflects_newest_surviving_period(self, monkeypatch):
         # The look-ahead filter drops the future column first; the note must
         # describe the newest column the agent actually sees.
-        _patch_ticker(
+        patch_ticker(
             monkeypatch,
-            quarterly_balance_sheet=_statement("2025-01-31", "2027-01-31"),
+            quarterly_balance_sheet=statement("2025-01-31", "2027-01-31"),
         )
         out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "Data lag" in out
@@ -136,7 +88,7 @@ class TestStatementLagNote:
         # with the look-ahead filter, silently (#73). The filter genuinely
         # needs a bound; the note only needs a reference date, so it now
         # judges against today — and the degraded mode is logged.
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2025-01-31"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2025-01-31"))
         with caplog.at_level(logging.WARNING, logger=yfin.__name__):
             out = yfin.get_balance_sheet("AAPL", "quarterly", None)
         assert "Data lag" in out
@@ -146,7 +98,7 @@ class TestStatementLagNote:
         # The wall-clock fallback must not false-alarm on a freshly filed
         # quarter just because the date was omitted.
         recent = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement(recent))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement(recent))
         out = yfin.get_balance_sheet("AAPL", "quarterly", None)
         assert "Data lag" not in out
 
@@ -156,18 +108,18 @@ class TestFundamentalsLiveSnapshotNote:
     _INFO = {"longName": "Apple Inc.", "marketCap": 1_000_000}
 
     def test_backtest_date_discloses_live_values(self, monkeypatch):
-        _patch_ticker(monkeypatch, info=self._INFO)
+        patch_ticker(monkeypatch, info=self._INFO)
         out = yfin.get_fundamentals("AAPL", "2020-01-01")
         assert "live values" in out
         assert "Apple Inc." in out  # data still rendered
 
     def test_current_date_has_no_note(self, monkeypatch):
-        _patch_ticker(monkeypatch, info=self._INFO)
+        patch_ticker(monkeypatch, info=self._INFO)
         out = yfin.get_fundamentals("AAPL", datetime.now().strftime("%Y-%m-%d"))
         assert "live values" not in out
 
     def test_no_curr_date_keeps_legacy_output(self, monkeypatch):
-        _patch_ticker(monkeypatch, info=self._INFO)
+        patch_ticker(monkeypatch, info=self._INFO)
         out = yfin.get_fundamentals("AAPL")
         assert "live values" not in out
 
@@ -183,13 +135,10 @@ class TestStatementBoundIsVendorAgnostic:
 
     def _both_vendor_notes(self, monkeypatch, period, curr_date):
         """Whether each vendor flagged a lag, for one fiscal period and date."""
-        import json
-
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement(period))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement(period))
         yf_out = yfin.get_balance_sheet("AAPL", "quarterly", curr_date)
 
-        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": period}]})
-        avf = _patch_av_request(monkeypatch, body)
+        avf = patch_av_request(monkeypatch, av_statement(period))
         av_out = avf.get_balance_sheet("AAPL", "quarterly", curr_date)
 
         return "Data lag" in yf_out, "Data lag" in _av_freshness_note(av_out)
@@ -232,11 +181,13 @@ class TestUnusableCurrDateIsVendorAgnostic:
     """A curr_date that was supplied but cannot be used must be refused the same
     way through either vendor (#89).
 
-    The three parametrized values are the three that used to be answered
-    differently by each vendor; the CHANGELOG entry records what each one did.
+    The refusal itself — every value, both vendors, the statement lanes'
+    bounding sentence and the overview's disclosure one — is the table-driven
+    sweep in ``test_date_refusal_coverage`` (#230). What stays here is the
+    shared decision's identity and what the fundamentals lanes do AROUND the
+    refusal: the omitted lane, the symbol that outranks the date, and the two
+    reasons a statement can empty.
     """
-
-    _UNUSABLE = ["", "abc", "2026/08/18"]
 
     def test_the_refusal_is_the_single_shared_decision(self):
         # Pins that neither vendor holds its own copy of the judgement: both
@@ -267,81 +218,16 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # and date_refusal is that same tail behind the shared parse (#230).
         assert mdv.refuse_date is utils.refuse_date
 
-    @pytest.mark.parametrize("curr_date", _UNUSABLE)
-    @pytest.mark.parametrize(
-        "attr,method",
-        [
-            ("quarterly_balance_sheet", "get_balance_sheet"),
-            ("quarterly_cashflow", "get_cashflow"),
-            ("quarterly_income_stmt", "get_income_statement"),
-        ],
-    )
-    def test_statements_refuse_in_one_voice(self, monkeypatch, curr_date, attr, method):
-        import json
-
-        # A future period: if either vendor were to serve unfiltered, the row it
-        # must never leak is exactly the one the missing bound would have removed.
-        _patch_ticker(monkeypatch, **{attr: _statement("2099-03-31")})
-        yf_out = getattr(yfin, method)("AAPL", "quarterly", curr_date)
-
-        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": "2099-03-31"}]})
-        av_out = getattr(_patch_av_request(monkeypatch, body), method)(
-            "AAPL", "quarterly", curr_date
-        )
-
-        # Exact equality, not startswith: it pins that the refusal is the WHOLE
-        # answer, so neither vendor can append the future row it just refused to
-        # bound. A "does not contain 2099-03-31" check could not fail once
-        # startswith passed, since the sentence interpolates only curr_date.
-        from tradingagents.dataflows.utils import invalid_date_sentinel
-
-        # kind="point": the statement lanes' curr_date genuinely bounds (the
-        # future row above is what the bound removes), so their refusal keeps
-        # claiming a bound and never offers omission (#144/#140 review).
-        assert (
-            yf_out == av_out == invalid_date_sentinel(curr_date, what="fundamentals", kind="point")
-        )
-        assert repr(curr_date) in yf_out  # the rejected value, so a retry can fix it
-
-    @pytest.mark.parametrize("curr_date", _UNUSABLE)
-    def test_the_overview_refuses_in_one_voice(self, monkeypatch, curr_date):
-        import json
-
-        # The live-snapshot disclosure needs a usable analysis date to decide
-        # whether this is a backtest at all, so without one yfinance served
-        # today's ratios with nothing said about them — the exact failure that
-        # disclosure exists to prevent.
-        _patch_ticker(monkeypatch, info={"longName": "Apple Inc.", "marketCap": 1_000_000})
-        yf_out = yfin.get_fundamentals("AAPL", curr_date)
-
-        av_out = _patch_av_request(monkeypatch, json.dumps({"Symbol": "AAPL"})).get_fundamentals(
-            "AAPL", curr_date
-        )
-
-        # Exact equality pins that the refusal is the whole answer — the ratios
-        # cannot ride along behind it (see the statement test for why a bare
-        # "Apple Inc. not in output" check would have no power here).
-        from tradingagents.dataflows.utils import invalid_date_sentinel
-
-        # kind="disclosure": the OVERVIEW lane serves a live snapshot the
-        # date never bounds — only the as-of disclosure is at stake (#144).
-        assert (
-            yf_out
-            == av_out
-            == invalid_date_sentinel(curr_date, what="fundamentals", kind="disclosure")
-        )
-
     def test_an_omitted_curr_date_still_takes_the_date_less_lane(self, monkeypatch):
-        import json
-
         # The refusal is for a value that was SUPPLIED. None means the model
         # omitted the argument, which keeps the #73 wall-clock fallback on both
         # vendors — refusing that too would delete a lane, not align one.
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2025-01-31"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2025-01-31"))
         yf_out = yfin.get_balance_sheet("AAPL", "quarterly", None)
 
-        body = json.dumps({"quarterlyReports": [{"fiscalDateEnding": "2025-01-31"}]})
-        av_out = _patch_av_request(monkeypatch, body).get_balance_sheet("AAPL", "quarterly", None)
+        av_out = patch_av_request(monkeypatch, av_statement("2025-01-31")).get_balance_sheet(
+            "AAPL", "quarterly", None
+        )
 
         assert "INVALID_CURR_DATE" not in yf_out
         assert "INVALID_CURR_DATE" not in av_out
@@ -355,12 +241,12 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # both vendors answer it first and an unknown ticker reaches the router's
         # no-data lane either way. Judging the date first would make yfinance
         # answer INVALID_CURR_DATE where Alpha Vantage raises.
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=pd.DataFrame())
+        patch_ticker(monkeypatch, quarterly_balance_sheet=pd.DataFrame())
         with pytest.raises(NoMarketDataError):
             yfin.get_balance_sheet("AAPL", "quarterly", "")
 
         with pytest.raises(NoMarketDataError):
-            _patch_av_request(monkeypatch, "{}").get_balance_sheet("AAPL", "quarterly", "")
+            patch_av_request(monkeypatch, "{}").get_balance_sheet("AAPL", "quarterly", "")
 
     def test_undatable_columns_are_reported_as_a_schema_break_not_a_coverage_gap(
         self, monkeypatch, caplog
@@ -374,7 +260,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         from tradingagents.dataflows.errors import NoMarketDataError
 
         broken = pd.DataFrame({"foo": [1.0], "bar": [2.0]}, index=["Total Assets"])
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=broken)
+        patch_ticker(monkeypatch, quarterly_balance_sheet=broken)
         with (
             caplog.at_level(logging.WARNING, logger=yfin.__name__),
             pytest.raises(NoMarketDataError) as exc,
@@ -391,7 +277,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # vendor's window, so they name the date and must not page anyone.
         from tradingagents.dataflows.errors import NoMarketDataError
 
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2027-01-31"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2027-01-31"))
         with (
             caplog.at_level(logging.WARNING, logger=yfin.__name__),
             pytest.raises(NoMarketDataError) as exc,
@@ -413,7 +299,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
         # caller: a broken point-in-time bound must fail loud, never serve the
         # frame whole — which is what falsiness used to do with "", leaking the
         # unfiltered frame rather than emptying it.
-        frame = _statement("2099-03-31")
+        frame = statement("2099-03-31")
         with pytest.raises(WiringGapError, match="look-ahead guard"):
             filter_financials_by_date(frame, "")
         assert filter_financials_by_date(frame, None) is frame
@@ -451,7 +337,7 @@ class TestUnusableCurrDateIsVendorAgnostic:
 
         monkeypatch.setattr(su, "coerce_period_labels", counting)
         monkeypatch.setattr(yfin, "coerce_period_labels", counting)
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-03-31", "2027-03-31"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2026-03-31", "2027-03-31"))
         out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "Balance Sheet" in out
         assert seen.count(2) == 1, seen
@@ -469,23 +355,18 @@ class TestUnusableCurrDateIsVendorAgnostic:
             '[{"fiscalDateEnding": null}, {"fiscalDateEnding": "n/a"}]}'
         )
         with pytest.raises(NoMarketDataError) as av_exc:
-            _patch_av_request(monkeypatch, av_body).get_balance_sheet(
+            patch_av_request(monkeypatch, av_body).get_balance_sheet(
                 "AAPL", "quarterly", "2026-08-18"
             )
         assert "carried no usable fiscalDateEnding" in str(av_exc.value)
         assert "2026-08-18" not in str(av_exc.value)
 
         broken = pd.DataFrame({"foo": [1.0], "bar": [2.0]}, index=["Total Assets"])
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=broken)
+        patch_ticker(monkeypatch, quarterly_balance_sheet=broken)
         with pytest.raises(NoMarketDataError) as yf_exc:
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "carried no usable fiscal period" in str(yf_exc.value)
         assert "2026-08-18" not in str(yf_exc.value)
-
-
-def _tz_statement(*cols, tz="UTC"):
-    """Statement frame whose fiscal-period columns carry a timezone."""
-    return pd.DataFrame({pd.Timestamp(c, tz=tz): [100.0] for c in cols}, index=["Total Assets"])
 
 
 @pytest.mark.unit
@@ -510,7 +391,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         ],
     )
     def test_a_tz_aware_frame_is_served_as_a_report(self, monkeypatch, attr, method):
-        _patch_ticker(monkeypatch, **{attr: _tz_statement("2026-06-30")})
+        patch_ticker(monkeypatch, **{attr: statement("2026-06-30", tz="UTC")})
         out = getattr(yfin, method)("AAPL", "quarterly", "2026-08-18")
         assert "Error retrieving" not in out
         assert "Total Assets" in out
@@ -519,8 +400,8 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         # Not merely "no longer an error string": the look-ahead filter must
         # still do its job on these labels, or the fix would have bought
         # readability by leaking future periods.
-        _patch_ticker(
-            monkeypatch, quarterly_balance_sheet=_tz_statement("2026-06-30", "2099-03-31")
+        patch_ticker(
+            monkeypatch, quarterly_balance_sheet=statement("2026-06-30", "2099-03-31", tz="UTC")
         )
         out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "2026-06-30" in out
@@ -531,7 +412,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         # a genuine coverage gap into a served report.
         from tradingagents.dataflows.errors import NoMarketDataError
 
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_tz_statement("2099-03-31"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2099-03-31", tz="UTC"))
         with pytest.raises(NoMarketDataError, match="on or before 2026-08-18"):
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
 
@@ -554,7 +435,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
             {c: [100.0] for c in (pd.Timestamp("2026-06-30", tz="UTC"), naive_label)},
             index=["Total Assets"],
         )
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "Error retrieving" not in out
         assert "2026-06-30" in out
@@ -564,9 +445,9 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
         # The rendered CSV header is agent-facing text, so it must not depend on
         # which yfinance build answered. Only the surviving labels are compared,
         # since the two frames differ in what the bound removes.
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_tz_statement("2026-06-30"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2026-06-30", tz="UTC"))
         zoned = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2026-06-30"))
         naive = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
 
         def _csv_header(report):
@@ -588,7 +469,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
             {c: [100.0] for c in (pd.Timestamp("2026-12-31", tz="UTC"), "2026-09-30")},
             index=["Total Assets"],
         )
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         with (
             caplog.at_level(logging.WARNING, logger=yfin.__name__),
             pytest.raises(NoMarketDataError) as exc,
@@ -610,7 +491,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
             {c: [100.0] for c in ("2020-03-31", pd.Timestamp("2020-06-30", tz="UTC"))},
             index=["Total Assets"],
         )
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         out = yfin.get_balance_sheet("AAPL", "quarterly", None)
         assert "Error retrieving" not in out
         note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
@@ -619,7 +500,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
     def test_tz_naive_columns_are_unchanged(self, monkeypatch):
         # The lane that already worked, pinned so the normalisation cannot have
         # been bought at its expense.
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=_statement("2026-06-30", "2099-03-31"))
+        patch_ticker(monkeypatch, quarterly_balance_sheet=statement("2026-06-30", "2099-03-31"))
         out = yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "2026-06-30" in out
         assert "2099-03-31" not in out
@@ -643,7 +524,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
 
         frame = pd.DataFrame([[100.0, 200.0]], index=["Total Assets"])
         frame.columns = pd.Index([pd.Timestamp("2026-06-30"), refusing_label], dtype=object)
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         with pytest.raises(NoMarketDataError) as exc:
             yfin.get_balance_sheet("AAPL", "quarterly", "2026-08-18")
         assert "could not be read as fiscal periods" in str(exc.value)
@@ -656,7 +537,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
 
         frame = pd.DataFrame([[100.0, 200.0]], index=["Total Assets"])
         frame.columns = pd.Index([pd.Timestamp("2026-06-30"), {"a": 1}], dtype=object)
-        _patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
+        patch_ticker(monkeypatch, quarterly_balance_sheet=frame)
         with pytest.raises(NoMarketDataError) as exc:
             yfin.get_balance_sheet("AAPL", "quarterly", None)
         assert "could not be read as fiscal periods" in str(exc.value)
@@ -689,7 +570,7 @@ class TestTzAwareStatementColumnsAreNotAnErrorString:
 class TestInsiderLagNote:
     def test_dead_filing_stream_carries_note(self, monkeypatch):
         df = pd.DataFrame({"Start Date": ["2020-01-01"], "Shares": [100]})
-        _patch_ticker(monkeypatch, insider_transactions=df)
+        patch_ticker(monkeypatch, insider_transactions=df)
         out = yfin.get_insider_transactions("AAPL")
         assert "Data lag" in out
         assert "insider filing" in out
@@ -697,13 +578,13 @@ class TestInsiderLagNote:
     def test_recent_filing_has_no_note(self, monkeypatch):
         recent = datetime.now().strftime("%Y-%m-%d")
         df = pd.DataFrame({"Start Date": [recent], "Shares": [100]})
-        _patch_ticker(monkeypatch, insider_transactions=df)
+        patch_ticker(monkeypatch, insider_transactions=df)
         out = yfin.get_insider_transactions("AAPL")
         assert "Data lag" not in out
 
     def test_missing_date_column_degrades_to_no_note(self, monkeypatch):
         df = pd.DataFrame({"Shares": [100]})
-        _patch_ticker(monkeypatch, insider_transactions=df)
+        patch_ticker(monkeypatch, insider_transactions=df)
         out = yfin.get_insider_transactions("AAPL")
         assert "Data lag" not in out
         assert "Insider Transactions" in out  # still renders
@@ -715,7 +596,7 @@ class TestInsiderLagNote:
         df = pd.DataFrame(
             {"Start Date": ["2019-01-01", "2020-06-30", "2019-07-15"], "Shares": [1, 2, 3]}
         )
-        _patch_ticker(monkeypatch, insider_transactions=df)
+        patch_ticker(monkeypatch, insider_transactions=df)
         out = yfin.get_insider_transactions("AAPL")
         note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
         assert "2020-06-30" in note_line
@@ -727,7 +608,7 @@ class TestInsiderLagNote:
         # into an "Error retrieving ..." line the router reports in place of data —
         # an annotation must degrade to silence, never replace what it decorates.
         df = pd.DataFrame({"Start Date": ["-", "n/a"], "Shares": [1, 2]})
-        _patch_ticker(monkeypatch, insider_transactions=df)
+        patch_ticker(monkeypatch, insider_transactions=df)
         out = yfin.get_insider_transactions("AAPL")
         assert "Error retrieving" not in out
         assert "Data lag" not in out
@@ -743,7 +624,7 @@ class TestInsiderLagNote:
         # (#117). No look-ahead risk either way: a future date still fails the
         # cutoff.
         df = pd.DataFrame({"Start Date": ["2020-01-01", "01/02/2020"], "Shares": [1, 2]})
-        _patch_ticker(monkeypatch, insider_transactions=df)
+        patch_ticker(monkeypatch, insider_transactions=df)
         out = yfin.get_insider_transactions("AAPL")
         note_line = next((line for line in out.splitlines() if "Data lag" in line), "")
         assert "2020-01-02" in note_line
@@ -779,7 +660,7 @@ class TestInsiderBoundIsVendorAgnostic:
 
         filed = (datetime.now() - timedelta(days=lag_days)).strftime("%Y-%m-%d")
 
-        _patch_ticker(
+        patch_ticker(
             monkeypatch,
             insider_transactions=pd.DataFrame({"Start Date": [filed], "Shares": [100]}),
         )
@@ -800,7 +681,7 @@ class TestInsiderBoundIsVendorAgnostic:
 
         import tradingagents.dataflows.alpha_vantage_news as avn
 
-        _patch_ticker(monkeypatch, insider_transactions=pd.DataFrame())
+        patch_ticker(monkeypatch, insider_transactions=pd.DataFrame())
         yf_out = yfin.get_insider_transactions("AAPL")
 
         monkeypatch.setattr(
@@ -839,7 +720,7 @@ class TestEmptyNewsWindowIsVendorAgnostic:
         monkeypatch.setattr(
             yfnews.yf,
             "Ticker",
-            lambda symbol: _FakeTicker(
+            lambda symbol: FakeTicker(
                 get_news=lambda count: [{"title": "Old news", "providerPublishTime": self._STALE}]
             ),
         )

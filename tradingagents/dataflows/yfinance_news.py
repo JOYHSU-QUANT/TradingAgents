@@ -17,7 +17,6 @@ from .config import get_config
 # (#187, #219). What each getter does before it asks Yahoo anything — the
 # config reads, the cache forget — is not that, and wears ``wiring_gap`` to
 # say so (#111, #200).
-from .errors import WiringGapError
 from .symbol_utils import normalize_symbol
 from .utils import date_range_refusal, date_refusal, wiring_gap
 from .yfinance_common import yf_fetch_unhidden
@@ -110,13 +109,16 @@ def get_news_yfinance(
     if (refusal := date_range_refusal(start_date, end_date, what="news")) is not None:
         return refusal
 
-    # Coerced inside the guard, as the Alpha Vantage sibling does with the
-    # same key: sent on as it was read, a value that is not a number reaches
-    # Yahoo as the article count and comes back as "No news found" — a
-    # coverage claim over a call that never asked properly (#136), where the
-    # sibling raises. One routed tool's two vendors must end alike (#219).
+    # Coerced and floored inside the guard, as the Alpha Vantage sibling does
+    # with the same key: sent on as it was read, a value that is not a number
+    # reaches Yahoo as the article count and comes back as "No news found",
+    # and so does a zero or a negative — a coverage claim over a call that
+    # never asked properly (#136), where the sibling raises or serves. One
+    # routed tool's two vendors must end alike (#219). Only the floor is
+    # shared: Alpha Vantage also caps at a vendor maximum this path has never
+    # had, and inventing one here would change what a large limit returns.
     with wiring_gap("news configuration"):
-        article_limit = int(get_config()["news_article_limit"])
+        article_limit = max(1, int(get_config()["news_article_limit"]))
     # Query Yahoo with the canonical symbol, like every other yfinance path —
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently
     # returns no news. Keep the user's ticker in the report header.
@@ -201,8 +203,10 @@ def get_global_news_yfinance(
         if isinstance(search_queries, str):
             # A bare string is iterable too — the loop below would run one
             # Yahoo search per character (``fetch_each`` refuses the same
-            # shape for the same reason).
-            raise WiringGapError("global_news_queries must be a list of queries, not a string")
+            # shape for the same reason). Raised untyped inside the guard so
+            # it takes the block's name like every other failure here; the
+            # guard is what makes it a WiringGapError.
+            raise TypeError("global_news_queries must be a list of queries, not a string")
 
     # Each coercion below takes whichever value won above — the configured
     # default or the one this call passed — so each is guarded under a name

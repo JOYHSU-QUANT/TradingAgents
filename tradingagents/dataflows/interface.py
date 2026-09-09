@@ -863,12 +863,22 @@ def route_to_vendor(method: str, *args, **kwargs):
     # lane logged keeps the whole of it, where the leaf's own log line used
     # to (#219). An optional category keeps its own
     # sentinels below: no-data first, then ``DATA_UNAVAILABLE``.
-    # Ahead of the report line, and only there: a core category's chain that
+    # Ahead of the report line, and ONLY there: a core category's chain that
     # met both our wiring gap and some vendor's library failing must end on
     # ours, which someone can fix, rather than hand the analyst the other as
-    # its answer. An optional category keeps its sentinel, where both are
-    # named the same way by whichever was met first (#219).
-    if first_wiring is not None and category not in OPTIONAL_CATEGORIES:
+    # its answer. Both conditions, because this outranks nothing else — a
+    # sibling's clean no-data verdict still wins (the ranking every ending
+    # below keeps), the caller's own indicator mistake still surfaces ahead
+    # of any vendor failure (#137: a missing key in its place would point at
+    # the wrong remedy), and among the vendors' own failures the first met
+    # still wins. An optional category keeps its sentinel, where a gap and a
+    # library failure are named the same way, by whichever was met first
+    # (#219).
+    if (
+        first_wiring is not None
+        and first_library is not None
+        and category not in OPTIONAL_CATEGORIES
+    ):
         raise first_wiring.error
 
     if first_library is not None and category not in OPTIONAL_CATEGORIES:

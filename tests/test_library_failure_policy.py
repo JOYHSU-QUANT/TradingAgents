@@ -292,6 +292,41 @@ def test_a_wiring_gap_outranks_a_sibling_library_failure_in_a_core_chain(order):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "sibling, expected",
+    [
+        (NoMarketDataError("AAPL", "AAPL", "no rows"), "NO_DATA_AVAILABLE"),
+        (UnsupportedIndicatorError("no vendor computes 'zzz'"), None),
+        (VendorUnavailableError("yahoo answered an outage page"), None),
+    ],
+)
+def test_a_wiring_gap_outranks_nothing_but_the_report_line(sibling, expected):
+    # The other half of the rule above. A gap is raised ahead of a library
+    # failure's report line and ahead of nothing else: a sibling's clean
+    # no-data verdict still ends the chain, the caller's own indicator
+    # mistake still surfaces first (#137 — a missing key in its place points
+    # at the wrong remedy), and among the vendors' own failures the first met
+    # still wins. Pinned because the guard that buys the rule above is one
+    # condition away from taking these too.
+    # The sibling first, so what is asserted is that the gap does not jump
+    # ahead of it. Met first the gap would win the vendors' own slot on the
+    # ordinary first-met rule, which is a different fact.
+    set_config({"data_vendors": {"news_data": "yfinance,alpha_vantage"}})
+    chain = {
+        "yfinance": _raises(sibling),
+        "alpha_vantage": _raises(WiringGapError("news configuration: 'news_article_limit'")),
+    }
+    with mock.patch.dict(interface.VENDOR_METHODS, {"get_news": chain}):
+        if expected is None:
+            with pytest.raises(type(sibling)) as info:
+                interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+            assert info.value is sibling
+        else:
+            out = interface.route_to_vendor("get_news", "AAPL", "2026-06-01", "2026-06-05")
+            assert out.startswith(expected)
+
+
+@pytest.mark.unit
 def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeypatch):
     # The readers of ``data_cache_dir`` the entry names. Farside has no copy
     # of its own any more — it imports SoSoValue's — so the identity is what
@@ -310,6 +345,38 @@ def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeyp
     monkeypatch.setattr(yfc, "get_config", dict)
     with pytest.raises(WiringGapError, match="OHLCV cache configuration"):
         yfc.load_ohlcv("AAPL", "2026-06-01")
+
+    # The other half of what the guard covers, and the reason ``makedirs``
+    # is inside it: a key set to something that is not a path answers with a
+    # TypeError, which outside the guard would read as the vendor's library.
+    monkeypatch.setattr(soso, "get_config", lambda: {"data_cache_dir": 12345})
+    with pytest.raises(WiringGapError, match="cache configuration"):
+        soso._cache_dir()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "config_value, guard",
+    [
+        ({"news_article_limit": "ten"}, "news configuration"),
+        ({"global_news_queries": "macro"}, "global news configuration"),
+    ],
+)
+def test_a_configured_value_of_the_wrong_shape_fails_the_call(config_value, guard, monkeypatch):
+    # Sent on as read, the first reaches Yahoo as the article count and comes
+    # back as "No news found" — a coverage claim over a call that never asked
+    # properly (#136) — and the second runs one search per character. Both
+    # are our configuration, so both end at the guard that names it.
+    import tradingagents.dataflows.yfinance_news as ynews
+
+    monkeypatch.setattr(ynews.yf, "Ticker", lambda *a, **k: pytest.fail("no fetch may be made"))
+    monkeypatch.setattr(ynews.yf, "Search", lambda *a, **k: pytest.fail("no fetch may be made"))
+    set_config(config_value)
+    with pytest.raises(WiringGapError, match=guard):
+        if "news_article_limit" in config_value:
+            ynews.get_news_yfinance("AAPL", "2026-06-01", "2026-06-05")
+        else:
+            ynews.get_global_news_yfinance("2026-06-01")
 
 
 @pytest.mark.unit

@@ -960,6 +960,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **A live tick's activity summary vanished whenever a later step raised**
+  (issue #238). The ``live tick …`` line is the loop's only per-tick trading
+  visibility, and it was logged AFTER ``driver.pump()`` — so any raise from the
+  pump skipped it: the two persist errors that deliberately reach the tick
+  guard, and a locked store. The ticks that lost their record were exactly the
+  ones worth keeping, the ones that had just submitted a slice or ingested a
+  fill. The line now comes from ``LiveExecutionEngine.tick()``'s own
+  ``finally``, which also closes the wider window a loop-level fix could not:
+  a raise from INSIDE the tick (a reconcile, the market read, the leg
+  termination write) is logged too, with the status reported as ``raised``
+  rather than ``ok`` because the counts say how far the tick got, not that it
+  finished. Those counts live in a mutable ``_TickProgress`` for the same
+  reason a return value cannot be trusted here — it is precisely what a raise
+  destroys: ``_drain_ws`` records each message's fills as they are booked, so
+  an infra failure on the third of five no longer reports zero, and
+  ``_submit_due_slices`` records a sent slice BEFORE the leg-termination write
+  that can fail with the order already at the venue.
+  The loop's shared containment now names the failing half. A ``phase`` marker
+  makes both the journal line and the DURABLE safe-mode ``detail`` read ``live
+  tick raised`` or ``live decision pump raised`` instead of always blaming the
+  tick — that string is what ``safe-mode --status`` and ``validate`` read back
+  hours later with no traceback beside it, and adoption and decision-cycle
+  writes all happen inside the pump. ``REASON_LIVE_TICK_ERROR`` is unchanged:
+  the lane and its recovery are the same, only the record was wrong.
+  RUNBOOK-live.md's journald evidence quotes the new wording.
+  Known trade-offs: the summary's gate is still ``events or slices or fills``,
+  so a future ``TickStatus`` member that appends no event would log nothing.
+  ``TickStatus`` has two members today and the no-market-data branch appends
+  its own event (the engine comment says so), so a ``status is not OK`` clause
+  was left out rather than adding one no test can exercise.
+
 - **A Bedrock completion that hit its cap was read as a natural stop**
   (#214 item 6). ``completion_metadata`` transcribed the Converse row from
   the docs as ``stop_reason``; run through the real langchain-aws 1.7.5

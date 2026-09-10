@@ -200,11 +200,26 @@ class LiveTickResult:
     events: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass
+class _TickProgress:
+    """What this tick has already done, still readable after a step raises.
+
+    Mutable and owned by :meth:`LiveExecutionEngine.tick`, because a return
+    value is precisely what a raise destroys (issue #238 review): a fill booked
+    by the second of five WS messages, or a slice already on the wire when the
+    cursor write failed, would be counted in a local the caller never receives.
+    Each step writes here the moment its fact becomes true, so the summary logged
+    from ``tick``'s finally reports the work rather than a zero.
+    """
+
+    fills: int = 0
+    slices: int = 0
+
+
 def _log_tick_activity(
     result: LiveTickResult | None,
     *,
-    fills: int,
-    slices: int,
+    progress: _TickProgress,
     protection: ProtectionOutcome | None,
     events: list[str],
 ) -> None:
@@ -225,13 +240,13 @@ def _log_tick_activity(
     on exactly that path, and the status is then reported as ``raised``: the
     counts are what the tick reached, not a claim that it finished.
     """
-    if not (events or slices or fills):
+    if not (events or progress.slices or progress.fills):
         return
     logger.info(
         "live tick %s: fills=%d slices=%d protection=%s events=%s",
         "raised" if result is None else result.status.value,
-        fills,
-        slices,
+        progress.fills,
+        progress.slices,
         None if protection is None else protection.value,
         list(events),
     )
@@ -505,20 +520,19 @@ class LiveExecutionEngine:
         events: list[str] = []
         # Hoisted out of the body so the ``finally`` can report what this tick had
         # already done when a step raised (issue #238).
-        fills = 0
-        submitted = 0
+        progress = _TickProgress()
         protection: ProtectionOutcome | None = None
         result: LiveTickResult | None = None
 
         try:
-            fills = self._drain_ws(now, events)
+            self._drain_ws(now, events, progress)
             # §18.2: refresh the kill switch every loop; the AI decision is off-thread
             # so this cadence is never blocked by a multi-minute cycle.
             self._kill_switch.tick()
 
             # §12.2: reconcile after any fill ingest, and on the 5-minute heartbeat.
             reconciled = False
-            if fills > 0:
+            if progress.fills > 0:
                 reconciled = self._reconcile("fill") or reconciled
             if self._last_reconcile_at is None or now - self._last_reconcile_at >= _HEARTBEAT:
                 reconciled = self._reconcile("heartbeat") or reconciled
@@ -562,7 +576,7 @@ class LiveExecutionEngine:
                 result = LiveTickResult(
                     at=now,
                     status=TickStatus.NO_MARKET_DATA,
-                    fills_ingested=fills,
+                    fills_ingested=progress.fills,
                     reconciled=reconciled,
                     events=tuple(events),
                 )
@@ -586,15 +600,15 @@ class LiveExecutionEngine:
             )
 
             # §9: submit any due slice(s) of the active plan.
-            submitted = self._submit_due_slices(snap.mid_price, now, events)
+            self._submit_due_slices(snap.mid_price, now, events, progress)
             self._maybe_expire_plan(now, events)
             self._maybe_advance_flip(snap, now, events)
 
             result = LiveTickResult(
                 at=now,
                 status=TickStatus.OK,
-                fills_ingested=fills,
-                slices_submitted=submitted,
+                fills_ingested=progress.fills,
+                slices_submitted=progress.slices,
                 protection=protection,
                 reconciled=reconciled,
                 events=tuple(events),
@@ -602,12 +616,12 @@ class LiveExecutionEngine:
             return result
         finally:
             _log_tick_activity(
-                result, fills=fills, slices=submitted, protection=protection, events=events
+                result, progress=progress, protection=protection, events=events
             )
 
     # -- tick steps -----------------------------------------------------------
 
-    def _drain_ws(self, now: datetime, events: list[str]) -> int:
+    def _drain_ws(self, now: datetime, events: list[str], progress: _TickProgress) -> None:
         """Empty the WS queue into the fill processor (§11.4 rule 2).
 
         Deliberately NO try/except around ``ingest_message``: it already skips
@@ -619,13 +633,16 @@ class LiveExecutionEngine:
         retry flag and no operator signal: a silently short ledger.
         """
         drained = self._ws.drain()
-        applied = 0
-        for message in drained:
-            results = self._fill_processor.ingest_message(message)
-            applied += sum(1 for r in results if r.outcome.value == "applied")
-        if applied:
-            events.append(f"fills_applied:{applied}")
-        return applied
+        try:
+            for message in drained:
+                results = self._fill_processor.ingest_message(message)
+                # Counted per MESSAGE: the raise this docstring promises to let
+                # through can land on the third of five, and the two fills booked
+                # before it are already durable (issue #238 review).
+                progress.fills += sum(1 for r in results if r.outcome.value == "applied")
+        finally:
+            if progress.fills:
+                events.append(f"fills_applied:{progress.fills}")
 
     def _reconcile(self, trigger: str) -> bool:
         """Run a §12.2 reconciliation pass and drive the safe-mode machine."""
@@ -782,11 +799,12 @@ class LiveExecutionEngine:
             events.append("venue_identity_fault")
         return outcome
 
-    def _submit_due_slices(self, mid: Decimal, now: datetime, events: list[str]) -> int:
+    def _submit_due_slices(
+        self, mid: Decimal, now: datetime, events: list[str], progress: _TickProgress
+    ) -> None:
         leg = self._leg
         if leg is None:
-            return 0
-        submitted = 0
+            return
         if leg.submitted < self._due_count(leg, now) and now < leg.deadline:
             # The deadline is a HARD envelope (decided 2026-07-22): a slice's
             # size and direction come from a decision older than the whole plan
@@ -819,11 +837,14 @@ class LiveExecutionEngine:
                 else:
                     leg.submitted += 1
                 if slice_outcome is _SliceOutcome.SENT_OK:
-                    submitted += 1
+                    # Recorded before the leg termination below, which writes to
+                    # the store and can raise: the slice is already on the wire
+                    # by then, and that is the one fact the tick's summary must
+                    # not lose (issue #238 review).
+                    progress.slices += 1
                     events.append(f"slice:{leg.plan_id}:{idx}")
         if leg.submitted >= leg.planned:
             self._terminate_leg(leg, now, "completed", events)
-        return submitted
 
     def _due_count(self, leg: _Leg, now: datetime) -> int:
         if now < leg.active_from:

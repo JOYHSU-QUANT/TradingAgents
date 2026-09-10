@@ -983,7 +983,8 @@ Breaking changes within the 0.x line are called out explicitly.
   the two lookups are deduplicated by canonical path so one file cannot be
   listed twice under two spellings. A sidecar that cannot be stat-ed counts as
   hot but is described as unmeasured, so the message never asserts data it did
-  not see. The one recovery step it does name is the one that destroys nothing
+  not see — per sidecar, so that one unmeasurable log cannot downgrade the
+  claim about a 20KB one beside it that stat-ed perfectly well. The one recovery step it does name is the one that destroys nothing
   — MOVING the log aside — because staying silent about that too would leave an
   operator who deleted their own main file with a refusal, a correct ``--db``
   and nowhere to go; opening the pair with a SQLite tool remains unsaid, being

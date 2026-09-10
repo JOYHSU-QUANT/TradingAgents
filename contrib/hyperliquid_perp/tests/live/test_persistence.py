@@ -1522,11 +1522,50 @@ def test_a_log_waiting_for_a_main_file_that_is_gone_is_refused_too(tmp_path):
     log = tmp_path / "x.db-wal"
     log.write_bytes(_HOT_WAL)
 
-    with pytest.raises(SchemaVersionError, match="is not there, but"):
+    with pytest.raises(SchemaVersionError, match="is not there, but") as caught:
         Database(store)
 
+    message = str(caught.value)
+    # The clauses that would be FALSE for the other branch. This one has no
+    # main file, so it cannot have been truncated, and there are not two files
+    # to promise about.
+    assert "deleted out from under its log" in message
+    assert "a truncated main file" not in message
+    # And the one recovery step that destroys nothing, for the operator who
+    # made this pair themselves by deleting the main file.
+    assert "MOVE it out of the way rather than deleting it" in message
     assert log.read_bytes() == _HOT_WAL
     assert not store.exists()  # and nothing was created on the way to refusing
+
+
+def test_a_measured_log_is_not_downgraded_by_one_beside_it_that_is_not(tmp_path, monkeypatch):
+    # The claim is per sidecar, not per refusal. A 20KB log the operator can
+    # see and rescue must not be reported as "may hold data" merely because the
+    # OTHER sidecar could not be stat-ed — that is the same untrue statement as
+    # asserting data about an unmeasurable file, only inverted.
+    store = tmp_path / "x.db"
+    store.touch()
+    wal, journal = tmp_path / "x.db-wal", tmp_path / "x.db-journal"
+    wal.write_bytes(_HOT_WAL)
+    journal.write_bytes(_HOT_JOURNAL)
+    real_stat = pathlib.Path.stat
+
+    def deny(self, *args, **kwargs):
+        if self.name.endswith("-journal"):
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", deny)
+
+    with pytest.raises(SchemaVersionError) as caught:
+        Database(store)
+
+    monkeypatch.undo()
+    message = str(caught.value)
+    assert f"{wal} holds data" in message  # measured, and said so
+    assert f"{journal} could not be measured" in message  # and this one was not
+    assert wal.read_bytes() == _HOT_WAL
+    assert journal.read_bytes() == _HOT_JOURNAL
 
 
 def test_an_empty_log_beside_an_empty_store_is_still_built_in_full(tmp_path):

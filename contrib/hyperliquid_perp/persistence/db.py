@@ -278,8 +278,10 @@ def _unreadable_error(file: Path, exc: BaseException, *, probed: bool) -> Schema
         # ``OSError`` renders its own filename into its text, quoted — on Windows
         # that is the path a second time with every separator doubled. The errno
         # and its text are the half worth printing; the path is already in front.
-        errno, strerror = getattr(exc, "errno", None), getattr(exc, "strerror", None)
-        reason = f"[Errno {errno}] {strerror}" if strerror else str(exc)
+        # Not named ``errno``: this module imports that as a module now, and a
+        # local of the same name would shadow it for the whole function body.
+        code, strerror = getattr(exc, "errno", None), getattr(exc, "strerror", None)
+        reason = f"[Errno {code}] {strerror}" if strerror else str(exc)
     return SchemaVersionError(
         f"{file} could not be opened for reading: {reason}. The path is there, "
         "but this build could not look inside the file to tell whether it is one "
@@ -287,8 +289,8 @@ def _unreadable_error(file: Path, exc: BaseException, *, probed: bool) -> Schema
     )
 
 
-def _hot_sidecars(file: Path) -> tuple[list[str], bool]:
-    """``file``'s log sidecars that could hold its content, and whether all were measured.
+def _hot_sidecars(file: Path) -> list[tuple[str, bool]]:
+    """``file``'s log sidecars that could hold its content, each with whether it was MEASURED.
 
     Non-empty ones only. SQLite leaves a zero-length ``-wal`` behind as a
     matter of course — a connection creates it before it has a frame to put in
@@ -309,11 +311,14 @@ def _hot_sidecars(file: Path) -> tuple[list[str], bool]:
     is whichever one this cannot know, so naming only one names the wrong one
     half the time.
 
-    A sidecar this cannot stat counts as hot, and the second return value says
-    so, because the message must not claim data it did not see. The question
-    being asked is whether anything would be destroyed, and a file that cannot
-    be measured cannot be shown to be empty; the cost of answering it wrongly
-    is one refusal over a log that was not there to lose. ``ENAMETOOLONG`` is
+    A sidecar this cannot stat counts as hot, and is flagged as unmeasured so
+    the message does not claim data it did not see. Per sidecar and not per
+    call: one unmeasurable log must not rewrite the claim about a 20KB one
+    sitting beside it that stat-ed perfectly well, which is the same untrue
+    statement in the other direction. The question being asked is whether
+    anything would be destroyed, and a file that cannot be measured cannot be
+    shown to be empty; the cost of answering it wrongly is one refusal over a
+    log that was not there to lose. ``ENAMETOOLONG`` is
     the exception, and the one failure that is knowledge rather than
     ignorance: a basename with room for ``-wal`` but not ``-journal`` (POSIX
     ``NAME_MAX``) says that sidecar cannot exist, so there is nothing to fail
@@ -345,9 +350,8 @@ def _hot_sidecars(file: Path) -> tuple[list[str], bool]:
     else:
         if resolved != file:
             bases.append(resolved)
-    names: list[str] = []
+    found: list[tuple[str, bool]] = []
     seen: set[str] = set()
-    measured = True
     for suffix in _SIDECAR_SUFFIXES:
         for base in bases:
             sidecar = base.parent / (base.name + suffix)
@@ -373,13 +377,23 @@ def _hot_sidecars(file: Path) -> tuple[list[str], bool]:
             if key in seen:
                 continue
             seen.add(key)
-            names.append(str(sidecar))
-            measured = measured and sized
-    return names, measured
+            found.append((str(sidecar), sized))
+    return found
+
+
+def _join(names: list[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — a list a sentence can hold.
+
+    ``" and ".join`` was fine while a refusal named at most two logs; with both
+    suffixes over both lookup bases it can name four.
+    """
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def _hot_log_error(
-    file: Path, names: list[str], *, missing: bool, measured: bool
+    file: Path, sidecars: list[tuple[str, bool]], *, missing: bool
 ) -> SchemaVersionError:
     """The one wording of "this database's content is in its log" (issue #236).
 
@@ -405,13 +419,17 @@ def _hot_log_error(
     step too would leave an operator who deleted their own main file with a
     refusal, a correct ``--db``, and nowhere to go.
     """
-    listed = " and ".join(names)
-    if measured:
-        claim = f"{listed} {'hold' if len(names) > 1 else 'holds'} data"
-    else:
-        claim = f"{listed} could not be measured and may hold data"
+    # Split by what was actually observed, so one unmeasurable sidecar cannot
+    # downgrade the claim about a log that stat-ed perfectly well beside it.
+    sized = [name for name, was_sized in sidecars if was_sized]
+    unsized = [name for name, was_sized in sidecars if not was_sized]
+    claims = []
+    if sized:
+        claims.append(f"{_join(sized)} {'hold' if len(sized) > 1 else 'holds'} data")
+    if unsized:
+        claims.append(f"{_join(unsized)} could not be measured and may hold data")
+    claim = "; ".join(claims)
     where = "is not there" if missing else "is zero bytes"
-    untouched = "The log has not been" if missing else "Neither file has been"
     looks_like = (
         "a half-restored backup, and a main file deleted out from under its log"
         if missing
@@ -424,11 +442,11 @@ def _hot_log_error(
         "own schema into it, and merely connecting destroys the log on the way "
         "— SQLite reads a log beside an empty main file as stale and deletes "
         "it (measured: 20KB of it gone, and this project's whole schema in "
-        f"what was left). {untouched} touched here. Copy the log aside before "
-        "anything else opens this path; an ordinary read-write open is what "
-        f"deletes it. Then check the --db path — {looks_like} both look like "
-        "this. If the log is yours to discard, MOVE it out of the way rather "
-        "than deleting it and this path builds as a new store."
+        "what was left). Nothing here has been touched. Copy the log aside "
+        "before anything else opens this path; an ordinary read-write open is "
+        f"what deletes it. Then check the --db path — {looks_like} both look "
+        "like this. If the log is yours to discard, MOVE it out of the way "
+        "rather than deleting it and this path builds as a new store."
     )
 
 
@@ -512,14 +530,14 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
             # log stale in SQLite's eyes and gone on the same open (measured:
             # the same 20KB). One verdict, two branches, because only one of
             # the two states has a ``stat`` to read.
-            hot, measured = _hot_sidecars(file)
+            hot = _hot_sidecars(file)
             if hot:
                 # ``from None`` because the missing main file is the PREMISE of
                 # this verdict rather than a failure inside it — the
                 # FileNotFoundError being handled would otherwise read as its
                 # cause. The sibling branch below needs no such clause: nothing
                 # is being handled there.
-                raise _hot_log_error(file, hot, missing=True, measured=measured) from None
+                raise _hot_log_error(file, hot, missing=True) from None
             return
         # There is nowhere to create it, so ``connect`` raises `unable to open
         # database file`, which main()'s last resort prints as exit 2. Named
@@ -602,9 +620,9 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # file is not probed at all, and why THIS function, the one that
         # promises in every sentence it raises that the file is untouched, can
         # keep saying so.
-        hot, measured = _hot_sidecars(file)
+        hot = _hot_sidecars(file)
         if hot:
-            raise _hot_log_error(file, hot, missing=False, measured=measured)
+            raise _hot_log_error(file, hot, missing=False)
         # The readability question the probe would have answered is asked here
         # instead, in the one way that opens nothing of SQLite's: an unreadable
         # empty file used to fall through to ``connect`` and its unnamed exit

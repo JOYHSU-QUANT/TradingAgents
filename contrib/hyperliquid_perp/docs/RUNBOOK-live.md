@@ -380,7 +380,7 @@ python -m contrib.hyperliquid_perp live \
 - **長駐建議**同 paper（[RUNBOOK §3](./RUNBOOK.md)）：掛在會自動重啟的監管下，
   working directory 設 repo 根目錄。監管（systemd 等）的重啟策略可依 exit code
   分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、**1**＝
-  config／憑證／環境錯誤——兩者都不該無腦無限重啟。**exit 1 至少有以下三種是暫時性的**：
+  config／憑證／環境錯誤——兩者都不該無腦無限重啟。**exit 1 至少有以下四種是暫時性的**：
   (a) 同錢包姊妹 run 還持著新鮮 lease 時的具名拒絕（訊息含 `ACCOUNT-wide`），等對方
   收工或 lease 過期後重跑就會好——但那代表有兩個 run 同時被啟動，該查的是啟動來源；
   (b) store 打不開來讀的具名拒絕（訊息含 `could not be opened for reading`），成因
@@ -394,8 +394,10 @@ python -m contrib.hyperliquid_perp live \
   是 `disk I/O error` 更要當硬體問題查而不是重啟。**與 (b) 的差別**是 (b) 連讀都讀
   不到、(d) 讀得到但開一個 store 要寫入。反過來，`could not be opened as a store`
   以外還有一種**永遠不會自己好**、重啟只會空轉的：主檔沒有 bytes 而旁邊的 log 有
-  （訊息含 `holds data`，issue #236）——那要人去把 log 移開或修好 `--db`，
-  監管重啟幫不上忙。
+  （issue #236）——那要人去把 log 移開或修好 `--db`，監管重啟幫不上忙。
+  **要抓這一條就 grep `is zero bytes, but` 與 `is not there, but` 這兩句**，
+  不要 grep `holds data`：列到兩個 log 時它是 `hold data`、量不到時是
+  `could not be measured and may hold data`，三種都對不上同一個字串。
   另外 `live`／`live-smoke` 收到 SIGTERM 會走與 Ctrl-C 相同的收尾（exit 130）。注意 live 的無人看管空窗風險比
   paper 高——真錢／真倉。
 

@@ -390,6 +390,14 @@ def quote_argument(value: object) -> str:
     A NON-string is ``repr``'d too, so it is delimited only where its own
     ``repr`` is: a number, ``None`` or a bool comes back bare. The tool
     schemas send JSON strings, so only a direct caller can reach that lane.
+
+    One VENDOR value takes this guard, and takes it for the reason above rather
+    than in spite of it: ``stocktwits``' symbol-mismatch answer names the
+    requested spelling and the echoed one in a single sentence whose whole
+    content is that they DIFFER. A vendor spelling flattened with the default
+    edges comes back reading like the clean one there ("AAPL#" as "AAPL"), and
+    the sentence becomes a self-contradiction (#233). Two spellings contrasted
+    character for character both want the quoted form.
     """
     if isinstance(value, str):
         flat = echo_argument(value)

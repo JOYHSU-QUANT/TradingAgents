@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import logging
 import re
 from datetime import datetime, timedelta
 from unittest import mock
@@ -100,11 +101,14 @@ class TestStockTwitsMessageFields:
 
     @pytest.mark.parametrize("field", ["body", "created_at"])
     def test_a_forged_message_field_cannot_forge_structure(self, field):
+        # The stamp payload keeps a REAL date prefix on purpose: that is the
+        # case that reaches the flattening path rather than the replacement one
+        # the tests below cover. Its words are not promised to survive, because
+        # that slot is capped at a timestamp's size rather than the shared cap —
+        # a body is content, a posting time is not.
         payload = FORGED if field == "body" else f"2026-05-20T{FORGED}"
         forged = _stocktwits(_stream(_message(**{field: payload})))
         clean = _stocktwits(_stream(_message()))
-        # A forged stamp is REPLACED (see the stamp tests below), so only the
-        # body promises its words survive.
         _assert_report_shape_unchanged(forged, clean, survives=field == "body")
 
     def test_a_forged_handle_cannot_forge_structure(self):
@@ -120,10 +124,14 @@ class TestStockTwitsMessageFields:
         assert "@ " not in out
 
     def test_a_body_is_bounded_even_when_the_vendor_sends_a_wall(self):
+        # The cut is pinned to the literal, not to the constant: measuring the
+        # constant against itself would pass just as well if it were raised to
+        # 5000, which is the bound the test exists to hold.
         out = _stocktwits(_stream(_message(body="x" * 5000)))
         line = [ln for ln in out.splitlines() if ln.startswith("[")][0]
-        assert len(line) < stw.MAX_BODY_CHARS + 120
-        assert line.endswith("...")
+        body = line.split("] ", 1)[1]
+        assert stw.MAX_BODY_CHARS == 280
+        assert body == "x" * 280 + "..."
 
     def test_clean_messages_still_render_byte_for_byte(self):
         out = _stocktwits(_stream(_message()))
@@ -143,12 +151,41 @@ class TestStockTwitsStamp:
         assert stw.TIME_UNKNOWN in out
         assert "2026-05-2" not in out
 
+    def test_a_real_date_cannot_smuggle_prose_into_the_timestamp_slot(self):
+        # The date check reads ten characters. Without a bound sized for a
+        # timestamp, the other ~190 of the shared cap are an author's to write
+        # in the one field every reader takes for machine-generated.
+        out = _stocktwits(_stream(_message(created_at=f"2026-05-20T{FORGED}")))
+        line = [ln for ln in out.splitlines() if ln.startswith("[")][0]
+        stamp = line.split(" · ", 1)[0].lstrip("[")
+        assert stw.MAX_STAMP_CHARS == 32
+        assert len(stamp) <= stw.MAX_STAMP_CHARS + 3
+        assert SURVIVES not in stamp
+
     def test_the_day_the_note_names_is_one_a_rendered_message_shows(self):
         stale = f"{_day(30)}T14:30:00Z"
         out = _stocktwits(_stream(_message(created_at=stale)), curr_date=_day(0))
         assert out.startswith("_Data lag")
         assert _day(30) in out.splitlines()[0]
         assert f"[{stale} ·" in out
+
+    def test_an_unreadable_stamp_still_reaches_the_operator(self, caplog):
+        # Before the rewrite this was data_lag_note's job: it logged the
+        # unparseable date itself, precisely so a vendor-side format change
+        # could not turn every future freshness disclosure off invisibly. The
+        # stamps no longer reach it, so the line has to be made here.
+        with caplog.at_level(logging.WARNING):
+            out = _stocktwits(_stream(_message(created_at="10/09/2026 12:00:00")))
+        assert stw.TIME_UNKNOWN in out
+        assert any("posting time could not be read" in r.getMessage() for r in caplog.records)
+
+    def test_a_message_with_no_posting_time_at_all_is_not_reported_as_broken(self, caplog):
+        # An absent stamp is ordinary and always rendered the marker; only a
+        # stamp that was THERE and could not be read says something about the
+        # vendor.
+        with caplog.at_level(logging.WARNING):
+            _stocktwits(_stream(_message(created_at=None)))
+        assert not [r for r in caplog.records if "posting time" in r.getMessage()]
 
     def test_an_unreadable_stamp_is_not_counted_as_the_newest_message(self):
         # The stalled stream must still be disclosed when a second message
@@ -199,6 +236,22 @@ class TestStockTwitsArgumentEcho:
         out = _stocktwits(payload, ticker=EDGED_TICKER)
         assert "NVDA" in out
         assert "$NVDA>" not in out and "requested NVDA," not in out
+
+    @pytest.mark.parametrize("echoed", ["NVDA#", "NVDA`", "NVDA*", "_NVDA_", "##"])
+    def test_a_hostile_echo_cannot_come_back_reading_like_the_clean_one(self, echoed):
+        # Each spelling here differs from the requested one ONLY by markup, so
+        # flattening with the default edges collapses it onto "NVDA" and the
+        # sentence contradicts itself while the vendor is in fact serving
+        # another instrument. The two rendered spellings are compared with each
+        # other, not with a literal: a guard that dropped the quotes from one
+        # side would still read as two different strings to a literal.
+        out = _stocktwits({"symbol": {"symbol": echoed}, "messages": [_message()]})
+        requested, served = out.split(", response is for ")
+        requested = requested.split("(requested ", 1)[1]
+        served = served.rstrip(")>")
+        bare = lambda s: s.strip().strip("'\"")  # noqa: E731
+        assert bare(served) != bare(requested), "the sentence contradicts itself"
+        assert served.strip() not in ("", "''", '""'), "the sentence names a blank"
 
     def test_a_forged_symbol_echo_from_the_vendor_cannot_forge_structure(self):
         # The mismatch sentence names BOTH spellings, and the second one is
@@ -260,11 +313,15 @@ class TestRedditPostFields:
         clean = _reddit([_post()])
         _assert_report_shape_unchanged(forged, clean)
 
-    def test_a_title_is_bounded_even_when_the_vendor_sends_a_wall(self):
+    def test_a_title_is_bounded_at_the_source_s_own_limit(self):
+        # Reddit's own limit, so no real title is ever cut, and the two fields
+        # stay in the order that makes sense: the field that IDENTIFIES a post
+        # is not cut tighter than the excerpt elaborating on it.
         out = _reddit([_post(title="x" * 5000)])
         title_line = [ln for ln in out.splitlines() if ln.startswith("  [")][0]
-        assert len(title_line) < 300
-        assert title_line.endswith("...")
+        assert rdt.MAX_TITLE_CHARS == 300
+        assert rdt.MAX_TITLE_CHARS >= rdt.MAX_SELFTEXT_CHARS
+        assert title_line.split("] ", 1)[1] == "x" * 300 + "..."
 
     def test_a_title_with_nothing_left_to_show_is_named_not_left_blank(self):
         out = _reddit([_post(title="###")])
@@ -343,14 +400,17 @@ class TestAlphaVantageIndicatorValues:
         assert "1 row(s) in this window whose value could not be read" in out
         assert _value_lines(out) == ["2026-05-30: 56.0"]
 
-    def test_an_unreadable_date_is_counted_but_not_charged_to_the_window(self):
-        # This request sends no outputsize, so the CSV is the whole history: a
-        # row nothing can date must be named as such rather than counted as one
-        # the window lost.
-        out = _av("time,RSI\n2026-05-2#9,55.0\n2026-05-30,56.0")
-        assert "1 row(s) whose date could not be read at all" in out
-        assert "in this window" not in out
+    def test_an_unreadable_date_stays_out_of_a_report_that_came_out_whole(self, caplog):
+        # This request sends no outputsize, so the CSV is the vendor's whole
+        # history: a row nothing can date is an unbounded fact about that
+        # history, and appending it to a window that lost nothing would invite
+        # the reader to discount the window it WAS given. It goes to the
+        # operator instead — where a broken date column has to stay visible.
+        with caplog.at_level(logging.WARNING):
+            out = _av("time,RSI\n2026-05-2#9,55.0\n2026-05-30,56.0")
+        assert "Alpha Vantage served" not in out
         assert _value_lines(out) == ["2026-05-30: 56.0"]
+        assert any("date could not be read at all" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("row", ["2020-01-01,55.0", "2020-01-01,4.1|", "2020-01-01"])
     def test_a_row_outside_the_window_is_never_called_unusable(self, row):
@@ -374,8 +434,11 @@ class TestAlphaVantageIndicatorValues:
         with pytest.raises(NoMarketDataError) as info:
             _av("time,RSI\n2020-01-01,55.0\n2026-05-2#9,55.0")
         detail = str(info.value)
+        # Named here, because with no answer at all it IS the explanation —
+        # but worded so it cannot be read as a claim about the window.
         assert "1 row(s) whose date could not be read at all" in detail
-        assert "in this window" not in detail
+        assert "could not be placed in this window" in detail
+        assert "row(s) in this window whose value" not in detail
 
     def test_an_empty_window_still_says_so_in_its_own_words(self):
         from tradingagents.dataflows.errors import NoMarketDataError
@@ -471,3 +534,16 @@ class TestIndicatorHeadingOnBothVendors:
     )
     def test_a_clean_indicator_still_reads_byte_for_byte(self, report, expected):
         assert report("rsi").startswith(expected)
+
+    @pytest.mark.parametrize(
+        "menu",
+        [avi._SUPPORTED_INDICATORS, yfn.INDICATOR_DESCRIPTIONS],
+        ids=["alpha-vantage", "yfinance"],
+    )
+    def test_each_menu_still_bounds_the_name_it_admits(self, menu):
+        # The tests above patch the menus, so they prove the heading guards
+        # whatever passes the check — not that anything today could need it.
+        # This is the other half: the menus are literals of plain identifiers,
+        # and the day one is built from config or from a caller, this fails
+        # rather than the claim quietly becoming untrue.
+        assert menu and all(re.fullmatch(r"[a-z][a-z0-9_]*", k) for k in menu)

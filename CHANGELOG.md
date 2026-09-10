@@ -978,8 +978,13 @@ Breaking changes within the 0.x line are called out explicitly.
   flattening is NAMED — "[unknown user]", "[title unavailable]" — rather than
   rendered as a bare "@" or a blank the reader would take for a real post.
   The three sentences that quote the requested ticker back, on each source,
-  take ``echo_argument``, and the symbol StockTwits echoes in a mismatch
-  answer is the vendor's text and takes the vendor guard.
+  take ``echo_argument``. The symbol StockTwits echoes in a MISMATCH answer is
+  the one vendor value that takes the argument guard, and it takes it for that
+  guard's own reason: the whole content of that sentence is that the two
+  spellings differ, and flattening with the default edges renders "AAPL#" as
+  "AAPL" and "##" as nothing at all — turning the sentence into a
+  self-contradiction the model reads as our bug, while the vendor is in fact
+  serving another instrument. Both spellings are named inside repr's quotes.
 
   The posting time is read TWICE — once to render it, once to decide whether
   the stream has stalled — and those had to become one value. Flattening alone
@@ -987,7 +992,13 @@ Breaking changes within the 0.x line are called out explicitly.
   skipped the message, so a stamp whose first ten characters are not a date
   now renders the existing "[time unknown]" marker and is excluded from the
   freshness decision, and the day that decision names is a prefix of a stamp
-  some message actually shows.
+  some message actually shows. The slot is capped at a timestamp's own size
+  rather than the shared 200: the check reads ten characters, so the rest of a
+  shared-cap slot would be an author's to write in the one field every reader
+  takes for machine-generated. A stamp that was present and could not be read
+  is logged — that line used to come from the freshness helper, which no
+  longer sees these values, and without it a vendor-side format change would
+  turn every future disclosure off invisibly.
 
   The Alpha Vantage indicator values take the rule the previous batch arrived
   at for the same kind of cell: a value the report presents as a NUMBER is
@@ -999,8 +1010,10 @@ Breaking changes within the 0.x line are called out explicitly.
   vendor's whole history: a row whose VALUE cannot be read is one the window
   lost, while a row nothing can DATE cannot be placed in the window at all, and
   counting the two together would let one corrupt row from years back claim a
-  window that lost nothing. An answer with no usable row left names whichever
-  of those happened rather than blaming the window for all of it.
+  window that lost nothing. So only the count of rows THIS WINDOW lost reaches
+  the report; the history-scoped one is logged for the operator, and is named
+  to the agent only where there is no answer at all — there it is the
+  explanation — worded so it cannot be read as a claim about the window.
   ``is_finite_number`` now has one definition in
   ``dataflows.utils`` because ``fred`` and this getter ask the same question of
   the same kind of value; the ``_is_finite_number`` helpers in ``deribit`` /
@@ -1013,9 +1026,9 @@ Breaking changes within the 0.x line are called out explicitly.
   vendors of one tool must not end alike on a clean spelling and differently
   on a hostile one (#219).
 
-  Known trade-offs. A Reddit title over 200 characters now ends in an ellipsis
-  where Reddit's own limit is 300, and the truncation marker on the two
-  excerpt fields changed from "…" to the shared helper's "...". A posting time
+  Known trade-offs. The truncation marker on the excerpt fields changed from
+  "…" to the shared helper's "...", and a body or excerpt made only of markup
+  now renders empty where it used to render the markup. A posting time
   this module cannot read as a date is no longer shown at all, so a vendor
   that switched to another timestamp format would read as missing rather than
   as odd. And the opt-in Reddit JSON path — WAF-blocked, unreachable by

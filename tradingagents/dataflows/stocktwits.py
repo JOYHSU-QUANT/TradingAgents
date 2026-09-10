@@ -25,6 +25,7 @@ from .utils import (
     echo_argument,
     live_snapshot_note,
     normalize_iso_date,
+    quote_argument,
     sanitize_untrusted,
 )
 
@@ -43,6 +44,12 @@ MAX_MESSAGE_LAG_DAYS = 7
 # shared MAX_UNTRUSTED_CHARS: here the body IS the content the block exists to
 # carry, where the shared cap bounds a field quoted inside a sentence of ours.
 MAX_BODY_CHARS = 280
+
+# Rendered length of one posting time. A timestamp's own size rather than the
+# shared cap: the date check below reads ten characters, so at the shared 200 a
+# stamp whose date is real could still carry ~190 characters of an author's
+# prose into a slot every reader takes for a timestamp (#233).
+MAX_STAMP_CHARS = 32
 
 # What renders where a message carries no usable posting time: absent, or a
 # stamp whose date this module cannot read (see _rendered_stamp).
@@ -64,7 +71,7 @@ def _rendered_stamp(raw: object) -> tuple[str, str | None]:
     day = normalize_iso_date(raw[:10]) if isinstance(raw, str) and len(raw) >= 10 else None
     if day is None:
         return TIME_UNKNOWN, None
-    return sanitize_untrusted(raw, limit=MAX_UNTRUSTED_CHARS), day
+    return sanitize_untrusted(raw, limit=MAX_STAMP_CHARS), day
 
 
 def _symbols_match(requested: str, echoed: str) -> bool:
@@ -124,10 +131,18 @@ def fetch_stocktwits_messages(
             ticker.upper(),
             echoed.upper(),
         )
+        # BOTH spellings inside repr's own quotes, the vendor's included. The
+        # whole content of this sentence is that the two DIFFER, so a guard
+        # that let a hostile spelling come back reading like the clean one
+        # would turn it into a self-contradiction the model reads as OUR bug:
+        # flattening alone renders "AAPL#" as "AAPL", and "##" as nothing at
+        # all (#233). This is the one place a vendor's value takes the argument
+        # guard, and it takes it for that guard's own reason — it is being
+        # CONTRASTED with an argument, character for character.
         return (
             f"<stocktwits unavailable: symbol mismatch "
-            f"(requested {echo_argument(ticker.upper())}, response is for "
-            f"{sanitize_untrusted(echoed.upper(), limit=MAX_UNTRUSTED_CHARS)})>"
+            f"(requested {quote_argument(ticker.upper())}, response is for "
+            f"{quote_argument(echoed.upper())})>"
         )
 
     # Same degrade-don't-raise contract for the message list itself: a truthy
@@ -157,6 +172,11 @@ def fetch_stocktwits_messages(
     # from the render loop rather than from a second pass over the same slice,
     # so the day that decides the note is one a message actually shows (#233).
     days: list[str] = []
+    # Stamps that were present and could not be read. Counted for the operator
+    # line below: the freshness note used to reach data_lag_note, which logged
+    # an unparseable date itself, and without that line a vendor-side format
+    # change would turn every future disclosure off invisibly.
+    unreadable_stamps = 0
     bullish = bearish = unlabeled = 0
     for m in messages[:limit]:
         # Missing fields get explicit unavailability markers, not values that
@@ -169,6 +189,8 @@ def fetch_stocktwits_messages(
         created, day = _rendered_stamp(m.get("created_at"))
         if day is not None:
             days.append(day)
+        elif m.get("created_at") is not None:
+            unreadable_stamps += 1
         user_env = m.get("user")
         raw_user = user_env.get("username") if isinstance(user_env, dict) else None
         # A handle with nothing left after flattening ("##") is as unusable as
@@ -196,6 +218,14 @@ def fetch_stocktwits_messages(
             tag = "no-label"
         lines.append(f"[{created} · {user} · {tag}] {body}")
 
+    if unreadable_stamps:
+        logger.warning(
+            "StockTwits sent %d message(s) for %s whose posting time could not be read; "
+            "rendered as %s and left out of the freshness check",
+            unreadable_stamps,
+            ticker.upper(),
+            TIME_UNKNOWN,
+        )
     newest_date = max(days, default=None)
     total = bullish + bearish + unlabeled
     bull_pct = round(100 * bullish / total) if total else 0

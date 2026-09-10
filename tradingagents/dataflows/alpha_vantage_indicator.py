@@ -1,3 +1,5 @@
+import logging
+
 from .alpha_vantage_common import _make_api_request
 from .errors import NoMarketDataError, UnsupportedIndicatorError, WiringGapError
 from .utils import (
@@ -10,6 +12,8 @@ from .utils import (
     sanitize_untrusted,
     unsupported_indicator,
 )
+
+logger = logging.getLogger(__name__)
 
 # Maximum age (calendar days) of the newest indicator row relative to
 # curr_date before the report carries a data-lag note, keyed by the requested
@@ -111,18 +115,33 @@ _INDICATOR_DESCRIPTIONS = {
 }
 
 
-def _rows_not_served(unusable: int, undatable: int) -> str:
-    """What the vendor sent that this window could not use, or "".
+def _window_rows_lost(unusable: int) -> str:
+    """The rows THIS WINDOW lost, or "".
 
-    One definition for the report note and for the no-rows refusal: they name
-    the same two counts, and a reader comparing a failed call against a thin
-    one should not have to tell two wordings apart (#233).
+    One definition, because the report note and the no-rows refusal name the
+    same count and a reader comparing a thin answer with a failed one should
+    not have to tell two wordings apart (#233).
     """
-    parts = []
-    if unusable:
-        parts.append(f"{unusable} row(s) in this window whose value could not be read")
+    return f"{unusable} row(s) in this window whose value could not be read" if unusable else ""
+
+
+def _rows_not_served(unusable: int, undatable: int) -> str:
+    """What the vendor sent that this call could not use, or "".
+
+    Only the REFUSAL says this much. An undatable row cannot be placed in the
+    window at all, and this request sends no ``outputsize``, so on a report that
+    came out whole the count would be an unbounded fact about the vendor's whole
+    history attached to a window that lost nothing — and the reader most likely
+    to act on it would discount the window it WAS given. Where there is no
+    answer at all it is the explanation, so it is named here, and worded so it
+    cannot be read as a claim about the window.
+    """
+    parts = [p for p in (_window_rows_lost(unusable),) if p]
     if undatable:
-        parts.append(f"{undatable} row(s) whose date could not be read at all")
+        parts.append(
+            f"{undatable} row(s) whose date could not be read at all, so they could not be "
+            f"placed in this window"
+        )
     return " and ".join(parts)
 
 
@@ -398,10 +417,23 @@ def get_indicator(
         if note:
             lag_note = "\n" + note + "\n"
 
-    # Dropped rows are disclosed rather than left as a gap in the dates, in
-    # fred's wording for the same fact about the same kind of payload.
-    served = _rows_not_served(unusable, undatable)
-    unusable_note = f"\n_(Alpha Vantage served {served}.)_\n" if served else ""
+    # Rows this window lost are disclosed rather than left as a gap in the
+    # dates, as fred discloses the same fact about the same kind of payload —
+    # though not in the same sentence, since fred requests a bounded range and
+    # merges the two counts this getter has to keep apart.
+    lost = _window_rows_lost(unusable)
+    unusable_note = f"\n_(Alpha Vantage served {lost}.)_\n" if lost else ""
+    if undatable:
+        # Not in the report: see _rows_not_served. The operator still has to be
+        # able to see a vendor whose date column has broken.
+        logger.warning(
+            "Alpha Vantage served %d %s row(s) whose date could not be read at all; "
+            "they could not be placed in the %s to %s window and are not reported to the agent",
+            undatable,
+            indicator,
+            before.strftime("%Y-%m-%d"),
+            curr_date,
+        )
 
     result_str = (
         # The indicator is the caller's own argument coming back into text the

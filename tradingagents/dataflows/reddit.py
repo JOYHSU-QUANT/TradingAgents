@@ -30,7 +30,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .utils import MAX_UNTRUSTED_CHARS, echo_argument, sanitize_untrusted
+from .utils import echo_argument, sanitize_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +48,15 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # investing trend more measured. Caller can override.
 DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
 
-# Rendered length of one post's body excerpt. The title takes the shared
-# MAX_UNTRUSTED_CHARS instead: Reddit's own title limit is 300 characters, so a
-# few real titles end in an ellipsis, and what that buys is that no single post
-# can bury the block under its own length. Until #233 the title had no bound at
-# all, and neither field was flattened — both are written by whoever posted,
-# and both land in what the sentiment analyst reads as its own SYSTEM prompt.
+# Rendered lengths for a post's two free-text fields. Until #233 the title had
+# no bound at ALL and neither field was flattened — both are written by whoever
+# posted, and both land in what the sentiment analyst reads as its own SYSTEM
+# prompt. The title takes Reddit's OWN limit rather than the shared
+# MAX_UNTRUSTED_CHARS: the point of the bound is that no single post can bury
+# the block under its own length (fifteen posts at most, so the difference is
+# about a kilobyte), and at 200 the field that IDENTIFIES a post would have been
+# cut tighter than the excerpt elaborating on it.
+MAX_TITLE_CHARS = 300
 MAX_SELFTEXT_CHARS = 240
 
 # What renders for a post whose title flattens to nothing. The fetcher already
@@ -258,7 +261,7 @@ def fetch_reddit_posts(
         lines = [header]
         for p in posts:
             title = (
-                sanitize_untrusted(p.get("title") or "", limit=MAX_UNTRUSTED_CHARS)
+                sanitize_untrusted(p.get("title") or "", limit=MAX_TITLE_CHARS)
                 or TITLE_UNAVAILABLE
             )
             score = p.get("score")

@@ -30,6 +30,7 @@ from tradingagents.agents.utils.news_data_tools import (
 )
 from tradingagents.agents.utils.prediction_markets_tools import get_prediction_markets
 from tradingagents.agents.utils.technical_indicators_tools import get_indicators
+from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS, sanitize_untrusted
 
 # Public surface: the data tools are imported here so agents and the graph
 # import them from one place, plus the instrument/language helpers defined below.
@@ -79,10 +80,24 @@ def get_language_instruction() -> str:
 
 
 def _clean_identity_value(value: Any) -> str | None:
-    """Return a trimmed string, or None for empty / placeholder-ish values."""
+    """One vendor identity field, flattened, or None where it says nothing.
+
+    These values are yfinance ``info`` free text — a name, a sector, an
+    industry, an exchange — and :func:`build_instrument_context` interpolates
+    them into the string that becomes EVERY analyst's and manager's system
+    prompt. That is the part of the prompt the model is told to treat as its
+    instructions, so it outranks the getter returns #233 spent three PRs on: a
+    longName carrying a line break and "## " opens a heading in it. One guard
+    here covers all five call sites (#233).
+
+    Flattening runs BEFORE the placeholder check, so a name spelled "_none_"
+    is recognised as the placeholder it is rather than passed through as a
+    company. It subsumes the strip this used to do: whitespace runs collapse
+    to single spaces, and nothing is left at the ends.
+    """
     if not isinstance(value, str):
         return None
-    cleaned = value.strip()
+    cleaned = sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)
     if not cleaned or cleaned.lower() in {"none", "n/a", "nan", "null"}:
         return None
     return cleaned
@@ -154,18 +169,30 @@ def build_instrument_context(
 
     details = []
     if identity:
-        name = identity.get("company_name") or identity.get("name")
+        # Read through the guard, not around it. Every value below is vendor
+        # free text on its way into a SYSTEM prompt, and this function is
+        # exported and takes any Mapping — so the flattening has to be a
+        # property of the RENDER rather than of the one resolver that happens
+        # to fill the dict today (#233). Cleaning a value the resolver already
+        # cleaned is BOUNDED rather than a no-op: where the cap fell on a
+        # space, a second pass re-slices and the ellipsis grows by one dot
+        # (202 to 203 characters, stable from there). No text is lost and the
+        # promised bound holds, which is what the double pass has to be safe
+        # for — it is not idempotent, and a comment saying so would be one a
+        # probe disproves.
+        field = lambda key: _clean_identity_value(identity.get(key))  # noqa: E731
+        name = field("company_name")
         if name:
             details.append(f"{'Name' if is_crypto else 'Company'}: {name}")
-        sector, industry = identity.get("sector"), identity.get("industry")
+        sector, industry = field("sector"), field("industry")
         if sector and industry:
             details.append(f"Business classification: {sector} / {industry}")
         elif sector:
             details.append(f"Sector: {sector}")
         elif industry:
             details.append(f"Industry: {industry}")
-        if identity.get("exchange"):
-            details.append(f"Exchange: {identity['exchange']}")
+        if exchange := field("exchange"):
+            details.append(f"Exchange: {exchange}")
 
     if details:
         context += (

@@ -509,9 +509,11 @@ class TestMalformedMarketsOmitted:
     def test_every_market_malformed_does_not_render_a_header_with_no_body(self):
         # The header has already promised "market-implied probabilities", so a
         # body of no lines left the analyst a heading to reason around with
-        # nothing under it. Reachable before this change too (a single market
-        # with mismatched outcomes does it); the question/label guards added
-        # another way in, which is what made it worth closing.
+        # nothing under it. Reachable before this change too — a single market
+        # whose first outcome price does not parse took the same exit — and the
+        # question/label guards added more ways in, which is what made it worth
+        # closing. (The outcome/price length guard is itself new here, so it is
+        # not the older path.)
         bad = _market(None, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
         out = self._fetch(bad)
         assert "No prediction markets for 'anything' could be rendered." in out

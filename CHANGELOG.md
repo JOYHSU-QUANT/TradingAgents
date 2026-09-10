@@ -1167,10 +1167,10 @@ Breaking changes within the 0.x line are called out explicitly.
 
   A report of nothing but malformed markets rendered as a header promising
   probabilities with no lines under it — the bare-header failure
-  ``get_fundamentals`` already refuses. A single market with mismatched
-  outcomes reached it before this change too; making the question guard strict
-  added another way in, which is what made it worth closing. That case now
-  says what happened, and says it
+  ``get_fundamentals`` already refuses. A single market whose first outcome
+  price did not parse reached it before this change too; making the question
+  guard strict added more ways in, which is what made it worth closing. That
+  case now says what happened, and says it
   ONCE: the reason belongs to the omitted clause, which names which
   malformations were actually seen. Reaching that branch honestly also needed
   ``limit`` coerced the way farside and fear_greed coerce their windows: a

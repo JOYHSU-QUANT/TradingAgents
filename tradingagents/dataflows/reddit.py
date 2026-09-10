@@ -30,6 +30,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .utils import MAX_UNTRUSTED_CHARS, echo_argument, sanitize_untrusted
+
 logger = logging.getLogger(__name__)
 
 _API = "https://www.reddit.com/r/{sub}/search.json?{qs}"
@@ -45,6 +47,19 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # discussion. wallstreetbets has the most volume but most noise; stocks /
 # investing trend more measured. Caller can override.
 DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
+
+# Rendered length of one post's body excerpt. The title takes the shared
+# MAX_UNTRUSTED_CHARS instead: Reddit's own title limit is 300 characters, so a
+# few real titles end in an ellipsis, and what that buys is that no single post
+# can bury the block under its own length. Until #233 the title had no bound at
+# all, and neither field was flattened — both are written by whoever posted,
+# and both land in what the sentiment analyst reads as its own SYSTEM prompt.
+MAX_SELFTEXT_CHARS = 240
+
+# What renders for a post whose title flattens to nothing. The fetcher already
+# drops an entry with no title; one spelled "###" is just as unlabeled, and is
+# named rather than rendered as a blank the reader would take for a real post.
+TITLE_UNAVAILABLE = "[title unavailable]"
 
 
 def _search_qs(ticker: str, limit: int) -> str:
@@ -229,16 +244,23 @@ def fetch_reddit_posts(
         total_posts += len(posts)
         if not posts:
             blocks.append(
-                f"r/{sub}: <no posts found mentioning {ticker.upper()} in the past 7 days>"
+                f"r/{sub}: <no posts found mentioning {echo_argument(ticker.upper())} "
+                f"in the past 7 days>"
             )
             continue
 
         via_rss = any(p.get("source") == "rss" for p in posts)
-        header = f"r/{sub} — {len(posts)} recent posts mentioning {ticker.upper()}"
+        header = (
+            f"r/{sub} — {len(posts)} recent posts mentioning "
+            f"{echo_argument(ticker.upper())}"
+        )
         header += " (via RSS feed; scores/comments unavailable):" if via_rss else ":"
         lines = [header]
         for p in posts:
-            title = (p.get("title") or "").replace("\n", " ").strip()
+            title = (
+                sanitize_untrusted(p.get("title") or "", limit=MAX_UNTRUSTED_CHARS)
+                or TITLE_UNAVAILABLE
+            )
             score = p.get("score")
             comments = p.get("num_comments")
             created = p.get("created_utc")
@@ -251,9 +273,7 @@ def fetch_reddit_posts(
             meta = created_str
             if score is not None and comments is not None:
                 meta += f" · {score:>4}↑ · {comments:>3}c"
-            selftext = (p.get("selftext") or "").replace("\n", " ").strip()
-            if len(selftext) > 240:
-                selftext = selftext[:240] + "…"
+            selftext = sanitize_untrusted(p.get("selftext") or "", limit=MAX_SELFTEXT_CHARS)
             lines.append(
                 f"  [{meta}] {title}" + (f"\n    body excerpt: {selftext}" if selftext else "")
             )
@@ -261,7 +281,7 @@ def fetch_reddit_posts(
 
     if total_posts == 0:
         return (
-            f"<no Reddit posts found mentioning {ticker.upper()} across "
+            f"<no Reddit posts found mentioning {echo_argument(ticker.upper())} across "
             f"{', '.join(f'r/{s}' for s in subreddits)} in the past 7 days>"
         )
     return "\n\n".join(blocks)

@@ -10,7 +10,6 @@ the routing layer treats it as "unavailable" rather than a hard crash.
 """
 
 import logging
-import math
 import os
 from datetime import datetime, timedelta
 
@@ -22,6 +21,7 @@ from .utils import (
     data_lag_note,
     date_refusal,
     echo_argument,
+    is_finite_number,
     json_body_or_outage,
     normalize_iso_date,
     quote_argument,
@@ -140,24 +140,6 @@ def get_api_key() -> str:
             "https://fred.stlouisfed.org/docs/api/api_key.html."
         )
     return api_key
-
-
-def _is_finite_number(value) -> bool:
-    """Whether FRED's raw observation value IS a number, before any flattening.
-
-    ``nan`` and ``inf`` are refused with the unparseable ones: both are floats
-    ``float()`` accepts, and either would poison the window delta and the
-    percentage change computed from it — a fabricated figure rather than a
-    missing one, which is the failure the observation guard exists to prevent.
-    """
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError, OverflowError):
-        # ``OverflowError`` is not hypothetical: ``json.loads`` keeps arbitrary
-        # precision, so a 400-digit integer literal raises here rather than in
-        # ``float()``'s usual lanes, and this guard exists precisely because
-        # the payload is not to be trusted.
-        return False
 
 
 def _resolve_series_id(indicator: str) -> str:
@@ -352,7 +334,7 @@ def get_macro_data(
         # value into a number, and the RENDERED one so a value that only the
         # raw form parses — a JSON ``true``, or a number the cap cut — cannot
         # reach the table and then fail the summary's ``float()`` silently.
-        if day is None or not (_is_finite_number(raw_value) and _is_finite_number(shown)):
+        if day is None or not (is_finite_number(raw_value) and is_finite_number(shown)):
             unusable += 1
             continue
         points.append((day, shown))

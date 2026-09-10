@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import re
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
@@ -177,6 +178,34 @@ INDICATOR_DESCRIPTIONS = {
         "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
     ),
 }
+
+def is_finite_number(value) -> bool:
+    """Whether a vendor's raw report cell IS a number, before any flattening.
+
+    Asked of the RAW spelling and of the RENDERED one by every getter that puts
+    a vendor's number into text the model reads: flattening turns "4.1|" into
+    "4.1", so a cell checked only after :func:`sanitize_untrusted` is a figure
+    the vendor never sent, standing where a conspicuous failure used to be
+    (#233). ``nan`` and ``inf`` are refused with the unparseable ones —
+    ``float()`` accepts both, and either poisons any delta computed from the
+    series.
+
+    One definition because ``fred`` and the Alpha Vantage indicator getter ask
+    the same question about the same kind of value. The vendor-local
+    ``_is_finite_number`` helpers in ``deribit`` / ``farside`` /
+    ``sosovalue_common`` ask a DIFFERENT one — they also reject ``bool``,
+    because there the value is about to be arithmetic rather than rendered —
+    and stay where they are.
+    """
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        # ``OverflowError`` is not hypothetical: ``json.loads`` keeps arbitrary
+        # precision, so a 400-digit integer literal raises here rather than in
+        # ``float()``'s usual lanes, and this guard exists precisely because
+        # the payload is not to be trusted.
+        return False
+
 
 def normalize_iso_date(value) -> str | None:
     """Canonical ``YYYY-MM-DD`` for a date string, or None if it is not a date.

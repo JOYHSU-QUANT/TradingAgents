@@ -960,6 +960,68 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The two sources anyone can post to reached the prompt unflattened, and the
+  Alpha Vantage indicator values reached it unchecked** (issue #233, third and
+  last batch). The first two batches closed the routed getters. These sources
+  are not routed: the sentiment analyst fetches StockTwits and Reddit itself
+  and pastes both blocks into its OWN system message, beside the "## Data
+  sources" headings that message writes for itself. So the payload lands in
+  the highest-privilege text of the run — and unlike a vendor's error string,
+  it is authored by whoever chose to post about the ticker, which is anyone.
+
+  What was renderable there. A Reddit post title had no length bound AT ALL
+  and only had its line breaks replaced, so one post could open a heading or
+  bury the block under its own bulk; the same for the selftext excerpt. A
+  StockTwits body had its line breaks replaced and nothing else, while the
+  posting time and the handle beside it were interpolated raw. All five now
+  take ``sanitize_untrusted``, and a handle or title with nothing left after
+  flattening is NAMED — "[unknown user]", "[title unavailable]" — rather than
+  rendered as a bare "@" or a blank the reader would take for a real post.
+  The three sentences that quote the requested ticker back, on each source,
+  take ``echo_argument``, and the symbol StockTwits echoes in a mismatch
+  answer is the vendor's text and takes the vendor guard.
+
+  The posting time is read TWICE — once to render it, once to decide whether
+  the stream has stalled — and those had to become one value. Flattening alone
+  would have printed "2026-09-1 0T.." where the freshness check had already
+  skipped the message, so a stamp whose first ten characters are not a date
+  now renders the existing "[time unknown]" marker and is excluded from the
+  freshness decision, and the day that decision names is a prefix of a stamp
+  some message actually shows.
+
+  The Alpha Vantage indicator values take the rule the previous batch arrived
+  at for the same kind of cell: a value the report presents as a NUMBER is
+  judged on its raw spelling AND its rendered one, because flattening "4.1|"
+  into "4.1" turns a reading the analyst would have questioned into one the
+  vendor never sent. Rows that fail are dropped and DISCLOSED — where before a
+  row with an unreadable date vanished with no trace — under two counts rather
+  than one, because this request sends no ``outputsize`` and the CSV is the
+  vendor's whole history: a row whose VALUE cannot be read is one the window
+  lost, while a row nothing can DATE cannot be placed in the window at all, and
+  counting the two together would let one corrupt row from years back claim a
+  window that lost nothing. An answer with no usable row left names whichever
+  of those happened rather than blaming the window for all of it.
+  ``is_finite_number`` now has one definition in
+  ``dataflows.utils`` because ``fred`` and this getter ask the same question of
+  the same kind of value; the ``_is_finite_number`` helpers in ``deribit`` /
+  ``farside`` / ``sosovalue_common`` ask a different one (they also reject
+  ``bool``, for values about to be arithmetic) and stay where they are.
+
+  The indicator heading takes ``echo_argument`` on BOTH vendors of that one
+  routed tool. Each is bounded today by its own menu check, so neither is a
+  live break; guarding one alone is what would have been wrong, since two
+  vendors of one tool must not end alike on a clean spelling and differently
+  on a hostile one (#219).
+
+  Known trade-offs. A Reddit title over 200 characters now ends in an ellipsis
+  where Reddit's own limit is 300, and the truncation marker on the two
+  excerpt fields changed from "…" to the shared helper's "...". A posting time
+  this module cannot read as a date is no longer shown at all, so a vendor
+  that switched to another timestamp format would read as missing rather than
+  as odd. And the opt-in Reddit JSON path — WAF-blocked, unreachable by
+  default since #862 — still formats its score and comment counts without a
+  type guard; the RSS path this ships against sets both to ``None``.
+
 - **The macro and ETF vendors' fields reached the prompt able to forge a table
   ROW** (issue #233, second batch). The first batch closed the router's
   sentinel and the yfinance family; these six modules render into a shape the

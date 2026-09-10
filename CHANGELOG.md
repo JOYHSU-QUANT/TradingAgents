@@ -971,7 +971,8 @@ Breaking changes within the 0.x line are called out explicitly.
 
   What was renderable there. A Reddit post title had no length bound AT ALL
   and only had its line breaks replaced, so one post could open a heading or
-  bury the block under its own bulk; the same for the selftext excerpt. A
+  bury the block under its own bulk. The selftext excerpt below it was capped
+  at 240 characters, so it could do the first of those but not the second. A
   StockTwits body had its line breaks replaced and nothing else, while the
   posting time and the handle beside it were interpolated raw. All five now
   take ``sanitize_untrusted``, and a handle or title with nothing left after

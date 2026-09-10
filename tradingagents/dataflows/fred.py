@@ -10,6 +10,7 @@ the routing layer treats it as "unavailable" rather than a hard crash.
 """
 
 import logging
+import math
 import os
 from datetime import datetime, timedelta
 
@@ -17,9 +18,12 @@ import requests
 
 from .errors import VendorError, VendorNotConfiguredError
 from .utils import (
+    MAX_UNTRUSTED_CHARS,
     data_lag_note,
     date_refusal,
+    echo_argument,
     json_body_or_outage,
+    normalize_iso_date,
     quote_argument,
     raise_for_http_status,
     sanitize_untrusted,
@@ -40,6 +44,11 @@ DEFAULT_LOOKBACK_DAYS = 365
 # Rows cap for the rendered table: recent values matter most for a decision, and
 # daily series (yields, VIX) over a long window would otherwise flood context.
 MAX_ROWS = 40
+
+# What the heading says when FRED gave the series no renderable title. Named
+# rather than defaulted to the series id, which would read as a series titled
+# after itself (#233).
+TITLE_UNAVAILABLE = "(title unavailable)"
 
 # Freshness thresholds (calendar days) for the data-lag note, keyed by FRED's
 # frequency_short code: how far the newest observation may trail curr_date
@@ -131,6 +140,24 @@ def get_api_key() -> str:
             "https://fred.stlouisfed.org/docs/api/api_key.html."
         )
     return api_key
+
+
+def _is_finite_number(value) -> bool:
+    """Whether FRED's raw observation value IS a number, before any flattening.
+
+    ``nan`` and ``inf`` are refused with the unparseable ones: both are floats
+    ``float()`` accepts, and either would poison the window delta and the
+    percentage change computed from it — a fabricated figure rather than a
+    missing one, which is the failure the observation guard exists to prevent.
+    """
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        # ``OverflowError`` is not hypothetical: ``json.loads`` keeps arbitrary
+        # precision, so a 400-digit integer literal raises here rather than in
+        # ``float()``'s usual lanes, and this guard exists precisely because
+        # the payload is not to be trusted.
+        return False
 
 
 def _resolve_series_id(indicator: str) -> str:
@@ -239,7 +266,7 @@ def get_macro_data(
     meta = _request("series", {"series_id": series_id}).get("seriess") or []
     if not meta:
         return (
-            f"FRED series '{series_id}' not found. Pass a known alias "
+            f"FRED series {quote_argument(series_id)} not found. Pass a known alias "
             f"(e.g. 'cpi', 'unemployment') or a valid FRED series ID."
         )
     info = meta[0]
@@ -258,10 +285,22 @@ def get_macro_data(
             f"FRED series identity mismatch: requested '{series_id}', response "
             f"is for '{echoed_id.strip()}'; refusing to render another series' data"
         )
-    title = info.get("title", series_id)
-    units = info.get("units_short") or info.get("units", "")
-    frequency = info.get("frequency", "")
-    seasonal = info.get("seasonal_adjustment_short", "")
+    # Series metadata is FRED's own free text and renders into the header's
+    # heading and label lines, so it takes the vendor flattening. What a field
+    # with nothing left to show becomes is decided at the heading below, not
+    # here: this helper answers only "what did FRED give us, as it will read".
+    def _meta(*keys) -> str:
+        """The first of these metadata fields FRED gave, as it will render."""
+        for key in keys:
+            shown = sanitize_untrusted(info.get(key) or "", limit=MAX_UNTRUSTED_CHARS)
+            if shown:
+                return shown
+        return ""
+
+    title = _meta("title")
+    units = _meta("units_short", "units")
+    frequency = _meta("frequency")
+    seasonal = _meta("seasonal_adjustment_short")
 
     observations = _request(
         "series/observations",
@@ -273,22 +312,93 @@ def get_macro_data(
         },
     ).get("observations", [])
 
-    # FRED encodes a missing observation as ".".
-    points = [
-        (o["date"], o["value"]) for o in observations if o.get("value") not in (".", None, "")
-    ]
+    # A row is ADMITTED on the shape of its RAW value, never repaired into one.
+    #
+    # Both halves are raw vendor strings that nothing coerces on the way in,
+    # and both render inside "|"-separated lines — the observation table's
+    # cells, and the Latest/Change summary, which uses "|" as its own field
+    # separator — so one "|" or line break forges a column or a whole row
+    # (#233). Flattening alone would close that and open something worse:
+    # ``sanitize_untrusted`` turns "4.1|" into "4.1", so a value that used to
+    # fail ``float()`` and degrade the summary visibly would instead parse and
+    # drive a computed macro delta with nothing to say it had been altered —
+    # and "2026-06-0#1" becomes "2026-06-0 1", which ``data_lag_note`` cannot
+    # read, so the freshness disclosure silently disappears and the report
+    # reads as MORE trustworthy for being corrupt.
+    #
+    # So the raw value is asked to BE a finite number and the raw date to be a
+    # date; a row that is neither is dropped and counted. The flattening that
+    # remains is a second line of defence, not the guard: a string that parses
+    # to a finite float and an ISO date both come through it byte for byte
+    # apart from whitespace, so the value judged and the value shown are one
+    # value. Same answer ``fear_greed`` already gives its rows, which coerce
+    # and raise rather than print whatever arrived.
+    points = []
+    unusable = 0
+    for o in observations:
+        raw_value = o.get("value")
+        if raw_value == ".":
+            # FRED's OWN missing-observation encoding, and the only one: a
+            # period means "this period has no reading", which is a fact about
+            # the series rather than a fault in the payload. An absent key or
+            # an empty string is neither, and used to be waved through here
+            # beside it — so a response whose every row was malformed still
+            # advised the reader to widen look_back_days.
+            continue
+        day = normalize_iso_date(o.get("date"))
+        shown = sanitize_untrusted(raw_value, limit=MAX_UNTRUSTED_CHARS)
+        # Both spellings are asked, which is what makes "judged == shown" true
+        # rather than nearly true: the RAW one so flattening cannot repair a
+        # value into a number, and the RENDERED one so a value that only the
+        # raw form parses — a JSON ``true``, or a number the cap cut — cannot
+        # reach the table and then fail the summary's ``float()`` silently.
+        if day is None or not (_is_finite_number(raw_value) and _is_finite_number(shown)):
+            unusable += 1
+            continue
+        points.append((day, shown))
 
-    header = (
-        f"## FRED: {title} ({series_id})\n"
-        f"- Units: {units}\n"
-        f"- Frequency: {frequency}"
-        f"{f' ({seasonal})' if seasonal else ''}\n"
-        f"- Window: {start_date} to {curr_date}\n"
-    )
+    # The series id is the caller's own argument coming back into text the
+    # model reads, bare and in running prose, so it takes ``echo_argument``.
+    # This module ALREADY echoed the id it REJECTED (``_resolve_series_id``
+    # above) while interpolating the accepted one raw — the guard and the hole
+    # were two screens apart in one file, which is why #233 groups by subject
+    # rather than by module. ``_resolve_series_id`` bounds it to 30 characters
+    # with no whitespace, so a line break is already impossible here; "|" and
+    # "#" are not, and the bound is a fact about a caller two hundred lines
+    # away rather than about this line.
+    echoed_series = echo_argument(series_id)
+    # A field with nothing left to show is NAMED where it is a subject and
+    # OMITTED where it is a label. The heading always has a name slot, so an
+    # absent or unrenderable title takes the marker rather than borrowing the
+    # series id — which would read exactly like a series FRED titled after
+    # itself. A "- Units: " with nothing after it is not a fact at all, so that
+    # line simply does not appear; the same rule PR #251 applied to the news
+    # report's summary and link lines.
+    header_lines = [f"## FRED: {title or TITLE_UNAVAILABLE} ({echoed_series})"]
+    if units:
+        header_lines.append(f"- Units: {units}")
+    if frequency:
+        header_lines.append(f"- Frequency: {frequency}{f' ({seasonal})' if seasonal else ''}")
+    elif seasonal:
+        # Seasonal adjustment rides on the Frequency line only because it
+        # usually has one to ride on. It is its own fact about the series, so
+        # dropping the label must not drop it too.
+        header_lines.append(f"- Seasonal adjustment: {seasonal}")
+    header_lines.append(f"- Window: {start_date} to {curr_date}")
+    header = "\n".join(header_lines) + "\n"
 
     if not points:
+        # "The series reports less frequently than your window" is the wrong
+        # explanation when rows arrived and were dropped as unusable, so this
+        # branch names that case rather than letting the cadence sentence stand
+        # for both.
+        if unusable:
+            return header + (
+                f"\nNo usable observations for {echoed_series} in this window: FRED "
+                f"served {unusable} row(s) whose date or value could not be read."
+            )
         return header + (
-            f"\nNo observations for {series_id} in this window. The series may "
+            f"\nNo observations for {echoed_series} in this window. The series may "
             f"report less frequently than the window length; widen look_back_days."
         )
 
@@ -313,7 +423,9 @@ def get_macro_data(
     max_lag = _MAX_LAG_DAYS_BY_FREQUENCY.get(str(info.get("frequency_short") or "").strip().upper())
     lag_note = ""
     if max_lag is not None:
-        lag_note = data_lag_note(last_date, curr_date, max_lag, f"{series_id} observation")
+        # The lag note renders into the report as its own paragraph, so the id
+        # it names is prompt text like the heading's.
+        lag_note = data_lag_note(last_date, curr_date, max_lag, f"{echoed_series} observation")
         if lag_note:
             # Leading blank line so the note renders as its own markdown
             # paragraph instead of a soft continuation of the Latest line.
@@ -331,4 +443,13 @@ def get_macro_data(
         "\n| Date | Value |\n| --- | --- |\n" + "\n".join(f"| {d} | {v} |" for d, v in shown) + "\n"
     )
 
-    return header + summary + lag_note + truncation_note + table
+    # Dropped rows are disclosed for the reason every omission in these reports
+    # is: a table that quietly loses observations is a different series from
+    # the one FRED served, and the reader has no way to see the difference.
+    unusable_note = (
+        f"\n_({unusable} observation(s) omitted: FRED's date or value was not usable)_\n"
+        if unusable
+        else ""
+    )
+
+    return header + summary + lag_note + unusable_note + truncation_note + table

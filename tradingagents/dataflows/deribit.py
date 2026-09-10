@@ -76,8 +76,10 @@ from .symbol_utils import classify_crypto_asset
 from .utils import (
     MAX_UNTRUSTED_CHARS,
     date_refusal,
+    echo_argument,
     failure_account,
     json_body_or_outage,
+    quote_argument,
     raise_for_http_status,
     sanitize_untrusted,
     wiring_gap,
@@ -605,8 +607,8 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     """Flatten a fragment this module did not author so it cannot forge structure.
 
     ``limit`` caps the result, and is passed ONLY where the untrusted fragment is
-    ISOLATED: Deribit's ``error.message``, a raw candle row echoed into the
-    malformed-shape error, and the caller-supplied ``asset``. It is not passed
+    ISOLATED: Deribit's ``error.message``, and a raw candle row echoed into the
+    malformed-shape error. It is not passed
     when flattening a whole exception message, because most of that string is
     this module's own carefully-worded diagnostic: capping there truncated
     "...points at a response-shape change rather than an empty market" one
@@ -615,10 +617,13 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     the model reads — see ``utils.sanitize_untrusted``; that is its slot to
     bound, and the log keeps the whole message.)
 
-    Several inputs reach the report without this module choosing their contents:
-    Deribit's JSON-RPC ``error.message``, a raw candle row, and the caller-supplied
-    ``asset`` (``curr_date`` is judged and echoed by the shared date refusal
-    before it gets this far). Interpolated raw, any can close the sentence it
+    Two inputs reach the report without this module choosing their contents:
+    Deribit's JSON-RPC ``error.message`` and a raw candle row. The caller's
+    ``asset`` is NOT one of them any more — it is the model's own argument
+    rather than the vendor's prose, so it takes ``utils.echo_argument`` and
+    ``utils.quote_argument``, which keep its edge markers instead of stripping
+    them (#233); ``curr_date`` is judged and echoed by the shared date refusal
+    before it gets this far. Interpolated raw, either can close the sentence it
     sits in and open new blocks — a second ``_Reading:_`` line, a fresh ``##``
     heading, a fabricated DVOL level — and the forged copy renders ABOVE the
     real one, so a downstream summariser keeping "the Reading line" quotes the
@@ -2675,7 +2680,8 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # more than one raise — so every
     # copy is a chance to forge a heading or a second Reading line. Uncounted on
     # purpose: this comment carried the number eight beside a list naming six, and
-    # said "one raise" where there are two. Grep `{asset}` for the live set.
+    # said "one raise" where there are two. Grep `{quoted}` for the live set
+    # (the sites take their quotes from ``repr`` now, not from the sentence).
     # Sanitising
     # after ``_classify_asset`` made the two disagree: "`BTC`" classified on the
     # raw string (unrecognized) but rendered from the flattened one, producing
@@ -2684,7 +2690,17 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     #
     # After the isinstance guard, so a non-string is still rejected as a caller's
     # bug rather than silently stringified into a symbol.
-    asset = _sanitize(asset, limit=MAX_UNTRUSTED_CHARS)
+    # ``echo_argument`` rather than the vendor default: this is the CALLER'S
+    # OWN spelling coming back into text it reads, so an edge marker becomes a
+    # space rather than vanishing — "_SOL" must not be quoted back as "SOL"
+    # inside a sentence saying this vendor serves no chain for it (#232, #233).
+    asset = echo_argument(asset)
+    # Every site below names it INSIDE QUOTES, and a value carrying the quote
+    # character closes the span early, after which the prose reads to the model
+    # as this tool's own words. ``quote_argument`` supplies delimiters ``repr``
+    # has already escaped, so those sentences must not add quotes of their own;
+    # a clean symbol renders byte for byte as it did before ('SOL').
+    quoted = quote_argument(asset)
     currency, market_proxy = _classify_asset(asset)
     if currency is None:
         # Not a recognized crypto risk asset. Like farside's equivalent path this
@@ -2692,7 +2708,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # useful to the analyst than a generic degraded-category sentinel).
         return (
             f"This vendor reads Deribit options for {' and '.join(SUPPORTED_CURRENCIES)} only, "
-            f"and '{asset}' is not a recognized crypto risk asset for which BTC's DVOL level "
+            f"and {quoted} is not a recognized crypto risk asset for which BTC's DVOL level "
             f"serves as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
             f"not substitute BTC or ETH implied volatility for it."
         )
@@ -2831,7 +2847,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # never will. The caller's own symbol appears for the same reason: naming
         # only the proxy currency shows an operator a BTC failure for a SOL request.
         proxy_note = (
-            f", and this vendor reads no options chain for '{asset}' on any date"
+            f", and this vendor reads no options chain for {quoted} on any date"
             if market_proxy and chain_withheld != "proxy"
             else ""
         )
@@ -2860,7 +2876,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             raise failure_cls(
                 # Parenthesised for the reason chain_absence's far-future branch is:
                 # proxy_note appends ", and this vendor reads no options chain for
-                # '{asset}' on any date", and against a trailing "which ..." clause
+                # {quoted} on any date", and against a trailing "which ..." clause
                 # that reads as one more remark about the DATE — the exact
                 # misreading proxy_note exists to prevent. Both far-future sites
                 # carry the suffix and both needed the brackets; only one of them
@@ -2871,7 +2887,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             )
         if chain_withheld == "proxy":
             raise failure_cls(
-                f"Deribit's options chain is not served for '{asset}', which has no Deribit "
+                f"Deribit's options chain is not served for {quoted}, which has no Deribit "
                 f"chain of its own; DVOL is unavailable for {currency} ({dvol_reason})"
             )
         raise failure_cls(
@@ -2885,12 +2901,12 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         # the heading would otherwise carry one byte-identical to a real BTC
         # report, with the proxy framing stripped off.
         header_lines = [
-            f"## Options Volatility — {currency} (market-wide proxy for '{asset}', Deribit)",
-            f"_This vendor reads no options chain for '{asset}'; showing the {currency} DVOL "
-            f"level as a market-wide crypto-vol proxy, not a signal specific to '{asset}'. "
+            f"## Options Volatility — {currency} (market-wide proxy for {quoted}, Deribit)",
+            f"_This vendor reads no options chain for {quoted}; showing the {currency} DVOL "
+            f"level as a market-wide crypto-vol proxy, not a signal specific to {quoted}. "
             f"The 25Δ skew is "
             f"NOT shown: a risk reversal measures demand for downside in {currency} itself and "
-            f"does not carry across to '{asset}'._",
+            f"does not carry across to {quoted}._",
         ]
     else:
         header_lines = [f"## Options Volatility — {currency} (Deribit)"]
@@ -3134,9 +3150,9 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
         )
     elif chain_withheld == "proxy":
         sections.append(
-            f"**Options chain (ATM IV / 25Δ skew):** not served for '{asset}' — see the note "
+            f"**Options chain (ATM IV / 25Δ skew):** not served for {quoted} — see the note "
             f"above. {currency}'s skew describes demand for downside in {currency}, not in "
-            f"'{asset}'. Do not substitute it."
+            f"{quoted}. Do not substitute it."
         )
     else:
         # Not "the chain request failed": nearly every reachable cause comes from
@@ -3184,7 +3200,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # lets the reader reconstruct it, and this line has to stand alone.
             # The clock clause is parenthesised rather than left as a trailing
             # "which ..." relative clause. The proxy suffix below appends ", and
-            # this vendor reads no options chain for '{asset}' on any date", which
+            # this vendor reads no options chain for {quoted} on any date", which
             # against a trailing relative clause reads as one more thing said about
             # the DATE — re-creating, in grammar, exactly the misreading the suffix
             # was added to prevent. The historical sibling has no trailing clause
@@ -3194,7 +3210,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
                 f"ahead of the UTC clock ({today}) when this report was built)"
             )
         elif chain_withheld == "proxy":
-            chain_absence = f"this vendor reads no options chain for '{asset}'"
+            chain_absence = f"this vendor reads no options chain for {quoted}"
         else:
             # A cause, not a restatement: the template around it already says no
             # skew is in the report, so "no skew could be derived" read as a
@@ -3218,7 +3234,7 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
             # second carrier, so without this the summarisable sentence says SOL's
             # skew was withheld because of the DATE, implying a live date would
             # serve it. It never will.
-            chain_absence += f", and this vendor reads no options chain for '{asset}' on any date"
+            chain_absence += f", and this vendor reads no options chain for {quoted} on any date"
 
     # Why no DVOL level is in this report, worded for the Reading line. The cause
     # text is the same one the body line carries; a reader deciding whether to wait

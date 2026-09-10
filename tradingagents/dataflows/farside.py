@@ -49,7 +49,14 @@ from parsel import Selector
 from .errors import VendorError, VendorUnavailableError
 from .sosovalue_common import _cache_dir, _cache_rejecter, _read_cache_preamble, _stale_caveat
 from .symbol_utils import classify_crypto_asset
-from .utils import date_refusal, failure_account, is_unreached, raise_for_http_status
+from .utils import (
+    date_refusal,
+    echo_argument,
+    failure_account,
+    is_unreached,
+    quote_argument,
+    raise_for_http_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +315,8 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
     issuer columns. The caller then degrades instead of receiving a half-parsed
     table.
 
-    A missing (or partly-blank) issuer header is deliberately *not* fatal: the
+    A missing issuer header, or one with columns this parser cannot read, is
+    deliberately *not* fatal: the
     figures are still verified by the Total cross-check, so the affected columns
     fall back to ``unnamed col N`` names, the parser logs, and it reports
     ``issuers_named=False`` for the caller to disclose. Losing some labels is not
@@ -346,16 +354,28 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
 
     header = _find_issuer_header(rows, data_row_idxs[0], num_cols)
     # Columns: 0 = date, last = Total, the rest = issuers. A column keeps its
-    # header ticker only when that cell is present and non-empty; otherwise it
-    # gets a self-describing ``unnamed col N`` placeholder (not a fake ``ETF{j}``
-    # that reads as a real ticker). all_named is True only when every column
-    # resolved a real label — a *found but partly-blank* header is not "named",
-    # so the report's disclosure still fires.
+    # header ticker only when that cell READS AS ONE; otherwise it gets a
+    # self-describing ``unnamed col N`` placeholder (not a fake ``ETF{j}`` that
+    # reads as a real ticker). all_named is True only when every column
+    # resolved a real label — a header that is found but has any column this
+    # parser could not read is not "named", so the report's disclosure still
+    # fires.
     issuer_cols = list(range(1, num_cols - 1))
     issuer_names = []
     unnamed_cols = []
     for j in issuer_cols:
         label = header[j] if header else ""
+        # A label that does not LOOK like an issuer ticker is treated as no
+        # label at all, rather than rendered as one. The cell is Farside's
+        # HTML, reached here through ``_cell_text``'s bare ``.strip()``, and it
+        # ends up inside "**Latest-day leaders:** {name} {flow}" — and in the
+        # rolling cache, so a bad label replays every refresh. Judging its
+        # SHAPE rather than flattening it is the honest half: a cell carrying
+        # "IBIT ## Foo" is not an issuer whose name happens to need cleaning,
+        # it is a column this parser could not read, and the placeholder plus
+        # ``issuers_named=False`` already say exactly that (#233).
+        if not _TICKER_RE.match(label):
+            label = ""
         issuer_names.append(label or f"unnamed col {j}")
         if not label:
             unnamed_cols.append(j)
@@ -371,7 +391,7 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
             asset,
         )
     elif unnamed_cols:
-        # Header found but one or more ticker cells are blank: log which columns
+        # Header found but one or more ticker cells are blank or unreadable: log which columns
         # fell back so a partial header change is diagnosable, not silent.
         logger.warning(
             "Farside %s: issuer header row found but columns %s have no ticker label; "
@@ -844,6 +864,38 @@ def get_etf_flow_data(
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
+    # Before the echo, not after: ``echo_argument`` goes through ``str``, so a
+    # TRUTHY non-string would be silently turned into a symbol and answered
+    # about — ``b"BTC"`` came back as a confident "there is no ETF flow signal
+    # for b'BTC'" to a model that asked about BTC. That is the caller's bug and
+    # belongs in the vendor-failed lane, which is where deribit and the
+    # treasuries module already put it (#233).
+    #
+    # Scoped to TRUTHY non-strings, which is deribit's standing decision and is
+    # pinned by a test there: a falsy argument keeps the no-signal sentence
+    # rather than being swallowed into an error. The exemption is not that a
+    # falsy value cannot be mistaken for a symbol — ``b""`` renders as ``b''``
+    # — but that widening it would change behaviour three modules already
+    # shipped, which is not this batch's call to make.
+    if asset and not isinstance(asset, str):
+        raise FarsideError(f"asset must be a symbol string, got {type(asset).__name__}")
+    # Flattened BEFORE classification, not after, so exactly one string is both
+    # decided on and rendered — sanitising afterwards makes the classified and
+    # the rendered strings disagree, and deribit's comment spells out what that
+    # produced there. ``asset`` is an LLM-written tool argument echoed into a
+    # markdown ``##`` heading, an emphasis caveat and the no-signal sentence,
+    # so every copy is a chance to forge structure (#233).
+    #
+    # ``echo_argument``, because the value is the CALLER'S OWN spelling coming
+    # back into text it reads: an edge marker becomes a space rather than
+    # vanishing, so "_SOL" is not quoted back as "SOL" beside a sentence
+    # saying there is no signal for it. The quoted sites take ``quoted``,
+    # whose delimiters ``repr`` has already escaped — a value carrying the
+    # quote character would otherwise close the span early and the prose after
+    # it would read as this tool's own words (#232). A clean symbol renders
+    # byte for byte as it did with the literal quotes: 'SOL'.
+    asset = echo_argument(asset)
+    quoted = quote_argument(asset)
     asset_key, market_proxy = _classify_asset(asset)
     if asset_key is None:
         # Not a recognized crypto risk asset (a stablecoin like USDT/USDC, a
@@ -853,7 +905,7 @@ def get_etf_flow_data(
         # statement, not an error, so it is returned (more useful to the analyst
         # than a generic degraded-category sentinel) rather than raised.
         return (
-            f"There is no spot-ETF flow signal for '{asset}': it has no US spot ETF of "
+            f"There is no spot-ETF flow signal for {quoted}: it has no US spot ETF of "
             f"its own and is not a recognized crypto risk asset for which BTC flows serve "
             f"as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
             f"not substitute BTC or ETH flows."
@@ -869,9 +921,9 @@ def get_etf_flow_data(
         # / risk agents, and a heading byte-identical to a real BTC report is
         # exactly what survives that hop with the proxy framing stripped off.
         header_lines = [
-            f"## Spot ETF Flows — {asset_key} (market-wide proxy for '{asset}', Farside, net US$m)",
-            f"_No spot ETF exists for '{asset}'; showing {asset_key} spot-ETF flows as a "
-            f"market-wide crypto risk-on/off proxy, not an '{asset}'-specific signal._",
+            f"## Spot ETF Flows — {asset_key} (market-wide proxy for {quoted}, Farside, net US$m)",
+            f"_No spot ETF exists for {quoted}; showing {asset_key} spot-ETF flows as a "
+            f"market-wide crypto risk-on/off proxy, not an {quoted}-specific signal._",
         ]
     else:
         header_lines = [f"## Spot ETF Flows — {asset_key} (Farside, net US$m)"]

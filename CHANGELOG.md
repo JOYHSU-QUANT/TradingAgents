@@ -960,6 +960,105 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The macro and ETF vendors' fields reached the prompt able to forge a table
+  ROW** (issue #233, second batch). The first batch closed the router's
+  sentinel and the yfinance family; these six modules render into a shape the
+  first batch did not have to reason about. ``fred`` and ``fear_greed`` print
+  their series as "|"-separated rows, so an unflattened cell is not merely a
+  line that reads oddly: one "|" forges a COLUMN, one line break forges a whole
+  ROW — an observation the model cannot tell from a real one, in a report whose
+  whole purpose is to be read as data. Same two subjects and two helpers as the
+  first batch, and the same rule about which value gets asked about.
+
+  ``fred`` is the file worth quoting. It already imported both helpers and
+  already echoed the series id it REJECTED — and interpolated the accepted one
+  raw into a ``##`` heading two screens further down, along with FRED's own
+  title, units and frequency, and into a series-not-found sentence it RETURNS
+  (so ``failure_account`` never sees it) inside quotes of its own writing.
+
+  Its observation cells are the sharper half, and flattening alone was the
+  wrong answer for them. ``date`` and ``value`` are RAW vendor strings that
+  nothing coerces on the way in, and they render three times over — the table,
+  the Latest/Change summary (which uses "|" as its own separator), and the
+  arithmetic that reads them. Flatten and ``"4.1|"`` becomes ``"4.1"``: a value
+  that used to fail ``float()`` and degrade the summary VISIBLY would instead
+  parse and drive a computed macro delta, with nothing in the report to say it
+  had been altered; ``"nan|"`` and ``"inf#"`` are worse, being floats that
+  poison the delta and its percentage. ``"2026-06-0#1"`` becomes
+  ``"2026-06-0 1"``, which ``data_lag_note`` cannot read — so the freshness
+  disclosure silently disappears and the report reads as MORE trustworthy for
+  being corrupt. Sanitising had turned a loud failure into a quiet wrong
+  answer. So a row is now ADMITTED on the shape of its raw value — a finite
+  number, and a date the shared ISO normaliser recognises — and a row that is
+  neither is dropped and DISCLOSED, with the no-rows sentence naming that case
+  rather than blaming the series' cadence. The flattening that remains is a
+  second line of defence. BOTH spellings are asked — the raw one so flattening
+  cannot repair a value into a number, the RENDERED one so a value only the raw
+  form parses (a JSON ``true``, or a number the cap cut) cannot reach the table
+  and then fail the summary's ``float()`` in silence — which is what makes
+  "the value judged and the value shown are one value" true here rather than
+  nearly true. It is the answer ``fear_greed`` already gave its own rows, which
+  coerce and raise rather than print whatever arrived. Only ``"."`` counts as
+  FRED's own missing-observation encoding: an absent key or an empty string was
+  being waved through beside it, so a response whose every row was malformed
+  still advised the reader to widen ``look_back_days``.
+
+  A field with nothing left to show is NAMED where it is a subject and OMITTED
+  where it is a label, the rule the first batch arrived at. An unrenderable
+  ``title`` takes a marker rather than borrowing the series id, which would
+  read as a series FRED titled after itself; a ``- Units: `` with nothing after
+  it is not a fact and simply does not appear; and ``fear_greed``'s
+  classification is named rather than leaving the Latest line on a bare
+  em-dash and the table row with an empty cell.
+
+  ``fear_greed``'s table looks identical and is not. Only
+  ``value_classification`` is guarded there, because ``date`` and ``value``
+  stopped being vendor text before they reached the row: one was derived from
+  an int timestamp through ``strftime`` and the other went through ``int()``.
+  Guarding them would have cost nothing and taught the next reader the wrong
+  rule — that a table cell is dangerous by virtue of being a cell rather than
+  by virtue of what reaches it.
+
+  The four crypto vendors echo one caller ARGUMENT, ``asset``, into a ``##``
+  heading, an emphasis caveat and a no-signal sentence. ``deribit`` and
+  ``sosovalue_treasuries`` already flattened it — with the VENDOR default,
+  which strips an edge marker off a value that is the caller's own, so ``_SOL``
+  came back as ``SOL`` inside a sentence saying we serve no signal for it;
+  ``farside`` and ``sosovalue`` did not flatten it at all. All four now take
+  ``echo_argument``, and all four flatten BEFORE classification so the spelling
+  decided on and the spelling printed cannot disagree — the failure deribit's
+  own comment already recorded. Every site that names the asset inside quotes
+  now takes ``quote_argument`` and drops the literal quotes it used to write:
+  a value carrying the quote character closed that span early, and the prose
+  after it read to the model as the tool's own words rather than as the
+  caller's argument. A clean symbol renders byte for byte as before, ``'SOL'``.
+
+  Flattening before classification widens what ``farside`` and ``sosovalue``
+  will answer, the two that used to classify the raw string: ``BTC|`` reached
+  the no-signal sentence and now serves a real BTC report. That is the intended
+  consequence of one string being both decided on and rendered — but it also
+  means a non-string argument would have been ``str``'d into a symbol and
+  answered about, so ``b"BTC"`` came back as a confident "there is no ETF flow
+  signal for ``b'BTC'``" to a model that had asked about BTC. Both modules now
+  carry the guard ``deribit`` and the treasuries module already placed ahead of
+  their own echo — including its scope, which is TRUTHY non-strings only. A
+  falsy argument keeps the no-signal sentence rather than being swallowed into
+  an error, which is deribit's standing decision and pinned by a test there;
+  the exemption is not that a falsy value cannot be mistaken for a symbol
+  (``b""`` renders as ``b''``) but that widening it would change behaviour
+  three modules already shipped, which is not this batch's call to make.
+
+  ``farside`` was guarding the caller's argument while rendering the vendor's
+  own field raw, in the same report — the shape ``fred``'s comment complains
+  about, one file over. Its issuer labels come from Farside's HTML header
+  through a bare ``.strip()``, land in ``**Latest-day leaders:**``, and are
+  written to the rolling cache, so a bad one replays on every refresh. A label
+  is now judged by its SHAPE rather than flattened: a cell carrying
+  ``IBIT ## Foo`` is not an issuer name that happens to need cleaning, it is a
+  column the parser could not read, and the ``unnamed col N`` placeholder plus
+  ``issuers_named=False`` — both already built, both already disclosed — say
+  exactly that.
+
 - **Symbols, tickers and yfinance's own text reached the prompt able to forge
   report structure** (issue #233, first batch). PR #202 bounded the vendor's
   share of the router's two sentinel slots, and PR #232 closed the sites it

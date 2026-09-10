@@ -64,6 +64,27 @@ def _parse_json_list(value) -> list:
         return []
 
 
+def _rendered_text(value: object) -> str:
+    """A Gamma text field as the report will show it, or ``""`` if unshowable.
+
+    Two ways a field with nothing to say used to reach the report anyway, both
+    because ``sanitize_untrusted`` goes through ``str``:
+
+    * a MISSING field (``None``) came back as the literal ``"None"`` — a market
+      rendered ``- **None**``, which no reader can tell from a real market
+      whose question text happens to be the string ``"None"``;
+    * a field of pure markdown (``"###"``) is a real, non-empty string that
+      FLATTENS to nothing, rendering an empty label.
+
+    Returning ``""`` for both lets the caller drop and disclose the market with
+    one check, and — because this is also the spelling the caller renders —
+    the value judged and the value shown are the same value (#233).
+    """
+    if not isinstance(value, str):
+        return ""
+    return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)
+
+
 def _is_forward_looking(market: dict, now: datetime) -> bool:
     """Keep only open markets that resolve in the future.
 
@@ -181,10 +202,25 @@ def get_prediction_markets(
             break
         prices = _parse_json_list(m.get("outcomePrices"))
         outcomes = _parse_json_list(m.get("outcomes"))
-        # A malformed market — mismatched outcome/price lists, an unparsable
-        # or out-of-range probability — is dropped and disclosed below, never
-        # rendered with a fabricated label or an impossible probability.
+        # A malformed market — a missing question or outcome label, mismatched
+        # outcome/price lists, an unparsable or out-of-range probability — is
+        # dropped and disclosed below, never rendered with a fabricated label
+        # or an impossible probability.
+        #
+        # The question and the first outcome label are judged on what they will
+        # RENDER as, which is what ``_rendered_text`` returns and what the line
+        # below shows — so the value judged and the value shown cannot differ.
+        # The comment above has claimed this completeness since before #232
+        # while the guard checked neither field (#233).
+        question = _rendered_text(m.get("question"))
+        if not question:
+            omitted += 1
+            continue
         if not outcomes or not prices or len(outcomes) != len(prices):
+            omitted += 1
+            continue
+        label = _rendered_text(outcomes[0])
+        if not label:
             omitted += 1
             continue
         try:
@@ -199,19 +235,19 @@ def get_prediction_markets(
         # created the market, and the router serves a successful report
         # verbatim (it caps only its sentinel slots), so an unflattened
         # question was a second forgery site three lines below the heading
-        # this PR fixed: a question carrying its own "## " line renders a
+        # PR #232 fixed: a question carrying its own "## " line renders a
         # heading impersonating another tool inside this report (#201
-        # review). The date is a vendor field too — and it is flattened
-        # BEFORE the slice, not after: slicing first spends the ten
-        # characters on the junk and the flatten then deletes the evidence
-        # the junk was there, so "\n2030-12-31" rendered as "2030-12-3" — a
-        # date 28 days early with nothing left in the line to say it was cut.
-        label = sanitize_untrusted(outcomes[0], limit=MAX_UNTRUSTED_CHARS)
+        # review). Both are flattened at the guard above, which judges what
+        # this line will actually show. The date is a vendor field too — and
+        # it is flattened BEFORE the slice, not after: slicing first spends
+        # the ten characters on the junk and the flatten then deletes the
+        # evidence the junk was there, so "\n2030-12-31" rendered as
+        # "2030-12-3" — a date 28 days early with nothing left in the line to
+        # say it was cut.
         volume = m.get("volumeNum") or 0
         end_date = sanitize_untrusted(m.get("endDate") or "")[:10]
         wk = m.get("oneWeekPriceChange")
         wk_str = f", 1-week {wk * 100:+.1f}pp" if isinstance(wk, (int, float)) and wk else ""
-        question = sanitize_untrusted(m.get("question"), limit=MAX_UNTRUSTED_CHARS)
         lines.append(
             f"- **{question}** — {label} {prob:.0%} "
             f"(${volume:,.0f} volume, resolves {end_date}{wk_str})"
@@ -221,7 +257,7 @@ def get_prediction_markets(
     if omitted:
         report += (
             f"\n{omitted} market(s) omitted (malformed vendor data: "
-            f"outcome/price mismatch, unparsable price, or out-of-range "
-            f"probability).\n"
+            f"missing question or outcome label, outcome/price mismatch, "
+            f"unparsable price, or out-of-range probability).\n"
         )
     return report

@@ -18,16 +18,84 @@ from .config import get_config
 # config reads, the cache forget — is not that, and wears ``wiring_gap`` to
 # say so (#111, #200).
 from .symbol_utils import normalize_symbol
-from .utils import date_range_refusal, date_refusal, wiring_gap
+from .utils import (
+    MAX_UNTRUSTED_CHARS,
+    date_range_refusal,
+    date_refusal,
+    echo_argument,
+    no_news_in_window,
+    sanitize_untrusted,
+    wiring_gap,
+)
 from .yfinance_common import yf_fetch_unhidden
 
 # Clamp the untrusted article count before it sizes an external yf.Search
 # call (#33): an LLM-supplied or misconfigured value must stay bounded.
 MAX_SEARCH_NEWS_COUNT = 100
 
+# How much of one article's summary may reach the prompt. Its own bound rather
+# than ``MAX_UNTRUSTED_CHARS``: that cap sizes LABELS — a title, a publisher, an
+# echoed argument — where 200 characters is generous, whereas the summary is the
+# news report's PAYLOAD and the same cap would cut most real articles mid
+# sentence, degrading what the news analyst reads to buy nothing (the structural
+# forgery is closed by the flattening, not by the cap). Still bounded, because a
+# vendor field with no ceiling can bury the report's own sentences under its bulk
+# and the article count alone does not bound the bytes (#233).
+MAX_NEWS_SUMMARY_CHARS = 2000
+
+
+def _flatten_article_fields(data: dict) -> dict:
+    """Flatten the four vendor-written text fields of one extracted article.
+
+    Every one of them is written by whoever filed the story, and the report
+    they are rendered into is served to the news analyst verbatim — the router
+    caps only its own sentinel slots. Unflattened, a title carrying its own
+    ``"\\n### "`` opens a heading inside a report the model is told to trust,
+    and the title sits at the START of its line, which is the most exploitable
+    position in the repo (#233). Flattening is what closes that: the report is
+    block-level, so a fragment with no line breaks cannot open a block however
+    it is punctuated.
+
+    Applied HERE, at the one place both article shapes (nested ``content`` and
+    flat) are read, and before the caller's window filter and title
+    de-duplication, which then agree with what is actually rendered rather than
+    with a spelling the report never shows. ``pub_date`` is a datetime and is
+    not text; it is untouched. What keeps the two news reports from drifting is
+    ``_render_article`` below, not this function: a fifth rendered field added
+    to one loop and not the other would escape a guard placed only here.
+
+    Labels take the shared cap; the summary takes its own, larger one for the
+    reason given at ``MAX_NEWS_SUMMARY_CHARS``. The link takes the label cap
+    too: a URL that long is already unusable as a citation, and the flattening
+    turns a ``#`` fragment marker into a space, so a fragment URL renders
+    changed — the report's honesty about structure is worth more than a
+    fragment anchor.
+
+    ``or ""`` before the two optional fields, because ``sanitize_untrusted``
+    goes through ``str``: they reach here as ``None`` when the vendor sends the
+    key carrying a null (the extraction's ``.get(key, "")`` default covers only
+    an ABSENT key), and a bare flatten would hand back the truthy string
+    ``"None"`` — which the renderers' ``if data["summary"]`` / ``if
+    data["link"]`` would then print as a body line reading ``None`` and a
+    ``Link: None``. Title and publisher cannot arrive that way: their
+    extraction already substitutes an explicit unavailability marker for a
+    false-y value (#31).
+    """
+    return {
+        **data,
+        "title": sanitize_untrusted(data["title"], limit=MAX_UNTRUSTED_CHARS),
+        "summary": sanitize_untrusted(data["summary"] or "", limit=MAX_NEWS_SUMMARY_CHARS),
+        "publisher": sanitize_untrusted(data["publisher"], limit=MAX_UNTRUSTED_CHARS),
+        "link": sanitize_untrusted(data["link"] or "", limit=MAX_UNTRUSTED_CHARS),
+    }
+
 
 def _extract_article_data(article: dict) -> dict:
-    """Extract article data from yfinance news format (handles nested 'content' structure)."""
+    """Extract article data from yfinance news format (handles nested 'content' structure).
+
+    The four text fields come back FLATTENED (see ``_flatten_article_fields``);
+    ``pub_date`` comes back as a datetime or None.
+    """
     # Handle nested content structure
     if "content" in article:
         content = article["content"]
@@ -49,7 +117,7 @@ def _extract_article_data(article: dict) -> dict:
             with contextlib.suppress(ValueError, AttributeError):
                 pub_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
 
-        return {
+        data = {
             "title": title,
             "summary": summary,
             "publisher": publisher,
@@ -65,13 +133,39 @@ def _extract_article_data(article: dict) -> dict:
         if ts:
             with contextlib.suppress(ValueError, OSError, TypeError):
                 pub_date = datetime.fromtimestamp(ts)
-        return {
+        data = {
             "title": article.get("title") or "(title unavailable)",
             "summary": article.get("summary", ""),
             "publisher": article.get("publisher") or "(source unavailable)",
             "link": article.get("link", ""),
             "pub_date": pub_date,
         }
+
+    # ONE exit, so a third article shape added later cannot reach the report
+    # unflattened by forgetting the wrapper.
+    return _flatten_article_fields(data)
+
+
+def _render_article(data: dict) -> str:
+    """One extracted article as the block both news reports render it.
+
+    The one place an article becomes prompt text. Both getters used to carry a
+    verbatim copy of these six lines, so "the ticker report and the global
+    report show an article the same way" was a fact about two literals rather
+    than about the code — and the flattening that keeps a title from opening a
+    heading of its own protects only the fields a copy actually renders (#233).
+
+    The two ``if``s are what make an absent summary or link no line at all,
+    rather than a line with nothing after the label; ``_flatten_article_fields``
+    keeps them working by coercing a vendor's null to ``""`` rather than to the
+    string ``"None"``.
+    """
+    block = f"### {data['title']} (source: {data['publisher']})\n"
+    if data["summary"]:
+        block += f"{data['summary']}\n"
+    if data["link"]:
+        block += f"Link: {data['link']}\n"
+    return block + "\n"
 
 
 def _in_news_window(pub_date, start_dt, end_dt) -> bool:
@@ -123,7 +217,14 @@ def get_news_yfinance(
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently
     # returns no news. Keep the user's ticker in the report header.
     canonical = normalize_symbol(ticker)
-    resolved = "" if canonical == ticker else f" (resolved to {canonical})"
+    # The report names both spellings, and both are the caller's own argument
+    # coming back into text the model reads, so both are echoed flattened and
+    # capped (#233). Bare, not quoted, so ``echo_argument`` is the right helper
+    # here — nothing wraps them in delimiters a value could close. The
+    # comparison stays on the RAW pair: it asks whether the alias table changed
+    # the symbol, which is not a question the flattening may answer.
+    echoed = echo_argument(ticker)
+    resolved = "" if canonical == ticker else f" (resolved to {echo_argument(canonical)})"
     stock = yf.Ticker(canonical)
     # Through the shared un-hidden boundary like every other yfinance leaf
     # (#116); an outage body takes its vendor-unavailable lane rather than
@@ -131,7 +232,7 @@ def get_news_yfinance(
     news = yf_fetch_unhidden(lambda: stock.get_news(count=article_limit), hidden_answer=list)
 
     if not news:
-        return f"No news found for {ticker}{resolved}"
+        return f"No news found for {echoed}{resolved}"
 
     # Parse date range for filtering
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -147,18 +248,17 @@ def get_news_yfinance(
         if not _in_news_window(data["pub_date"], start_dt, end_dt):
             continue
 
-        news_str += f"### {data['title']} (source: {data['publisher']})\n"
-        if data["summary"]:
-            news_str += f"{data['summary']}\n"
-        if data["link"]:
-            news_str += f"Link: {data['link']}\n"
-        news_str += "\n"
+        news_str += _render_article(data)
         filtered_count += 1
 
     if filtered_count == 0:
-        return f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
+        # The shared definition, so this sentence and the Alpha Vantage
+        # sibling's cannot drift in wording or in which guard the symbol takes
+        # (#219, #233). It echoes the ticker itself; the resolution clause is
+        # this vendor's own, since only this one resolves aliases.
+        return no_news_in_window(ticker, start_date, end_date, resolved=resolved)
 
-    return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
+    return f"## {echoed}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
 
 def get_global_news_yfinance(
@@ -273,12 +373,15 @@ def get_global_news_yfinance(
 
         if news:
             for article in news:
-                # Handle both flat and nested structures
-                if "content" in article:
-                    data = _extract_article_data(article)
-                    title = data["title"]
-                else:
-                    title = article.get("title", "")
+                # Both shapes through the one extraction, which handles them
+                # both: the flat branch used to key on the RAW title while the
+                # render below uses the flattened one, so the same story
+                # arriving once nested and once flat with a marker in its title
+                # survived de-duplication twice and rendered two identical
+                # headings. Reading the same value the report shows is also
+                # what lets the docstring on ``_flatten_article_fields`` claim
+                # the two agree (#233).
+                title = _extract_article_data(article)["title"]
 
                 # Deduplicate by title
                 if title and title not in seen_titles:
@@ -304,12 +407,7 @@ def get_global_news_yfinance(
         data = _extract_article_data(article)
         if not _in_news_window(data["pub_date"], start_dt, curr_dt):
             continue
-        news_str += f"### {data['title']} (source: {data['publisher']})\n"
-        if data["summary"]:
-            news_str += f"{data['summary']}\n"
-        if data["link"]:
-            news_str += f"Link: {data['link']}\n"
-        news_str += "\n"
+        news_str += _render_article(data)
         kept += 1
 
     # All candidates fell outside the window -> say so rather than return an

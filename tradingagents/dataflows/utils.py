@@ -405,6 +405,57 @@ def quote_argument(value) -> str:
     return flat
 
 
+# The two sentences the vendors of one routed tool must serve WORD FOR WORD,
+# defined once each. Both used to be a literal in the yfinance module and a
+# second literal in the Alpha Vantage one, each under a comment promising the
+# other copy said the same thing — and the promise was pinned only by a
+# cross-vendor equality test spelling one canonical symbol, so the two could
+# diverge the moment a value stopped being canonical. Same reasoning as
+# ``_OMIT_CLAUSE`` above: one literal, so one vendor cannot start saying
+# something the other stopped saying (#140 review, #219, #233).
+#
+# The ECHO happens in here rather than at the call sites, which is the half
+# that matters most: the two vendors have to agree on WHICH guard the value
+# takes, not merely on the words around it. A caller reaching for
+# ``echo_argument`` where its sibling reached for ``quote_argument`` would
+# leave the twins identical on a clean spelling and different on a hostile
+# one — exactly the divergence a cross-vendor equality test on a clean symbol
+# cannot see.
+
+
+def no_insider_transactions(symbol: object) -> str:
+    """The empty-insider-stream answer, in the voice both vendors share.
+
+    An empty stream is normal here — many valid symbols have no filings — so
+    both vendors say so in prose rather than one answering raw empty JSON the
+    agent might hedge over (#90). Each names the spelling IT queried: yfinance
+    the canonical symbol it resolved to, Alpha Vantage the raw one it sent,
+    because echoing a spelling a vendor never used would misattribute the
+    emptiness. The sentence quotes the symbol, so the echo is
+    ``quote_argument`` (see there for why the quotes are repr's and not the
+    f-string's).
+    """
+    return f"No insider transactions reported for symbol {quote_argument(symbol)}"
+
+
+def no_news_in_window(ticker: object, start_date: str, end_date: str, *, resolved: str = "") -> str:
+    """The nothing-in-the-window answer, in the voice both news vendors share.
+
+    Alpha Vantage filters ``NEWS_SENTIMENT`` server-side by ``time_from`` /
+    ``time_to``, so its empty feed asserts only "nothing in the window you
+    asked for" — the same claim the yfinance getter makes when articles exist
+    but none fall inside the window. The two reach the sentence from different
+    sides on purpose; what has to match is the sentence the agent reads, since
+    which vendor served the call is not something the agent can see.
+
+    ``resolved`` is the caller's own, already-guarded clause naming the symbol
+    it actually queried, and is empty for a vendor that queries the spelling it
+    was handed. The dates are the caller's too, and reach here having already
+    been refused if they were not usable (#111), so they are not echoed.
+    """
+    return f"No news found for {echo_argument(ticker)}{resolved} between {start_date} and {end_date}"
+
+
 def invalid_date_sentinel(
     value,
     *,

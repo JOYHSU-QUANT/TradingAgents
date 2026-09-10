@@ -14,10 +14,14 @@ from .symbol_utils import NoMarketDataError, normalize_symbol
 from .utils import (
     INDICATOR_DESCRIPTIONS,
     MAX_INSIDER_LAG_DAYS,
+    MAX_UNTRUSTED_CHARS,
     data_lag_note,
     date_range_refusal,
     date_refusal,
+    echo_argument,
     live_snapshot_note,
+    no_insider_transactions,
+    sanitize_untrusted,
     statement_lag_bound,
 )
 from .yfinance_common import (
@@ -137,7 +141,12 @@ def _statement_report(data, ticker, canonical, curr_date, freq, noun: str, title
             )
         raise NoMarketDataError(ticker, canonical, f"no {noun} data on or before {curr_date}")
 
-    header = f"# {title} data for {canonical} ({freq})\n"
+    # ``title`` is this module's own noun; the other two are the caller's —
+    # the alias table's answer for the symbol it asked about, and the
+    # frequency it named, which is read for one spelling ("quarterly") and
+    # otherwise echoed as given. Both are flattened and capped on the way back
+    # into a heading line the model reads (#233).
+    header = f"# {title} data for {echo_argument(canonical)} ({echo_argument(freq)})\n"
     header += _statement_lag_note(data, curr_date, freq, f"{noun} period")
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + data.to_csv()
@@ -256,7 +265,13 @@ def get_YFin_data_online(
 
     # Add header information; note the resolved symbol when it differs so the
     # agent (and user) can see which instrument was actually priced.
-    label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
+    # Both spellings are the caller's own, echoed flattened and capped into a
+    # heading line the model reads (#233). The comparison stays on the RAW
+    # pair: it asks whether the alias table changed the symbol, which is not a
+    # question the flattening may answer.
+    label = echo_argument(canonical)
+    if canonical != symbol.upper():
+        label += f" (from {echo_argument(symbol)})"
     header = f"# Stock data for {label} from {start_date} to {end_date}\n"
     header += f"# Total records: {len(data)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -278,8 +293,12 @@ def get_stock_stats_indicators_window(
     # agent-facing text, editable apart, and invisible to module-level drift
     # tests (#137).
     if indicator not in INDICATOR_DESCRIPTIONS:
+        # The rejected name is the caller's own, and #117 renders this message
+        # as one line of report text, so it is echoed flattened and capped —
+        # bare, in running prose, which is ``echo_argument``'s case (#233).
         raise UnsupportedIndicatorError(
-            f"Indicator {indicator} is not supported. Please choose from: {list(INDICATOR_DESCRIPTIONS.keys())}"
+            f"Indicator {echo_argument(indicator)} is not supported. "
+            f"Please choose from: {list(INDICATOR_DESCRIPTIONS.keys())}"
         )
 
     # Unusable dates are refused before any request, in the shared voice (#111).
@@ -420,10 +439,21 @@ def get_fundamentals(
         ("Free Cash Flow", info.get("freeCashflow")),
     ]
 
+    # Every value above is read straight out of yfinance ``info``, a vendor
+    # document of free-form JSON, and the report it lands in is served to the
+    # agent verbatim. Name, Sector and Industry are prose by nature, so those
+    # were the live forgery sites (#233) — but the flattening is applied to
+    # the WHOLE list rather than to those three: a number comes through
+    # ``str`` byte for byte here, so covering the numeric fields costs nothing
+    # and leaves no field whose safety rests on the vendor sending the type we
+    # expect. Each line starts with this module's own label, so the vendor's
+    # share cannot open the line even before flattening; what flattening
+    # closes is the line BREAK inside a value, which would otherwise start a
+    # line the vendor writes in full.
     lines = []
     for label, value in fields:
         if value is not None:
-            lines.append(f"{label}: {value}")
+            lines.append(f"{label}: {sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)}")
 
     # yfinance returns a stub dict (e.g. {"trailingPegRatio": None}) for
     # unknown symbols, so `info` is truthy but every field is empty. Treat
@@ -442,7 +472,7 @@ def get_fundamentals(
     ) is not None:
         return refusal
 
-    header = f"# Company Fundamentals for {canonical}\n"
+    header = f"# Company Fundamentals for {echo_argument(canonical)}\n"
     # yfinance ``info`` is a live current-state snapshot with no
     # historical form; when the analysis date sits behind the wall clock
     # (a backtest), say so or today's ratios read as that date's (#30).
@@ -529,7 +559,11 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
     # Empty is normal here (many valid symbols have no insider filings),
     # so report it plainly rather than treating the symbol as invalid.
     if data is None or data.empty:
-        return f"No insider transactions reported for symbol '{canonical}'"
+        # The shared definition, so this sentence and the Alpha Vantage
+        # sibling's cannot drift in wording or in which guard the symbol
+        # takes (#219, #233). This vendor names the canonical spelling — the
+        # one it actually queried.
+        return no_insider_transactions(canonical)
 
     # Convert to CSV string for consistency with other functions
     csv_string = data.to_csv()
@@ -555,7 +589,7 @@ def get_insider_transactions(ticker: Annotated[str, "ticker symbol of the compan
             )
 
     # Add header information
-    header = f"# Insider Transactions data for {canonical}\n"
+    header = f"# Insider Transactions data for {echo_argument(canonical)}\n"
     header += lag_line
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 

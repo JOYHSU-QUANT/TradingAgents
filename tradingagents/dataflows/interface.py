@@ -38,6 +38,7 @@ from .utils import (
     failure_account,
     generic_failure_words,
     is_vendor_outage,
+    quote_argument,
     sanitize_untrusted,
 )
 from .y_finance import (
@@ -901,9 +902,18 @@ def route_to_vendor(method: str, *args, **kwargs):
                 method,
                 first_error.error,
             )
-        sym = last_no_data.symbol
+        # Both are the CALLER'S symbol echoed back into a sentence it reads —
+        # the model's own argument, or the alias table's answer for it — and
+        # both are quoted, so they take ``quote_argument`` rather than the
+        # bare-echo helper: a spelling carrying its own quote character would
+        # otherwise close the span early and the prose after it would read as
+        # the router's words (#232, #233). The comparison stays on the RAW
+        # pair, so the resolved clause still appears exactly when the alias
+        # table changed the symbol, not when the flattening did.
+        raw = last_no_data.symbol
         canonical = last_no_data.canonical
-        resolved = "" if canonical == sym else f" (resolved to '{canonical}')"
+        sym = quote_argument(raw)
+        resolved = "" if canonical == raw else f" (resolved to {quote_argument(canonical)})"
         # Surface the typed error's detail (e.g. "latest row is 2025-06-11 ...
         # stale") so the agent sees the specific reason — invalid symbol, no
         # coverage, or stale data — not just a generic "unavailable". The
@@ -932,7 +942,7 @@ def route_to_vendor(method: str, *args, **kwargs):
                 f"delisted, not covered, or the vendor returned stale data."
             )
         return (
-            f"NO_DATA_AVAILABLE: No usable market data for '{sym}'{resolved}{verdict} "
+            f"NO_DATA_AVAILABLE: No usable market data for {sym}{resolved}{verdict} "
             f"Do not estimate or fabricate values — report that data is unavailable "
             f"for this symbol."
         )

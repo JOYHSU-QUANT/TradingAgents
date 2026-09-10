@@ -438,6 +438,54 @@ class TestMalformedMarketsOmitted:
         assert "Broken outcomes?" not in out
         assert "1 market(s) omitted" in out
 
+    @pytest.mark.parametrize("missing", [None, "", "   "])
+    def test_a_market_with_no_question_is_omitted_rather_than_labelled_none(self, missing):
+        # It used to pass this guard, because sanitize_untrusted goes through
+        # ``str``: the market rendered as "- **None**", indistinguishable from
+        # a real market whose question text is the string "None", and it was
+        # not counted — so the disclosure sentence said nothing about it
+        # (#233). ``**None**`` is the shape that must never appear.
+        market = _market(missing, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "**None**" not in out
+        assert "1 market(s) omitted" in out
+        assert "missing question or outcome label" in out
+
+    @pytest.mark.parametrize("question", ["###", "**", "|", "  _  "])
+    def test_a_question_that_flattens_to_nothing_is_omitted_too(self, question):
+        # The guard has to judge the RENDERED spelling: a question of pure
+        # markdown passes any check on the raw value and then sanitizes to an
+        # empty string, rendering an empty bolded label and going uncounted.
+        market = _market(question, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "- ****" not in out
+        assert "1 market(s) omitted" in out
+
+    def test_an_outcome_label_that_flattens_to_nothing_is_omitted_too(self):
+        market = _market("Labelled?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market["outcomes"] = '["###", "No"]'
+        out = self._fetch(market)
+        assert "Labelled?" not in out
+        assert "1 market(s) omitted" in out
+
+    @pytest.mark.parametrize("outcomes", ['[null, "No"]', '["", "No"]'])
+    def test_a_market_with_no_first_outcome_label_is_omitted(self, outcomes):
+        # Same hole one field along: a null first outcome rendered "— None 76%"
+        # and was not counted either.
+        market = _market("Labelled?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market["outcomes"] = outcomes
+        out = self._fetch(market)
+        assert "Labelled?" not in out
+        assert "1 market(s) omitted" in out
+
+    def test_the_disclosure_still_counts_the_reasons_it_already_named(self):
+        # The new clauses are added to the sentence, not swapped in: a market
+        # dropped for a price mismatch still reads the same way.
+        market = _market("Mismatched?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market["outcomes"] = '["No"]'
+        out = self._fetch(market)
+        assert "outcome/price mismatch, unparsable price, or out-of-range probability" in out
+
     def test_no_disclosure_when_all_markets_clean(self):
         with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
             out = polymarket.get_prediction_markets("anything", limit=10)

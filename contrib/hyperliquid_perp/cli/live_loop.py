@@ -400,33 +400,18 @@ def _run_live_loop(
             tick_started = time.monotonic()
             now = clock.now()
             _live_heartbeat(db, run_id, pid=pid, now=now, safe_mode=safe_mode)
+            # Which half of the iteration a raise came from. The containment
+            # below is shared by both, and its ``detail`` is DURABLE — safe mode
+            # stores it, and `safe-mode --status` and validate read it back hours
+            # later with no traceback beside it. Before this marker that record
+            # said "live tick raised" whatever had failed, so a pump failure was
+            # filed against the tick (issue #238 review).
+            phase = "tick"
             try:
-                tick = engine.tick()
-                # Per-tick operator visibility: the live loop is otherwise silent
-                # between the startup banner and whatever individual components
-                # warn about (the paper loop logs its cycle events likewise). Only
-                # a tick that DID something is logged, so an idle 10s cadence stays
-                # quiet; the decision-cycle tag is logged whenever it advances.
-                #
-                # Logged HERE rather than beside that decision-cycle line, which is
-                # the pump's own output (issue #238). pump() raises by design —
-                # _PlanRegisteredPersistError and _PendingResponsePersistError go
-                # up to the tick guard so a persist failure enters safe mode, and a
-                # locked store reaches it too — and the raise leaves this block for
-                # that guard, dropping any summary sitting after the call. Those
-                # are exactly the ticks worth recording: the ones that submitted a
-                # slice or ingested a fill and THEN met the failure, afterwards
-                # reconstructible only from orders/fills. Not a finally: this
-                # reports engine.tick()'s result and nothing else.
-                if tick.events or tick.slices_submitted or tick.fills_ingested:
-                    logger.info(
-                        "live tick %s: fills=%d slices=%d protection=%s events=%s",
-                        tick.status.value,
-                        tick.fills_ingested,
-                        tick.slices_submitted,
-                        None if tick.protection is None else tick.protection.value,
-                        list(tick.events),
-                    )
+                # The tick logs its own per-tick activity summary from a finally,
+                # so no raise below can eat the record (see _log_tick_activity).
+                engine.tick()
+                phase = "decision pump"
                 # The seam between the two blocking halves of one iteration.
                 # engine.tick() refreshes at its top and across its own blocking
                 # work, but driver.pump() then runs _build_context ON THIS THREAD:
@@ -466,8 +451,10 @@ def _run_live_loop(
                 # BaseException, so Ctrl-C / SIGTERM still reaches the handler below.
                 _contain_as_recoverable_safe_mode(
                     safe_mode,
-                    log_message="live tick raised — entering recoverable safe mode and continuing",
-                    detail="live tick raised (see log)",
+                    log_message=(
+                        f"live {phase} raised — entering recoverable safe mode and continuing"
+                    ),
+                    detail=f"live {phase} raised (see log)",
                 )
             # The sleep DEDUCTS the tick's own wall time (decided 2026-07-22):
             # ``max_tick_gap_seconds`` is a promise about the wall clock BETWEEN

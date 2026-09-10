@@ -200,6 +200,43 @@ class LiveTickResult:
     events: tuple[str, ...] = field(default_factory=tuple)
 
 
+def _log_tick_activity(
+    result: LiveTickResult | None,
+    *,
+    fills: int,
+    slices: int,
+    protection: ProtectionOutcome | None,
+    events: list[str],
+) -> None:
+    """Per-tick operator visibility, logged from ``tick``'s ``finally``.
+
+    The live loop is otherwise silent between the startup banner and whatever
+    individual components warn about (the paper loop logs its cycle events
+    likewise). Only a tick that DID something is logged, so an idle 10s cadence
+    stays quiet.
+
+    Inside the tick rather than at the loop's call site (issue #238), because
+    everything that eats this record raises: the loop's ``driver.pump()`` did
+    when the summary sat after it, and the tick's own steps do too — a fill is
+    drained at the top and slices are submitted near the bottom, with a store
+    write, a reconcile or a protection sync able to raise after either. Both
+    lanes end at the loop's tick guard, which logs a traceback and enters safe
+    mode but knows nothing of what the tick got done first. ``result`` is None
+    on exactly that path, and the status is then reported as ``raised``: the
+    counts are what the tick reached, not a claim that it finished.
+    """
+    if not (events or slices or fills):
+        return
+    logger.info(
+        "live tick %s: fills=%d slices=%d protection=%s events=%s",
+        "raised" if result is None else result.status.value,
+        fills,
+        slices,
+        None if protection is None else protection.value,
+        list(events),
+    )
+
+
 class LiveExecutionEngine:
     """Drives one live run's §9 sliced execution, one ~10s tick at a time."""
 
@@ -466,94 +503,107 @@ class LiveExecutionEngine:
         a fill — books move on WS."""
         now = self._clock.now()
         events: list[str] = []
+        # Hoisted out of the body so the ``finally`` can report what this tick had
+        # already done when a step raised (issue #238).
+        fills = 0
+        submitted = 0
+        protection: ProtectionOutcome | None = None
+        result: LiveTickResult | None = None
 
-        fills = self._drain_ws(now, events)
-        # §18.2: refresh the kill switch every loop; the AI decision is off-thread
-        # so this cadence is never blocked by a multi-minute cycle.
-        self._kill_switch.tick()
+        try:
+            fills = self._drain_ws(now, events)
+            # §18.2: refresh the kill switch every loop; the AI decision is off-thread
+            # so this cadence is never blocked by a multi-minute cycle.
+            self._kill_switch.tick()
 
-        # §12.2: reconcile after any fill ingest, and on the 5-minute heartbeat.
-        reconciled = False
-        if fills > 0:
-            reconciled = self._reconcile("fill") or reconciled
-        if self._last_reconcile_at is None or now - self._last_reconcile_at >= _HEARTBEAT:
-            reconciled = self._reconcile("heartbeat") or reconciled
+            # §12.2: reconcile after any fill ingest, and on the 5-minute heartbeat.
+            reconciled = False
+            if fills > 0:
+                reconciled = self._reconcile("fill") or reconciled
+            if self._last_reconcile_at is None or now - self._last_reconcile_at >= _HEARTBEAT:
+                reconciled = self._reconcile("heartbeat") or reconciled
 
-        # §10.4: a position that reached flat this tick settles one segment
-        # (and abandons any in-flight leg — its target died with the position).
-        self._detect_settlement(now, events)
+            # §10.4: a position that reached flat this tick settles one segment
+            # (and abandons any in-flight leg — its target died with the position).
+            self._detect_settlement(now, events)
 
-        snap_result = self._provider.fetch(
-            self._coin, requested_at=now, timeout_seconds=self._timeout
-        )
-        # The snapshot is a full-timeout REST call on this thread — the SAME client
-        # and the SAME network_timeout_s as everything else (its own
-        # ``timeout_seconds`` only judges the answer's FRESHNESS once it arrives;
-        # it does not bound the socket). Without this refresh it chains straight
-        # into the submit ladder below, making the longest unrefreshed run 4 rather
-        # than the 3 ``_MAX_UNREFRESHED_REST_CALLS`` records — and at the timeout
-        # the RUNBOOK itself recommends that is 32s against a 30s gap, with the
-        # advisory silent because it budgets 3. Placed BEFORE the is_valid check so
-        # the fail-closed early return is covered too (2026-08-01 exit check).
-        refresh_across_blocking_work(self._kill_switch, what="market snapshot")
-        if not snap_result.is_valid:
-            # No fresh mark: hold protection and slices this tick (§10.2 fail-closed
-            # posture — the books and kill switch already advanced above). Never
-            # silently: every miss is an event (the loop's per-tick log gates on
-            # events), and a persistent outage escalates to recoverable safe mode —
-            # fills still arrive via the reconciler backfill while the feed is down,
-            # so the position can drift under a stale SL and the daily-loss guard
-            # is offline for exactly as long as the outage lasts.
-            self._no_data_streak += 1
-            events.append("no_market_data")
-            if self._no_data_streak >= _NO_MARKET_DATA_SAFE_MODE_TICKS:
-                self._safe_mode.enter(
-                    "recoverable",
-                    REASON_NO_MARKET_DATA,
-                    detail=(
-                        f"market data unavailable for {self._no_data_streak} "
-                        f"consecutive ticks (threshold {_NO_MARKET_DATA_SAFE_MODE_TICKS})"
-                    ),
+            snap_result = self._provider.fetch(
+                self._coin, requested_at=now, timeout_seconds=self._timeout
+            )
+            # The snapshot is a full-timeout REST call on this thread — the SAME client
+            # and the SAME network_timeout_s as everything else (its own
+            # ``timeout_seconds`` only judges the answer's FRESHNESS once it arrives;
+            # it does not bound the socket). Without this refresh it chains straight
+            # into the submit ladder below, making the longest unrefreshed run 4 rather
+            # than the 3 ``_MAX_UNREFRESHED_REST_CALLS`` records — and at the timeout
+            # the RUNBOOK itself recommends that is 32s against a 30s gap, with the
+            # advisory silent because it budgets 3. Placed BEFORE the is_valid check so
+            # the fail-closed early return is covered too (2026-08-01 exit check).
+            refresh_across_blocking_work(self._kill_switch, what="market snapshot")
+            if not snap_result.is_valid:
+                # No fresh mark: hold protection and slices this tick (§10.2 fail-closed
+                # posture — the books and kill switch already advanced above). Never
+                # silently: every miss is an event (the per-tick log gates on events),
+                # and a persistent outage escalates to recoverable safe mode —
+                # fills still arrive via the reconciler backfill while the feed is down,
+                # so the position can drift under a stale SL and the daily-loss guard
+                # is offline for exactly as long as the outage lasts.
+                self._no_data_streak += 1
+                events.append("no_market_data")
+                if self._no_data_streak >= _NO_MARKET_DATA_SAFE_MODE_TICKS:
+                    self._safe_mode.enter(
+                        "recoverable",
+                        REASON_NO_MARKET_DATA,
+                        detail=(
+                            f"market data unavailable for {self._no_data_streak} "
+                            f"consecutive ticks (threshold {_NO_MARKET_DATA_SAFE_MODE_TICKS})"
+                        ),
+                    )
+                result = LiveTickResult(
+                    at=now,
+                    status=TickStatus.NO_MARKET_DATA,
+                    fills_ingested=fills,
+                    reconciled=reconciled,
+                    events=tuple(events),
                 )
-            return LiveTickResult(
+                return result
+            self._no_data_streak = 0
+            snap = snap_result.snapshot
+            assert snap is not None
+            position = self._read_position()
+
+            # §17 protection sync (recompute SL/TP; emergency close on no-safe-SL).
+            protection = self._sync_protection(position, snap, now, events)
+            # §12.2 rule 6: an SL/TP create / modify / cancel is an exchange-state
+            # change — reconcile it this tick rather than waiting for the 5-minute
+            # heartbeat to notice a mismatch.
+            if self._protection.orders_changed_last_sync:
+                self._reconcile("protection_change")
+
+            # §10.3 daily-loss cap (unrealized included).
+            self._loss_guards.evaluate_daily_loss(
+                account_equity=self._equity(position, snap.mark_price), now=now
+            )
+
+            # §9: submit any due slice(s) of the active plan.
+            submitted = self._submit_due_slices(snap.mid_price, now, events)
+            self._maybe_expire_plan(now, events)
+            self._maybe_advance_flip(snap, now, events)
+
+            result = LiveTickResult(
                 at=now,
-                status=TickStatus.NO_MARKET_DATA,
+                status=TickStatus.OK,
                 fills_ingested=fills,
+                slices_submitted=submitted,
+                protection=protection,
                 reconciled=reconciled,
                 events=tuple(events),
             )
-        self._no_data_streak = 0
-        snap = snap_result.snapshot
-        assert snap is not None
-        position = self._read_position()
-
-        # §17 protection sync (recompute SL/TP; emergency close on no-safe-SL).
-        protection = self._sync_protection(position, snap, now, events)
-        # §12.2 rule 6: an SL/TP create / modify / cancel is an exchange-state
-        # change — reconcile it this tick rather than waiting for the 5-minute
-        # heartbeat to notice a mismatch.
-        if self._protection.orders_changed_last_sync:
-            self._reconcile("protection_change")
-
-        # §10.3 daily-loss cap (unrealized included).
-        self._loss_guards.evaluate_daily_loss(
-            account_equity=self._equity(position, snap.mark_price), now=now
-        )
-
-        # §9: submit any due slice(s) of the active plan.
-        submitted = self._submit_due_slices(snap.mid_price, now, events)
-        self._maybe_expire_plan(now, events)
-        self._maybe_advance_flip(snap, now, events)
-
-        return LiveTickResult(
-            at=now,
-            status=TickStatus.OK,
-            fills_ingested=fills,
-            slices_submitted=submitted,
-            protection=protection,
-            reconciled=reconciled,
-            events=tuple(events),
-        )
+            return result
+        finally:
+            _log_tick_activity(
+                result, fills=fills, slices=submitted, protection=protection, events=events
+            )
 
     # -- tick steps -----------------------------------------------------------
 

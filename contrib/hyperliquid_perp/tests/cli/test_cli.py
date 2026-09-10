@@ -6341,22 +6341,26 @@ def test_an_unclassified_startup_adoption_raise_still_reaches_the_loop(tmp_path,
         db.close()
 
 
-def test_a_ticks_activity_summary_is_logged_even_when_the_pump_raises(
-    tmp_path, monkeypatch, caplog
-):
-    """issue #238: the summary sits BEFORE the pump, so a raise cannot eat it.
+def _contained_details(db_path) -> list[str]:
+    """The durable ``detail`` of every safe-mode event a drive left behind."""
+    db = Database(db_path)
+    try:
+        with db.transaction() as conn:
+            return [row["detail"] for row in repo.iter_safe_mode_events(conn, "r1")]
+    finally:
+        db.close()
 
-    That line is the loop's only per-tick trading visibility, and ``pump()``
-    raises by design — the two persist errors go up to the tick guard so a
-    failed write enters safe mode, and a locked store lands there too. With the
-    summary after the call, the raise skipped it, so the ticks that lost their
-    record were precisely the ones worth keeping: a slice was submitted or a
-    fill ingested, and THEN the store failed.
 
-    Both halves are asserted: the summary reports the work (it names the counts,
-    so a summary logged from an empty tick would not pass), and the guard is
-    untouched — the raise is still contained as a recoverable latch and the loop
-    still ticks again, which a summary hoisted out of the ``try`` would break.
+def test_a_raising_pump_is_contained_as_the_pump_and_not_as_the_tick(tmp_path, monkeypatch):
+    """issue #238 review: the durable containment record names the failing half.
+
+    Both halves share one containment, and its ``detail`` said "live tick
+    raised" whatever had failed — so a pump failure was filed against the tick.
+    That string outlives the journal: safe mode stores it, and `safe-mode
+    --status` and validate read it back with no traceback beside it, which is
+    the one moment an operator has to tell a tick fault from a decision-driver
+    one. The reason stays REASON_LIVE_TICK_ERROR — the lane and its recovery are
+    the same, only the record was wrong.
     """
     from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
     from contrib.hyperliquid_perp.live.safe_mode import REASON_LIVE_TICK_ERROR, SafeModeManager
@@ -6364,18 +6368,15 @@ def test_a_ticks_activity_summary_is_logged_even_when_the_pump_raises(
     did_something = LiveTickResult(
         at=_T0, status=TickStatus.OK, fills_ingested=2, slices_submitted=1
     )
-    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli.live_loop"):
-        built = _drive_live_loop_construction(
-            tmp_path,
-            monkeypatch,
-            fetch_clearinghouse=lambda: _clearinghouse(),
-            tick_results=(did_something,),
-            pump_raises=sqlite3.OperationalError("database is locked"),
-        )
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        tick_results=(did_something,),
+        pump_raises=sqlite3.OperationalError("database is locked"),
+    )
     assert built.ticks == 2, "the contained pump raise ended the loop instead of ticking again"
-    summaries = [r.getMessage() for r in caplog.records if "slices=" in r.getMessage()]
-    assert summaries, "the tick that submitted a slice went unlogged because the pump raised"
-    assert "fills=2 slices=1" in summaries[0]
+    assert _contained_details(built.db_path) == ["live decision pump raised (see log)"]
 
     db = Database(built.db_path)
     try:
@@ -6384,6 +6385,23 @@ def test_a_ticks_activity_summary_is_logged_even_when_the_pump_raises(
         assert not state.is_manual and state.reason == REASON_LIVE_TICK_ERROR
     finally:
         db.close()
+
+
+def test_a_raising_tick_is_still_contained_as_the_tick(tmp_path, monkeypatch):
+    """The other half of the phase marker: it must not be set too early.
+
+    Moving ``phase = "decision pump"`` above ``engine.tick()`` would file every
+    tick fault against the driver and pass the sibling test above, so this lane
+    pins the original wording — which the RUNBOOK's journald evidence quotes.
+    """
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        tick_results=(sqlite3.OperationalError("database is locked"),),
+    )
+    assert built.ticks == 2, "the contained tick raise ended the loop instead of ticking again"
+    assert _contained_details(built.db_path) == ["live tick raised (see log)"]
 
 
 class _StopBeforeTheLoop(Exception):
@@ -6427,11 +6445,12 @@ def _drive_live_loop_construction(
     ``resume_startup`` classification and the real containment both run.
     ``pump_raises`` makes ``driver.pump()`` raise instead, leaving adoption on
     its ordinary clean path (no in-progress row, so it reads the store and
-    returns), and ``tick_results`` hands the leading ticks a result each before
-    the sentinel ends the drive — together they reproduce one iteration whose
-    tick DID something and whose pump then failed (issue #238). A drive that
-    survives its first tick reaches the cadence sleep at the bottom of the body,
-    so ``_LIVE_TICK_SECONDS`` is zeroed rather than waiting the real 10s.
+    returns). ``tick_results`` feeds the leading ticks one entry each before the
+    sentinel ends the drive — a :class:`LiveTickResult` is returned, an exception
+    instance is raised — so an iteration can be driven past its first tick and
+    into the pump (issue #238 review). A drive that survives its first tick
+    reaches the cadence sleep at the bottom of the body, so ``_LIVE_TICK_SECONDS``
+    is zeroed rather than waiting the real 10s.
 
     The loop BODY needs a whole live session — a real §19.1 pass the offline
     doubles cannot produce — which is why its sibling invariant in
@@ -6463,7 +6482,9 @@ def _drive_live_loop_construction(
     from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
     from contrib.hyperliquid_perp.live.venue_identity import VenueIdentityMonitor
 
-    reach_loop_body = adoption_raises is not None or pump_raises is not None
+    reach_loop_body = (
+        adoption_raises is not None or pump_raises is not None or bool(tick_results)
+    )
 
     class _FakeMarket:
         def __init__(self, _client):
@@ -6546,7 +6567,10 @@ def _drive_live_loop_construction(
         def _stop(self, *args, **kwargs):
             built.ticks += 1
             if built.ticks <= len(tick_results):
-                return tick_results[built.ticks - 1]
+                queued = tick_results[built.ticks - 1]
+                if isinstance(queued, BaseException):
+                    raise queued
+                return queued
             raise _StopTheLoop
 
         def _raising_pump(self, *args, **kwargs):

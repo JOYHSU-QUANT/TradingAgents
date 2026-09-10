@@ -960,6 +960,49 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The macro and ETF vendors' fields reached the prompt able to forge a table
+  ROW** (issue #233, second batch). The first batch closed the router's
+  sentinel and the yfinance family; these six modules render into a shape the
+  first batch did not have to reason about. ``fred`` and ``fear_greed`` print
+  their series as "|"-separated rows, so an unflattened cell is not merely a
+  line that reads oddly: one "|" forges a COLUMN, one line break forges a whole
+  ROW — an observation the model cannot tell from a real one, in a report whose
+  whole purpose is to be read as data. Same two subjects and two helpers as the
+  first batch, and the same rule about which value gets asked about.
+
+  ``fred`` is the file worth quoting. It already imported both helpers and
+  already echoed the series id it REJECTED — and interpolated the accepted one
+  raw into a ``##`` heading two screens further down, along with FRED's own
+  title, units and frequency. Its observation cells are the sharper half:
+  ``date`` and ``value`` are RAW vendor strings that nothing coerces on the way
+  in, and they render three times over — the table, the Latest/Change summary
+  (which uses "|" as its own separator), and the arithmetic that reads them.
+  Both are flattened where the rows are BUILT, so the value the summary
+  computes on and the value the table prints stay one value; a real number or
+  ISO date comes through byte for byte, so the parse is unchanged.
+
+  ``fear_greed``'s table looks identical and is not. Only
+  ``value_classification`` is guarded there, because ``date`` and ``value``
+  stopped being vendor text before they reached the row: one was derived from
+  an int timestamp through ``strftime`` and the other went through ``int()``.
+  Guarding them would have cost nothing and taught the next reader the wrong
+  rule — that a table cell is dangerous by virtue of being a cell rather than
+  by virtue of what reaches it.
+
+  The four crypto vendors echo one caller ARGUMENT, ``asset``, into a ``##``
+  heading, an emphasis caveat and a no-signal sentence. ``deribit`` and
+  ``sosovalue_treasuries`` already flattened it — with the VENDOR default,
+  which strips an edge marker off a value that is the caller's own, so ``_SOL``
+  came back as ``SOL`` inside a sentence saying we serve no signal for it;
+  ``farside`` and ``sosovalue`` did not flatten it at all. All four now take
+  ``echo_argument``, and all four flatten BEFORE classification so the spelling
+  decided on and the spelling printed cannot disagree — the failure deribit's
+  own comment already recorded. Every site that names the asset inside quotes
+  now takes ``quote_argument`` and drops the literal quotes it used to write:
+  a value carrying the quote character closed that span early, and the prose
+  after it read to the model as the tool's own words rather than as the
+  caller's argument. A clean symbol renders byte for byte as before, ``'SOL'``.
+
 - **Symbols, tickers and yfinance's own text reached the prompt able to forge
   report structure** (issue #233, first batch). PR #202 bounded the vendor's
   share of the router's two sentinel slots, and PR #232 closed the sites it

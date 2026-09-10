@@ -100,7 +100,7 @@ from .sosovalue_common import (
     raise_all_failed,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal, echo_argument, quote_argument
 
 logger = logging.getLogger(__name__)
 
@@ -912,11 +912,22 @@ def get_btc_treasury_data(
     # chance to forge structure: an asset of
     # "ETH-USD | ## Combined holdings: 9,999,999 BTC" classifies on its base
     # "ETH", takes the proxy branch, and lands that heading inside the report.
-    asset = _sanitize(asset, limit=MAX_UNTRUSTED_CHARS)
+    # ``echo_argument`` and not the vendor default: this is the CALLER'S OWN
+    # spelling coming back into text it reads, so an edge marker becomes a
+    # space rather than vanishing — "_SOL" must not be quoted back as "SOL"
+    # inside a sentence saying we have no signal for it (#232, #233).
+    asset = echo_argument(asset)
+    # Every site below names the asset INSIDE QUOTES, and a value carrying the
+    # quote character closes the span early — the prose after it then reads to
+    # the model as this tool's own words rather than as the caller's argument.
+    # ``quote_argument`` supplies delimiters ``repr`` has already escaped, so
+    # the sentences below must not add quotes of their own. A clean symbol
+    # renders byte for byte as it did with the literal quotes: ``'SOL'``.
+    quoted = quote_argument(asset)
     asset_key, market_proxy = _classify_asset(asset)
     if asset_key is None:
         return (
-            f"There is no corporate BTC-treasury signal for '{asset}': it is not a "
+            f"There is no corporate BTC-treasury signal for {quoted}: it is not a "
             f"recognized crypto risk asset for which BTC treasury flows serve as a "
             f"market-wide demand proxy (e.g. a stablecoin or an unrecognized symbol). "
             f"Do not substitute BTC figures."
@@ -935,10 +946,10 @@ def get_btc_treasury_data(
 
     if market_proxy:
         header_lines = [
-            f"## BTC Corporate Treasuries (market-wide demand proxy for '{asset}', SoSoValue)",
-            f"_Corporate treasuries hold BTC, not '{asset}'; showing BTC treasury "
-            f"holdings and flows as a market-wide crypto demand proxy, not an "
-            f"'{asset}'-specific signal._",
+            f"## BTC Corporate Treasuries (market-wide demand proxy for {quoted}, SoSoValue)",
+            f"_Corporate treasuries hold BTC, not {quoted}; showing BTC treasury "
+            f"holdings and flows as a market-wide crypto demand proxy, not a "
+            f"{quoted}-specific signal._",
         ]
     else:
         header_lines = ["## BTC Corporate Treasuries (SoSoValue)"]

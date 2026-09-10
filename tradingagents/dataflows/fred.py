@@ -17,8 +17,10 @@ import requests
 
 from .errors import VendorError, VendorNotConfiguredError
 from .utils import (
+    MAX_UNTRUSTED_CHARS,
     data_lag_note,
     date_refusal,
+    echo_argument,
     json_body_or_outage,
     quote_argument,
     raise_for_http_status,
@@ -258,10 +260,19 @@ def get_macro_data(
             f"FRED series identity mismatch: requested '{series_id}', response "
             f"is for '{echoed_id.strip()}'; refusing to render another series' data"
         )
-    title = info.get("title", series_id)
-    units = info.get("units_short") or info.get("units", "")
-    frequency = info.get("frequency", "")
-    seasonal = info.get("seasonal_adjustment_short", "")
+    # Series metadata is FRED's own free text and renders into the header's
+    # heading and label lines, so it takes the vendor flattening. The default
+    # for a missing title is the caller's series id, which is an ARGUMENT and
+    # is echoed as one below — so the substitution happens after the flatten,
+    # not before, and each value takes the guard its own subject calls for.
+    title = sanitize_untrusted(info.get("title") or "", limit=MAX_UNTRUSTED_CHARS)
+    units = sanitize_untrusted(
+        info.get("units_short") or info.get("units", ""), limit=MAX_UNTRUSTED_CHARS
+    )
+    frequency = sanitize_untrusted(info.get("frequency", ""), limit=MAX_UNTRUSTED_CHARS)
+    seasonal = sanitize_untrusted(
+        info.get("seasonal_adjustment_short", ""), limit=MAX_UNTRUSTED_CHARS
+    )
 
     observations = _request(
         "series/observations",
@@ -274,12 +285,37 @@ def get_macro_data(
     ).get("observations", [])
 
     # FRED encodes a missing observation as ".".
+    #
+    # Both halves are flattened HERE, where the rows are built, rather than at
+    # the three places they render. They are raw vendor strings — nothing
+    # coerces them to a date or a number on the way in — and every one of their
+    # render sites is inside a "|"-separated line: the observation table's
+    # cells, and the Latest/Change summary, which uses "|" as its own field
+    # separator. One "|" or line break there forges a column or a whole row
+    # (#233). Flattening at the boundary also keeps the value the summary
+    # arithmetic reads identical to the value the table prints; a real number
+    # or ISO date comes through byte for byte, so the parse below is unchanged.
     points = [
-        (o["date"], o["value"]) for o in observations if o.get("value") not in (".", None, "")
+        (
+            sanitize_untrusted(o["date"], limit=MAX_UNTRUSTED_CHARS),
+            sanitize_untrusted(o["value"], limit=MAX_UNTRUSTED_CHARS),
+        )
+        for o in observations
+        if o.get("value") not in (".", None, "")
     ]
 
+    # The series id is the caller's own argument coming back into text the
+    # model reads, bare and in running prose, so it takes ``echo_argument``.
+    # This module ALREADY echoed the id it REJECTED (``_resolve_series_id``
+    # above) while interpolating the accepted one raw — the guard and the hole
+    # were two screens apart in one file, which is why #233 groups by subject
+    # rather than by module. ``_resolve_series_id`` bounds it to 30 characters
+    # with no whitespace, so a line break is already impossible here; "|" and
+    # "#" are not, and the bound is a fact about a caller two hundred lines
+    # away rather than about this line.
+    echoed_series = echo_argument(series_id)
     header = (
-        f"## FRED: {title} ({series_id})\n"
+        f"## FRED: {title or echoed_series} ({echoed_series})\n"
         f"- Units: {units}\n"
         f"- Frequency: {frequency}"
         f"{f' ({seasonal})' if seasonal else ''}\n"
@@ -288,7 +324,7 @@ def get_macro_data(
 
     if not points:
         return header + (
-            f"\nNo observations for {series_id} in this window. The series may "
+            f"\nNo observations for {echoed_series} in this window. The series may "
             f"report less frequently than the window length; widen look_back_days."
         )
 
@@ -313,7 +349,9 @@ def get_macro_data(
     max_lag = _MAX_LAG_DAYS_BY_FREQUENCY.get(str(info.get("frequency_short") or "").strip().upper())
     lag_note = ""
     if max_lag is not None:
-        lag_note = data_lag_note(last_date, curr_date, max_lag, f"{series_id} observation")
+        # The lag note renders into the report as its own paragraph, so the id
+        # it names is prompt text like the heading's.
+        lag_note = data_lag_note(last_date, curr_date, max_lag, f"{echoed_series} observation")
         if lag_note:
             # Leading blank line so the note renders as its own markdown
             # paragraph instead of a soft continuation of the Latest line.

@@ -109,7 +109,7 @@ from .sosovalue_common import (
     load_rolling_snapshot,
 )
 from .symbol_utils import classify_crypto_asset
-from .utils import MAX_UNTRUSTED_CHARS, date_refusal
+from .utils import MAX_UNTRUSTED_CHARS, date_refusal, echo_argument, quote_argument
 
 logger = logging.getLogger(__name__)
 
@@ -966,6 +966,16 @@ def get_etf_flow_data(
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
+    # Flattened BEFORE classification for the reason its Farside twin and the
+    # treasuries module both give: exactly one string is decided on and
+    # rendered, so the classified spelling and the printed one cannot disagree.
+    # ``echo_argument`` because the value is the caller's own; ``quoted`` for
+    # the sites that name it inside quotes, whose delimiters ``repr`` escapes
+    # (a value carrying the quote character would close the span early and the
+    # prose after it would read as this tool's own words). A clean symbol
+    # renders byte for byte as it did with the literal quotes (#232, #233).
+    asset = echo_argument(asset)
+    quoted = quote_argument(asset)
     asset_key, market_proxy = _classify_asset(asset)
     if asset_key is None:
         # Same no-signal statement as the Farside vendor: a stablecoin has no
@@ -973,7 +983,7 @@ def get_etf_flow_data(
         # would be a misleading signal, and a specific message beats the
         # generic degraded-category sentinel.
         return (
-            f"There is no spot-ETF flow signal for '{asset}': it has no US spot ETF of "
+            f"There is no spot-ETF flow signal for {quoted}: it has no US spot ETF of "
             f"its own and is not a recognized crypto risk asset for which BTC flows serve "
             f"as a market-wide proxy (e.g. a stablecoin or an unrecognized symbol). Do "
             f"not substitute BTC or ETH flows."
@@ -988,10 +998,10 @@ def get_etf_flow_data(
         # The proxy marker must live in the heading, not only the caveat: the
         # report is re-summarised downstream and the heading is what survives.
         header_lines = [
-            f"## Spot ETF Flows — {asset_key} (market-wide proxy for '{asset}', SoSoValue, "
+            f"## Spot ETF Flows — {asset_key} (market-wide proxy for {quoted}, SoSoValue, "
             f"net US$m)",
-            f"_No spot ETF exists for '{asset}'; showing {asset_key} spot-ETF flows as a "
-            f"market-wide crypto risk-on/off proxy, not an '{asset}'-specific signal._",
+            f"_No spot ETF exists for {quoted}; showing {asset_key} spot-ETF flows as a "
+            f"market-wide crypto risk-on/off proxy, not an {quoted}-specific signal._",
         ]
     else:
         header_lines = [f"## Spot ETF Flows — {asset_key} (SoSoValue, net US$m)"]

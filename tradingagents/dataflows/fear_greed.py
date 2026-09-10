@@ -22,11 +22,13 @@ import requests
 
 from .errors import VendorError, VendorUnavailableError
 from .utils import (
+    MAX_UNTRUSTED_CHARS,
     date_refusal,
     failure_account,
     is_unreached,
     json_body_or_outage,
     raise_for_http_status,
+    sanitize_untrusted,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,7 +244,27 @@ def get_fear_greed_data(
             day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
         except (KeyError, ValueError, TypeError, OSError, OverflowError) as e:
             raise FearGreedError(f"Malformed Fear & Greed row {row!r}") from e
-        points.append({"date": day, "value": value, "label": row.get("value_classification", "")})
+        # ``label`` is the ONE field of this row that reaches the report as the
+        # vendor wrote it, and it renders into a table cell and the Latest
+        # line, so a "|" or a line break there forges a column or a row (#233).
+        # Flattened where the row is built, so the value judged by the window
+        # filter below and the value the table prints are the same value.
+        #
+        # ``date`` and ``value`` are deliberately NOT flattened: neither is
+        # vendor text by the time it lands here. ``day`` was derived from an
+        # int timestamp through ``strftime`` and ``value`` went through
+        # ``int()``, both above, so their shapes are this module's own. That is
+        # what makes this file's table different from ``fred``'s, whose two
+        # cells are raw vendor strings nothing coerces.
+        points.append(
+            {
+                "date": day,
+                "value": value,
+                "label": sanitize_untrusted(
+                    row.get("value_classification", ""), limit=MAX_UNTRUSTED_CHARS
+                ),
+            }
+        )
 
     # Lookahead-safe: keep only readings on or before curr_date, ascending.
     points = [p for p in points if p["date"] <= curr_date]

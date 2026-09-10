@@ -607,8 +607,8 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     """Flatten a fragment this module did not author so it cannot forge structure.
 
     ``limit`` caps the result, and is passed ONLY where the untrusted fragment is
-    ISOLATED: Deribit's ``error.message``, a raw candle row echoed into the
-    malformed-shape error, and the caller-supplied ``asset``. It is not passed
+    ISOLATED: Deribit's ``error.message``, and a raw candle row echoed into the
+    malformed-shape error. It is not passed
     when flattening a whole exception message, because most of that string is
     this module's own carefully-worded diagnostic: capping there truncated
     "...points at a response-shape change rather than an empty market" one
@@ -617,10 +617,13 @@ def _sanitize(text: object, *, limit: int | None = None) -> str:
     the model reads — see ``utils.sanitize_untrusted``; that is its slot to
     bound, and the log keeps the whole message.)
 
-    Several inputs reach the report without this module choosing their contents:
-    Deribit's JSON-RPC ``error.message``, a raw candle row, and the caller-supplied
-    ``asset`` (``curr_date`` is judged and echoed by the shared date refusal
-    before it gets this far). Interpolated raw, any can close the sentence it
+    Two inputs reach the report without this module choosing their contents:
+    Deribit's JSON-RPC ``error.message`` and a raw candle row. The caller's
+    ``asset`` is NOT one of them any more — it is the model's own argument
+    rather than the vendor's prose, so it takes ``utils.echo_argument`` and
+    ``utils.quote_argument``, which keep its edge markers instead of stripping
+    them (#233); ``curr_date`` is judged and echoed by the shared date refusal
+    before it gets this far. Interpolated raw, either can close the sentence it
     sits in and open new blocks — a second ``_Reading:_`` line, a fresh ``##``
     heading, a fabricated DVOL level — and the forged copy renders ABOVE the
     real one, so a downstream summariser keeping "the Reading line" quotes the

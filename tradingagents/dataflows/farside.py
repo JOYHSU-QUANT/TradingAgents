@@ -315,7 +315,8 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
     issuer columns. The caller then degrades instead of receiving a half-parsed
     table.
 
-    A missing (or partly-blank) issuer header is deliberately *not* fatal: the
+    A missing issuer header, or one with columns this parser cannot read, is
+    deliberately *not* fatal: the
     figures are still verified by the Total cross-check, so the affected columns
     fall back to ``unnamed col N`` names, the parser logs, and it reports
     ``issuers_named=False`` for the caller to disclose. Losing some labels is not
@@ -353,11 +354,12 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
 
     header = _find_issuer_header(rows, data_row_idxs[0], num_cols)
     # Columns: 0 = date, last = Total, the rest = issuers. A column keeps its
-    # header ticker only when that cell is present and non-empty; otherwise it
-    # gets a self-describing ``unnamed col N`` placeholder (not a fake ``ETF{j}``
-    # that reads as a real ticker). all_named is True only when every column
-    # resolved a real label — a *found but partly-blank* header is not "named",
-    # so the report's disclosure still fires.
+    # header ticker only when that cell READS AS ONE; otherwise it gets a
+    # self-describing ``unnamed col N`` placeholder (not a fake ``ETF{j}`` that
+    # reads as a real ticker). all_named is True only when every column
+    # resolved a real label — a header that is found but has any column this
+    # parser could not read is not "named", so the report's disclosure still
+    # fires.
     issuer_cols = list(range(1, num_cols - 1))
     issuer_names = []
     unnamed_cols = []
@@ -389,7 +391,7 @@ def _parse_flow_table(html: str, asset: str) -> _ParsedTable:
             asset,
         )
     elif unnamed_cols:
-        # Header found but one or more ticker cells are blank: log which columns
+        # Header found but one or more ticker cells are blank or unreadable: log which columns
         # fell back so a partial header change is diagnosable, not silent.
         logger.warning(
             "Farside %s: issuer header row found but columns %s have no ticker label; "

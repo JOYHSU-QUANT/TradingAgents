@@ -1033,14 +1033,20 @@ Breaking changes within the 0.x line are called out explicitly.
   after it read to the model as the tool's own words rather than as the
   caller's argument. A clean symbol renders byte for byte as before, ``'SOL'``.
 
-  Flattening before classification widens what these two vendors will answer:
-  ``BTC|`` used to reach the no-signal sentence and now serves a real BTC
-  report. That is the intended consequence of one string being both decided on
-  and rendered — but it also means a non-string argument would have been
-  ``str``'d into a symbol and answered about, so ``b"BTC"`` came back as a
-  confident "there is no ETF flow signal for ``b'BTC'``" to a model that had
-  asked about BTC. Both modules now refuse a non-string first, the guard
-  ``deribit`` and the treasuries module already placed ahead of their own echo.
+  Flattening before classification widens what ``farside`` and ``sosovalue``
+  will answer, the two that used to classify the raw string: ``BTC|`` reached
+  the no-signal sentence and now serves a real BTC report. That is the intended
+  consequence of one string being both decided on and rendered — but it also
+  means a non-string argument would have been ``str``'d into a symbol and
+  answered about, so ``b"BTC"`` came back as a confident "there is no ETF flow
+  signal for ``b'BTC'``" to a model that had asked about BTC. Both modules now
+  carry the guard ``deribit`` and the treasuries module already placed ahead of
+  their own echo — including its scope, which is TRUTHY non-strings only. A
+  falsy argument keeps the no-signal sentence rather than being swallowed into
+  an error, which is deribit's standing decision and pinned by a test there;
+  the exemption is not that a falsy value cannot be mistaken for a symbol
+  (``b""`` renders as ``b''``) but that widening it would change behaviour
+  three modules already shipped, which is not this batch's call to make.
 
   ``farside`` was guarding the caller's argument while rendering the vendor's
   own field raw, in the same report — the shape ``fred``'s comment complains

@@ -1515,9 +1515,9 @@ def test_a_log_waiting_for_a_main_file_that_is_gone_is_refused_too(tmp_path):
     # refuses, so the log dies on exactly the same open (measured), but the
     # guard reaches it down a different branch: there is no `stat` to read, so
     # the "nothing there yet, connect() creates it" shortcut is what has to ask.
-    # Not reachable through `validate`, which stops at its own `database ...
-    # does not exist` first; an owning command (`paper`, `live`) creates stores
-    # and goes straight through.
+    # Reachable only through `paper --create` / `live --create`: every other
+    # command, and those two WITHOUT --create, stop at their own `database ...
+    # does not exist` before a Database is ever constructed.
     store = tmp_path / "x.db"
     log = tmp_path / "x.db-wal"
     log.write_bytes(_HOT_WAL)
@@ -1627,11 +1627,17 @@ def test_a_populated_store_that_cannot_be_written_is_never_a_raw_error(tmp_path)
     # `connect` succeeds even when the file denies writes — measured, but
     # measured on Windows (`icacls WD,AD`). On POSIX a read-only main file can
     # also fail for a reason of its own: SQLite must create a `-shm` to read a
-    # WAL database at all, and a read-only connection cannot. So the assertion
+    # WAL database at all, and a read-only connection may not. So the assertion
     # is the invariant that holds on EITHER platform — whatever SQLite decides,
-    # nothing RAW escapes. Either the store opens, or it is the named refusal;
-    # never the bare OperationalError that `validate` prints as an exit-5
-    # ledger verdict, which is the whole of issue #235.
+    # nothing RAW escapes. Never the bare OperationalError that `validate`
+    # prints as an exit-5 ledger verdict, which is the whole of issue #235.
+    #
+    # BOTH named refusals are accepted, because which one fires depends on
+    # where the platform stops: the `mode=ro` PROBE runs before `connect`, so a
+    # `-shm` SQLite may not create is #210's `could not be opened for reading`,
+    # while a platform whose probe gets through fails on `connect`'s write and
+    # gets #235's wording. Pinning one would pin this box's answer as if it
+    # were every box's.
     store = tmp_path / "live.db"
     Database(store).close()
     with unwritable(store):
@@ -1639,7 +1645,10 @@ def test_a_populated_store_that_cannot_be_written_is_never_a_raw_error(tmp_path)
             with Database(store, migrate=False) as db:
                 assert stored_schema_version(db.conn) == SCHEMA_VERSION
         except SchemaVersionError as exc:
-            assert "could not be opened as a store" in str(exc)
+            assert (
+                "could not be opened as a store" in str(exc)
+                or "could not be opened for reading" in str(exc)
+            ), f"named, but with neither refusal's wording: {exc}"
 
 
 def test_every_operational_failure_of_the_open_is_named_not_only_the_write_denial(

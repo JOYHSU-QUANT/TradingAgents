@@ -33,6 +33,12 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+# What a reading says where the vendor's classification has nothing left to
+# show. Named rather than left blank: the Latest line would otherwise end on a
+# bare em-dash and the table row would carry an empty cell, neither of which
+# tells the reader anything was missing (#233).
+CLASSIFICATION_UNAVAILABLE = "(classification unavailable)"
+
 FNG_URL = "https://api.alternative.me/fng/"
 
 # Network timeout (seconds), consistent with the other vendors.
@@ -262,7 +268,8 @@ def get_fear_greed_data(
                 "value": value,
                 "label": sanitize_untrusted(
                     row.get("value_classification", ""), limit=MAX_UNTRUSTED_CHARS
-                ),
+                )
+                or CLASSIFICATION_UNAVAILABLE,
             }
         )
 

@@ -948,7 +948,7 @@ def get_btc_treasury_data(
         header_lines = [
             f"## BTC Corporate Treasuries (market-wide demand proxy for {quoted}, SoSoValue)",
             f"_Corporate treasuries hold BTC, not {quoted}; showing BTC treasury "
-            f"holdings and flows as a market-wide crypto demand proxy, not a "
+            f"holdings and flows as a market-wide crypto demand proxy, not an "
             f"{quoted}-specific signal._",
         ]
     else:

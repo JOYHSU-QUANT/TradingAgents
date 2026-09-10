@@ -46,19 +46,29 @@ def _rows(report: str) -> list[str]:
     return [ln for ln in report.splitlines() if ln.startswith("|")]
 
 
-def _assert_table_shape_unchanged(forged: str, clean: str) -> None:
-    """The malicious value changed no row's existence and no row's width.
+def _assert_report_shape_unchanged(forged: str, clean: str, *, survives: bool = True) -> None:
+    """The malicious value forged no line, no heading and no column, ANYWHERE.
 
-    The point of the whole batch: a cell is the one place where flattening buys
-    something a per-line "no markers" assertion would miss. A line break forges
-    a ROW; a "|" forges a COLUMN in the row it lands on. Both are counted here,
-    against what the SAME call renders for a clean value, so a reworded header
-    or an added column moves both sides together.
+    Measured over the WHOLE report rather than over "the line the payload
+    landed on", which is the mistake the first draft of this suite made: the
+    forged ``\\n## `` opens its heading on a DIFFERENT line, so a per-line
+    assertion looks at the one place the forgery is not — and ``lstrip("# ")``
+    on that line strips the very marker it means to catch. Every one of those
+    cases passed against the unguarded code.
+
+    Everything is counted against what the SAME call renders for a clean value
+    of the same words, so a reworded sentence or an added column moves both
+    sides together and only a guard that stopped being applied fails here.
     """
-    forged_rows, clean_rows = _rows(forged), _rows(clean)
-    assert len(forged_rows) == len(clean_rows), "a row was forged or destroyed"
-    assert [r.count("|") for r in forged_rows] == [r.count("|") for r in clean_rows]
-    assert SURVIVES in forged, "the words must survive; only the markup may not"
+    f, c = forged.splitlines(), clean.splitlines()
+    assert len(f) == len(c), "a line was forged or destroyed"
+    assert sum(1 for ln in f if ln.lstrip().startswith("#")) == sum(
+        1 for ln in c if ln.lstrip().startswith("#")
+    ), "a heading was forged"
+    assert len(_rows(forged)) == len(_rows(clean)), "a table row was forged"
+    assert sum(ln.count("|") for ln in f) == sum(ln.count("|") for ln in c), "a column was forged"
+    if survives:
+        assert SURVIVES in forged, "the words must survive; only the markup may not"
 
 
 # --------------------------------------------------------------------------
@@ -111,25 +121,39 @@ class TestFredObservationTable:
     number on the way in — and both render inside "|"-separated lines."""
 
     @pytest.mark.parametrize("field", ["value", "date"])
-    def test_a_forged_observation_cannot_add_or_widen_a_row(self, field):
+    def test_an_unusable_observation_is_dropped_and_disclosed(self, field):
+        # Not flattened into shape: ``sanitize_untrusted`` would turn "4.1|"
+        # into "4.1", so a value that used to fail ``float()`` and degrade the
+        # summary visibly would instead drive a computed macro delta with
+        # nothing to say it had been altered.
         second = {"date": "2026-07-01", "value": "4.3"}
-        forged = _fred_report(obs=[{**_FRED_CLEAN_OBS[0], field: FORGED}, second])
-        clean = _fred_report(obs=[{**_FRED_CLEAN_OBS[0], field: SURVIVES}, second])
-        _assert_table_shape_unchanged(forged, clean)
+        report = _fred_report(obs=[{**_FRED_CLEAN_OBS[0], field: FORGED}, second])
+        assert SURVIVES not in report
+        assert len(_rows(report)) == 3  # header, separator, the one good row
+        assert "1 observation(s) omitted" in report
 
-    def test_a_forged_observation_cannot_forge_the_latest_line_either(self):
-        # That line uses "|" as its own field separator, so it is a table cell
-        # in everything but name.
-        forged = _fred_report(obs=[{"date": "2026-06-01", "value": FORGED}])
-        latest = [ln for ln in forged.splitlines() if ln.startswith("**Latest:**")]
-        assert len(latest) == 1
-        assert latest[0].count("|") <= 1  # the separator the sentence itself writes
-        assert "#" not in latest[0]
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "NaN", "Infinity"])
+    def test_a_non_finite_value_is_dropped_rather_than_computed_with(self, value):
+        # These ARE floats, so a bare ``float()`` admits them and the window
+        # delta and its percentage become nan/inf — a fabricated figure rather
+        # than a missing one.
+        report = _fred_report(obs=[{"date": "2026-06-01", "value": value}, _FRED_CLEAN_OBS[1]])
+        assert "nan" not in report.lower()
+        assert "inf" not in report.lower()
+        assert "1 observation(s) omitted" in report
+
+    def test_every_row_unusable_does_not_blame_the_series_cadence(self):
+        # "widen look_back_days" is the wrong advice when rows arrived and were
+        # dropped; the reader would go looking for a series that reports rarely.
+        report = _fred_report(obs=[{"date": "nope", "value": "4.1"}])
+        assert "widen look_back_days" not in report
+        assert "No usable observations" in report
 
     def test_clean_observations_still_render_byte_for_byte(self):
         report = _fred_report()
         assert "| 2026-06-01 | 4.1 |" in report
         assert "| 2026-07-01 | 4.3 |" in report
+        assert "omitted" not in report
 
 
 @pytest.mark.unit
@@ -140,11 +164,24 @@ class TestFredSeriesMetadata:
         "field", ["title", "units_short", "frequency", "seasonal_adjustment_short"]
     )
     def test_a_forged_metadata_field_cannot_open_a_heading(self, field):
-        report = _fred_report(meta=_fred_meta(**{field: FORGED}))
-        carrying = [ln for ln in report.splitlines() if SURVIVES in ln]
-        assert len(carrying) == 1
-        assert "#" not in carrying[0].lstrip("# ")
-        assert "|" not in carrying[0]
+        _assert_report_shape_unchanged(
+            _fred_report(meta=_fred_meta(**{field: FORGED})),
+            _fred_report(meta=_fred_meta(**{field: SURVIVES})),
+        )
+
+    @pytest.mark.parametrize("field", ["units_short", "frequency"])
+    def test_a_label_with_nothing_left_to_show_is_omitted_not_printed_empty(self, field):
+        # A "- Units: " with nothing after it is not a fact. ``units`` reads two
+        # keys, so the fallback is cleared too.
+        report = _fred_report(meta=_fred_meta(units="", **{field: "###"}))
+        label = {"units_short": "- Units:", "frequency": "- Frequency:"}[field]
+        assert label not in report
+
+    def test_a_title_with_nothing_left_to_show_is_NAMED_not_borrowed(self):
+        # The heading always has a name slot, so borrowing the series id would
+        # read as a series FRED titled after itself.
+        report = _fred_report(meta=_fred_meta(title="###"))
+        assert report.startswith(f"## FRED: {fred.TITLE_UNAVAILABLE} (UNRATE)\n")
 
     def test_clean_metadata_still_reads_byte_for_byte(self):
         report = _fred_report()
@@ -159,20 +196,24 @@ class TestFredSeriesIdEcho:
     already echoed the id it REJECTED while interpolating the accepted one
     raw — the guard and the hole were two screens apart in one file."""
 
-    def test_a_forged_series_id_cannot_forge_structure_in_the_heading(self):
-        # A raw FRED series id, so ``_resolve_series_id`` accepts it: no
-        # whitespace and within its length bound, but carrying markers.
-        report = _fred_report(indicator="UN|RATE#X", meta=_fred_meta(title=""))
-        heading = report.splitlines()[0]
-        assert heading.startswith("## FRED: ")
-        assert "|" not in heading
-        assert "#" not in heading.lstrip("# ")
+    # A raw FRED series id, so ``_resolve_series_id`` accepts it: no whitespace
+    # and within its length bound, but carrying markers.
+    @pytest.mark.parametrize("obs", [None, []], ids=["with-rows", "no-rows"])
+    def test_a_forged_series_id_cannot_forge_structure(self, obs):
+        _assert_report_shape_unchanged(
+            _fred_report(indicator="UN|RATE#X", obs=obs),
+            _fred_report(indicator="UNRATEX", obs=obs),
+            survives=False,
+        )
 
-    def test_a_forged_series_id_cannot_forge_the_no_observations_sentence(self):
-        report = _fred_report(indicator="UN|RATE#X", obs=[])
-        sentence = [ln for ln in report.splitlines() if ln.startswith("No observations for")]
-        assert len(sentence) == 1
-        assert "|" not in sentence[0]
+    def test_a_series_id_carrying_a_quote_cannot_close_the_not_found_span(self):
+        # The fourth echo site, and the only one whose sentence writes quotes:
+        # a returned report string, not a raise, so ``failure_account`` never
+        # sees it.
+        with mock.patch.object(fred, "_request", side_effect=_fred_stub({"seriess": []}, [])):
+            out = fred.get_macro_data("UNRATE'S", GOOD, 400)
+        assert "'UNRATE'S'" not in out
+        assert '"UNRATE\'S"' in out
 
     def test_an_edge_marker_series_id_does_not_come_back_stripped(self):
         # ``keep_edges``: "_UNRATE" must not be quoted back as "UNRATE" in a
@@ -209,16 +250,29 @@ class TestFearGreedClassificationCell:
     ``strftime``, and through ``int()`` — which is what makes this table
     different from ``fred``'s, whose two cells are raw vendor strings."""
 
-    def test_a_forged_classification_cannot_add_or_widen_a_row(self):
-        forged = _fg_report([_fg_row(GOOD, 31, FORGED), _fg_row("2026-07-16", 25, "Fear")])
-        clean = _fg_report([_fg_row(GOOD, 31, SURVIVES), _fg_row("2026-07-16", 25, "Fear")])
-        _assert_table_shape_unchanged(forged, clean)
+    def test_a_forged_classification_cannot_forge_a_row_or_a_heading(self):
+        second = _fg_row("2026-07-16", 25, "Fear")
+        _assert_report_shape_unchanged(
+            _fg_report([_fg_row(GOOD, 31, FORGED), second]),
+            _fg_report([_fg_row(GOOD, 31, SURVIVES), second]),
+        )
 
-    def test_a_forged_classification_cannot_forge_the_latest_line(self):
-        report = _fg_report([_fg_row(GOOD, 31, FORGED)])
-        latest = [ln for ln in report.splitlines() if ln.startswith("**Latest")]
-        assert len(latest) == 1
-        assert "|" not in latest[0] and "#" not in latest[0]
+    def test_a_classification_with_nothing_left_to_show_is_named(self):
+        # Otherwise the Latest line ends on a bare em-dash and the table row
+        # carries an empty cell — the same shape PR #251 closed elsewhere.
+        report = _fg_report([_fg_row(GOOD, 31, "###")])
+        assert f"31 — {fg.CLASSIFICATION_UNAVAILABLE}" in report
+        assert f"| {GOOD} | 31 | {fg.CLASSIFICATION_UNAVAILABLE} |" in report
+
+    def test_the_unguarded_two_columns_stay_this_module_s_own_shapes(self):
+        # ``label`` may be the only guarded cell ONLY while these two are not
+        # vendor text by the time they render. If someone relaxes the int
+        # coercion above, this table quietly goes back to unguarded and the
+        # forged-classification test above would not see it.
+        with pytest.raises(fg.FearGreedError):
+            _fg_report([{**_fg_row(GOOD, 31, "Fear"), "value": "3#1"}])
+        with pytest.raises(fg.FearGreedError):
+            _fg_report([{**_fg_row(GOOD, 31, "Fear"), "timestamp": "17#8"}])
 
     def test_clean_readings_still_render_byte_for_byte(self):
         report = _fg_report([_fg_row(GOOD, 31, "Fear"), _fg_row("2026-07-16", 25, "Extreme Fear")])
@@ -251,6 +305,20 @@ def _deribit(asset):
 # sentence without reaching its vendor — the shortest path through the echo.
 _UNRECOGNIZED = [_farside, _sosovalue, _treasuries, _deribit]
 
+# The first thing each getter reaches for AFTER classification succeeds. Making
+# it raise is how the tests below tell "the symbol was recognised" from "the
+# no-signal sentence was returned" without going near a vendor.
+_PAST_CLASSIFICATION = {
+    _farside: (fars, "_load_flows"),
+    _sosovalue: (soso, "_load_snapshot"),
+    _treasuries: (treas, "_load_snapshot"),
+    _deribit: (drb, "_utc_now"),
+}
+
+
+class _Recognized(Exception):
+    """Raised from the stub above: classification let this symbol through."""
+
 
 @pytest.mark.unit
 class TestAssetArgumentEcho:
@@ -263,12 +331,32 @@ class TestAssetArgumentEcho:
     @pytest.mark.parametrize("getter", _UNRECOGNIZED)
     def test_a_forged_asset_cannot_forge_structure(self, getter):
         # USDT: a stablecoin, so every vendor takes its no-signal branch.
-        out = getter(f"USDT{FORGED}")
-        carrying = [ln for ln in out.splitlines() if SURVIVES in ln]
-        assert carrying, "the words must survive; only the markup may not"
-        for line in carrying:
-            assert "|" not in line
-            assert "#" not in line.lstrip("# ")
+        _assert_report_shape_unchanged(getter(f"USDT{FORGED}"), getter(f"USDT{SURVIVES}"))
+
+    @pytest.mark.parametrize("getter", _UNRECOGNIZED)
+    def test_the_symbol_classified_is_the_symbol_rendered(self, getter):
+        # The reason the flatten runs BEFORE ``_classify_asset`` and not after.
+        # "`BTC`" classifies as UNRECOGNISED while rendering — through
+        # ``quote_argument``, which flattens on its own — as "BTC", so the two
+        # disagreeing produced "'BTC' is not a recognized crypto risk asset" as
+        # the report's only content, with nothing else in it to correct the
+        # claim. Flattened first, the same string is recognised and the vendor
+        # is actually consulted, which is what the stub below detects.
+        module, attr = _PAST_CLASSIFICATION[getter]
+        with (
+            mock.patch.object(module, attr, side_effect=_Recognized),
+            pytest.raises(_Recognized),
+        ):
+            getter("`BTC`")
+
+    @pytest.mark.parametrize("getter", _UNRECOGNIZED)
+    def test_a_non_string_asset_is_refused_rather_than_answered_about(self, getter):
+        # ``echo_argument`` goes through ``str``, so without a type guard ahead
+        # of it b"BTC" came back as a confident "there is no signal for b'BTC'"
+        # to a model that had asked about BTC.
+        with pytest.raises(Exception) as info:
+            getter(b"BTC")
+        assert "symbol string" in str(info.value)
 
     @pytest.mark.parametrize("getter", _UNRECOGNIZED)
     def test_an_edge_marker_asset_does_not_come_back_stripped(self, getter):

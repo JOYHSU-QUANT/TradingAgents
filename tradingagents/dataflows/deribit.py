@@ -2677,7 +2677,8 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
     # more than one raise — so every
     # copy is a chance to forge a heading or a second Reading line. Uncounted on
     # purpose: this comment carried the number eight beside a list naming six, and
-    # said "one raise" where there are two. Grep `{asset}` for the live set.
+    # said "one raise" where there are two. Grep `{quoted}` for the live set
+    # (the sites take their quotes from ``repr`` now, not from the sentence).
     # Sanitising
     # after ``_classify_asset`` made the two disagree: "`BTC`" classified on the
     # raw string (unrecognized) but rendered from the flattened one, producing

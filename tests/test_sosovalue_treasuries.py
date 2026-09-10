@@ -1008,6 +1008,16 @@ class TestRender:
             report = _render(_snapshot(), asset=asset)
             assert f"market-wide demand proxy for '{asset}'" in report
             assert "840,447" in report  # still the BTC data
+            # The caveat pinned WORD FOR WORD, not merely "contains the
+            # symbol". #233 rewrote these three sites to take their quotes from
+            # ``repr`` instead of writing literal ones, and a substitution that
+            # also moved a word — this sentence lost its "an" — shipped green
+            # because nothing here read the sentence.
+            assert (
+                f"_Corporate treasuries hold BTC, not '{asset}'; showing BTC treasury "
+                f"holdings and flows as a market-wide crypto demand proxy, not an "
+                f"'{asset}'-specific signal._"
+            ) in report
 
     def test_pair_form_btc_is_native(self):
         report = _render(_snapshot(), asset="BTC-USD")

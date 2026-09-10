@@ -973,13 +973,37 @@ Breaking changes within the 0.x line are called out explicitly.
   ``fred`` is the file worth quoting. It already imported both helpers and
   already echoed the series id it REJECTED — and interpolated the accepted one
   raw into a ``##`` heading two screens further down, along with FRED's own
-  title, units and frequency. Its observation cells are the sharper half:
-  ``date`` and ``value`` are RAW vendor strings that nothing coerces on the way
-  in, and they render three times over — the table, the Latest/Change summary
-  (which uses "|" as its own separator), and the arithmetic that reads them.
-  Both are flattened where the rows are BUILT, so the value the summary
-  computes on and the value the table prints stay one value; a real number or
-  ISO date comes through byte for byte, so the parse is unchanged.
+  title, units and frequency, and into a series-not-found sentence it RETURNS
+  (so ``failure_account`` never sees it) inside quotes of its own writing.
+
+  Its observation cells are the sharper half, and flattening alone was the
+  wrong answer for them. ``date`` and ``value`` are RAW vendor strings that
+  nothing coerces on the way in, and they render three times over — the table,
+  the Latest/Change summary (which uses "|" as its own separator), and the
+  arithmetic that reads them. Flatten and ``"4.1|"`` becomes ``"4.1"``: a value
+  that used to fail ``float()`` and degrade the summary VISIBLY would instead
+  parse and drive a computed macro delta, with nothing in the report to say it
+  had been altered; ``"nan|"`` and ``"inf#"`` are worse, being floats that
+  poison the delta and its percentage. ``"2026-06-0#1"`` becomes
+  ``"2026-06-0 1"``, which ``data_lag_note`` cannot read — so the freshness
+  disclosure silently disappears and the report reads as MORE trustworthy for
+  being corrupt. Sanitising had turned a loud failure into a quiet wrong
+  answer. So a row is now ADMITTED on the shape of its raw value — a finite
+  number, and a date the shared ISO normaliser recognises — and a row that is
+  neither is dropped and DISCLOSED, with the no-rows sentence naming that case
+  rather than blaming the series' cadence. The flattening that remains is a
+  second line of defence: a finite number and an ISO date both pass through it
+  byte for byte, so the value judged and the value shown are one value. It is
+  the answer ``fear_greed`` already gave its own rows, which coerce and raise
+  rather than print whatever arrived.
+
+  A field with nothing left to show is NAMED where it is a subject and OMITTED
+  where it is a label, the rule the first batch arrived at. An unrenderable
+  ``title`` takes a marker rather than borrowing the series id, which would
+  read as a series FRED titled after itself; a ``- Units: `` with nothing after
+  it is not a fact and simply does not appear; and ``fear_greed``'s
+  classification is named rather than leaving the Latest line on a bare
+  em-dash and the table row with an empty cell.
 
   ``fear_greed``'s table looks identical and is not. Only
   ``value_classification`` is guarded there, because ``date`` and ``value``
@@ -1002,6 +1026,26 @@ Breaking changes within the 0.x line are called out explicitly.
   a value carrying the quote character closed that span early, and the prose
   after it read to the model as the tool's own words rather than as the
   caller's argument. A clean symbol renders byte for byte as before, ``'SOL'``.
+
+  Flattening before classification widens what these two vendors will answer:
+  ``BTC|`` used to reach the no-signal sentence and now serves a real BTC
+  report. That is the intended consequence of one string being both decided on
+  and rendered — but it also means a non-string argument would have been
+  ``str``'d into a symbol and answered about, so ``b"BTC"`` came back as a
+  confident "there is no ETF flow signal for ``b'BTC'``" to a model that had
+  asked about BTC. Both modules now refuse a non-string first, the guard
+  ``deribit`` and the treasuries module already placed ahead of their own echo.
+
+  ``farside`` was guarding the caller's argument while rendering the vendor's
+  own field raw, in the same report — the shape ``fred``'s comment complains
+  about, one file over. Its issuer labels come from Farside's HTML header
+  through a bare ``.strip()``, land in ``**Latest-day leaders:**``, and are
+  written to the rolling cache, so a bad one replays on every refresh. A label
+  is now judged by its SHAPE rather than flattened: a cell carrying
+  ``IBIT ## Foo`` is not an issuer name that happens to need cleaning, it is a
+  column the parser could not read, and the ``unnamed col N`` placeholder plus
+  ``issuers_named=False`` — both already built, both already disclosed — say
+  exactly that.
 
 - **Symbols, tickers and yfinance's own text reached the prompt able to forge
   report structure** (issue #233, first batch). PR #202 bounded the vendor's

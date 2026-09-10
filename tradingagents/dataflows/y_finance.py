@@ -341,7 +341,11 @@ def get_stock_stats_indicators_window(
         ind_string += f"{date_str}: {value}\n"
 
     result_str = (
-        f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
+        # Bounded to this vendor's menu by the membership check above, and
+        # guarded anyway: the Alpha Vantage sibling serving this same routed
+        # tool guards its heading, and two vendors of one tool must not render
+        # a hostile spelling differently (#219, #233).
+        f"## {echo_argument(indicator)} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
         + ind_string
         + "\n\n"
         # Indexed, not .get() with a placeholder: membership was checked

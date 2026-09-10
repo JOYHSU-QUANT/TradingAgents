@@ -1,11 +1,19 @@
+import logging
+
 from .alpha_vantage_common import _make_api_request
 from .errors import NoMarketDataError, UnsupportedIndicatorError, WiringGapError
 from .utils import (
     INDICATOR_DESCRIPTIONS,
+    MAX_UNTRUSTED_CHARS,
     data_lag_note,
     date_refusal,
+    echo_argument,
+    is_finite_number,
+    sanitize_untrusted,
     unsupported_indicator,
 )
+
+logger = logging.getLogger(__name__)
 
 # Maximum age (calendar days) of the newest indicator row relative to
 # curr_date before the report carries a data-lag note, keyed by the requested
@@ -105,6 +113,36 @@ _INDICATOR_DESCRIPTIONS = {
     for indicator in _SUPPORTED_INDICATORS
     if indicator not in _NO_ENDPOINT_INDICATORS
 }
+
+
+def _window_rows_lost(unusable: int) -> str:
+    """The rows THIS WINDOW lost, or "".
+
+    One definition, because the report note and the no-rows refusal name the
+    same count and a reader comparing a thin answer with a failed one should
+    not have to tell two wordings apart (#233).
+    """
+    return f"{unusable} row(s) in this window whose value could not be read" if unusable else ""
+
+
+def _rows_not_served(unusable: int, undatable: int) -> str:
+    """What the vendor sent that this call could not use, or "".
+
+    Only the REFUSAL says this much. An undatable row cannot be placed in the
+    window at all, and this request sends no ``outputsize``, so on a report that
+    came out whole the count would be an unbounded fact about the vendor's whole
+    history attached to a window that lost nothing — and the reader most likely
+    to act on it would discount the window it WAS given. Where there is no
+    answer at all it is the explanation, so it is named here, and worded so it
+    cannot be read as a claim about the window.
+    """
+    parts = [p for p in (_window_rows_lost(unusable),) if p]
+    if undatable:
+        parts.append(
+            f"{undatable} row(s) whose date could not be read at all, so they could not be "
+            f"placed in this window"
+        )
+    return " and ".join(parts)
 
 
 def get_indicator(
@@ -302,36 +340,61 @@ def get_indicator(
     value_col_idx = header.index(target_col_name)
 
     result_data = []
+    # Two counts, because they are two different facts and this request sends
+    # no ``outputsize``: the CSV is the vendor's whole history, not the window.
+    # A row whose value cannot be read is omitted FROM THE WINDOW and the report
+    # says so; a row whose DATE cannot be read cannot be placed in the window at
+    # all, so counting the two together would let one corrupt row from years
+    # back claim a window that lost nothing. Before #233 both simply vanished,
+    # and a series of unreadable cells read as a quiet week.
+    unusable = 0
+    undatable = 0
     for line in lines[1:]:
         if not line.strip():
             continue
         values = line.split(",")
-        if len(values) > value_col_idx:
-            try:
-                date_str = values[date_col_idx].strip()
-                # Parse the date
-                date_dt = datetime.strptime(date_str, "%Y-%m-%d")
-
-                # Check if date is in our range
-                if before <= date_dt <= curr_date_dt:
-                    value = values[value_col_idx].strip()
-                    result_data.append((date_dt, value))
-            except (ValueError, IndexError):
-                continue
+        try:
+            date_dt = datetime.strptime(values[date_col_idx].strip(), "%Y-%m-%d")
+        except (ValueError, IndexError):
+            undatable += 1
+            continue
+        if not (before <= date_dt <= curr_date_dt):
+            continue
+        if len(values) <= value_col_idx:
+            # Dated, and inside the window, but carrying no value column: this
+            # one IS a row the window lost.
+            unusable += 1
+            continue
+        raw_value = values[value_col_idx].strip()
+        shown = sanitize_untrusted(raw_value, limit=MAX_UNTRUSTED_CHARS)
+        # Both spellings are asked, as fred's observation guard asks them: the
+        # RAW one so flattening cannot repair a value into a number — "4.1|"
+        # becomes "4.1", turning a cell the reader would have questioned into
+        # an indicator reading the vendor never sent — and the RENDERED one so
+        # a value only the raw form can parse cannot reach the report either.
+        if not (is_finite_number(raw_value) and is_finite_number(shown)):
+            unusable += 1
+            continue
+        result_data.append((date_dt, shown))
 
     if not result_data:
-        # Every fetched row fell outside the window. This used to embed
-        # "No data available for the specified date range." inside a
-        # well-formed "## RSI values from ... to ..." report — the most
+        # Nothing usable, for up to three different reasons, so the detail names
+        # the ones that actually happened rather than blaming the window for all
+        # of them. This exit used to embed "No data available for the specified
+        # date range." inside a well-formed "## RSI values from ... to ..." report — the most
         # concealed of this getter's prose exits, since it carried no error
         # wording at all. Raising instead matches what the same vendor's
         # daily-bars getter does with a header-only CSV (#30/#106): the
         # chain can fall back, and a chain with no other vendor emits the
         # router's no-data sentinel.
+        window = f"between {before.strftime('%Y-%m-%d')} and {curr_date}"
+        served = _rows_not_served(unusable, undatable)
         raise NoMarketDataError(
             symbol,
             detail=(
-                f"no {indicator} rows between {before.strftime('%Y-%m-%d')} and {curr_date}"
+                f"no usable {indicator} rows {window}: Alpha Vantage served {served}"
+                if served
+                else f"no {indicator} rows {window}"
             ),
         )
 
@@ -354,10 +417,38 @@ def get_indicator(
         if note:
             lag_note = "\n" + note + "\n"
 
+    # Rows this window lost are disclosed rather than left as a gap in the
+    # dates, as fred discloses the same fact about the same kind of payload —
+    # though not in the same sentence, since fred requests a bounded range and
+    # merges the two counts this getter has to keep apart.
+    lost = _window_rows_lost(unusable)
+    unusable_note = f"\n_(Alpha Vantage served {lost}.)_\n" if lost else ""
+    if undatable:
+        # Not in the report: see _rows_not_served. The operator still has to be
+        # able to see a vendor whose date column has broken.
+        logger.warning(
+            "Alpha Vantage served %d %s row(s) whose date could not be read at all; "
+            "they could not be placed in the %s to %s window and are not reported to the agent",
+            undatable,
+            indicator,
+            before.strftime("%Y-%m-%d"),
+            curr_date,
+        )
+
     result_str = (
-        f"## {indicator.upper()} values from {before.strftime('%Y-%m-%d')} to {curr_date}:\n\n"
+        # The indicator is the caller's own argument coming back into text the
+        # model reads. The membership check two hundred lines above bounds it
+        # to this module's menu, which is a fact about a caller far from here
+        # rather than about this line — the same reason fred echoes a series
+        # id its resolver already bounded (#233). The yfinance sibling's
+        # heading takes the guard in the same commit: one routed tool must not
+        # render a hostile spelling one way through one vendor and another way
+        # through the other (#219).
+        f"## {echo_argument(indicator.upper())} values from "
+        f"{before.strftime('%Y-%m-%d')} to {curr_date}:\n\n"
         + ind_string
         + lag_note
+        + unusable_note
         + "\n\n"
         + _INDICATOR_DESCRIPTIONS[indicator]
     )

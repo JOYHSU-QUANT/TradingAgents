@@ -173,8 +173,13 @@ def build_instrument_context(
         # free text on its way into a SYSTEM prompt, and this function is
         # exported and takes any Mapping — so the flattening has to be a
         # property of the RENDER rather than of the one resolver that happens
-        # to fill the dict today (#233). _clean_identity_value is idempotent,
-        # so the resolver's own pass costs nothing here.
+        # to fill the dict today (#233). Cleaning a value the resolver already
+        # cleaned is BOUNDED rather than a no-op: where the cap fell on a
+        # space, a second pass re-slices and the ellipsis grows by one dot
+        # (202 to 203 characters, stable from there). No text is lost and the
+        # promised bound holds, which is what the double pass has to be safe
+        # for — it is not idempotent, and a comment saying so would be one a
+        # probe disproves.
         field = lambda key: _clean_identity_value(identity.get(key))  # noqa: E731
         name = field("company_name")
         if name:

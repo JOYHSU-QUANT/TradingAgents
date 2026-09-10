@@ -977,10 +977,10 @@ Breaking changes within the 0.x line are called out explicitly.
   take ``sanitize_untrusted``, and a handle or title with nothing left after
   flattening is NAMED — "[unknown user]", "[title unavailable]" — rather than
   rendered as a bare "@" or a blank the reader would take for a real post.
-  The three sentences that quote the requested ticker back, on each source,
-  take ``echo_argument``. The symbol StockTwits echoes in a MISMATCH answer is
-  the one vendor value that takes the argument guard, and it takes it for that
-  guard's own reason: the whole content of that sentence is that the two
+  The sentences that quote the requested ticker back take ``echo_argument`` —
+  three on each source, bar the one below. Both spellings in StockTwits'
+  MISMATCH answer take ``quote_argument`` instead, the vendor's echo included,
+  and the vendor's takes that argument guard for the guard's own reason: the whole content of that sentence is that the two
   spellings differ, and flattening with the default edges renders "AAPL#" as
   "AAPL" and "##" as nothing at all — turning the sentence into a
   self-contradiction the model reads as our bug, while the vendor is in fact

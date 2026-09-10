@@ -179,12 +179,17 @@ class TestStockTwitsStamp:
         assert stw.TIME_UNKNOWN in out
         assert any("posting time could not be read" in r.getMessage() for r in caplog.records)
 
-    def test_a_message_with_no_posting_time_at_all_is_not_reported_as_broken(self, caplog):
+    @pytest.mark.parametrize("absent", [None, "", 0])
+    def test_a_message_with_no_posting_time_at_all_is_not_reported_as_broken(
+        self, absent, caplog
+    ):
         # An absent stamp is ordinary and always rendered the marker; only a
         # stamp that was THERE and could not be read says something about the
-        # vendor.
+        # vendor. An empty string renders identically to an absent one, so it
+        # is not the format change this line exists to report.
         with caplog.at_level(logging.WARNING):
-            _stocktwits(_stream(_message(created_at=None)))
+            out = _stocktwits(_stream(_message(created_at=absent)))
+        assert stw.TIME_UNKNOWN in out
         assert not [r for r in caplog.records if "posting time" in r.getMessage()]
 
     def test_an_unreadable_stamp_is_not_counted_as_the_newest_message(self):
@@ -251,7 +256,11 @@ class TestStockTwitsArgumentEcho:
         served = served.rstrip(")>")
         bare = lambda s: s.strip().strip("'\"")  # noqa: E731
         assert bare(served) != bare(requested), "the sentence contradicts itself"
-        assert served.strip() not in ("", "''", '""'), "the sentence names a blank"
+        # An all-markup echo does flatten to a blank; what the quotes buy is
+        # that the blank is VISIBLE as one rather than reading as a word that
+        # never arrived. So the guarantee pinned here is the delimiters, not
+        # non-emptiness — asserting the latter would claim more than is true.
+        assert served[0] in "'\"" and served[-1] == served[0], "the echo is not delimited"
 
     def test_a_forged_symbol_echo_from_the_vendor_cannot_forge_structure(self):
         # The mismatch sentence names BOTH spellings, and the second one is

@@ -189,7 +189,7 @@ def fetch_stocktwits_messages(
         created, day = _rendered_stamp(m.get("created_at"))
         if day is not None:
             days.append(day)
-        elif m.get("created_at") is not None:
+        elif m.get("created_at"):
             unreadable_stamps += 1
         user_env = m.get("user")
         raw_user = user_env.get("username") if isinstance(user_env, dict) else None

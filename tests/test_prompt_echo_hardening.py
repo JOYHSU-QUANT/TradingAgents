@@ -550,6 +550,25 @@ class TestArticleFieldsThatRenderToNothing:
     def test_a_clean_title_and_publisher_are_untouched(self, monkeypatch):
         assert "### Fed holds (source: Reuters)" in _news(monkeypatch)
 
+    @pytest.mark.parametrize("container", [[], {}, ["x"], {"u": "http://a"}])
+    def test_a_container_field_never_reaches_the_report_as_a_python_repr(
+        self, monkeypatch, container
+    ):
+        # The same boundary polymarket draws, applied to all four fields: a
+        # heading of "### []", a body line of "['x']", and above all a
+        # "Link: {'u': ...}" that reads as a citation — which is the whole of
+        # what the link treatment exists to prevent.
+        out = _news(
+            monkeypatch,
+            title=container,
+            publisher=container,
+            summary=container,
+            link=container,
+        )
+        assert repr(container) not in out
+        assert f"### {yfnews.TITLE_UNAVAILABLE} (source: {yfnews.SOURCE_UNAVAILABLE})" in out
+        assert "Link: " not in out
+
     def test_the_global_report_no_longer_drops_such_an_article(self, monkeypatch):
         # The sharpest shape: ONE article, whose title flattens away. The
         # de-duplication skipped a false-y title, so the report answered "no

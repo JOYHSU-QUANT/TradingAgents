@@ -51,6 +51,25 @@ TITLE_UNAVAILABLE = "(title unavailable)"
 SOURCE_UNAVAILABLE = "(source unavailable)"
 
 
+def _vendor_text(value: object) -> str:
+    """What the vendor sent, if it sent TEXT — otherwise ``""``.
+
+    One definition for all four article fields, because the question each of
+    them has to answer first is the same one, and answering it per-field is
+    how they drifted: ``None`` was handled everywhere (a bare flatten hands
+    back the truthy string ``"None"``), the scalar boundary only where someone
+    had seen the failure. Everything past this point may assume text.
+
+    Scalars pass: a number in a text field has something to show, and the
+    flattening returns it byte for byte. A list or object does not, and
+    letting ``str`` have it puts a Python repr into the report — ``### []``
+    for a heading, ``Link: {'url': ...}`` for a citation, which is the whole
+    of what ``_citation`` exists to prevent. Same boundary, same reasons, as
+    ``polymarket._rendered_text``.
+    """
+    return str(value) if isinstance(value, (str, int, float)) else ""
+
+
 def _label(value: object, unavailable: str) -> str:
     """A heading label as the report will show it, or the unavailability marker.
 
@@ -63,14 +82,7 @@ def _label(value: object, unavailable: str) -> str:
     the value asked about and the value shown are one value, so "nothing to
     show" cannot mean one thing to the check and another to the report.
     """
-    # Scalars, the same boundary ``polymarket._rendered_text`` draws and for
-    # both of its reasons: a vendor sending ``0`` has sent something, and
-    # short-circuiting on falsiness would answer the marker for a value that
-    # module renders; while a list or object has nothing to show, and letting
-    # ``str`` have it would put a Python repr in the heading — ``### []``.
-    if not isinstance(value, (str, int, float)):
-        value = ""
-    return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS) or unavailable
+    return sanitize_untrusted(_vendor_text(value), limit=MAX_UNTRUSTED_CHARS) or unavailable
 
 
 def _citation(value: object) -> str:
@@ -91,7 +103,7 @@ def _citation(value: object) -> str:
     than cut, which the renderer's ``if data["link"]`` already turns into no
     line at all.
     """
-    flat = " ".join(str(value or "").split())
+    flat = " ".join(_vendor_text(value).split())
     return flat if len(flat) <= MAX_UNTRUSTED_CHARS else ""
 
 
@@ -121,18 +133,20 @@ def _flatten_article_fields(data: dict) -> dict:
     reason given at ``MAX_NEWS_SUMMARY_CHARS``; the LINK is an address rather
     than prose and must survive as written or not at all (``_citation``).
 
-    ``or ""`` before every field, because ``sanitize_untrusted`` goes through
-    ``str``: a field reaches here as ``None`` when the vendor sends the key
-    carrying a null (the extraction's ``.get(key, "")`` default covers only an
-    ABSENT key), and a bare flatten would hand back the truthy string
-    ``"None"`` — which the renderer's ``if data["summary"]`` / ``if
-    data["link"]`` would then print as a body line reading ``None`` and a
-    ``Link: None``.
+    All four go through ``_vendor_text`` first, which is where "the vendor did
+    not send text" is decided once rather than four times — a field reaches
+    here as ``None`` when the vendor sends the key carrying a null (the
+    extraction's ``.get(key, "")`` default covers only an ABSENT key), and a
+    bare flatten would hand back the truthy string ``"None"``, which the
+    renderer's ``if data["summary"]`` / ``if data["link"]`` would print as a
+    body line reading ``None`` and a ``Link: None``.
     """
     return {
         **data,
         "title": _label(data["title"], TITLE_UNAVAILABLE),
-        "summary": sanitize_untrusted(data["summary"] or "", limit=MAX_NEWS_SUMMARY_CHARS),
+        "summary": sanitize_untrusted(
+            _vendor_text(data["summary"]), limit=MAX_NEWS_SUMMARY_CHARS
+        ),
         "publisher": _label(data["publisher"], SOURCE_UNAVAILABLE),
         "link": _citation(data["link"]),
     }
@@ -446,8 +460,6 @@ def get_global_news_yfinance(
                 # The cost is that they may carry different bodies — but that
                 # is what de-duplicating on a title has always cost here, and
                 # the alternative keys on a spelling the report never shows.
-                # Untitled articles share one key for the same reason: they all
-                # render as the same marker.
                 data = _extract_article_data(article)
                 title = data["title"]
 

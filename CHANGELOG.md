@@ -1032,7 +1032,12 @@ Breaking changes within the 0.x line are called out explicitly.
   spelling, in one helper both shapes reach, which is the rule the Polymarket
   half of this entry states: the value asked about and the value shown are one
   value — including its scalar boundary, so a title arriving as a list cannot
-  render ``### []`` any more than an outcome can render ``**[]**``. ``get_fundamentals`` had the same mismatch one report along — its
+  render ``### []`` any more than an outcome can render ``**[]**``. All four
+  article fields answer "did the vendor send text at all" in ONE place
+  (``_vendor_text``), because answering it per field is how they drifted: the
+  null case was handled everywhere, the list-or-object case only where someone
+  had seen it fail, which would have left ``Link: {'url': ...}`` rendering as
+  a citation — the whole of what the link treatment exists to prevent. ``get_fundamentals`` had the same mismatch one report along — its
   ``is not None`` test let a field of pure markdown print a bare ``Sector:``
   — and now tests what the line will show. Two consequences worth stating,
   because this is a prompt segment point: an untitled article is now KEPT and
@@ -1160,10 +1165,12 @@ Breaking changes within the 0.x line are called out explicitly.
   to ``2030-12-3`` — a plausible date 28 days early, with nothing in the line
   to say it had been cut.
 
-  Making the question guard strict made a report of nothing but malformed
-  markets reachable for the first time, and it rendered as a header promising
+  A report of nothing but malformed markets rendered as a header promising
   probabilities with no lines under it — the bare-header failure
-  ``get_fundamentals`` already refuses. That case now says so, and says it
+  ``get_fundamentals`` already refuses. A single market with mismatched
+  outcomes reached it before this change too; making the question guard strict
+  added another way in, which is what made it worth closing. That case now
+  says what happened, and says it
   ONCE: the reason belongs to the omitted clause, which names which
   malformations were actually seen. Reaching that branch honestly also needed
   ``limit`` coerced the way farside and fear_greed coerce their windows: a

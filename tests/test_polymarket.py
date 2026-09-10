@@ -509,8 +509,9 @@ class TestMalformedMarketsOmitted:
     def test_every_market_malformed_does_not_render_a_header_with_no_body(self):
         # The header has already promised "market-implied probabilities", so a
         # body of no lines left the analyst a heading to reason around with
-        # nothing under it. Reachable only since the question/label guards
-        # started dropping markets that used to render as "- **None**".
+        # nothing under it. Reachable before this change too (a single market
+        # with mismatched outcomes does it); the question/label guards added
+        # another way in, which is what made it worth closing.
         bad = _market(None, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
         out = self._fetch(bad)
         assert "No prediction markets for 'anything' could be rendered." in out
@@ -616,7 +617,7 @@ class TestMarketLineFiguresAreNotFabricated:
         assert "$1,234 volume, resolves 2030-12-31" in out
 
     def test_a_numeric_question_still_renders_rather_than_being_called_missing(self):
-        # ``_rendered_text`` refuses only None: Gamma sends strings, but a JSON
+        # ``_rendered_text`` admits scalars: Gamma sends strings, but a JSON
         # number has something to show and used to render. Dropping it would
         # disclose a real market as a MISSING question.
         market = _market(123, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")

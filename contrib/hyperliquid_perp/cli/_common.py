@@ -76,7 +76,10 @@ def _open_owned_store(path: str | Path) -> Database | None:
     the point it owns the store. :class:`Database`'s deferred policy settles
     the edge cases at open: an EMPTY store (no file, a file holding no objects
     of its own, or one holding nothing but this project's empty bookkeeping
-    table) has no owner and is built in full; a SQLite file holding
+    table) has no owner and is built in full — unless a ``-wal`` or
+    ``-journal`` beside it holds the database the main file has none of, which
+    is refused rather than built into and destroyed (issue #236); a SQLite
+    file holding
     objects that are NOT this project's is refused by name rather than built
     into, so a mistyped ``--db`` cannot open a daemon's books inside another
     application's database (issue #174); a store migrated by a

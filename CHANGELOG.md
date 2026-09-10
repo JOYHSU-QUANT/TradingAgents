@@ -978,8 +978,19 @@ Breaking changes within the 0.x line are called out explicitly.
   nothing about whose file it is, every store here has one — and a zero-length
   sidecar does not count, since SQLite creates one before it has a frame to
   put in it and a ``touch``-ed store beside an empty log still builds in full.
-  The message deliberately offers no recovery step: the obvious one, opening
-  the pair with any SQLite tool, is exactly what deletes the log.
+  Every hot sidecar found is named, by PATH rather than by bare name, since a
+  symlinked ``--db`` can leave the log in a directory the operator never typed;
+  the two lookups are deduplicated by canonical path so one file cannot be
+  listed twice under two spellings. A sidecar that cannot be stat-ed counts as
+  hot but is described as unmeasured, so the message never asserts data it did
+  not see. The one recovery step it does name is the one that destroys nothing
+  — MOVING the log aside — because staying silent about that too would leave an
+  operator who deleted their own main file with a refusal, a correct ``--db``
+  and nowhere to go; opening the pair with a SQLite tool remains unsaid, being
+  the thing that deletes it. Our own stores never present this shape: ``PRAGMA
+  journal_mode = WAL`` writes a 4096-byte header on the first connection
+  (measured), so a SIGKILLed daemon leaves a non-empty main file beside its hot
+  log and opens exactly as it always did.
 - **A `--db` that could be read but not opened borrowed the ledger-integrity
   verdict** (issue #235, the mirror of #210). Opening a store is itself a
   write — that same ``PRAGMA journal_mode = WAL`` records the mode in the
@@ -997,6 +1008,20 @@ Breaking changes within the 0.x line are called out explicitly.
   ``DatabaseError`` verdict at exit 5. A populated store of ours never arrives
   there: it is already in WAL, so that PRAGMA is a read for it and ``connect``
   succeeds even against a file that denies writes (measured).
+  The catch is deliberately WIDER than the write denial that motivated it: a
+  writer holding the store past the bounded wait (``database is locked``) and a
+  failing disk (``disk I/O error``) reach the same open and are named the same
+  way, because each of them is a store this build could not open. Both are
+  pinned. Known trade-offs, accepted deliberately: a hardware fault now reads
+  as exit 1 rather than exit 5, so RUNBOOK-live §4's transient-exit-1 list says
+  in as many words that ``disk I/O error`` on this lane is to be investigated
+  as hardware and not restarted through. And a report-only command
+  (``validate`` / ``export``) against an archived store on a read-only mount is
+  named rather than served: opening those ``mode=ro`` would let them read it,
+  but that is a change to the migrate/lease contract of every reporting
+  command, not to this refusal, and such a store was already dead at exit 5
+  before this — so nothing is newly blocked and the wider change is not made
+  here.
 - **A live tick's activity summary vanished whenever a later step raised**
   (issue #238). The ``live tick …`` line is the loop's only per-tick trading
   visibility, and it was logged AFTER ``driver.pump()`` — so any raise from the

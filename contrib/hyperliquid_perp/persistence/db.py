@@ -19,6 +19,7 @@ idempotent and a future schema change is an append to ``MIGRATIONS``.
 
 from __future__ import annotations
 
+import errno
 import logging
 import sqlite3
 from collections.abc import Iterator
@@ -286,8 +287,8 @@ def _unreadable_error(file: Path, exc: BaseException, *, probed: bool) -> Schema
     )
 
 
-def _hot_sidecars(file: Path) -> list[str]:
-    """The log sidecars of ``file`` that could be holding its content, by path.
+def _hot_sidecars(file: Path) -> tuple[list[str], bool]:
+    """``file``'s log sidecars that could hold its content, and whether all were measured.
 
     Non-empty ones only. SQLite leaves a zero-length ``-wal`` behind as a
     matter of course — a connection creates it before it has a frame to put in
@@ -303,67 +304,131 @@ def _hot_sidecars(file: Path) -> list[str]:
     name from, while ``GetFullPathNameW`` on Windows does not. Neither was
     measured here (this box refuses to create a symlink at all: ``WinError
     1314``), and asking both costs two ``stat`` calls and makes the answer not
-    matter. One name per suffix is enough to name the file, so the first hot
-    one wins and the second base is not consulted.
+    matter. EVERY hot sidecar found is returned, not the first: when both
+    bases really are different files, the one the operator has to carry aside
+    is whichever one this cannot know, so naming only one names the wrong one
+    half the time.
 
-    A sidecar this cannot stat counts as hot. The question being asked is
-    whether anything would be destroyed, and a file that cannot be measured
-    cannot be shown to be empty; the cost of answering it wrongly is one
-    refusal over a log that was not there to lose.
+    A sidecar this cannot stat counts as hot, and the second return value says
+    so, because the message must not claim data it did not see. The question
+    being asked is whether anything would be destroyed, and a file that cannot
+    be measured cannot be shown to be empty; the cost of answering it wrongly
+    is one refusal over a log that was not there to lose. ``ENAMETOOLONG`` is
+    the exception, and the one failure that is knowledge rather than
+    ignorance: a basename with room for ``-wal`` but not ``-journal`` (POSIX
+    ``NAME_MAX``) says that sidecar cannot exist, so there is nothing to fail
+    closed over.
     """
     bases = [file]
-    with suppress(OSError):
-        # ``strict=False``: the missing-main-file branch calls this too, and a
-        # dangling symlink still names the directory its log would live in.
+    try:
+        # Non-strict by default since 3.6, which is what the missing-main-file
+        # branch needs: a dangling symlink still names where its log would be.
         resolved = file.resolve()
+    except OSError as exc:
+        # Not suppressed. Every other uncertainty in here fails closed, and
+        # swallowing this one would fail OPEN — a symlinked ``--db`` whose
+        # resolution raises (a symlink cycle, a directory this may not
+        # traverse) would be checked in one place only, and the log beside the
+        # other one dies exactly as it did before this guard existed. Refusing
+        # is the wrong conservative answer here: most paths that will not
+        # resolve have no sidecar anywhere, and refusing every one of them
+        # would break stores with nothing wrong with them. So the lookup
+        # narrows and SAYS it narrowed — logged for the same reason as the
+        # bookkeeping downgrade below, that it changes what this function is
+        # able to answer.
+        logger.warning(
+            "could not resolve %s to look for a log beside its target (%s); "
+            "only the path as given was checked.",
+            file,
+            exc,
+        )
+    else:
         if resolved != file:
             bases.append(resolved)
-    hot = []
+    names: list[str] = []
+    seen: set[str] = set()
+    measured = True
     for suffix in _SIDECAR_SUFFIXES:
         for base in bases:
             sidecar = base.parent / (base.name + suffix)
+            sized = True
             try:
                 empty = sidecar.stat().st_size == 0
             except FileNotFoundError:
                 continue
-            except OSError:
-                empty = False
-            if not empty:
-                hot.append(str(sidecar))
-                break
-    return hot
+            except OSError as exc:
+                if exc.errno == errno.ENAMETOOLONG:
+                    continue  # cannot exist, so nothing to be careful about
+                empty, sized = False, False
+            if empty:
+                continue
+            # Identity by the canonical path, so the two bases cannot list one
+            # file twice: a relative ``--db``, or a Windows 8.3 short name in
+            # the path, makes them two SPELLINGS of the same sidecar. What is
+            # DISPLAYED stays the spelling this lookup used — the one the
+            # operator will recognise.
+            key = str(sidecar)
+            with suppress(OSError):
+                key = str(sidecar.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(str(sidecar))
+            measured = measured and sized
+    return names, measured
 
 
-def _hot_log_error(file: Path, names: list[str], *, missing: bool) -> SchemaVersionError:
+def _hot_log_error(
+    file: Path, names: list[str], *, missing: bool, measured: bool
+) -> SchemaVersionError:
     """The one wording of "this database's content is in its log" (issue #236).
 
     Reached from the two branches that would otherwise call the file an empty
     store — a main file truncated to zero bytes, and one that is not there at
     all — because ``connect`` creates the second as the first and both are
-    destroyed identically from there.
+    destroyed identically from there. Only the two clauses that would be false
+    for the other differ.
 
-    Says what was seen and stops. It deliberately offers no recovery step: the
-    obvious one, opening the pair with any SQLite tool, is the very thing that
-    deletes the log, and nothing here has measured one that does not.
+    The log by its PATH, not its bare name: a symlinked ``--db`` can leave it
+    in a different directory from the one the operator typed (see
+    :func:`_hot_sidecars`), and this whole message is about finding that file.
+
+    Claims data only where data was seen. A sidecar that could not be stat-ed
+    is treated as hot and said to be unmeasured, because the alternative is
+    the one unhedged assertion in a module whose other two refusal wordings
+    (:func:`_unreadable_error`, :func:`_unopenable_error`) both list causes
+    rather than pick one.
+
+    The one recovery step it names is the one that destroys nothing: MOVING
+    the log out of the way. Opening the pair with a SQLite tool is what
+    deletes it, so that is left unsaid — but staying silent about the safe
+    step too would leave an operator who deleted their own main file with a
+    refusal, a correct ``--db``, and nowhere to go.
     """
     listed = " and ".join(names)
-    holds = "hold" if len(names) > 1 else "holds"
+    if measured:
+        claim = f"{listed} {'hold' if len(names) > 1 else 'holds'} data"
+    else:
+        claim = f"{listed} could not be measured and may hold data"
     where = "is not there" if missing else "is zero bytes"
-    # The log by its PATH, not its bare name: a symlinked ``--db`` can leave it
-    # in a different directory from the one the operator typed (see
-    # :func:`_hot_sidecars`), and the whole message is about finding that file.
+    untouched = "The log has not been" if missing else "Neither file has been"
+    looks_like = (
+        "a half-restored backup, and a main file deleted out from under its log"
+        if missing
+        else "a truncated main file, and a half-restored backup"
+    )
     return SchemaVersionError(
-        f"{file} {where}, but {listed} {holds} data. A SQLite "
-        "database in that shape keeps its content in the log, not in the main "
-        "file. Refusing to open it: this build would read the main file as an "
-        "empty store and build its own schema into it, and merely connecting "
-        "destroys the log on the way — SQLite reads a log beside an empty main "
-        "file as stale and deletes it (measured: 20KB of it gone, and this "
-        "project's whole schema in what was left). Neither file has been "
-        "touched here. Copy both aside before anything else opens this path — "
-        "an ordinary read-write open is what deletes the log — then check the "
-        "--db path: a truncated main file and a half-restored backup both look "
-        "like this."
+        f"{file} {where}, but {claim}. A SQLite database in that shape keeps "
+        "its content in the log, not in the main file. Refusing to open it: "
+        "this build would read the main file as an empty store and build its "
+        "own schema into it, and merely connecting destroys the log on the way "
+        "— SQLite reads a log beside an empty main file as stale and deletes "
+        "it (measured: 20KB of it gone, and this project's whole schema in "
+        f"what was left). {untouched} touched here. Copy the log aside before "
+        "anything else opens this path; an ordinary read-write open is what "
+        f"deletes it. Then check the --db path — {looks_like} both look like "
+        "this. If the log is yours to discard, MOVE it out of the way rather "
+        "than deleting it and this path builds as a new store."
     )
 
 
@@ -447,11 +512,14 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
             # log stale in SQLite's eyes and gone on the same open (measured:
             # the same 20KB). One verdict, two branches, because only one of
             # the two states has a ``stat`` to read.
-            hot = _hot_sidecars(file)
+            hot, measured = _hot_sidecars(file)
             if hot:
-                # ``from None`` like the sibling branch below: the missing main
-                # file is the premise of this verdict, not a failure inside it.
-                raise _hot_log_error(file, hot, missing=True) from None
+                # ``from None`` because the missing main file is the PREMISE of
+                # this verdict rather than a failure inside it — the
+                # FileNotFoundError being handled would otherwise read as its
+                # cause. The sibling branch below needs no such clause: nothing
+                # is being handled there.
+                raise _hot_log_error(file, hot, missing=True, measured=measured) from None
             return
         # There is nowhere to create it, so ``connect`` raises `unable to open
         # database file`, which main()'s last resort prints as exit 2. Named
@@ -534,9 +602,9 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         # file is not probed at all, and why THIS function, the one that
         # promises in every sentence it raises that the file is untouched, can
         # keep saying so.
-        hot = _hot_sidecars(file)
+        hot, measured = _hot_sidecars(file)
         if hot:
-            raise _hot_log_error(file, hot, missing=False)
+            raise _hot_log_error(file, hot, missing=False, measured=measured)
         # The readability question the probe would have answered is asked here
         # instead, in the one way that opens nothing of SQLite's: an unreadable
         # empty file used to fall through to ``connect`` and its unnamed exit
@@ -878,7 +946,10 @@ class Database:
         this build's to upgrade) or predates the lease columns entirely (see
         below), and an EMPTY store — a file with no objects of its own, or
         nothing but this project's empty bookkeeping table — is built in full,
-        since nothing can own it.
+        since nothing can own it. "Empty" is a fact about the file AND its
+        sidecars: a main file with no bytes (or none at all) is not empty when
+        a log beside it holds the database, and is refused rather than built
+        into (issue #236).
 
         Ahead of all three policies sits a fact about the FILE rather than
         about any policy: a SQLite database holding objects that are not this

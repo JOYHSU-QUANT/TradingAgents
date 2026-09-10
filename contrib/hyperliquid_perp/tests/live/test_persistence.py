@@ -36,7 +36,7 @@ from contrib.hyperliquid_perp.persistence.schema import (
     SCHEMA_VERSION,
 )
 
-from ..conftest import build_store_at, migrations_up_to, unreadable
+from ..conftest import build_store_at, migrations_up_to, unreadable, unwritable
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
@@ -1346,25 +1346,211 @@ def test_a_db_that_exists_but_cannot_be_read_is_refused_by_name(tmp_path, popula
     assert message.count(str(store)) == 1
 
 
-def test_the_refusal_leaves_a_log_beside_an_empty_file_alone(tmp_path):
-    # The refusal's central claim is that it has not modified the file, and an
-    # empty one is accepted WITHOUT being opened in SQLite so that claim stays
-    # literally true: SQLite reads a zero-length main file as an empty database
-    # and treats a -wal beside it as stale, so one read-only probe of that pair
-    # deletes the log. Scoped deliberately to this function — the caller reaches
-    # connect() on the very next line, whose `PRAGMA journal_mode = WAL` destroys the
-    # same log, because an empty file is "ours to build in full" and building is
-    # a write. So this pins an invariant of the refusal, not a promise to the
-    # operator; `Database(...)` on this same pair would eat the log.
+# A log with a header and a body in it, for the pairs below. The two magics
+# are SQLite's own: a WAL header starts 0x377f0682, a rollback journal
+# 0xd9d505f920a163d7.
+_HOT_WAL = b"\x37\x7f\x06\x82" + bytes(20000)
+_HOT_JOURNAL = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7" + bytes(20000)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "body"),
+    [("-wal", _HOT_WAL), ("-journal", _HOT_JOURNAL)],
+    ids=["a write-ahead log", "a rollback journal"],
+)
+def test_a_store_whose_content_is_in_its_log_is_refused_by_name(tmp_path, suffix, body):
+    # Issue #236. A zero-length main file with a log beside it is not an empty
+    # database, it is a database every byte of which is in that log — and
+    # SQLite reads such a log as stale and DELETES it on the first open,
+    # `PRAGMA journal_mode = WAL` very much included. The old behaviour was the
+    # worst available: 20KB of somebody's data gone and this project's whole
+    # schema built into what was left, after which the file looks like a store
+    # to whoever opens it next (the issue-#174 harm, reached through the one
+    # door that guard cannot see — it asks the MAIN file what it holds).
+    # Pinned through `Database`, not the guard alone, because the promise is
+    # now end-to-end.
+    store = tmp_path / "x.db"
+    store.touch()
+    log = tmp_path / ("x.db" + suffix)
+    log.write_bytes(body)
+
+    with pytest.raises(SchemaVersionError) as caught:
+        Database(store)
+
+    message = str(caught.value)
+    assert str(store) in message  # which file, for an operator holding several
+    assert log.name in message  # and which log, since that is where the data is
+    assert "check the --db path" in message
+    # The damage, measured on the files themselves rather than on the wording.
+    assert log.read_bytes() == body
+    assert store.stat().st_size == 0
+
+
+def test_both_logs_are_named_when_both_hold_data(tmp_path):
+    # Nothing stops a file having both sidecars, and the operator has to be
+    # told to carry BOTH aside — naming one and silently dropping the other
+    # would lose exactly what the refusal exists to preserve.
+    store = tmp_path / "x.db"
+    store.touch()
+    wal, journal = tmp_path / "x.db-wal", tmp_path / "x.db-journal"
+    wal.write_bytes(_HOT_WAL)
+    journal.write_bytes(_HOT_JOURNAL)
+
+    with pytest.raises(SchemaVersionError) as caught:
+        Database(store)
+
+    message = str(caught.value)
+    assert str(wal) in message
+    assert str(journal) in message
+    assert " hold data" in message  # and it agrees with itself: two, not one
+    assert wal.read_bytes() == _HOT_WAL
+    assert journal.read_bytes() == _HOT_JOURNAL
+
+
+def test_a_sidecar_that_cannot_be_measured_counts_as_holding_data(tmp_path, monkeypatch):
+    # The fail-closed half of the rule. What is being asked is whether opening
+    # this pair would destroy something, and a sidecar this build cannot stat
+    # cannot be shown to be EMPTY — so it is treated as full. Getting that
+    # backwards costs somebody their log; getting it wrong this way costs one
+    # refusal over a file that was not there to lose.
     store = tmp_path / "x.db"
     store.touch()
     log = tmp_path / "x.db-wal"
-    log.write_bytes(b"\x37\x7f\x06\x82" + bytes(20000))  # a WAL header and a body
+    log.write_bytes(_HOT_WAL)
+    real_stat = pathlib.Path.stat
 
-    db_module._refuse_a_foreign_store(store)  # accepted, no raise
+    def deny(self, *args, **kwargs):
+        # The MAIN file still answers: the guard has to reach the zero-length
+        # branch at all before the sidecar question is asked.
+        if self.name.endswith("-wal"):
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
 
-    assert log.exists() and log.stat().st_size == 20004
-    assert store.stat().st_size == 0
+    monkeypatch.setattr(pathlib.Path, "stat", deny)
+
+    with pytest.raises(SchemaVersionError, match="is zero bytes, but"):
+        Database(store)
+
+    monkeypatch.undo()
+    assert log.read_bytes() == _HOT_WAL
+
+
+def test_a_log_beside_the_target_of_a_symlinked_db_is_found_too(tmp_path):
+    # A --db that is a symlink puts "beside the path as typed" and "beside the
+    # file it resolves to" in different directories, and the platforms disagree
+    # about which of them SQLite derives the log's name from: the unix VFS
+    # resolves symlinks while building the full pathname, GetFullPathNameW does
+    # not. Neither was measured — this box will not create a symlink at all
+    # (WinError 1314) — so the guard asks both bases, and that is what this
+    # pins. Skipped rather than asserted where the platform refuses, so it
+    # never passes on a premise that did not hold.
+    real, linked = tmp_path / "real", tmp_path / "linked"
+    real.mkdir()
+    linked.mkdir()
+    target = real / "store.db"
+    target.touch()
+    link = linked / "alias.db"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this platform will not create a symlink here")
+    log = real / "store.db-wal"
+    log.write_bytes(_HOT_WAL)
+
+    with pytest.raises(SchemaVersionError, match="is zero bytes, but") as caught:
+        Database(link)
+
+    # Named by PATH, not by bare name: the operator typed the other directory.
+    assert str(log) in str(caught.value)
+    assert log.read_bytes() == _HOT_WAL
+    assert target.stat().st_size == 0
+
+
+def test_a_log_waiting_for_a_main_file_that_is_gone_is_refused_too(tmp_path):
+    # The same pair one step further along: the main file DELETED rather than
+    # truncated — a half-restored backup, or a `rm x.db` that missed the
+    # sidecar. `connect` creates the zero-length database the case above
+    # refuses, so the log dies on exactly the same open (measured), but the
+    # guard reaches it down a different branch: there is no `stat` to read, so
+    # the "nothing there yet, connect() creates it" shortcut is what has to ask.
+    # Not reachable through `validate`, which stops at its own `database ...
+    # does not exist` first; an owning command (`paper`, `live`) creates stores
+    # and goes straight through.
+    store = tmp_path / "x.db"
+    log = tmp_path / "x.db-wal"
+    log.write_bytes(_HOT_WAL)
+
+    with pytest.raises(SchemaVersionError, match="is not there, but"):
+        Database(store)
+
+    assert log.read_bytes() == _HOT_WAL
+    assert not store.exists()  # and nothing was created on the way to refusing
+
+
+def test_an_empty_log_beside_an_empty_store_is_still_built_in_full(tmp_path):
+    # The verdict is keyed on a log with BYTES in it, not on the presence of a
+    # sidecar: SQLite creates a zero-length -wal as a matter of course, before
+    # it has a frame to put in it, so one holds nothing and deleting it loses
+    # nothing. Refusing here would turn an ordinary `touch`-ed store into an
+    # operator error over a file with no content in it.
+    store = tmp_path / "x.db"
+    store.touch()
+    (tmp_path / "x.db-wal").touch()
+
+    with Database(store) as db:
+        assert stored_schema_version(db.conn) == SCHEMA_VERSION
+
+    assert store.stat().st_size > 0  # built in full, exactly as before
+
+
+def test_our_own_wal_store_opens_beside_its_own_log_unchanged(tmp_path):
+    # And the other half of that combination: every store this project runs is
+    # in WAL, so a -wal beside one is the NORMAL state and says nothing about
+    # whose file it is. What makes the pair above a refusal is the main file
+    # having no bytes in it; a store with content opens as it always has.
+    store = tmp_path / "live.db"
+    Database(store).close()
+    log = tmp_path / "live.db-wal"
+    log.write_bytes(_HOT_WAL)  # as if a writer had left frames uncheckpointed
+    assert store.stat().st_size > 0
+
+    with Database(store, migrate=False) as db:
+        assert stored_schema_version(db.conn) == SCHEMA_VERSION
+
+
+def test_a_zero_length_store_that_cannot_be_written_is_refused_by_name(tmp_path):
+    # Issue #235, the mirror of #210: a --db this build reads perfectly well
+    # and still cannot OPEN, because opening a store is a write — `PRAGMA
+    # journal_mode = WAL` records the mode in the database header. It used to
+    # die there as a bare OperationalError, which `validate` printed as an
+    # exit-5 `store integrity failure` (see the CLI test) and an owning command
+    # as an exit-2 traceback.
+    store = tmp_path / "ro.db"
+    store.touch()
+    with unwritable(store):
+        # The premise: reading is fine, so nothing in the guard above can see
+        # anything wrong with this file.
+        with store.open("rb"):
+            pass
+        with pytest.raises(SchemaVersionError) as caught:
+            Database(store)
+    message = str(caught.value)
+    assert str(store) in message
+    assert "could not be opened as a store" in message
+    assert "denies writes" in message  # the cause, named
+    assert "could not be opened for reading" not in message  # #210's, not this
+
+
+def test_a_populated_store_that_cannot_be_written_still_opens(tmp_path):
+    # The line #235's fix must not cross. A store of ours is already in WAL, so
+    # that PRAGMA is a READ for it and `connect` succeeds even when the file
+    # denies writes (measured) — the failure comes later, from a write that
+    # really is a write, and must stay what it is instead of being reported as
+    # a mistyped --db. Only the open is wrapped, which is what keeps that true.
+    store = tmp_path / "live.db"
+    Database(store).close()
+    with unwritable(store), Database(store, migrate=False) as db:
+        assert stored_schema_version(db.conn) == SCHEMA_VERSION
 
 
 def test_a_foreign_bookkeeping_table_this_build_cannot_read_is_still_foreign(tmp_path):

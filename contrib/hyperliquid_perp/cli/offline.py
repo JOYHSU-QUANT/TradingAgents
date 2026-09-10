@@ -226,9 +226,13 @@ def _cmd_validate(argv: list[str]) -> int:
         # an I/O failure mid-scan. The strongest possible "investigate the
         # store" signal — the same exit-5 verdict as a failing report, not a
         # generic tool crash. A store that could not be OPENED is a different
-        # verdict and mostly no longer arrives here: the guard in
-        # ``persistence.db`` names it, and the open above turns that into a
-        # named exit 1 (issue #210).
+        # verdict and no longer arrives here: the guard in ``persistence.db``
+        # names the file this build must not open (issue #210 for one it cannot
+        # read, #236 for one whose content is in a log beside it), and
+        # ``Database`` names the one it cannot open as a store even though it
+        # reads (#235) — all of them ``SchemaVersionError``, which the open
+        # above turns into a named exit 1. What is left for this handler is
+        # what the open SUCCEEDED at and the scan then found.
         print(f"error: store integrity failure — {exc}", file=sys.stderr)
         return 5
     for line in report.summary_lines():

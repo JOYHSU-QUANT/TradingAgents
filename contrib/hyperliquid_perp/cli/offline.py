@@ -227,8 +227,16 @@ def _cmd_validate(argv: list[str]) -> int:
         # store" signal — the same exit-5 verdict as a failing report, not a
         # generic tool crash. A store that could not be OPENED is a different
         # verdict and mostly no longer arrives here: the guard in
-        # ``persistence.db`` names it, and the open above turns that into a
-        # named exit 1 (issue #210).
+        # ``persistence.db`` names the file this build must not open (issue
+        # #210 for one it cannot read, #236 for one whose content is in a log
+        # beside it), and ``Database`` names the one it cannot open as a store
+        # even though it reads (#235) — all of them ``SchemaVersionError``,
+        # which the open above turns into a named exit 1. "Mostly", because one
+        # open failure still lands here and should: a file that is not a SQLite
+        # database, and a corrupt one, raise plain ``DatabaseError`` rather than
+        # the ``OperationalError`` those guards narrow themselves to, and that
+        # IS an integrity verdict — telling an operator whose disk is rotting
+        # that they mistyped ``--db`` is the error this split exists to avoid.
         print(f"error: store integrity failure — {exc}", file=sys.stderr)
         return 5
     for line in report.summary_lines():

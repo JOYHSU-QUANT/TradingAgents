@@ -179,6 +179,65 @@ def unreadable(path: Path):
         assert not _denied(), "left the file unreadable"
 
 
+@contextmanager
+def unwritable(path: Path):
+    """Inside the block, ``path`` exists and READS fine but cannot be written.
+
+    The staging behind issue #235, and the mirror of :func:`unreadable` — same
+    two vocabularies for the same reasons: POSIX mode bits, which root ignores
+    (so the test skips rather than passing on a premise that never held), and
+    on Windows an ``icacls`` deny ACE, since a mode bit there is a fiction
+    ``os.chmod`` writes as the read-only flag.
+
+    Only the WRITE rights are denied — ``WD`` (write data) and ``AD`` (append
+    data) on Windows, mode ``0o444`` on POSIX — so every read right survives,
+    ``READ_CONTROL`` among them, which is what lets ``icacls`` read the ACL it
+    needs to remove its own ACE afterwards. The restore is in a ``finally`` and
+    asserted, because an ACE left behind poisons every later run.
+
+    The self-check opens the file for UPDATE, which is the question SQLite
+    effectively asks: it falls back to a read-only handle rather than failing
+    the open, and surfaces the denial on the first write instead.
+    """
+
+    def _denied() -> bool:
+        try:
+            with path.open("r+b"):
+                return False
+        except OSError:
+            return True
+
+    if os.name == "nt":
+        user = os.environ.get("USERNAME")
+        if not user:
+            pytest.skip("no USERNAME to hang an icacls deny ACE on")
+        deny = subprocess.run(
+            ["icacls", str(path), "/deny", f"{user}:(WD,AD)"], capture_output=True
+        )
+        if deny.returncode != 0:
+            pytest.skip("icacls refused to deny writes on this box")
+
+        def restore() -> None:
+            done = subprocess.run(["icacls", str(path), "/remove:d", user], capture_output=True)
+            assert done.returncode == 0, "left a deny ACE behind"
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root writes through any mode bits")
+        was = path.stat().st_mode
+        os.chmod(path, 0o444)
+
+        def restore() -> None:
+            os.chmod(path, was)
+
+    try:
+        if not _denied():
+            pytest.skip("the platform did not honour the denial")
+        yield
+    finally:
+        restore()
+        assert not _denied(), "left the file unwritable"
+
+
 @pytest.fixture
 def meta_and_asset_ctxs():
     return _load("meta_and_asset_ctxs.json")

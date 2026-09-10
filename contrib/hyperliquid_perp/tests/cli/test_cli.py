@@ -59,6 +59,7 @@ from ..conftest import (
     record_reconciliation_sweep_wiring,
     stamp_prompt_regimes,
     unreadable,
+    unwritable,
     write_payload,
 )
 from ..live.test_startup import _clearinghouse
@@ -1098,6 +1099,64 @@ def test_a_db_that_cannot_be_read_is_a_named_exit_1(tmp_path, capsys, paper_seam
     assert "could not be opened for reading" in err
     assert str(path) in err
     assert "store integrity failure" not in err  # the code that means something else
+
+
+@pytest.mark.parametrize("command", ["validate", "paper"])
+def test_a_db_that_cannot_be_written_is_a_named_exit_1(tmp_path, capsys, paper_seams, command):
+    # Issue #235, the other side of #210 and measured through the CLI an
+    # operator actually types. A zero-length --db that reads fine but denies
+    # writes gets past every guard — there is nothing wrong with the PATH — and
+    # then dies inside connect(), because opening a store WRITES: `PRAGMA
+    # journal_mode = WAL` puts the mode in the database header. `validate`
+    # catches sqlite3.Error around the open and called that an exit-5 `store
+    # integrity failure`, whose meaning is "the ledger does not add up,
+    # investigate the accounting" — a file permission borrowing the one verdict
+    # the RUNBOOK says to treat as a data-integrity incident. An owning command
+    # reached main()'s exit-2 last resort instead.
+    path = tmp_path / "ro.db"
+    path.touch()
+    argv = (
+        ["validate", "--run-id", "r", "--db", str(path)]
+        if command == "validate"
+        else _paper_argv(path, run_id="r", config=paper_seams)
+    )
+    with unwritable(path):
+        rc = cli_main(argv)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "could not be opened as a store" in err
+    assert str(path) in err
+    assert "store integrity failure" not in err  # the ledger verdict, not this one
+
+
+@pytest.mark.parametrize("command", ["validate", "paper"])
+def test_a_db_whose_content_is_in_its_log_is_a_named_exit_1(
+    tmp_path, capsys, paper_seams, command
+):
+    # Issue #236 through the CLI. A zero-length main file beside a hot -wal was
+    # read as an empty store and built into in full, destroying the log on the
+    # way in — the issue-#174 harm reached through the one door that guard
+    # cannot see, since it asks the MAIN file what it holds. Both commands now
+    # refuse by name, and the assertion that matters is on the FILE.
+    path = tmp_path / "x.db"
+    path.touch()
+    log = tmp_path / "x.db-wal"
+    body = b"\x37\x7f\x06\x82" + bytes(20000)
+    log.write_bytes(body)
+    argv = (
+        ["validate", "--run-id", "r", "--db", str(path)]
+        if command == "validate"
+        else _paper_argv(path, run_id="r", config=paper_seams)
+    )
+
+    rc = cli_main(argv)
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "x.db-wal" in err
+    assert "store integrity failure" not in err
+    assert log.read_bytes() == body  # the whole point: still there
+    assert path.stat().st_size == 0
 
 
 def test_validate_operator_errors_exit_1(tmp_path, capsys):

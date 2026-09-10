@@ -19,6 +19,7 @@ idempotent and a future schema change is an append to ``MIGRATIONS``.
 
 from __future__ import annotations
 
+import errno
 import logging
 import sqlite3
 from collections.abc import Iterator
@@ -110,10 +111,13 @@ class SchemaVersionError(RuntimeError):
 
     Or there is no store to read a schema from: a mistyped ``--db`` naming
     another application's database, a directory, something that is not a
-    regular file, or a path or file that cannot be read reaches the same
-    verdict — this build will not operate on this file — and reaches it
-    without reading a version at all (see
-    :func:`_refuse_a_foreign_store`). One type, because nothing branches on the
+    regular file, a path or file that cannot be read, or a database whose
+    content is in a log beside an empty main file reaches the same verdict —
+    this build will not operate on this file — and reaches it without reading a
+    version at all (see :func:`_refuse_a_foreign_store`). So does a file this
+    build can read but cannot OPEN as a store, which is decided one layer out
+    because opening is where the writing starts (see
+    :func:`_unopenable_error`). One type, because nothing branches on the
     difference: every one of them is the CLI's named exit 1, and the remedy
     that does differ is already in the message.
     """
@@ -144,6 +148,15 @@ _STORE_TABLES = ("decision_attempts", "scheduler_state")
 # A foreign object name is echoed back to the operator; ``sqlite_master.name``
 # has no length limit, so one pathological name would swamp the message.
 _MAX_NAME_CHARS = 40
+
+# SQLite's write-ahead log and rollback journal, each named by appending to the
+# main file's own path. Either can hold the entire content of a database whose
+# main file is zero bytes, and both are DESTROYED by opening such a pair — so
+# they have to be recognised from the filesystem alone, without asking SQLite
+# anything (issue #236). ``-shm`` is deliberately absent: it is a shared-memory
+# index rebuilt from the ``-wal``, so one beside an empty main file holds
+# nothing and proves nothing.
+_SIDECAR_SUFFIXES = ("-wal", "-journal")
 
 
 def _sqlite_file_uri(file: Path) -> str:
@@ -265,12 +278,175 @@ def _unreadable_error(file: Path, exc: BaseException, *, probed: bool) -> Schema
         # ``OSError`` renders its own filename into its text, quoted — on Windows
         # that is the path a second time with every separator doubled. The errno
         # and its text are the half worth printing; the path is already in front.
-        errno, strerror = getattr(exc, "errno", None), getattr(exc, "strerror", None)
-        reason = f"[Errno {errno}] {strerror}" if strerror else str(exc)
+        # Not named ``errno``: this module imports that as a module now, and a
+        # local of the same name would shadow it for the whole function body.
+        code, strerror = getattr(exc, "errno", None), getattr(exc, "strerror", None)
+        reason = f"[Errno {code}] {strerror}" if strerror else str(exc)
     return SchemaVersionError(
         f"{file} could not be opened for reading: {reason}. The path is there, "
         "but this build could not look inside the file to tell whether it is one "
         f"of its stores. {checks} The database file has not been modified."
+    )
+
+
+def _hot_sidecars(file: Path) -> list[tuple[str, bool]]:
+    """``file``'s log sidecars that could hold its content, each with whether it was MEASURED.
+
+    Non-empty ones only. SQLite leaves a zero-length ``-wal`` behind as a
+    matter of course — a connection creates it before it has a frame to put in
+    it — so deleting one loses nothing, and a zero-length main file beside a
+    zero-length log is built in full today and goes on being (measured). A
+    sidecar with BYTES in it beside a main file with none is the opposite
+    case: those bytes are the database.
+
+    Looked for beside the path AS GIVEN and beside its resolved form, because
+    a ``--db`` that is a symlink puts those two in different directories and
+    the platforms disagree about which one SQLite then uses: the unix VFS
+    resolves symlinks when it builds the full pathname it derives the log's
+    name from, while ``GetFullPathNameW`` on Windows does not. Neither was
+    measured here (this box refuses to create a symlink at all: ``WinError
+    1314``), and asking both costs two ``stat`` calls and makes the answer not
+    matter. EVERY hot sidecar found is returned, not the first: when both
+    bases really are different files, the one the operator has to carry aside
+    is whichever one this cannot know, so naming only one names the wrong one
+    half the time.
+
+    A sidecar this cannot stat counts as hot, and is flagged as unmeasured so
+    the message does not claim data it did not see. Per sidecar and not per
+    call: one unmeasurable log must not rewrite the claim about a 20KB one
+    sitting beside it that stat-ed perfectly well, which is the same untrue
+    statement in the other direction. The question being asked is whether
+    anything would be destroyed, and a file that cannot be measured cannot be
+    shown to be empty; the cost of answering it wrongly is one refusal over a
+    log that was not there to lose. ``ENAMETOOLONG`` is
+    the exception, and the one failure that is knowledge rather than
+    ignorance: a basename with room for ``-wal`` but not ``-journal`` (POSIX
+    ``NAME_MAX``) says that sidecar cannot exist, so there is nothing to fail
+    closed over.
+    """
+    bases = [file]
+    try:
+        # Non-strict by default since 3.6, which is what the missing-main-file
+        # branch needs: a dangling symlink still names where its log would be.
+        resolved = file.resolve()
+    except OSError as exc:
+        # Not suppressed. Every other uncertainty in here fails closed, and
+        # swallowing this one would fail OPEN — a symlinked ``--db`` whose
+        # resolution raises (a symlink cycle, a directory this may not
+        # traverse) would be checked in one place only, and the log beside the
+        # other one dies exactly as it did before this guard existed. Refusing
+        # is the wrong conservative answer here: most paths that will not
+        # resolve have no sidecar anywhere, and refusing every one of them
+        # would break stores with nothing wrong with them. So the lookup
+        # narrows and SAYS it narrowed — logged for the same reason as the
+        # bookkeeping downgrade below, that it changes what this function is
+        # able to answer.
+        logger.warning(
+            "could not resolve %s to look for a log beside its target (%s); "
+            "only the path as given was checked.",
+            file,
+            exc,
+        )
+    else:
+        if resolved != file:
+            bases.append(resolved)
+    found: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    for suffix in _SIDECAR_SUFFIXES:
+        for base in bases:
+            sidecar = base.parent / (base.name + suffix)
+            sized = True
+            try:
+                empty = sidecar.stat().st_size == 0
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.ENAMETOOLONG:
+                    continue  # cannot exist, so nothing to be careful about
+                empty, sized = False, False
+            if empty:
+                continue
+            # Identity by the canonical path, so the two bases cannot list one
+            # file twice: a relative ``--db``, or a Windows 8.3 short name in
+            # the path, makes them two SPELLINGS of the same sidecar. What is
+            # DISPLAYED stays the spelling this lookup used — the one the
+            # operator will recognise.
+            key = str(sidecar)
+            with suppress(OSError):
+                key = str(sidecar.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((str(sidecar), sized))
+    return found
+
+
+def _join(names: list[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — a list a sentence can hold.
+
+    ``" and ".join`` was fine while a refusal named at most two logs; with both
+    suffixes over both lookup bases it can name four.
+    """
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _hot_log_error(
+    file: Path, sidecars: list[tuple[str, bool]], *, missing: bool
+) -> SchemaVersionError:
+    """The one wording of "this database's content is in its log" (issue #236).
+
+    Reached from the two branches that would otherwise call the file an empty
+    store — a main file truncated to zero bytes, and one that is not there at
+    all — because ``connect`` creates the second as the first and both are
+    destroyed identically from there. Only the two clauses that would be false
+    for the other differ.
+
+    The log by its PATH, not its bare name: a symlinked ``--db`` can leave it
+    in a different directory from the one the operator typed (see
+    :func:`_hot_sidecars`), and this whole message is about finding that file.
+
+    Claims data only where data was seen. A sidecar that could not be stat-ed
+    is treated as hot and said to be unmeasured, because the alternative is
+    the one unhedged assertion in a module whose other two refusal wordings
+    (:func:`_unreadable_error`, :func:`_unopenable_error`) both list causes
+    rather than pick one.
+
+    The one recovery step it names is the one that destroys nothing: MOVING
+    the log out of the way. Opening the pair with a SQLite tool is what
+    deletes it, so that is left unsaid — but staying silent about the safe
+    step too would leave an operator who deleted their own main file with a
+    refusal, a correct ``--db``, and nowhere to go.
+    """
+    # Split by what was actually observed, so one unmeasurable sidecar cannot
+    # downgrade the claim about a log that stat-ed perfectly well beside it.
+    sized = [name for name, was_sized in sidecars if was_sized]
+    unsized = [name for name, was_sized in sidecars if not was_sized]
+    claims = []
+    if sized:
+        claims.append(f"{_join(sized)} {'hold' if len(sized) > 1 else 'holds'} data")
+    if unsized:
+        claims.append(f"{_join(unsized)} could not be measured and may hold data")
+    claim = "; ".join(claims)
+    where = "is not there" if missing else "is zero bytes"
+    looks_like = (
+        "a half-restored backup, and a main file deleted out from under its log"
+        if missing
+        else "a truncated main file, and a half-restored backup"
+    )
+    return SchemaVersionError(
+        f"{file} {where}, but {claim}. A SQLite database in that shape keeps "
+        "its content in the log, not in the main file. Refusing to open it: "
+        "this build would read the main file as an empty store and build its "
+        "own schema into it, and merely connecting destroys the log on the way "
+        "— SQLite reads a log beside an empty main file as stale and deletes "
+        "it (measured: 20KB of it gone, and this project's whole schema in "
+        "what was left). Nothing here has been touched. Copy the log aside "
+        "before anything else opens this path; an ordinary read-write open is "
+        f"what deletes it. Then check the --db path — {looks_like} both look "
+        "like this. If the log is yours to discard, MOVE it out of the way "
+        "rather than deleting it and this path builds as a new store."
     )
 
 
@@ -294,8 +470,17 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     in it, and from ``connect`` for a zero-length one, which returned above the
     probe (issue #210). Both ways in are named now, through
     :func:`_unreadable_error`: the probe's own open, and — for a zero-length
-    file, which is accepted without being probed — a plain read that opens
-    nothing of SQLite's.
+    file, which is answered without being probed — a plain read that opens
+    nothing of SQLite's. The same file being unWRITABLE is a question about
+    every store rather than about this ``--db``, and is named one layer out
+    (:func:`_unopenable_error`, issue #235).
+
+    And the mistype that is not about the main file at all: a zero-length or
+    missing main file with a non-empty ``-wal`` or ``-journal`` beside it,
+    whose content is entirely in that log. It reads as an empty store to every
+    check here, and both this function's probe and the caller's ``connect``
+    delete the log outright — so the pair is refused by name instead
+    (:func:`_hot_log_error`, issue #236).
 
     "EMPTY store" used to mean ``MAX(schema_migrations.version) == 0``, which is
     a fact about OUR bookkeeping, not about the file: another application's
@@ -317,9 +502,11 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     opening a WAL database read-only materialises SQLite's own empty ``-shm`` /
     ``-wal`` pair beside one that had none, which its owner reclaims on its next
     open — and a ``-wal`` beside a ZERO-LENGTH main file reads as stale and is
-    deleted, which is why an empty file never reaches the probe at all (see the
-    branch that returns above it). Unlinking those again would mean racing the
-    sidecars of a process that may be live — worse than leaving them.
+    DELETED, which is why an empty file never reaches the probe at all (see the
+    branch above it, which answers from the filesystem instead — and refuses
+    outright when such a log is there, since the caller's ``connect`` would
+    destroy it just the same, issue #236). Unlinking sidecars again would mean
+    racing those of a process that may be live — worse than leaving them.
 
     ``immutable=1`` would leave even those alone but is unusable here: it
     ignores the ``-wal``, so a LIVE foreign database reads back as holding no
@@ -336,7 +523,22 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
     except FileNotFoundError:
         parent = file.parent
         if parent.is_dir():
-            return  # nothing there yet; connect() creates it, as it always has
+            # Nothing there yet; connect() creates it, as it always has —
+            # unless a log is sitting in that directory waiting for the main
+            # file somebody deleted out from under it. ``connect`` creates the
+            # zero-length database the branch below refuses, which makes that
+            # log stale in SQLite's eyes and gone on the same open (measured:
+            # the same 20KB). One verdict, two branches, because only one of
+            # the two states has a ``stat`` to read.
+            hot = _hot_sidecars(file)
+            if hot:
+                # ``from None`` because the missing main file is the PREMISE of
+                # this verdict rather than a failure inside it — the
+                # FileNotFoundError being handled would otherwise read as its
+                # cause. The sibling branch below needs no such clause: nothing
+                # is being handled there.
+                raise _hot_log_error(file, hot, missing=True) from None
+            return
         # There is nowhere to create it, so ``connect`` raises `unable to open
         # database file`, which main()'s last resort prints as exit 2. Named
         # here for the same reason as the branches below: a mistyped --db must
@@ -400,32 +602,39 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
             "disk — check the --db path."
         )
     if info.st_size == 0:
-        # ``touch``-ed: ours to build in full, and deliberately NOT probed.
-        # SQLite reads a zero-length main file as an empty database and treats
-        # a ``-wal`` beside it as stale, so a read-only open of that pair
-        # DELETES the log — measured, 20KB of it gone after one probe. THIS
-        # function is the one that promises the file is untouched, and it says
-        # so in the sentences it raises, so it does not spend that promise on a
-        # question it can ask another way. It is only this function's invariant:
-        # the caller reaches ``connect`` on its very next line, whose ``PRAGMA
-        # journal_mode = WAL`` destroys the same log — an empty main file is
-        # "ours to build in full" and building is a write. What the shortcut
-        # buys the operator is nothing; what it buys the reader is that the
-        # refusal's central claim stays literally true.
+        # ``touch``-ed: ours to build in full — unless its content is in a log
+        # beside it. A zero-length main file with a non-empty ``-wal`` or
+        # ``-journal`` next to it is not an empty database, it is a database
+        # every byte of which is in that log: a main file truncated, a backup
+        # half-restored, a writer that died before its first commit. Both this
+        # function and the ``connect`` on the caller's next line destroy such a
+        # log — SQLite reads one beside an empty main file as stale and deletes
+        # it, and ``PRAGMA journal_mode = WAL`` is a write like any other
+        # (measured: 20KB gone, this project's whole schema built into what was
+        # left). Refused by name instead (issue #236), and keyed on the
+        # COMBINATION: a ``-wal`` alone says nothing about whose file this is,
+        # our own stores all have one.
         #
+        # Asked of the FILESYSTEM, never of SQLite. A read-only probe deletes
+        # that log for the same reason ``connect`` does — which is why an empty
+        # file is not probed at all, and why THIS function, the one that
+        # promises in every sentence it raises that the file is untouched, can
+        # keep saying so.
+        hot = _hot_sidecars(file)
+        if hot:
+            raise _hot_log_error(file, hot, missing=False)
         # The readability question the probe would have answered is asked here
         # instead, in the one way that opens nothing of SQLite's: an unreadable
         # empty file used to fall through to ``connect`` and its unnamed exit
-        # (issue #210). Readability only — a zero-length store that reads but
-        # cannot be WRITTEN still dies in ``connect`` — ``attempt to write a
-        # readonly database``, unnamed, exactly as it did before this. It is the
-        # zero-length one that dies there and normally not a populated store of
-        # ours, which is already in WAL, so ``connect``'s ``PRAGMA journal_mode =
-        # WAL`` is a read for it and succeeds (measured on a local store; one
-        # whose WAL switch silently fell back — see :func:`connect` — is the
-        # exception, and dies on that PRAGMA too). Naming that one means asking
-        # about WRITING, which is a different question from this function's and
-        # would have to be asked of every store, not just an empty one.
+        # (issue #210). Readability only. Whether a store can be WRITTEN is a
+        # different question, and one that has to be asked of every store
+        # rather than only an empty one — a zero-length store that reads but
+        # cannot be written dies on that same ``PRAGMA journal_mode = WAL``,
+        # and is named where every store passes through instead
+        # (:meth:`Database.__init__`, issue #235). A populated store of ours
+        # does not reach that: it is already in WAL, so the PRAGMA is a read
+        # for it and ``connect`` succeeds (measured; one whose WAL switch
+        # silently fell back — see :func:`connect` — is the exception).
         try:
             with file.open("rb"):
                 pass
@@ -555,6 +764,43 @@ def _refuse_a_foreign_store(path: str | Path) -> None:
         "would leave a file that looks like a store to whoever opens it next, "
         f"this daemon included.{ours_too} The database file has not been "
         "modified; check the --db path."
+    )
+
+
+def _unopenable_error(path: str | Path, exc: sqlite3.OperationalError) -> SchemaVersionError:
+    """The one wording of "this build could not OPEN that file as a store" (issue #235).
+
+    Opening a store is itself a write — :func:`connect`'s ``PRAGMA journal_mode
+    = WAL`` records the journal mode in the database header — so a file this
+    build reads perfectly well can still fail there. A zero-length ``--db``
+    that denies writes is the measured case: ``attempt to write a readonly
+    database``, which used to propagate raw for ``validate`` to print as
+    `store integrity failure` at exit 5 — the code whose meaning is "the ledger
+    does not add up, investigate the accounting" — and for an owning command to
+    reach main()'s exit-2 last resort, whose ``fatal: unexpected error:`` line
+    names the exception and nothing about the ``--db``. Both send an operator
+    after accounting that is fine. It is issue #210's harm from the other side:
+    that one named the file this build could not READ.
+
+    Lists rather than diagnoses, like :func:`_unreadable_error`: a denied
+    write, a read-only mount and a directory that will not take the ``-wal``
+    are not reliably distinguishable from what SQLite says, and picking one
+    would be a diagnosis nothing here measured.
+
+    Only the OPEN is wrapped, so a write that fails while the daemon is
+    actually writing stays what it is instead of being dressed up as a bad
+    ``--db``. A populated store of ours does not arrive here at all: it is
+    already in WAL, so that PRAGMA is a read for it and ``connect`` succeeds
+    even when the file denies writes (measured) — its writes fail later, where
+    they belong.
+    """
+    return SchemaVersionError(
+        f"{path} could not be opened as a store: {exc}. The file is there and "
+        "this build could read it, but opening a store WRITES to it — SQLite "
+        "records the journal mode in the database header. Check whether the "
+        "file or its directory denies writes, whether the volume is mounted "
+        "read-only, and whether another process holds it. Nothing of this "
+        "project's schema was created in it."
     )
 
 
@@ -718,7 +964,10 @@ class Database:
         this build's to upgrade) or predates the lease columns entirely (see
         below), and an EMPTY store — a file with no objects of its own, or
         nothing but this project's empty bookkeeping table — is built in full,
-        since nothing can own it.
+        since nothing can own it. "Empty" is a fact about the file AND its
+        sidecars: a main file with no bytes (or none at all) is not empty when
+        a log beside it holds the database, and is refused rather than built
+        into (issue #236).
 
         Ahead of all three policies sits a fact about the FILE rather than
         about any policy: a SQLite database holding objects that are not this
@@ -756,7 +1005,15 @@ class Database:
                 "migrate=True would already have upgraded the store on open"
             )
         _refuse_a_foreign_store(path)  # before connect(), which writes
-        self._conn = connect(path)
+        try:
+            self._conn = connect(path)
+        except sqlite3.OperationalError as exc:
+            # The OPEN only, and ``OperationalError`` only. A file that is not
+            # a SQLite database at all raises plain ``DatabaseError`` from the
+            # same call, and that is a different verdict with its own wording
+            # and its own exit 5 — left alone here exactly as it is inside the
+            # refusal above.
+            raise _unopenable_error(path, exc) from exc
         self._in_transaction = False
         self._migration_pending = False
         try:

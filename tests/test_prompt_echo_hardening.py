@@ -563,6 +563,39 @@ class TestArticleFieldsThatRenderToNothing:
         assert "No global news found" not in out
         assert yfnews.TITLE_UNAVAILABLE in out
 
+    def test_two_untitled_articles_are_not_treated_as_one_story(self, monkeypatch):
+        # The marker is THIS module's text, not the vendor's, so two unrelated
+        # stories that both arrived untitled are not duplicates — collapsing
+        # them would drop the second for a resemblance we invented.
+        now = datetime.now().timestamp()
+        articles = [
+            _article(title="###", link="https://x.invalid/one", summary="First.",
+                     providerPublishTime=now),
+            _article(title=None, link="https://x.invalid/two", summary="Second.",
+                     providerPublishTime=now),
+        ]
+        monkeypatch.setattr(yfnews.yf, "Search", lambda **kw: FakeTicker(news=articles))
+        monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
+        monkeypatch.setattr(yfnews.YfData, "cache_get", mock.Mock(cache_clear=lambda: None))
+        out = yfnews.get_global_news_yfinance(datetime.now().strftime("%Y-%m-%d"))
+        assert "First." in out and "Second." in out
+        assert out.count(yfnews.TITLE_UNAVAILABLE) == 2
+
+    def test_two_untitled_unlinked_articles_are_not_treated_as_one_story(self, monkeypatch):
+        # And with no citable link either there is nothing left to tell them
+        # apart, so they are not de-duplicated at all: the resemblance is made
+        # entirely of our own placeholder text.
+        now = datetime.now().timestamp()
+        articles = [
+            _article(title="", link="", summary="First.", providerPublishTime=now),
+            _article(title="###", link="", summary="Second.", providerPublishTime=now),
+        ]
+        monkeypatch.setattr(yfnews.yf, "Search", lambda **kw: FakeTicker(news=articles))
+        monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
+        monkeypatch.setattr(yfnews.YfData, "cache_get", mock.Mock(cache_clear=lambda: None))
+        out = yfnews.get_global_news_yfinance(datetime.now().strftime("%Y-%m-%d"))
+        assert "First." in out and "Second." in out
+
 
 @pytest.mark.unit
 class TestFundamentalsFieldsThatRenderToNothing:

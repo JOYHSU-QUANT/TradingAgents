@@ -12,6 +12,7 @@ outcomes (a "Yes" at 0.76 means the market prices a 76% chance).
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
 import requests
@@ -21,6 +22,7 @@ from .utils import (
     date_refusal,
     json_body_or_outage,
     live_snapshot_note,
+    normalize_iso_date,
     quote_argument,
     raise_for_http_status,
     sanitize_untrusted,
@@ -71,6 +73,25 @@ VOLUME_UNAVAILABLE = "volume unavailable"
 DATE_UNAVAILABLE = "(date unavailable)"
 
 
+def _traded_volume(market: dict) -> float | None:
+    """A market's traded volume as a number, or ``None`` if there is not one.
+
+    One reading for the two places volume is used — the RANKING and the
+    rendered line — because they used to disagree about what a usable number
+    is. The ranking's ``or 0`` accepted whatever the vendor sent and then let
+    ``sort`` compare it: a string volume beside any second market raised
+    ``TypeError`` out of the report path, which no single-market test can see.
+
+    ``bool`` is refused because it is an ``int`` and would rank and render as
+    1, and a non-finite float because ``$nan volume`` is as invented a depth
+    reading as the ``$0`` this replaced.
+    """
+    value = market.get("volumeNum")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
 def _rendered_text(value: object) -> str:
     """A Gamma text field as the report will show it, or ``""`` if unshowable.
 
@@ -87,13 +108,15 @@ def _rendered_text(value: object) -> str:
     one check, and — because this is also the spelling the caller renders —
     the value judged and the value shown are the same value (#233).
 
-    Only ``None`` is refused outright, not every non-string. Gamma sends these
-    fields as strings, but a JSON number or bool arriving in one is a value
-    with something to show, and it used to render: refusing it here would drop
-    a real market and disclose it as a MISSING question, which is a different
-    claim from the one the data supports.
+    Scalars only, and that boundary is load-bearing in BOTH directions. A JSON
+    number or bool arriving in one of these fields is a value with something to
+    show and used to render, so refusing it would drop a real market and
+    disclose it as a MISSING question — a different claim from the one the data
+    supports. A list or an object has nothing to show, and admitting it would
+    put a Python repr in the report as a label: an outcome rendered ``**[]**``
+    beside a real probability.
     """
-    if value is None:
+    if not isinstance(value, (str, int, float)):
         return ""
     return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)
 
@@ -143,7 +166,13 @@ def get_prediction_markets(
         each with its implied probability, traded volume, resolution date, and
         recent (1-week) move — or the sentinel.
     """
-    if limit is None:
+    # A None, zero, or nonsensical negative limit (a hallucinated tool argument)
+    # falls back to the default rather than producing a degenerate report, the
+    # same coercion farside and fear_greed give their windows. Zero is not
+    # merely degenerate here: the walk below breaks before judging anything, so
+    # the report would reach the all-dropped branch and say every market was
+    # malformed when none had been looked at.
+    if limit is None or limit <= 0:
         limit = DEFAULT_LIMIT
 
     # Refused for the fundamentals getters' reason (#89) — their curr_date is
@@ -184,7 +213,9 @@ def get_prediction_markets(
         for m in event.get("markets", [])
         if _is_forward_looking(m, now)
     ]
-    candidates.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
+    # Ranked on the same reading the line renders, so a market cannot be
+    # ordered by a figure the report then declines to show.
+    candidates.sort(key=lambda m: _traded_volume(m) or 0.0, reverse=True)
 
     header = (
         f"## Polymarket prediction markets: {quote_argument(topic)}\n"
@@ -266,13 +297,15 @@ def get_prediction_markets(
         # the least trustworthy one on the page. A missing endDate rendered
         # "resolves " with nothing after it. Both are fabrications of the same
         # kind as the bolded ``None`` this guard already refuses (#233).
-        raw_volume = m.get("volumeNum")
-        volume_str = (
-            f"${raw_volume:,.0f} volume"
-            if isinstance(raw_volume, (int, float)) and not isinstance(raw_volume, bool)
-            else VOLUME_UNAVAILABLE
-        )
-        end_date = sanitize_untrusted(m.get("endDate") or "")[:10] or DATE_UNAVAILABLE
+        volume = _traded_volume(m)
+        volume_str = f"${volume:,.0f} volume" if volume is not None else VOLUME_UNAVAILABLE
+        # The slice is not a parse: flattening turns "2#030-12-31" into
+        # "2 030-12-3" and "2030-12-3*1" into "2030-12-3", so a value with
+        # noise in it rendered a PLAUSIBLE WRONG date — 12/3 for 12/31 —
+        # with nothing in the line to say it had been cut. Only a value the
+        # shared normaliser recognises as a date is shown as one.
+        end_date = normalize_iso_date(sanitize_untrusted(m.get("endDate") or "")[:10])
+        end_date = end_date or DATE_UNAVAILABLE
         wk = m.get("oneWeekPriceChange")
         wk_str = f", 1-week {wk * 100:+.1f}pp" if isinstance(wk, (int, float)) and wk else ""
         lines.append(
@@ -286,9 +319,12 @@ def get_prediction_markets(
         # analyst a heading with nothing under it to reason from — the same
         # bare-header failure ``get_fundamentals`` refuses. Say what happened;
         # the omitted clause below gives the reason.
-        report = header + (
-            f"No usable prediction markets for {quote_argument(topic)}: every market "
-            f"matched was dropped as malformed vendor data."
+        # The reason is left to the omitted clause below rather than spelled
+        # again here: that one names WHICH malformations were seen, so a second
+        # sentence saying "malformed vendor data" would be the weaker of two
+        # copies a reader has to reconcile.
+        report = (
+            header + f"No prediction markets for {quote_argument(topic)} could be rendered.\n"
         )
     else:
         report = header + "\n".join(lines) + "\n"

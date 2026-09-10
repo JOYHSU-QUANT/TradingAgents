@@ -63,7 +63,12 @@ def _label(value: object, unavailable: str) -> str:
     the value asked about and the value shown are one value, so "nothing to
     show" cannot mean one thing to the check and another to the report.
     """
-    return sanitize_untrusted(value or "", limit=MAX_UNTRUSTED_CHARS) or unavailable
+    # ``None`` rather than falsy: a vendor sending ``0`` has sent something,
+    # and short-circuiting it here would answer the marker for a value
+    # ``polymarket._rendered_text`` — the rule this docstring cites — renders.
+    return sanitize_untrusted("" if value is None else value, limit=MAX_UNTRUSTED_CHARS) or (
+        unavailable
+    )
 
 
 def _citation(value: object) -> str:
@@ -441,7 +446,8 @@ def get_global_news_yfinance(
                 # the alternative keys on a spelling the report never shows.
                 # Untitled articles share one key for the same reason: they all
                 # render as the same marker.
-                title = _extract_article_data(article)["title"]
+                data = _extract_article_data(article)
+                title = data["title"]
 
                 # Deduplicate by the rendered heading. ``_label`` never answers
                 # empty — an untitled or unrenderable title becomes the marker
@@ -449,8 +455,23 @@ def get_global_news_yfinance(
                 # served, which is what a false-y title used to do here while
                 # the ticker report rendered the same article with an empty
                 # heading (#233).
-                if title and title not in seen_titles:
-                    seen_titles.add(title)
+                #
+                # Untitled articles are the exception, and take their LINK into
+                # the key: the marker is this module's own text, not the
+                # vendor's, so two unrelated stories that both arrived without
+                # a usable title are not the same story and collapsing them
+                # would drop the second one for a resemblance we invented.
+                # An untitled article with no citable link either has nothing
+                # left to tell it apart, so it is not de-duplicated at all:
+                # dropping it would be dropping a served article for a
+                # resemblance made entirely of our own placeholder text.
+                key = (
+                    title
+                    if title != TITLE_UNAVAILABLE
+                    else (title, data["link"] or object())
+                )
+                if key not in seen_titles:
+                    seen_titles.add(key)
                     all_news.append(article)
 
         if len(all_news) >= limit:

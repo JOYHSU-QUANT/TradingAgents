@@ -1035,9 +1035,12 @@ Breaking changes within the 0.x line are called out explicitly.
   ``is not None`` test let a field of pure markdown print a bare ``Sector:``
   — and now tests what the line will show. Two consequences worth stating,
   because this is a prompt segment point: an untitled article is now KEPT and
-  marked in both reports rather than kept in one and dropped by the other, and
-  every untitled article shares one de-duplication key, so at most one appears
-  per global run.
+  marked in both reports rather than kept in one and dropped by the other. Such
+  an article takes its LINK into the de-duplication key, since the marker is
+  this module's own text rather than the vendor's — two unrelated stories that
+  both arrived untitled are not one story, and collapsing them would drop the
+  second for a resemblance we invented. With no citable link either, such an
+  article is not de-duplicated at all, for the same reason.
 
   The link is the one article field the flattening must NOT touch, and this
   shipped guarding it like the others. It is not prose the model reads past but
@@ -1119,10 +1122,13 @@ Breaking changes within the 0.x line are called out explicitly.
   fields go through one ``_rendered_text`` helper that answers ``""`` for
   anything with nothing to show, and its result is what the line renders — so
   the value judged and the value shown are the same value, by construction
-  rather than by inspection. It refuses ``None`` and nothing else: Gamma sends
-  these fields as strings, but a JSON number arriving in one has something to
-  show and used to render, and dropping it would disclose a real market as a
-  MISSING question — a different claim from the one the data supports. The
+  rather than by inspection. It admits SCALARS, and that boundary is
+  load-bearing in both directions: Gamma sends these fields as strings, but a
+  JSON number arriving in one has something to show and used to render, so
+  dropping it would disclose a real market as a MISSING question — a different
+  claim from the one the data supports — while a list or object has nothing to
+  show, and admitting it would put a Python repr in the report as a label, an
+  outcome rendered ``**[]**`` beside a real probability. The
   disclosure says "no renderable question or outcome label" for the same
   reason: a question that flattened away was not missing.
 
@@ -1135,14 +1141,29 @@ Breaking changes within the 0.x line are called out explicitly.
   missing ``endDate`` rendered ``resolves `` with nothing after it. Both are
   now NAMED rather than defaulted, and the market keeps its probability signal:
   neither absence makes the line unreadable, so dropping it would trade a real
-  signal for a tidier guard. The volume test is also now a type test, which
-  the ``or 0`` was not: a non-numeric volume reached a ``,.0f`` format and
-  raised out of a report path.
+  signal for a tidier guard. The volume test is also now a type and finiteness
+  test, which the ``or 0`` was not: a non-numeric volume reached a ``,.0f``
+  format and raised out of a report path, and a JSON NaN or Infinity — both
+  floats — would have printed ``$nan volume``, the same invented depth reading
+  in a stranger spelling. The RANKING reads volume through the same helper for
+  the same reason it must: its own ``or 0`` handed whatever the vendor sent to
+  ``sort``, so a string volume beside any second market raised ``TypeError``
+  before a line was rendered — a failure a one-market test cannot see, because
+  a single element is never compared. The resolution date is now checked
+  against the shared ISO normaliser rather than merely for emptiness: the
+  ten-character slice is not a parse, and ``"2030-12-3*1"`` flattened and cut
+  to ``2030-12-3`` — a plausible date 28 days early, with nothing in the line
+  to say it had been cut.
 
   Making the question guard strict made a report of nothing but malformed
   markets reachable for the first time, and it rendered as a header promising
   probabilities with no lines under it — the bare-header failure
-  ``get_fundamentals`` already refuses. That case now says so.
+  ``get_fundamentals`` already refuses. That case now says so, and says it
+  ONCE: the reason belongs to the omitted clause, which names which
+  malformations were actually seen. Reaching that branch honestly also needed
+  ``limit`` coerced the way farside and fear_greed coerce their windows: a
+  ``limit`` of zero broke the walk before it judged anything, so the new
+  sentence would have reported on markets it never looked at.
 
 - **A database whose content was in its log was read as an empty store, and
   the log destroyed on the way in** (issue #236). The foreign-store refusal

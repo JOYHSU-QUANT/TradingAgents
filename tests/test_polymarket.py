@@ -523,9 +523,11 @@ class TestMalformedMarketsOmitted:
         # all-dropped branch would have reported markets it never looked at.
         with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
             out = polymarket.get_prediction_markets("anything", limit=0)
-        assert "could be rendered" not in out
-        assert "omitted" not in out
-        assert "Open big?" in out  # the default limit served real markets
+            default = polymarket.get_prediction_markets("anything", limit=None)
+        # Byte for byte the default report — which pins the coercion itself
+        # rather than the wording of any one sentence.
+        assert out == default
+        assert "Open big?" in out
 
 
 @pytest.mark.unit
@@ -554,14 +556,19 @@ class TestMarketLineFiguresAreNotFabricated:
         assert f"resolves {polymarket.DATE_UNAVAILABLE}" in out
         assert "resolves ," not in out and "resolves )" not in out
 
-    @pytest.mark.parametrize("junk", [float("nan"), float("inf"), True])
-    def test_a_non_finite_or_boolean_volume_is_named_rather_than_printed(self, junk):
-        # NaN and Infinity ARE floats, so an isinstance test alone printed
-        # "$nan volume" — the same invented depth reading as "$0 volume".
+    @pytest.mark.parametrize(
+        "junk", [float("nan"), float("inf"), True, -5, 10**400, "1234", None]
+    )
+    def test_an_unusable_volume_is_named_rather_than_printed(self, junk):
+        # Every shape that must not become a dollar figure. NaN and Infinity
+        # ARE floats and printed "$nan volume"; True is an int and printed
+        # "$1"; a negative is not an amount anything traded; a 400-digit int
+        # (json.loads keeps arbitrary precision) raised OverflowError inside
+        # the guard itself; a string raised out of the ",.0f" format.
         market = _market("Real?", 0.30, volume=junk, end_date="2030-12-31T00:00:00Z")
         out = self._fetch(market)
         assert polymarket.VOLUME_UNAVAILABLE in out
-        assert "nan" not in out and "inf" not in out
+        assert "$" not in out.split("Real?")[1]  # no dollar figure on THAT line
 
     def test_a_non_numeric_volume_is_named_rather_than_crashing_the_format(self):
         # ``or 0`` kept a truthy string, which the ",.0f" format then raised
@@ -591,7 +598,8 @@ class TestMarketLineFiguresAreNotFabricated:
         market = _market("Real?", 0.30, volume=100, end_date=noisy)
         out = self._fetch(market)
         assert f"resolves {polymarket.DATE_UNAVAILABLE}" in out
-        assert "2030-12-3 " not in out
+        # And no PREFIX of the mangled value was shown as if it were the date.
+        assert f"resolves {polymarket.sanitize_untrusted(noisy)[:10]}" not in out
 
     @pytest.mark.parametrize("container", [[], {}, {"a": 1}, ["x"]])
     def test_a_container_question_is_omitted_rather_than_rendered_as_a_repr(self, container):
@@ -599,7 +607,7 @@ class TestMarketLineFiguresAreNotFabricated:
         # report as a label: "- **[]** — Yes 30%" beside a real probability.
         market = _market(container, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
         out = self._fetch(market)
-        assert "**[]**" not in out and "**{}**" not in out
+        assert f"**{container}**" not in out  # the repr of THIS value
         assert "1 market(s) omitted" in out
 
     def test_real_figures_still_render_unchanged(self):

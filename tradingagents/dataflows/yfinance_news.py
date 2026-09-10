@@ -63,12 +63,14 @@ def _label(value: object, unavailable: str) -> str:
     the value asked about and the value shown are one value, so "nothing to
     show" cannot mean one thing to the check and another to the report.
     """
-    # ``None`` rather than falsy: a vendor sending ``0`` has sent something,
-    # and short-circuiting it here would answer the marker for a value
-    # ``polymarket._rendered_text`` — the rule this docstring cites — renders.
-    return sanitize_untrusted("" if value is None else value, limit=MAX_UNTRUSTED_CHARS) or (
-        unavailable
-    )
+    # Scalars, the same boundary ``polymarket._rendered_text`` draws and for
+    # both of its reasons: a vendor sending ``0`` has sent something, and
+    # short-circuiting on falsiness would answer the marker for a value that
+    # module renders; while a list or object has nothing to show, and letting
+    # ``str`` have it would put a Python repr in the heading — ``### []``.
+    if not isinstance(value, (str, int, float)):
+        value = ""
+    return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS) or unavailable
 
 
 def _citation(value: object) -> str:

@@ -82,14 +82,23 @@ def _traded_volume(market: dict) -> float | None:
     ``sort`` compare it: a string volume beside any second market raised
     ``TypeError`` out of the report path, which no single-market test can see.
 
-    ``bool`` is refused because it is an ``int`` and would rank and render as
-    1, and a non-finite float because ``$nan volume`` is as invented a depth
-    reading as the ``$0`` this replaced.
+    Refused, and each for the reason the line would otherwise state something
+    the data does not support: ``bool``, because it is an ``int`` and would
+    rank and render as 1; a non-finite float, because ``$nan volume`` is as
+    invented a depth reading as the ``$0`` this replaced; a negative, because
+    no market has traded a negative amount; and an integer too large to be a
+    double, because ``json.loads`` keeps arbitrary precision and ``float`` on
+    a 400-digit integer raises ``OverflowError`` — out of the RANKING, which
+    touches every candidate, including ones no line would ever have shown.
     """
     value = market.get("volumeNum")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def _rendered_text(value: object) -> str:
@@ -150,7 +159,8 @@ def get_prediction_markets(
     Args:
         topic: Event keyword(s), e.g. "Fed rate cut", "recession 2026",
             "US election", or a sector/company event.
-        limit: Max markets to return (ranked by traded volume); ``None`` uses
+        limit: Max markets to return (ranked by traded volume); ``None``, zero
+            or a negative (a hallucinated argument) uses
             DEFAULT_LIMIT.
         curr_date: The date being analysed (yyyy-mm-dd). Prices are always
             fetched live; when curr_date sits behind the wall clock (beyond

@@ -1031,7 +1031,8 @@ Breaking changes within the 0.x line are called out explicitly.
   day the vendor had covered. The substitution now runs on the RENDERED
   spelling, in one helper both shapes reach, which is the rule the Polymarket
   half of this entry states: the value asked about and the value shown are one
-  value. ``get_fundamentals`` had the same mismatch one report along — its
+  value — including its scalar boundary, so a title arriving as a list cannot
+  render ``### []`` any more than an outcome can render ``**[]**``. ``get_fundamentals`` had the same mismatch one report along — its
   ``is not None`` test let a field of pure markdown print a bare ``Sector:``
   — and now tests what the line will show. Two consequences worth stating,
   because this is a prompt segment point: an untitled article is now KEPT and
@@ -1149,7 +1150,11 @@ Breaking changes within the 0.x line are called out explicitly.
   the same reason it must: its own ``or 0`` handed whatever the vendor sent to
   ``sort``, so a string volume beside any second market raised ``TypeError``
   before a line was rendered — a failure a one-market test cannot see, because
-  a single element is never compared. The resolution date is now checked
+  a single element is never compared. The helper refuses a negative (nothing
+  traded a negative amount) and an integer too large to be a double:
+  ``json.loads`` keeps arbitrary precision, and ``float`` on a 400-digit
+  integer raises ``OverflowError``, which the ranking would now hit for EVERY
+  candidate rather than only for one a line was about to show. The resolution date is now checked
   against the shared ISO normaliser rather than merely for emptiness: the
   ten-character slice is not a parse, and ``"2030-12-3*1"`` flattened and cut
   to ``2030-12-3`` — a plausible date 28 days early, with nothing in the line

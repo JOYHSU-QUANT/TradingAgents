@@ -973,10 +973,12 @@ def get_etf_flow_data(
     # belongs in the vendor-failed lane, which is where deribit and the
     # treasuries module already put it (#233).
     #
-    # ``asset and`` keeps deribit's exemption rather than tightening past it:
-    # a FALSY argument (``None`` from an omitted parameter, ``0``, ``b""``) is
-    # already safe here, because it cannot be mistaken for a symbol and lands
-    # on the no-signal sentence, which is the honest answer to "no asset".
+    # Scoped to TRUTHY non-strings, which is deribit's standing decision and is
+    # pinned by a test there: a falsy argument keeps the no-signal sentence
+    # rather than being swallowed into an error. The exemption is not that a
+    # falsy value cannot be mistaken for a symbol — ``b""`` renders as ``b''``
+    # — but that widening it would change behaviour three modules already
+    # shipped, which is not this batch's call to make.
     if asset and not isinstance(asset, str):
         raise SoSoValueError(f"asset must be a symbol string, got {type(asset).__name__}")
     # Flattened BEFORE classification for the reason its Farside twin and the

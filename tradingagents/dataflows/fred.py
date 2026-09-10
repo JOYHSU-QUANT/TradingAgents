@@ -286,10 +286,9 @@ def get_macro_data(
             f"is for '{echoed_id.strip()}'; refusing to render another series' data"
         )
     # Series metadata is FRED's own free text and renders into the header's
-    # heading and label lines, so it takes the vendor flattening. The default
-    # for a missing title is the caller's series id, which is an ARGUMENT and
-    # is echoed as one below — so the substitution happens after the flatten,
-    # not before, and each value takes the guard its own subject calls for.
+    # heading and label lines, so it takes the vendor flattening. What a field
+    # with nothing left to show becomes is decided at the heading below, not
+    # here: this helper answers only "what did FRED give us, as it will read".
     def _meta(*keys) -> str:
         """The first of these metadata fields FRED gave, as it will render."""
         for key in keys:

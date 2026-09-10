@@ -66,6 +66,9 @@ def _assert_report_shape_unchanged(forged: str, clean: str, *, survives: bool = 
         1 for ln in c if ln.lstrip().startswith("#")
     ), "a heading was forged"
     assert len(_rows(forged)) == len(_rows(clean)), "a table row was forged"
+    # Per row AND in total: the widths say WHICH row gained a column, and the
+    # total catches a "|" that landed outside the table altogether.
+    assert [r.count("|") for r in _rows(forged)] == [r.count("|") for r in _rows(clean)]
     assert sum(ln.count("|") for ln in f) == sum(ln.count("|") for ln in c), "a column was forged"
     if survives:
         assert SURVIVES in forged, "the words must survive; only the markup may not"
@@ -161,10 +164,19 @@ class TestFredObservationTable:
         assert "widen look_back_days" not in report
         assert "No usable observations" in report
 
-    def test_frieds_own_missing_marker_is_not_counted_as_a_fault(self):
+    def test_freds_own_missing_marker_is_not_counted_as_a_fault(self):
         report = _fred_report(obs=[{"date": "2026-06-01", "value": "."}, _FRED_CLEAN_OBS[1]])
         assert "omitted" not in report
         assert "| 2026-07-01 | 4.3 |" in report
+
+    def test_the_latest_line_is_a_table_row_in_all_but_name(self):
+        # It uses "|" as its own field separator, which is why the two cells
+        # feeding it are guarded at all. Pinned so the next reader does not
+        # take it for ordinary prose.
+        latest = [ln for ln in _fred_report().splitlines() if ln.startswith("**Latest:**")]
+        assert len(latest) == 1
+        assert latest[0].count("|") == 1
+        assert latest[0].startswith("**Latest:** 4.3 (2026-07-01) | **Change over window:**")
 
     @pytest.mark.parametrize("value", [True, "1" + "0" * 250])
     def test_a_value_only_the_RAW_form_can_parse_is_dropped_too(self, value):
@@ -381,14 +393,24 @@ class TestAssetArgumentEcho:
         ):
             getter("`BTC`")
 
+    @pytest.mark.parametrize("bad", [b"BTC", 123, ["BTC"]])
     @pytest.mark.parametrize("getter", _UNRECOGNIZED)
-    def test_a_non_string_asset_is_refused_rather_than_answered_about(self, getter):
+    def test_a_non_string_asset_is_refused_rather_than_answered_about(self, getter, bad):
         # ``echo_argument`` goes through ``str``, so without a type guard ahead
         # of it b"BTC" came back as a confident "there is no signal for b'BTC'"
         # to a model that had asked about BTC.
         with pytest.raises(Exception) as info:
-            getter(b"BTC")
+            getter(bad)
         assert "symbol string" in str(info.value)
+
+    @pytest.mark.parametrize("falsy", [None, "", 0])
+    @pytest.mark.parametrize("getter", _UNRECOGNIZED)
+    def test_a_falsy_asset_keeps_the_no_signal_sentence(self, getter, falsy):
+        # deribit's standing decision, pinned there since before this batch:
+        # the guard is scoped to TRUTHY non-strings so a falsy argument is not
+        # swallowed into an error. Pinned for the two vendors that gained the
+        # guard here, so the four stay alike.
+        assert "no" in getter(falsy).lower()
 
     @pytest.mark.parametrize("getter", _UNRECOGNIZED)
     def test_an_edge_marker_asset_does_not_come_back_stripped(self, getter):

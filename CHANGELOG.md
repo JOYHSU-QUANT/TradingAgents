@@ -992,10 +992,16 @@ Breaking changes within the 0.x line are called out explicitly.
   number, and a date the shared ISO normaliser recognises — and a row that is
   neither is dropped and DISCLOSED, with the no-rows sentence naming that case
   rather than blaming the series' cadence. The flattening that remains is a
-  second line of defence: a finite number and an ISO date both pass through it
-  byte for byte, so the value judged and the value shown are one value. It is
-  the answer ``fear_greed`` already gave its own rows, which coerce and raise
-  rather than print whatever arrived.
+  second line of defence. BOTH spellings are asked — the raw one so flattening
+  cannot repair a value into a number, the RENDERED one so a value only the raw
+  form parses (a JSON ``true``, or a number the cap cut) cannot reach the table
+  and then fail the summary's ``float()`` in silence — which is what makes
+  "the value judged and the value shown are one value" true here rather than
+  nearly true. It is the answer ``fear_greed`` already gave its own rows, which
+  coerce and raise rather than print whatever arrived. Only ``"."`` counts as
+  FRED's own missing-observation encoding: an absent key or an empty string was
+  being waved through beside it, so a response whose every row was malformed
+  still advised the reader to widen ``look_back_days``.
 
   A field with nothing left to show is NAMED where it is a subject and OMITTED
   where it is a label, the rule the first batch arrived at. An unrenderable

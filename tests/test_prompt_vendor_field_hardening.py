@@ -142,12 +142,44 @@ class TestFredObservationTable:
         assert "inf" not in report.lower()
         assert "1 observation(s) omitted" in report
 
-    def test_every_row_unusable_does_not_blame_the_series_cadence(self):
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"date": "nope", "value": "4.1"},
+            {"date": "2026-06-01"},  # the value key is absent
+            {"date": "2026-06-01", "value": ""},
+        ],
+        ids=["bad-date", "no-value-key", "empty-value"],
+    )
+    def test_every_row_unusable_does_not_blame_the_series_cadence(self, row):
         # "widen look_back_days" is the wrong advice when rows arrived and were
-        # dropped; the reader would go looking for a series that reports rarely.
-        report = _fred_report(obs=[{"date": "nope", "value": "4.1"}])
+        # dropped; the reader would go looking for a series that reports
+        # rarely. An absent or empty value used to be waved through beside
+        # FRED's own "." encoding, which is the only one that means "this
+        # period has no reading".
+        report = _fred_report(obs=[row])
         assert "widen look_back_days" not in report
         assert "No usable observations" in report
+
+    def test_frieds_own_missing_marker_is_not_counted_as_a_fault(self):
+        report = _fred_report(obs=[{"date": "2026-06-01", "value": "."}, _FRED_CLEAN_OBS[1]])
+        assert "omitted" not in report
+        assert "| 2026-07-01 | 4.3 |" in report
+
+    @pytest.mark.parametrize("value", [True, "1" + "0" * 250])
+    def test_a_value_only_the_RAW_form_can_parse_is_dropped_too(self, value):
+        # ``float(True)`` is 1.0 and ``float`` of a 251-digit string is finite,
+        # but the RENDERED spelling is "True" and a capped prefix — neither
+        # parses, so the table would have shown a figure the summary silently
+        # could not compute with.
+        report = _fred_report(obs=[{"date": "2026-06-01", "value": value}, _FRED_CLEAN_OBS[1]])
+        assert "1 observation(s) omitted" in report
+        assert "True" not in report
+
+    def test_seasonal_adjustment_survives_a_missing_frequency(self):
+        # It rides on the Frequency line only because there usually is one.
+        report = _fred_report(meta=_fred_meta(frequency=""))
+        assert "- Seasonal adjustment: SA" in report
 
     def test_clean_observations_still_render_byte_for_byte(self):
         report = _fred_report()

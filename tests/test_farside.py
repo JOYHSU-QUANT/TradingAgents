@@ -179,6 +179,37 @@ class TestParseTable:
         assert set(parsed.records[0]["issuers"]) == {"IBIT", "unnamed col 2", "GBTC"}
         assert "columns [2]" in caplog.text  # names which column fell back
 
+    def test_an_issuer_cell_that_is_not_a_ticker_falls_back_too(self, caplog):
+        # Present but unreadable is not "named". The cell is Farside's HTML,
+        # reached through a bare .strip(), and it renders into the report's
+        # leaders line AND is written to the rolling cache, so a cell carrying
+        # markdown would replay on every refresh. Judged by SHAPE rather than
+        # flattened: "FBTC ## Foo" is not an issuer whose name needs cleaning,
+        # it is a column this parser could not read (#233).
+        html = (
+            '<table class="etf">'
+            "<tr><th></th><th>IBIT</th><th>FBTC ## Foo</th><th>GBTC</th><th>Total</th></tr>"
+            "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td><td>6.0</td></tr>"
+            "</table>"
+        )
+        with caplog.at_level(logging.WARNING, logger=FARSIDE_LOGGER):
+            parsed = farside._parse_flow_table(html, "BTC")
+        assert parsed.issuers_named is False
+        assert set(parsed.records[0]["issuers"]) == {"IBIT", "unnamed col 2", "GBTC"}
+
+    def test_real_issuer_tickers_are_not_downgraded(self):
+        # The filter must not cost us labels we have. Three to six upper-case
+        # letters covers the real board, Grayscale's three-letter mini included.
+        html = (
+            '<table class="etf">'
+            "<tr><th></th><th>IBIT</th><th>BTC</th><th>BITB</th><th>Total</th></tr>"
+            "<tr><td>06 Jul 2026</td><td>1.0</td><td>2.0</td><td>3.0</td><td>6.0</td></tr>"
+            "</table>"
+        )
+        parsed = farside._parse_flow_table(html, "BTC")
+        assert parsed.issuers_named is True
+        assert set(parsed.records[0]["issuers"]) == {"IBIT", "BTC", "BITB"}
+
     def test_ragged_row_raises(self):
         # First data row sets 4 columns; the second has 3 -> structural mismatch.
         html = (

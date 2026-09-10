@@ -863,11 +863,16 @@ def get_etf_flow_data(
     curr_date = curr_dt.strftime("%Y-%m-%d")
 
     # Before the echo, not after: ``echo_argument`` goes through ``str``, so a
-    # non-string would be silently turned into a symbol and answered about —
-    # ``b"BTC"`` came back as a confident "there is no ETF flow signal for
-    # b'BTC'" to a model that asked about BTC. A non-string is the caller's
-    # bug and belongs in the vendor-failed lane, which is where deribit and
-    # the treasuries module already put it (#233).
+    # TRUTHY non-string would be silently turned into a symbol and answered
+    # about — ``b"BTC"`` came back as a confident "there is no ETF flow signal
+    # for b'BTC'" to a model that asked about BTC. That is the caller's bug and
+    # belongs in the vendor-failed lane, which is where deribit and the
+    # treasuries module already put it (#233).
+    #
+    # ``asset and`` keeps deribit's exemption rather than tightening past it:
+    # a FALSY argument (``None`` from an omitted parameter, ``0``, ``b""``) is
+    # already safe here, because it cannot be mistaken for a symbol and lands
+    # on the no-signal sentence, which is the honest answer to "no asset".
     if asset and not isinstance(asset, str):
         raise FarsideError(f"asset must be a symbol string, got {type(asset).__name__}")
     # Flattened BEFORE classification, not after, so exactly one string is both

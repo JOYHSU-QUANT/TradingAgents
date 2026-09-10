@@ -152,7 +152,11 @@ def _is_finite_number(value) -> bool:
     """
     try:
         return math.isfinite(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # ``OverflowError`` is not hypothetical: ``json.loads`` keeps arbitrary
+        # precision, so a 400-digit integer literal raises here rather than in
+        # ``float()``'s usual lanes, and this guard exists precisely because
+        # the payload is not to be trusted.
         return False
 
 
@@ -334,13 +338,25 @@ def get_macro_data(
     unusable = 0
     for o in observations:
         raw_value = o.get("value")
-        if raw_value in (".", None, ""):
-            continue  # FRED's own missing-observation encoding, not a fault
+        if raw_value == ".":
+            # FRED's OWN missing-observation encoding, and the only one: a
+            # period means "this period has no reading", which is a fact about
+            # the series rather than a fault in the payload. An absent key or
+            # an empty string is neither, and used to be waved through here
+            # beside it — so a response whose every row was malformed still
+            # advised the reader to widen look_back_days.
+            continue
         day = normalize_iso_date(o.get("date"))
-        if day is None or not _is_finite_number(raw_value):
+        shown = sanitize_untrusted(raw_value, limit=MAX_UNTRUSTED_CHARS)
+        # Both spellings are asked, which is what makes "judged == shown" true
+        # rather than nearly true: the RAW one so flattening cannot repair a
+        # value into a number, and the RENDERED one so a value that only the
+        # raw form parses — a JSON ``true``, or a number the cap cut — cannot
+        # reach the table and then fail the summary's ``float()`` silently.
+        if day is None or not (_is_finite_number(raw_value) and _is_finite_number(shown)):
             unusable += 1
             continue
-        points.append((day, sanitize_untrusted(raw_value, limit=MAX_UNTRUSTED_CHARS)))
+        points.append((day, shown))
 
     # The series id is the caller's own argument coming back into text the
     # model reads, bare and in running prose, so it takes ``echo_argument``.
@@ -364,6 +380,11 @@ def get_macro_data(
         header_lines.append(f"- Units: {units}")
     if frequency:
         header_lines.append(f"- Frequency: {frequency}{f' ({seasonal})' if seasonal else ''}")
+    elif seasonal:
+        # Seasonal adjustment rides on the Frequency line only because it
+        # usually has one to ride on. It is its own fact about the series, so
+        # dropping the label must not drop it too.
+        header_lines.append(f"- Seasonal adjustment: {seasonal}")
     header_lines.append(f"- Window: {start_date} to {curr_date}")
     header = "\n".join(header_lines) + "\n"
 

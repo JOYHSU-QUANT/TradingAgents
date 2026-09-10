@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -834,6 +835,129 @@ def test_emergency_close_prices_off_mid_not_mark(tmp_path):
     # be asserting nothing about WHICH price it used.
     assert expected != off_mark
     assert close["limit_price"] == expected
+
+
+def _tick_summaries(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("live tick ")]
+
+
+def test_a_tick_that_did_something_logs_one_activity_summary(tmp_path, caplog):
+    """The per-tick operator line: the only trading visibility the live loop has.
+
+    A tick that did nothing stays silent (an idle 10s cadence must not fill the
+    journal), so the counts are what earns the line — asserted here rather than
+    merely that something was logged.
+    """
+    db, clock, engine, gate, sub = _build(tmp_path, ws=_FakeWs(messages=[{"raw": 1}]))
+    _script(engine, [_snap()])
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.live.engine"):
+        engine.tick()
+    (summary,) = _tick_summaries(caplog)
+    assert summary.startswith("live tick ok: fills=1 slices=0")
+    db.close()
+
+
+def test_a_tick_that_raises_still_logs_what_it_had_already_done(tmp_path, caplog):
+    """issue #238: a raise must not erase the record of the work before it.
+
+    The whole point of the line is the tick that DID something and then met a
+    failure — a fill is drained at the top and slices are submitted near the
+    bottom, and a store write, a reconcile or a market read can raise after
+    either. Logged from ``tick``'s finally, so the raise carries on to the
+    loop's tick guard with the record already made; the status reads ``raised``
+    rather than ``ok`` because the counts are how far it got, not a finished
+    tick.
+    """
+    db, clock, engine, gate, sub = _build(tmp_path, ws=_FakeWs(messages=[{"raw": 1}]))
+
+    def _boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    engine._provider = SimpleNamespace(fetch=_boom)
+    with (
+        caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.live.engine"),
+        pytest.raises(sqlite3.OperationalError),
+    ):
+        engine.tick()
+    (summary,) = _tick_summaries(caplog)
+    assert summary.startswith("live tick raised: fills=1 slices=0")
+    db.close()
+
+
+def test_fills_booked_before_a_mid_batch_ingest_failure_are_still_reported(tmp_path, caplog):
+    """A raise on the third of five messages must not zero the first two.
+
+    ``_drain_ws`` deliberately lets an infra/DB ingest failure through, and those
+    earlier fills are already durable when it does — counted into a local the
+    caller never receives, they would be reported as ``fills=0`` by the very
+    line that exists to record them (issue #238 review).
+    """
+    db, clock, engine, gate, sub = _build(
+        tmp_path, ws=_FakeWs(messages=[{"raw": 1}, {"raw": 2}, {"raw": 3}])
+    )
+
+    class _FailsOnTheThird:
+        def __init__(self) -> None:
+            self.seen = 0
+
+        def ingest_message(self, message):
+            self.seen += 1
+            if self.seen == 3:
+                raise sqlite3.OperationalError("database is locked")
+            return [SimpleNamespace(outcome=SimpleNamespace(value="applied"))]
+
+    engine._fill_processor = _FailsOnTheThird()
+    _script(engine, [_snap()])
+    with (
+        caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.live.engine"),
+        pytest.raises(sqlite3.OperationalError),
+    ):
+        engine.tick()
+    (summary,) = _tick_summaries(caplog)
+    assert summary.startswith("live tick raised: fills=2 slices=0")
+    assert "fills_applied:2" in summary
+    db.close()
+
+
+def test_a_sent_slice_is_reported_when_the_leg_termination_raises(tmp_path, caplog):
+    """The highest-stakes window: the slice is on the wire, the store write is not.
+
+    ``_terminate_leg`` runs after the last slice of a leg is sent and writes to
+    the store, so a lock there raises with an order already at the venue. Losing
+    that from the summary leaves the one tick an operator most needs looking
+    idle (issue #238 review).
+    """
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()] * 8)
+    reg = engine.start_plan(_decision("long", 5), output_id="o1")  # 4 slices
+    leg = engine._leg
+    # Poised on the LAST slice, so sending it completes the leg and the
+    # termination write below is what raises.
+    leg.submitted = leg.planned - 1
+
+    def _boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    engine._terminate_leg = _boom
+    clock.advance(engine._slice_interval * leg.planned)
+    with (
+        caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.live.engine"),
+        pytest.raises(sqlite3.OperationalError),
+    ):
+        engine.tick()
+    (summary,) = _tick_summaries(caplog)
+    assert summary.startswith("live tick raised: fills=0 slices=1"), reg
+    db.close()
+
+
+def test_an_idle_tick_logs_no_activity_summary(tmp_path, caplog):
+    """The gate the two tests above rest on: no events, no fills, no slices."""
+    db, clock, engine, gate, sub = _build(tmp_path)
+    _script(engine, [_snap()])
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.live.engine"):
+        engine.tick()
+    assert _tick_summaries(caplog) == []
+    db.close()
 
 
 def test_fill_ingest_failure_propagates_out_of_tick(tmp_path):

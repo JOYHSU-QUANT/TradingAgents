@@ -457,8 +457,12 @@ paper 車道從 issue #181 起有同一條車道（兩車道現在共用同一�
 常數來源）就印一行 `shortfall: stranded_decision_cycle = <attempt_id> …` 並給 exit 4。那一行帶
 attempt id，可以直接拿去查 `decision_attempts`。這條**只是 shortfall 不是 failure**：最常見的成因
 （開機當下被 export／validate 鎖住）自己會好，收斂後那列變終態，下一次 `validate` 就不再印。
-journald 佐證仍是上面兩種訊息之一以 tick 頻率重複，並伴隨 `live tick raised — entering
-recoverable safe mode and continuing`。看到就照 §5 人工介入，先確認誰握著 SQLite 鎖。
+journald 佐證仍是上面兩種訊息之一以 tick 頻率重複，並伴隨 `live decision pump raised —
+entering recoverable safe mode and continuing`——這一行**點名是哪一半失敗**（issue #238）：
+adoption 與 decision cycle 的寫入都在 `driver.pump()` 裡，所以這個情境是 `decision pump`；
+`engine.tick()` 自己失敗時同一行會是 `live tick raised — …`。安全模式存下來的 `detail`
+（`safe-mode --status` 與 `validate` 讀得到）用同一組措辭。看到就照 §5 人工介入，先確認誰
+握著 SQLite 鎖。
 
 > **不會自癒的那一類走另一條路，見 §6 的 `decision_adoption_wedged`。** 上面兩條分支的前提是
 > 「等鎖放開就會好」。adoption 也可能因為**這列 row 本身**而失敗（同一個 run 有兩列

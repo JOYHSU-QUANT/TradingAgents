@@ -438,6 +438,54 @@ class TestMalformedMarketsOmitted:
         assert "Broken outcomes?" not in out
         assert "1 market(s) omitted" in out
 
+    @pytest.mark.parametrize("missing", [None, "", "   "])
+    def test_a_market_with_no_question_is_omitted_rather_than_labelled_none(self, missing):
+        # It used to pass this guard, because sanitize_untrusted goes through
+        # ``str``: the market rendered as "- **None**", indistinguishable from
+        # a real market whose question text is the string "None", and it was
+        # not counted — so the disclosure sentence said nothing about it
+        # (#233). ``**None**`` is the shape that must never appear.
+        market = _market(missing, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "**None**" not in out
+        assert "1 market(s) omitted" in out
+        assert "no renderable question or outcome label" in out
+
+    @pytest.mark.parametrize("question", ["###", "**", "|", "  _  "])
+    def test_a_question_that_flattens_to_nothing_is_omitted_too(self, question):
+        # The guard has to judge the RENDERED spelling: a question of pure
+        # markdown passes any check on the raw value and then sanitizes to an
+        # empty string, rendering an empty bolded label and going uncounted.
+        market = _market(question, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "- ****" not in out
+        assert "1 market(s) omitted" in out
+
+    def test_an_outcome_label_that_flattens_to_nothing_is_omitted_too(self):
+        market = _market("Labelled?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market["outcomes"] = '["###", "No"]'
+        out = self._fetch(market)
+        assert "Labelled?" not in out
+        assert "1 market(s) omitted" in out
+
+    @pytest.mark.parametrize("outcomes", ['[null, "No"]', '["", "No"]'])
+    def test_a_market_with_no_first_outcome_label_is_omitted(self, outcomes):
+        # Same hole one field along: a null first outcome rendered "— None 76%"
+        # and was not counted either.
+        market = _market("Labelled?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market["outcomes"] = outcomes
+        out = self._fetch(market)
+        assert "Labelled?" not in out
+        assert "1 market(s) omitted" in out
+
+    def test_the_disclosure_still_counts_the_reasons_it_already_named(self):
+        # The new clauses are added to the sentence, not swapped in: a market
+        # dropped for a price mismatch still reads the same way.
+        market = _market("Mismatched?", 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        market["outcomes"] = '["No"]'
+        out = self._fetch(market)
+        assert "outcome/price mismatch, unparsable price, or out-of-range probability" in out
+
     def test_no_disclosure_when_all_markets_clean(self):
         with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
             out = polymarket.get_prediction_markets("anything", limit=10)
@@ -457,6 +505,127 @@ class TestMalformedMarketsOmitted:
         assert "Good two?" in out  # backfilled into the malformed slot
         assert "Bad top?" not in out
         assert "1 market(s) omitted" in out
+
+    def test_every_market_malformed_does_not_render_a_header_with_no_body(self):
+        # The header has already promised "market-implied probabilities", so a
+        # body of no lines left the analyst a heading to reason around with
+        # nothing under it. Reachable before this change too — a single market
+        # whose first outcome price does not parse took the same exit — and the
+        # question/label guards added more ways in, which is what made it worth
+        # closing. (The outcome/price length guard is itself new here, so it is
+        # not the older path.)
+        bad = _market(None, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(bad)
+        assert "No prediction markets for 'anything' could be rendered." in out
+        # The REASON is given once, by the omitted clause, not twice.
+        assert out.count("malformed vendor data") == 1
+        assert "1 market(s) omitted" in out
+
+    def test_a_zero_limit_does_not_claim_every_market_was_malformed(self):
+        # ``limit=0`` broke the walk before it judged anything, so the
+        # all-dropped branch would have reported markets it never looked at.
+        with mock.patch.object(polymarket, "_request", return_value=_SEARCH):
+            out = polymarket.get_prediction_markets("anything", limit=0)
+            default = polymarket.get_prediction_markets("anything", limit=None)
+        # Byte for byte the default report — which pins the coercion itself
+        # rather than the wording of any one sentence.
+        assert out == default
+        assert "Open big?" in out
+
+
+@pytest.mark.unit
+class TestMarketLineFiguresAreNotFabricated:
+    """Volume and resolution date are NAMED when absent, not defaulted. A
+    stand-in figure is read as the vendor's answer, and this report's own
+    header tells the model that volume measures how much to trust a market
+    (#233)."""
+
+    @staticmethod
+    def _fetch(market):
+        search = {"events": [{"markets": [market]}]}
+        with mock.patch.object(polymarket, "_request", return_value=search):
+            return polymarket.get_prediction_markets("anything", limit=10)
+
+    def test_a_missing_volume_is_named_rather_than_rendered_as_zero(self):
+        market = _market("Real?", 0.30, volume=None, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "$0 volume" not in out
+        assert polymarket.VOLUME_UNAVAILABLE in out
+        assert "Real?" in out  # the market keeps its probability signal
+
+    def test_a_missing_end_date_is_named_rather_than_left_blank(self):
+        market = _market("Real?", 0.30, volume=100, end_date=None)
+        out = self._fetch(market)
+        assert f"resolves {polymarket.DATE_UNAVAILABLE}" in out
+        assert "resolves ," not in out and "resolves )" not in out
+
+    @pytest.mark.parametrize(
+        "junk", [float("nan"), float("inf"), True, -5, 10**400, "1234", None]
+    )
+    def test_an_unusable_volume_is_named_rather_than_printed(self, junk):
+        # Every shape that must not become a dollar figure. NaN and Infinity
+        # ARE floats and printed "$nan volume"; True is an int and printed
+        # "$1"; a negative is not an amount anything traded; a 400-digit int
+        # (json.loads keeps arbitrary precision) raised OverflowError inside
+        # the guard itself; a string raised out of the ",.0f" format.
+        market = _market("Real?", 0.30, volume=junk, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert polymarket.VOLUME_UNAVAILABLE in out
+        assert "$" not in out.split("Real?")[1]  # no dollar figure on THAT line
+
+    def test_a_non_numeric_volume_is_named_rather_than_crashing_the_format(self):
+        # ``or 0`` kept a truthy string, which the ",.0f" format then raised
+        # TypeError on — an untyped raise out of a report path.
+        market = _market("Real?", 0.30, volume="lots", end_date="2030-12-31T00:00:00Z")
+        assert polymarket.VOLUME_UNAVAILABLE in self._fetch(market)
+
+    def test_a_non_numeric_volume_does_not_break_the_RANKING_either(self):
+        # Two markets, because the ranking is where the string actually bit:
+        # ``sort``'s key was a separate ``or 0`` reading, and comparing a str
+        # against an int raised TypeError before any line was rendered. One
+        # market never compares, so a single-market test cannot see this.
+        junk = _market("Junk?", 0.30, volume="1234", end_date="2030-12-31T00:00:00Z")
+        good = _market("Good?", 0.60, volume=5_000, end_date="2030-12-31T00:00:00Z")
+        search = {"events": [{"markets": [junk, good]}]}
+        with mock.patch.object(polymarket, "_request", return_value=search):
+            out = polymarket.get_prediction_markets("anything", limit=10)
+        assert "Good?" in out and "Junk?" in out
+        assert "$5,000 volume" in out
+        assert polymarket.VOLUME_UNAVAILABLE in out
+
+    @pytest.mark.parametrize("noisy", ["2#030-12-31", "2030-12-3*1", "not-a-date"])
+    def test_a_date_the_flattening_mangled_is_named_rather_than_shown_wrong(self, noisy):
+        # The slice is not a parse: "2030-12-3*1" flattens to "2030-12-3 1",
+        # whose first ten characters read as 12/3 — a plausible date 28 days
+        # early, with nothing in the line to say it had been cut.
+        market = _market("Real?", 0.30, volume=100, end_date=noisy)
+        out = self._fetch(market)
+        assert f"resolves {polymarket.DATE_UNAVAILABLE}" in out
+        # And no PREFIX of the mangled value was shown as if it were the date.
+        assert f"resolves {polymarket.sanitize_untrusted(noisy)[:10]}" not in out
+
+    @pytest.mark.parametrize("container", [[], {}, {"a": 1}, ["x"]])
+    def test_a_container_question_is_omitted_rather_than_rendered_as_a_repr(self, container):
+        # Widening the scalar test to "not None" would put a Python repr in the
+        # report as a label: "- **[]** — Yes 30%" beside a real probability.
+        market = _market(container, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert f"**{container}**" not in out  # the repr of THIS value
+        assert "1 market(s) omitted" in out
+
+    def test_real_figures_still_render_unchanged(self):
+        market = _market("Real?", 0.30, volume=1234, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "$1,234 volume, resolves 2030-12-31" in out
+
+    def test_a_numeric_question_still_renders_rather_than_being_called_missing(self):
+        # ``_rendered_text`` admits scalars: Gamma sends strings, but a JSON
+        # number has something to show and used to render. Dropping it would
+        # disclose a real market as a MISSING question.
+        market = _market(123, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "**123**" in out
+        assert "omitted" not in out
 
 
 @pytest.mark.unit

@@ -16,6 +16,8 @@ from .utils import (
     data_lag_note,
     date_range_refusal,
     date_refusal,
+    no_insider_transactions,
+    no_news_in_window,
     wiring_gap,
 )
 
@@ -111,12 +113,10 @@ def get_news(ticker, start_date, end_date) -> str:
 
     return _news_body(
         _make_api_request("NEWS_SENTIMENT", params),
-        # Keep this sentence in lockstep with the yfinance getter's
-        # nothing-in-window answer — a cross-vendor test pins the two equal for
-        # the canonical spelling. This vendor names the symbol it actually
-        # queried (raw, not normalized): echoing a spelling it never sent would
-        # misattribute the emptiness.
-        f"No news found for {ticker} between {start_date} and {end_date}",
+        # The shared definition, so this sentence and the yfinance getter's
+        # cannot drift in wording OR in which guard the symbol takes. No
+        # ``resolved`` clause: this vendor queries the spelling it was handed.
+        no_news_in_window(ticker, start_date, end_date),
     )
 
 
@@ -232,12 +232,11 @@ def _annotate_insider_freshness(result, symbol: str) -> str:
     if not isinstance(rows, list):
         return _served_body(result, parsed)
     if not rows and not (_AV_ENVELOPE_KEYS & parsed.keys()):
-        # Keep this sentence in lockstep with the yfinance getter's empty-frame
-        # answer — a cross-vendor test pins the two equal for the canonical
-        # spelling. This vendor names the symbol it actually queried (raw, not
-        # normalized): echoing a spelling it never sent would misattribute the
-        # emptiness.
-        return f"No insider transactions reported for symbol '{symbol}'"
+        # The shared definition, so this sentence and the yfinance getter's
+        # empty-frame answer cannot drift. This vendor names the symbol it
+        # actually queried (raw, not normalized): echoing a spelling it never
+        # sent would misattribute the emptiness.
+        return no_insider_transactions(symbol)
     latest = _newest_row_date(rows, "transaction_date")
     if latest is None:
         return _served_body(result, parsed)

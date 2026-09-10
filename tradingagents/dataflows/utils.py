@@ -332,7 +332,7 @@ def echo_argument(value: object) -> str:
     return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS, keep_edges=True)
 
 
-def quote_argument(value) -> str:
+def quote_argument(value: object) -> str:
     """A model argument echoed back INSIDE ITS OWN QUOTES, flattened and capped.
 
     Returns a STRING value already delimited — do not wrap the result in
@@ -403,6 +403,113 @@ def quote_argument(value) -> str:
             capped += "..."
         return capped + closer
     return flat
+
+
+# The sentences the vendors of one routed tool must agree on, defined once
+# each. Each used to be a literal in the yfinance module and a second literal
+# in the Alpha Vantage one, each under a comment promising the other copy said
+# the same thing — and the promise was pinned only by a cross-vendor equality
+# test spelling one canonical symbol, so the two could diverge the moment a
+# value stopped being canonical. Same reasoning as ``_OMIT_CLAUSE`` above: one
+# literal, so one vendor cannot start saying something the other stopped
+# saying (#140 review, #219, #233).
+#
+# What belongs here is a sentence carrying a value the two vendors have to
+# guard the SAME WAY. "No global news found between {start} and {curr}" is a
+# twin of the same shape and is deliberately NOT here: every value in it is a
+# date the caller's refusal already vetted, so there is no guard for the two
+# to disagree about and moving it would only add a hop.
+#
+# The ECHO happens in here rather than at the call sites, which is the half
+# that matters most: the two vendors have to agree on WHICH guard the value
+# takes, not merely on the words around it. A caller reaching for
+# ``echo_argument`` where its sibling reached for ``quote_argument`` would
+# leave the twins identical on a clean spelling and different on a hostile
+# one — exactly the divergence a cross-vendor equality test on a clean symbol
+# cannot see.
+
+
+def no_insider_transactions(symbol: object) -> str:
+    """The empty-insider-stream answer, in the voice both vendors share.
+
+    An empty stream is normal here — many valid symbols have no filings — so
+    both vendors say so in prose rather than one answering raw empty JSON the
+    agent might hedge over (#90). Each names the spelling IT queried: yfinance
+    the canonical symbol it resolved to, Alpha Vantage the raw one it sent,
+    because echoing a spelling a vendor never used would misattribute the
+    emptiness. The sentence quotes the symbol, so the echo is
+    ``quote_argument`` (see there for why the quotes are repr's and not the
+    f-string's).
+    """
+    return f"No insider transactions reported for symbol {quote_argument(symbol)}"
+
+
+def resolved_clause(raw: object, canonical: object) -> str:
+    """The " (resolved to X)" aside, or nothing when the alias table changed nothing.
+
+    One definition because the clause is appended to sentences in more than one
+    module and the ECHO has to be the same at each: a copy reaching for
+    :func:`sanitize_untrusted` instead would strip an edge marker and quote a
+    spelling back that the caller never wrote.
+
+    The comparison stays on the RAW pair. It asks whether the alias table
+    changed the symbol, which is not a question the flattening may answer: two
+    spellings differing only in characters the flattening collapses are still
+    two spellings, and hiding the aside would tell the model its argument was
+    served as written when it was not.
+
+    Bare, not quoted — the callers name the symbol in running prose. A quoted
+    sentence wants its own clause built on :func:`quote_argument`, as the
+    router's sentinel does.
+    """
+    return "" if canonical == raw else f" (resolved to {echo_argument(canonical)})"
+
+
+def no_news_in_window(
+    ticker: object, start_date: str, end_date: str, *, canonical: object = None
+) -> str:
+    """The nothing-in-the-window answer, in the voice both news vendors share.
+
+    Alpha Vantage filters ``NEWS_SENTIMENT`` server-side by ``time_from`` /
+    ``time_to``, so its empty feed asserts only "nothing in the window you
+    asked for" — the same claim the yfinance getter makes when articles exist
+    but none fall inside the window. The two reach the sentence from different
+    sides on purpose; what has to match is the sentence the agent reads, since
+    which vendor served the call is not something the agent can see.
+
+    ``canonical`` is the spelling the vendor actually queried, RAW: this
+    function builds the resolution aside and does the echoing itself, so a
+    vendor cannot hand over a clause built with the wrong guard — the sibling
+    below takes its symbol raw for the same reason, and a helper that guards
+    one argument while trusting another is a contract only its docstring
+    states. A vendor that queries the spelling it was handed passes nothing.
+
+    The dates are the caller's too, and reach here having already been refused
+    if they were not usable (#111), so they are not echoed.
+    """
+    aside = resolved_clause(ticker, ticker if canonical is None else canonical)
+    return f"No news found for {echo_argument(ticker)}{aside} between {start_date} and {end_date}"
+
+
+def unsupported_indicator(indicator: object, supported) -> str:
+    """The unknown-indicator refusal, in the voice both indicator vendors share.
+
+    #117 renders this message as one line of report text, so the rejected name
+    is the caller's own argument re-entering text the model reads and takes
+    :func:`echo_argument` — bare, in running prose.
+
+    One definition for the same reason the two sentences above have one: the
+    yfinance and Alpha Vantage indicator getters are two vendors of ONE routed
+    tool, so guarding the echo on one side alone would leave them ending alike
+    on a clean spelling and differently on a hostile one (#219). ``supported``
+    is each vendor's OWN menu — the two genuinely cover different indicators,
+    and that difference is the vendor's to state; which guard the caller's
+    value takes is not.
+    """
+    return (
+        f"Indicator {echo_argument(indicator)} is not supported. "
+        f"Please choose from: {list(supported)}"
+    )
 
 
 def invalid_date_sentinel(

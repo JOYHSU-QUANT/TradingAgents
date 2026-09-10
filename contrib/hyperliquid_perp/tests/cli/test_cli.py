@@ -6341,6 +6341,51 @@ def test_an_unclassified_startup_adoption_raise_still_reaches_the_loop(tmp_path,
         db.close()
 
 
+def test_a_ticks_activity_summary_is_logged_even_when_the_pump_raises(
+    tmp_path, monkeypatch, caplog
+):
+    """issue #238: the summary sits BEFORE the pump, so a raise cannot eat it.
+
+    That line is the loop's only per-tick trading visibility, and ``pump()``
+    raises by design — the two persist errors go up to the tick guard so a
+    failed write enters safe mode, and a locked store lands there too. With the
+    summary after the call, the raise skipped it, so the ticks that lost their
+    record were precisely the ones worth keeping: a slice was submitted or a
+    fill ingested, and THEN the store failed.
+
+    Both halves are asserted: the summary reports the work (it names the counts,
+    so a summary logged from an empty tick would not pass), and the guard is
+    untouched — the raise is still contained as a recoverable latch and the loop
+    still ticks again, which a summary hoisted out of the ``try`` would break.
+    """
+    from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_LIVE_TICK_ERROR, SafeModeManager
+
+    did_something = LiveTickResult(
+        at=_T0, status=TickStatus.OK, fills_ingested=2, slices_submitted=1
+    )
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli.live_loop"):
+        built = _drive_live_loop_construction(
+            tmp_path,
+            monkeypatch,
+            fetch_clearinghouse=lambda: _clearinghouse(),
+            tick_results=(did_something,),
+            pump_raises=sqlite3.OperationalError("database is locked"),
+        )
+    assert built.ticks == 2, "the contained pump raise ended the loop instead of ticking again"
+    summaries = [r.getMessage() for r in caplog.records if "slices=" in r.getMessage()]
+    assert summaries, "the tick that submitted a slice went unlogged because the pump raised"
+    assert "fills=2 slices=1" in summaries[0]
+
+    db = Database(built.db_path)
+    try:
+        state = SafeModeManager(db=db, run_id="r1", gate=None).current()
+        assert state is not None, "the raising pump paused no new risk"
+        assert not state.is_manual and state.reason == REASON_LIVE_TICK_ERROR
+    finally:
+        db.close()
+
+
 class _StopBeforeTheLoop(Exception):
     """Sentinel: every kwarg the pins below assert is already decided."""
 
@@ -6360,18 +6405,33 @@ class _StopTheLoop(BaseException):
 
 
 def _drive_live_loop_construction(
-    tmp_path, monkeypatch, *, fetch_clearinghouse, adoption_raises=None, arm_pending_fail=False
+    tmp_path,
+    monkeypatch,
+    *,
+    fetch_clearinghouse,
+    adoption_raises=None,
+    arm_pending_fail=False,
+    pump_raises=None,
+    tick_results=(),
 ):
     """Build ``_run_live_loop``'s components and stop; return what it built with.
 
-    With ``adoption_raises`` the drive goes FURTHER, into the loop body: the
-    provider stops being the stopping point and becomes a stub, the driver's
-    ``_adopt`` raises the given exception (so the real ``resume_startup``
-    classification and the real containment both run), the run lease is seeded
-    for this pid so the loop's heartbeat does not fatally disown it, and the
-    first ``engine.tick()`` raises :class:`_StopTheLoop` to end the drive.
-    ``built.ticks`` then counts the tick calls the loop actually reached and
-    ``built.db_path`` locates the store for the durable assertions.
+    With ``adoption_raises`` or ``pump_raises`` the drive goes FURTHER, into the
+    loop body: the provider stops being the stopping point and becomes a stub,
+    the run lease is seeded for this pid so the loop's heartbeat does not fatally
+    disown it, and ``engine.tick()`` raises :class:`_StopTheLoop` to end the
+    drive. ``built.ticks`` then counts the tick calls the loop actually reached
+    and ``built.db_path`` locates the store for the durable assertions.
+
+    ``adoption_raises`` makes the driver's ``_adopt`` raise it, so the real
+    ``resume_startup`` classification and the real containment both run.
+    ``pump_raises`` makes ``driver.pump()`` raise instead, leaving adoption on
+    its ordinary clean path (no in-progress row, so it reads the store and
+    returns), and ``tick_results`` hands the leading ticks a result each before
+    the sentinel ends the drive — together they reproduce one iteration whose
+    tick DID something and whose pump then failed (issue #238). A drive that
+    survives its first tick reaches the cadence sleep at the bottom of the body,
+    so ``_LIVE_TICK_SECONDS`` is zeroed rather than waiting the real 10s.
 
     The loop BODY needs a whole live session — a real §19.1 pass the offline
     doubles cannot produce — which is why its sibling invariant in
@@ -6402,6 +6462,8 @@ def _drive_live_loop_construction(
     from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
     from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
     from contrib.hyperliquid_perp.live.venue_identity import VenueIdentityMonitor
+
+    reach_loop_body = adoption_raises is not None or pump_raises is not None
 
     class _FakeMarket:
         def __init__(self, _client):
@@ -6449,7 +6511,7 @@ def _drive_live_loop_construction(
             # constructing through the real class.
             inspect.signature(real_provider).bind(*args, **kwargs)
             built.provider = kwargs
-            if adoption_raises is None:
+            if not reach_loop_body:
                 raise _StopBeforeTheLoop
             # Loop-body drive: stand in for the provider instead of stopping.
             # Nothing calls it — the tick sentinel fires before the first pump.
@@ -6465,7 +6527,7 @@ def _drive_live_loop_construction(
     accounting.initialize_run(
         db, run_id="r1", mode="live", initial_balance_usdc=D(200), schema_version=SCHEMA_VERSION
     )
-    if adoption_raises is not None:
+    if reach_loop_body:
         from contrib.hyperliquid_perp.live.decision import LiveDecisionDriver
         from contrib.hyperliquid_perp.live.engine import LiveExecutionEngine
 
@@ -6483,14 +6545,25 @@ def _drive_live_loop_construction(
 
         def _stop(self, *args, **kwargs):
             built.ticks += 1
+            if built.ticks <= len(tick_results):
+                return tick_results[built.ticks - 1]
             raise _StopTheLoop
+
+        def _raising_pump(self, *args, **kwargs):
+            raise pump_raises
 
         # _adopt, not resume_startup: the classification that decides
         # recoverable-vs-manual containment lives IN resume_startup, so
         # patching that away would leave the tests asserting the CLI's
         # dispatch over a verdict the test made up.
-        monkeypatch.setattr(LiveDecisionDriver, "_adopt", _raising_adopt)
+        if adoption_raises is not None:
+            monkeypatch.setattr(LiveDecisionDriver, "_adopt", _raising_adopt)
+        if pump_raises is not None:
+            monkeypatch.setattr(LiveDecisionDriver, "pump", _raising_pump)
         monkeypatch.setattr(LiveExecutionEngine, "tick", _stop)
+        # The body sleeps out the rest of the cadence after each contained tick,
+        # so a drive that survives its first tick would wait the real 10s.
+        monkeypatch.setattr(cli_mod.live_loop, "_LIVE_TICK_SECONDS", 0.0)
         # The loop heartbeats BEFORE its first tick and treats a lost lease as
         # fatal, so an unseeded lock_pid would end the drive for an unrelated
         # reason and read as "the loop body never ran".
@@ -6526,7 +6599,7 @@ def _drive_live_loop_construction(
         run_id="r1",
         symbol="BTC",
     )
-    stop_at = _StopBeforeTheLoop if adoption_raises is None else _StopTheLoop
+    stop_at = _StopTheLoop if reach_loop_body else _StopBeforeTheLoop
     try:
         with pytest.raises(stop_at):
             cli_mod._run_live_loop(

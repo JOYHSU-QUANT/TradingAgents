@@ -169,18 +169,25 @@ def build_instrument_context(
 
     details = []
     if identity:
-        name = identity.get("company_name") or identity.get("name")
+        # Read through the guard, not around it. Every value below is vendor
+        # free text on its way into a SYSTEM prompt, and this function is
+        # exported and takes any Mapping — so the flattening has to be a
+        # property of the RENDER rather than of the one resolver that happens
+        # to fill the dict today (#233). _clean_identity_value is idempotent,
+        # so the resolver's own pass costs nothing here.
+        field = lambda key: _clean_identity_value(identity.get(key))  # noqa: E731
+        name = field("company_name")
         if name:
             details.append(f"{'Name' if is_crypto else 'Company'}: {name}")
-        sector, industry = identity.get("sector"), identity.get("industry")
+        sector, industry = field("sector"), field("industry")
         if sector and industry:
             details.append(f"Business classification: {sector} / {industry}")
         elif sector:
             details.append(f"Sector: {sector}")
         elif industry:
             details.append(f"Industry: {industry}")
-        if identity.get("exchange"):
-            details.append(f"Exchange: {identity['exchange']}")
+        if exchange := field("exchange"):
+            details.append(f"Exchange: {exchange}")
 
     if details:
         context += (

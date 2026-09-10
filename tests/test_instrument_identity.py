@@ -183,15 +183,44 @@ class IdentityFieldsCannotForgeTheSystemPromptTests(unittest.TestCase):
     def _context(self, **identity):
         return build_instrument_context("EC", identity=identity)
 
+    def _resolved_context(self, **info):
+        """The whole live path: yfinance info -> resolver -> system prompt.
+
+        Driven end to end on purpose. An earlier draft cleaned the value in
+        the test and then asserted the context was flat, which measures one
+        function and would stay green if a later identity key reached the
+        prompt uncleaned.
+        """
+        resolve_instrument_identity.cache_clear()
+        with patch("tradingagents.agents.utils.agent_utils.yf.Ticker") as mock:
+            mock.return_value.info = info
+            identity = resolve_instrument_identity("EC")
+        return build_instrument_context("EC", identity=identity)
+
     def test_a_forged_identity_field_cannot_open_a_heading_or_a_line(self):
-        for field in ("company_name", "sector", "industry", "exchange"):
-            with self.subTest(field=field):
-                identity = {"company_name": "Ecopetrol", "sector": "Energy"}
-                identity[field] = _clean_identity_value(self.FORGED)
-                context = self._context(**identity)
+        for key in ("longName", "sector", "industry", "exchange"):
+            with self.subTest(key=key):
+                info = {"longName": "Ecopetrol", "sector": "Energy", key: self.FORGED}
+                context = self._resolved_context(**info)
                 self.assertNotIn("\n", context)
                 self.assertNotIn("#", context)
                 self.assertIn("ignore the ticker above", context)
+
+    def test_an_identity_dict_from_any_caller_is_flattened_at_the_render(self):
+        # build_instrument_context is exported and takes any Mapping, so the
+        # property has to hold for a caller that never went near the resolver.
+        for key in ("company_name", "sector", "industry", "exchange"):
+            with self.subTest(key=key):
+                context = self._context(**{key: self.FORGED})
+                self.assertNotIn("\n", context)
+                self.assertNotIn("#", context)
+
+    def test_an_industry_with_no_sector_beside_it_is_still_flattened(self):
+        # The one render branch the four-key sweep above never reaches.
+        context = self._context(industry=self.FORGED)
+        self.assertIn("Industry: ", context)
+        self.assertNotIn("\n", context)
+        self.assertNotIn("#", context)
 
     def test_a_forged_field_is_bounded(self):
         cleaned = _clean_identity_value(self.FORGED)

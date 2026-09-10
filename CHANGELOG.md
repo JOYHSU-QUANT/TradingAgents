@@ -963,20 +963,28 @@ Breaking changes within the 0.x line are called out explicitly.
 - **The instrument identity reached every analyst's SYSTEM prompt unflattened**
   (issue #233, closing it). The three batches before this one closed what
   GETTERS return. This is the same payload one level up: the identity resolver
-  reads ``longName``, ``sector``, ``industry`` and ``exchange`` from
-  yfinance's free-text ``info``, and ``build_instrument_context`` interpolates
-  them into the string every analyst and both managers receive as their system
-  message — the part of the prompt the model is told to treat as its
-  instructions rather than as data a tool returned. A company name carrying a
-  line break and "## " opened a heading there, with no length bound, and the
-  only guard was a ``.strip()``.
+  reads ``longName`` (or ``shortName``), ``sector``, ``industry`` and
+  ``exchange`` from yfinance's free-text ``info``, and
+  ``build_instrument_context`` interpolates them into the string every analyst
+  and both managers receive as their system message — the part of the prompt
+  the model is told to treat as its instructions rather than as data a tool
+  returned. A company name carrying a line break and "## " opened a heading
+  there, with no length bound, and the only guard was a ``.strip()``.
 
-  One function covers all five interpolation sites, so the fix is
-  ``sanitize_untrusted`` inside ``_clean_identity_value``. It runs BEFORE the
-  placeholder check, which also closes a smaller hole: a name spelled
-  "_none_" used to survive as a company, because the strip left the
-  underscores on and the check only knew the bare spellings. A clean value is
-  unchanged, whitespace runs excepted.
+  The guard is ``sanitize_untrusted`` inside ``_clean_identity_value``, and it
+  runs BEFORE the placeholder check — which closes a smaller hole on the way:
+  a name spelled "_none_" used to survive as a company, because the strip left
+  the underscores on and the check only knew the bare spellings.
+
+  The RENDER reads through that guard rather than around it. Putting it only
+  where the resolver fills the dict would have made "every identity value is
+  flattened" a fact about today's single caller: ``build_instrument_context``
+  is exported and takes any ``Mapping``, and it carried a ``name`` fallback key
+  nothing in the repo produced and nothing cleaned. That key is gone, and each
+  field is now flattened as it is rendered, so the property holds for any
+  caller and any key. A clean value comes through unchanged apart from
+  whitespace runs and markdown markers — "Grupo #1 S.A." renders as "Grupo 1
+  S.A.".
 
 - **The two sources anyone can post to reached the prompt unflattened, and the
   Alpha Vantage indicator values reached it unchecked** (issue #233, third and

@@ -64,6 +64,13 @@ def _parse_json_list(value) -> list:
         return []
 
 
+# What a market line says where the vendor sent no figure. Named rather than
+# defaulted: the two slots carry meaning the model acts on (depth, and when the
+# question settles), so a stand-in number would be read as the answer.
+VOLUME_UNAVAILABLE = "volume unavailable"
+DATE_UNAVAILABLE = "(date unavailable)"
+
+
 def _rendered_text(value: object) -> str:
     """A Gamma text field as the report will show it, or ``""`` if unshowable.
 
@@ -79,8 +86,14 @@ def _rendered_text(value: object) -> str:
     Returning ``""`` for both lets the caller drop and disclose the market with
     one check, and — because this is also the spelling the caller renders —
     the value judged and the value shown are the same value (#233).
+
+    Only ``None`` is refused outright, not every non-string. Gamma sends these
+    fields as strings, but a JSON number or bool arriving in one is a value
+    with something to show, and it used to render: refusing it here would drop
+    a real market and disclose it as a MISSING question, which is a different
+    claim from the one the data supports.
     """
-    if not isinstance(value, str):
+    if value is None:
         return ""
     return sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)
 
@@ -244,20 +257,45 @@ def get_prediction_markets(
         # evidence the junk was there, so "\n2030-12-31" rendered as
         # "2030-12-3" — a date 28 days early with nothing left in the line to
         # say it was cut.
-        volume = m.get("volumeNum") or 0
-        end_date = sanitize_untrusted(m.get("endDate") or "")[:10]
+        # Volume and resolution date are named, not judged: neither absence
+        # makes the line unreadable, so the market keeps its probability
+        # signal. What they may NOT do is answer with a plausible figure the
+        # vendor never sent. ``or 0`` rendered a missing volume as "$0 volume"
+        # — and this report's own header tells the model that higher volume
+        # means a deeper, more reliable market, so "$0" asserted the market was
+        # the least trustworthy one on the page. A missing endDate rendered
+        # "resolves " with nothing after it. Both are fabrications of the same
+        # kind as the bolded ``None`` this guard already refuses (#233).
+        raw_volume = m.get("volumeNum")
+        volume_str = (
+            f"${raw_volume:,.0f} volume"
+            if isinstance(raw_volume, (int, float)) and not isinstance(raw_volume, bool)
+            else VOLUME_UNAVAILABLE
+        )
+        end_date = sanitize_untrusted(m.get("endDate") or "")[:10] or DATE_UNAVAILABLE
         wk = m.get("oneWeekPriceChange")
         wk_str = f", 1-week {wk * 100:+.1f}pp" if isinstance(wk, (int, float)) and wk else ""
         lines.append(
             f"- **{question}** — {label} {prob:.0%} "
-            f"(${volume:,.0f} volume, resolves {end_date}{wk_str})"
+            f"({volume_str}, resolves {end_date}{wk_str})"
         )
 
-    report = header + "\n".join(lines) + "\n"
+    if not lines:
+        # Every candidate was dropped. The header above has already promised
+        # "market-implied probabilities", so an empty body would leave the
+        # analyst a heading with nothing under it to reason from — the same
+        # bare-header failure ``get_fundamentals`` refuses. Say what happened;
+        # the omitted clause below gives the reason.
+        report = header + (
+            f"No usable prediction markets for {quote_argument(topic)}: every market "
+            f"matched was dropped as malformed vendor data."
+        )
+    else:
+        report = header + "\n".join(lines) + "\n"
     if omitted:
         report += (
             f"\n{omitted} market(s) omitted (malformed vendor data: "
-            f"missing question or outcome label, outcome/price mismatch, "
+            f"no renderable question or outcome label, outcome/price mismatch, "
             f"unparsable price, or out-of-range probability).\n"
         )
     return report

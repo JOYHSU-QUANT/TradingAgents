@@ -23,6 +23,7 @@ from .utils import (
     no_insider_transactions,
     sanitize_untrusted,
     statement_lag_bound,
+    unsupported_indicator,
 )
 from .yfinance_common import (
     _assert_ohlcv_not_stale,
@@ -293,13 +294,12 @@ def get_stock_stats_indicators_window(
     # agent-facing text, editable apart, and invisible to module-level drift
     # tests (#137).
     if indicator not in INDICATOR_DESCRIPTIONS:
-        # The rejected name is the caller's own, and #117 renders this message
-        # as one line of report text, so it is echoed flattened and capped —
-        # bare, in running prose, which is ``echo_argument``'s case (#233).
-        raise UnsupportedIndicatorError(
-            f"Indicator {echo_argument(indicator)} is not supported. "
-            f"Please choose from: {list(INDICATOR_DESCRIPTIONS.keys())}"
-        )
+        # The shared definition, so this refusal and the Alpha Vantage
+        # sibling's cannot differ in which guard the rejected name takes: they
+        # are two vendors of one routed tool, and guarding only this side would
+        # leave them ending alike on a clean spelling and differently on a
+        # hostile one (#219, #233). The menu stays this vendor's own.
+        raise UnsupportedIndicatorError(unsupported_indicator(indicator, INDICATOR_DESCRIPTIONS))
 
     # Unusable dates are refused before any request, in the shared voice (#111).
     refusal = date_refusal(curr_date, what="indicator values", kind="point")
@@ -450,10 +450,19 @@ def get_fundamentals(
     # share cannot open the line even before flattening; what flattening
     # closes is the line BREAK inside a value, which would otherwise start a
     # line the vendor writes in full.
+    # The emptiness test is on the RENDERED value, not the raw one. A field of
+    # pure markdown ("***") is a real, non-empty value that flattens to
+    # nothing, so a raw test let it past and printed a label with nothing after
+    # it — the same line the ``is not None`` test above exists to prevent, and
+    # the same raw-versus-rendered mismatch ``polymarket._rendered_text``
+    # closes for that report's fields (#233).
     lines = []
     for label, value in fields:
-        if value is not None:
-            lines.append(f"{label}: {sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)}")
+        if value is None:
+            continue
+        shown = sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)
+        if shown:
+            lines.append(f"{label}: {shown}")
 
     # yfinance returns a stub dict (e.g. {"trailingPegRatio": None}) for
     # unknown symbols, so `info` is truthy but every field is empty. Treat

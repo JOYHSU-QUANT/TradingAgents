@@ -24,6 +24,7 @@ from .utils import (
     date_refusal,
     echo_argument,
     no_news_in_window,
+    resolved_clause,
     sanitize_untrusted,
     wiring_gap,
 )
@@ -42,6 +43,49 @@ MAX_SEARCH_NEWS_COUNT = 100
 # vendor field with no ceiling can bury the report's own sentences under its bulk
 # and the article count alone does not bound the bytes (#233).
 MAX_NEWS_SUMMARY_CHARS = 2000
+
+# What a heading says when the vendor gave it nothing to say. One definition
+# each: both used to be typed twice, once per article shape, and the flattening
+# below is now a third place that has to reach for the same words (#31, #233).
+TITLE_UNAVAILABLE = "(title unavailable)"
+SOURCE_UNAVAILABLE = "(source unavailable)"
+
+
+def _label(value: object, unavailable: str) -> str:
+    """A heading label as the report will show it, or the unavailability marker.
+
+    The marker used to be substituted for a false-y RAW value, before the
+    flattening — so a title of ``"###"``, non-empty and therefore never
+    marked, flattened to nothing and rendered a heading with no text in it,
+    and (in the global report, whose de-duplication drops a false-y title)
+    made a served article vanish with no count and no disclosure. Judging the
+    RENDERED spelling is the same rule ``polymarket._rendered_text`` applies:
+    the value asked about and the value shown are one value, so "nothing to
+    show" cannot mean one thing to the check and another to the report.
+    """
+    return sanitize_untrusted(value or "", limit=MAX_UNTRUSTED_CHARS) or unavailable
+
+
+def _citation(value: object) -> str:
+    """The article's URL, or ``""`` when it cannot be cited AS WRITTEN.
+
+    A link is the one article field the flattening must not rewrite. It is not
+    prose the model reads past — it is an address the model can cite, and
+    ``sanitize_untrusted`` would silently return a DIFFERENT, still-plausible
+    URL: ``#`` becomes a space, a word-boundary ``_`` is deleted, and the cap
+    hands back a prefix wearing an ellipsis. A citation that points somewhere
+    else is worse than no citation, and nothing in the line would say it had
+    been changed.
+
+    The structural risk here is only the line break: the line begins with this
+    module's own ``Link: `` label, so the vendor cannot open it, and ``|`` or
+    ``*`` inside a URL cannot start a block. So whitespace is collapsed — that
+    much is load-bearing — and a URL too long to be one line is DROPPED rather
+    than cut, which the renderer's ``if data["link"]`` already turns into no
+    line at all.
+    """
+    flat = " ".join(str(value or "").split())
+    return flat if len(flat) <= MAX_UNTRUSTED_CHARS else ""
 
 
 def _flatten_article_fields(data: dict) -> dict:
@@ -64,29 +108,26 @@ def _flatten_article_fields(data: dict) -> dict:
     ``_render_article`` below, not this function: a fifth rendered field added
     to one loop and not the other would escape a guard placed only here.
 
-    Labels take the shared cap; the summary takes its own, larger one for the
-    reason given at ``MAX_NEWS_SUMMARY_CHARS``. The link takes the label cap
-    too: a URL that long is already unusable as a citation, and the flattening
-    turns a ``#`` fragment marker into a space, so a fragment URL renders
-    changed — the report's honesty about structure is worth more than a
-    fragment anchor.
+    Three treatments, because the fields are three different things. The two
+    LABELS take the shared cap and the marker substitution (``_label``); the
+    SUMMARY is the report's payload and takes its own, larger cap for the
+    reason given at ``MAX_NEWS_SUMMARY_CHARS``; the LINK is an address rather
+    than prose and must survive as written or not at all (``_citation``).
 
-    ``or ""`` before the two optional fields, because ``sanitize_untrusted``
-    goes through ``str``: they reach here as ``None`` when the vendor sends the
-    key carrying a null (the extraction's ``.get(key, "")`` default covers only
-    an ABSENT key), and a bare flatten would hand back the truthy string
-    ``"None"`` — which the renderers' ``if data["summary"]`` / ``if
+    ``or ""`` before every field, because ``sanitize_untrusted`` goes through
+    ``str``: a field reaches here as ``None`` when the vendor sends the key
+    carrying a null (the extraction's ``.get(key, "")`` default covers only an
+    ABSENT key), and a bare flatten would hand back the truthy string
+    ``"None"`` — which the renderer's ``if data["summary"]`` / ``if
     data["link"]`` would then print as a body line reading ``None`` and a
-    ``Link: None``. Title and publisher cannot arrive that way: their
-    extraction already substitutes an explicit unavailability marker for a
-    false-y value (#31).
+    ``Link: None``.
     """
     return {
         **data,
-        "title": sanitize_untrusted(data["title"], limit=MAX_UNTRUSTED_CHARS),
+        "title": _label(data["title"], TITLE_UNAVAILABLE),
         "summary": sanitize_untrusted(data["summary"] or "", limit=MAX_NEWS_SUMMARY_CHARS),
-        "publisher": sanitize_untrusted(data["publisher"], limit=MAX_UNTRUSTED_CHARS),
-        "link": sanitize_untrusted(data["link"] or "", limit=MAX_UNTRUSTED_CHARS),
+        "publisher": _label(data["publisher"], SOURCE_UNAVAILABLE),
+        "link": _citation(data["link"]),
     }
 
 
@@ -99,12 +140,15 @@ def _extract_article_data(article: dict) -> dict:
     # Handle nested content structure
     if "content" in article:
         content = article["content"]
-        # Missing fields get explicit unavailability markers, not values that
-        # could be misread as a real title or a publisher named "Unknown".
-        title = content.get("title") or "(title unavailable)"
+        # A missing title or publisher gets an explicit unavailability marker
+        # rather than a value that could be misread as a real title or a
+        # publisher named "Unknown" (#31). The substitution lives in ``_label``,
+        # one hop down, so that "gave us nothing" and "gave us nothing that
+        # survives rendering" get the same answer instead of two.
+        title = content.get("title")
         summary = content.get("summary", "")
         provider = content.get("provider") or {}
-        publisher = provider.get("displayName") or "(source unavailable)"
+        publisher = provider.get("displayName")
 
         # Get URL from canonicalUrl or clickThroughUrl
         url_obj = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
@@ -134,9 +178,9 @@ def _extract_article_data(article: dict) -> dict:
             with contextlib.suppress(ValueError, OSError, TypeError):
                 pub_date = datetime.fromtimestamp(ts)
         data = {
-            "title": article.get("title") or "(title unavailable)",
+            "title": article.get("title"),
             "summary": article.get("summary", ""),
-            "publisher": article.get("publisher") or "(source unavailable)",
+            "publisher": article.get("publisher"),
             "link": article.get("link", ""),
             "pub_date": pub_date,
         }
@@ -158,7 +202,12 @@ def _render_article(data: dict) -> str:
     The two ``if``s are what make an absent summary or link no line at all,
     rather than a line with nothing after the label; ``_flatten_article_fields``
     keeps them working by coercing a vendor's null to ``""`` rather than to the
-    string ``"None"``.
+    string ``"None"``, and ``_citation`` uses the same channel to withhold a
+    URL it cannot pass through unchanged.
+
+    The heading has no such ``if`` and needs none: ``_label`` answers the
+    unavailability marker rather than an empty string, so the two slots it
+    fills are never blank.
     """
     block = f"### {data['title']} (source: {data['publisher']})\n"
     if data["summary"]:
@@ -224,7 +273,7 @@ def get_news_yfinance(
     # comparison stays on the RAW pair: it asks whether the alias table changed
     # the symbol, which is not a question the flattening may answer.
     echoed = echo_argument(ticker)
-    resolved = "" if canonical == ticker else f" (resolved to {echo_argument(canonical)})"
+    resolved = resolved_clause(ticker, canonical)
     stock = yf.Ticker(canonical)
     # Through the shared un-hidden boundary like every other yfinance leaf
     # (#116); an outage body takes its vendor-unavailable lane rather than
@@ -254,9 +303,11 @@ def get_news_yfinance(
     if filtered_count == 0:
         # The shared definition, so this sentence and the Alpha Vantage
         # sibling's cannot drift in wording or in which guard the symbol takes
-        # (#219, #233). It echoes the ticker itself; the resolution clause is
-        # this vendor's own, since only this one resolves aliases.
-        return no_news_in_window(ticker, start_date, end_date, resolved=resolved)
+        # (#219, #233). The canonical spelling goes over RAW: the aside is the
+        # helper's to build and to echo, so a vendor cannot hand it a clause
+        # guarded the other way. Alpha Vantage passes none — it queries the
+        # spelling it was handed.
+        return no_news_in_window(ticker, start_date, end_date, canonical=canonical)
 
     return f"## {echoed}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
@@ -381,9 +432,23 @@ def get_global_news_yfinance(
                 # headings. Reading the same value the report shows is also
                 # what lets the docstring on ``_flatten_article_fields`` claim
                 # the two agree (#233).
+                #
+                # Identity is therefore the RENDERED heading, cap included: two
+                # titles the cap makes indistinguishable render one heading, so
+                # keeping both would show the reader the same headline twice.
+                # The cost is that they may carry different bodies — but that
+                # is what de-duplicating on a title has always cost here, and
+                # the alternative keys on a spelling the report never shows.
+                # Untitled articles share one key for the same reason: they all
+                # render as the same marker.
                 title = _extract_article_data(article)["title"]
 
-                # Deduplicate by title
+                # Deduplicate by the rendered heading. ``_label`` never answers
+                # empty — an untitled or unrenderable title becomes the marker
+                # — so this no longer silently drops an article the vendor
+                # served, which is what a false-y title used to do here while
+                # the ticker report rendered the same article with an empty
+                # heading (#233).
                 if title and title not in seen_titles:
                     seen_titles.add(title)
                     all_news.append(article)

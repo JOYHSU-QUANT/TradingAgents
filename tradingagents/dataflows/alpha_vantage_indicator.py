@@ -4,6 +4,7 @@ from .utils import (
     INDICATOR_DESCRIPTIONS,
     data_lag_note,
     date_refusal,
+    unsupported_indicator,
 )
 
 # Maximum age (calendar days) of the newest indicator row relative to
@@ -166,9 +167,13 @@ def get_indicator(
     from dateutil.relativedelta import relativedelta
 
     if indicator not in _SUPPORTED_INDICATORS:
-        raise UnsupportedIndicatorError(
-            f"Indicator {indicator} is not supported. Please choose from: {list(_SUPPORTED_INDICATORS.keys())}"
-        )
+        # The shared definition, so this refusal and the yfinance sibling's
+        # cannot differ in which guard the rejected name takes (#219, #233).
+        # This side used to interpolate the name RAW while the other echoed it,
+        # which is the divergence the shared sentences exist to prevent: one
+        # routed tool ending alike on a clean spelling and differently on a
+        # hostile one, decided by a config key the agent cannot see.
+        raise UnsupportedIndicatorError(unsupported_indicator(indicator, _SUPPORTED_INDICATORS))
 
     # Unusable dates are refused before any request, in the shared voice (#111).
     refusal = date_refusal(curr_date, what="indicator values", kind="point")

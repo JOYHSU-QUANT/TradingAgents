@@ -449,7 +449,7 @@ class TestMalformedMarketsOmitted:
         out = self._fetch(market)
         assert "**None**" not in out
         assert "1 market(s) omitted" in out
-        assert "missing question or outcome label" in out
+        assert "no renderable question or outcome label" in out
 
     @pytest.mark.parametrize("question", ["###", "**", "|", "  _  "])
     def test_a_question_that_flattens_to_nothing_is_omitted_too(self, question):
@@ -505,6 +505,63 @@ class TestMalformedMarketsOmitted:
         assert "Good two?" in out  # backfilled into the malformed slot
         assert "Bad top?" not in out
         assert "1 market(s) omitted" in out
+
+    def test_every_market_malformed_does_not_render_a_header_with_no_body(self):
+        # The header has already promised "market-implied probabilities", so a
+        # body of no lines left the analyst a heading to reason around with
+        # nothing under it. Reachable only since the question/label guards
+        # started dropping markets that used to render as "- **None**".
+        bad = _market(None, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(bad)
+        assert "No usable prediction markets for 'anything'" in out
+        assert "1 market(s) omitted" in out
+
+
+@pytest.mark.unit
+class TestMarketLineFiguresAreNotFabricated:
+    """Volume and resolution date are NAMED when absent, not defaulted. A
+    stand-in figure is read as the vendor's answer, and this report's own
+    header tells the model that volume measures how much to trust a market
+    (#233)."""
+
+    @staticmethod
+    def _fetch(market):
+        search = {"events": [{"markets": [market]}]}
+        with mock.patch.object(polymarket, "_request", return_value=search):
+            return polymarket.get_prediction_markets("anything", limit=10)
+
+    def test_a_missing_volume_is_named_rather_than_rendered_as_zero(self):
+        market = _market("Real?", 0.30, volume=None, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "$0 volume" not in out
+        assert polymarket.VOLUME_UNAVAILABLE in out
+        assert "Real?" in out  # the market keeps its probability signal
+
+    def test_a_missing_end_date_is_named_rather_than_left_blank(self):
+        market = _market("Real?", 0.30, volume=100, end_date=None)
+        out = self._fetch(market)
+        assert f"resolves {polymarket.DATE_UNAVAILABLE}" in out
+        assert "resolves ," not in out and "resolves )" not in out
+
+    def test_a_non_numeric_volume_is_named_rather_than_crashing_the_format(self):
+        # ``or 0`` kept a truthy string, which the ",.0f" format then raised
+        # TypeError on — an untyped raise out of a report path.
+        market = _market("Real?", 0.30, volume="lots", end_date="2030-12-31T00:00:00Z")
+        assert polymarket.VOLUME_UNAVAILABLE in self._fetch(market)
+
+    def test_real_figures_still_render_unchanged(self):
+        market = _market("Real?", 0.30, volume=1234, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "$1,234 volume, resolves 2030-12-31" in out
+
+    def test_a_numeric_question_still_renders_rather_than_being_called_missing(self):
+        # ``_rendered_text`` refuses only None: Gamma sends strings, but a JSON
+        # number has something to show and used to render. Dropping it would
+        # disclose a real market as a MISSING question.
+        market = _market(123, 0.30, volume=100, end_date="2030-12-31T00:00:00Z")
+        out = self._fetch(market)
+        assert "**123**" in out
+        assert "omitted" not in out
 
 
 @pytest.mark.unit

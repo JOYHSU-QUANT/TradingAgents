@@ -1021,6 +1021,51 @@ Breaking changes within the 0.x line are called out explicitly.
   literals, and a fifth rendered field added to one would have escaped both the
   flattening and a reviewer reading the promise on the flattening helper.
 
+  A field can be non-empty and still have nothing to SHOW, and the marker this
+  module already had for that was being chosen from the raw value. A title of
+  pure markdown (``"###"``) was never false-y, so it never got
+  ``(title unavailable)`` — it flattened to nothing and rendered a heading with
+  no text in it, and in the global report, whose de-duplication skips a
+  false-y title, it made a served article vanish with no count and no
+  disclosure: one such article answered ``No global news found for ...`` for a
+  day the vendor had covered. The substitution now runs on the RENDERED
+  spelling, in one helper both shapes reach, which is the rule the Polymarket
+  half of this entry states: the value asked about and the value shown are one
+  value. ``get_fundamentals`` had the same mismatch one report along — its
+  ``is not None`` test let a field of pure markdown print a bare ``Sector:``
+  — and now tests what the line will show. Two consequences worth stating,
+  because this is a prompt segment point: an untitled article is now KEPT and
+  marked in both reports rather than kept in one and dropped by the other, and
+  every untitled article shares one de-duplication key, so at most one appears
+  per global run.
+
+  The link is the one article field the flattening must NOT touch, and this
+  shipped guarding it like the others. It is not prose the model reads past but
+  an address it can cite, and ``sanitize_untrusted`` handed back a different,
+  still-plausible URL: ``#`` became a space, a word-boundary ``_`` was deleted,
+  and the cap returned a prefix wearing an ellipsis — with nothing in the line
+  to say so. A citation that points somewhere else is worse than no citation.
+  Links now take whitespace collapsing only (the line break is the whole of
+  what this slot could forge — the line starts with our own ``Link: `` label,
+  and ``|`` or ``*`` inside a URL cannot open a block), and a URL too long to
+  render on one line is DROPPED rather than cut.
+
+  A third twin sentence, found the same way as the first two and for the same
+  reason it matters: this change guarded the unsupported-indicator refusal on
+  the yfinance side and left Alpha Vantage's interpolating the name raw. That
+  is precisely the divergence the shared definitions exist to prevent — two
+  vendors of one routed tool ending alike on a clean spelling and differently
+  on a hostile one, decided by a config key the agent cannot see. It is now
+  ``utils.unsupported_indicator``, with each vendor still naming its own menu.
+  ``no_news_in_window`` also stopped taking a pre-built resolution clause: it
+  takes the canonical spelling RAW and builds the aside itself
+  (``utils.resolved_clause``), so a second news vendor cannot hand it a clause
+  guarded the other way — a helper that guards one argument while trusting
+  another states its contract only in a docstring. The one twin deliberately
+  NOT collapsed is ``No global news found between ...``: every value in it is
+  a date the caller's refusal already vetted, so there is no guard for two
+  vendors to disagree about.
+
   Two things the flattening had to be taught, both found reviewing this change
   before it shipped. ``sanitize_untrusted`` goes through ``str``, so a summary
   or link the vendor sends as a null would have come back as the truthy string
@@ -1039,9 +1084,13 @@ Breaking changes within the 0.x line are called out explicitly.
   reads to buy nothing — the structural forgery is closed by the flattening,
   not by the cap. It is capped at ``MAX_NEWS_SUMMARY_CHARS`` (2000) instead,
   because a vendor field with no ceiling can still bury the report's own
-  sentences and the article count alone does not bound the bytes. The link
-  takes the label cap, so a URL carrying a ``#`` fragment now renders changed;
-  a URL past 200 characters is not a usable citation anyway. And
+  sentences and the article count alone does not bound the bytes. That is a
+  per-FIELD ceiling, not a report-level one: a full ticker report is still
+  bounded only by the article limit times these caps, and shrinking that is a
+  question about prompt cost rather than about forgery. The global report's
+  de-duplication keys on the rendered heading, cap included, so two titles the
+  cap makes indistinguishable render once — they would have rendered the same
+  headline twice, though their bodies may differ. And
   ``get_stock_stats_indicators_window``'s ``## {indicator}`` heading is
   deliberately NOT guarded: the membership check above it accepts only keys of
   this project's own ``INDICATOR_DESCRIPTIONS``, so the value there can never
@@ -1070,7 +1119,30 @@ Breaking changes within the 0.x line are called out explicitly.
   fields go through one ``_rendered_text`` helper that answers ``""`` for
   anything with nothing to show, and its result is what the line renders — so
   the value judged and the value shown are the same value, by construction
-  rather than by inspection.
+  rather than by inspection. It refuses ``None`` and nothing else: Gamma sends
+  these fields as strings, but a JSON number arriving in one has something to
+  show and used to render, and dropping it would disclose a real market as a
+  MISSING question — a different claim from the one the data supports. The
+  disclosure says "no renderable question or outcome label" for the same
+  reason: a question that flattened away was not missing.
+
+  The same line's other two vendor fields were fabricating figures rather than
+  labels, which is worse here than anywhere else in the report: the header
+  above them tells the model that higher traded volume means a deeper, more
+  reliable market. A missing ``volumeNum`` went through ``or 0`` and rendered
+  ``$0 volume`` — an assertion that this was the least trustworthy market on
+  the page, about a market whose volume the vendor simply did not send — and a
+  missing ``endDate`` rendered ``resolves `` with nothing after it. Both are
+  now NAMED rather than defaulted, and the market keeps its probability signal:
+  neither absence makes the line unreadable, so dropping it would trade a real
+  signal for a tidier guard. The volume test is also now a type test, which
+  the ``or 0`` was not: a non-numeric volume reached a ``,.0f`` format and
+  raised out of a report path.
+
+  Making the question guard strict made a report of nothing but malformed
+  markets reachable for the first time, and it rendered as a header promising
+  probabilities with no lines under it — the bare-header failure
+  ``get_fundamentals`` already refuses. That case now says so.
 
 - **A database whose content was in its log was read as an empty store, and
   the log destroyed on the way in** (issue #236). The foreign-store refusal

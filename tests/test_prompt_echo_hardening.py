@@ -28,6 +28,7 @@ from unittest import mock
 import pandas as pd
 import pytest
 
+import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_news as yfnews
@@ -176,11 +177,36 @@ class TestYfinanceNewsArticleFields:
         forged = _line_carrying(_news(monkeypatch, publisher=FORGED))
         _assert_cannot_forge(forged, clean)
 
-    def test_a_forged_link_cannot_forge_a_row(self, monkeypatch):
-        clean = _line_carrying(_news(monkeypatch, link=f"https://x.invalid/{SURVIVES}"))
-        forged = _line_carrying(_news(monkeypatch, link=FORGED))
+    def test_a_forged_link_cannot_open_a_block_of_its_own(self, monkeypatch):
+        # The link is the one article field NOT put through the markdown
+        # translation: it is an address the model may cite, and a rewritten URL
+        # still looks like a URL. So the property here is narrower than the
+        # other three fields' — no line of its own — and it is the whole of
+        # what this slot can forge, because the line starts with the module's
+        # own "Link: " label.
+        #
+        # A SHORT forgery, deliberately: the shared FORGED payload is longer
+        # than a citable URL, so it exercises the cap rather than the line
+        # break, and the test below owns that half.
+        forged = _line_carrying(_news(monkeypatch, link=f"https://x.invalid/a\n## {SURVIVES}"))
         assert forged.startswith("Link: ")
-        _assert_cannot_forge(forged, clean)
+        assert "\n" not in forged
+        assert SURVIVES in forged
+
+    def test_a_clean_link_reaches_the_report_byte_for_byte(self, monkeypatch):
+        # The markdown translation used to delete a word-boundary "_" and turn
+        # a "#" fragment into a space, handing back a DIFFERENT, still-valid
+        # looking URL with nothing in the line to say it had been changed.
+        url = "https://x.invalid/a_-b_.html#section-2"
+        assert f"Link: {url}\n" in _news(monkeypatch, link=url)
+
+    def test_a_link_too_long_to_cite_is_omitted_rather_than_cut(self, monkeypatch):
+        # A cut URL wears an ellipsis and points nowhere; the renderer's own
+        # "if link" turns the empty answer into no line at all, which is the
+        # honest outcome for an address that cannot survive whole.
+        out = _news(monkeypatch, link="https://x.invalid/" + "q" * MAX_UNTRUSTED_CHARS)
+        assert "Link: " not in out
+        assert "Fed holds" in out  # the ARTICLE is still reported
 
     def test_a_forged_summary_is_flattened_and_bounded_by_its_own_cap(self, monkeypatch):
         # The summary is the report's PAYLOAD rather than a label, so it keeps
@@ -487,3 +513,64 @@ class TestAlphaVantageTwinSentences:
         # names only the one it sent. What must match is the shared clause.
         shared = self._news(monkeypatch, FORGED).split(" between ")[0]
         assert shared in yfnews.get_news_yfinance(FORGED, "2026-06-01", "2026-06-05")
+
+    def test_the_unsupported_indicator_refusal_matches_across_vendors(self, monkeypatch):
+        # The third twin. This PR guarded the yfinance side first and left the
+        # Alpha Vantage one interpolating the name raw, which is the exact
+        # divergence the shared definitions exist to prevent: one routed tool
+        # ending alike on a clean spelling and differently on a hostile one,
+        # decided by a config key the agent cannot see (#219, #233).
+        def refuse(vendor):
+            with pytest.raises(UnsupportedIndicatorError) as info:
+                vendor()
+            return str(info.value).split(". Please choose from:")[0]
+
+        yf_side = refuse(lambda: yfin.get_stock_stats_indicators_window("AAPL", FORGED, GOOD, 5))
+        av_side = refuse(lambda: avi.get_indicator("AAPL", FORGED, GOOD, 5))
+        assert yf_side == av_side
+        # And the guard is actually doing something on both sides.
+        assert "\n" not in av_side and "|" not in av_side
+
+
+@pytest.mark.unit
+class TestArticleFieldsThatRenderToNothing:
+    """A vendor field can be non-empty and still have nothing to show. The
+    marker substitution used to run on the RAW value, so a title of pure
+    markdown was never marked and rendered as an empty heading — or, in the
+    global report, made a served article vanish uncounted (#31, #233)."""
+
+    def test_a_title_of_pure_markdown_gets_the_unavailability_marker(self, monkeypatch):
+        out = _news(monkeypatch, title="###")
+        assert f"### {yfnews.TITLE_UNAVAILABLE} (source: Reuters)" in out
+        assert "###  (source:" not in out  # the empty heading it used to render
+
+    def test_a_publisher_of_pure_markdown_gets_the_unavailability_marker(self, monkeypatch):
+        assert f"(source: {yfnews.SOURCE_UNAVAILABLE})" in _news(monkeypatch, publisher="|*|")
+
+    def test_a_clean_title_and_publisher_are_untouched(self, monkeypatch):
+        assert "### Fed holds (source: Reuters)" in _news(monkeypatch)
+
+    def test_the_global_report_no_longer_drops_such_an_article(self, monkeypatch):
+        # The sharpest shape: ONE article, whose title flattens away. The
+        # de-duplication skipped a false-y title, so the report answered "no
+        # global news" for a day the vendor did serve — a coverage claim about
+        # data it had.
+        article = _article(title="###", providerPublishTime=datetime.now().timestamp())
+        monkeypatch.setattr(yfnews.yf, "Search", lambda **kw: FakeTicker(news=[article]))
+        monkeypatch.setattr(yfnews, "yf_fetch_unhidden", lambda fn, **kw: fn())
+        monkeypatch.setattr(yfnews.YfData, "cache_get", mock.Mock(cache_clear=lambda: None))
+        out = yfnews.get_global_news_yfinance(datetime.now().strftime("%Y-%m-%d"))
+        assert "No global news found" not in out
+        assert yfnews.TITLE_UNAVAILABLE in out
+
+
+@pytest.mark.unit
+class TestFundamentalsFieldsThatRenderToNothing:
+    """``get_fundamentals`` omits a field with nothing to say. The test was on
+    the RAW value, so a field of pure markdown printed a bare label (#233)."""
+
+    def test_a_field_that_flattens_away_is_omitted_not_printed_empty(self, monkeypatch):
+        patch_ticker(monkeypatch, info={"longName": "Apple", "sector": "***"})
+        out = yfin.get_fundamentals("AAPL", GOOD)
+        assert "Sector:" not in out
+        assert "Name: Apple" in out  # the report is otherwise unchanged

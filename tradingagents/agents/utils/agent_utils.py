@@ -30,6 +30,7 @@ from tradingagents.agents.utils.news_data_tools import (
 )
 from tradingagents.agents.utils.prediction_markets_tools import get_prediction_markets
 from tradingagents.agents.utils.technical_indicators_tools import get_indicators
+from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS, sanitize_untrusted
 
 # Public surface: the data tools are imported here so agents and the graph
 # import them from one place, plus the instrument/language helpers defined below.
@@ -79,10 +80,24 @@ def get_language_instruction() -> str:
 
 
 def _clean_identity_value(value: Any) -> str | None:
-    """Return a trimmed string, or None for empty / placeholder-ish values."""
+    """One vendor identity field, flattened, or None where it says nothing.
+
+    These values are yfinance ``info`` free text — a name, a sector, an
+    industry, an exchange — and :func:`build_instrument_context` interpolates
+    them into the string that becomes EVERY analyst's and manager's system
+    prompt. That is the part of the prompt the model is told to treat as its
+    instructions, so it outranks the getter returns #233 spent three PRs on: a
+    longName carrying a line break and "## " opens a heading in it. One guard
+    here covers all five call sites (#233).
+
+    Flattening runs BEFORE the placeholder check, so a name spelled "_none_"
+    is recognised as the placeholder it is rather than passed through as a
+    company. It subsumes the strip this used to do: whitespace runs collapse
+    to single spaces, and nothing is left at the ends.
+    """
     if not isinstance(value, str):
         return None
-    cleaned = value.strip()
+    cleaned = sanitize_untrusted(value, limit=MAX_UNTRUSTED_CHARS)
     if not cleaned or cleaned.lower() in {"none", "n/a", "nan", "null"}:
         return None
     return cleaned

@@ -17,7 +17,7 @@ the other end would have made that decision untestable.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -88,6 +88,45 @@ def funding_points(
         )
         for i in range(count)
     ]
+
+
+def candles(
+    closes: Sequence[float],
+    *,
+    start_ms: int = ANCHOR_MS,
+    interval: str = "4h",
+    step_ms: int | None = None,
+    highs: Sequence[float] | None = None,
+    lows: Sequence[float] | None = None,
+) -> list[Candle]:
+    """Bars whose closes — and optionally highs and lows — are exactly as given.
+
+    The sibling of :func:`bars`, which owns its own price ramp because the
+    store and gap tests care about stamps and not about prices. This one is
+    for the feature tests, where the prices ARE the subject: a Donchian test
+    has to set highs apart from closes to tell which series the channel was
+    built from, and an arithmetic test has to know the answer by hand.
+
+    Here rather than in either test module because both need it — and because
+    ``Candle`` is a borrowed DTO this package pins against upstream drift, so
+    a field renamed there should have one factory to chase, not three.
+    """
+    step = interval_to_ms(interval) if step_ms is None else step_ms
+    made = []
+    for index, close in enumerate(closes):
+        price = Decimal(str(close))
+        made.append(
+            Candle(
+                open_time=start_ms + index * step,
+                close_time=start_ms + (index + 1) * step,
+                open=price,
+                high=Decimal(str(highs[index])) if highs else price + 10,
+                low=Decimal(str(lows[index])) if lows else price - 10,
+                close=price,
+                volume=Decimal("1.5"),
+            )
+        )
+    return made
 
 
 @dataclass

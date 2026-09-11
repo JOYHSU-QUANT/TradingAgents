@@ -26,8 +26,8 @@ FUNDING_INTERVAL_MS = 60 * 60_000
 # an exact grid, 524 of those 531 read as off-grid — a report that flags
 # everything answers nothing, which is the same failure the grid's anchoring
 # choice exists to avoid. Five seconds is fifty times the jitter observed and
-# a seven-hundredth of the step, so it absorbs posting latency while leaving
-# any stamp genuinely in the wrong slot to be named.
+# one seven-hundred-and-twentieth of the step, so it absorbs posting latency
+# while leaving any stamp genuinely in the wrong slot to be named.
 FUNDING_STAMP_TOLERANCE_MS = 5_000
 
 # Candle stamps get NO tolerance, and that is a measurement rather than an

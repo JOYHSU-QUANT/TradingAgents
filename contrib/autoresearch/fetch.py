@@ -144,6 +144,10 @@ class StopReason(str, Enum):
     """Why a walk ended. Reported, because the endings mean very different things.
 
     ``REACHED_SINCE`` / ``REACHED_END`` is the walk finishing its job.
+    ``INTERRUPTED`` is the one nothing inside the walk ever sets: it is what
+    the recorded reach still says when the walk left by raising — a venue
+    failure, a Ctrl-C — so an ending that was never reached cannot name
+    itself.
     ``VENUE_EXHAUSTED`` means the venue stopped serving older data — for a
     backfill starting before the coin listed, the correct and expected
     ending. ``NO_PROGRESS`` and ``PAGE_LIMIT`` are the walk protecting itself:
@@ -157,6 +161,7 @@ class StopReason(str, Enum):
     VENUE_EXHAUSTED = "the venue served no older data"
     NO_PROGRESS = "the venue stopped moving the window"
     PAGE_LIMIT = "hit the request limit"
+    INTERRUPTED = "the walk did not finish"
 
 
 @dataclass(frozen=True)
@@ -179,6 +184,53 @@ class SeriesFetch:
     @property
     def rows_added(self) -> int:
         return self.rows_after - self.rows_before
+
+
+def _record_reach(
+    store: ResearchStore,
+    *,
+    coin: str,
+    series: str,
+    venue_clock_ms: int,
+    since_ms: int,
+    stopped: StopReason,
+    span: Callable[[], tuple[int | None, int | None]],
+    count: Callable[[], int],
+) -> None:
+    """Write where a walk reached, and never become the failure it reports.
+
+    Called from a ``finally``, so it runs while an exception may already be
+    propagating — which is exactly when the row matters most and exactly when
+    writing it is most likely to fail too. A store error here must therefore
+    be contained: replacing "the venue refused" with "the store could not be
+    written" would send an operator to the wrong system entirely, and losing
+    a breadcrumb is the smaller harm. The same discipline the perp package
+    applies to its own backfill breadcrumbs.
+
+    ``span`` and ``count`` are called HERE rather than by the caller for the
+    same reason: they are store reads, so they can fail the same way, and
+    inside the containment they cost a warning instead of a traceback.
+    """
+    try:
+        earliest, latest = span()
+        store.record_series_state(
+            coin=coin,
+            series=series,
+            venue_clock_ms=venue_clock_ms,
+            since_ms=since_ms,
+            earliest_ms=earliest,
+            latest_ms=latest,
+            rows=count(),
+            stopped=stopped.name,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "%s %s: could not record where the backfill reached; the stored reach "
+            "now describes an earlier run",
+            coin,
+            series,
+            exc_info=True,
+        )
 
 
 def _window(since: datetime, end: datetime, *, what: str) -> tuple[int, int]:
@@ -224,34 +276,64 @@ def backfill_candles(
     since_ms, _ = _window(since, end, what=f"{coin} {key} candle backfill")
     before = store.count_candles(coin, key)
     cursor, pages, written = end, 0, 0
-    stopped = StopReason.PAGE_LIMIT
-    while pages < MAX_PAGES:
-        page = _served(
-            partial(market.get_candles, coin, key, page_bars, end=cursor),
-            sleep=sleep,
-            what=f"{coin} {key} candles",
+    # INTERRUPTED until the walk says otherwise, because the recording below
+    # happens in a ``finally``: an ending this function never reached must not
+    # be able to name itself. Initialising to PAGE_LIMIT here (which the
+    # ``else`` arm now sets) would have a throttled walk record "hit the
+    # request limit" on its way out.
+    stopped = StopReason.INTERRUPTED
+    try:
+        while pages < MAX_PAGES:
+            page = _served(
+                partial(market.get_candles, coin, key, page_bars, end=cursor),
+                sleep=sleep,
+                what=f"{coin} {key} candles",
+            )
+            pages += 1
+            if not page:
+                stopped = StopReason.VENUE_EXHAUSTED
+                break
+            # ``min`` rather than ``page[0]``: the port says oldest first, and
+            # the walk's whole correctness rests on which bar the next window
+            # ends at. Deriving it from the values costs one pass and cannot
+            # be wrong.
+            oldest = min(bar.open_time for bar in page)
+            written += store.upsert_candles(
+                coin, key, [b for b in page if b.open_time >= since_ms]
+            )
+            if oldest <= since_ms:
+                stopped = StopReason.REACHED_SINCE
+                break
+            # The next window ENDS at this page's oldest open. That bar closes
+            # after it, so it is not served again; the bar before it closes
+            # exactly at it, so nothing is skipped. Anything else here is
+            # either a duplicated page or a one-bar hole per page.
+            nxt = from_epoch_ms(oldest)
+            if nxt >= cursor:
+                stopped = StopReason.NO_PROGRESS
+                break
+            cursor = nxt
+        else:
+            # The loop CONDITION went false, which is the request bound.
+            stopped = StopReason.PAGE_LIMIT
+    finally:
+        # In a ``finally``, because the ending this row exists to record is the
+        # one that does not return: a venue failure propagates out of
+        # ``_served`` by design, and a Ctrl-C arrives anywhere. On the return
+        # path alone the row kept the PREVIOUS run's answer while the store
+        # had grown underneath it, so a store left half-filled by an
+        # interrupted 2020 backfill still read "reached the requested start"
+        # — the exact claim this table was added to be able to contradict.
+        _record_reach(
+            store,
+            coin=coin,
+            series=key,
+            venue_clock_ms=epoch_ms(end, what=f"{coin} {key} candle backfill end"),
+            since_ms=since_ms,
+            stopped=stopped,
+            span=partial(store.candle_span, coin, key),
+            count=partial(store.count_candles, coin, key),
         )
-        pages += 1
-        if not page:
-            stopped = StopReason.VENUE_EXHAUSTED
-            break
-        # ``min`` rather than ``page[0]``: the port says oldest first, and the
-        # walk's whole correctness rests on which bar the next window ends at.
-        # Deriving it from the values costs one pass and cannot be wrong.
-        oldest = min(bar.open_time for bar in page)
-        written += store.upsert_candles(coin, key, [b for b in page if b.open_time >= since_ms])
-        if oldest <= since_ms:
-            stopped = StopReason.REACHED_SINCE
-            break
-        # The next window ENDS at this page's oldest open. That bar closes
-        # after it, so it is not served again; the bar before it closes
-        # exactly at it, so nothing is skipped. Anything else here is either
-        # a duplicated page or a one-bar hole per page.
-        nxt = from_epoch_ms(oldest)
-        if nxt >= cursor:
-            stopped = StopReason.NO_PROGRESS
-            break
-        cursor = nxt
     logger.info(
         "%s %s candles: %d page(s), %d row(s) written, stopped because %s",
         coin,
@@ -261,21 +343,6 @@ def backfill_candles(
         stopped.value,
     )
     after = store.count_candles(coin, key)
-    earliest, latest = store.candle_span(coin, key)
-    # Recorded, not merely returned: ``stopped`` is the only thing separating a
-    # series the venue cannot serve more of from one an interrupted backfill
-    # left short, and the rows themselves never say which. Returned it would
-    # reach an operator's terminal and nothing else.
-    store.record_series_state(
-        coin=coin,
-        series=key,
-        venue_clock_ms=epoch_ms(end, what=f"{coin} {key} candle backfill end"),
-        since_ms=since_ms,
-        earliest_ms=earliest,
-        latest_ms=latest,
-        rows=after,
-        stopped=stopped.name,
-    )
     return SeriesFetch(
         label=f"{coin} {key} candles",
         pages=pages,
@@ -307,42 +374,69 @@ def backfill_funding(
     span_ms = page_days * MS_PER_DAY
     before = store.count_funding(coin)
     cursor_ms, pages, written = since_ms, 0, 0
-    stopped = StopReason.REACHED_END
-    while cursor_ms <= end_ms:
-        if pages >= MAX_PAGES:
-            stopped = StopReason.PAGE_LIMIT
-            break
-        # The window end is NOT clamped to ``end_ms``, and that is load-bearing:
-        # the endpoint derives its START as ``end - page_days``, so clamping the
-        # end drags the start back below the cursor. The walk then re-requests
-        # records it already holds, reads their stamps as "older than the
-        # cursor", concludes the venue served nothing new and stops — silently,
-        # a page short of the end, every single time the last window would
-        # overhang. Asking past the venue's clock costs nothing (there is no
-        # data there) and the filter below is what keeps anything past it out.
-        window_end_ms = cursor_ms + span_ms
-        window_end = from_epoch_ms(window_end_ms)
-        points = _served(
-            partial(market.get_funding_history, coin, page_days, end=window_end),
-            sleep=sleep,
-            what=f"{coin} funding",
+    # INTERRUPTED until the walk says otherwise; the ``else`` arm below is what
+    # now sets REACHED_END. See the candle walk for why the initial value may
+    # not be an ending this function might never reach.
+    stopped = StopReason.INTERRUPTED
+    try:
+        while cursor_ms <= end_ms:
+            if pages >= MAX_PAGES:
+                stopped = StopReason.PAGE_LIMIT
+                break
+            # The window end is NOT clamped to ``end_ms``, and that is
+            # load-bearing: the endpoint derives its START as
+            # ``end - page_days``, so clamping the end drags the start back
+            # below the cursor. The walk then re-requests records it already
+            # holds, reads their stamps as "older than the cursor", concludes
+            # the venue served nothing new and stops — silently, a page short
+            # of the end, every single time the last window would overhang.
+            # Asking past the venue's clock costs nothing (there is no data
+            # there) and the filter below keeps anything past it out.
+            window_end_ms = cursor_ms + span_ms
+            window_end = from_epoch_ms(window_end_ms)
+            points = _served(
+                partial(market.get_funding_history, coin, page_days, end=window_end),
+                sleep=sleep,
+                what=f"{coin} funding",
+            )
+            pages += 1
+            written += store.upsert_funding(
+                coin, [p for p in points if since_ms <= p.time <= end_ms]
+            )
+            newest = max((p.time for p in points if p.time <= end_ms), default=None)
+            # Resume just past the newest record RECEIVED, not past the window
+            # that was asked for: those differ exactly when the venue
+            # truncated, and that difference is the tail this walk exists not
+            # to lose. An empty window has no tail, so it is stepped over as
+            # asked.
+            #
+            # Both arms are strictly greater than ``cursor_ms`` — the first by
+            # its own guard, the second because ``window_end_ms >= cursor_ms``
+            # — so the forward walk cannot stall the way the backward one can,
+            # and there is no NO_PROGRESS branch here to match the candle
+            # walk's. A venue answering every request with the same single
+            # record would advance one millisecond per page and be stopped by
+            # MAX_PAGES instead. Writing the guard anyway would have looked
+            # like protection while being unreachable code no test could reach.
+            cursor_ms = (
+                newest + 1
+                if newest is not None and newest >= cursor_ms
+                else window_end_ms + 1
+            )
+        else:
+            # The loop CONDITION went false: the cursor passed the window end.
+            stopped = StopReason.REACHED_END
+    finally:
+        _record_reach(
+            store,
+            coin=coin,
+            series=FUNDING_SERIES,
+            venue_clock_ms=end_ms,
+            since_ms=since_ms,
+            stopped=stopped,
+            span=partial(store.funding_span, coin),
+            count=partial(store.count_funding, coin),
         )
-        pages += 1
-        written += store.upsert_funding(coin, [p for p in points if since_ms <= p.time <= end_ms])
-        newest = max((p.time for p in points if p.time <= end_ms), default=None)
-        # Resume just past the newest record RECEIVED, not past the window
-        # that was asked for: those differ exactly when the venue truncated,
-        # and that difference is the tail this walk exists not to lose. An
-        # empty window has no tail, so it is stepped over as asked.
-        # Both arms are strictly greater than ``cursor_ms`` — the first by its
-        # own guard, the second because ``window_end_ms >= cursor_ms`` — so the
-        # forward walk cannot stall the way the backward one can, and there is
-        # no NO_PROGRESS branch here to match the candle walk's. A venue that
-        # answered every request with the same single record would advance one
-        # millisecond per page and be stopped by MAX_PAGES instead. Writing the
-        # guard anyway would have looked like protection while being
-        # unreachable code that no test could ever reach either.
-        cursor_ms = newest + 1 if newest is not None and newest >= cursor_ms else window_end_ms + 1
     logger.info(
         "%s funding: %d page(s), %d row(s) written, stopped because %s",
         coin,
@@ -351,17 +445,6 @@ def backfill_funding(
         stopped.value,
     )
     after = store.count_funding(coin)
-    earliest, latest = store.funding_span(coin)
-    store.record_series_state(
-        coin=coin,
-        series=FUNDING_SERIES,
-        venue_clock_ms=end_ms,
-        since_ms=since_ms,
-        earliest_ms=earliest,
-        latest_ms=latest,
-        rows=after,
-        stopped=stopped.name,
-    )
     return SeriesFetch(
         label=f"{coin} funding",
         pages=pages,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 
 import pytest
@@ -504,15 +505,97 @@ def test_each_walk_records_where_it_reached_and_why_it_stopped(store):
     assert funding["rows"] == len(points)
 
 
+def test_a_walk_that_dies_mid_flight_records_that_it_did_not_finish(store):
+    """The ending the table exists for, driven rather than hand-written.
+
+    A walk that raises is precisely the case a front-truncated store comes
+    from, and it is the one recorded on no return path. Left there, the row
+    kept the PREVIOUS run's answer while the store grew underneath it: a
+    store half-filled by an interrupted deep backfill still read "reached the
+    requested start", the exact claim this table was added to contradict.
+
+    Written by driving a real failure through the walk. An earlier version of
+    this test called ``record_series_state`` itself and asserted on the row it
+    had just written, which demonstrated a row the walk could not produce.
+    """
+    series = bars(60)
+    market = market_at(series[-1].close_time, candles={("BTC", "4h"): series})
+    window = {
+        "coin": "BTC",
+        "interval": "4h",
+        "since": _since(ANCHOR_MS),
+        "end": market.clock,
+    }
+    # A completed shallow walk first, so there is a stale answer to overwrite.
+    backfill_candles(market, store, page_bars=100, **window)
+    assert store.series_state(coin="BTC", series="4h")["stopped"] == (
+        StopReason.REACHED_SINCE.name
+    )
+
+    # Now a walk that dies partway through.
+    class DyingMarket(ScriptedMarket):
+        def get_candles(self, coin, interval, lookback, *, end):
+            if len(self.candle_calls) >= 1:
+                raise ExchangeError("Hyperliquid request failed: the venue fell over")
+            return super().get_candles(coin, interval, lookback, end=end)
+
+    dying = DyingMarket(
+        clock=market.clock, candles={("BTC", "4h"): bars(200, start_ms=ANCHOR_MS - 140 * STEP_4H)}
+    )
+    with pytest.raises(ExchangeError):
+        backfill_candles(
+            dying,
+            store,
+            coin="BTC",
+            interval="4h",
+            since=_since(ANCHOR_MS - 140 * STEP_4H),
+            end=market.clock,
+            page_bars=20,
+            sleep=lambda _seconds: None,
+        )
+    state = store.series_state(coin="BTC", series="4h")
+    assert state["stopped"] == StopReason.INTERRUPTED.name
+    # And it describes the store as it NOW is, not as the finished walk left it.
+    assert state["rows"] == store.count_candles("BTC", "4h")
+    assert state["since_ms"] == ANCHOR_MS - 140 * STEP_4H
+
+
+def test_a_store_write_that_fails_on_the_way_out_does_not_replace_the_real_error(store):
+    """Recording a breadcrumb may not become the failure it was reporting.
+
+    The recording runs in a ``finally``, so it runs while the venue's error is
+    already propagating. If the store is failing too, the operator must still
+    be told the venue refused - being sent to the wrong system is worse than
+    losing a breadcrumb.
+    """
+
+    class DownMarket(ScriptedMarket):
+        def get_candles(self, coin, interval, lookback, *, end):
+            raise ExchangeError("Hyperliquid request failed: the venue fell over")
+
+    def explode(**_kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    market = DownMarket(clock=from_epoch_ms(ANCHOR_MS + 10_000_000))
+    store.record_series_state = explode  # type: ignore[method-assign]
+    with pytest.raises(ExchangeError, match="the venue fell over"):
+        backfill_candles(
+            market,
+            store,
+            coin="BTC",
+            interval="4h",
+            since=_since(ANCHOR_MS),
+            end=market.clock,
+            sleep=lambda _seconds: None,
+        )
+
+
 def test_a_front_truncated_series_scans_clean_but_records_the_interruption(store):
     """Why the recorded reach exists at all.
 
-    A walk stopped by the request limit lands the NEWEST pages and none of the
-    older ones, so what it leaves behind is a contiguous grid missing its
-    front. The gap scan anchors on the first stamp it finds, so that store
-    reports no holes - exactly like a series the venue genuinely has no more
-    of. The stop reason is the only thing that separates them, and it lives
-    nowhere in the rows.
+    A store missing the FRONT of its span is internally consistent, so the gap
+    scan reports no holes - exactly like a series the venue genuinely has no
+    more of. The stop reason is the only thing that separates them.
     """
     series = bars(60)
     market = market_at(series[-1].close_time, candles={("BTC", "4h"): series})
@@ -528,7 +611,6 @@ def test_a_front_truncated_series_scans_clean_but_records_the_interruption(store
     )
     assert result.stopped is StopReason.REACHED_SINCE
 
-    # Now the same series, cut short: only the newest two pages landed.
     with ResearchStore() as truncated:
         truncated.upsert_candles("BTC", "4h", series[20:])
         truncated.record_series_state(
@@ -539,12 +621,10 @@ def test_a_front_truncated_series_scans_clean_but_records_the_interruption(store
             earliest_ms=series[20].open_time,
             latest_ms=series[-1].open_time,
             rows=40,
-            stopped=StopReason.PAGE_LIMIT.name,
+            stopped=StopReason.INTERRUPTED.name,
         )
-        # Indistinguishable to the scan...
         assert scan_candles(truncated, coin="BTC", interval="4h").complete
         assert scan_candles(store, coin="BTC", interval="4h").complete
-        # ...and told apart by what each walk recorded.
         cut = truncated.series_state(coin="BTC", series="4h")
         whole = store.series_state(coin="BTC", series="4h")
         assert cut["stopped"] != whole["stopped"]

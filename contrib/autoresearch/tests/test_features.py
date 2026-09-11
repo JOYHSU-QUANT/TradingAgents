@@ -328,6 +328,22 @@ def test_cumulative_funding_sums_the_settlements_inside_the_bars_it_names():
     assert series[1] == pytest.approx(float(Decimal("0.00001") * (6 + 7 + 8 + 9)))
 
 
+def test_a_four_settlement_window_needs_all_four():
+    """The coverage fraction rounds UP, and at this window that is the whole rule.
+
+    ``funding_cum_1`` spans four hours. Floored, 90% of four is three — so the
+    window this guard was written to stop reporting, the one missing a
+    settlement, would have gone on being reported a quarter short. Every
+    longer window lands well clear of its boundary; this is the one where the
+    rounding decides.
+    """
+    whole = funding_points(20)
+    holed = [point for point in whole if point.time != whole[9].time]
+    bars = candles([100, 110, 120])
+    assert _column(FeatureFrame(SeriesBundle(bars, funding=whole)), "funding_cum_1")[2] is not None
+    assert _column(FeatureFrame(SeriesBundle(bars, funding=holed)), "funding_cum_1")[2] is None
+
+
 def test_cumulative_funding_is_none_when_the_series_starts_inside_the_window():
     """A sum missing part of its window is understated and does not look wrong.
 
@@ -506,12 +522,15 @@ def test_every_engine_backed_feature_is_computed_in_one_walk(monkeypatch):
             funding_zscore=real.funding_zscore,
         ),
     )
-    frame = _frame([30000 + 100 * index for index in range(30)])
+    # Sixty bars, because every one of the four has to have a value: a column
+    # of ``None`` is refused now, and a fixture too short for ``ema_50`` would
+    # be testing the refusal rather than the walk.
+    frame = _frame([30000 + 100 * index for index in range(60)])
     _column(frame, "ema_20")
     _column(frame, "ema_50")
     _column(frame, "rsi_14")
     _column(frame, "regime")
-    assert len(calls) == 30  # one per bar, not one per bar per feature
+    assert len(calls) == 60  # one per bar, not one per bar per feature
 
 
 def test_the_indicator_engine_sees_the_window_the_live_path_fetches():
@@ -554,6 +573,21 @@ def test_an_indicator_engine_that_answers_nothing_at_all_is_refused(monkeypatch)
     frame = _frame([30000 + 100 * index for index in range(120)])
     with pytest.raises(FeatureError, match="the indicator engine returned nothing"):
         _column(frame, "ema_20")
+
+
+def test_a_column_of_silence_is_refused_however_many_times_it_is_asked_for():
+    """The indicator walk fills five columns at once, so four reach a caller cached.
+
+    Checked on the SECOND request as well as the first: the guard used to run
+    only on the computing path, so asking for a working indicator first and
+    the short one afterwards handed back the column of silence. That is the
+    order an evaluator actually uses — ``spec.features`` sorts the regime last.
+    """
+    frame = _frame([30000 + 100 * index for index in range(45)])
+    assert _column(frame, "rsi_14")[-1] is not None  # fills the cache for all five
+    for _attempt in range(2):
+        with pytest.raises(FeatureError, match="ema_50 has no value at any"):
+            _column(frame, "ema_50")
 
 
 def test_a_warming_up_engine_is_not_mistaken_for_a_broken_one():

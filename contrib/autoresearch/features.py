@@ -67,6 +67,7 @@ hand it a column of silence.
 
 from __future__ import annotations
 
+import math
 import statistics
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Sequence
@@ -193,8 +194,15 @@ def _window_is_covered(observed: int, span_ms: int) -> bool:
     and it had to reason about the boundary to do even that — it allowed a
     whole extra settlement of slack, which understated a four-settlement sum
     by a quarter, and it was blind to every hole that did not touch the edge.
+
+    Rounded UP, which is the whole of the difference between a policy and an
+    accident: a four-settlement window floored at 90% requires three, so
+    ``funding_cum_1`` would have gone on reporting the same quarter-understated
+    sum this function was written to stop — and a window shorter than about an
+    hour would have required none at all, reporting a carry of zero from no
+    settlements whatever.
     """
-    return observed >= int(span_ms / FUNDING_INTERVAL_MS * _MIN_WINDOW_COVERAGE)
+    return observed >= math.ceil(span_ms / FUNDING_INTERVAL_MS * _MIN_WINDOW_COVERAGE)
 
 
 # What a computed feature is: a number, a regime label, or "not available at
@@ -353,8 +361,15 @@ class FeatureFrame:
         if cached is None:
             self._require_source(ref.kind)
             cached = self._compute(ref.kind, ref.period)
-            self._require_an_answer_somewhere(ref, cached)
             self._cache[key] = cached
+        # Checked on every return, not only after computing: the indicator
+        # walk fills the cache for five features at once, so four of them
+        # reached their first caller through the hit above and skipped the
+        # guard entirely. That is the likeliest order too — ``spec.features``
+        # sorts the regime last, so an evaluator walking it asks a working
+        # indicator first and would have been handed the column of silence
+        # this refuses.
+        self._require_an_answer_somewhere(ref, cached)
         return cached
 
     def value_at(self, ref: FeatureRef, index: int) -> FeatureValue:

@@ -533,8 +533,8 @@ def test_a_key_written_twice_is_refused_rather_than_resolved_to_the_last_one():
     [
         ("rsi_14", 150, "oscillator"),
         ("ret_6", -2, "return"),
-        ("funding_rate", 3, "rate"),
         ("close", -1, "price"),
+        ("atr_14", -5, "price_span"),
     ],
 )
 def test_a_threshold_the_feature_could_never_cross_is_refused(left, threshold, scale):
@@ -547,6 +547,24 @@ def test_a_threshold_the_feature_could_never_cross_is_refused(left, threshold, s
     message = _message(_base(entry={"long": [{"left": left, "op": ">", "right": threshold}]}))
     assert f"measured in {scale}" in message
     assert "never cross" in message
+
+
+@pytest.mark.parametrize("left", ["funding_zscore_30", "funding_rate", "funding_cum_24"])
+def test_a_feature_with_no_definitional_bound_takes_any_finite_threshold(left):
+    """A z-score of 245 is a real reading, so ±10 was a cap with no arithmetic in it.
+
+    Measured on ordinary hourly funding, a single spike scores in the
+    hundreds — and that is exactly where a ``funding_filter`` hypothesis
+    lives, so capping it would have refused the family's own signal with a
+    sentence claiming the threshold could never be crossed.
+    """
+    spec = parse_spec(
+        _base(
+            family="funding_filter",
+            entry={"long": [{"left": left, "op": ">", "right": 250}]},
+        )
+    )
+    assert spec.entries(Side.LONG)[0].right == 250.0
 
 
 def test_a_threshold_merely_on_the_wrong_scale_is_not_caught():
@@ -625,6 +643,13 @@ def test_a_threshold_built_in_code_is_checked_against_the_features_scale_too():
         Condition(left=FeatureRef(FeatureKind.RSI, 14), op=Op.GT, right=150.0)
     with pytest.raises(SpecError, match="finite number"):
         Condition(left=FeatureRef(FeatureKind.CLOSE), op=Op.GT, right=float("inf"))
+    # And the two shapes that escaped as a ``TypeError`` — outside the lane
+    # the CLI catches and the hypothesis loop turns into a note, which is the
+    # same escape the huge-integer overflow made at the parser.
+    with pytest.raises(SpecError, match="is a number, got 'x'"):
+        Condition(left=FeatureRef(FeatureKind.CLOSE), op=Op.GT, right="x")
+    with pytest.raises(SpecError, match="is a number, got True"):
+        Condition(left=FeatureRef(FeatureKind.RSI, 14), op=Op.GT, right=True)
 
 
 def test_a_sizing_built_in_code_cannot_carry_the_other_modes_fields():
@@ -634,6 +659,14 @@ def test_a_sizing_built_in_code_cannot_carry_the_other_modes_fields():
         Sizing(mode=SizingMode.FIXED_MARGIN_FRACTION)
     with pytest.raises(SpecError, match="needs 'max_fraction'"):
         Sizing(mode=SizingMode.VOL_TARGET, target_vol=0.02, vol_lookback=20)
+    for broken in (
+        {"mode": SizingMode.FIXED_MARGIN_FRACTION, "fraction": "x"},
+        {"mode": SizingMode.VOL_TARGET, "target_vol": "x", "vol_lookback": 20, "max_fraction": 0.5},
+    ):
+        # Refused as a spec failure, not as a ``TypeError`` from the first
+        # comparison that meets the string.
+        with pytest.raises(SpecError, match="is a number, got 'x'"):
+            Sizing(**broken)
 
 
 def test_a_volatility_lookback_is_judged_by_the_vocabulary_that_owns_periods():
@@ -679,8 +712,8 @@ def test_a_spec_built_in_code_meets_the_structural_rules_too():
     # And the hold bound, which exists so ``max_bars`` cannot become a second
     # spelling of "never exit" — a later phase mutating a hold length does not
     # pass the parser that used to be the only place this was checked.
-    with pytest.raises(SpecError, match=f"between 1 and {MAX_HOLD_BARS}"):
-        StrategySpec(
+    def _held_for(max_bars):
+        return StrategySpec(
             family=Family.BREAKOUT,
             entry_long=(entry,),
             entry_short=(),
@@ -688,8 +721,17 @@ def test_a_spec_built_in_code_meets_the_structural_rules_too():
             exit_short=(),
             filters=(),
             sizing=sizing,
-            max_bars=10**9,
+            max_bars=max_bars,
         )
+
+    with pytest.raises(SpecError, match=f"between 1 and {MAX_HOLD_BARS}"):
+        _held_for(10**9)
+    # And its type, for the reason the thresholds' is checked: 12.5 bars is
+    # not a hold, ``True`` is not one either, and a string left the bound
+    # comparison as a TypeError outside the refusal lane.
+    for wrong in (12.5, True, "x"):
+        with pytest.raises(SpecError, match="a whole number of bars"):
+            _held_for(wrong)
 
 
 def test_two_specs_that_say_the_same_thing_land_in_one_place_in_a_set():

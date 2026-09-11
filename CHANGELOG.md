@@ -78,8 +78,8 @@ Breaking changes within the 0.x line are called out explicitly.
   config's own default asks for each cycle, so the same bar gets the same
   indicator here and there. It is also the difference between a linear cost
   and a quadratic one - the engine rebuilds its frame per call, so the
-  expanding prefix this started as reached 6.8 ms a bar by bar 5000 against
-  about 1.6 ms flat.
+  expanding prefix this started as reaches 12 ms a bar by bar 5000 against
+  about 2.5 ms flat.
 
   Five places where mirroring the live path means NOT passing a value through,
   and each is a number that would otherwise be quietly wrong rather than

@@ -32,7 +32,8 @@ memory `hyperliquid-autoresearch-mvp-direction`。
   自由運算式。未知欄位、未知 feature、未知 op、未來 offset 一律**具名拒絕**，句子裡帶著
   文件內的路徑（`spec.entry.long[0].right`）與該怎麼改。
 - **逐 bar 的 feature 計算**（`features.py`）：每個值只由「截至該 bar 收盤」的資料算出來，
-  而且是**建構上如此**——indicator 引擎拿到的永遠是 `bars[: t + 1]`。
+  而且是**建構上如此**——indicator 引擎拿到的 window 永遠**結束在這根 bar**，起點則固定
+  往回 200 根，也就是實盤每 cycle fetch 的根數（見下面「無前視是建構保證」）。
 - **三個 pin 測試**（`tests/test_pins.py`）：`compute_indicators`、`classify_regime`、
   `funding_zscore` 的簽名與固定輸入的固定輸出。
 
@@ -150,16 +151,16 @@ start`／`reached the requested end`（正常跑完）、`hit the request limit`
 ### 無前視是建構保證
 
 每個 feature 的值只由「截至該 bar 收盤」的資料算出來，因為**沒有一條路徑寫得出 t+1**：
-indicator 引擎拿到的 window 結束在這根 bar，日線只看 `close_time` 已經 ≤ 這根 4h bar 收盤
-的那些，funding 同理。測試（`test_features.py`）把 bundle 截到第 t 根再算一次，要求兩邊
+indicator 引擎拿到的 window **結束在這根 bar**（起點見下一段），日線只看 `close_time`
+已經 ≤ 這根 4h bar 收盤的那些，funding 同理。測試（`test_features.py`）把 bundle 截到第 t 根再算一次，要求兩邊
 完全相同——**而且截兩次**：只截 bar 抓得到「往前索引」的錯，連日線與 funding 一起截才抓得到
 「去讀一根當下看不到的日 K」的錯。旁邊還有一個守門測試，要求被檢查的那根 bar 上**每個**
 feature 都有值，否則一整排 `None` 會跟自己完美相符。
 
 window 的**起點**則是另一件事：它固定往回 200 根，也就是實盤每個 cycle 去 fetch 的根數
 （`candle_lookback`）。同一根 bar 因此在這裡與那裡拿到同一個 EMA；順帶一提，這也讓成本從
-平方變回線性——引擎每次呼叫都重建 frame，餵不斷變長的 prefix 到第 5000 根是 6.8 ms/bar，
-固定 window 是大約 1.6 ms。
+平方變回線性——引擎每次呼叫都重建 frame，餵不斷變長的 prefix 到第 5000 根本機實測
+12 ms/bar，固定 window 是大約 2.5 ms。
 
 有幾個地方「忠實鏡射實盤」的意思是**不要**把上游的值直接傳出來：
 

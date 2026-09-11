@@ -230,12 +230,12 @@ def test_a_daily_series_that_stops_early_does_not_carry_its_last_close_forward()
     series = _column(frame, "close_1d")
     assert series[6] == pytest.approx(2000.0)  # the second day closed here
     assert series[11] == pytest.approx(2000.0)  # still inside that day
-    # Bar 12 closes exactly one day after that daily bar did, which is the
-    # instant the next one is due — leniently still current, the same way a
-    # funding rate is current for one whole interval. Bar 13 is where the
-    # daily series is definitely no longer describing this bar's day.
-    assert series[12] == pytest.approx(2000.0)
-    assert series[13] is None
+    # Bar 12 closes exactly one day after that daily bar did — the instant the
+    # next daily bar was due, and it is not there. On a complete series this
+    # age is unreachable: a bar closing when a day closes sees that day at an
+    # age of zero, so the oldest a close ever gets is 20h. Reaching 24h IS the
+    # gap, and it lands on the 00:00 UTC bar.
+    assert series[12] is None
 
 
 def test_a_daily_close_one_millisecond_into_the_future_is_invisible():
@@ -424,7 +424,7 @@ def test_the_regime_is_the_borrowed_label_once_the_indicators_exist():
 def test_every_engine_backed_feature_is_computed_in_one_walk(monkeypatch):
     """Asking for two indicators must not walk the series twice.
 
-    The walk is the only expensive thing this module does — about 3 ms a bar —
+    The walk is the only expensive thing this module does — about 2.5 ms a bar —
     so a frame computing each indicator separately would multiply the cost of
     an experiment by the number of indicators its spec happens to mention.
     """

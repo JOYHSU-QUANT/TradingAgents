@@ -25,8 +25,8 @@ saw, and the difference would be invisible in the results.
 
 Feeding the engine a fixed trailing window rather than the whole prefix is
 also what keeps the cost linear: the engine rebuilds its frame on every call,
-so an expanding prefix is quadratic — measured at 6.8 ms a bar by bar 5000,
-against about 1.6 ms flat here.
+so an expanding prefix grows with the series — measured on this box at
+12 ms a bar by bar 5000, against about 2.5 ms flat here.
 
 Two places where mirroring the live path means NOT passing its value through:
 
@@ -93,8 +93,17 @@ __all__ = [
 
 # How many closed bars the indicator engine is shown at each bar — the count
 # the live path's own fetch asks for, taken from that config's declared
-# default rather than repeated as a number here, so the two cannot drift apart
+# DEFAULT rather than repeated as a number here, so the two cannot drift apart
 # without ``tests/test_pins.py`` saying so.
+#
+# The default is as far as this reaches, and the limit is worth stating: the
+# running value is a YAML key an operator may set, in a file that is
+# deliberately not in the repository. So "the same bar gets the same
+# indicator here and there" holds while the server sits at the default, and a
+# server fetching a different number would make research indicators
+# incomparable with nothing going red. Closing that needs the lookback to
+# become an argument to the frame rather than a constant, which is PR A3's to
+# do when it learns where an experiment's parameters come from.
 LIVE_CANDLE_LOOKBACK: Final = MarketDataConfig().candle_lookback
 
 # Bound once, at import: ``context_analytics`` imports pandas and stockstats
@@ -132,15 +141,25 @@ _INDICATOR_NAMES: Final[tuple[str, ...]] = tuple(
 # legitimately tightens both.
 _FUNDING_STALE_MS: Final = FUNDING_INTERVAL_MS + FUNDING_STAMP_TOLERANCE_MS
 
-# The same rule for the daily backdrop: a bar's daily close may be up to one
-# whole day old (a 4h bar at 20:00 reads the day that closed at 00:00), and
-# anything older means the daily series has stopped or has a hole. Carrying a
-# daily close forward past that is the same defect as carrying a funding rate
-# forward — a trend filter frozen at one number, permanently on or permanently
-# off, scored as a filter that was live. ``fetch`` walks 4h and 1d in separate
-# invocations, so "4h current, 1d months behind" is the default consequence of
-# running one and not the other.
-_DAILY_STALE_MS: Final = MS_PER_DAY + CANDLE_STAMP_TOLERANCE_MS
+# The same question for the daily backdrop, with a different answer at the
+# boundary. Carrying a daily close forward is the same defect as carrying a
+# funding rate forward — a trend filter frozen at one number, permanently on
+# or permanently off, scored as a filter that was live — and ``fetch`` walks
+# 4h and 1d in separate invocations, so "4h current, 1d months behind" is the
+# default consequence of running one and not the other.
+#
+# Stale AT one day rather than past it, which is where this differs from
+# funding, and the reason is the stamps. Bar stamps are exact
+# (``CANDLE_STAMP_TOLERANCE_MS`` is 0, measured), so a 4h bar closing at the
+# same instant as a daily bar SEES that daily bar, at an age of zero; on a
+# complete daily series the oldest a close can be is one bar short of a day
+# (20h on the 4h grid). An age of exactly one day is therefore only reachable
+# when the daily bar due at that instant is missing — the case this exists to
+# catch — and it would land on the 00:00 UTC bar, where a daily trend filter
+# is most likely to be read. Funding cannot use the same rule: its
+# settlements are stamped AFTER the hour, so on a complete series a bar
+# legitimately reads a rate a full interval old.
+_DAILY_STALE_MS: Final = MS_PER_DAY - CANDLE_STAMP_TOLERANCE_MS
 
 # What a computed feature is: a number, a regime label, or "not available at
 # this bar". ``None`` is never a zero and never a NaN — the same rule the perp
@@ -230,8 +249,8 @@ class FeatureFrame:
     history alone, so a hypothesis loop scoring fifty specs over the same
     bundle computes them once. That matters most for the borrowed indicator
     engine, which is asked for its latest value once per bar — measured at
-    about 1.6 ms a bar on this box, so a 5000-bar series is about eight
-    seconds paid once rather than eight seconds a trial.
+    about 2.5 ms a bar on this box, so a 5000-bar series is some thirteen
+    seconds paid once rather than thirteen seconds a trial.
 
     Frozen so the bundle cannot be swapped out from under the cache. The cache
     itself is a plain dict that is mutated, never rebound: an assignable
@@ -323,9 +342,8 @@ class FeatureFrame:
 
         One walk, for every name, whatever was asked for. The shared part of a
         call is smaller than that sounds — measured on a 200-bar window, the
-        frame build is about 0.5 ms of a 4.8 ms four-name call, and ``rsi_14``
-        alone is 1.4 ms — so a frame asked for one indicator does pay for
-        three it will not read.
+        frame build is about 0.55 ms of a 2.4 ms four-name call — so a frame
+        asked for one indicator does pay for three it will not read.
 
         It is still the right default HERE, and the reason is the caller: one
         frame serves a whole experiment (plan §5's A4 scores many specs
@@ -611,7 +629,7 @@ class FeatureFrame:
         for bar in self.bundle.bars:
             while pointer < len(closes) and closes[pointer] <= bar.close_time:
                 pointer += 1
-            stale = pointer == 0 or bar.close_time - closes[pointer - 1] > _DAILY_STALE_MS
+            stale = pointer == 0 or bar.close_time - closes[pointer - 1] >= _DAILY_STALE_MS
             counts.append(0 if stale else pointer)
         self._alignments["daily"] = counts
         return counts

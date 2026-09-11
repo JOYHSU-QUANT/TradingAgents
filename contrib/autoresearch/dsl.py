@@ -160,27 +160,34 @@ _EQUALITIES: Final = (Op.EQ, Op.NE)
 # doubled inside thirty days, so ``ret_180 > 1`` has to stay writable.
 #
 # Which means this catches the IMPOSSIBLE threshold (``rsi_14 > 150``,
-# ``funding_rate > 3``) and not the merely wrong one: ``rsi_14 < 0.3``, from a
-# model that has met a 0..1 oscillator elsewhere, is inside 0..100 and passes
-# here. That mistake is left to the failure summary the hypothesis loop shows
-# the model, and it is worth saying so rather than letting this table look
-# like a defence it is not.
+# ``ret_6 > -2``) and not the merely wrong one: ``rsi_14 < 0.3``, from a model
+# that has met a 0..1 oscillator elsewhere, is inside 0..100 and passes here.
+# That mistake is left to the failure summary the hypothesis loop shows the
+# model, and it is worth saying so rather than letting this table look like a
+# defence it is not.
 _UNIT_BOUNDS: Final[dict[FeatureUnit, tuple[float, float]]] = {
-    FeatureUnit.PRICE: (0.0, math.inf),
-    FeatureUnit.PRICE_SPAN: (0.0, math.inf),
-    FeatureUnit.RETURN: (-1.0, 10.0),
-    FeatureUnit.RATE: (-1.0, 1.0),
-    FeatureUnit.RATE_SUM: (-1.0, 1.0),
-    FeatureUnit.SCORE: (-10.0, 10.0),
-    FeatureUnit.OSCILLATOR: (0.0, 100.0),
+    FeatureUnit.PRICE: (0.0, math.inf),  # a price is not negative
+    FeatureUnit.PRICE_SPAN: (0.0, math.inf),  # nor is a distance between two
+    FeatureUnit.RETURN: (-1.0, math.inf),  # a price cannot fall by more than all of it
+    FeatureUnit.OSCILLATOR: (0.0, 100.0),  # the definition of the index itself
 }
+
+# The units with NO bound, listed rather than left to a lookup miss. Each one
+# is genuinely unbounded, and a first cut of this table did not say so: a
+# z-score was capped at ±10, which is a plausibility hint wearing a hard
+# bound's sentence. Measured on ordinary hourly funding, one spike scores
+# z = 245 — so that cap sat exactly where the ``funding_filter`` family's
+# signal lives and refused it as "a threshold it can never cross". A funding
+# rate has no definitional limit either; the venue's own cap is a venue
+# policy, not arithmetic.
+_UNBOUNDED_UNITS: Final = (FeatureUnit.RATE, FeatureUnit.RATE_SUM, FeatureUnit.SCORE)
 
 # Total over the units a NUMBER can be compared against — the regime is the
 # one exclusion, since it is compared with a label and never with a threshold.
-# Asserted rather than defaulted, because ``.get()`` returning ``None`` here
+# Asserted rather than defaulted, because a lookup miss returning ``None``
 # would silently exempt the next unit added (and two were added already).
-assert set(_UNIT_BOUNDS) == set(FeatureUnit) - {FeatureUnit.REGIME}, (
-    "every non-regime unit needs threshold bounds"
+assert set(_UNIT_BOUNDS) | set(_UNBOUNDED_UNITS) == set(FeatureUnit) - {FeatureUnit.REGIME}, (
+    "every non-regime unit is either bounded or deliberately not"
 )
 
 # The share of equity the live path will actually let a decision commit
@@ -312,6 +319,7 @@ class Sizing:
             _require_fraction(self.fraction, "fraction")
             return
         _require_fraction(self.max_fraction, "max_fraction")
+        _require_number(self.target_vol, "target_vol")
         if not _MIN_TARGET_VOL <= self.target_vol <= _MAX_TARGET_VOL:
             raise SpecError(
                 f"target_vol {self.target_vol:g} is outside {_MIN_TARGET_VOL}..{_MAX_TARGET_VOL}; "
@@ -522,15 +530,23 @@ def _check_structure(spec: StrategySpec) -> None:
             )
     declared = dict(spec.params)
     used = {condition.right_param for condition in spec.conditions} - {None}
-    if spec.max_bars is not None and not 1 <= spec.max_bars <= MAX_HOLD_BARS:
+    if spec.max_bars is not None:
         # Bounded here as well as at the parser, for the reason the bound
         # exists: ``max_bars`` must not become a second spelling of "never
         # exit", and a later phase mutating a hold length does not go through
-        # the parser.
-        raise SpecError(
-            f"spec.exit.max_bars: a hold is between 1 and {MAX_HOLD_BARS} bars, got "
-            f"{spec.max_bars}"
-        )
+        # the parser. Its TYPE is checked for the same reason the thresholds'
+        # is — ``12.5`` bars is not a hold and ``True`` is not one either,
+        # while a string left the comparison as a ``TypeError``, outside the
+        # refusal lane entirely.
+        if isinstance(spec.max_bars, bool) or not isinstance(spec.max_bars, int):
+            raise SpecError(
+                f"spec.exit.max_bars: a hold is a whole number of bars, got {spec.max_bars!r}"
+            )
+        if not 1 <= spec.max_bars <= MAX_HOLD_BARS:
+            raise SpecError(
+                f"spec.exit.max_bars: a hold is between 1 and {MAX_HOLD_BARS} bars, got "
+                f"{spec.max_bars}"
+            )
     unused = sorted(set(declared) - used)
     if unused:
         raise SpecError(
@@ -698,10 +714,12 @@ def _check_threshold(left: FeatureRef, number: float, *, named: str | None = Non
     The bounds are hard ones (see :data:`_UNIT_BOUNDS`), so what this refuses
     is a threshold that could never be met. It is a narrower guard than the
     cross-unit one: it catches the impossible threshold, not every threshold
-    on the wrong scale.
+    on the wrong scale — and three units have no bound at all, which is said
+    where they are listed rather than left to a lookup that finds nothing.
     """
-    if not math.isfinite(number):
-        raise SpecError(f"a threshold is a finite number, got {number!r}")
+    _require_number(number, "a threshold")
+    if left.unit not in _UNIT_BOUNDS:
+        return
     low, high = _UNIT_BOUNDS[left.unit]
     if low <= number <= high:
         return
@@ -739,32 +757,31 @@ def _right(
     return _number(value, path), None
 
 
-def _threshold(
-    number: float, path: str, left: FeatureRef, *, named: str | None = None
-) -> float:
-    """A number compared against ``left``, checked against that feature's own scale.
+def _require_number(value: object, what: str) -> float:
+    """A finite number, refused as a :class:`SpecError` rather than a ``TypeError``.
 
-    The bounds are hard ones (see :data:`_UNIT_BOUNDS`), so what this refuses
-    is a threshold that could never be met — the numeric twin of the
-    cross-unit comparison next door. It is a narrower guard than that one: it
-    catches the impossible threshold, not every threshold on the wrong scale.
+    The type guards need this as much as the parser does, and for the reason
+    they exist: a spec assembled in code does not pass ``_number``, so without
+    it ``Condition(..., right="x")`` came out of ``math.isfinite`` as a
+    ``TypeError`` — outside the refusal lane the CLI catches and the
+    hypothesis loop turns into a note. That is the same escape the huge-integer
+    ``OverflowError`` made one level down.
+
+    ``True`` is not a number here for the same reason it is not one at the
+    parser: ``isinstance(True, int)`` is true, so a threshold of ``True``
+    would read as ``1.0`` and pass for a sensible bound on anything scaled
+    near unity.
     """
-    bounds = _UNIT_BOUNDS.get(left.unit)
-    if bounds is None or bounds[0] <= number <= bounds[1]:
-        return number
-    low, high = bounds
-    span = f"{low:g}" if high == math.inf else f"{low:g}..{high:g}"
-    source = f"{named!r} ({number:g})" if named else f"{number:g}"
-    raise SpecError(
-        f"{path}: {left} is measured in {left.unit.value}, which cannot be outside "
-        f"{span}, so {source} is a threshold it can never cross. Thresholds are on the "
-        f"feature's own scale — `python -m contrib.autoresearch vocab` states each one."
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SpecError(f"{what} is a number, got {value!r}")
+    if not math.isfinite(value):
+        raise SpecError(f"{what} is a finite number, got {value!r}")
+    return float(value)
 
 
-def _require_fraction(value: float | None, name: str) -> None:
+def _require_fraction(value: object, name: str) -> None:
     """A share of the account: above 0, at most 1. Pathless, for the type guards."""
-    if value is None or not 0 < value <= 1:
+    if not 0 < _require_number(value, f"{name} is a fraction of the account, which") <= 1:
         raise SpecError(f"{name} is a fraction of the account, above 0 and at most 1, got {value!r}")
 
 

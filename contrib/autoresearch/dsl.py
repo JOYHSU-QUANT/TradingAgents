@@ -529,6 +529,14 @@ def _check_structure(spec: StrategySpec) -> None:
                 f"conditions can never be reached — remove them, or add the entry they belong to"
             )
     declared = dict(spec.params)
+    for name, value in spec.params:
+        # Checked here because a spec built in code does not pass the parser,
+        # and a parameter is shown back beside the number it stands for: a
+        # param carrying a string while its condition carries the real
+        # threshold is a report that disagrees with what was measured.
+        if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):
+            raise SpecError(f"spec.params: {name!r} is not a usable parameter name")
+        _require_number(value, f"spec.params.{name}")
     used = {condition.right_param for condition in spec.conditions} - {None}
     if spec.max_bars is not None:
         # Bounded here as well as at the parser, for the reason the bound
@@ -723,12 +731,17 @@ def _check_threshold(left: FeatureRef, number: float, *, named: str | None = Non
     low, high = _UNIT_BOUNDS[left.unit]
     if low <= number <= high:
         return
-    span = f"{low:g}" if high == math.inf else f"{low:g}..{high:g}"
+    if high == math.inf:
+        limit = f"below {low:g}"
+    elif low == -math.inf:
+        limit = f"above {high:g}"
+    else:
+        limit = f"outside {low:g}..{high:g}"
     source = f"{named!r} ({number:g})" if named else f"{number:g}"
     raise SpecError(
-        f"{left} is measured in {left.unit.value}, which cannot be outside {span}, so "
-        f"{source} is a threshold it can never cross. Thresholds are on the feature's own "
-        f"scale — `python -m contrib.autoresearch vocab` states each one."
+        f"{left} is measured in {left.unit.value}, which cannot be {limit}, so {source} is "
+        f"a threshold it can never cross. Thresholds are on the feature's own scale — "
+        f"`python -m contrib.autoresearch vocab` states each one."
     )
 
 
@@ -760,28 +773,34 @@ def _right(
 def _require_number(value: object, what: str) -> float:
     """A finite number, refused as a :class:`SpecError` rather than a ``TypeError``.
 
-    The type guards need this as much as the parser does, and for the reason
-    they exist: a spec assembled in code does not pass ``_number``, so without
-    it ``Condition(..., right="x")`` came out of ``math.isfinite`` as a
-    ``TypeError`` — outside the refusal lane the CLI catches and the
-    hypothesis loop turns into a note. That is the same escape the huge-integer
-    ``OverflowError`` made one level down.
+    THE one numeric guard, reached from both directions: the parser passes the
+    document path as ``what``, a type guard passes a noun. It was two guards
+    for one round, and they immediately disagreed — the parser's caught the
+    huge-integer ``OverflowError`` while the type seam's let it out, which is
+    the same escape, at the layer written to close it.
 
-    ``True`` is not a number here for the same reason it is not one at the
-    parser: ``isinstance(True, int)`` is true, so a threshold of ``True``
-    would read as ``1.0`` and pass for a sensible bound on anything scaled
-    near unity.
+    Three refusals, and none of them is a technicality. ``True`` is not a
+    number, because ``isinstance(True, int)`` is true and a threshold of
+    ``True`` would read as ``1.0`` — a plausible bound on anything scaled near
+    unity. An integer too large for a float is not one either: JSON puts no
+    limit on an integer literal, and ``float()`` raises an ``ArithmeticError``,
+    which is outside the ``ValueError`` lane every refusal here travels in. And
+    a non-finite float is not a number a rule can be written against.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SpecError(f"{what} is a number, got {value!r}")
-    if not math.isfinite(value):
-        raise SpecError(f"{what} is a finite number, got {value!r}")
-    return float(value)
+        raise SpecError(f"{what}: expected a number, got {value!r}")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise SpecError(f"{what}: {value!r} is too large to be a number") from exc
+    if not math.isfinite(number):
+        raise SpecError(f"{what}: expected a finite number, got {value!r}")
+    return number
 
 
 def _require_fraction(value: object, name: str) -> None:
     """A share of the account: above 0, at most 1. Pathless, for the type guards."""
-    if not 0 < _require_number(value, f"{name} is a fraction of the account, which") <= 1:
+    if not 0 < _require_number(value, name) <= 1:
         raise SpecError(f"{name} is a fraction of the account, above 0 and at most 1, got {value!r}")
 
 
@@ -869,26 +888,8 @@ def _enum(vocabulary: type[VocabEnum], value: object, path: str):
 
 
 def _number(value: object, path: str) -> float:
-    """A finite number. ``True`` is not one, and that is not a technicality.
-
-    ``isinstance(True, int)`` is true in Python, so a spec carrying
-    ``"right": true`` would otherwise compare a feature against ``1.0`` and
-    read as a sensible threshold on anything scaled near unity.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SpecError(f"{path}: expected a number, got {value!r}")
-    try:
-        number = float(value)
-    except OverflowError as exc:
-        # A JSON integer has no size limit, and ``float()`` on a 400-digit one
-        # raises an ``ArithmeticError`` — which is outside the ``ValueError``
-        # lane every refusal here travels in, so it escaped the CLI as a
-        # traceback and would reach the hypothesis loop as a crash rather than
-        # as a note the model can be shown.
-        raise SpecError(f"{path}: {value!r} is too large to be a threshold") from exc
-    if not math.isfinite(number):
-        raise SpecError(f"{path}: expected a finite number, got {value!r}")
-    return number
+    """A finite number at ``path``. The path IS the noun the shared guard names."""
+    return _require_number(value, path)
 
 
 def _whole(value: object, path: str, *, low: int, high: int) -> int:

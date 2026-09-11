@@ -510,7 +510,7 @@ def test_an_integer_too_large_for_a_float_is_refused_rather_than_raised_on():
     text = json.dumps(_base()).replace('"donchian_high_20"', "9" * 400)
     with pytest.raises(SpecError) as caught:
         load_spec(text)
-    assert "too large to be a threshold" in str(caught.value)
+    assert "is too large to be a number" in str(caught.value)
 
 
 def test_a_key_written_twice_is_refused_rather_than_resolved_to_the_last_one():
@@ -646,10 +646,14 @@ def test_a_threshold_built_in_code_is_checked_against_the_features_scale_too():
     # And the two shapes that escaped as a ``TypeError`` — outside the lane
     # the CLI catches and the hypothesis loop turns into a note, which is the
     # same escape the huge-integer overflow made at the parser.
-    with pytest.raises(SpecError, match="is a number, got 'x'"):
+    with pytest.raises(SpecError, match="expected a number, got 'x'"):
         Condition(left=FeatureRef(FeatureKind.CLOSE), op=Op.GT, right="x")
-    with pytest.raises(SpecError, match="is a number, got True"):
+    with pytest.raises(SpecError, match="expected a number, got True"):
         Condition(left=FeatureRef(FeatureKind.RSI, 14), op=Op.GT, right=True)
+    # Including the one that escaped as an OverflowError while this guard and
+    # the parser's were two guards instead of one.
+    with pytest.raises(SpecError, match="too large to be a number"):
+        Condition(left=FeatureRef(FeatureKind.CLOSE), op=Op.GT, right=10**400)
 
 
 def test_a_sizing_built_in_code_cannot_carry_the_other_modes_fields():
@@ -665,7 +669,7 @@ def test_a_sizing_built_in_code_cannot_carry_the_other_modes_fields():
     ):
         # Refused as a spec failure, not as a ``TypeError`` from the first
         # comparison that meets the string.
-        with pytest.raises(SpecError, match="is a number, got 'x'"):
+        with pytest.raises(SpecError, match="expected a number, got 'x'"):
             Sizing(**broken)
 
 
@@ -747,3 +751,27 @@ def test_two_specs_that_say_the_same_thing_land_in_one_place_in_a_set():
     same = parse_spec(_base(params={"floor": 30}, entry=written))
     other = parse_spec(_base(entry={"long": [{"left": "rsi_14", "op": "<", "right": 40}]}))
     assert len({first, same, other}) == 2
+
+
+def test_a_parameter_value_is_checked_on_the_type_as_well():
+    """A param is printed back beside the number it stands for.
+
+    So one carrying a string while its condition carries the real threshold is
+    a report that disagrees with what was measured — and a spec built in code
+    does not pass the parser that used to be the only thing checking this.
+    """
+    sizing = Sizing(mode=SizingMode.FIXED_MARGIN_FRACTION, fraction=0.25)
+    entry = Condition(
+        left=FeatureRef(FeatureKind.RSI, 14), op=Op.LT, right=30.0, right_param="oversold"
+    )
+    with pytest.raises(SpecError, match="expected a number, got 'x'"):
+        StrategySpec(
+            family=Family.MEAN_REVERSION,
+            entry_long=(entry,),
+            entry_short=(),
+            exit_long=(),
+            exit_short=(),
+            filters=(),
+            sizing=sizing,
+            params=(("oversold", "x"),),
+        )

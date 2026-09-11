@@ -280,7 +280,7 @@ _SPECS: Final[tuple[FeatureSpec, ...]] = (
         source=SeriesSource.DAILY,
         periods=(20, 50, 200),
         period_noun="days",
-        summary="simple mean of the last N daily closes that had closed by this bar's close.",
+        summary="mean of the daily closes inside the last N DAYS, up to this bar's close.",
     ),
     FeatureSpec(
         kind=FeatureKind.FUNDING_RATE,
@@ -321,7 +321,15 @@ _BY_KIND: Final[dict[FeatureKind, FeatureSpec]] = {spec.kind: spec for spec in _
 # Every kind declared exactly once, and every kind declared: a member added to
 # the enum without a row above would be a name the parser accepts and nothing
 # computes, and the reverse is a row nothing can reach.
-assert tuple(_BY_KIND) == tuple(FeatureKind), "the vocabulary and its enum disagree"
+#
+# Raised rather than asserted, here and at the two sibling checks in
+# ``features`` and ``dsl``: these are import-time invariants, not debug aids,
+# and ``python -O`` strips an assert. What each of them guards is a silent
+# exemption — a kind nothing computes, a unit no threshold bound applies to —
+# which is precisely the failure that must not become reachable by running the
+# package one flag differently.
+if tuple(_BY_KIND) != tuple(FeatureKind):
+    raise RuntimeError("the vocabulary and its enum disagree")
 
 
 def spec_of(kind: FeatureKind) -> FeatureSpec:

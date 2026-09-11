@@ -43,18 +43,26 @@ Two places where mirroring the live path means NOT passing its value through:
   settlement older than one interval plus its posting jitter is not this
   bar's rate at all, and the feature is ``None``.
 
-What this module does NOT do is decide whether a series is fit to measure on.
-Holes are the gap scan's finding and refusing to evaluate across one is the
-evaluator's job (plan PR A3); a sum over a window with a hole in it is
-understated, and the guard here is only the coarse one — a window whose ENDS
-the source series does not cover yields ``None`` rather than a number that
-looks fine. That guard is one place the live path is deliberately NOT
-mirrored: live fetches its own thirty-day funding window every cycle and
-prints the sample count into the prompt beside the z-score, so a thin window
-is visible to the reader. A research feature has no such channel — a
-``funding_zscore_30`` computed off two days of settlements would be a
-different measurement wearing the same name, and three window lengths would
-silently be one column.
+A windowed number carries the name it is filed under or it is not reported: a
+``funding_cum_24`` whose window is missing settlements would say the carry was
+small when the settlements were simply absent, and a ``funding_zscore_30``
+standardised against one day would be a different measurement wearing the same
+name. So the occupancy of each window is COUNTED (see
+:func:`_window_is_covered`), not inferred from where the series begins — the
+front-edge test that preceded it could see only a series starting inside the
+window, and was blind to every hole that did not touch the edge.
+
+This is one place the live path is deliberately NOT mirrored: live fetches its
+own thirty-day funding window every cycle and prints the sample count into the
+prompt beside the z-score, so a thin window is visible to whoever reads it. A
+research feature has no such channel.
+
+And a feature that is unavailable at EVERY bar is refused rather than
+reported, because ``None`` everywhere is indistinguishable from a rule that
+never fired — which is a strategy scored as tried when the bundle could never
+have answered it. Whether the store is fit to measure on is still the
+evaluator's call (plan PR A3); what this module owes it is to be unable to
+hand it a column of silence.
 """
 
 from __future__ import annotations
@@ -79,6 +87,7 @@ from .upstream import (
     MarketDataConfig,
     MarketRegime,
     context_analytics,
+    from_epoch_ms,
     required_candles,
 )
 from .vocabulary import FeatureKind, FeatureRef, SeriesSource, spec_of
@@ -131,14 +140,14 @@ _INDICATOR_NAMES: Final[tuple[str, ...]] = tuple(
 # closing at 04:00:00.000 whose 04:00 settlement was stamped 57 ms late reads
 # the 03:00 one, which is exactly one interval old and correct.
 #
-# The same number answers a second question — may a window START this far
-# after its nominal opening and still be covered — and that is one number for
-# two questions, so it is worth saying why it is the same one. A window is
-# half-open, so the first settlement inside one opening at T is the one at
-# T + interval; a series whose first stamp is no later than that (plus the
-# jitter) covers the window completely. Both bounds are therefore "one
-# settlement's worth of slack", which is why tightening the jitter allowance
-# legitimately tightens both.
+# This answers one question only — is the last settlement still this bar's
+# rate. It was briefly also the slack allowed at a window's START, on the
+# reasoning that a half-open window opening at T first contains the
+# settlement at T + interval. That reasoning was wrong: settlements are
+# stamped just AFTER the hour, so a window opening on the bar grid at T first
+# contains the one at T + jitter, and allowing a whole interval let a
+# four-settlement sum be reported with three. Counting the window's occupancy
+# asks the question directly and needs no boundary reasoning at all.
 _FUNDING_STALE_MS: Final = FUNDING_INTERVAL_MS + FUNDING_STAMP_TOLERANCE_MS
 
 # The same question for the daily backdrop, with a different answer at the
@@ -160,6 +169,33 @@ _FUNDING_STALE_MS: Final = FUNDING_INTERVAL_MS + FUNDING_STAMP_TOLERANCE_MS
 # settlements are stamped AFTER the hour, so on a complete series a bar
 # legitimately reads a rate a full interval old.
 _DAILY_STALE_MS: Final = MS_PER_DAY - CANDLE_STAMP_TOLERANCE_MS
+
+# How much of a window has to be there for the number over it to carry the
+# name it is filed under. A fraction rather than exact equality, because the
+# venue itself occasionally skips a settlement and a research feature that
+# went ``None`` on every such bar would be measuring the venue's uptime; a
+# fraction rather than nothing, because the alternative is a ``funding_cum_24``
+# that says the carry was small when the settlements were simply absent, and a
+# ``funding_zscore_30`` standardised against one day (the borrowed function's
+# own floor is 24 samples).
+#
+# It is a POLICY, not a fact about the market, and it is the only one in this
+# module: a hole big enough to breach it is a store problem, which the gap
+# scan reports and a re-fetch fixes.
+_MIN_WINDOW_COVERAGE: Final = 0.9
+
+
+def _window_is_covered(observed: int, span_ms: int) -> bool:
+    """Does a window spanning ``span_ms`` hold enough of its hourly settlements?
+
+    Counted rather than inferred from where the series starts. The front-edge
+    test this replaces could only see a series that BEGINS inside the window,
+    and it had to reason about the boundary to do even that — it allowed a
+    whole extra settlement of slack, which understated a four-settlement sum
+    by a quarter, and it was blind to every hole that did not touch the edge.
+    """
+    return observed >= int(span_ms / FUNDING_INTERVAL_MS * _MIN_WINDOW_COVERAGE)
+
 
 # What a computed feature is: a number, a regime label, or "not available at
 # this bar". ``None`` is never a zero and never a NaN — the same rule the perp
@@ -194,6 +230,30 @@ def _require_ascending(stamps: Sequence[int], *, what: str) -> None:
         if later <= earlier:
             raise FeatureError(
                 f"{what} must be strictly ascending by timestamp; {later} follows {earlier}"
+            )
+
+
+def _require_daily_cadence(daily: Sequence[Candle]) -> None:
+    """Refuse a "daily" series whose bars are not a day apart.
+
+    Ordering is checked above; this checks the cadence, because nothing else
+    does and everything downstream assumes it. ``SeriesBundle(bars, daily=bars)``
+    — one positional slip in the bundle builder PR A3 will write — was
+    accepted, and then ``sma_1d_200`` was a 200-BAR mean of 4h candles (33
+    days) wearing a 200-day name, while the staleness rule that exists to
+    catch a stalled daily series was measuring against a cadence it had never
+    verified.
+
+    Closer together than a day is the slip; FURTHER apart is a hole, which is
+    a fact about the venue's history and is the coverage check's business, not
+    this one's.
+    """
+    for earlier, later in zip(daily, daily[1:], strict=False):
+        if later.close_time - earlier.close_time < MS_PER_DAY - CANDLE_STAMP_TOLERANCE_MS:
+            raise FeatureError(
+                f"the daily series has bars {later.close_time - earlier.close_time} ms apart, "
+                f"which is less than a day — this is not a 1d series, and every feature "
+                f"reading it would be measured over a window shorter than its name"
             )
 
 
@@ -238,6 +298,7 @@ class SeriesBundle:
         _require_ascending([bar.close_time for bar in self.bars], what="bar closes")
         _require_ascending([bar.open_time for bar in self.daily], what="daily bars")
         _require_ascending([bar.close_time for bar in self.daily], what="daily bar closes")
+        _require_daily_cadence(self.daily)
         _require_ascending([point.time for point in self.funding], what="funding settlements")
 
 
@@ -292,6 +353,7 @@ class FeatureFrame:
         if cached is None:
             self._require_source(ref.kind)
             cached = self._compute(ref.kind, ref.period)
+            self._require_an_answer_somewhere(ref, cached)
             self._cache[key] = cached
         return cached
 
@@ -314,6 +376,37 @@ class FeatureFrame:
         return self.series(ref)[shifted]
 
     # -- guards ------------------------------------------------------------
+
+    def _require_an_answer_somewhere(
+        self, ref: FeatureRef, column: tuple[FeatureValue, ...]
+    ) -> None:
+        """Refuse a feature this bundle cannot answer at ANY bar.
+
+        ``_require_source`` asks the narrow version of this question — is the
+        source series there at all — and the narrow version turned out to be
+        the rare one. A daily series that ends before the bars begin, a
+        funding walk resumed from a later ``--since``, a spec naming
+        ``sma_1d_200`` over a store holding ninety days: each leaves a column
+        that is ``None`` at every bar, which is the value warm-up produces and
+        which an evaluator therefore reads as "this rule does not fire here",
+        bar after bar, to the end. The strategy is then filed as tried and
+        found wanting, having never been tried — the one outcome this package
+        exists to prevent.
+
+        A column empty everywhere is the same fact whatever produced it, so
+        the check is on the column rather than on any of the reasons. The
+        engine's own failure keeps its more specific sentence by being checked
+        first.
+        """
+        if any(value is not None for value in column):
+            return
+        bars = self.bundle.bars
+        span = f"{from_epoch_ms(bars[0].close_time):%Y-%m-%d} to {from_epoch_ms(bars[-1].close_time):%Y-%m-%d}"
+        raise FeatureError(
+            f"{ref.name} has no value at any of this bundle's {len(bars)} bars ({span}), so a "
+            f"spec reading it cannot be evaluated here — it would score as a strategy that "
+            f"never fired. Fetch more history, or measure a spec this store can answer."
+        )
 
     def _require_source(self, kind: FeatureKind) -> None:
         source = spec_of(kind).source
@@ -495,12 +588,27 @@ class FeatureFrame:
         return tuple(None if count == 0 else closes[count - 1] for count in self._daily_counts())
 
     def _sma_1d(self, period: int | None) -> tuple[FeatureValue, ...]:
-        closes = [float(bar.close) for bar in self.bundle.daily]
+        """The mean of the daily closes inside the last ``period`` DAYS.
+
+        Not "the last ``period`` daily closes", which is the same thing on a
+        complete series and a different thing on one with a hole: twenty
+        closes drawn from twenty-five calendar days is a twenty-five-day mean
+        reported under a name that says twenty. Counted the way a funding
+        window is, and refused below the same coverage.
+        """
+        daily = self.bundle.daily
+        closes = [float(bar.close) for bar in daily]
         assert period is not None
-        return tuple(
-            None if count < period else statistics.fmean(closes[count - period : count])
-            for count in self._daily_counts()
-        )
+        out: list[FeatureValue] = []
+        for bar, count in zip(self.bundle.bars, self._daily_counts(), strict=True):
+            opened = bar.close_time - period * MS_PER_DAY
+            first = bisect_right([day.close_time for day in daily[:count]], opened)
+            observed = count - first
+            if count == 0 or observed < int(period * _MIN_WINDOW_COVERAGE):
+                out.append(None)
+                continue
+            out.append(statistics.fmean(closes[first:count]))
+        return tuple(out)
 
     def _funding_rate(self, _period: int | None) -> tuple[FeatureValue, ...]:
         points = self.bundle.funding
@@ -523,15 +631,6 @@ class FeatureFrame:
                 continue
             as_of_ms = bar.close_time
             cutoff = as_of_ms - period * MS_PER_DAY
-            if times[0] > cutoff + _FUNDING_STALE_MS:
-                # The window reaches further back than the series does, so
-                # this is not the N-day z-score it is named after — it is
-                # however many days happen to be stored, and on a short store
-                # the 7-, 14- and 30-day features are one identical column.
-                # The borrowed function cannot say so: its own floor is 24
-                # samples, which is a single day of settlements.
-                out.append(None)
-                continue
             # Sliced to the borrowed function's OWN window (it keeps
             # ``cutoff <= p.time < as_of_ms``), so the filter it runs is a
             # no-op. Without the slice this walks the whole settlement history
@@ -551,10 +650,16 @@ class FeatureFrame:
             # settlement at or before the close is either the last one inside
             # the borrowed function's half-open window or the one sitting
             # exactly on its edge, and slicing to it covers both.
-            score, _samples = _ANALYTICS.funding_zscore(
+            score, samples = _ANALYTICS.funding_zscore(
                 points[bisect_left(times, cutoff) : found], points[found].rate, as_of_ms, period
             )
-            out.append(score)
+            # The sample count the borrowed function hands back, used rather
+            # than discarded: its own floor is 24 — one day — so a window with
+            # a month-long hole in the middle still answers, and answers a
+            # one-day z-score under a name that says thirty. The live path
+            # prints that count into the prompt beside the number; here there
+            # is no reader to print it to.
+            out.append(score if _window_is_covered(samples, period * MS_PER_DAY) else None)
         return tuple(out)
 
     def _funding_cum(self, period: int | None) -> tuple[FeatureValue, ...]:
@@ -574,18 +679,15 @@ class FeatureFrame:
                 out.append(None)
                 continue
             opened = bars[index - period].close_time
-            if times[0] > opened + _FUNDING_STALE_MS:
-                # The other end: a settlement series that starts inside the
-                # window is missing part of it. A hole in the MIDDLE is not
-                # caught here — that is the gap scan's finding and the
-                # evaluator's refusal (plan §3.4), not something a sum can see.
-                out.append(None)
-                continue
             # ``found`` is the last settlement at or before this bar's close,
             # so ``found + 1`` is where the running total stands there — the
             # same point the rate feature reads, said once rather than
             # re-derived with a second bisect that could drift from it.
-            out.append(totals[found + 1] - totals[bisect_right(times, opened)])
+            first = bisect_right(times, opened)
+            if not _window_is_covered(found + 1 - first, bars[index].close_time - opened):
+                out.append(None)
+                continue
+            out.append(totals[found + 1] - totals[first])
         return tuple(out)
 
     # -- shared alignment --------------------------------------------------
@@ -685,9 +787,11 @@ _BUILDERS: Final[dict[FeatureKind, Callable[[FeatureFrame, int | None], tuple[Fe
     FeatureKind.FUNDING_CUM: FeatureFrame._funding_cum,
 }
 
-assert set(_BUILDERS) | set(_INDICATOR_KINDS) | {FeatureKind.REGIME} == set(FeatureKind), (
-    "every feature kind needs something that computes it"
-)
+if set(_BUILDERS) | set(_INDICATOR_KINDS) | {FeatureKind.REGIME} != set(FeatureKind):
+    # Raised rather than asserted — see the note in ``vocabulary``: under
+    # ``python -O`` an assert here would let a kind with nothing to compute it
+    # reach a trial as a ``KeyError``.
+    raise RuntimeError("every feature kind needs something that computes it")
 
 
 def _regime_of(indicators: dict[str, float | None], close: Decimal) -> MarketRegime | None:

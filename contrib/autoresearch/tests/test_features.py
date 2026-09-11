@@ -209,9 +209,16 @@ def test_a_daily_bar_is_invisible_until_the_day_it_covers_has_closed():
 
 
 def test_a_daily_average_is_none_until_that_many_days_have_closed():
-    day_bars = _daily(3, start_ms=ANCHOR_MS - 3 * _DAY_MS, closes=[1000, 2000, 3000])
-    bundle = SeriesBundle(candles([100, 110]), daily=day_bars)
-    assert _column(FeatureFrame(bundle), "sma_1d_20")[0] is None
+    """Warm-up, checked on a bundle that can answer the feature somewhere.
+
+    Where it can never answer it, the refusal two tests down takes over: a
+    column of ``None`` at every bar is not a warm-up story, it is a feature
+    this history cannot produce.
+    """
+    daily = _daily(22, start_ms=ANCHOR_MS - 22 * _DAY_MS)
+    bundle = SeriesBundle(candles([100 + index for index in range(12)]), daily=daily)
+    series = _column(FeatureFrame(bundle), "sma_1d_20")
+    assert series[0] is not None  # twenty-two days have closed behind this bar
 
 
 def test_a_daily_series_that_stops_early_does_not_carry_its_last_close_forward():
@@ -245,12 +252,44 @@ def test_a_daily_close_one_millisecond_into_the_future_is_invisible():
     closing a millisecond later is not, and nothing about the number would
     look wrong if it were.
     """
-    bars = candles([100, 110, 120])
-    on_time = candles([1000], start_ms=bars[1].close_time - _DAY_MS, step_ms=_DAY_MS)
-    late = candles([2000], start_ms=bars[2].close_time - _DAY_MS + 1, step_ms=_DAY_MS)
-    series = _column(FeatureFrame(SeriesBundle(bars, daily=on_time + late)), "close_1d")
-    assert series[1] == pytest.approx(1000.0)
-    assert series[2] == pytest.approx(1000.0)  # not 2000: that day closes 1 ms too late
+    # Two daily bars a clean day apart, and 4h bars placed so that one closes
+    # one millisecond BEFORE the second day does and the next closes after it.
+    daily = candles([1000, 2000], start_ms=ANCHOR_MS, step_ms=_DAY_MS)
+    just_before = daily[1].close_time - 1
+    bars = candles([100, 110], start_ms=just_before - _STEP_MS, step_ms=_STEP_MS)
+    assert bars[0].close_time == just_before
+    series = _column(FeatureFrame(SeriesBundle(bars, daily=daily)), "close_1d")
+    assert series[0] == pytest.approx(1000.0)  # the second day closes 1 ms too late
+    assert series[1] == pytest.approx(2000.0)  # and by this bar it has closed
+
+
+def test_a_daily_mean_spans_the_days_it_names_rather_than_counting_closes():
+    """Twenty closes drawn from twenty-five days is a twenty-five-day mean.
+
+    The name says twenty, so a series missing days inside the window is
+    ``None`` rather than a number over a longer stretch than it claims — the
+    same rule the funding windows are held to, counted the same way.
+    """
+    whole = _daily(40, start_ms=ANCHOR_MS - 40 * _DAY_MS)
+    # Five days missing from INSIDE the window the bars will read — a hole
+    # further back would be outside it and would rightly change nothing.
+    holed = whole[:30] + whole[35:]
+    bars = candles([100 + index for index in range(6)])
+    assert _column(FeatureFrame(SeriesBundle(bars, daily=whole)), "sma_1d_20")[0] is not None
+    with pytest.raises(FeatureError, match="sma_1d_20 has no value at any"):
+        _column(FeatureFrame(SeriesBundle(bars, daily=holed)), "sma_1d_20")
+
+
+def test_a_daily_series_that_is_not_daily_is_refused_at_construction():
+    """One positional slip in a bundle builder, and every 1d name is a lie.
+
+    ``SeriesBundle(bars, daily=bars)`` made ``sma_1d_200`` a 200-BAR mean of
+    4h candles — 33 days under a 200-day name — and left the staleness rule
+    measuring against a cadence nothing had checked.
+    """
+    bars = candles([100 + index for index in range(6)])
+    with pytest.raises(FeatureError, match="this is not a 1d series"):
+        SeriesBundle(bars, daily=bars)
 
 
 def test_a_daily_feature_without_a_daily_series_is_refused_by_name():
@@ -388,8 +427,31 @@ def test_a_funding_window_the_series_does_not_reach_back_across_is_refused():
     points = funding_points(48)  # two days of settlements
     bars = candles([30000 + 10 * index for index in range(4)], start_ms=ANCHOR_MS + 40 * MS_PER_HOUR)
     frame = FeatureFrame(SeriesBundle(bars, funding=points))
-    assert _column(frame, "funding_zscore_30") == (None,) * 4
-    assert _column(frame, "funding_zscore_7") == (None,) * 4
+    for window in ("funding_zscore_30", "funding_zscore_7"):
+        # Refused rather than answered: unavailable at every bar is not a
+        # market fact, it is a bundle that cannot be asked this question.
+        with pytest.raises(FeatureError, match=f"{window} has no value at any"):
+            _column(frame, window)
+
+
+def test_a_window_with_a_hole_in_its_middle_is_refused_as_well():
+    """The case the front-edge guard this replaced could not see at all.
+
+    A settlement series that STARTS before the window and ENDS after it can
+    still be missing most of the middle — an interrupted walk resumed from a
+    later ``--since`` — and the borrowed z-score's own floor is 24 samples, so
+    it answers a one-day z-score under a thirty-day name. Occupancy is
+    therefore counted rather than inferred from where the series begins.
+    """
+    whole = funding_points(40 * 24)
+    holed = [point for point in whole if not 5 * 24 <= whole.index(point) < 33 * 24]
+    bars = candles(
+        [30000 + 10 * index for index in range(4)], start_ms=ANCHOR_MS + 34 * 24 * MS_PER_HOUR
+    )
+    intact = FeatureFrame(SeriesBundle(bars, funding=whole))
+    assert all(value is not None for value in _column(intact, "funding_zscore_30"))
+    with pytest.raises(FeatureError, match="funding_zscore_30 has no value at any"):
+        _column(FeatureFrame(SeriesBundle(bars, funding=holed)), "funding_zscore_30")
 
 
 def test_a_funding_feature_without_a_funding_series_is_refused_by_name():
@@ -495,8 +557,16 @@ def test_an_indicator_engine_that_answers_nothing_at_all_is_refused(monkeypatch)
 
 
 def test_a_warming_up_engine_is_not_mistaken_for_a_broken_one():
-    """The guard above must not fire on the one thing that legitimately empties a column."""
-    assert _column(_frame([30000 + 100 * index for index in range(12)]), "ema_50") == (None,) * 12
+    """Both refuse, and the sentences are what tell them apart.
+
+    A bundle too short for ``ema_50`` cannot answer it — true, and said in
+    those words. Calling that a broken engine would send someone to look at
+    stockstats when what they need is more history.
+    """
+    short = _frame([30000 + 100 * index for index in range(12)])
+    with pytest.raises(FeatureError, match="ema_50 has no value at any of this bundle's 12 bars"):
+        _column(short, "ema_50")
+    assert _column(_frame([30000 + 100 * index for index in range(60)]), "ema_50")[-1] is not None
 
 
 # -- offsets ---------------------------------------------------------------

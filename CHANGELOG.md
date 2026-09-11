@@ -56,6 +56,15 @@ Breaking changes within the 0.x line are called out explicitly.
   hypothesis costs more than the trial it saves.
 
   INVARIANTS LIVE ON THE TYPES, not in the parser that happens to build one.
+  A feature compared with itself is refused (`close > close` never fires,
+  `close >= close` always does, and both satisfy every other guard - worse,
+  `funding_rate >= funding_rate` would certify a `funding_filter` whose rule
+  does not depend on funding). A declared parameter and the condition using it
+  must agree in both directions, because the two are printed together in every
+  report and a later phase perturbing a threshold by rewriting `params` would
+  otherwise score the unchanged rule under the new value. The three
+  import-time totality checks raise rather than assert, since `python -O`
+  strips an assert and each of them guards a silent exemption.
   `Condition`, `Sizing` and `StrategySpec` each check themselves, so the
   evaluator mutating a spec and the ledger reloading one meet the same rules a
   parsed document does - `FeatureRef` already worked that way for periods and
@@ -80,6 +89,27 @@ Breaking changes within the 0.x line are called out explicitly.
   and a quadratic one - the engine rebuilds its frame per call, so the
   expanding prefix this started as reaches 12 ms a bar by bar 5000 against
   about 2.5 ms flat.
+
+  A WINDOW CARRIES THE NAME IT IS FILED UNDER, or it is not reported. How
+  much of each window is actually there is counted — settlements against the
+  hours the window spans, daily closes against the days — rather than inferred
+  from where the series happens to begin, which is what the first version did
+  and which could see only a series starting inside the window. It was blind
+  to every hole that did not touch the edge, so a `funding_zscore_30` could be
+  standardised against a single day (the borrowed function's own floor is 24
+  samples) and a `sma_1d_20` could be twenty closes drawn from twenty-five
+  calendar days. Both are now `None`. And a feature unavailable at EVERY bar
+  is refused by name rather than reported as a column of `None`, because
+  `None` everywhere is indistinguishable from a rule that never fired — which
+  is a strategy scored as tried when this history could never have answered
+  it. That is the package's whole premise, and the narrow version of the check
+  (is the source series present at all) turned out to be the rare case.
+
+  A daily series is also checked for being daily: `SeriesBundle(bars,
+  daily=bars)` is one positional slip in the bundle builder PR A3 will write,
+  and it made `sma_1d_200` a 200-BAR mean of 4h candles - 33 days under a
+  200-day name - while the staleness rule that exists to catch a stalled daily
+  series measured against a cadence nothing had verified.
 
   Five places where mirroring the live path means NOT passing a value through,
   and each is a number that would otherwise be quietly wrong rather than

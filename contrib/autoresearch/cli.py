@@ -287,7 +287,7 @@ def _cmd_validate_spec(args: argparse.Namespace) -> int:
     path = Path(args.spec)
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         # Named, and named as a SPEC failure: the command's whole job is to
         # say whether this document is usable, and "it could not be read" is
         # one of the answers to that. Left to propagate it would be an OSError

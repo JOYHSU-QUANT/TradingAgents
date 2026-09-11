@@ -149,6 +149,9 @@ _SIZING_FIELDS: Final[dict[SizingMode, tuple[str, ...]]] = {
 }
 
 
+# The one field whose name in a document differs from its name on the type.
+_SIZING_KEYS: Final[dict[str, str]] = {"vol_lookback": "lookback"}
+
 _ORDERINGS: Final = (Op.GT, Op.GE, Op.LT, Op.LE)
 _EQUALITIES: Final = (Op.EQ, Op.NE)
 
@@ -186,9 +189,12 @@ _UNBOUNDED_UNITS: Final = (FeatureUnit.RATE, FeatureUnit.RATE_SUM, FeatureUnit.S
 # one exclusion, since it is compared with a label and never with a threshold.
 # Asserted rather than defaulted, because a lookup miss returning ``None``
 # would silently exempt the next unit added (and two were added already).
-assert set(_UNIT_BOUNDS) | set(_UNBOUNDED_UNITS) == set(FeatureUnit) - {FeatureUnit.REGIME}, (
-    "every non-regime unit is either bounded or deliberately not"
-)
+if set(_UNIT_BOUNDS) | set(_UNBOUNDED_UNITS) != set(FeatureUnit) - {FeatureUnit.REGIME}:
+    # Raised rather than asserted — see the note in ``vocabulary``. This one
+    # is the load-bearing member of the three: ``_check_threshold`` returns
+    # early for a unit it cannot classify, so under ``python -O`` a newly
+    # added unit would take any threshold at all, silently.
+    raise RuntimeError("every non-regime unit is either bounded or deliberately not")
 
 # The share of equity the live path will actually let a decision commit
 # (``RiskConfig.max_target_margin_pct`` is 60). Used as the default cap on
@@ -256,6 +262,15 @@ class Condition:
         Messages carry no path, because a condition does not know where it
         sits in a document; :func:`_condition` prefixes the one it built.
         """
+        if isinstance(self.right, int) and not isinstance(self.right, bool):
+            # ``json.loads`` yields an ``int`` for ``30`` and a ``float`` for
+            # ``30.0``, and a threshold that is one or the other by accident
+            # renders two ways in the read-back and answers the guard below two
+            # ways. Narrowed once, here, so everything downstream sees one type
+            # — THROUGH the shared guard, because a bare ``float()`` on a
+            # 400-digit integer is the overflow that guard exists to catch,
+            # and doing the conversion by hand put it back in front of it.
+            object.__setattr__(self, "right", _require_number(self.right, "a threshold"))
         if self.right_param is not None and not isinstance(self.right, float):
             raise SpecError(
                 f"right_param {self.right_param!r} names the parameter a NUMBER came "
@@ -308,12 +323,16 @@ class Sizing:
         wanted = _SIZING_FIELDS[self.mode]
         for name in sorted({field for row in _SIZING_FIELDS.values() for field in row}):
             value = getattr(self, name)
+            # Named by the key a DOCUMENT uses, since that is the audience for
+            # most of these sentences: told it "needs 'vol_lookback'", a model
+            # writes that key and is told back that no such key exists.
+            spelled = _SIZING_KEYS.get(name, name)
             if name in wanted and value is None:
-                raise SpecError(f"{self.mode.value} sizing needs {name!r}")
+                raise SpecError(f"{self.mode.value} sizing needs {spelled!r}")
             if name not in wanted and value is not None:
                 raise SpecError(
-                    f"{self.mode.value} sizing does not read {name!r}, got {value!r} — a knob "
-                    f"nothing reads looks like a knob that is working"
+                    f"{self.mode.value} sizing does not read {spelled!r}, got {value!r} — a "
+                    f"knob nothing reads looks like a knob that is working"
                 )
         if self.mode is SizingMode.FIXED_MARGIN_FRACTION:
             _require_fraction(self.fraction, "fraction")
@@ -433,6 +452,11 @@ def load_spec(text: str) -> StrategySpec:
         )
     except json.JSONDecodeError as exc:
         raise SpecError(f"spec is not valid JSON: {exc}") from exc
+    except RecursionError as exc:
+        # ``json`` recurses once per nesting level, and a few thousand of them
+        # ended the round with a traceback rather than with a refusal the loop
+        # can show the model. Nothing legal here is nested more than five deep.
+        raise SpecError("spec is nested too deeply to read") from exc
     return parse_spec(payload)
 
 
@@ -528,7 +552,7 @@ def _check_structure(spec: StrategySpec) -> None:
                 f"spec.exit.{side.value}: there are no {side.value} entries, so these exit "
                 f"conditions can never be reached — remove them, or add the entry they belong to"
             )
-    declared = dict(spec.params)
+    declared: dict[str, float] = {}
     for name, value in spec.params:
         # Checked here because a spec built in code does not pass the parser,
         # and a parameter is shown back beside the number it stands for: a
@@ -536,7 +560,31 @@ def _check_structure(spec: StrategySpec) -> None:
         # threshold is a report that disagrees with what was measured.
         if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):
             raise SpecError(f"spec.params: {name!r} is not a usable parameter name")
-        _require_number(value, f"spec.params.{name}")
+        if name in declared:
+            # The duplicate-key refusal one layer up, made again here: a
+            # mapping keeps the last and a report shows the last, so two
+            # declarations of one knob are two specs wearing one name.
+            raise SpecError(f"spec.params: {name!r} is declared twice")
+        declared[name] = _require_number(value, f"spec.params.{name}")
+    for condition in spec.conditions:
+        name = condition.right_param
+        if name is None:
+            continue
+        if name not in declared:
+            raise SpecError(
+                f"spec.params: no parameter named {name!r} is declared, but a condition "
+                f"({condition}) says its threshold came from one"
+            )
+        if declared[name] != condition.right:
+            # The knob and the number it stands for are shown together in every
+            # report, so they cannot be two records of one fact. A later phase
+            # perturbing a threshold by rewriting ``params`` would otherwise
+            # score the UNCHANGED rule and file it under the new value — a
+            # strategy never tried, recorded as tried.
+            raise SpecError(
+                f"spec.params: {name!r} is declared as {declared[name]!r} while the "
+                f"condition using it compares against {condition.right!r}"
+            )
     used = {condition.right_param for condition in spec.conditions} - {None}
     if spec.max_bars is not None:
         # Bounded here as well as at the parser, for the reason the bound
@@ -700,6 +748,18 @@ def _check_comparison(
             f"compare the regime, which is the one label in this vocabulary."
         )
     if isinstance(right, FeatureRef):
+        if right == left:
+            # Same kind, same period, same offset: ``close > close`` never
+            # fires and ``close >= close`` always does, and both satisfy every
+            # other guard — same unit, an ordering operator, no threshold to
+            # bound. Worse than a wasted trial when the family check is
+            # watching: ``funding_rate >= funding_rate`` certifies a
+            # ``funding_filter`` whose rule does not depend on funding at all.
+            raise SpecError(
+                f"{left} is compared with itself, which is a rule that fires at every bar "
+                f"or at none. Compare it with another feature, with an offset of itself "
+                f"(an object carrying {left.name!r} and an offset), or with a number."
+            )
         if right.unit is not left.unit:
             raise SpecError(
                 f"{left} is measured in {left.unit.value} and {right} in {right.unit.value}; "

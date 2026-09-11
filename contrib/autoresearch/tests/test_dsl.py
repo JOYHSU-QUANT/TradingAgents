@@ -753,6 +753,80 @@ def test_two_specs_that_say_the_same_thing_land_in_one_place_in_a_set():
     assert len({first, same, other}) == 2
 
 
+def test_a_feature_compared_with_itself_is_refused():
+    """``close > close`` never fires; ``close >= close`` always does.
+
+    Both pass every other guard — one unit, an ordering operator, no threshold
+    to bound — and the second is worse than a wasted trial: a
+    ``funding_rate >= funding_rate`` filter certifies a ``funding_filter``
+    whose rule does not depend on funding at all.
+    """
+    for op in (">", ">="):
+        assert "compared with itself" in _message(
+            _base(entry={"long": [{"left": "close", "op": op, "right": "close"}]})
+        )
+    assert "compared with itself" in _message(
+        _base(
+            family="funding_filter",
+            entry={"long": [{"left": "funding_rate", "op": ">=", "right": "funding_rate"}]},
+        )
+    )
+    # An OFFSET of itself is the real rule this must not take with it.
+    spec = parse_spec(
+        _base(
+            entry={
+                "long": [{"left": "close", "op": ">", "right": {"feature": "close", "offset": 1}}]
+            }
+        )
+    )
+    assert str(spec.entries(Side.LONG)[0]) == "close > close[1]"
+
+
+def test_a_parameter_and_the_condition_using_it_have_to_agree():
+    """They are printed together in every report, so they are one fact, not two.
+
+    A later phase perturbing a threshold by rewriting ``params`` would
+    otherwise score the UNCHANGED rule and file it under the new value — a
+    strategy never tried, recorded as tried.
+    """
+    sizing = Sizing(mode=SizingMode.FIXED_MARGIN_FRACTION, fraction=0.25)
+    entry = Condition(
+        left=FeatureRef(FeatureKind.RSI, 14), op=Op.LT, right=30.0, right_param="oversold"
+    )
+
+    def _spec(params):
+        return StrategySpec(
+            family=Family.MEAN_REVERSION,
+            entry_long=(entry,),
+            entry_short=(),
+            exit_long=(),
+            exit_short=(),
+            filters=(),
+            sizing=sizing,
+            params=params,
+        )
+
+    assert _spec((("oversold", 30.0),)).params == (("oversold", 30.0),)
+    with pytest.raises(SpecError, match="declared as 99.0 while the condition"):
+        _spec((("oversold", 99.0),))
+    with pytest.raises(SpecError, match="no parameter named 'oversold' is declared"):
+        _spec(())
+    with pytest.raises(SpecError, match="'oversold' is declared twice"):
+        _spec((("oversold", 30.0), ("oversold", 30.0)))
+
+
+def test_a_sizing_refusal_names_the_key_a_document_would_carry():
+    """Told it needs 'vol_lookback', a model writes that key and is told it is unknown."""
+    with pytest.raises(SpecError, match="needs 'lookback'"):
+        Sizing(mode=SizingMode.VOL_TARGET, target_vol=0.02, max_fraction=0.5)
+
+
+def test_a_spec_nested_past_what_json_can_read_is_refused_rather_than_raised_on():
+    """``json`` recurses per level; a few thousand ended the round with a traceback."""
+    with pytest.raises(SpecError, match="nested too deeply"):
+        load_spec("[" * 20000 + "]" * 20000)
+
+
 def test_a_parameter_value_is_checked_on_the_type_as_well():
     """A param is printed back beside the number it stands for.
 

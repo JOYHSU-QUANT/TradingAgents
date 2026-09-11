@@ -82,11 +82,23 @@ def test_a_period_on_a_stem_that_takes_none_says_how_to_write_it():
     assert "'regime' takes no period" in str(caught.value)
 
 
-def test_a_parameterised_stem_written_bare_is_refused():
-    """``ema`` alone is not a feature — every engine-backed name carries its period."""
+@pytest.mark.parametrize(
+    ("bare", "wanted"),
+    [("ema", "ema_20"), ("sma_1d", "sma_1d_20"), ("atr_pct", "atr_pct_14")],
+)
+def test_a_parameterised_stem_written_bare_is_told_it_needs_a_period(bare, wanted):
+    """And it is told about ITS OWN stem, including when that stem contains one.
+
+    ``sma_1d`` does not start with ``sma_1d_`` but does start with ``sma_``, so
+    a bare one was refused as "sma has no period '1d'" — which steers the
+    author (a model, next round) towards ``sma_20``: a legal name, for a
+    twenty-BAR mean. The hypothesis then scored is not the one written.
+    """
     with pytest.raises(SpecError) as caught:
-        parse_feature_name("ema")
-    assert "is not a feature" in str(caught.value)
+        parse_feature_name(bare)
+    message = str(caught.value)
+    assert f"{bare!r} needs a period" in message
+    assert wanted in message
 
 
 def test_an_unknown_name_is_told_the_vocabulary_is_closed_and_where_to_look():

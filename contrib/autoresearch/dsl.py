@@ -334,11 +334,19 @@ class Sizing:
                     f"{self.mode.value} sizing does not read {spelled!r}, got {value!r} — a "
                     f"knob nothing reads looks like a knob that is working"
                 )
+        # Each number is NARROWED, not merely checked: ``_require_number``
+        # returns the float it validated, and dropping that return left a
+        # code-built ``Sizing(fraction=1)`` holding an ``int`` where a parsed
+        # one holds ``1.0``. That is the drift ``Condition`` narrows int to
+        # float to prevent, at the same seam these guards exist for — the
+        # evaluator rewriting a spec, the ledger reloading one.
         if self.mode is SizingMode.FIXED_MARGIN_FRACTION:
-            _require_fraction(self.fraction, "fraction")
+            object.__setattr__(self, "fraction", _require_fraction(self.fraction, "fraction"))
             return
-        _require_fraction(self.max_fraction, "max_fraction")
-        _require_number(self.target_vol, "target_vol")
+        object.__setattr__(
+            self, "max_fraction", _require_fraction(self.max_fraction, "max_fraction")
+        )
+        object.__setattr__(self, "target_vol", _require_number(self.target_vol, "target_vol"))
         if not _MIN_TARGET_VOL <= self.target_vol <= _MAX_TARGET_VOL:
             raise SpecError(
                 f"target_vol {self.target_vol:g} is outside {_MIN_TARGET_VOL}..{_MAX_TARGET_VOL}; "
@@ -858,10 +866,16 @@ def _require_number(value: object, what: str) -> float:
     return number
 
 
-def _require_fraction(value: object, name: str) -> None:
-    """A share of the account: above 0, at most 1. Pathless, for the type guards."""
-    if not 0 < _require_number(value, name) <= 1:
+def _require_fraction(value: object, name: str) -> float:
+    """A share of the account: above 0, at most 1. Pathless, for the type guards.
+
+    Returns the narrowed float, like :func:`_require_number` does, so a caller
+    can store what was validated rather than the thing it was handed.
+    """
+    number = _require_number(value, name)
+    if not 0 < number <= 1:
         raise SpecError(f"{name} is a fraction of the account, above 0 and at most 1, got {value!r}")
+    return number
 
 
 def _ref(value: object, path: str) -> FeatureRef:

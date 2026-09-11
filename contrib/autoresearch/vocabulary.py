@@ -365,6 +365,15 @@ def _takes_no_period(kind: FeatureKind, shown: object) -> str:
     return f"{kind.value!r} takes no period — write it as {kind.value!r}, not {shown!r}"
 
 
+def _needs_a_period(kind: FeatureKind) -> str:
+    """The stem is real and the period is missing, which is its own mistake."""
+    spec = _BY_KIND[kind]
+    return (
+        f"{kind.value!r} needs a period: this package computes it over "
+        f"{list(spec.periods)} {spec.period_noun}, so write {_spell(kind, spec.periods[0])!r}"
+    )
+
+
 # Every legal spelling, resolved to its ``(kind, period)`` — built from the
 # table so the two can never disagree, and used as the parser's fast path.
 _BY_NAME: Final[dict[str, tuple[FeatureKind, int | None]]] = {
@@ -403,6 +412,15 @@ def parse_feature_name(text: object, *, path: str = "feature") -> tuple[FeatureK
     if found is not None:
         return found
     for kind in _STEMS:
+        # The stem ALONE counts as a match, not only the stem plus a period.
+        # Without that, a parameterised stem containing an underscore was
+        # attributed to the shorter stem inside it: bare ``sma_1d`` does not
+        # start with ``sma_1d_`` but does start with ``sma_``, so it was
+        # refused as "sma has no period '1d'" — which steers whoever wrote it
+        # (a model, next round) towards ``sma_20``, a legal name for a
+        # twenty-BAR mean. The hypothesis then scored is not the one written.
+        if text == kind.value:
+            raise SpecError(f"{path}: {_needs_a_period(kind)}")
         if not text.startswith(f"{kind.value}_"):
             continue
         suffix = text[len(kind.value) + 1 :]

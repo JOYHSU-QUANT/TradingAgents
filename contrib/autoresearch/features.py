@@ -186,14 +186,20 @@ _DAILY_STALE_MS: Final = MS_PER_DAY - CANDLE_STAMP_TOLERANCE_MS
 _MIN_WINDOW_COVERAGE: Final = 0.9
 
 
-def _window_is_covered(observed: int, span_ms: int) -> bool:
-    """Does a window spanning ``span_ms`` hold enough of its hourly settlements?
+def _window_is_covered(observed: int, expected: float) -> bool:
+    """Did a window that should hold ``expected`` observations hold enough of them?
 
     Counted rather than inferred from where the series starts. The front-edge
     test this replaces could only see a series that BEGINS inside the window,
     and it had to reason about the boundary to do even that — it allowed a
     whole extra settlement of slack, which understated a four-settlement sum
     by a quarter, and it was blind to every hole that did not touch the edge.
+
+    Takes the expected COUNT rather than a span in milliseconds, so the daily
+    windows can ask it too. With a span it silently assumed an hourly cadence,
+    so the daily lane wrote its own comparison out by hand — and got a
+    different one, a floor where this rounds up, under a docstring claiming
+    the same coverage.
 
     Rounded UP, which is the whole of the difference between a policy and an
     accident: a four-settlement window floored at 90% requires three, so
@@ -202,7 +208,7 @@ def _window_is_covered(observed: int, span_ms: int) -> bool:
     hour would have required none at all, reporting a carry of zero from no
     settlements whatever.
     """
-    return observed >= math.ceil(span_ms / FUNDING_INTERVAL_MS * _MIN_WINDOW_COVERAGE)
+    return observed >= math.ceil(expected * _MIN_WINDOW_COVERAGE)
 
 
 # What a computed feature is: a number, a regime label, or "not available at
@@ -613,13 +619,17 @@ class FeatureFrame:
         """
         daily = self.bundle.daily
         closes = [float(bar.close) for bar in daily]
+        # Built once. Rebuilt inside the loop it was bars × daily reads — some
+        # twelve million of them across the three periods on a full store —
+        # and the module already keeps exactly this kind of list beside the
+        # columns, for exactly this reason.
+        stamps = [day.close_time for day in daily]
         assert period is not None
         out: list[FeatureValue] = []
         for bar, count in zip(self.bundle.bars, self._daily_counts(), strict=True):
             opened = bar.close_time - period * MS_PER_DAY
-            first = bisect_right([day.close_time for day in daily[:count]], opened)
-            observed = count - first
-            if count == 0 or observed < int(period * _MIN_WINDOW_COVERAGE):
+            first = bisect_right(stamps, opened, hi=count)
+            if count == 0 or not _window_is_covered(count - first, period):
                 out.append(None)
                 continue
             out.append(statistics.fmean(closes[first:count]))
@@ -674,7 +684,7 @@ class FeatureFrame:
             # one-day z-score under a name that says thirty. The live path
             # prints that count into the prompt beside the number; here there
             # is no reader to print it to.
-            out.append(score if _window_is_covered(samples, period * MS_PER_DAY) else None)
+            out.append(score if _window_is_covered(samples, period * 24) else None)
         return tuple(out)
 
     def _funding_cum(self, period: int | None) -> tuple[FeatureValue, ...]:
@@ -699,7 +709,8 @@ class FeatureFrame:
             # same point the rate feature reads, said once rather than
             # re-derived with a second bisect that could drift from it.
             first = bisect_right(times, opened)
-            if not _window_is_covered(found + 1 - first, bars[index].close_time - opened):
+            expected = (bars[index].close_time - opened) / FUNDING_INTERVAL_MS
+            if not _window_is_covered(found + 1 - first, expected):
                 out.append(None)
                 continue
             out.append(totals[found + 1] - totals[first])

@@ -328,6 +328,21 @@ def test_cumulative_funding_sums_the_settlements_inside_the_bars_it_names():
     assert series[1] == pytest.approx(float(Decimal("0.00001") * (6 + 7 + 8 + 9)))
 
 
+@pytest.mark.parametrize(
+    ("observed", "expected", "covered"),
+    [(4, 4, True), (3, 4, False), (7, 7, True), (6, 7, False), (18, 20, True), (17, 20, False)],
+)
+def test_the_coverage_rule_rounds_up_whatever_the_window_counts(observed, expected, covered):
+    """One rounding rule for every window, asserted on the rule itself.
+
+    The daily lane used to write this comparison out by hand with a floor, and
+    agreed with the shared one only by luck of the declared periods (90% of 20
+    is exactly 18). A period of 7 is where they part: floored, it accepts six
+    days under a seven-day name.
+    """
+    assert features_module._window_is_covered(observed, expected) is covered
+
+
 def test_a_four_settlement_window_needs_all_four():
     """The coverage fraction rounds UP, and at this window that is the whole rule.
 

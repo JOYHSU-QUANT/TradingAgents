@@ -673,6 +673,21 @@ def test_a_sizing_built_in_code_cannot_carry_the_other_modes_fields():
             Sizing(**broken)
 
 
+def test_a_sizing_built_in_code_reads_back_the_way_a_parsed_one_does():
+    """The guard narrows the numbers it checks; dropping that return left a drift.
+
+    ``Sizing(fraction=1)`` held an ``int`` where a parsed one holds ``1.0`` —
+    the same two-renderings problem ``Condition`` narrows int to float to
+    avoid, at the seam (A3 rewrite, A4 reload) these guards exist for.
+    """
+    built = Sizing(mode=SizingMode.FIXED_MARGIN_FRACTION, fraction=1)
+    parsed = parse_spec(_base(sizing={"mode": "fixed_margin_fraction", "fraction": 1})).sizing
+    assert built == parsed
+    assert isinstance(built.fraction, float)
+    targeted = Sizing(mode=SizingMode.VOL_TARGET, target_vol=0.02, vol_lookback=20, max_fraction=1)
+    assert isinstance(targeted.max_fraction, float)
+
+
 def test_a_volatility_lookback_is_judged_by_the_vocabulary_that_owns_periods():
     """``10.0 in (10, 20, 50)`` is true, which is why membership was not enough.
 

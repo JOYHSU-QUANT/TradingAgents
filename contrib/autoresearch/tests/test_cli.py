@@ -1,7 +1,8 @@
-"""What the two commands do with a store, a venue, and a mistyped argument."""
+"""What the commands do with a store, a venue, a spec, and a mistyped argument."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -354,3 +355,81 @@ def test_a_fetch_whose_breadcrumb_write_failed_does_not_claim_it_never_ran(
     assert "30 row(s) written" in out
     assert "never fetched" not in out
     assert "reach: no fetch has recorded one in this store" in out
+
+
+# -- the two commands that are about the language, not the store -----------
+
+
+def test_vocab_prints_the_listing_and_opens_nothing(monkeypatch, capsys):
+    """It answers from this build alone: no store, no socket, no --db to mistype."""
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("vocab must not open a store or a venue")
+
+    monkeypatch.setattr(upstream, "build_market_data", explode)
+    monkeypatch.setattr("contrib.autoresearch.cli.ResearchStore", explode)
+    assert main(["vocab"]) == 0
+    out = capsys.readouterr().out
+    assert "funding_zscore_N" in out
+    assert "regime" in out
+
+
+def test_validate_spec_reads_a_good_spec_back_in_words(tmp_path, capsys):
+    spec = tmp_path / "rule.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "family": "regime_filter",
+                "entry": {"long": [{"left": "close", "op": ">", "right": "ema_20"}]},
+                "filters": [{"left": "regime", "op": "==", "right": "trending"}],
+                "sizing": {"mode": "fixed_margin_fraction", "fraction": 0.25},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["validate-spec", "--spec", str(spec)]) == 0
+    out = capsys.readouterr().out
+    assert "enter long when: close > ema_20" in out
+    assert "features used: close, ema_20, regime" in out
+
+
+def test_validate_spec_refuses_a_bad_spec_with_the_path_inside_the_document(
+    tmp_path, capsys
+):
+    """Exit 1, unlike a store with gaps in it: the document was the input."""
+    spec = tmp_path / "rule.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "family": "breakout",
+                "entry": {"long": [{"left": "close", "op": ">", "right": "ema_9"}]},
+                "sizing": {"mode": "fixed_margin_fraction", "fraction": 0.25},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["validate-spec", "--spec", str(spec)]) == 1
+    assert "spec.entry.long[0].right: 'ema' has no period '9'" in capsys.readouterr().err
+
+
+def test_validate_spec_names_a_file_it_cannot_read(tmp_path, capsys):
+    """An OSError traceback would read as a defect here rather than a typed path."""
+    assert main(["validate-spec", "--spec", str(tmp_path / "absent.json")]) == 1
+    assert "error: cannot read --spec" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["vocab", "--db", "x.sqlite"], ["validate-spec", "--spec", "r.json", "--coin", "BTC"]],
+    ids=["vocab-db", "spec-coin"],
+)
+def test_neither_language_command_takes_a_store_or_a_market_argument(argv):
+    """The absence is the statement, so it is pinned.
+
+    A ``--db`` these accepted and ignored would invite the reading that a spec
+    is checked against the data it will be measured on — which is the
+    evaluator's job (plan PR A3), not this command's.
+    """
+    with pytest.raises(SystemExit) as caught:
+        main(argv)
+    assert caught.value.code == 2

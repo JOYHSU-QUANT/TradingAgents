@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import ast
 import importlib
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -65,7 +67,12 @@ def _imported_modules(path: Path) -> set[str]:
 
 
 def test_the_scan_has_sources_to_walk():
-    """Guard every scan below: an empty walk would pass them all vacuously."""
+    """Guard every scan below: an empty walk would pass them all vacuously.
+
+    An inventory rather than a count, and it has to grow with the package —
+    the three modules most likely to reach upstream are the ones that compute
+    things, and they joined after this list was first written.
+    """
     assert {p.name for p in _SOURCES} >= {
         "upstream.py",
         "store.py",
@@ -73,6 +80,9 @@ def test_the_scan_has_sources_to_walk():
         "gaps.py",
         "cli.py",
         "ports.py",
+        "vocabulary.py",
+        "features.py",
+        "dsl.py",
     }
 
 
@@ -91,7 +101,12 @@ def test_re_exports_are_the_upstream_objects_themselves():
     """
     for module_name, attribute in upstream.BORROWED:
         if not hasattr(upstream, attribute):
-            continue  # the lazily-imported reader; the audit test above covers it
+            # The lazily-imported names: the exchange reader, and the three
+            # analytics that drag pandas in. They are covered by
+            # ``test_pins.py``, which asserts the same identity on what
+            # ``context_analytics()`` returns — NOT by the audit test above,
+            # which only asks whether the name still exists upstream.
+            continue
         assert getattr(upstream, attribute) is getattr(
             importlib.import_module(module_name), attribute
         )
@@ -123,6 +138,38 @@ def test_upstream_imports_nothing_it_has_not_declared():
         if name.startswith(_UPSTREAM_PACKAGE)
     }
     assert actual == declared
+
+
+def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack():
+    """The deferred imports, checked by what is actually in ``sys.modules``.
+
+    Two of the borrowed names are built inside a call rather than imported at
+    module scope — the exchange reader (the Hyperliquid SDK) and the three
+    analytics (pandas and stockstats, 511 ms against 57 ms for the whole store
+    layer). That arrangement is published in the README and the module
+    docstrings as a measured fact, and nothing enforced it: adding one
+    ``from .features import ...`` line to ``cli.py`` made ``gaps`` pay the
+    pandas cost with every test still green.
+
+    Checked in a SUBPROCESS because this one cannot be undone in-process —
+    by the time the suite runs, ``test_features`` has imported pandas for its
+    own reasons, and ``sys.modules`` never forgets.
+    """
+    probe = (
+        "import sys; import contrib.autoresearch.cli as cli; "
+        "from contrib.autoresearch.cli import main; main(['vocab']); "
+        "heavy = sorted(m for m in ('pandas', 'stockstats', 'hyperliquid') if m in sys.modules); "
+        "print(heavy)"
+    )
+    root = Path(upstream.__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=root,
+        check=True,
+    )
+    assert result.stdout.strip().endswith("[]"), result.stdout
 
 
 def test_the_borrow_reaches_no_persistence_module_of_the_perp_package():

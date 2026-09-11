@@ -1,4 +1,6 @@
-"""``python -m contrib.autoresearch`` — the research store's two commands.
+"""``python -m contrib.autoresearch`` — the research radar's commands.
+
+Two of them are about the store:
 
 - ``fetch --coin BTC --interval 4h --since 2023-01-01`` — walk that candle
   series and the coin's funding history into the store, then scan what landed
@@ -7,14 +9,27 @@
   stored. No network, so it is the command to reach for when judging a store
   rather than filling one.
 
+Two are about the LANGUAGE a hypothesis is written in, and neither opens a
+store or a socket:
+
+- ``vocab`` — print the closed feature vocabulary, generated from the table
+  the parser resolves against (plan §4).
+- ``validate-spec --spec rule.json`` — parse one spec and read it back in
+  words, or refuse it naming the path inside the document and the fix. It is
+  the same parser the hypothesis loop will run, so a spec that passes here is
+  one a trial can be spent on.
+
 Exit codes, kept in step with the perp package's CLI so an operator's habits
 carry across: ``0`` the command did what it says, ``1`` a named operator,
-store or venue failure (the sentence on stderr says which), ``2`` argparse's
-own usage errors (a malformed argv, or an ``--interval`` outside the two this
-package studies), ``130`` interrupted. Note what ``1`` does NOT mean here: a store with gaps in it is a
-successful scan, reported and exited ``0``. Gaps are a fact about the venue's
-history, not a failure of the command that found them — and the command that
-fills them is ``fetch``, which an operator reads this report to decide about.
+store, venue or spec failure (the sentence on stderr says which), ``2``
+argparse's own usage errors (a malformed argv, or an ``--interval`` outside
+the two this package studies), ``130`` interrupted. Note what ``1`` does NOT
+mean here: a store with gaps in it is a successful scan, reported and exited
+``0``. Gaps are a fact about the venue's history, not a failure of the
+command that found them — and the command that fills them is ``fetch``, which
+an operator reads this report to decide about. A REFUSED SPEC is the other
+way round: the document was the input, and a spec this parser will not accept
+is one no trial should be spent on, so it exits ``1``.
 """
 
 from __future__ import annotations
@@ -26,6 +41,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .dsl import SpecError, describe_spec, load_spec
 from .fetch import (
     FUNDING_SERIES,
     StopReason,
@@ -42,6 +58,7 @@ from .store import (
     default_db_path,
 )
 from .upstream import CandleInterval, ExchangeError, from_epoch_ms
+from .vocabulary import describe_vocabulary
 
 __all__ = ["main"]
 
@@ -138,6 +155,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "gaps", help="scan the stored series for holes (reads the store only, no network)"
     )
     add_common(gaps_cmd)
+
+    # Neither of the next two takes --coin, --interval or --db, and the
+    # absence is the statement: the vocabulary and the parser are properties
+    # of this build, not of a store or of a market. A --db they ignored would
+    # invite the reading that a spec is checked against the data it will be
+    # measured on, which is the evaluator's job (plan PR A3) and not this
+    # command's.
+    subparsers.add_parser(
+        "vocab", help="print the closed feature vocabulary a spec may refer to"
+    )
+    spec_cmd = subparsers.add_parser(
+        "validate-spec", help="parse a strategy spec and read it back, or refuse it by name"
+    )
+    spec_cmd.add_argument("--spec", required=True, help="path to a JSON strategy spec")
     return parser
 
 
@@ -246,7 +277,34 @@ def _cmd_gaps(args: argparse.Namespace) -> int:
     return 0
 
 
-_COMMANDS = {"fetch": _cmd_fetch, "gaps": _cmd_gaps}
+def _cmd_vocab(_args: argparse.Namespace) -> int:
+    for line in describe_vocabulary():
+        print(line)
+    return 0
+
+
+def _cmd_validate_spec(args: argparse.Namespace) -> int:
+    path = Path(args.spec)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Named, and named as a SPEC failure: the command's whole job is to
+        # say whether this document is usable, and "it could not be read" is
+        # one of the answers to that. Left to propagate it would be an OSError
+        # traceback, which reads as a defect in this package rather than as
+        # the mistyped path it is.
+        raise SpecError(f"cannot read --spec {path}: {exc}") from exc
+    for line in describe_spec(load_spec(text)):
+        print(line)
+    return 0
+
+
+_COMMANDS = {
+    "fetch": _cmd_fetch,
+    "gaps": _cmd_gaps,
+    "vocab": _cmd_vocab,
+    "validate-spec": _cmd_validate_spec,
+}
 
 
 def main(argv: list[str] | None = None) -> int:

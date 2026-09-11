@@ -10,6 +10,164 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **autoresearch: the language a hypothesis is written in, and a guarantee that
+  it saw no future** (plan PR A2). A closed feature vocabulary, a declarative
+  spec parser, and per-bar feature values - the three pieces the evaluator in
+  PR A3 will need, and nothing that measures anything yet. `contrib/
+  hyperliquid_perp` is untouched.
+
+  THE VOCABULARY IS FINITE, and finite on purpose. Each of the sixteen feature
+  kinds declares the periods it accepts, so `python -m contrib.autoresearch
+  vocab` can list the whole language - and the listing is generated from the
+  same table the parser resolves against, because a hand-kept copy drifts in
+  the direction that costs most: a model asked for names the parser then
+  refuses. The periods for `ema`, `rsi` and `atr` are the ones the perp
+  package's indicator engine actually supports, checked against
+  `supported_indicators()` by a test, since a name the engine answers `None`
+  for at every bar is not a stricter vocabulary - it is a strategy that never
+  fires, scored as one that was tried and found wanting. The momentum and
+  channel ladders reach thirty days and twenty days respectively, because
+  crypto time-series momentum is a weeks-to-months effect and a ladder
+  stopping at four days could not express it at all.
+
+  A SPEC IS DATA, never code: no `eval`, no `exec`, no expression to compile.
+  `validate-spec --spec rule.json` parses one and reads it back in words, or
+  refuses it naming the path inside the document (`spec.entry.long[0].right`)
+  and the edit that would fix it - the sentence is what PR B1's loop will show
+  the model next round, so a refusal that did not say which edit to make would
+  spend the trial and teach nothing. The refusals are about shapes that PARSE
+  and mean nothing: an offset reaching into the future (the lag syntax exists,
+  so what is refused is the direction, not the concept), a comparison across
+  units, an equality on a computed float (a rule that never fires), a
+  threshold the feature could never cross (`rsi_14 > 150`), and a declaration
+  nothing reads. That last one takes the plan's own `features` list with it:
+  the feature set IS the set the conditions name, so a second copy can only
+  ever be a copy that disagrees, and it disagrees silently in both directions.
+
+  The unit table needed two more entries than it first had, and the reason is
+  worth recording: its first cut gave `atr_14` the same unit as a close, which
+  re-admitted `close > atr_14` - true at essentially every bar, the same
+  defect as the `close > rsi_14` the units exist to refuse, one unit later.
+  `funding_cum_24` against `funding_rate` was the same shape and fired at 276
+  bars out of 276 when measured. A level is not a distance, and a sum is not
+  one of its terms. The numeric half of the rule is narrower than it looks and
+  says so: it refuses the impossible threshold, not every threshold on the
+  wrong scale, because a plausibility range that refuses an unusual-but-real
+  hypothesis costs more than the trial it saves.
+
+  INVARIANTS LIVE ON THE TYPES, not in the parser that happens to build one.
+  A feature compared with itself is refused (`close > close` never fires,
+  `close >= close` always does, and both satisfy every other guard - worse,
+  `funding_rate >= funding_rate` would certify a `funding_filter` whose rule
+  does not depend on funding). A declared parameter and the condition using it
+  must agree in both directions, because the two are printed together in every
+  report and a later phase perturbing a threshold by rewriting `params` would
+  otherwise score the unchanged rule under the new value. The three
+  import-time totality checks raise rather than assert, since `python -O`
+  strips an assert and each of them guards a silent exemption.
+  `Condition`, `Sizing` and `StrategySpec` each check themselves, so the
+  evaluator mutating a spec and the ledger reloading one meet the same rules a
+  parsed document does - `FeatureRef` already worked that way for periods and
+  offsets, and a rule that holds only for the documents the parser sees is not
+  a rule about conditions. `params` became an ordered tuple rather than a
+  dict, so a "frozen" spec is frozen and `hash(spec)` works: deduplicating
+  identical hypotheses is the first thing a trials ledger will reach for.
+
+  NO LOOK-AHEAD IS A CONSTRUCTION, not a hope. Every feature is a function of
+  the bars up to `t` plus the daily bars and settlements that had closed by
+  `bars[t].close_time`. The test recomputes every feature in the vocabulary on
+  a bundle truncated at `t` - once dropping the later bars, once dropping the
+  later daily and funding rows as well, since only the second catches an
+  alignment reaching for a close the bar could not have seen - and a companion
+  test asserts every feature HAS a value at the bar being checked, because a
+  sweep over columns of `None` would agree with itself perfectly.
+
+  Where the window BEGINS is a separate decision, and it is the live path's:
+  the indicator engine is shown the last 200 closed bars, the count that
+  config's own default asks for each cycle, so the same bar gets the same
+  indicator here and there. It is also the difference between a linear cost
+  and a quadratic one - the engine rebuilds its frame per call, so the
+  expanding prefix this started as reaches 12 ms a bar by bar 5000 against
+  about 2.5 ms flat.
+
+  A WINDOW CARRIES THE NAME IT IS FILED UNDER, or it is not reported. How
+  much of each window is actually there is counted — settlements against the
+  hours the window spans, daily closes against the days — rather than inferred
+  from where the series happens to begin, which is what the first version did
+  and which could see only a series starting inside the window. It was blind
+  to every hole that did not touch the edge, so a `funding_zscore_30` could be
+  standardised against a single day (the borrowed function's own floor is 24
+  samples) and a `sma_1d_20` could be twenty closes drawn from twenty-five
+  calendar days. Both are now `None`. And a feature unavailable at EVERY bar
+  is refused by name rather than reported as a column of `None`, because
+  `None` everywhere is indistinguishable from a rule that never fired — which
+  is a strategy scored as tried when this history could never have answered
+  it. That is the package's whole premise, and the narrow version of the check
+  (is the source series present at all) turned out to be the rare case.
+
+  A daily series is also checked for being daily: `SeriesBundle(bars,
+  daily=bars)` is one positional slip in the bundle builder PR A3 will write,
+  and it made `sma_1d_200` a 200-BAR mean of 4h candles - 33 days under a
+  200-day name - while the staleness rule that exists to catch a stalled daily
+  series measured against a cadence nothing had verified.
+
+  Five places where mirroring the live path means NOT passing a value through,
+  and each is a number that would otherwise be quietly wrong rather than
+  absent. `classify_regime` answers `RANGING` when its indicators are missing,
+  and the live path never shows that answer to anyone - its pre-engine guard
+  refuses the whole cycle - so the feature is `None` during warm-up rather
+  than `ranging`. The rate being z-scored is kept out of the window it is
+  scored against, because the live caller passes a rate that is not in its
+  history and folding a value into its own mean makes a genuine outlier read
+  as less extreme. A funding settlement older than one interval plus its
+  posting jitter is not this bar's rate, and neither is a daily close more
+  than a day old - `fetch` walks 4h and 1d separately, so "4h current, 1d
+  months behind" is the default consequence of running one and not the other,
+  and a carried-forward daily close freezes a trend filter permanently on or
+  permanently off. A z-score window the settlement series does not reach back
+  across is `None`, because the borrowed function's own floor is 24 samples -
+  one day - so on a young store it answers a number and the 7-, 14- and
+  30-day features are silently one column. And an indicator column empty at
+  every bar past its own warm-up is refused by name: upstream catches a
+  stockstats failure per indicator and returns `None`, which on the live path
+  is one warning a cycle and here is five thousand `None`s that read exactly
+  like warm-up.
+
+  Plan §3.2's pins arrive with the code that depends on them:
+  `compute_indicators`, `classify_regime` and `funding_zscore` are each held
+  to their signature (this package passes positionally, so a reordering
+  upstream would keep every call valid and change what was measured) and to
+  fixed outputs at fixed inputs, including the regime thresholds at the
+  boundary in both directions. Two live NUMBERS are pinned beside them - the
+  200-bar fetch window and RiskGate's 60% margin clamp, which is the default
+  cap on vol-targeted sizing so nothing is promoted at a size the live path
+  would cut. Red there is not automatically a bug upstream: it is a statement
+  that research numbers either side of the change are not the same
+  measurement, and the response is to re-run the experiments rather than to
+  edit the expected value until it passes.
+
+  The three analytics are imported inside a call, like the exchange reader
+  before them, because `domains/perp/indicators` pulls in pandas and
+  stockstats: 511 ms against 57 ms for the whole store layer. `gaps`, `vocab`
+  and `validate-spec` therefore pay no import cost at all and `fetch` pays
+  only the reader's, and a subprocess test now holds that arrangement in place
+  - it was published as a measured fact and enforced by nothing, and one
+  import line in `cli.py` made `gaps` pay the pandas cost with every test
+  still green.
+
+  Deliberately absent, and recorded rather than left to be noticed: there is
+  no stop-loss and no take-profit. An exit is a feature comparison or
+  `max_bars`, because a protective exit under a next-bar-open fill model could
+  only ever trigger at a close, and an intrabar stop is the single place a
+  backtest most easily cheats. The consequence is not neutral - the live paper
+  run does place stop and take-profit orders, so a research drawdown is a
+  floor on what the live one would have been rather than an estimate of it.
+  Two of the five families (`breakout`, `mean_reversion`) are honest metadata
+  rather than checked claims, for a related reason: the same conditions can be
+  either idea and nothing here measures intent - which means the plan's
+  per-family trial penalty cannot key on that field alone, since relabelling a
+  spec is free.
+
 - **autoresearch: a research store of its own, and two scans that between them
   say whether it is fit to measure on** (plan PR A1). A new
   `contrib/autoresearch/` package, parallel to `hyperliquid_perp` and touching

@@ -10,6 +10,96 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **autoresearch: a research store of its own, and two scans that between them
+  say whether it is fit to measure on** (plan PR A1). A new
+  `contrib/autoresearch/` package, parallel to `hyperliquid_perp` and touching
+  none of it: the research radar is not a second trading system, so it places
+  no orders, owns no positions, and writes to nothing but its own
+  `data/autoresearch.sqlite` (schema v1 - `candles`, `funding`,
+  `series_state`). What it borrows from the perp package is read-only and
+  listed once, in `upstream.BORROWED`; every other module goes through that
+  module, which a test enforces by parsing the import graph - statements and
+  `importlib.import_module` alike - rather than by searching for a string,
+  since these files discuss the perp package at length in their prose. The
+  `experiments` / `trials` tables the plan describes are deliberately absent
+  until PR A4 brings the code that writes and reads them.
+
+  `python -m contrib.autoresearch fetch --coin BTC --interval 4h --since
+  2023-01-01` walks history in and then scans what landed; `gaps` re-runs that
+  scan with no network at all. The two walks run in OPPOSITE directions
+  because the two endpoints truncate at opposite ends: candles are anchored on
+  their window END, so paging backwards from the oldest bar received is exact,
+  while funding is anchored on its START and caps its response, so a short
+  page is missing its NEWEST records - walked backwards that tail would be
+  stepped over and lost, and walked forwards from the newest record actually
+  received the walk picks it up at the cost of one extra request. Every
+  window is cut at the VENUE's clock, read before the first request (issue
+  #124's discipline), and the walks are built out of upserts throughout, so a
+  backfill cut short by anything is resumed by re-running it.
+
+  TWO SCANS, because one of them structurally cannot answer the question. The
+  gap scan assigns every stored stamp to the slot nearest it and reports gaps,
+  duplicate slots and off-grid stamps separately - three findings with three
+  different remedies. But it anchors its grid on the first stamp it finds, so
+  a series whose FRONT was cut off by an interrupted backfill is internally
+  consistent and scans as having no holes, exactly like one the venue
+  genuinely serves no more of. `series_state` records what each walk actually
+  reached and why it stopped there, which is the one fact the rows can never
+  carry, and both commands print it beside the scan.
+
+  That row is written from a `finally`, not on the way out of a successful
+  return, because the ending it exists to record is the one that does not
+  return: a venue failure propagates by design and a Ctrl-C arrives anywhere.
+  Written on the return path only, it kept the PREVIOUS run's answer while the
+  store grew underneath it, so a store half-filled by an interrupted deep
+  backfill still read "reached the requested start" - the one claim the table
+  was added to be able to contradict. Both walks therefore start at an
+  `INTERRUPTED` reason that nothing inside them ever sets, so an ending that
+  was never reached cannot name itself, and the write is contained: a store
+  that is failing too may not replace the venue error the operator actually
+  needs to see, because being sent to the wrong system is worse than losing a
+  breadcrumb.
+
+  Things the live venue taught that a scripted fake could not, each now a
+  constant or a rule with its reading beside it. A funding settlement is
+  stamped when it POSTS, tens of milliseconds past the hour, so an exact grid
+  called 524 of 531 real settlements misaligned; the slot tolerance is
+  per-series and measured. The 5000-bar figure is a HISTORY DEPTH bound, not
+  only a per-response one: `4h` reaches back about 833 days and then the venue
+  serves nothing older, while `1d` pulled BTC's whole history (2214 bars from
+  2020-08-19) - so the plan's "start at listing" is reachable on the daily
+  series only, `--interval` is restricted to the two the plan names (at `1h`
+  the depth limit leaves about 208 days, which scans clean and is far too
+  short for a train/validation/holdout split to mean anything), and the fetch
+  says which ending it met rather than implying it finished. Around 44 rapid
+  reads earn a 429, well inside one multi-year backfill, so a throttle - and
+  only a throttle - is waited out on a bounded rising schedule.
+
+  Guards on what the store will accept. A `--db` that is a populated SQLite
+  file without our bookkeeping table - the operator slip of aiming it at
+  `paper_trading.db` - is refused by name, and the check runs on the
+  connection about to be written through rather than on a read-only probe
+  opened beside it: that probe built its URI by interpolating the path, so a
+  `--db` containing `#` opened the URI's fragment, read a different file,
+  found no tables and reported "not foreign" about a store it had never looked
+  at. A path that cannot be opened at all is refused by name too, carrying
+  sqlite's own diagnosis, rather than arriving as a traceback. `--since`
+  accepts a bare date as midnight UTC and demands an offset from anything
+  else, matched on the bare-date shape rather than by excluding separators -
+  `fromisoformat` also takes a lowercase `t`, which a blacklist let through
+  and stamped midnight, silently dropping the hours the operator wrote. A coin
+  is canonicalised at the CLI and again in every store verb, so one market
+  cannot be filed as two series and `--coin btc` cannot reach the venue as a
+  `KeyError` wearing an exchange-failure message. There is no `--network`: a
+  row is keyed by `(coin, interval, open_time)` and names no venue, so testnet
+  and mainnet bars for one instant are one row, and a switch whose only
+  reachable effect is to blend two venues is worse than no switch.
+
+  `.gitignore` gains `*.sqlite` and its three sidecar patterns. Unlike the
+  `*.db` rules above them the hazard here is bulk rather than disclosure - the
+  store holds public market data, but years of 4h bars is a large binary
+  nobody wants in a diff, and one `fetch` rebuilds it from the venue.
+
 - **hyperliquid_perp: the acceptance report can now see a funding event stuck
   by a defect, not only one stuck by a bad timestamp** (issue #208, schema
   v12). ``backfill_pending_funding`` contains six per-event failures so a pass

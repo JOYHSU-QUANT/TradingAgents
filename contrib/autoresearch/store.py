@@ -1,20 +1,26 @@
 """``autoresearch.sqlite`` — opening it, migrating it, and reading/writing history.
 
-One small class rather than a repository layer: this store has two tables and
-four verbs, and the perp package's split (``db`` + ``persistence.repository``)
-earns itself on fifteen tables and a transaction contract this package does
-not have. What IS copied from it, because both were bought by incidents there:
-WAL plus a busy timeout, an explicit autocommit connection so transactions
-begin where this module says, and a refusal — by name, before any write —
-of a file that is not this package's store.
+One small class rather than a repository layer: this store has three tables
+and a handful of verbs, and the perp package's split (``db`` +
+``persistence.repository``) earns itself on fifteen tables and a transaction
+contract this package does not have. What IS copied from it, because both were
+bought by incidents there: WAL plus a busy timeout, an explicit autocommit
+connection so transactions begin where this module says, and a refusal — by
+name, before any write — of a file that is not this package's store.
 
-The refusal matters more here than the size of the module suggests. The
-obvious operator slip is ``--db`` pointing at the paper store (they sit in the
-same ``data/`` directory, and one of them is the file every other command in
-this repo takes). Opening that file and running migrations against it would
-add two tables to the store a live paper run is writing to — which plan §3.2
-forbids outright. So an existing file that has tables but no
-``schema_version`` is refused, named, and left untouched.
+The refusal matters more here than the size of the module suggests. The slip
+it exists for is ``--db`` pointing at the paper store: opening that file and
+running migrations against it would add tables to a store a live paper run is
+writing to, which plan §3.2 forbids outright. So an existing file that has
+tables but no ``schema_version`` is refused, named, and left untouched.
+
+The two stores do NOT sit side by side, and the reason to say so is that the
+opposite is the easy thing to assume: the perp CLI defaults ``--db`` to a
+RELATIVE ``paper_trading.db`` and its runbook is written from inside
+``contrib/hyperliquid_perp/``, while this one defaults to the repo root's
+``data/``. So the slip is not a directory listing offering two similar names
+— it is that ``--db`` takes any path at all, and a paper store is the file
+every other command in this repo is pointed at.
 """
 
 from __future__ import annotations

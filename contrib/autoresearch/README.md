@@ -21,7 +21,10 @@ memory `hyperliquid-autoresearch-mvp-direction`。
 - 自己的 store `autoresearch.sqlite`（schema v1：`candles`、`funding`、`series_state`）。
 - `series_state`：每條序列一列，記上一跑 fetch **實際抽到哪、為什麼停在那**。gap 掃描回答不了這件事：它以第一個 stamp 當格線原點，所以前端被截掉的序列掃起來「完全沒洞」——跟交易所真的沒更舊資料長得一模一樣。
 - `fetch` 指令：由新往舊分頁抓 candles、由舊往新分頁抓 funding history，全部 upsert。
-- gap 檢查：掃出序列上的洞（缺格）與不在格線上的時間戳，只回報、不修補。
+- gap 檢查：把每個時間戳指派到最近的格位，分開回報**三種**發現——
+  **洞**（中間有空格，重抓可補）、**重複格位**（兩筆落在同一格；一小時內兩筆 funding
+  會把那小時的 carry 算兩次，而且 row 數看起來更健康）、**不在格線上**（重抓修不好，
+  意思是交易所改了節奏，或兩種節奏被寫進同一條序列）。只回報，不修補。
 
 **還沒有的東西**（依計畫 §5 的順序）：feature 詞彙表與 DSL parser（A2）、bar 級模擬與
 成本模型（A3）、`experiments`／`trials` ledger 與 baseline 校準（A4）、LLM 假說迴圈
@@ -65,15 +68,42 @@ python -m contrib.autoresearch gaps --coin BTC --interval 4h
 上市」只有 `1d` 這條序列做得到。fetch 會老實說「停在 the venue served no older
 data」，不會靜默地裝作抓完了。
 
-還有一件：連續快速要求約 44 次就會吃到 429。fetch 遇到 throttle 會等（2s／5s／15s／30s，
-共五次），等不到就具名失敗；已寫進去的頁不會不見，重跑即可。
+還有一件：連續快速要求約 44 次就會吃到 429。fetch 遇到 throttle 會等**四次**
+（2s→5s→15s→30s），加上最後一次不再等的嘗試，共 **五次嘗試**；都等不到就具名
+失敗。只有 throttle 會等，其他交易所錯誤一次也不重試。已寫進去的頁不會不見，重跑即可。
 
-store 預設在 repo root 的 `data/autoresearch.sqlite`，用 `--db` 改路徑。指到一個
-**不是**本套件 store 的 SQLite 檔（例如 paper 的 `paper_trading.db`）會被具名拒絕——
-不會有任何 migration 跑在別人的檔案上。
+### 掃描輸出跟 `reach:` 那一行
 
-離開碼：`0` 成功、`1` 具名的操作／store／交易所失敗、`130` 中斷。**store 有洞不算失敗**：
-掃到洞是成功掃描的結果，exit 0；要補洞請跑 `fetch`。
+兩個指令在每條序列的 gap 報告下面，都會多印一行 `reach:`——上一跑 fetch **實際抽到哪、
+為什麼停在那**。這一行是 gap 掃描答不了的那半：
+
+```
+BTC 4h candles: 4999 rows, 2024-05-30... .. 2026-09-10... - no gaps
+  reach: stopped because the venue served no older data (asked from ..., venue clock ...)
+```
+
+最要緊的是區分這兩句：`the venue served no older data`（交易所真的沒更舊的，這就是完整資料）
+跟 `the walk did not finish`（被交易所錯誤或 Ctrl-C 打斷，**前端缺一塊**）。兩者的 gap 報告
+會長得一模一樣，因為掃描以第一個 stamp 當格線原點。另外還有 `reached the requested
+start`／`reached the requested end`（正常跑完）、`hit the request limit`、
+`the venue stopped moving the window`。從沒記錄過的 store 則是 `no fetch has recorded one in this store`。
+
+所以 `gaps` 不只是「看有沒有洞」，它也是回答「上次回補是不是被打斷」的那個指令。
+
+## store 路徑與拒絕
+
+預設在 repo root 的 `data/autoresearch.sqlite`，用 `--db` 改路徑。四種會被**具名拒絕**的情況：
+
+1. 指到一個**不是**本套件 store 的 SQLite 檔（例如 paper 的 `paper_trading.db`）——不會有任何
+   migration 跑在別人的檔案上，連對方的 journal mode 都不會被動到。
+2. 指到一個**不是一般檔案**的路徑（例如目錄）。
+3. **根本開不起來**的路徑（目錄建不出來、不是資料庫、權限不夠）——訊息會帶著 sqlite
+   自己的診斷，而不是一堆 traceback。
+4. 被**更新版本的 build** 寫過的 store（schema 版本比本 build 新）。
+
+離開碼：`0` 成功、`1` 具名的操作／store／交易所失敗、`2` argparse 自己的用法錯誤
+（例如 `--interval 1h`）、`130` 中斷。**store 有洞不算失敗**：掃到洞是成功掃描的結果，
+exit 0；要補洞請跑 `fetch`。
 
 ## 對 `hyperliquid_perp` 的關係
 

@@ -226,7 +226,7 @@ def _record_reach(
     except Exception:  # noqa: BLE001
         logger.warning(
             "%s %s: could not record where the backfill reached; the stored reach "
-            "now describes an earlier run",
+            "is now stale, or absent if this store has never recorded one",
             coin,
             series,
             exc_info=True,

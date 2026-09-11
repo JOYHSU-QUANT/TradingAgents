@@ -270,7 +270,7 @@ def test_a_store_nothing_was_ever_fetched_into_says_so(tmp_path, capsys):
     assert main(["gaps", "--db", str(tmp_path / DB_FILENAME)]) == 0
     out = capsys.readouterr().out
     assert "no rows stored" in out
-    assert "reach: never fetched into this store" in out
+    assert "reach: no fetch has recorded one in this store" in out
 
 
 def test_a_lower_case_coin_reaches_the_venue_in_its_own_spelling(tmp_path, monkeypatch):
@@ -326,3 +326,31 @@ def test_a_stop_reason_this_build_does_not_know_does_not_break_the_scan(tmp_path
         )
     assert main(["gaps", "--db", str(path)]) == 0
     assert "reach: stopped because SOMETHING_A_LATER_BUILD_ADDED" in capsys.readouterr().out
+
+
+def test_a_fetch_whose_breadcrumb_write_failed_does_not_claim_it_never_ran(
+    tmp_path, monkeypatch, capsys
+):
+    """Two lines that contradicted each other, one of them false.
+
+    A first-ever fetch whose ``series_state`` write fails is contained by
+    design - the rows are landed and durable - but the scan below it then
+    printed "never fetched into this store" directly under a summary saying
+    thirty rows had just been written.
+    """
+    series = bars(30)
+    _serve(
+        monkeypatch,
+        market_at(series[-1].close_time, candles={("BTC", "4h"): series}, funding={"BTC": []}),
+    )
+
+    def explode(**_kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(ResearchStore, "record_series_state", explode)
+    path = tmp_path / DB_FILENAME
+    assert main(["fetch", "--since", "2023-01-01", "--db", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "30 row(s) written" in out
+    assert "never fetched" not in out
+    assert "reach: no fetch has recorded one in this store" in out

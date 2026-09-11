@@ -9,8 +9,9 @@
 
 Exit codes, kept in step with the perp package's CLI so an operator's habits
 carry across: ``0`` the command did what it says, ``1`` a named operator,
-store or venue failure (the sentence on stderr says which), ``130``
-interrupted. Note what ``1`` does NOT mean here: a store with gaps in it is a
+store or venue failure (the sentence on stderr says which), ``2`` argparse's
+own usage errors (a malformed argv, or an ``--interval`` outside the two this
+package studies), ``130`` interrupted. Note what ``1`` does NOT mean here: a store with gaps in it is a
 successful scan, reported and exited ``0``. Gaps are a fact about the venue's
 history, not a failure of the command that found them — and the command that
 fills them is ``fetch``, which an operator reads this report to decide about.
@@ -172,7 +173,10 @@ def _print_reach(store: ResearchStore, *, coin: str, series: str) -> None:
     """
     state = store.series_state(coin=coin, series=series)
     if state is None:
-        print("  reach: never fetched into this store")
+        # "no fetch has recorded one", not "never fetched": a fetch whose
+        # breadcrumb write failed has just run and landed rows, and saying it
+        # never happened contradicts the line printed directly above.
+        print("  reach: no fetch has recorded one in this store")
         return
     # A recorded name this build does not know is shown as it was stored, not
     # raised on. The column holds ``StopReason``'s member NAMES so the stored

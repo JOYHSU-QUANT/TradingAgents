@@ -370,3 +370,29 @@ def test_the_recorded_state_survives_a_reopen_and_the_latest_write_wins(tmp_path
     assert state["stopped"] == "VENUE_EXHAUSTED"
     assert state["rows"] == 4
     assert state["coin"] == "BTC"
+
+
+def test_the_recorded_reach_is_filed_under_the_canonical_coin(store):
+    """The one verb whose canonicalisation the round-trip test could not see.
+
+    The earlier test wrote the row with an already-canonical "BTC" and read it
+    back with "btc", so it proved the READ side only. This writes with the
+    lower-case spelling, which is what the CLI's own guard would let through
+    if it were ever removed.
+    """
+    store.record_series_state(
+        coin=" btc ",
+        series="4h",
+        venue_clock_ms=ANCHOR_MS + 99,
+        since_ms=ANCHOR_MS,
+        earliest_ms=ANCHOR_MS,
+        latest_ms=ANCHOR_MS + 3,
+        rows=4,
+        stopped="REACHED_SINCE",
+    )
+    state = store.series_state(coin="BTC", series="4h")
+    assert state is not None, "the row was filed under an uncanonical spelling"
+    assert state["coin"] == "BTC"
+    # And one market cannot end up with two rows.
+    rows = store.conn.execute("SELECT COUNT(*) FROM series_state").fetchone()[0]
+    assert rows == 1

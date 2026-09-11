@@ -47,6 +47,19 @@ Breaking changes within the 0.x line are called out explicitly.
   reached and why it stopped there, which is the one fact the rows can never
   carry, and both commands print it beside the scan.
 
+  That row is written from a `finally`, not on the way out of a successful
+  return, because the ending it exists to record is the one that does not
+  return: a venue failure propagates by design and a Ctrl-C arrives anywhere.
+  Written on the return path only, it kept the PREVIOUS run's answer while the
+  store grew underneath it, so a store half-filled by an interrupted deep
+  backfill still read "reached the requested start" - the one claim the table
+  was added to be able to contradict. Both walks therefore start at an
+  `INTERRUPTED` reason that nothing inside them ever sets, so an ending that
+  was never reached cannot name itself, and the write is contained: a store
+  that is failing too may not replace the venue error the operator actually
+  needs to see, because being sent to the wrong system is worse than losing a
+  breadcrumb.
+
   Things the live venue taught that a scripted fake could not, each now a
   constant or a rule with its reading beside it. A funding settlement is
   stamped when it POSTS, tens of milliseconds past the hour, so an exact grid
@@ -81,6 +94,11 @@ Breaking changes within the 0.x line are called out explicitly.
   row is keyed by `(coin, interval, open_time)` and names no venue, so testnet
   and mainnet bars for one instant are one row, and a switch whose only
   reachable effect is to blend two venues is worse than no switch.
+
+  `.gitignore` gains `*.sqlite` and its three sidecar patterns. Unlike the
+  `*.db` rules above them the hazard here is bulk rather than disclosure - the
+  store holds public market data, but years of 4h bars is a large binary
+  nobody wants in a diff, and one `fetch` rebuilds it from the venue.
 
 - **hyperliquid_perp: the acceptance report can now see a funding event stuck
   by a defect, not only one stuck by a bad timestamp** (issue #208, schema

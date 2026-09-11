@@ -630,3 +630,83 @@ def test_a_front_truncated_series_scans_clean_but_records_the_interruption(store
         assert cut["stopped"] != whole["stopped"]
         assert cut["earliest_ms"] > cut["since_ms"], "the front of the asked-for span is missing"
         assert whole["earliest_ms"] == whole["since_ms"]
+
+
+# -- the funding walk's own guards ----------------------------------------
+#
+# Round 2 restructured BOTH walks to record from a finally, and only the candle
+# walk got a test. The exit check found that reverting either half on the
+# funding walk left the whole suite green: the fix was holding nothing here.
+
+
+def test_a_funding_walk_that_dies_mid_flight_records_that_it_did_not_finish(store):
+    """The funding walk's half of round 2, which nothing held in place.
+
+    The forward walk truncates the NEWEST end, so what an interrupted run
+    leaves behind is a prefix - and a prefix scans as having no gaps at all.
+    Without the recorded INTERRUPTED, a Ctrl-C partway through a multi-year
+    funding backfill leaves a short store whose every printed line says it is
+    whole.
+    """
+    points = funding_points(24 * 40)
+    market = market_at(points[-1].time, funding={"BTC": points})
+    window = {"coin": "BTC", "since": _since(ANCHOR_MS), "end": market.clock}
+    backfill_funding(market, store, **window)
+    assert store.series_state(coin="BTC", series=fetch_module.FUNDING_SERIES)["stopped"] == (
+        StopReason.REACHED_END.name
+    )
+
+    class DyingMarket(ScriptedMarket):
+        def get_funding_history(self, coin, window_days, *, end):
+            if len(self.funding_calls) >= 1:
+                raise ExchangeError("Hyperliquid request failed: the venue fell over")
+            return super().get_funding_history(coin, window_days, end=end)
+
+    dying = DyingMarket(clock=market.clock, funding={"BTC": points})
+    with pytest.raises(ExchangeError):
+        backfill_funding(
+            dying,
+            store,
+            coin="BTC",
+            since=_since(ANCHOR_MS - 400 * 24 * MS_PER_HOUR),
+            end=market.clock,
+            sleep=lambda _seconds: None,
+        )
+    state = store.series_state(coin="BTC", series=fetch_module.FUNDING_SERIES)
+    assert state["stopped"] == StopReason.INTERRUPTED.name
+    assert state["since_ms"] == ANCHOR_MS - 400 * 24 * MS_PER_HOUR
+
+
+def test_the_funding_row_stamps_the_venue_clock_it_was_cut_at(store):
+    """The data vintage a later trial's metrics are tied to.
+
+    Pinned for funding as well as candles: it is a different assignment in a
+    different function, and the CLI prints it as "venue clock".
+    """
+    points = funding_points(24 * 3)
+    market = market_at(points[-1].time, funding={"BTC": points})
+    backfill_funding(market, store, coin="BTC", since=_since(ANCHOR_MS), end=market.clock)
+    state = store.series_state(coin="BTC", series=fetch_module.FUNDING_SERIES)
+    assert state["venue_clock_ms"] == epoch_ms(market.clock, what="test")
+    assert state["venue_clock_ms"] != state["since_ms"]
+    assert state["earliest_ms"] == points[0].time
+    assert state["latest_ms"] == points[-1].time
+
+
+def test_funding_that_posted_while_the_walk_ran_is_not_stored(store):
+    """The other half of the un-clamped window: the read-before-fetch cut.
+
+    The last request deliberately reaches up to a page past the venue clock,
+    so on a real backfill the venue serves settlements that posted WHILE the
+    walk was running. Those are past the clock the window was cut at, and
+    admitting them is exactly what issue #124's discipline forbids. No other
+    fixture can see this, because ``market_at`` puts the clock one second past
+    the last scripted point - so this one scripts points beyond it.
+    """
+    inside = funding_points(24 * 5)
+    later = funding_points(6, start_ms=inside[-1].time + 10 * MS_PER_HOUR)
+    market = market_at(inside[-1].time, funding={"BTC": [*inside, *later]})
+    backfill_funding(market, store, coin="BTC", since=_since(ANCHOR_MS), end=market.clock)
+    stored = [p.time for p in store.iter_funding("BTC")]
+    assert stored == [p.time for p in inside]
+    assert max(stored) < epoch_ms(market.clock, what="test")

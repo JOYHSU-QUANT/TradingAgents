@@ -75,6 +75,15 @@ db.sqlite3-journal
 *.db-wal
 *.db-shm
 *.db-journal
+# Same rule, the other extension: contrib/autoresearch keeps its BTC history in
+# data/autoresearch.sqlite (plus WAL sidecars). It holds public market data
+# rather than trading activity, so the hazard is bulk rather than disclosure --
+# years of 4h bars is a large binary nobody wants in a diff, and it is rebuilt
+# from the venue by one `fetch` command.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
 
 # Flask stuff:
 instance/

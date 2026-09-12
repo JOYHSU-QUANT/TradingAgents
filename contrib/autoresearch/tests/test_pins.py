@@ -23,8 +23,13 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.autoresearch.costs import LIVE_LEVERAGE, LIVE_SLIPPAGE_BPS, LIVE_TAKER_FEE_RATE
 from contrib.autoresearch.dsl import LIVE_MARGIN_CAP
-from contrib.autoresearch.features import _INDICATOR_NAMES, LIVE_CANDLE_LOOKBACK
+from contrib.autoresearch.features import (
+    _INDICATOR_NAMES,
+    LIVE_CANDLE_LOOKBACK,
+    MIN_INDICATOR_LOOKBACK,
+)
 from contrib.autoresearch.upstream import (
     REGIME_INDICATORS,
     Candle,
@@ -177,6 +182,39 @@ def test_the_vol_target_cap_is_still_what_risk_gate_would_allow():
     from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskConfig
 
     assert LIVE_MARGIN_CAP * 100 == RiskConfig().max_target_margin_pct == 60
+
+
+def test_the_cost_defaults_are_the_paper_run_s_own():
+    """Three more numbers written down rather than imported, for the same reason.
+
+    The evaluator's default cost model claims to be the paper trader's fee,
+    slippage and leverage. If any of those config defaults moved, research
+    net returns would quietly stop being comparable with the paper ledger.
+    """
+    from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskConfig
+    from contrib.hyperliquid_perp.paper.config import FillModelConfig, PaperExecutionConfig
+
+    assert Decimal(str(LIVE_TAKER_FEE_RATE)) == PaperExecutionConfig().taker_fee_rate
+    assert Decimal(str(LIVE_SLIPPAGE_BPS)) == FillModelConfig().slippage_bps
+    assert Decimal(str(LIVE_LEVERAGE)) == RiskConfig().leverage
+
+
+def test_the_studied_intervals_are_spelled_the_venue_s_way():
+    """``STUDIED_INTERVALS`` is a literal so ``constants`` stays import-free; this is
+    what keeps it a subset of the venue's vocabulary."""
+    from contrib.autoresearch.constants import STUDIED_INTERVALS
+    from contrib.autoresearch.upstream import CandleInterval
+
+    assert set(STUDIED_INTERVALS) <= {member.value for member in CandleInterval}
+    assert STUDIED_INTERVALS == ("4h", "1d")
+
+
+def test_the_indicator_window_floor_is_the_engine_s_own_warm_up():
+    """Derived from the borrowed table, so an ``ema_100`` added upstream and to
+    the vocabulary raises the floor without an edit here."""
+    from contrib.autoresearch.upstream import required_candles
+
+    assert MIN_INDICATOR_LOOKBACK == required_candles(list(_INDICATOR_NAMES)) == 50
 
 
 # -- classify_regime -------------------------------------------------------

@@ -143,7 +143,7 @@ def test_a_spec_reads_back_as_the_rules_the_evaluator_will_act_on():
     rendered = "\n".join(describe_spec(spec))
     assert "enter long when: close > donchian_high_20" in rendered
     assert "exit long when: rsi_14 < cool (45.0)" in rendered  # the name AND the number
-    assert "only while: regime == trending" in rendered
+    assert "enter only while: regime == trending" in rendered
     assert "never above 0.6 of equity" in rendered  # the live clamp, filled in as the default
 
 

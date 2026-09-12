@@ -10,6 +10,71 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **autoresearch: an evaluator that decides at a close, fills at the next open,
+  and withholds the holdout** (plan PR A3). The bar-level simulation, the cost
+  model it charges, the fixed split it measures on, and the metrics it hands
+  back - everything the ledger and the calibration baselines in PR A4 will
+  score with. Still a library: no command runs it yet, and
+  `contrib/hyperliquid_perp` is untouched.
+
+  THE FILL RULE IS THE SHAPE OF THE LOOP, not a check on it. A decision at bar
+  `t` reads features through `value_at`, which cannot be handed a future
+  offset, and becomes a pending order the loop fills when it reaches `t + 1`
+  - there is no code path that prices a decision at the close it was taken
+  on. The tests measure it anyway: one long trade is computed by hand, every
+  cost term of it, on a series whose opens differ from its closes; and the
+  same window is evaluated on the whole history and on the history cut off
+  at `t`, demanding identical decisions (plan §3.6b). The rule a cheat would
+  need cannot be built at all, which is the narrower half of the same test.
+
+  FOUR SEMANTIC GAPS the parser left open are decided in one place. An empty
+  `exit` HOLDS - until an opposite entry reverses the position or the window
+  ends - because "exit when the entry stops holding" would make every
+  breakout spec without an exit leave a bar after it entered. An opposite
+  entry REVERSES at one fill; it is the reading that makes an always-in rule
+  writable. Filters gate ENTRIES only, reversals included, and the read-back
+  now says `enter only while:` so that is visible. And a feature that is
+  `None` at a bar does not fire, for exits exactly as for entries - one value,
+  one reading - with the bars where a consulted rule had no value COUNTED, so
+  a rule that went silent for a month is a number rather than a hold.
+
+  THE WINDOW IS THE MEASURED SPAN for every spec (plan §10.2), so exposure and
+  hit rate share a denominator whichever hypothesis is scored. Warm-up is not
+  derived from the spec (that would mix bar periods, day periods, the offset
+  bound and the engine's own minimums) - it is measured: a feature with no
+  value at the window's first bar refuses the window by name, saying which
+  bar it first has one at. A position still open at the last bar is flattened
+  at that close, so a window never reads a bar of the next one; that is what
+  the holdout lock rests on. `evaluate_split` measures train and validation
+  and returns no holdout figure unless told `holdout=True` at the call site,
+  and `Split.loadable_until` hands the store a bound so an unpromoted trial's
+  bundle does not hold the holdout ROWS either. Which rows that is was wrong
+  once: bounding by "the bound plus one interval" read a bar past the last
+  one admitted, and the fix reads the close off the last bar loaded.
+
+  COSTS ARE THE PAPER RUN'S (plan §3.7). Fee 0.045%, five basis points of
+  slippage, leverage 1 - written as numbers and pinned against the paper
+  config defaults, the way the margin cap already was. Gross is the price
+  move mid to mid; net subtracts fee and slippage on every fill and the
+  funding of every HOURLY settlement while held, signed the way the paper
+  ledger signs it. Both are reported. A maker lane exists for the run-5
+  switch and changes the fee alone: zeroing slippage would price in the fill
+  and ignore the miss. The indicator window is now a frame parameter with
+  the live 200 as its default and the engine's warm-up as its floor, and the
+  report prints which was used (plan §10.3).
+
+  Refused by name (`EvaluationError`): a window with a hole in its bars (plan
+  §3.4), one shorter than two bars, one whose funding series covers under
+  ninety percent of it, one a spec's feature has not warmed up for. A window
+  over `1h` bars is refused at the split, since the venue's interval enum is
+  wider than the two this package studies and the CLI's `choices` was the
+  only thing saying so.
+
+  Known trade-offs, recorded rather than filed: the indicator pass still
+  computes all four names whatever a spec asks for (plan §10.5); regime
+  buckets on a bundle shorter than the engine's warm-up are all
+  `unlabelled`; a `1d` experiment reads the daily rows twice.
+
 - **autoresearch: the language a hypothesis is written in, and a guarantee that
   it saw no future** (plan PR A2). A closed feature vocabulary, a declarative
   spec parser, and per-bar feature values - the three pieces the evaluator in

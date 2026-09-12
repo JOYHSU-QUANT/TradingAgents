@@ -41,6 +41,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .constants import STUDIED_INTERVALS
 from .dsl import SpecError, describe_spec, load_spec
 from .fetch import (
     FUNDING_SERIES,
@@ -57,19 +58,14 @@ from .store import (
     canonical_coin,
     default_db_path,
 )
-from .upstream import CandleInterval, ExchangeError, from_epoch_ms
+from .upstream import ExchangeError, from_epoch_ms
 from .vocabulary import describe_vocabulary
 
 __all__ = ["main"]
 
-# The intervals this package studies, NOT the venue's whole vocabulary. Plan §1
-# names 4h (the paper cycle) and 1d (the daily backdrop) and nothing else, and
-# the venue's ~5000-bar depth limit is what makes that a correctness matter
-# rather than taste: at 1h it reaches about 208 days and at 15m about 52, and
-# such a series scans as having no holes and is far too short for the
-# train/validation/holdout split to mean anything. Borrowing the whole enum
-# would import a vocabulary this package deliberately does not have.
-_INTERVALS = (CandleInterval.H4.value, CandleInterval.D1.value)
+# ``--interval``'s choices: the two intervals this package studies (see
+# ``constants.STUDIED_INTERVALS`` for why it is two and not the venue's enum).
+_INTERVALS = STUDIED_INTERVALS
 
 # The one naive form ``--since`` accepts: a calendar date and nothing else.
 _BARE_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -125,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--coin", default="BTC", help="perp coin symbol (default: BTC)")
         sub.add_argument(
             "--interval",
-            default=CandleInterval.H4.value,
+            default=_INTERVALS[0],
             choices=_INTERVALS,
             help="candle interval (default: 4h)",
         )

@@ -11,10 +11,10 @@ a check on the construction, not the guarantee itself.
 
 The three borrowed analytics are used the way the live path uses them, and
 that is a decision about COMPARABILITY, taken down to the window each one
-sees. The indicator engine is handed the last
-:data:`LIVE_CANDLE_LOOKBACK` closed bars — the count the trader's own fetch
-asks for every cycle, read off that config's default rather than written down
-again here — and asked for the latest value. The regime label comes from the
+sees. The indicator engine is handed the last ``indicator_lookback`` closed
+bars — by default :data:`LIVE_CANDLE_LOOKBACK`, the count the trader's own
+fetch asks for every cycle, read off that config's default rather than
+written down again here — and asked for the latest value. The regime label comes from the
 borrowed classifier over those indicators. The funding z-score is the
 borrowed function over the stored settlements, with the rate being scored
 kept OUT of the window it is scored against, because the live caller passes a
@@ -48,7 +48,7 @@ A windowed number carries the name it is filed under or it is not reported: a
 small when the settlements were simply absent, and a ``funding_zscore_30``
 standardised against one day would be a different measurement wearing the same
 name. So the occupancy of each window is COUNTED (see
-:func:`_window_is_covered`), not inferred from where the series begins — the
+:func:`window_is_covered`), not inferred from where the series begins — the
 front-edge test that preceded it could see only a series starting inside the
 window, and was blind to every hole that did not touch the edge.
 
@@ -95,10 +95,13 @@ from .vocabulary import FeatureKind, FeatureRef, SeriesSource, spec_of
 
 __all__ = [
     "LIVE_CANDLE_LOOKBACK",
+    "MIN_INDICATOR_LOOKBACK",
+    "MIN_WINDOW_COVERAGE",
     "FeatureError",
     "FeatureFrame",
     "FeatureValue",
     "SeriesBundle",
+    "window_is_covered",
 ]
 
 # How many closed bars the indicator engine is shown at each bar — the count
@@ -109,11 +112,10 @@ __all__ = [
 # The default is as far as this reaches, and the limit is worth stating: the
 # running value is a YAML key an operator may set, in a file that is
 # deliberately not in the repository. So "the same bar gets the same
-# indicator here and there" holds while the server sits at the default, and a
-# server fetching a different number would make research indicators
-# incomparable with nothing going red. Closing that needs the lookback to
-# become an argument to the frame rather than a constant, which is PR A3's to
-# do when it learns where an experiment's parameters come from.
+# indicator here and there" holds while the server sits at the default. It is
+# therefore the DEFAULT of the frame's ``indicator_lookback`` rather than the
+# rule: an experiment measured against a server fetching a different count
+# passes that count in, and the report says which was used.
 LIVE_CANDLE_LOOKBACK: Final = MarketDataConfig().candle_lookback
 
 # Bound once, at import: ``context_analytics`` imports pandas and stockstats
@@ -135,6 +137,13 @@ _FEATURE_INDICATORS: Final[dict[str, tuple[FeatureKind, int]]] = {
 _INDICATOR_NAMES: Final[tuple[str, ...]] = tuple(
     dict.fromkeys(list(_FEATURE_INDICATORS) + list(REGIME_INDICATORS))
 )
+
+# The fewest bars the engine can be shown and still answer for every
+# indicator this vocabulary reads (the engine's own warm-up table, borrowed).
+# A frame with a lookback below it is not a stricter window — it is one on
+# which ``ema_50`` is ``None`` at every bar, which ``_require_a_working_engine``
+# would then report as the engine failing.
+MIN_INDICATOR_LOOKBACK: Final = required_candles(_INDICATOR_NAMES)
 
 # How old the last settlement may be and still be THIS bar's funding rate: one
 # interval, plus the jitter the venue posts with (see ``constants``). A bar
@@ -183,10 +192,10 @@ _DAILY_STALE_MS: Final = MS_PER_DAY - CANDLE_STAMP_TOLERANCE_MS
 # It is a POLICY, not a fact about the market, and it is the only one in this
 # module: a hole big enough to breach it is a store problem, which the gap
 # scan reports and a re-fetch fixes.
-_MIN_WINDOW_COVERAGE: Final = 0.9
+MIN_WINDOW_COVERAGE: Final = 0.9
 
 
-def _window_is_covered(observed: int, expected: float) -> bool:
+def window_is_covered(observed: int, expected: float) -> bool:
     """Did a window that should hold ``expected`` observations hold enough of them?
 
     Counted rather than inferred from where the series starts. The front-edge
@@ -208,7 +217,7 @@ def _window_is_covered(observed: int, expected: float) -> bool:
     hour would have required none at all, reporting a carry of zero from no
     settlements whatever.
     """
-    return observed >= math.ceil(expected * _MIN_WINDOW_COVERAGE)
+    return observed >= math.ceil(expected * MIN_WINDOW_COVERAGE)
 
 
 # What a computed feature is: a number, a regime label, or "not available at
@@ -335,6 +344,12 @@ class FeatureFrame:
     """
 
     bundle: SeriesBundle
+    # How many closed bars the indicator engine is shown at each bar. An
+    # experiment parameter, not a constant (plan §10.3): the live value is a
+    # YAML key an operator may set in a file that is not in the repository,
+    # so a frame measured against a server running a different count is told
+    # that count, and the report states it.
+    indicator_lookback: int = LIVE_CANDLE_LOOKBACK
     _cache: dict[tuple[FeatureKind, int | None], tuple[FeatureValue, ...]] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
@@ -345,6 +360,19 @@ class FeatureFrame:
     _alignments: dict[str, list] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+
+    def __post_init__(self) -> None:
+        lookback = self.indicator_lookback
+        if isinstance(lookback, bool) or not isinstance(lookback, int):
+            raise FeatureError(
+                f"indicator_lookback is a whole number of bars, got {lookback!r}"
+            )
+        if lookback < MIN_INDICATOR_LOOKBACK:
+            raise FeatureError(
+                f"indicator_lookback {lookback} is below the {MIN_INDICATOR_LOOKBACK} bars the "
+                f"engine needs to answer for every indicator in the vocabulary; a shorter "
+                f"window is not stricter, it is a frame on which those features never warm up"
+            )
 
     # -- the two public verbs ---------------------------------------------
 
@@ -476,11 +504,13 @@ class FeatureFrame:
         for index, bar in enumerate(bars):
             # The window ENDS at this bar, which is the whole no-look-ahead
             # guarantee: the engine cannot see further because it was never
-            # given further. It BEGINS a fixed lookback earlier, which is the
-            # comparability one — the live path fetches exactly that many bars
-            # per cycle, so the same bar gets the same indicator here and
-            # there.
-            window = bars[max(0, index + 1 - LIVE_CANDLE_LOOKBACK) : index + 1]
+            # given further. It BEGINS ``indicator_lookback`` bars earlier,
+            # which is the comparability one — at the default, that is the
+            # count the live path fetches per cycle, so the same bar gets the
+            # same indicator here and there; at any other value the frame is
+            # measuring against a server that fetches that other count, and
+            # the report says which.
+            window = bars[max(0, index + 1 - self.indicator_lookback) : index + 1]
             values = _ANALYTICS.compute_indicators(window, _INDICATOR_NAMES)
             for name in _INDICATOR_NAMES:
                 columns[name].append(values.get(name))
@@ -629,7 +659,7 @@ class FeatureFrame:
         for bar, count in zip(self.bundle.bars, self._daily_counts(), strict=True):
             opened = bar.close_time - period * MS_PER_DAY
             first = bisect_right(stamps, opened, hi=count)
-            if count == 0 or not _window_is_covered(count - first, period):
+            if count == 0 or not window_is_covered(count - first, period):
                 out.append(None)
                 continue
             out.append(statistics.fmean(closes[first:count]))
@@ -684,7 +714,7 @@ class FeatureFrame:
             # one-day z-score under a name that says thirty. The live path
             # prints that count into the prompt beside the number; here there
             # is no reader to print it to.
-            out.append(score if _window_is_covered(samples, period * 24) else None)
+            out.append(score if window_is_covered(samples, period * 24) else None)
         return tuple(out)
 
     def _funding_cum(self, period: int | None) -> tuple[FeatureValue, ...]:
@@ -710,7 +740,7 @@ class FeatureFrame:
             # re-derived with a second bisect that could drift from it.
             first = bisect_right(times, opened)
             expected = (bars[index].close_time - opened) / FUNDING_INTERVAL_MS
-            if not _window_is_covered(found + 1 - first, expected):
+            if not window_is_covered(found + 1 - first, expected):
                 out.append(None)
                 continue
             out.append(totals[found + 1] - totals[first])

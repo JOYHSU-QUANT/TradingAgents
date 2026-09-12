@@ -64,8 +64,8 @@ VENUE_BASE_MAKER_FEE_RATE: Final = 0.00015
 _BPS: Final = 10_000.0
 
 
-def _cost(value: object, name: str, *, low: float, strict: bool = False) -> float:
-    """A cost field: a finite number at or above ``low`` (above, when ``strict``).
+def _cost(value: object, name: str, *, positive: bool = False) -> float:
+    """A cost field: a finite number that is not negative (and not zero, if ``positive``).
 
     Through the vocabulary's one numeric guard, then re-raised as a plain
     ``ValueError`` naming the field: ``SpecError`` means "the hypothesis said
@@ -75,8 +75,8 @@ def _cost(value: object, name: str, *, low: float, strict: bool = False) -> floa
         number = require_number(value, f"CostModel.{name}")
     except SpecError as exc:
         raise ValueError(str(exc)) from exc
-    if number < low or (strict and number == low):
-        bound = f"> {low:g}" if strict else f">= {low:g}"
+    if number < 0 or (positive and number == 0):
+        bound = "> 0" if positive else ">= 0"
         raise ValueError(f"CostModel.{name} must be a number {bound}, got {value!r}")
     return number
 
@@ -107,8 +107,8 @@ class CostModel:
     def __post_init__(self) -> None:
         object.__setattr__(self, "fill_role", FillRole(self.fill_role))
         for name in ("taker_fee_rate", "maker_fee_rate", "slippage_bps"):
-            object.__setattr__(self, name, _cost(getattr(self, name), name, low=0.0))
-        object.__setattr__(self, "leverage", _cost(self.leverage, "leverage", low=0.0, strict=True))
+            object.__setattr__(self, name, _cost(getattr(self, name), name))
+        object.__setattr__(self, "leverage", _cost(self.leverage, "leverage", positive=True))
 
     @property
     def fee_rate(self) -> float:
@@ -153,8 +153,16 @@ class CostModel:
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> CostModel:
-        """The inverse of :meth:`to_dict`, refusing a key this model does not have."""
-        unknown = sorted(set(payload) - set(cls.__dataclass_fields__))
-        if unknown:
-            raise ValueError(f"CostModel does not have {unknown}")
+        """The inverse of :meth:`to_dict`: exactly the model's fields, all of them.
+
+        A missing key is refused, not defaulted. A record that lost its
+        ``fill_role`` column would otherwise read back as the live taker
+        model, and a trial measured under it would be filed as measured
+        under the defaults.
+        """
+        fields = set(cls.__dataclass_fields__)
+        if set(payload) != fields:
+            raise ValueError(
+                f"a cost record has exactly the keys {sorted(fields)}, got {sorted(payload)}"
+            )
         return cls(**payload)  # type: ignore[arg-type]

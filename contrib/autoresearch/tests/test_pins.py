@@ -199,6 +199,15 @@ def test_the_cost_defaults_are_the_paper_run_s_own():
     assert Decimal(str(LIVE_LEVERAGE)) == RiskConfig().leverage
 
 
+def test_the_funding_sign_is_the_paper_ledger_s():
+    """A long at a positive rate PAYS — issue #134's one formula, pinned here
+    because the evaluator charges the same sign in its own float lane."""
+    from contrib.hyperliquid_perp.domains.perp.margin import funding_cost
+
+    assert funding_cost(Decimal(1), Decimal("0.0001")) > 0
+    assert funding_cost(Decimal(-1), Decimal("0.0001")) < 0
+
+
 def test_the_studied_intervals_are_spelled_the_venue_s_way():
     """``STUDIED_INTERVALS`` is a literal so ``constants`` stays import-free; this is
     what keeps it a subset of the venue's vocabulary."""

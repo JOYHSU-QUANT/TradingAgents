@@ -368,7 +368,6 @@ class _Bar:
 
     gross: float = 0.0
     cost: float = 0.0
-    fills: float = 0.0  # |notional| filled, for turnover
 
 
 class _Reader:
@@ -403,7 +402,11 @@ class _Reader:
         """
         if not conditions:
             return False
-        return all(self._holds(condition, index) for condition in conditions)
+        # Every condition is read, not short-circuited: ``bars_unevaluable``
+        # is a property of the rule and the history, and a lazy AND would
+        # make it depend on the order the author wrote the clauses in.
+        outcomes = [self._holds(condition, index) for condition in conditions]
+        return all(outcomes)
 
     def passes(self, index: int) -> bool:
         """The filter reading: nothing declared is nothing gating."""
@@ -430,15 +433,15 @@ class _Reader:
         assert sizing.target_vol is not None and sizing.max_fraction is not None
         assert self.sizing_ref is not None
         realized = self.read(self.sizing_ref, index)
-        if realized is None:
+        if realized is None or realized <= 0:
             # A vol-targeted rule that cannot read the vol cannot say how much
             # it wants, which is the same fact as a condition it cannot
-            # evaluate.
+            # evaluate. A vol of exactly zero — ten identical closes, a stuck
+            # feed — is that case too, not a licence to size to the cap.
             self.unevaluable = True
             return None
         cap = sizing.max_fraction * costs.leverage
-        wanted = cap if realized <= 0 else min(sizing.target_vol / float(realized), cap)
-        return wanted * equity
+        return min(sizing.target_vol / float(realized), cap) * equity
 
     def entry(self, index: int, equity: float, costs: CostModel) -> tuple[_Pending | None, bool]:
         """Which entry fires at this bar, sized; the bool says both did.
@@ -524,9 +527,6 @@ def evaluate_segment(
     gross_returns: list[float] = []
     net_returns: list[float] = []
     equity_path: list[float] = []
-    bars_held = 0
-    fills_total = 0.0
-    funding_total = 0.0
     unevaluable = conflicting = 0
     ruined = False
 
@@ -557,8 +557,6 @@ def evaluate_segment(
             paid = settlements.due(bar, held.signed_size * close_price)
             held.funding += paid
             running.cost += paid
-            funding_total += paid
-            bars_held += 1
             if last:
                 # The window's last bar: flatten at its close so the window
                 # reads nothing of the next one. Costed like any other fill.
@@ -569,21 +567,23 @@ def evaluate_segment(
 
         # 3. Book the bar.
         before = equity
+        if held is not None and before + running.gross - running.cost <= 0:
+            # Ruin: the position is closed at this close like any other fill
+            # — its costs are real — and the window is over. The bars after
+            # it are booked flat; the equity path is not padded, so the mean
+            # equity turnover is measured against is the equity that traded.
+            ruined = True
+            trades.append(_close(held, index, close_price, ExitReason.RUIN, costs, running))
+            held = None
         equity += running.gross - running.cost
         gross_returns.append(running.gross / before)
         net_returns.append((running.gross - running.cost) / before)
         equity_path.append(equity)
-        fills_total += running.fills
         previous_close = close_price
-        if equity <= 0:
-            ruined = True
-            if held is not None:
-                trades.append(held.closed(index, close_price, ExitReason.RUIN))
-                held = None
+        if ruined:
             remaining = stop - index - 1
             gross_returns += [0.0] * remaining
             net_returns += [0.0] * remaining
-            equity_path += [equity] * remaining
             break
 
         # 4. Decide at this close, for the next open — never on the last bar.
@@ -593,9 +593,16 @@ def evaluate_segment(
             unevaluable += reader.unevaluable
             conflicting += both
 
+    # Every position ends as a trade (the window flattens, ruin closes), so
+    # what was held, filled and paid is read off the trades rather than kept
+    # in accumulators beside them — one record of each number.
     count = stop - first
     bars_per_year = MS_PER_YEAR / step
-    mean_equity = statistics.fmean(equity_path)
+    # Turnover is measured against the equity that TRADED: the ruin bar's
+    # equity is at or below zero and is not a stake anything was filled on.
+    traded = equity_path[:-1] if ruined else equity_path
+    mean_equity = statistics.fmean(traded) if traded else 0.0
+    filled = sum(t.notional + t.size * t.exit_price for t in trades)
     return SegmentResult(
         segment=segment,
         bars=count,
@@ -603,11 +610,11 @@ def evaluate_segment(
         gross=_tally(gross_returns, [t.gross_pnl for t in trades], bars_per_year),
         net=_tally(net_returns, [t.net_pnl for t in trades], bars_per_year),
         trades=tuple(trades),
-        exposure=bars_held / count,
-        turnover=fills_total / mean_equity if mean_equity > 0 else 0.0,
+        exposure=sum(t.bars_held for t in trades) / count,
+        turnover=filled / mean_equity if mean_equity > 0 else 0.0,
         fees_paid=sum(t.fees for t in trades),
         slippage_paid=sum(t.slippage for t in trades),
-        funding_paid=funding_total,
+        funding_paid=sum(t.funding for t in trades),
         bars_unevaluable=unevaluable,
         bars_conflicting=conflicting,
         funding_settlements_missing=settlements.missing(bars[first], bars[stop - 1]),
@@ -623,7 +630,6 @@ def _open(
 ) -> _Open:
     fee, slip = costs.fill_cost(notional)
     running.cost += fee + slip
-    running.fills += notional
     return _Open(
         side=side,
         entry_index=index,
@@ -643,7 +649,6 @@ def _close(
     held.fees += fee
     held.slippage += slip
     running.cost += fee + slip
-    running.fills += notional
     return held.closed(index, price, reason)
 
 
@@ -698,7 +703,12 @@ class _Settlements:
         """
         lo, _ = self._slice(first_bar, FUNDING_STAMP_TOLERANCE_MS)
         _, hi = self._slice(last_bar, FUNDING_STAMP_TOLERANCE_MS)
-        return hi - lo, (last_bar.close_time - first_bar.open_time) // FUNDING_INTERVAL_MS
+        # Rounded, because a venue close is one millisecond BEFORE the next
+        # open (see ``constants``): floored, a span of N hours less 1 ms
+        # expected N - 1 settlements, and a window with one genuinely absent
+        # read as complete.
+        span = last_bar.close_time - first_bar.open_time
+        return hi - lo, round(span / FUNDING_INTERVAL_MS)
 
     def missing(self, first_bar: Candle, last_bar: Candle) -> int:
         """How many of the settlements the window's span should hold are not there."""
@@ -837,16 +847,25 @@ def _require_measurable(
             f"understated without looking wrong. Run `gaps`, then `fetch` the window."
         )
     for ref in spec.features:
-        if frame.value_at(ref, first) is not None:
-            continue
+        # The column once (its guard fires once), then a scan bounded by the
+        # window: the message says where inside the window the feature wakes
+        # up, and reads nothing past it.
+        column = frame.series(ref)
         ready = next(
-            (i for i in range(first, len(bars)) if frame.value_at(ref, i) is not None), None
+            (
+                i
+                for i in range(first, stop)
+                if i - ref.offset >= 0 and column[i - ref.offset] is not None
+            ),
+            None,
         )
+        if ready == first:
+            continue
         when = (
             f"it first has one at {from_epoch_ms(bars[ready].open_time).isoformat()} "
             f"({ready - first} bars in)"
             if ready is not None
-            else "and has none at any later bar either"
+            else "and has none anywhere inside the window either"
         )
         raise EvaluationError(
             f"{ref} has no value at the first bar of {segment} "
@@ -900,12 +919,16 @@ def load_bundle(
     settlements are read to the CLOSE of the last bar that bound admitted —
     taken from that bar, not derived from the bound, since the bound may sit
     anywhere between two opens — because that close is the instant its
-    features are aligned at. A daily bar is bounded on the close it has to
-    have reached, so a day that closes inside the next window is not held
-    even though it opened inside this one; a settlement stamped after that
-    close is a fact about the next bar. The holdout lock is the reason not
-    to hold either. Exact edges on both, the way the feature module and the
-    settlement accounting read them.
+    features are aligned at. A daily bar is kept only if its OWN close has
+    been reached — filtered on that stamp, not derived from its open, since a
+    venue close is a millisecond short of the next open — so a day that
+    closes inside the next window is not held even though it opened inside
+    this one. The settlements are read up to the one DUE at that close,
+    which the venue posts a few ms after it, so the bound carries the posting
+    jitter; without it every bounded bundle read as missing its last
+    settlement. That settlement is a fact about the close just reached; the
+    one after it is a fact about the next window, and is not read. The
+    holdout lock is the reason.
     """
     key = studied_interval(interval)
     daily_key = CandleInterval.D1.value
@@ -913,14 +936,17 @@ def load_bundle(
     if not bars:
         raise EvaluationError(f"the store holds no {key} bars for {coin} in that span")
     last_close = bars[-1].close_time
+    if key == daily_key:
+        # The backdrop IS the decision series: a prefix of what was just
+        # read, not a second scan of the same rows.
+        daily = bars
+    else:
+        daily = list(store.iter_candles(coin, daily_key, until_ms=until_ms and last_close))
+    if until_ms is not None:
+        daily = [bar for bar in daily if bar.close_time <= last_close]
+    funding_until = None if until_ms is None else last_close + FUNDING_STAMP_TOLERANCE_MS
     return SeriesBundle(
-        bars,
-        daily=list(
-            store.iter_candles(
-                coin, daily_key, until_ms=None if until_ms is None else last_close - MS_PER_DAY
-            )
-        ),
-        funding=list(store.iter_funding(coin, until_ms=None if until_ms is None else last_close)),
+        bars, daily=daily, funding=list(store.iter_funding(coin, until_ms=funding_until))
     )
 
 

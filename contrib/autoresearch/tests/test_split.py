@@ -31,13 +31,33 @@ def test_by_shares_cuts_sixty_twenty_twenty_with_the_holdout_newest():
     assert split.holdout.start_ms > split.validation.start_ms > split.train.start_ms
 
 
+def test_a_share_that_is_not_exactly_representable_still_cuts_at_the_bar_it_names():
+    """``0.7`` of 100 bars is bar 70, not the 69 that flooring ``span * 0.7`` gives."""
+    split = _split(100, train_share=0.7, validation_share=0.15)
+    assert split.train.end_ms == ANCHOR_MS + 70 * _STEP
+    assert split.validation.end_ms == ANCHOR_MS + 85 * _STEP
+
+
+def test_the_end_is_snapped_too_so_the_holdout_has_no_partial_tail():
+    split = Split.by_shares("4h", start_ms=ANCHOR_MS, end_ms=ANCHOR_MS + 100 * _STEP + 1)
+    assert split.holdout.end_ms == ANCHOR_MS + 100 * _STEP
+
+
+def test_an_edge_outside_the_epoch_range_is_refused_as_a_split_error():
+    """Not as the decoder's OverflowError from inside the refusal's own sentence."""
+    with pytest.raises(SplitError, match="not a venue instant"):
+        Segment(SegmentName.TRAIN, ANCHOR_MS, 10**20)
+    with pytest.raises(SplitError, match="at or before it starts"):
+        Segment(SegmentName.TRAIN, 10**20, 5)
+
+
 def test_boundaries_are_snapped_onto_the_bar_grid():
     """A boundary inside a bar would let a bar belong to two windows depending on the stamp read."""
-    split = _split(101)  # 60.6 and 80.8 bars in, before snapping
+    split = _split(101)  # 60.6 and 80.8 bars in, before snapping to the nearest bar
     assert (split.train.end_ms - ANCHOR_MS) % _STEP == 0
     assert (split.validation.end_ms - ANCHOR_MS) % _STEP == 0
-    assert split.train.end_ms == ANCHOR_MS + 60 * _STEP
-    assert split.validation.end_ms == ANCHOR_MS + 80 * _STEP
+    assert split.train.end_ms == ANCHOR_MS + 61 * _STEP
+    assert split.validation.end_ms == ANCHOR_MS + 81 * _STEP
 
 
 def test_a_bar_belongs_to_the_window_it_opens_in():

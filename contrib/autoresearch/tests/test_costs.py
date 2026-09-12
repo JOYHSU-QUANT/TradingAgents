@@ -76,8 +76,11 @@ def test_the_record_round_trips_and_names_the_role_by_value():
     assert record["fill_role"] == "maker"
     assert set(record) == set(CostModel.__dataclass_fields__)
     assert CostModel.from_dict(record) == model
-    with pytest.raises(ValueError, match="does not have"):
+    with pytest.raises(ValueError, match="exactly the keys"):
         CostModel.from_dict({**record, "stop_loss": 0.02})
+    # A record that lost a column is refused, not read back as the defaults.
+    with pytest.raises(ValueError, match="exactly the keys"):
+        CostModel.from_dict({k: v for k, v in record.items() if k != "fill_role"})
 
 
 def test_the_description_states_every_number_the_metrics_depend_on():

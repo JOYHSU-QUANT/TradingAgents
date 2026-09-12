@@ -111,9 +111,20 @@ class Segment:
                 )
         if self.end_ms <= self.start_ms:
             raise SplitError(
-                f"{self.name.value}: ends ({from_epoch_ms(self.end_ms).isoformat()}) at or "
-                f"before it starts ({from_epoch_ms(self.start_ms).isoformat()})"
+                f"{self.name.value}: ends ({_stamp(self.end_ms)}) at or before it starts "
+                f"({_stamp(self.start_ms)})"
             )
+        for field in ("start_ms", "end_ms"):
+            # Decodable, so every message below can print it: an edge outside
+            # the epoch range would otherwise escape as the decoder's own
+            # OverflowError from inside a sentence meant to refuse it.
+            try:
+                from_epoch_ms(getattr(self, field))
+            except (OverflowError, ValueError, OSError) as exc:
+                raise SplitError(
+                    f"{self.name.value}.{field}: {getattr(self, field)} is not a venue instant "
+                    f"({exc})"
+                ) from exc
 
     def bar_range(self, open_times: Sequence[int]) -> tuple[int, int]:
         """``(first, stop)`` indices into an ascending ``open_times`` — the segment's bars."""
@@ -124,6 +135,18 @@ class Segment:
             f"{self.name.value}: {from_epoch_ms(self.start_ms):%Y-%m-%d %H:%M} .. "
             f"{from_epoch_ms(self.end_ms):%Y-%m-%d %H:%M}"
         )
+
+
+def _stamp(ms: int) -> str:
+    """An edge as text for a refusal — the raw number if it does not decode.
+
+    The decodability check runs after the ordering check, so this is the one
+    place a sentence may meet an edge the decoder refuses.
+    """
+    try:
+        return from_epoch_ms(ms).isoformat()
+    except (OverflowError, ValueError, OSError):
+        return str(ms)
 
 
 @dataclass(frozen=True)
@@ -194,10 +217,12 @@ class Split:
     ) -> Split:
         """Cut ``[start_ms, end_ms)`` into three by share of its SPAN, snapped to the grid.
 
-        Snapped to whole intervals from ``start_ms`` so a boundary never falls
-        inside a bar — a bar that opens before a boundary and closes after it
-        would otherwise belong to one segment by this module's rule and be
-        argued into the other by a reader thinking in close times.
+        Snapped to whole intervals from ``start_ms`` — the END included, so an
+        operator's "now" does not leave the holdout with a partial tail that
+        the evaluator would refuse as history the store lacks — because a
+        boundary inside a bar would let that bar belong to one segment by
+        this module's rule and be argued into the other by a reader thinking
+        in close times.
         """
         key = studied_interval(interval)
         step = interval_to_ms(key)
@@ -213,9 +238,14 @@ class Split:
             )
         if end_ms <= start_ms:
             raise SplitError("the split's span ends at or before it starts")
-        span = end_ms - start_ms
-        first_cut = start_ms + step * int(span * train_share // step)
-        second_cut = start_ms + step * int(span * (train_share + validation_share) // step)
+        # ROUNDED to the nearest bar, not floored: ``0.7`` is not exactly
+        # representable, so ``span * 0.7 // step`` is 69 of 100 bars, and a
+        # split recreated from its shares in another session would then sit
+        # one bar off the boundary its shares name.
+        span = step * ((end_ms - start_ms) // step)
+        end_ms = start_ms + span
+        first_cut = start_ms + step * round(span * train_share / step)
+        second_cut = start_ms + step * round(span * (train_share + validation_share) / step)
         return cls(
             interval=key,
             train=Segment(SegmentName.TRAIN, start_ms, first_cut),

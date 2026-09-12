@@ -123,7 +123,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "--interval",
             default=_INTERVALS[0],
             choices=_INTERVALS,
-            help="candle interval (default: 4h)",
+            help=f"candle interval (default: {_INTERVALS[0]})",
         )
         sub.add_argument(
             "--db", default=None, help=f"store path (default: <repo>/data/{DB_FILENAME})"

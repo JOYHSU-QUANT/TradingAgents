@@ -335,7 +335,7 @@ class Sizing:
                     f"{self.mode.value} sizing does not read {spelled!r}, got {value!r} — a "
                     f"knob nothing reads looks like a knob that is working"
                 )
-        # Each number is NARROWED, not merely checked: ``_require_number``
+        # Each number is NARROWED, not merely checked: ``require_number``
         # returns the float it validated, and dropping that return left a
         # code-built ``Sizing(fraction=1)`` holding an ``int`` where a parsed
         # one holds ``1.0``. That is the drift ``Condition`` narrows int to
@@ -842,7 +842,8 @@ def _right(
 def _require_fraction(value: object, name: str) -> float:
     """A share of the account: above 0, at most 1. Pathless, for the type guards.
 
-    Returns the narrowed float, like :func:`_require_number` does, so a caller
+    Returns the narrowed float, like :func:`~contrib.autoresearch.vocabulary.require_number`
+    does, so a caller
     can store what was validated rather than the thing it was handed.
     """
     number = require_number(value, name)

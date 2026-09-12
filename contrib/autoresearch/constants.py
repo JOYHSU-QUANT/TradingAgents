@@ -48,9 +48,13 @@ FUNDING_INTERVAL_MS = 60 * 60_000
 FUNDING_STAMP_TOLERANCE_MS = 5_000
 
 # Candle stamps get NO tolerance, and that is a measurement rather than an
-# oversight: the venue's bar stamps are the grid (``open_time`` on the
-# interval, ``close_time`` exactly one interval later), confirmed on the same
-# 2026-09-11 read — 132 consecutive 4h bars, every one exact. A venue that
-# started jittering bar stamps would be changing what a bar IS, so the scan
-# should say so loudly rather than absorb it.
+# oversight: the venue's ``open_time`` stamps are the grid, confirmed on the
+# 2026-09-11 read — 132 consecutive 4h bars, every one exact — and the scan
+# measures ``open_time`` alone. ``close_time`` is the venue's own statement of
+# where the bar ended, and it is ONE MILLISECOND before the next open
+# (measured 2026-09-12: 14399999 ms on all 4999 4h rows, 86399999 on all
+# 2215 daily rows), not the next open itself. Arithmetic that mixes a close
+# with an open, or with an interval, has to say which of the two it means.
+# A venue that started jittering bar stamps would be changing what a bar IS,
+# so the scan should say so loudly rather than absorb it.
 CANDLE_STAMP_TOLERANCE_MS = 0

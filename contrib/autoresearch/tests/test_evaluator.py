@@ -43,7 +43,7 @@ from contrib.autoresearch.features import (
     SeriesBundle,
 )
 from contrib.autoresearch.split import Segment, SegmentName, Split
-from contrib.autoresearch.upstream import FundingPoint, MarketRegime
+from contrib.autoresearch.upstream import FundingPoint, MarketRegime, interval_to_ms
 from contrib.autoresearch.vocabulary import FeatureKind, FeatureRef
 
 from .conftest import ANCHOR_MS, MS_PER_HOUR, candles
@@ -91,19 +91,16 @@ def _spec(**overrides) -> StrategySpec:
     return parse_spec(body)
 
 
-def _run(
-    spec,
-    bundle,
-    first=0,
-    stop=None,
-    costs=_COSTS,
-    interval="4h",
-    lookback=LIVE_CANDLE_LOOKBACK,
-) -> SegmentResult:
+def _run(spec, bundle, first=0, stop=None, costs=_COSTS, interval="4h") -> SegmentResult:
     stop = len(bundle.bars) if stop is None else stop
-    step = _DAY if interval == "1d" else _STEP
-    frame = FeatureFrame(bundle, indicator_lookback=lookback)
+    step = interval_to_ms(interval)
+    frame = FeatureFrame(bundle)
     return evaluate_segment(spec, frame, _segment(first, stop, step=step), costs, interval=interval)
+
+
+def _venue_shaped(bars):
+    """Bars whose close is a millisecond before the next open — the venue's real stamps."""
+    return [dataclasses.replace(bar, close_time=bar.close_time - 1) for bar in bars]
 
 
 def _equity_before(result: SegmentResult, index: int) -> float:
@@ -321,6 +318,24 @@ def test_a_rule_whose_feature_has_no_value_does_not_fire_and_is_counted():
     # Bars 6, 7, 8 decide with ``close_1d`` stale (bar 9 is the last and does
     # not decide); bars 1..5 read the daily close of 50 and 110 < 50 is false.
     assert result.bars_unevaluable == 3
+    assert "3 bars where a consulted rule had no value" in "\n".join(result.describe())
+
+
+def test_every_clause_is_consulted_so_the_silent_count_does_not_depend_on_order():
+    """An AND that stopped at the first false clause would count a silent second
+    clause only on the bars where the first happened to hold."""
+    daily = candles([50.0], start_ms=ANCHOR_MS + _STEP - _DAY, step_ms=_DAY)
+    closes = [90.0] * 10  # the first clause is false at every bar
+    spec = _spec(
+        entry={
+            "long": [
+                {"left": "close", "op": ">", "right": 100},
+                {"left": "close_1d", "op": ">", "right": 10},
+            ]
+        }
+    )
+    result = _run(spec, _bundle(closes, daily=daily))
+    assert result.bars_unevaluable == 3  # bars 6, 7, 8: close_1d stale, and counted anyway
 
 
 def test_a_vol_targeted_rule_needs_its_vol_at_the_first_bar_too():
@@ -352,7 +367,7 @@ def test_a_vol_targeted_rule_sizes_by_the_realized_vol_it_reads():
 
 
 def test_a_vol_target_is_capped_at_the_margin_cap_times_leverage():
-    steady = [100.0 * 1.001**i for i in range(13)]  # near-zero vol: the target wants far more
+    steady = [100.0 * 1.001**i for i in range(13)]  # tiny (not zero) vol: the target wants more
     spec = _spec(
         family="vol_targeting",
         entry={"long": [{"left": "close", "op": ">", "right": 1}]},
@@ -374,6 +389,7 @@ def test_long_and_short_firing_together_enter_nothing_and_are_counted():
     result = _run(spec, _bundle(closes))
     assert result.trades == ()
     assert result.bars_conflicting == 4
+    assert "4 bars where long and short both fired" in "\n".join(result.describe())
 
 
 def test_both_entries_firing_while_held_is_a_conflict_too_not_a_reversal():
@@ -711,6 +727,68 @@ def test_the_report_states_the_parameters_the_numbers_depend_on():
     assert "gross: return" in text and "net  : return" in text
 
 
+def test_venue_shaped_stamps_count_and_align_the_same_as_the_test_shaped_ones(store):
+    """The venue closes a bar one millisecond before the next open. The expected
+    settlement count must not lose one to that millisecond, and the daily bar
+    whose close is exactly the last 4h close must still be loaded."""
+    bars = _venue_shaped(candles([110.0] * 12))
+    daily = _venue_shaped(candles([1000.0, 1001.0], start_ms=ANCHOR_MS, step_ms=_DAY))
+    store.upsert_candles("BTC", "4h", bars)
+    store.upsert_candles("BTC", "1d", daily)
+    store.upsert_funding("BTC", [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(12)])
+    # Bound at the fifth bar: the first day is still open, so no daily bar...
+    five = load_bundle(store, coin="BTC", interval="4h", until_ms=bars[4].open_time)
+    assert five.daily == ()
+    # ...and at the sixth its close is EXACTLY the last 4h close (both a
+    # millisecond short of the next open), so the day is loaded.
+    six = load_bundle(store, coin="BTC", interval="4h", until_ms=bars[5].open_time)
+    assert len(six.daily) == 1 and six.daily[0].close_time == six.bars[-1].close_time
+    result = evaluate_segment(_spec(), FeatureFrame(six), _segment(0, 6), _COSTS, interval="4h")
+    assert result.funding_settlements_missing == 0
+    # Filled at bar 1's open and held through five closes: four settlements each.
+    assert result.trades[0].funding == pytest.approx(5 * 4 * 0.0001 * result.trades[0].size * 110)
+
+
+def test_a_daily_experiment_reads_its_backdrop_from_the_bars_it_already_has(store):
+    daily = candles([1000 + i for i in range(12)], start_ms=ANCHOR_MS, step_ms=_DAY)
+    store.upsert_candles("BTC", "1d", daily)
+    store.upsert_funding("BTC", _funding(12, hours=12 * 24))
+    bundle = load_bundle(store, coin="BTC", interval="1d", until_ms=ANCHOR_MS + 9 * _DAY)
+    assert len(bundle.bars) == 10
+    assert bundle.daily == bundle.bars
+    assert load_bundle(store, coin="BTC", interval="1d").daily == tuple(daily)
+
+
+def test_a_ruined_run_pays_for_its_last_fill_and_measures_turnover_on_the_equity_that_traded():
+    closes = [100, 90, 80, 70, 60]
+    opens = [100, 100, 90, 80, 70]
+    spec = _spec(
+        entry={"long": [{"left": "close", "op": ">", "right": 50}]},
+        sizing={"mode": "fixed_margin_fraction", "fraction": 1.0},
+    )
+    result = _run(
+        spec,
+        _bundle(closes, opens=opens),
+        costs=CostModel(leverage=20, taker_fee_rate=0.001, slippage_bps=0),
+    )
+    trade = result.trades[-1]
+    assert trade.exit_reason is ExitReason.RUIN
+    assert trade.fees == pytest.approx(0.001 * (20 + trade.size * 90))
+    assert result.turnover > 0
+
+
+def test_a_zero_realized_vol_cannot_be_targeted():
+    flat = [100.0] * 13
+    spec = _spec(
+        family="vol_targeting",
+        entry={"long": [{"left": "close", "op": ">", "right": 1}]},
+        sizing={"mode": "vol_target", "target_vol": 0.05, "lookback": 10},
+    )
+    result = _run(spec, _bundle(flat, rate=0.0), first=10, costs=_FREE)
+    assert result.trades == ()
+    assert result.bars_unevaluable == 2
+
+
 def test_load_bundle_reads_nothing_past_the_bound(store):
     """The holdout lock at the store: rows past ``loadable_until`` are never read."""
     store.upsert_candles("BTC", "4h", candles(_wander(30)))
@@ -729,6 +807,14 @@ def test_load_bundle_reads_nothing_past_the_bound(store):
     everything = load_bundle(store, coin="BTC", interval="4h")
     assert len(everything.bars) == 30
     assert len(everything.funding) == 120
+    # The settlement DUE at the bound's last close posts 57 ms after it and is
+    # read; the one due an hour later is not. Measured on the window: no
+    # settlement missing, which a bound at the exact close got wrong.
+    store.upsert_funding("BTC", [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(30)])
+    late = load_bundle(store, coin="BTC", interval="4h", until_ms=split.loadable_until())
+    assert late.funding[-1].time == late.bars[-1].close_time + 57
+    result = evaluate_segment(_spec(), FeatureFrame(late), split.validation, _COSTS, interval="4h")
+    assert result.funding_settlements_missing == 0
     with pytest.raises(EvaluationError, match="holds no 1d bars for ETH"):
         load_bundle(store, coin="ETH", interval="1d")
 
@@ -738,14 +824,18 @@ def test_the_indicator_window_actually_changes_what_the_engine_is_shown():
     must give the number fifty bars give, and not the number two hundred do."""
     from contrib.autoresearch.upstream import context_analytics
 
-    closes = [30000 + (i * 37) % 1000 for i in range(260)]
+    closes = [30000 + (i * 37) % 1000 for i in range(130)]
     bundle = _bundle(closes, rate=0.0)
     narrow = FeatureFrame(bundle, indicator_lookback=50)
-    wide = FeatureFrame(bundle)
     ref = FeatureRef(FeatureKind.EMA, 50)
-    expected = context_analytics().compute_indicators(bundle.bars[-50:], ["ema_50"])["ema_50"]
-    assert narrow.series(ref)[-1] == pytest.approx(expected, rel=1e-12)
-    assert wide.series(ref)[-1] != pytest.approx(expected, rel=1e-6)
+    engine = context_analytics().compute_indicators
+    assert narrow.series(ref)[-1] == pytest.approx(
+        engine(bundle.bars[-50:], ["ema_50"])["ema_50"], rel=1e-12
+    )
+    # ...and the default window sees all 130 bars, which is a different EMA.
+    assert engine(bundle.bars, ["ema_50"])["ema_50"] != pytest.approx(
+        narrow.series(ref)[-1], rel=1e-6
+    )
 
 
 def test_the_indicator_window_is_a_frame_parameter_with_a_floor():
@@ -768,23 +858,6 @@ def test_a_trade_reads_back_with_its_reason_and_both_pnls():
     assert text.startswith("long 2 bars @ 120 -> 130: gross +")
     assert text.endswith("(segment_end)")
     assert "net +" in text
-
-
-def test_the_report_notes_say_when_a_rule_went_silent_or_spoke_twice():
-    closes = [100.0] * 5
-    both = _spec(
-        entry={
-            "long": [{"left": "close", "op": ">", "right": 50}],
-            "short": [{"left": "close", "op": "<", "right": 150}],
-        }
-    )
-    assert "4 bars where long and short both fired" in "\n".join(
-        _run(both, _bundle(closes)).describe()
-    )
-    daily = candles([50.0], start_ms=ANCHOR_MS + _STEP - _DAY, step_ms=_DAY)
-    silent = _spec(exit={"long": [{"left": "close", "op": "<", "right": "close_1d"}]})
-    lines = _run(silent, _bundle([110.0] * 10, daily=daily)).describe()
-    assert "3 bars where a consulted rule had no value" in "\n".join(lines)
 
 
 def test_the_evaluator_refuses_an_interval_this_package_does_not_study():

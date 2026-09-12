@@ -300,8 +300,9 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
   warm-up 在窗口第一根就被拒絕；留著是型別上的完整，不是行為。
 - **短於 50 根的 bundle，regime 分桶全記 `unlabelled`**：那是 report 的維度不是 spec 的
   feature，對它套「整欄 None 就拒絕」會讓每個小測試都得先餵 50 根。
-- **`--interval 1d` 的 experiment 會把 1d 序列讀兩次**（bars 與 daily 是同一批 rows）；
-  `close_1d` 在那上面退化成 `close`，parser 看不到 interval 所以擋不了（承 A2 §10.8）。
+- **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批
+  rows，`load_bundle` 直接拿 bars 當 backdrop，不讀第二次）；parser 看不到 interval 所以擋不了
+  （承 A2 §10.8）。
 
 ## 測試
 

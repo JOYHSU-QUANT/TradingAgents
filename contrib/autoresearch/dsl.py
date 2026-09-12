@@ -84,6 +84,7 @@ from .vocabulary import (
     SpecError,
     parse_feature_name,
     periods_for,
+    require_number,
     spec_of,
 )
 
@@ -270,7 +271,7 @@ class Condition:
             # — THROUGH the shared guard, because a bare ``float()`` on a
             # 400-digit integer is the overflow that guard exists to catch,
             # and doing the conversion by hand put it back in front of it.
-            object.__setattr__(self, "right", _require_number(self.right, "a threshold"))
+            object.__setattr__(self, "right", require_number(self.right, "a threshold"))
         if self.right_param is not None and not isinstance(self.right, float):
             raise SpecError(
                 f"right_param {self.right_param!r} names the parameter a NUMBER came "
@@ -334,7 +335,7 @@ class Sizing:
                     f"{self.mode.value} sizing does not read {spelled!r}, got {value!r} — a "
                     f"knob nothing reads looks like a knob that is working"
                 )
-        # Each number is NARROWED, not merely checked: ``_require_number``
+        # Each number is NARROWED, not merely checked: ``require_number``
         # returns the float it validated, and dropping that return left a
         # code-built ``Sizing(fraction=1)`` holding an ``int`` where a parsed
         # one holds ``1.0``. That is the drift ``Condition`` narrows int to
@@ -346,7 +347,7 @@ class Sizing:
         object.__setattr__(
             self, "max_fraction", _require_fraction(self.max_fraction, "max_fraction")
         )
-        object.__setattr__(self, "target_vol", _require_number(self.target_vol, "target_vol"))
+        object.__setattr__(self, "target_vol", require_number(self.target_vol, "target_vol"))
         if not _MIN_TARGET_VOL <= self.target_vol <= _MAX_TARGET_VOL:
             raise SpecError(
                 f"target_vol {self.target_vol:g} is outside {_MIN_TARGET_VOL}..{_MAX_TARGET_VOL}; "
@@ -573,7 +574,7 @@ def _check_structure(spec: StrategySpec) -> None:
             # mapping keeps the last and a report shows the last, so two
             # declarations of one knob are two specs wearing one name.
             raise SpecError(f"spec.params: {name!r} is declared twice")
-        declared[name] = _require_number(value, f"spec.params.{name}")
+        declared[name] = require_number(value, f"spec.params.{name}")
     for condition in spec.conditions:
         name = condition.right_param
         if name is None:
@@ -793,7 +794,7 @@ def _check_threshold(left: FeatureRef, number: float, *, named: str | None = Non
     on the wrong scale — and three units have no bound at all, which is said
     where they are listed rather than left to a lookup that finds nothing.
     """
-    _require_number(number, "a threshold")
+    require_number(number, "a threshold")
     if left.unit not in _UNIT_BOUNDS:
         return
     low, high = _UNIT_BOUNDS[left.unit]
@@ -838,41 +839,14 @@ def _right(
     return _number(value, path), None
 
 
-def _require_number(value: object, what: str) -> float:
-    """A finite number, refused as a :class:`SpecError` rather than a ``TypeError``.
-
-    THE one numeric guard, reached from both directions: the parser passes the
-    document path as ``what``, a type guard passes a noun. It was two guards
-    for one round, and they immediately disagreed — the parser's caught the
-    huge-integer ``OverflowError`` while the type seam's let it out, which is
-    the same escape, at the layer written to close it.
-
-    Three refusals, and none of them is a technicality. ``True`` is not a
-    number, because ``isinstance(True, int)`` is true and a threshold of
-    ``True`` would read as ``1.0`` — a plausible bound on anything scaled near
-    unity. An integer too large for a float is not one either: JSON puts no
-    limit on an integer literal, and ``float()`` raises an ``ArithmeticError``,
-    which is outside the ``ValueError`` lane every refusal here travels in. And
-    a non-finite float is not a number a rule can be written against.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SpecError(f"{what}: expected a number, got {value!r}")
-    try:
-        number = float(value)
-    except OverflowError as exc:
-        raise SpecError(f"{what}: {value!r} is too large to be a number") from exc
-    if not math.isfinite(number):
-        raise SpecError(f"{what}: expected a finite number, got {value!r}")
-    return number
-
-
 def _require_fraction(value: object, name: str) -> float:
     """A share of the account: above 0, at most 1. Pathless, for the type guards.
 
-    Returns the narrowed float, like :func:`_require_number` does, so a caller
+    Returns the narrowed float, like :func:`~contrib.autoresearch.vocabulary.require_number`
+    does, so a caller
     can store what was validated rather than the thing it was handed.
     """
-    number = _require_number(value, name)
+    number = require_number(value, name)
     if not 0 < number <= 1:
         raise SpecError(f"{name} is a fraction of the account, above 0 and at most 1, got {value!r}")
     return number
@@ -963,7 +937,7 @@ def _enum(vocabulary: type[VocabEnum], value: object, path: str):
 
 def _number(value: object, path: str) -> float:
     """A finite number at ``path``. The path IS the noun the shared guard names."""
-    return _require_number(value, path)
+    return require_number(value, path)
 
 
 def _whole(value: object, path: str, *, low: int, high: int) -> int:
@@ -995,7 +969,10 @@ def describe_spec(spec: StrategySpec) -> list[str]:
     if spec.max_bars is not None:
         lines.append(f"exit after {spec.max_bars} bars held")
     if spec.filters:
-        lines.append(f"only while: {_joined(spec.filters)}")
+        # "enter", because that is all a filter gates (plan §10.1c): a filter
+        # turning false does not close a position — an exit is written under
+        # ``exit`` or it is not a rule.
+        lines.append(f"enter only while: {_joined(spec.filters)}")
     lines.append(f"sizing: {spec.sizing}")
     lines.append(f"features used: {', '.join(str(ref) for ref in spec.features)}")
     return lines

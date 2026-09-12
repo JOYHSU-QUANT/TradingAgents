@@ -16,7 +16,8 @@ memory `hyperliquid-autoresearch-mvp-direction`。
 
 ## 現況
 
-**PR A1＝資料落地層、PR A2（本次）＝假說寫得出來的那套語言。** 已經有的東西：
+**PR A1＝資料落地層、PR A2＝假說寫得出來的那套語言、PR A3（本次）＝替假說打分的評估器。**
+已經有的東西：
 
 - 自己的 store `autoresearch.sqlite`（schema v1：`candles`、`funding`、`series_state`）。
 - `series_state`：每條序列一列，記上一跑 fetch **實際抽到哪、為什麼停在那**。gap 掃描回答不了這件事：它以第一個 stamp 當格線原點，所以前端被截掉的序列掃起來「完全沒洞」——跟交易所真的沒更舊資料長得一模一樣。
@@ -32,13 +33,23 @@ memory `hyperliquid-autoresearch-mvp-direction`。
   自由運算式。未知欄位、未知 feature、未知 op、未來 offset 一律**具名拒絕**，句子裡帶著
   文件內的路徑（`spec.entry.long[0].right`）與該怎麼改。
 - **逐 bar 的 feature 計算**（`features.py`）：每個值只由「截至該 bar 收盤」的資料算出來，
-  而且是**建構上如此**——indicator 引擎拿到的 window 永遠**結束在這根 bar**，起點則固定
-  往回 200 根，也就是實盤每 cycle fetch 的根數（見下面「無前視是建構保證」）。
+  而且是**建構上如此**——indicator 引擎拿到的 window 永遠**結束在這根 bar**，起點則往回
+  `indicator_lookback` 根（預設 200＝實盤每 cycle fetch 的根數；A3 起是 frame 的參數，
+  見下面「無前視是建構保證」）。
 - **三個 pin 測試**（`tests/test_pins.py`）：`compute_indicators`、`classify_regime`、
   `funding_zscore` 的簽名與固定輸入的固定輸出。
+- **成本模型**（`costs.py`）：taker／maker 費率、slippage、槓桿，一個 frozen 值；預設就是
+  paper run 的三個數字（0.045%、5 bps、槓桿 1），pin 在 `test_pins.py`。
+- **固定切分＋holdout 鎖**（`split.py`）：train／validation／holdout 按日曆切、holdout 最新；
+  沒有明說 `holdout=True` 就拿不到那段，連 rows 都不從 store 讀。
+- **bar 級評估器**（`evaluator.py`）：t 收盤決策、t+1 開盤成交、gross／net 兩組指標、
+  regime 分桶；空的 `exit`、反向 entry、filter、`None` 四題的語意在這裡定（見下面）。
 
-**還沒有的東西**（依計畫 §5 的順序）：bar 級模擬與成本模型（A3）、`experiments`／`trials`
-ledger 與 baseline 校準（A4）、LLM 假說迴圈（B1）、context bridge（C1，排 run 6）。
+**還沒有的東西**（依計畫 §5 的順序）：`experiments`／`trials` ledger、trial penalty、
+`evaluate`／`promote`／`report` 指令與 baseline 校準（A4）、LLM 假說迴圈（B1）、
+context bridge（C1，排 run 6）。**現在還沒有任何指令會跑評估器**——A3 是函式庫，
+`tests/test_evaluator.py` 是它唯一的呼叫端；接指令時記得把 `EvaluationError`／
+`FeatureError` 加進 CLI 的 exit-1 lane（兩個都是 `RuntimeError`，現在的 lane 接不到）。
 
 `experiments`／`trials` 兩張表**故意還沒建**：等 A4 把寫它們、讀它們的程式一起帶進來。
 現在先建好，只會多兩張沒有生產者也沒有消費者的表。
@@ -87,6 +98,13 @@ data」，不會靜默地裝作抓完了。
 還有一件：連續快速要求約 44 次就會吃到 429。fetch 遇到 throttle 會等**四次**
 （2s→5s→15s→30s），加上最後一次不再等的嘗試，共 **五次嘗試**；都等不到就具名
 失敗。只有 throttle 會等，其他交易所錯誤一次也不重試。已寫進去的頁不會不見，重跑即可。
+
+### 交易所的 `close_time` 比下一根的 `open_time` 早 1 ms（2026-09-12 實測）
+
+4h 全部 4999 列 `close_time − open_time = 14399999`，1d 全部 2215 列 `= 86399999`。任何把
+close 跟 open 或跟 interval 混著算的算式都得說清楚用的是哪一個：評估器算「這段該有幾筆
+settlement」用 round 不用 floor，日線 backdrop 用日 K **自己的** close 過濾而不是從 open 推。
+測試用的 `candles()` 工廠是 `close = open + step`，所以碰邊界的測試要自己造 venue 形狀的 bar。
 
 ### 掃描輸出跟 `reach:` 那一行
 
@@ -157,8 +175,10 @@ indicator 引擎拿到的 window **結束在這根 bar**（起點見下一段）
 「去讀一根當下看不到的日 K」的錯。旁邊還有一個守門測試，要求被檢查的那根 bar 上**每個**
 feature 都有值，否則一整排 `None` 會跟自己完美相符。
 
-window 的**起點**則是另一件事：它固定往回 200 根，也就是實盤每個 cycle 去 fetch 的根數
-（`candle_lookback`）。同一根 bar 因此在這裡與那裡拿到同一個 EMA；順帶一提，這也讓成本從
+window 的**起點**則是另一件事：它往回 `indicator_lookback` 根，**預設** 200＝實盤每個 cycle
+去 fetch 的根數（`candle_lookback`），同一根 bar 因此在這裡與那裡拿到同一個 EMA——而這句話
+只在預設下成立：實盤的值是 gitignored 的 `local.yaml` 可以改的，所以 A3 把它做成 frame 的
+參數、報表印出用的是哪個（計畫 §10.3）。順帶一提，固定 window 也讓成本從
 平方變回線性——引擎每次呼叫都重建 frame，餵不斷變長的 prefix 到第 5000 根本機實測
 12 ms/bar，固定 window 是大約 2.5 ms。
 
@@ -181,6 +201,49 @@ window 的**起點**則是另一件事：它固定往回 200 根，也就是實�
   只有兩天時，上游那個函式的下限是 24 筆（＝一天），所以它會給你一個數字，而 7／14／30 三
   個 feature 會是同一欄。這裡直接回 `None`。這一條是**刻意不鏡射實盤**：實盤每個 cycle 自己
   抓 30 天窗，而且會把 `n=` 印進 prompt 讓讀的人看見，研究這邊沒有那個管道。
+
+### 評估器：t 收盤決策、t+1 開盤成交
+
+`evaluator.py` 是計畫 §3.6 那條規則做成無法繞過的形狀：迴圈在 bar t 用 `value_at` 讀
+feature（它收不到未來 offset），讀到的東西變成一張 *pending* 單，迴圈走到 t+1 才用那根的
+**開盤價**成交。沒有任何路徑會用決策當根的收盤價成交，所以測試抓不到東西——但
+`test_evaluator.py` 還是量了：一筆 long 逐項手算（成交價、fee、slippage、逐小時 funding），
+以及對整段歷史與截到 t 的歷史各跑一次、要求 t 之前的每個決定完全相同（計畫 §3.6b）。
+
+A2 的 parser 留了四個語意缺口（計畫 §10.1），這裡一次定死：
+
+| 缺口 | 定案 | 為什麼 |
+|---|---|---|
+| 空的 `exit`、也沒 `max_bars` | **抱到反向 entry 反手，或抱到窗口結束** | 「entry 不再成立就平」會讓每個沒寫 exit 的 breakout 進場下一根就出場；parser 給 `max_bars` 設上限時已經假設「never exit」是評估器認得的東西 |
+| 持倉中反向 entry 成立 | **反手**（同一次成交平掉再開反向） | 最有訊號的讀法，也是 always-in 規則寫得出來的唯一讀法 |
+| `filters` | **只擋進場**（含反手），變 false 不平倉 | 想「regime 翻了就平」的規則寫在 `exit`，read-back 看得到；read-back 現在印 `enter only while:` |
+| 持倉中 exit／filter 的 feature 是 `None` | **不觸發，續抱，並計數**（`bars_unevaluable`） | `features.py` 對 entry 的讀法就是「None＝這裡不觸發」；exit 反過來 fail-closed 等於同一個值兩種讀法。計數是為了讓「一條規則安靜了一個月」變成數字而不是一次 hold |
+
+其他形狀：同向 entry 持倉中不加碼；long／short 同根同時成立不進場、計數
+（`bars_conflicting`）；窗口最後一根收盤**強制平倉**（付成本），所以一個窗口永遠不讀下一個
+窗口的 bar——holdout 鎖就靠這一點；權益歸零記 `ruined`、停止，不做 liquidation 引擎；
+DSL 本來就沒有停損停利。
+
+**窗口就是量測範圍，對每個 spec 一樣**（計畫 §10.2）：exposure／hit rate 的分母對每個
+假說都相同。warm-up 不是從 spec 推出來的（那得混 bar、day、`MAX_OFFSET_BARS`、上游
+`required_candles` 四種單位），而是**量出來的**：某個 feature 在窗口第一根沒有值，整個窗口
+被具名拒絕，句子裡帶著它第幾根才有值——要嘛把窗口往後移，要嘛抓更舊的歷史。
+
+**成本**（計畫 §3.7）：gross＝mid 到 mid 的價差；net 再扣每次成交的 fee＋slippage（算在 mid
+名目上，跟實盤「fee 算在滑價後的價格」差 fee×slippage，預設下是名目的五億分之一）與持倉
+期間每個**逐小時** settlement 的 funding（正負號同 paper ledger：long 在正費率**付**）。
+兩組都印，因為「gross 好看、net 不好看」是假說迴圈最常生出來的東西。`indicator_lookback`
+現在是 frame 的參數（預設仍是實盤的 200），報表會印出用的是哪個（計畫 §10.3）。
+
+**指標**（計畫 §3.9）：total return、Sharpe（bar 報酬年化，報表明寫 `sqrt(2190 bars/year)`）、
+max drawdown、hit rate 各算 gross／net 一組；exposure、turnover（名目成交／平均權益）、
+fees／slippage／funding 各自的總額、每個 regime 的 net return 分桶。always-flat 各指標是
+**0 不是 NaN**（計畫 §6.6）。
+
+**會被具名拒絕的窗口**（`EvaluationError`）：bar 有洞（計畫 §3.4：一個洞讀成格線就是兩根
+相鄰 bar 之間一次巨大報酬）、少於兩根、funding 覆蓋不到九成（成本模型逐小時結算，缺 settlement
+會低估 carry 而看起來完全正常；缺一兩筆則只回報 `funding_settlements_missing`）、
+spec 的 feature 在第一根沒有值。這三種都是「換窗口或補資料」的事，不是改 spec 的事。
 
 ## store 路徑與拒絕
 
@@ -221,6 +284,25 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
 `test_upstream.py` 開一個 subprocess 跑 `vocab`，回頭看 `sys.modules` 裡有沒有 pandas。
 （沒有它時，在 `cli.py` 加一行 `from .features import ...` 可以讓 `gaps` 開始付 pandas 的
 錢，而全套測試依然全綠。）
+
+## 已知取捨（記著就好，不開 issue）
+
+- **indicator 一次算四個名字**（計畫 §10.5）：評估器知道整個 experiment 的 feature 聯集，
+  可以只叫 frame 算需要的；沒做，因為一個 frame 服務整個 experiment，聯集遲早全要。
+  順帶：regime 分桶讓**每個** spec 都付這趟 indicator walk（5000 根本機實測約 12 秒，
+  每個 frame 一次），就算 spec 一個 indicator 都沒讀；而 engine 真的壞掉時，那個
+  `FeatureError` 會從一個沒讀 indicator 的 spec 冒出來。一個只對「碰巧算過」的 spec
+  出現的 report 維度不是維度，所以照付。
+- **gross 的分母是 net 權益路徑**：gross bar return＝該根價差損益／當時實際持有的權益，
+  再複利。所以 `gross.total_return` 不等於各筆 `gross_pnl` 的總和；兩組指標同分母，
+  差的只有成本項，這才是「gross 好看、net 不好看」要比的東西。
+- **`_notional` 的 `None` 分支實務上到不了**：`realized_vol_N` 只在 warm-up 是 `None`，而
+  warm-up 在窗口第一根就被拒絕；留著是型別上的完整，不是行為。
+- **短於 50 根的 bundle，regime 分桶全記 `unlabelled`**：那是 report 的維度不是 spec 的
+  feature，對它套「整欄 None 就拒絕」會讓每個小測試都得先餵 50 根。
+- **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批
+  rows，`load_bundle` 直接拿 bars 當 backdrop，不讀第二次）；parser 看不到 interval 所以擋不了
+  （承 A2 §10.8）。
 
 ## 測試
 

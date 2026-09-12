@@ -98,8 +98,13 @@ def candles(
     step_ms: int | None = None,
     highs: Sequence[float] | None = None,
     lows: Sequence[float] | None = None,
+    opens: Sequence[float] | None = None,
 ) -> list[Candle]:
-    """Bars whose closes — and optionally highs and lows — are exactly as given.
+    """Bars whose closes — and optionally opens, highs and lows — are exactly as given.
+
+    ``opens`` default to the closes. The evaluator tests set them apart,
+    because "filled at the next OPEN" is only distinguishable from "filled at
+    this CLOSE" on a bar whose two prices differ.
 
     The sibling of :func:`bars`, which owns its own price ramp because the
     store and gap tests care about stamps and not about prices. This one is
@@ -115,13 +120,16 @@ def candles(
     made = []
     for index, close in enumerate(closes):
         price = Decimal(str(close))
+        opened = Decimal(str(opens[index])) if opens else price
         made.append(
             Candle(
                 open_time=start_ms + index * step,
                 close_time=start_ms + (index + 1) * step,
-                open=price,
-                high=Decimal(str(highs[index])) if highs else price + 10,
-                low=Decimal(str(lows[index])) if lows else price - 10,
+                open=opened,
+                # The default band brackets BOTH prices, so an open ten away
+                # from its close is still a legal bar.
+                high=Decimal(str(highs[index])) if highs else max(opened, price) + 10,
+                low=Decimal(str(lows[index])) if lows else min(opened, price) - 10,
                 close=price,
                 volume=Decimal("1.5"),
             )

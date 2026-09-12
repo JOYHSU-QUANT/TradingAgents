@@ -340,7 +340,7 @@ def test_the_coverage_rule_rounds_up_whatever_the_window_counts(observed, expect
     is exactly 18). A period of 7 is where they part: floored, it accepts six
     days under a seven-day name.
     """
-    assert features_module._window_is_covered(observed, expected) is covered
+    assert features_module.window_is_covered(observed, expected) is covered
 
 
 def test_a_four_settlement_window_needs_all_four():

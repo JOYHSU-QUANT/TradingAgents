@@ -393,9 +393,9 @@ class FeatureFrame:
     One frame per experiment, not one per trial: the arrays depend on the
     history alone, so a hypothesis loop scoring fifty specs over the same
     bundle computes them once. That matters most for the borrowed indicator
-    engine, which is asked for its latest value once per bar — measured at
-    about 2.5 ms a bar on this box, so a 5000-bar series is some thirteen
-    seconds paid once rather than thirteen seconds a trial.
+    engine, which is asked for its latest value once per bar past its warm-up —
+    measured at about 2.5 ms a bar on this box, so a 5000-bar series is about
+    twelve seconds paid once rather than twelve seconds a trial.
 
     Frozen so the bundle cannot be swapped out from under the cache. The cache
     itself is a plain dict that is mutated, never rebound: an assignable

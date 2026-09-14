@@ -1019,7 +1019,7 @@ def test_load_bundle_reads_nothing_past_the_bound(store):
 
 def test_the_indicator_window_actually_changes_what_the_engine_is_shown():
     """Pinned against the engine over the last fifty bars: a frame told fifty
-    must give the number fifty bars give, and not the number two hundred do."""
+    must give the number fifty bars give, and not the number all 130 bars do."""
     from contrib.autoresearch.upstream import context_analytics
 
     closes = [30000 + (i * 37) % 1000 for i in range(130)]
@@ -1030,7 +1030,7 @@ def test_the_indicator_window_actually_changes_what_the_engine_is_shown():
     assert narrow.series(ref)[-1] == pytest.approx(
         engine(bundle.bars[-50:], ["ema_50"])["ema_50"], rel=1e-12
     )
-    # ...and the default window sees all 130 bars, which is a different EMA.
+    # ...and not the engine's number over all 130 bars, which is a different EMA.
     assert engine(bundle.bars, ["ema_50"])["ema_50"] != pytest.approx(
         narrow.series(ref)[-1], rel=1e-6
     )

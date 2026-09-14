@@ -70,8 +70,8 @@ Breaking changes within the 0.x line are called out explicitly.
   whose funding series covers under ninety percent of it, one a spec's
   feature has not warmed up for, and one whose edge is off the store's bar
   grid (a hand-built or ledger-read segment; `by_shares` snaps its cuts). A
-  bundle holding a funding rate that is not a finite number is refused when
-  it is built (`FeatureError`). A window over `1h` bars is refused at the
+  bundle holding a funding rate, or a bar or daily-bar price, that is not a
+  finite number is refused when it is built (`FeatureError`). A window over `1h` bars is refused at the
   split, since the venue's interval enum is wider than the two this package
   studies and the CLI's `choices` was the only thing saying so; so are span
   edges that are not whole epoch ms, and shares that round a segment down to
@@ -93,7 +93,9 @@ Breaking changes within the 0.x line are called out explicitly.
   buckets on a bundle shorter than the engine's warm-up are all
   `unlabelled`; on a `1d` experiment the backdrop is the decision series
   itself (read once), so `close_1d` degenerates to `close`; `vol_target`
-  sizes at entry and does not re-size a held position.
+  sizes at entry and does not re-size a held position; a Sharpe of 0 means
+  a series with no deviation, which a run that lost the same amount at every
+  bar also is, so it is read beside the total return and the trade count.
 
 - **autoresearch: the language a hypothesis is written in, and a guarantee that
   it saw no future** (plan PR A2). A closed feature vocabulary, a declarative

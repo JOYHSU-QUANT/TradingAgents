@@ -100,6 +100,23 @@ def test_a_funding_rate_that_is_not_a_finite_number_is_refused():
         assert SeriesBundle(ordered, funding=fine).funding[1].rate == rate
 
 
+def test_a_price_that_is_not_a_finite_number_is_refused_on_either_series():
+    """``Candle`` orders its prices and keeps ``low`` above zero; an all-Infinity
+    bar passes both, and a position marked to it books a return that never ruins."""
+    ordered = candles([100, 101, 102])
+    infinite = Decimal("Infinity")
+    broken = dataclasses.replace(
+        ordered[1], open=infinite, high=infinite, low=infinite, close=infinite
+    )
+    with pytest.raises(FeatureError, match=r"the bar opening at .* not a finite number"):
+        SeriesBundle([ordered[0], broken, ordered[2]])
+    daily = candles([1000, 1001], step_ms=24 * MS_PER_HOUR)
+    bad_day = dataclasses.replace(daily[1], high=infinite, close=infinite)
+    with pytest.raises(FeatureError, match=r"the daily bar opening at .* not a finite number"):
+        SeriesBundle(ordered, daily=[daily[0], bad_day])
+    assert SeriesBundle(ordered, daily=daily).daily == tuple(daily)
+
+
 def test_a_series_whose_closes_are_out_of_order_is_refused_too():
     """The stamp the ALIGNMENTS read, which is not the one the lookbacks read.
 

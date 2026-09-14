@@ -282,8 +282,10 @@ class SegmentResult:
     ``ruined`` is the fact to read, not something to infer from the trades:
     the last trade's ``exit_reason`` is ``ruin`` only when a position was
     still held when the account emptied. The fill that empties it can be a
-    pending close (``exit_rule``, ``max_bars``, ``reversal``) or the window's
-    own flatten (``segment_end``). After a ruin the remaining bars are booked
+    pending close (``exit_rule``, ``max_bars``) or the window's own flatten
+    (``segment_end``); a reversal that empties it still ends on ``ruin``,
+    because the position it opened is held when the bar is booked. After a
+    ruin the remaining bars are booked
     flat, so every statistic is still over the whole window — the same
     denominator as every other spec — and a Sharpe of an early ruin is diluted
     by the flat bars after it. Rank or filter on ``ruined`` before any ratio.
@@ -775,6 +777,12 @@ def _tally(returns: Sequence[float], trade_pnls: Sequence[float], bars_per_year:
     §6.6 wants that reported as zeros so a report reads "did nothing" rather
     than failing to render. ``sharpe`` is 0 when the deviation is 0 for the
     same reason: a series that never moved has no risk-adjusted anything.
+
+    So a Sharpe of 0 is not "did nothing". A series that lost the SAME
+    non-zero amount at every bar also has no deviation and also reads 0 —
+    read it beside ``total_return`` and the trade count. On real history the
+    compounding equity makes identical bar returns all but impossible; kept
+    as 0 rather than ±inf, which no ledger row can hold (decided 2026-09-14).
     """
     path = [STARTING_EQUITY]
     for r in returns:

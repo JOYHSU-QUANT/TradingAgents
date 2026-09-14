@@ -330,25 +330,47 @@ class SeriesBundle:
         # a feature value every comparison reads as false and a funding charge
         # that turns a trial's statistics into an exception from inside
         # ``statistics`` — refused here, where both of them come from.
-        bad = next((p for p in self.funding if not _is_finite_rate(p.rate)), None)
+        bad = next((p for p in self.funding if not _is_finite_number(p.rate)), None)
         if bad is not None:
             raise FeatureError(
                 f"the funding settlement at {bad.time} ms has rate {bad.rate}, which is not a "
                 f"finite number — re-fetch that window"
             )
+        # The same hole on the prices: ``Candle`` checks ``low <= open, close <=
+        # high`` and ``low > 0``, and an all-Infinity bar passes both. A held
+        # position marked to it books an infinite return that never ruins (a
+        # gain), and the window ends as the same exception from ``statistics``.
+        for what, series in (("bar", self.bars), ("daily bar", self.daily)):
+            broken = next(
+                (
+                    bar
+                    for bar in series
+                    if not all(_is_finite_number(getattr(bar, f)) for f in _PRICE_FIELDS)
+                ),
+                None,
+            )
+            if broken is not None:
+                raise FeatureError(
+                    f"the {what} opening at {broken.open_time} ms has a price that is not a "
+                    f"finite number (open {broken.open}, high {broken.high}, low {broken.low}, "
+                    f"close {broken.close}) — re-fetch that window"
+                )
 
 
-def _is_finite_rate(rate: object) -> bool:
-    """Whether ``rate`` is a number every reader of it can use.
+_PRICE_FIELDS: Final = ("open", "high", "low", "close")
+
+
+def _is_finite_number(value: object) -> bool:
+    """Whether a stored ``value`` (a rate, a price) is a number every reader of it can use.
 
     Through ``float`` rather than ``Decimal.is_finite``, because that is how
-    every reader in this module takes the rate. The DTO annotates it as a
-    ``Decimal`` without enforcing it, and a hand-built bundle with a float
-    rate has always worked. A signalling NaN, or text that is not a number,
-    cannot be converted at all, and is refused like any other non-finite rate.
+    every reader in this module takes it. The DTOs annotate a ``Decimal``
+    without enforcing it, and a hand-built bundle with float values has always
+    worked. A signalling NaN, or text that is not a number, cannot be
+    converted at all, and is refused like any other non-finite value.
     """
     try:
-        return math.isfinite(float(rate))  # type: ignore[arg-type]
+        return math.isfinite(float(value))  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
         return False
 

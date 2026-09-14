@@ -241,7 +241,9 @@ A2 的 parser 留了四個語意缺口（計畫 §10.1），這裡一次定死�
 **指標**（計畫 §3.9）：total return、Sharpe（bar 報酬年化，報表明寫 `sqrt(2190 bars/year)`）、
 max drawdown、hit rate 各算 gross／net 一組；exposure、turnover（名目成交／平均權益）、
 fees／slippage／funding 各自的總額、每個 regime 的 net return 分桶。always-flat 各指標是
-**0 不是 NaN**（計畫 §6.6）。
+**0 不是 NaN**（計畫 §6.6）。標準差為 0 時 Sharpe 一律報 0，所以 **Sharpe 0 不等於沒交易**：
+每根都虧同樣金額的序列也是 0，要跟 total return 與交易數一起讀（2026-09-14 拍板，不報 ±inf）。
+`ruined` 為真的窗口先濾掉再看任何比率。
 
 **會被具名拒絕的窗口**（`EvaluationError`）：bar 有洞（計畫 §3.4：一個洞讀成格線就是兩根
 相鄰 bar 之間一次巨大報酬）、少於兩根、funding 覆蓋不到九成（成本模型逐小時結算，缺 settlement

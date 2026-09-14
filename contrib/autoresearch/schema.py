@@ -117,8 +117,9 @@ CREATE TABLE series_state (
 #
 # Two departures from the plan's column list, both on purpose. There is no
 # ``family``: plan §10.6 found that two of the five families are an author's
-# intent and relabelling is free, so the trial penalty counts every trial in
-# the experiment and family is a report dimension on the TRIAL. And
+# intent and relabelling is free, so the trial penalty counts distinct rules
+# (on the coin, across its experiments — see ``ledger``) and family is a report
+# dimension on the TRIAL. And
 # ``indicator_lookback`` is here because it changes every indicator a trial
 # reads (plan §11): two experiments differing only in it would otherwise write
 # identical rows. ``coin`` is here because nothing else in the row names the

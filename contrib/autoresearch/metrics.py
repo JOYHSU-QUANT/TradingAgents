@@ -217,13 +217,17 @@ def describe_measurement(
     split: Split,
     indicator_lookback: int,
     segments: Sequence[SegmentMetrics],
+    *,
+    withheld_because: str = "not promoted",
 ) -> list[str]:
     """A measured spec as lines to print: what was scored, under what, and what it scored.
 
     Every parameter a number depends on is printed above the numbers — the
     cost model, the indicator window, the annualisation, the split — because a
     Sharpe with those left implicit is a number nobody can reproduce. A window
-    of the split that was not measured is named as withheld.
+    of the split that was not measured is named as withheld, and why:
+    ``withheld_because`` is "not promoted" unless the caller withholds figures
+    that exist (a search view of a promoted trial must not say it was not).
     """
     lines = list(describe_spec(spec))
     lines.append(costs.describe())
@@ -238,7 +242,7 @@ def describe_measurement(
     measured = {segment.segment.name for segment in segments}
     for withheld in split.ordered:
         if withheld.name not in measured:
-            lines.append(f"{withheld.name.value}: withheld (not promoted)")
+            lines.append(f"{withheld.name.value}: withheld ({withheld_because})")
     return lines
 
 

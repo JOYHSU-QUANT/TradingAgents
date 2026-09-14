@@ -23,11 +23,15 @@ Five are the LEDGER (plan PR A4), and every one of them reads a store:
 
 - ``experiment --name btc-4h --interval 4h`` — measure where the store's
   history is fit to measure on, cut train / validation / holdout, and write
-  the conditions every trial in it will be measured under.
+  the conditions every trial in it will be measured under. The first one on a
+  coin pins its holdout for good, so ``--dry-run`` prints the same split and
+  writes no experiment.
 - ``evaluate --experiment btc-4h --spec rule.json`` — score one rule on train
-  and validation and file it as a trial. The holdout is not read.
+  and validation and file it as a trial. The holdout is not read, and a rule
+  already filed is answered without its holdout even if it was promoted.
 - ``promote --experiment btc-4h --trial 3`` — apply the gate, and only then
-  measure that one trial's holdout. Once.
+  measure that one trial's holdout. Once per trial; and every promotion on a
+  coin is counted, because each is another look at the same window.
 - ``report [--experiment btc-4h [--trial 3]]`` — read the ledger back. Reads
   nothing else, and loads no part of the feature stack.
 - ``calibrate --experiment btc-4h`` — score the baselines (buy-and-hold,
@@ -83,7 +87,9 @@ from .ledger import (
     Ledger,
     LedgerError,
     Penalty,
+    SearchTrial,
     Trial,
+    TrialStatus,
     Verdict,
 )
 from .metrics import describe_measurement
@@ -238,6 +244,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="bars the indicator engine is shown at each bar (default: the live candle_lookback)",
     )
     experiment_cmd.add_argument("--notes", default="", help="free text stored with the experiment")
+    experiment_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "print the split and whether it would pin the coin's holdout, and write no "
+            "experiment (opening the store still brings its schema up to date)"
+        ),
+    )
 
     evaluate_cmd = subparsers.add_parser(
         "evaluate", help="score a spec on train and validation and file it as a trial"
@@ -412,7 +426,7 @@ def _cmd_experiment(args: argparse.Namespace) -> int:
     # The feature stack is imported here, inside the command that computes:
     # ``report`` and the language commands must not pay for pandas.
     from .features import LIVE_CANDLE_LOOKBACK
-    from .research import open_experiment
+    from .research import plan_experiment
 
     costs = CostModel(
         taker_fee_rate=args.taker_fee_rate,
@@ -426,7 +440,7 @@ def _cmd_experiment(args: argparse.Namespace) -> int:
     store, ledger = _open_ledger(args)
     with store:
         pinned = ledger.holdout_pin(_coin(args))
-        experiment = open_experiment(
+        experiment = plan_experiment(
             ledger,
             experiment_id=args.name,
             coin=_coin(args),
@@ -438,35 +452,58 @@ def _cmd_experiment(args: argparse.Namespace) -> int:
             validation_share=args.validation_share,
             notes=args.notes,
         )
+        if not args.dry_run:
+            experiment = ledger.create_experiment(experiment)
         for line in experiment.describe():
             print(line)
+        print(_shares(experiment))
         holdout = from_epoch_ms(experiment.split.holdout.start_ms).isoformat()
-        pin = (
-            "the start every experiment on this coin already withholds"
-            if pinned is not None
-            else f"now pinned for every later experiment on {experiment.coin}"
-        )
+        if pinned is not None:
+            pin = (
+                "the start every experiment on this coin already withholds — the share flags "
+                "only divide train from validation before it"
+            )
+        elif args.dry_run:
+            pin = f"which this experiment would pin for every later one on {experiment.coin}"
+        else:
+            pin = f"now pinned for every later experiment on {experiment.coin}"
         print(f"holdout begins at {holdout}, {pin}")
         print(
             "train begins at the first bar every feature of the vocabulary has a value "
             "(with room for the deepest offset), so no legal spec is refused for warm-up"
         )
+        if args.dry_run:
+            print("dry run: no experiment was written, and no holdout was pinned")
     return 0
 
 
-def _describe_trial(experiment: Experiment, trial: Trial) -> list[str]:
-    head = (
-        f"trial #{trial.trial_id} of {experiment.experiment_id} ({trial.status.value}, "
-        f"measured {trial.created_at}"
+def _shares(experiment: Experiment) -> str:
+    """The shares the split actually has, in bars — under a pin they are not the flags'."""
+    windows = experiment.split.ordered
+    total = windows[-1].end_ms - windows[0].start_ms
+    return "actual shares of the span: " + ", ".join(
+        f"{window.name.value} {(window.end_ms - window.start_ms) / total:.1%}" for window in windows
     )
-    if trial.promoted_at:
-        head += f", promoted {trial.promoted_at}"
+
+
+def _describe_trial(experiment: Experiment, trial: Trial | SearchTrial) -> list[str]:
+    """One trial as lines; a search view says its holdout is withheld, never "not promoted"."""
+    head = f"trial #{trial.trial_id} of {experiment.experiment_id} ("
+    if isinstance(trial, Trial):
+        head += f"{trial.status.value}, measured {trial.created_at}"
+        if trial.promoted_at:
+            head += f", promoted {trial.promoted_at}"
+        because = "not promoted"
+    else:
+        head += f"measured {trial.created_at}"
+        because = "not shown to a search; `report` shows a promoted trial's"
     return [head + ")"] + describe_measurement(
         trial.spec,
         experiment.costs,
         experiment.split,
         experiment.indicator_lookback,
         trial.segments,
+        withheld_because=because,
     )
 
 
@@ -493,6 +530,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
                 f"this rule was already measured in {experiment.experiment_id} as trial "
                 f"#{measurement.trial.trial_id}; nothing was measured or filed"
             )
+            # The search view: resubmitting a rule is not a way to read its holdout.
             lines = _describe_trial(experiment, measurement.trial)
         else:
             lines = describe_result(measurement.result)
@@ -519,7 +557,16 @@ def _cmd_promote(args: argparse.Namespace) -> int:
         print(f"promoted trial #{trial.trial_id}; its holdout was measured once, below")
         for line in _describe_trial(experiment, trial):
             print(line)
+        print(_looks(ledger, experiment.coin))
     return 0
+
+
+def _looks(ledger: Ledger, coin: str) -> str:
+    looks = ledger.holdout_looks(coin)
+    return (
+        f"{coin}'s holdout has been measured {looks} time(s), across every experiment on it; "
+        f"each promotion is another look at the same window"
+    )
 
 
 def _rank(trial: Trial) -> tuple[bool, float, int]:
@@ -555,7 +602,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
         if not trials:
             print("no trials yet — `evaluate` files one")
             return 0
-        print(experiment.penalty.describe(len(trials)))
+        print(experiment.penalty.describe(ledger.rules_tried(experiment.coin)))
+        print(_looks(ledger, experiment.coin))
         families = Counter(trial.family for trial in trials)
         print("by family: " + ", ".join(f"{name} {n}" for name, n in sorted(families.items())))
         for trial in sorted(trials, key=_rank):
@@ -567,7 +615,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             )
             if validation.ruined:
                 line += " — RUINED"
-            if trial.holdout is not None:
+            if trial.status is TrialStatus.PROMOTED and trial.holdout is not None:
                 line += (
                     f"; holdout sharpe {trial.holdout.net.sharpe:.2f} "
                     f"net {trial.holdout.net.total_return:+.2%} (promoted)"

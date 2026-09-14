@@ -34,10 +34,15 @@ Breaking changes within the 0.x line are called out explicitly.
   holdout figures on a row that is not promoted.
 
   THE PENALTY COUNTS LOOKS, NOT LABELS. The promote threshold is
-  `1.0 + 0.25 ln(n)`, with `n` every trial in the experiment at promote time -
-  not per family (relabelling is free, plan §10.6), and not the trial's own
-  ordinal (a rule promoted after five hundred others were measured was chosen
-  from five hundred and one). A rule already measured is not another trial:
+  `1.0 + 0.25 ln(n)`, with `n` the distinct rules tried on the COIN, across
+  every experiment on it, at promote time - not per family (relabelling is
+  free, plan §10.6), not per experiment (a new name over the same pinned
+  windows would start the count again), and not the trial's own ordinal (a
+  rule promoted after five hundred others were measured was chosen from five
+  hundred and one). The same rule re-measured under other costs in another
+  experiment is a trial there and still one rule. The penalty's base and `k`
+  are pinned per coin like the holdout, so a later experiment cannot lower
+  the bar with a flag either. A rule already measured is not another trial:
   the hash is of the rule, blind to clause order, parameter names, the family
   label, the side a feature comparison was written from and the spelling of a
   number, and a duplicate is answered with the earlier trial without being
@@ -59,8 +64,27 @@ Breaking changes within the 0.x line are called out explicitly.
   synthetic driftless markets, where the answers are known in advance: seeded
   random rules have a median gross Sharpe within three standard errors of
   zero and keep less net than gross; the noise rule pays for every round trip;
-  buy-and-hold earns exactly the window's price move; always-flat is zeros,
-  never NaN.
+  buy-and-hold earns the window's price move (exactly, on a costless run);
+  always-flat is zeros, never NaN.
+
+  WHAT A SEARCH MAY SEE, AND WHAT AN OPERATOR IS TOLD. A trial read for a
+  search (`Ledger.search_trials`, and the trial `evaluate` answers a duplicate
+  with) is a `SearchTrial`, which has no holdout field: resubmitting a promoted
+  rule does not print its holdout. `promote` and `report` say how many times
+  the coin's holdout has been measured, across experiments - a count, not a
+  limit. `experiment --dry-run` prints the split, its actual shares and
+  whether it would pin the holdout, and writes no experiment; a pinned coin's
+  share flags only divide train from validation, and the actual shares say so.
+  An experiment whose LAST bars lack a value of the vocabulary - a daily or
+  funding series fetched short of the decision bars - is refused at creation
+  and again at promote: past a series' end the features read "no value", which
+  would sit a rule that reads it flat through its holdout.
+
+  The store now turns SQLite's foreign keys on, so a trial filed under an
+  experiment the store does not hold is refused by name instead of written
+  and listed by nothing; a `Trial` value refuses holdout figures or a
+  promotion time without `promoted`, and a family column its spec disagrees
+  with.
 
   A FUNDING SETTLEMENT MAY POST UP TO TWENTY MINUTES LATE and still be its
   hour's (was five seconds). Found by running the ledger against the real

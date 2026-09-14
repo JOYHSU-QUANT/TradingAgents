@@ -5,15 +5,20 @@ The evaluator answers "what did this spec score on this window"; this module
 answers the questions a SEARCH over specs raises, which the evaluator cannot:
 
 **How many looks has this validation window had?** Every distinct rule
-measured inside an experiment is one more comparison against the same
-validation bars, so the bar a trial must clear to be promoted rises with
-``ln(n)`` (plan §3.10). ``n`` counts EVERY trial in the experiment, not the
-trials of one ``family``: two of the five families are an author's intent and
-relabelling is free (plan §10.6), so a per-family count would be a count a
-hypothesis loop can reset by changing a word. And ``n`` is the count at
-PROMOTE time, not the trial's own ordinal — the look-elsewhere problem is
-about how many rules were tried, and an early trial promoted after five
-hundred others were measured was chosen from five hundred and one.
+measured against a coin's history is one more comparison against the bars
+before its holdout, so the bar a trial must clear to be promoted rises with
+``ln(n)`` (plan §3.10). ``n`` counts every DISTINCT RULE tried on the COIN,
+across every experiment on it — not the trials of one ``family``, and not the
+trials of one experiment. Both are labels a hypothesis loop can change for
+free: two of the five families are an author's intent (plan §10.6), and an
+experiment is a name — on an unchanged store a second one cuts the same
+windows, since the holdout is pinned per coin. A count either could reset is
+not a count of looks (decided 2026-09-14). The same rule measured again under
+other costs in another experiment is a second trial there, and still ONE
+rule: it does not raise ``n``. And ``n`` is the count at PROMOTE time, not the
+trial's own ordinal — the look-elsewhere problem is about how many rules were
+tried, and an early trial promoted after five hundred others were measured
+was chosen from five hundred and one.
 
 **Is this the same rule again?** A spec whose :func:`~.dsl.spec_hash` is
 already in the experiment is not a second trial: the evaluator is
@@ -71,6 +76,7 @@ __all__ = [
     "Ledger",
     "LedgerError",
     "Penalty",
+    "SearchTrial",
     "Trial",
     "TrialStatus",
     "Verdict",
@@ -137,7 +143,7 @@ class Penalty:
 
     def describe(self, trials: int) -> str:
         return (
-            f"promote threshold at {trials} trial(s): validation net sharpe >= "
+            f"promote threshold at {trials} rule(s) tried on this coin: validation net sharpe >= "
             f"{self.threshold(trials):.2f} ({self.sharpe_base:g} + {self.k:g} × ln {trials})"
         )
 
@@ -178,6 +184,11 @@ class Experiment:
                 f"starting with a letter or digit), got {self.experiment_id!r}"
             )
         object.__setattr__(self, "coin", canonical_coin(self.coin))
+        for name, kind in (("costs", CostModel), ("split", Split), ("penalty", Penalty)):
+            if not isinstance(getattr(self, name), kind):
+                raise ValueError(
+                    f"an experiment's {name} is a {kind.__name__}, got {getattr(self, name)!r}"
+                )
         lookback = self.indicator_lookback
         if isinstance(lookback, bool) or not isinstance(lookback, int) or lookback < 1:
             raise ValueError(f"indicator_lookback is a whole number of bars, got {lookback!r}")
@@ -212,10 +223,73 @@ class Trial:
     created_at: str
     promoted_at: str | None
 
+    def __post_init__(self) -> None:
+        # The table's two CHECKs, held by the value too: a Trial built by hand
+        # (a test, a preview) must not be able to say "measured" with holdout
+        # figures on it, and a reader may branch on either half.
+        if not isinstance(self.status, TrialStatus):
+            raise ValueError(f"a trial's status is a TrialStatus, got {self.status!r}")
+        promoted = self.status is TrialStatus.PROMOTED
+        if promoted != (self.holdout is not None) or promoted != (self.promoted_at is not None):
+            raise ValueError(
+                f"a trial carries holdout figures and a promotion time if and only if it is "
+                f"promoted; got status {self.status.value} with holdout "
+                f"{'present' if self.holdout is not None else 'absent'} and promoted_at "
+                f"{self.promoted_at!r}"
+            )
+        # ``family`` is a column for SQL, and a copy of the spec's: a row whose
+        # two disagree would be counted in ``report`` under a label its rule
+        # does not carry.
+        if self.family != self.spec.family.value:
+            raise ValueError(
+                f"a trial's family column says {self.family!r} and its spec says "
+                f"{self.spec.family.value!r}"
+            )
+
     @property
     def segments(self) -> tuple[SegmentMetrics, ...]:
         measured = (self.train, self.validation)
         return measured if self.holdout is None else (*measured, self.holdout)
+
+    def for_search(self) -> SearchTrial:
+        """What a search may be shown of this trial: train and validation, never the holdout."""
+        return SearchTrial(
+            trial_id=self.trial_id,
+            experiment_id=self.experiment_id,
+            family=self.family,
+            spec=self.spec,
+            spec_hash=self.spec_hash,
+            train=self.train,
+            validation=self.validation,
+            created_at=self.created_at,
+        )
+
+
+@dataclass(frozen=True)
+class SearchTrial:
+    """A trial as a hypothesis search may see it (plan §3.11: the loop never sees the holdout).
+
+    Not a :class:`Trial` with ``holdout=None``: that value would say "not
+    promoted" about a trial that was, and a reader could not tell a withheld
+    figure from an absent one. This type has no holdout to leak — the
+    failure summary a search builds from the ledger is built from these
+    (:meth:`Ledger.search_trials`, and :func:`~.research.measure` answers a
+    duplicate with one). Whether the trial was promoted is still readable
+    from the gate's blockers; plan B1 decides whether that too is withheld.
+    """
+
+    trial_id: int
+    experiment_id: str
+    family: str
+    spec: StrategySpec
+    spec_hash: str
+    train: SegmentMetrics
+    validation: SegmentMetrics
+    created_at: str
+
+    @property
+    def segments(self) -> tuple[SegmentMetrics, ...]:
+        return (self.train, self.validation)
 
 
 @dataclass(frozen=True)
@@ -245,8 +319,8 @@ def promotion_verdict(experiment: Experiment, trial: Trial, trials: int) -> Verd
     4. **A positive net return** — the Sharpe is read beside the return: a
        series that lost the same amount at every bar has no deviation and
        reads 0 as well.
-    5. **Net Sharpe at or above** :meth:`Penalty.threshold` of the experiment's
-       CURRENT trial count.
+    5. **Net Sharpe at or above** :meth:`Penalty.threshold` of the CURRENT
+       number of distinct rules tried on the coin (:meth:`Ledger.rules_tried`).
 
     Only annualised figures would be comparable across windows:
     ``total_return`` is a whole-window total, and validation is a third the
@@ -315,6 +389,9 @@ class Ledger:
                     f"bars trials were chosen on inside the holdout, a later one would put the "
                     f"old holdout inside validation."
                 )
+            penalty = self._penalty_pin(conn, stamped.coin)
+            if penalty is not None and stamped.penalty != penalty:
+                raise LedgerError(_penalty_moved(stamped.coin, penalty, stamped.penalty))
             try:
                 conn.execute(
                     "INSERT INTO experiments (experiment_id, coin, created_at, cost_params_json,"
@@ -357,6 +434,32 @@ class Ledger:
                 f"the one that pins {coin}'s holdout: {exc}"
             ) from exc
 
+    def penalty_pin(self, coin: str) -> Penalty | None:
+        """The promote penalty the first experiment on ``coin`` fixed, or ``None`` if none exists.
+
+        Pinned for the same reason ``n`` is counted per coin (decided
+        2026-09-14): a later experiment with ``k = 0`` or a lower base would
+        lower the bar every rule on the coin has to clear, one flag away from
+        the reset a per-coin count exists to close.
+        """
+        return self._penalty_pin(self.store.conn, canonical_coin(coin))
+
+    def _penalty_pin(self, conn: sqlite3.Connection, coin: str) -> Penalty | None:
+        row = conn.execute(
+            "SELECT experiment_id, penalty_json FROM experiments WHERE coin = ?"
+            " ORDER BY rowid LIMIT 1",
+            (coin,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return Penalty.from_dict(json.loads(row["penalty_json"]))
+        except ValueError as exc:
+            raise LedgerError(
+                f"experiment {row['experiment_id']}'s penalty record cannot be read, and it is "
+                f"the one that pins {coin}'s promote threshold: {exc}"
+            ) from exc
+
     def experiment(self, experiment_id: str) -> Experiment:
         row = self.store.conn.execute(
             "SELECT * FROM experiments WHERE experiment_id = ?", (experiment_id,)
@@ -367,6 +470,35 @@ class Ledger:
                 f"--experiment lists the ones it has"
             )
         return self._experiment(row)
+
+    def require_stored(self, experiment: Experiment) -> None:
+        """Refuse an ``Experiment`` value that is not the row this store holds under its name.
+
+        A trial is filed against the conditions it was measured under, and
+        :func:`_require_window` can only compare figures with the VALUE it is
+        handed. A value built or planned (``research.plan_experiment`` writes
+        nothing) under a stored name, with another split or other costs, would
+        file a trial the stored experiment never had the windows for — in an
+        append-only ledger, raising the coin's rule count for good. Read the
+        experiment back with :meth:`experiment` instead.
+        """
+        self._require_stored(self.store.conn, experiment)
+
+    def _require_stored(self, conn: sqlite3.Connection, experiment: Experiment) -> None:
+        row = conn.execute(
+            "SELECT * FROM experiments WHERE experiment_id = ?", (experiment.experiment_id,)
+        ).fetchone()
+        if row is None:
+            raise LedgerError(
+                f"this store has no experiment named {experiment.experiment_id!r} to file the "
+                f"trial under — an experiment held in memory is not one the store holds"
+            )
+        stored = self._experiment(row)
+        if replace(experiment, created_at=stored.created_at) != stored:
+            raise LedgerError(
+                f"experiment {experiment.experiment_id} is stored with other conditions than the "
+                f"ones offered — read it back from the ledger rather than building or planning one"
+            )
 
     def experiments(self) -> list[Experiment]:
         rows = self.store.conn.execute("SELECT * FROM experiments ORDER BY rowid").fetchall()
@@ -386,6 +518,7 @@ class Ledger:
         _require_window(experiment, validation, experiment.split.validation)
         digest = spec_hash(spec)
         with self.store.transaction() as conn:
+            self._require_stored(conn, experiment)
             try:
                 cursor = conn.execute(
                     "INSERT INTO trials (experiment_id, family, spec_json, spec_hash,"
@@ -410,10 +543,15 @@ class Ledger:
                     "SELECT trial_id FROM trials WHERE experiment_id = ? AND spec_hash = ?",
                     (experiment.experiment_id, digest),
                 ).fetchone()
-                where = f" as trial #{existing[0]}" if existing is not None else ""
+                if existing is None:
+                    # Not the UNIQUE constraint, so not a duplicate: say what
+                    # sqlite said rather than guess which constraint it was.
+                    raise LedgerError(
+                        f"the trial could not be filed in {experiment.experiment_id}: {exc}"
+                    ) from exc
                 raise LedgerError(
-                    f"this rule was already measured in {experiment.experiment_id}{where}; "
-                    f"measuring it again is the same numbers, not another trial"
+                    f"this rule was already measured in {experiment.experiment_id} as trial "
+                    f"#{existing[0]}; measuring it again is the same numbers, not another trial"
                 ) from exc
         return self.trial(experiment.experiment_id, int(cursor.lastrowid))
 
@@ -439,15 +577,41 @@ class Ledger:
         ).fetchall()
         return [self._trial(row) for row in rows]
 
-    def count_trials(self, experiment_id: str) -> int:
-        """Every trial in the experiment, promoted or not — the ``n`` of plan §3.10."""
+    def search_trials(self, experiment_id: str) -> list[SearchTrial]:
+        """Every trial of the experiment as a search may see it — no holdout figure on any."""
+        return [trial.for_search() for trial in self.trials(experiment_id)]
+
+    def rules_tried(self, coin: str) -> int:
+        """Distinct rules measured on ``coin`` in any experiment, promoted or not — plan §3.10's ``n``.
+
+        Counted by ``spec_hash`` across every experiment on the coin, all of
+        which withhold the same holdout (see the module docstring for why not
+        per experiment).
+        """
         return self.store.conn.execute(
-            "SELECT COUNT(*) FROM trials WHERE experiment_id = ?", (experiment_id,)
+            "SELECT COUNT(DISTINCT trials.spec_hash) FROM trials"
+            " JOIN experiments ON experiments.experiment_id = trials.experiment_id"
+            " WHERE experiments.coin = ?",
+            (canonical_coin(coin),),
+        ).fetchone()[0]
+
+    def holdout_looks(self, coin: str) -> int:
+        """How many times ``coin``'s holdout has been measured: every promotion, in any experiment.
+
+        Not a limit — a count, printed where a promotion happens and where the
+        ledger is read. Each promotion is one more look at the one window the
+        pin keeps unchosen-on, and after enough of them it is not that window.
+        """
+        return self.store.conn.execute(
+            "SELECT COUNT(*) FROM trials"
+            " JOIN experiments ON experiments.experiment_id = trials.experiment_id"
+            " WHERE experiments.coin = ? AND trials.status = ?",
+            (canonical_coin(coin), TrialStatus.PROMOTED.value),
         ).fetchone()[0]
 
     def verdict(self, experiment: Experiment, trial: Trial) -> Verdict:
-        """:func:`promotion_verdict` at the experiment's CURRENT trial count — the one gate call."""
-        return promotion_verdict(experiment, trial, self.count_trials(experiment.experiment_id))
+        """:func:`promotion_verdict` at the coin's CURRENT rule count — the one gate call."""
+        return promotion_verdict(experiment, trial, self.rules_tried(experiment.coin))
 
     def trial_counts(self, experiment_id: str) -> tuple[int, int]:
         """``(trials, promoted)``, counted in SQL for a listing that shows no figures."""
@@ -468,6 +632,7 @@ class Ledger:
         """
         _require_window(experiment, holdout, experiment.split.holdout)
         with self.store.transaction() as conn:
+            self._require_stored(conn, experiment)
             cursor = conn.execute(
                 "UPDATE trials SET status = ?, holdout_metrics_json = ?, promoted_at = ?"
                 " WHERE experiment_id = ? AND trial_id = ? AND status = ?",
@@ -544,6 +709,15 @@ def _name_taken(experiment_id: str) -> str:
     return (
         f"this store already has an experiment named {experiment_id!r}; an experiment's "
         f"conditions are written once — name the new one differently"
+    )
+
+
+def _penalty_moved(coin: str, pinned: Penalty, offered: Penalty) -> str:
+    return (
+        f"{coin}'s promote threshold is sharpe_base {pinned.sharpe_base:g}, k {pinned.k:g}, pinned "
+        f"by the first experiment on it, and this experiment asks for sharpe_base "
+        f"{offered.sharpe_base:g}, k {offered.k:g}. The rules tried on a coin are counted across "
+        f"its experiments, so every experiment on it holds them to the same bar."
     )
 
 

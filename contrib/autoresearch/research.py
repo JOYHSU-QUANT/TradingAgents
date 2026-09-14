@@ -10,7 +10,7 @@ only when told to — two defaults, each harmless alone. Every read in this
 module passes ``Split.loadable_until(holdout=...)``, and ``holdout=True`` is
 written in exactly one place: :func:`promote`, after the gate. A trial that
 has not been promoted is measured on a bundle that does not HOLD the holdout
-rows. The one read of the whole store is :func:`open_experiment`, which needs
+rows. The one read of the whole store is :func:`plan_experiment`, which needs
 the span to cut and computes no figure for any window.
 
 Before anything is measured, the history it is measured on is scanned
@@ -40,7 +40,16 @@ from .dsl import StrategySpec, spec_hash
 from .evaluator import EvaluationError, SplitResult, evaluate_split, load_bundle
 from .features import FeatureFrame, SeriesBundle
 from .gaps import GapReport, scan_stamps
-from .ledger import Experiment, Ledger, LedgerError, Penalty, Trial, Verdict
+from .ledger import (
+    Experiment,
+    Ledger,
+    LedgerError,
+    Penalty,
+    SearchTrial,
+    Trial,
+    Verdict,
+    _penalty_moved,
+)
 from .metrics import SegmentMetrics
 from .split import (
     DEFAULT_TRAIN_SHARE,
@@ -51,6 +60,7 @@ from .split import (
     SplitError,
     studied_interval,
 )
+from .store import canonical_coin
 from .upstream import from_epoch_ms, interval_to_ms
 from .vocabulary import (
     MAX_OFFSET_BARS,
@@ -67,9 +77,11 @@ __all__ = [
     "first_measurable_index",
     "measure",
     "open_experiment",
+    "plan_experiment",
     "plan_split",
     "promote",
     "require_clean_history",
+    "require_measurable_tail",
 ]
 
 # How far before the first bar a feature at that bar can read, per series: the
@@ -86,9 +98,13 @@ class Measurement:
     ``result`` is ``None`` for a duplicate: the rule was already measured in
     this experiment, ``trial`` is that earlier trial, and nothing was computed
     or written — the evaluator is deterministic, so a re-run is not a look.
+
+    ``trial`` is the SEARCH view (:class:`~.ledger.SearchTrial`): resubmitting
+    a promoted rule must not be a way for a hypothesis loop to read its
+    holdout (plan §3.11).
     """
 
-    trial: Trial
+    trial: SearchTrial
     verdict: Verdict
     result: SplitResult | None
     funding_holes: int = 0
@@ -171,7 +187,7 @@ def first_measurable_index(frame: FeatureFrame) -> int:
     series that ends before the bars begin) is the frame's own refusal, and
     names what to fetch.
     """
-    columns = [frame.series(FeatureRef(*parse_feature_name(name))) for name in feature_names()]
+    columns = [column for _name, column in _vocabulary_columns(frame)]
     bars = len(frame.bundle.bars)
     run = 0
     for index in range(bars):
@@ -183,6 +199,39 @@ def first_measurable_index(frame: FeatureFrame) -> int:
         f"of the vocabulary, so an experiment here would refuse some legal spec at its first "
         f"bar — fetch older history, or fill the hole `gaps` reports"
     )
+
+
+def require_measurable_tail(frame: FeatureFrame) -> None:
+    """Refuse a frame whose LAST bars lack a value of the vocabulary — the start rule, at the end.
+
+    The span's end is where the bars end, and the tail of the span is the
+    holdout. A daily or funding series fetched earlier than the decision bars
+    stops short of them, and the features past its end read ``None`` — which
+    mid-window is "does not trigger", not a refusal. So a rule that reads a
+    daily mean would pass the gate and then sit silently flat through the end
+    of its holdout, while a rule that reads none would not: the per-spec
+    difference :func:`first_measurable_index` exists to rule out at the start
+    (decided 2026-09-14). The last ``MAX_OFFSET_BARS + 1`` bars must have every
+    value, the reach of the deepest offset, as at the start. Checked when an
+    experiment is created and again at promote, on the holdout-bound frame.
+    """
+    bars = len(frame.bundle.bars)
+    tail = range(max(0, bars - MAX_OFFSET_BARS - 1), bars)
+    missing = [
+        name for name, column in _vocabulary_columns(frame) if any(column[i] is None for i in tail)
+    ]
+    if missing:
+        last = from_epoch_ms(frame.bundle.bars[-1].open_time).isoformat()
+        raise EvaluationError(
+            f"{len(missing)} feature(s) of the vocabulary have no value on the last "
+            f"{len(tail)} bars (to {last}): {', '.join(missing)}. The series they read stop "
+            f"short of the decision bars — `fetch` the 1d bars and the funding up to the same "
+            f"end, then try again; the end of the span is the holdout."
+        )
+
+
+def _vocabulary_columns(frame: FeatureFrame) -> list[tuple[str, tuple]]:
+    return [(name, frame.series(FeatureRef(*parse_feature_name(name)))) for name in feature_names()]
 
 
 def plan_split(
@@ -246,7 +295,7 @@ def plan_split(
 # -- the verbs ----------------------------------------------------------------
 
 
-def open_experiment(
+def plan_experiment(
     ledger: Ledger,
     *,
     experiment_id: str,
@@ -259,19 +308,26 @@ def open_experiment(
     validation_share: float = DEFAULT_VALIDATION_SHARE,
     notes: str = "",
 ) -> Experiment:
-    """Measure where the store's history is fit to measure on, cut the split, write the experiment.
+    """Measure where the store's history is fit to measure on and cut the split; write nothing.
 
     Reads the whole store: the span to cut is the span the store holds. No
     figure for any window is computed here — the indicator walk runs so the
-    warm-up can be MEASURED — so reading the holdout rows at this one moment
-    lets nothing be chosen on them.
+    warm-up and the tail can be MEASURED — so reading the holdout rows at this
+    one moment lets nothing be chosen on them. What ``experiment --dry-run``
+    prints; :func:`open_experiment` writes it.
     """
     key = studied_interval(interval)
+    # Refused before the store is read, so a dry run says it too; the write
+    # checks it again inside its transaction.
+    pinned_penalty = ledger.penalty_pin(coin)
+    if pinned_penalty is not None and penalty != pinned_penalty:
+        raise LedgerError(_penalty_moved(canonical_coin(coin), pinned_penalty, penalty))
     bundle = load_bundle(ledger.store, coin=coin, interval=key)
     require_clean_history(bundle, key)
     frame = FeatureFrame(bundle, indicator_lookback=indicator_lookback)
     bars = bundle.bars
     first = first_measurable_index(frame)
+    require_measurable_tail(frame)
     split = plan_split(
         key,
         grid_origin_ms=bars[0].open_time,
@@ -281,17 +337,20 @@ def open_experiment(
         train_share=train_share,
         validation_share=validation_share,
     )
-    return ledger.create_experiment(
-        Experiment(
-            experiment_id=experiment_id,
-            coin=coin,
-            costs=costs,
-            split=split,
-            indicator_lookback=indicator_lookback,
-            penalty=penalty,
-            notes=notes,
-        )
+    return Experiment(
+        experiment_id=experiment_id,
+        coin=coin,
+        costs=costs,
+        split=split,
+        indicator_lookback=indicator_lookback,
+        penalty=penalty,
+        notes=notes,
     )
+
+
+def open_experiment(ledger: Ledger, **conditions) -> Experiment:
+    """:func:`plan_experiment`, then write it — the pin and the name are checked in the write."""
+    return ledger.create_experiment(plan_experiment(ledger, **conditions))
 
 
 def _frame(ledger: Ledger, experiment: Experiment, *, holdout: bool) -> tuple[FeatureFrame, int]:
@@ -313,10 +372,13 @@ def measure(ledger: Ledger, experiment: Experiment, spec: StrategySpec) -> Measu
     :class:`Measurement`); the refusal of a duplicate row is the ledger's, so
     two runs racing on one rule still file it once.
     """
+    # Before the evaluation, not only at the write: a value that is not the
+    # stored experiment would otherwise pay for a measurement it cannot file.
+    ledger.require_stored(experiment)
     existing = ledger.trial_by_hash(experiment.experiment_id, spec_hash(spec))
     if existing is not None:
         return Measurement(
-            trial=existing,
+            trial=existing.for_search(),
             verdict=ledger.verdict(experiment, existing),
             result=None,
         )
@@ -329,7 +391,9 @@ def measure(ledger: Ledger, experiment: Experiment, spec: StrategySpec) -> Measu
         SegmentMetrics.from_result(result.validation),
     )
     verdict = ledger.verdict(experiment, trial)
-    return Measurement(trial=trial, verdict=verdict, result=result, funding_holes=holes)
+    return Measurement(
+        trial=trial.for_search(), verdict=verdict, result=result, funding_holes=holes
+    )
 
 
 def promote(ledger: Ledger, experiment: Experiment, trial_id: int) -> Trial:
@@ -342,6 +406,7 @@ def promote(ledger: Ledger, experiment: Experiment, trial_id: int) -> Trial:
     the gate was passed on figures the store no longer gives, and it is
     refused by name rather than promoted.
     """
+    ledger.require_stored(experiment)
     trial = ledger.trial(experiment.experiment_id, trial_id)
     verdict = ledger.verdict(experiment, trial)
     if not verdict.eligible:
@@ -350,6 +415,9 @@ def promote(ledger: Ledger, experiment: Experiment, trial_id: int) -> Trial:
             + "; ".join(verdict.blockers)
         )
     frame, _holes = _frame(ledger, experiment, holdout=True)
+    # The tail was whole when the experiment was cut; a store revised since
+    # could have lost it, and the holdout is measured on exactly those bars.
+    require_measurable_tail(frame)
     result = evaluate_split(trial.spec, frame, experiment.split, experiment.costs, holdout=True)
     for filed, again in (
         (trial.train, SegmentMetrics.from_result(result.train)),

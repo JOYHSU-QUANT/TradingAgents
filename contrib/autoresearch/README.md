@@ -304,9 +304,14 @@ segment 才會；`by_shares` 會貼格線）。這幾種都是「換窗口或補
   計畫 §11 原本寫「不得更早」，這裡改成**完全相同**：更晚的起點會把舊 holdout 放進新的
   validation，更早的起點會把舊 trial 挑選時看過的 validation 放進新的 holdout——兩邊都讓
   holdout 不再是「沒有被挑選過的歷史」。
-- **門檻＝`sharpe_base + k·ln(n)`**（預設 1.0、0.25），`n` 是**整個 experiment** 在
-  **promote 當下**的 trial 數。不按 family 算（改標籤就能歸零），也不用 trial 自己的序號
-  （第 1 個 trial 在試了 500 條之後才 promote，它是從 501 條裡挑出來的）。
+- **門檻＝`sharpe_base + k·ln(n)`**（預設 1.0、0.25），`n` 是**這個 coin 所有 experiment**
+  在 **promote 當下**試過的**不同規則**數（按 `spec_hash` 去重，`Ledger.rules_tried`）。不按
+  family 算（改標籤就能歸零）、不按 experiment 算（holdout 每個 coin 一個 pin，store 沒變時換個
+  名字開新 experiment 切出來是同一組窗口，n 卻會歸零；2026-09-14 拍板），也不用 trial 自己的序號
+  （第 1 個 trial 在試了 500 條之後才 promote，它是從 501 條裡挑出來的）。同一條規則換成本在另一個
+  experiment 重量，在那裡是一個 trial，但仍是一條規則、`n` 不加。**`sharpe_base`／`k` 也按 coin
+  pin**：第一個 experiment 定下之後，同 coin 的 experiment 帶不同的 penalty 會被具名拒絕（`--dry-run`
+  也會），否則 `--penalty-k 0` 就能繞過跨 experiment 的 `n`。
 - **同一條規則只是一個 trial**：`spec_hash` 看規則不看文件——clause 順序、重複 clause、param
   名字、family 標籤、feature 對 feature 的比較寫在哪一邊、`30` 或 `30.0` 都不影響；門檻、op、
   offset、side、`max_bars`、sizing 會。重複的規則 `evaluate` 直接回報舊 trial，不重算、`n`
@@ -324,6 +329,18 @@ segment 才會；`by_shares` 會貼格線）。這幾種都是「換窗口或補
 - **量之前先掃歷史**（計畫 §11）：4h bar（含窗口前的暖機）與 `sma_1d_200` 讀得到的日線，有任何
   洞／重複／不在格線就拒絕——評估器自己的窗口檢查看不到暖機。funding 的重複與不在格線拒絕，
   **洞只計數**（跟 feature 的 90% 覆蓋政策一致，交易所偶爾真的少一筆）。
+- **span 的尾端也是量的**：最後 `MAX_OFFSET_BARS + 1` 根只要有任何一欄詞彙沒有值（1d 或
+  funding 比 4h 早抓、停在決策 bar 之前）就拒絕，建立 experiment 時一次、promote 時在含 holdout
+  的 frame 上再一次。窗口中段的「沒有值」是不觸發、不拒絕，而尾端正是 holdout——讀日線的規則
+  會悄悄空手度過 holdout，不讀的不會。
+- **搜尋看得到什麼**：`Ledger.search_trials` 與 `evaluate` 回報重複規則時給的是
+  `SearchTrial`——只有 train／validation，**沒有** holdout 欄位（計畫 §3.11）。重送一條已
+  promote 的規則不會印出它的 holdout；`report` 是操作者的視圖，照印。promote 本身是 CLI 動作。
+- **holdout 被看過幾次會印出來**：`promote` 與 `report` 印「這個 coin 的 holdout 已被量過
+  k 次（跨 experiment）」。只計數、不設上限；每 promote 一次就是多看一眼同一段窗口。
+- **`experiment --dry-run`**：印切分、實際各窗口占比、會不會建立 pin，不寫 experiment
+  （開 store 仍會把 schema 升到最新）。coin 已有 pin 時 share 旗標只決定 train:validation，
+  「actual shares」那行會照實印出。
 - **baseline 不是 trial**：`calibrate` 什麼都不記，門檻不動。
 - **`report` 只讀 ledger**，不重算、不載入 pandas（`test_upstream.py` 的 subprocess 測試守著）；
   它印的量測文字和 `evaluate` 當下印的是同一個函式（`metrics.describe_measurement`）產生的。
@@ -390,6 +407,8 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
   holdout 是另開一個 store 的事，這裡不提供輪替。
 - **`experiment` 會讀到 holdout 的 rows**（量 span 與暖機要用），不算任何窗口的分數；鎖擋的是
   trial 的量測。
+- **`SearchTrial` 不藏 promote 狀態**：gate 的 blocker 會說「已經 promote 過」；要不要連這個
+  也對搜尋隱藏，留給 B1。
 - **CLI 認 `EvaluationError`／`FeatureError` 是查 `sys.modules`**：直接 import 會讓每個指令付
   pandas 的錢；它們被 raise 出來，就代表定義它們的模組已經載入。
 - **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批

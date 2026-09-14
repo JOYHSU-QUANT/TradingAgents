@@ -195,6 +195,20 @@ def test_every_experiment_on_a_coin_withholds_the_same_window(ledger):
     assert ledger.holdout_pin("ETH") == grown.holdout.start_ms
 
 
+def test_every_experiment_on_a_coin_holds_rules_to_the_same_penalty(ledger):
+    """``n`` is counted per coin, so the bar it raises is pinned per coin too (2026-09-14)."""
+    first = ledger.create_experiment(_experiment("first"))
+    assert ledger.penalty_pin("btc") == first.penalty == Penalty()
+    for looser in (Penalty(k=0.0), Penalty(sharpe_base=0.5)):
+        with pytest.raises(LedgerError, match="promote threshold is sharpe_base 1, k 0.25, pinned"):
+            ledger.create_experiment(_experiment("looser", penalty=looser))
+    ledger.create_experiment(_experiment("same"))
+    ledger.create_experiment(
+        _experiment("eth", coin="ETH", split=_split(offset_bars=10), penalty=Penalty(k=0.0))
+    )
+    assert ledger.penalty_pin("ETH") == Penalty(k=0.0)
+
+
 # -- trials ------------------------------------------------------------------------
 
 
@@ -208,7 +222,7 @@ def test_a_trial_reads_back_as_the_spec_and_the_figures_that_were_filed(ledger):
     assert trial.train == _metrics(experiment.split.train)
     assert trial.validation == _metrics(experiment.split.validation)
     assert ledger.trials("btc-4h") == [trial]
-    assert ledger.count_trials("btc-4h") == 1
+    assert ledger.rules_tried("btc") == 1
 
 
 def test_the_same_rule_is_one_trial_whatever_it_is_labelled(ledger):
@@ -216,11 +230,60 @@ def test_the_same_rule_is_one_trial_whatever_it_is_labelled(ledger):
     first = _file(ledger, experiment)
     with pytest.raises(LedgerError, match=r"already measured in btc-4h as trial #1"):
         _file(ledger, experiment, _spec(family="mean_reversion"))
-    assert ledger.count_trials("btc-4h") == 1
+    assert ledger.rules_tried("btc") == 1
     assert ledger.trial_by_hash("btc-4h", first.spec_hash) == first
-    # Another experiment is another set of looks.
+    # Another experiment (other costs, say) files the rule as its own trial —
+    # and it is still one rule tried on the coin.
     other = ledger.create_experiment(_experiment("again"))
     assert _file(ledger, other).trial_id == 2
+    assert ledger.rules_tried("BTC") == 1
+
+
+def test_a_trial_for_an_experiment_the_store_does_not_hold_is_refused_by_name(ledger, store):
+    """The row is not written, to be listed by nothing — by the ledger, and by the store's FK."""
+    with pytest.raises(LedgerError, match="no experiment named 'never-written' to file the trial"):
+        _file(ledger, _experiment("never-written"))
+    assert store.conn.execute("SELECT COUNT(*) FROM trials").fetchone()[0] == 0
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        store.conn.execute(
+            "INSERT INTO trials (experiment_id, family, spec_json, spec_hash, train_metrics_json,"
+            " validation_metrics_json, status, created_at) VALUES"
+            " ('never-written', 'breakout', '{}', 'h', '{}', '{}', 'measured', 'now')"
+        )
+
+
+def test_a_trial_is_filed_only_under_the_conditions_the_store_holds(ledger):
+    stored = ledger.create_experiment(_experiment())
+    planned = dataclasses.replace(stored, created_at="", costs=CostModel(slippage_bps=9))
+    with pytest.raises(LedgerError, match="stored with other conditions"):
+        _file(ledger, planned)
+    # The same conditions, not yet stamped (as ``plan_experiment`` returns them): accepted.
+    assert _file(ledger, dataclasses.replace(stored, created_at="")).trial_id == 1
+
+
+def test_a_trial_value_cannot_disagree_with_itself(ledger):
+    experiment = ledger.create_experiment(_experiment())
+    trial = _file(ledger, experiment)
+    holdout = _metrics(experiment.split.holdout)
+    for changes, message in (
+        ({"holdout": holdout}, "if and only if it is promoted"),
+        ({"promoted_at": "2026-09-14T00:00:00+00:00"}, "if and only if it is promoted"),
+        ({"status": TrialStatus.PROMOTED, "holdout": holdout}, "if and only if it is promoted"),
+        ({"family": "mean_reversion"}, "family column says 'mean_reversion'"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            dataclasses.replace(trial, **changes)
+    search = trial.for_search()
+    assert not hasattr(search, "holdout")
+    assert search.segments == (trial.train, trial.validation)
+    assert ledger.search_trials("btc-4h") == [search]
+
+
+def test_an_experiment_s_conditions_are_the_types_they_are_read_as():
+    with pytest.raises(ValueError, match="costs is a CostModel"):
+        _experiment(costs={"taker_fee_rate": 0.0})
+    with pytest.raises(ValueError, match="split is a Split"):
+        _experiment(split=None)
 
 
 def test_figures_for_another_window_are_refused(ledger):
@@ -256,18 +319,32 @@ def test_the_threshold_rises_with_the_log_of_the_trial_count():
 
 
 def test_a_trial_that_clears_the_bar_alone_does_not_clear_it_after_more_were_tried(ledger):
-    """``n`` is the experiment's count at promote time, not the trial's ordinal."""
+    """``n`` is the coin's count at promote time, not the trial's ordinal."""
     experiment = ledger.create_experiment(_experiment())
     trial = _file(ledger, experiment, sharpe=1.2)
-    assert promotion_verdict(experiment, trial, ledger.count_trials("btc-4h")).eligible
+    assert ledger.verdict(experiment, trial).eligible
     for threshold in (40, 50):
         _file(ledger, experiment, _spec(threshold), sharpe=0.1)
-    verdict = promotion_verdict(experiment, trial, ledger.count_trials("btc-4h"))
+    verdict = ledger.verdict(experiment, trial)
     assert verdict.trials == 3
     assert verdict.threshold == pytest.approx(1 + 0.25 * math.log(3))
     assert verdict.blockers == (
         "its validation net sharpe 1.20 is below 1.27 (1 + 0.25 × ln 3)",
     )
+
+
+def test_a_new_experiment_on_the_coin_does_not_start_the_count_again(ledger):
+    """A second name over the same pinned windows is not a fresh validation window (2026-09-14)."""
+    first = ledger.create_experiment(_experiment("first"))
+    for threshold in (30, 40, 50):
+        _file(ledger, first, _spec(threshold), sharpe=0.1)
+    renamed = ledger.create_experiment(_experiment("renamed"))
+    trial = _file(ledger, renamed, _spec(60), sharpe=1.3)
+    verdict = ledger.verdict(renamed, trial)
+    assert verdict.trials == 4
+    assert verdict.blockers == ("its validation net sharpe 1.30 is below 1.35 (1 + 0.25 × ln 4)",)
+    ledger.create_experiment(_experiment("eth", coin="ETH", split=_split(offset_bars=10)))
+    assert (ledger.rules_tried("BTC"), ledger.rules_tried("eth")) == (4, 0)
 
 
 def test_the_gate_lists_every_blocker(ledger):
@@ -310,7 +387,9 @@ def test_a_trial_is_promoted_once(ledger):
     experiment = ledger.create_experiment(_experiment())
     trial = _file(ledger, experiment)
     holdout = _metrics(experiment.split.holdout, sharpe=0.7)
+    assert ledger.holdout_looks("BTC") == 0
     promoted = ledger.promote(experiment, trial, holdout)
+    assert ledger.holdout_looks("btc") == 1
     assert promoted.status is TrialStatus.PROMOTED
     assert promoted.holdout == holdout and promoted.promoted_at
     assert promoted.segments == (trial.train, trial.validation, holdout)

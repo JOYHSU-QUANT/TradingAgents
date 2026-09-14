@@ -324,7 +324,7 @@ def test_measuring_a_trial_reads_no_row_of_the_holdout(ledger, monkeypatch):
     # read; the one due an hour into the holdout is not.
     assert holdout_start <= bundle.funding[-1].time < holdout_start + MS_PER_HOUR
     assert measurement.result is not None and measurement.result.holdout is None
-    assert measurement.trial.holdout is None
+    assert not hasattr(measurement.trial, "holdout")
 
 
 def test_a_rule_measured_again_is_the_same_trial_and_reads_nothing(ledger, monkeypatch):
@@ -333,7 +333,7 @@ def test_a_rule_measured_again_is_the_same_trial_and_reads_nothing(ledger, monke
     monkeypatch.setattr(research, "load_bundle", _unreachable)
     again = measure(ledger, experiment, parse_spec({**_BUY, "family": "mean_reversion"}))
     assert again.duplicate and again.trial == first.trial
-    assert ledger.count_trials("btc-4h") == 1
+    assert ledger.rules_tried("BTC") == 1
 
 
 # -- promoting -------------------------------------------------------------------------
@@ -351,6 +351,52 @@ def test_promote_measures_the_holdout_once_past_the_gate(ledger, monkeypatch):
     assert promoted.holdout.trades == 1
     with pytest.raises(LedgerError, match="already been promoted"):
         promote(ledger, experiment, measurement.trial.trial_id)
+    assert ledger.holdout_looks("BTC") == 1
+    # Plan §3.11: sending the promoted rule again is not a way to read its holdout.
+    again = measure(ledger, experiment, parse_spec(_BUY))
+    assert again.duplicate and not hasattr(again.trial, "holdout")
+    assert ledger.search_trials("btc-4h") == [again.trial]
+
+
+def test_an_experiment_value_that_is_not_the_stored_one_is_refused_before_measuring(
+    ledger, monkeypatch
+):
+    stored = ledger.experiment("btc-4h")
+    moved = dataclasses.replace(stored, split=plan_split(
+        "4h",
+        grid_origin_ms=_START,
+        train_start_ms=stored.split.train.start_ms + _STEP,
+        end_ms=stored.split.holdout.end_ms,
+        pinned_holdout_ms=stored.split.holdout.start_ms,
+    ))
+    monkeypatch.setattr(research, "load_bundle", _unreachable)
+    with pytest.raises(LedgerError, match="stored with other conditions"):
+        measure(ledger, moved, parse_spec(_BUY))
+    assert ledger.rules_tried("BTC") == 0
+
+
+def _cut_daily_bars_from(store: ResearchStore, day: int) -> None:
+    store.conn.execute(
+        "DELETE FROM candles WHERE coin = 'BTC' AND interval = '1d' AND open_time >= ?",
+        (_START + day * _DAY,),
+    )
+
+
+def test_a_span_whose_daily_bars_stop_short_of_its_end_is_refused_by_name(fresh):
+    """The end is measured as the start is: past a series' end a feature reads no value."""
+    _cut_daily_bars_from(fresh.store, 60)
+    with pytest.raises(EvaluationError, match=r"no value on the last 25 bars .*sma_1d_200"):
+        _open(fresh)
+    assert fresh.experiments() == []
+
+
+def test_promote_refuses_a_holdout_whose_daily_bars_were_lost_since(ledger):
+    experiment = ledger.experiment("btc-4h")
+    measurement = measure(ledger, experiment, parse_spec(_BUY))
+    _cut_daily_bars_from(ledger.store, 60)
+    with pytest.raises(EvaluationError, match="sma_1d_200"):
+        promote(ledger, experiment, measurement.trial.trial_id)
+    assert ledger.holdout_looks("BTC") == 0
 
 
 def test_a_trial_the_gate_refuses_never_reads_the_holdout(ledger, monkeypatch):
@@ -382,7 +428,7 @@ def test_calibrate_scores_the_baselines_on_both_windows_and_files_nothing(ledger
     experiment = ledger.experiment("btc-4h")
     rows = dict(calibrate(ledger, experiment))
     assert set(rows) == {"buy_and_hold", "always_flat", "high_turnover_noise"}
-    assert ledger.count_trials("btc-4h") == 0
+    assert ledger.rules_tried("BTC") == 0
     windows = [experiment.split.train, experiment.split.validation]
     for segments in rows.values():
         assert [metrics.segment for metrics in segments] == windows
@@ -406,14 +452,26 @@ def test_the_commands_walk_an_experiment_from_creation_to_promotion(history, tmp
     store = ["--db", str(db)]
     experiment = ["--experiment", "btc-4h"]
 
-    assert main(["experiment", "--name", "btc-4h", "--indicator-lookback", str(_LOOKBACK), *store]) == 0
-    assert "now pinned for every later experiment on BTC" in capsys.readouterr().out
+    create = ["experiment", "--name", "btc-4h", "--indicator-lookback", str(_LOOKBACK), *store]
+    assert main([*create, "--dry-run"]) == 0
+    dry = capsys.readouterr().out
+    assert "which this experiment would pin for every later one on BTC" in dry
+    assert "actual shares of the span: train " in dry
+    assert "dry run: no experiment was written" in dry
+    assert main(["report", *store]) == 0
+    assert "no experiments in this store" in capsys.readouterr().out
+
+    assert main(create) == 0
+    created = capsys.readouterr().out
+    assert "now pinned for every later experiment on BTC" in created
+    assert "dry run" not in created
+    assert _conditions(created) == _conditions(dry)
 
     assert main(["evaluate", *experiment, "--spec", str(buy), *store]) == 0
     evaluated = capsys.readouterr().out
     assert "filed as trial #1 of btc-4h" in evaluated
     assert "holdout: withheld (not promoted)" in evaluated
-    assert "promote threshold at 1 trial(s)" in evaluated
+    assert "promote threshold at 1 rule(s) tried on this coin" in evaluated
     assert "eligible: `promote` would measure its holdout" in evaluated
 
     assert main(["evaluate", *experiment, "--spec", str(buy), *store]) == 0
@@ -435,10 +493,18 @@ def test_the_commands_walk_an_experiment_from_creation_to_promotion(history, tmp
     promoted = capsys.readouterr().out
     assert "promoted trial #1" in promoted
     assert "withheld" not in promoted and "\nholdout: " in promoted
+    assert "BTC's holdout has been measured 1 time(s)" in promoted
+
+    # Resubmitting the promoted rule answers with train and validation only.
+    assert main(["evaluate", *experiment, "--spec", str(buy), *store]) == 0
+    resubmitted = capsys.readouterr().out
+    assert "\nholdout: withheld (not shown to a search" in resubmitted
+    assert "\nholdout: [" not in resubmitted and "holdout sharpe" not in resubmitted
 
     assert main(["report", *experiment, *store]) == 0
     table = capsys.readouterr().out
-    assert "promote threshold at 2 trial(s)" in table
+    assert "promote threshold at 2 rule(s) tried on this coin" in table
+    assert "BTC's holdout has been measured 1 time(s)" in table
     assert "by family: breakout 2" in table
     assert "(promoted)" in table
 
@@ -450,7 +516,13 @@ def test_the_commands_walk_an_experiment_from_creation_to_promotion(history, tmp
     assert "high_turnover_noise validation:" in calibrated
     assert "baselines are not trials" in calibrated
     assert main(["report", *experiment, *store]) == 0
-    assert "promote threshold at 2 trial(s)" in capsys.readouterr().out
+    assert "promote threshold at 2 rule(s) tried on this coin" in capsys.readouterr().out
+
+
+def _conditions(output: str) -> list[str]:
+    """What ``experiment`` printed about the split and the costs — the lines a dry run must match."""
+    skipped = ("store:", "experiment btc-4h:", "holdout begins", "dry run:")
+    return [line for line in output.splitlines() if not line.startswith(skipped)]
 
 
 @pytest.mark.parametrize(

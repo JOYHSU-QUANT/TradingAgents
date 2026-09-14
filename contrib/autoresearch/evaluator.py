@@ -92,16 +92,14 @@ from .gaps import scan_stamps
 from .split import Segment, Split, studied_interval
 from .store import ResearchStore
 from .upstream import (
-    REGIME_INDICATORS,
     Candle,
     CandleInterval,
     MarketRegime,
     VocabEnum,
     from_epoch_ms,
     interval_to_ms,
-    required_candles,
 )
-from .vocabulary import FeatureKind, FeatureRef
+from .vocabulary import FeatureKind, FeatureRef, SpecError, require_number
 
 __all__ = [
     "MS_PER_YEAR",
@@ -135,12 +133,6 @@ STARTING_EQUITY: Final = 1.0
 UNLABELLED: Final = "unlabelled"
 
 _REGIME_REF: Final = FeatureRef(FeatureKind.REGIME)
-
-# The bar at which the regime can first be labelled: the warm-up of the trio
-# the classifier reads — NOT the vocabulary-wide indicator floor, which only
-# equals it today because ``ema_50`` happens to be both the regime's slowest
-# input and the slowest indicator in the vocabulary.
-_REGIME_WARMUP: Final = required_candles(REGIME_INDICATORS)
 
 
 class EvaluationError(RuntimeError):
@@ -194,6 +186,12 @@ class Trade:
         # losing short rather than refuse.
         object.__setattr__(self, "side", Side(self.side))
         object.__setattr__(self, "exit_reason", ExitReason(self.exit_reason))
+        for name in ("entry_index", "exit_index"):
+            index = getattr(self, name)
+            # ``bars_held`` is index arithmetic: a float index is a fractional
+            # holding period in the exposure figure rather than a refusal.
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                raise ValueError(f"Trade.{name} must be a bar index (an int >= 0), got {index!r}")
         if self.exit_index < self.entry_index:
             raise ValueError(
                 f"a trade exits at bar {self.exit_index}, before it entered at {self.entry_index}"
@@ -207,10 +205,15 @@ class Trade:
             ("slippage", False),
         ):
             require_amount(getattr(self, name), f"Trade.{name}", positive=positive)
-        # Funding is signed (a short at a positive rate receives), so it is
-        # held to finiteness alone.
-        if not math.isfinite(self.funding):
-            raise ValueError(f"Trade.funding must be a finite number, got {self.funding!r}")
+        # Funding is signed (a short at a positive rate receives), so it goes
+        # through the one numeric guard with no sign bound — a hand copy here
+        # let ``True`` through, and then an int too large for a float.
+        try:
+            require_number(self.funding, "Trade.funding")
+        except SpecError as exc:
+            raise ValueError(
+                f"Trade.funding must be a finite number, got {self.funding!r}"
+            ) from exc
 
     @property
     def signed_size(self) -> float:
@@ -726,10 +729,13 @@ class _Settlements:
     positive rate pays), which is what the running cost adds.
 
     Coverage is counted by stamps, the way the feature module counts a
-    window's occupancy, so an extra off-grid stamp inside the span could in
-    principle stand in for a missing hour. The store's primary key is the
-    stamp, so it cannot be an exact duplicate; the gap scan is what names an
-    off-grid one.
+    window's occupancy — so a count alone lets an off-grid stamp, or a second
+    one in the same hour, stand in for a missing hour, and :meth:`due` would
+    charge its rate as that hour's carry while the report says nothing is
+    missing. The store's primary key rules out an exact duplicate; the other
+    two are refused by the scanner's own verdict, because
+    ``_require_measurable`` puts the window's stamps (:meth:`within`) through
+    the gap scan before it counts them.
     """
 
     def __init__(self, bundle: SeriesBundle) -> None:
@@ -755,14 +761,23 @@ class _Settlements:
         real window would read as missing exactly one. The charging edges
         in :meth:`due` stay exact for the reason the class docstring gives.
         """
-        lo, _ = self._slice(first_bar, FUNDING_STAMP_TOLERANCE_MS)
-        _, hi = self._slice(last_bar, FUNDING_STAMP_TOLERANCE_MS)
+        lo, hi = self._span(first_bar, last_bar)
         # Rounded, because a venue close is one millisecond BEFORE the next
         # open (see ``constants``): floored, a span of N hours less 1 ms
         # expected N - 1 settlements, and a window with one genuinely absent
         # read as complete.
         span = last_bar.close_time - first_bar.open_time
         return hi - lo, round(span / FUNDING_INTERVAL_MS)
+
+    def within(self, first_bar: Candle, last_bar: Candle) -> list[int]:
+        """The settlement stamps over the span of those bars, on :meth:`held`'s jittered edges."""
+        lo, hi = self._span(first_bar, last_bar)
+        return self.times[lo:hi]
+
+    def _span(self, first_bar: Candle, last_bar: Candle) -> tuple[int, int]:
+        lo, _ = self._slice(first_bar, FUNDING_STAMP_TOLERANCE_MS)
+        _, hi = self._slice(last_bar, FUNDING_STAMP_TOLERANCE_MS)
+        return lo, hi
 
     def missing(self, first_bar: Candle, last_bar: Candle) -> int:
         """How many of the settlements the window's span should hold are not there."""
@@ -805,8 +820,16 @@ def _regime_buckets(
 ) -> tuple[RegimeBucket, ...]:
     """Net return per regime label over the window, in the label's declared order.
 
+    A bar's return is filed under the regime at the PREVIOUS close — the one
+    known when the position that earned it was chosen. The label at the
+    bar's own close is computed over that bar's move, so a large down bar
+    that flips the classifier would file its own loss under the bear it
+    caused. The window's first bar reads the bar before it, which the
+    bundle may hold (that bar is always flat, so it moves nothing).
+
     The regime column is asked for only when the bundle is long enough for
-    the engine to have warmed up somewhere in it. Shorter than that, every
+    the engine to have warmed up somewhere in it: a full indicator window,
+    which the frame holds at or above the classifier's own warm-up. Shorter than that, every
     bar is ``None`` by warm-up and the frame would refuse the column as one
     it cannot answer — which is the right refusal for a SPEC feature and the
     wrong one for a report dimension; here those bars are simply unlabelled.
@@ -817,14 +840,14 @@ def _regime_buckets(
     that appeared only for the specs that happened to warm it would not be a
     dimension; the cost is stated in the README's trade-offs instead.
     """
-    if len(frame.bundle.bars) >= _REGIME_WARMUP:
+    if len(frame.bundle.bars) >= frame.indicator_lookback:
         labels = frame.series(_REGIME_REF)
     else:
         labels = (None,) * len(frame.bundle.bars)
     bars: Counter[str] = Counter()
     totals: defaultdict[str, float] = defaultdict(float)
     for index, net in zip(range(first, stop), net_returns, strict=True):
-        label = labels[index]
+        label = labels[index - 1] if index > 0 else None
         key = UNLABELLED if label is None else label.value
         bars[key] += 1
         totals[key] += net
@@ -913,6 +936,24 @@ def _require_measurable(
         raise EvaluationError(
             "the cost model settles funding hourly and this bundle has no settlements — "
             "fetch without --skip-funding before measuring on it"
+        )
+    # Structure before count, as for the bars: counted alone, a stamp off the
+    # hourly grid fills in for a missing hour and is charged as its carry.
+    # Holes stay the count's business below — a settlement or two short is
+    # reported, not refused.
+    funding_scan = scan_stamps(
+        f"{segment} funding",
+        FUNDING_INTERVAL_MS,
+        FUNDING_STAMP_TOLERANCE_MS,
+        settlements.within(bars[first], bars[stop - 1]),
+    )
+    if funding_scan.duplicate_ms or funding_scan.misaligned_ms:
+        raise EvaluationError(
+            f"{segment}'s funding settlements are not on the hourly grid "
+            f"({len(funding_scan.duplicate_ms)} duplicate slot(s), "
+            f"{len(funding_scan.misaligned_ms)} off-grid stamp(s)); counted, such a stamp "
+            f"would stand in for a missing hour and be charged as its carry. A re-fetch "
+            f"does not repair this — run `gaps` to see which stamps."
         )
     stored, expected = settlements.held(bars[first], bars[stop - 1])
     if not window_is_covered(stored, expected):

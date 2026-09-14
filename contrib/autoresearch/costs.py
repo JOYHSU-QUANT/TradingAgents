@@ -132,8 +132,8 @@ class CostModel:
         mid ± slippage and books the fee on that price; here the price move
         is kept gross (mid to mid) so the two costs can be reported apart
         from it, and the difference between fee-on-mid and fee-on-slipped-mid
-        is the fee rate times the slippage rate — five parts in a hundred
-        million of notional under the defaults.
+        is the fee rate times the slippage rate — 0.00045 × 0.0005, 2.25 parts
+        in ten million of notional under the defaults.
         """
         notional = abs(notional)
         return notional * self.fee_rate, notional * self.slippage_rate

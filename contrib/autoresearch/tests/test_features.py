@@ -26,6 +26,7 @@ import pytest
 from contrib.autoresearch import features as features_module
 from contrib.autoresearch.features import (
     LIVE_CANDLE_LOOKBACK,
+    MIN_INDICATOR_LOOKBACK,
     FeatureError,
     FeatureFrame,
     SeriesBundle,
@@ -43,6 +44,15 @@ from .conftest import ANCHOR_MS, MS_PER_HOUR, candles, funding_points
 _STEP_MS = 4 * MS_PER_HOUR
 _DAY_MS = 24 * MS_PER_HOUR
 _ANALYTICS = context_analytics()
+
+
+def _narrow(closes: list[float]) -> FeatureFrame:
+    """A frame whose indicator window is the engine's floor, so a short fixture warms up.
+
+    No indicator is read before a FULL window, so at the live 200 every
+    fixture below would have to be two hundred bars long to see one.
+    """
+    return FeatureFrame(SeriesBundle(candles(closes)), indicator_lookback=MIN_INDICATOR_LOOKBACK)
 
 
 def _daily(count: int, *, start_ms: int, closes: list[float] | None = None) -> list[Candle]:
@@ -89,8 +99,9 @@ def test_a_funding_rate_that_is_not_a_finite_number_is_refused():
     ``"NaN"``; nothing upstream checks the rate itself."""
     ordered = candles([100, 101, 102])
     points = funding_points(3)
-    for rate in ("NaN", "sNaN", "Infinity", "-Infinity", "1E+400"):
-        broken = points[:1] + [FundingPoint(time=points[1].time, rate=Decimal(rate))] + points[2:]
+    for rate in ("NaN", "sNaN", "Infinity", "-Infinity", "1E+400", True):
+        value = rate if isinstance(rate, bool) else Decimal(rate)
+        broken = points[:1] + [FundingPoint(time=points[1].time, rate=value)] + points[2:]
         with pytest.raises(FeatureError, match=r"rate .* is not a finite number"):
             SeriesBundle(ordered, funding=broken)
     # Not a type check: the DTO annotates a Decimal without enforcing it, and a
@@ -214,8 +225,8 @@ def test_realised_volatility_is_the_deviation_of_the_bar_returns():
 
 
 def test_atr_percent_is_the_atr_against_this_bar_s_close():
-    closes = [30000 + 100 * index for index in range(40)]
-    frame = _frame(closes)
+    closes = [30000 + 100 * index for index in range(60)]
+    frame = _narrow(closes)
     atr = _column(frame, "atr_14")
     pct = _column(frame, "atr_pct_14")
     assert atr[-1] is not None
@@ -534,17 +545,37 @@ def test_the_regime_is_none_while_its_indicators_are_warming_up():
     ``regime == ranging`` filter would fire on it — trading the warm-up rather
     than the market.
     """
-    series = _column(_frame([30000 + 100 * index for index in range(60)]), "regime")
+    series = _column(_narrow([30000 + 100 * index for index in range(60)]), "regime")
     assert all(value is None for value in series[:49])
     assert series[-1] is not None
 
 
 def test_the_regime_is_the_borrowed_label_once_the_indicators_exist():
     closes = [30000 + 100 * index for index in range(60)]
-    values = _ANALYTICS.compute_indicators(candles(closes), ["atr_14", "ema_20", "ema_50"])
+    window = candles(closes)[-MIN_INDICATOR_LOOKBACK:]
+    values = _ANALYTICS.compute_indicators(window, ["atr_14", "ema_20", "ema_50"])
     expected = _ANALYTICS.classify_regime(values, Decimal(str(closes[-1])))
     assert isinstance(expected, MarketRegime)
-    assert _column(_frame(closes), "regime")[-1] is expected
+    assert _column(_narrow(closes), "regime")[-1] is expected
+
+
+def test_no_indicator_is_read_before_the_engine_is_shown_a_full_window():
+    """A shorter window is a different number from the live one, and a backfill
+    of older history would move it — so before a full window it is warm-up.
+
+    At sixty, ``ema_50`` has had a value on a short window since bar 49; the
+    first one read here is bar 59's, and it is the engine's over exactly sixty.
+    """
+    closes = [30000 + (index * 37) % 900 for index in range(90)]
+    bars = candles(closes)
+    column = _column(FeatureFrame(SeriesBundle(bars), indicator_lookback=60), "ema_50")
+    assert all(value is None for value in column[:59])
+    assert column[59] == pytest.approx(
+        _ANALYTICS.compute_indicators(bars[:60], ["ema_50"])["ema_50"], rel=1e-12
+    )
+    short = FeatureFrame(SeriesBundle(bars[:59]), indicator_lookback=60)
+    with pytest.raises(FeatureError, match="shown a full 60-bar window"):
+        _column(short, "ema_50")
 
 
 def test_every_engine_backed_feature_is_computed_in_one_walk(monkeypatch):
@@ -573,12 +604,13 @@ def test_every_engine_backed_feature_is_computed_in_one_walk(monkeypatch):
     # Sixty bars, because every one of the four has to have a value: a column
     # of ``None`` is refused now, and a fixture too short for ``ema_50`` would
     # be testing the refusal rather than the walk.
-    frame = _frame([30000 + 100 * index for index in range(60)])
+    frame = _narrow([30000 + 100 * index for index in range(60)])
     _column(frame, "ema_20")
     _column(frame, "ema_50")
     _column(frame, "rsi_14")
     _column(frame, "regime")
-    assert len(calls) == 60  # one per bar, not one per bar per feature
+    # One per bar that has a full window behind it, not one per bar per feature.
+    assert len(calls) == 60 - MIN_INDICATOR_LOOKBACK + 1
 
 
 def test_the_indicator_engine_sees_the_window_the_live_path_fetches():
@@ -618,7 +650,7 @@ def test_an_indicator_engine_that_answers_nothing_at_all_is_refused(monkeypatch)
             funding_zscore=real.funding_zscore,
         ),
     )
-    frame = _frame([30000 + 100 * index for index in range(120)])
+    frame = _narrow([30000 + 100 * index for index in range(120)])
     with pytest.raises(FeatureError, match="the indicator engine returned nothing"):
         _column(frame, "ema_20")
 
@@ -631,8 +663,9 @@ def test_a_column_of_silence_is_refused_however_many_times_it_is_asked_for():
     the short one afterwards handed back the column of silence. That is the
     order an evaluator actually uses — ``spec.features`` sorts the regime last.
     """
-    frame = _frame([30000 + 100 * index for index in range(45)])
-    assert _column(frame, "rsi_14")[-1] is not None  # fills the cache for all five
+    frame = _narrow([30000 + 100 * index for index in range(45)])
+    with pytest.raises(FeatureError, match="rsi_14 has no value at any"):
+        _column(frame, "rsi_14")  # computes, and fills the cache for all five
     for _attempt in range(2):
         with pytest.raises(FeatureError, match="ema_50 has no value at any"):
             _column(frame, "ema_50")
@@ -648,7 +681,7 @@ def test_a_warming_up_engine_is_not_mistaken_for_a_broken_one():
     short = _frame([30000 + 100 * index for index in range(12)])
     with pytest.raises(FeatureError, match="ema_50 has no value at any of this bundle's 12 bars"):
         _column(short, "ema_50")
-    assert _column(_frame([30000 + 100 * index for index in range(60)]), "ema_50")[-1] is not None
+    assert _column(_narrow([30000 + 100 * index for index in range(60)]), "ema_50")[-1] is not None
 
 
 # -- offsets ---------------------------------------------------------------

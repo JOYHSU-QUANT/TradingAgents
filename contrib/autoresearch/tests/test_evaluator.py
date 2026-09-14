@@ -91,10 +91,12 @@ def _spec(**overrides) -> StrategySpec:
     return parse_spec(body)
 
 
-def _run(spec, bundle, first=0, stop=None, costs=_COSTS, interval="4h") -> SegmentResult:
+def _run(
+    spec, bundle, first=0, stop=None, costs=_COSTS, interval="4h", lookback=LIVE_CANDLE_LOOKBACK
+) -> SegmentResult:
     stop = len(bundle.bars) if stop is None else stop
     step = interval_to_ms(interval)
-    frame = FeatureFrame(bundle)
+    frame = FeatureFrame(bundle, indicator_lookback=lookback)
     return evaluate_segment(spec, frame, _segment(first, stop, step=step), costs, interval=interval)
 
 
@@ -521,8 +523,7 @@ def test_regime_buckets_partition_the_window_s_bars_and_its_net_return():
     closes = [
         30000 + 100 * i + (300 if i % 3 == 0 else -200 if i % 3 == 1 else 0) for i in range(70)
     ]
-    frame = FeatureFrame(_bundle(closes))
-    result = evaluate_segment(_spec(), frame, _segment(52, 70), _COSTS, interval="4h")
+    result = _run(_spec(), _bundle(closes), first=52, lookback=MIN_INDICATOR_LOOKBACK)
     labels = {bucket.label for bucket in result.regime_buckets}
     assert labels and labels <= {regime.value for regime in MarketRegime}
     assert sum(bucket.bars for bucket in result.regime_buckets) == result.bars
@@ -531,16 +532,36 @@ def test_regime_buckets_partition_the_window_s_bars_and_its_net_return():
     )
 
 
+def test_a_bar_s_return_is_filed_under_the_regime_known_when_its_position_was_chosen():
+    """The label at a bar's own close is computed over that bar's move; the one
+    the position was chosen under is the close before."""
+    closes = [30000 + 60 * i for i in range(60)] + [30000 - 900 * i for i in range(1, 21)]
+    frame = FeatureFrame(_bundle(closes), indicator_lookback=MIN_INDICATOR_LOOKBACK)
+    result = evaluate_segment(_spec(), frame, _segment(52, 80), _COSTS, interval="4h")
+    labels = frame.series(FeatureRef(FeatureKind.REGIME))
+    assert any(labels[i] is not labels[i - 1] for i in range(52, 80))  # the fixture flips
+    expected: dict[str, float] = {}
+    for index, net in zip(range(52, 80), result.net_bar_returns, strict=True):
+        key = labels[index - 1].value
+        expected[key] = expected.get(key, 0.0) + net
+    assert {b.label: b.net_return for b in result.regime_buckets} == pytest.approx(expected)
+
+
 def test_a_bundle_too_short_for_the_regime_reports_its_bars_unlabelled():
     closes = [110, 120, 130]
     assert len(closes) < MIN_INDICATOR_LOOKBACK
     result = _run(_spec(), _bundle(closes))
     assert [(b.label, b.bars) for b in result.regime_buckets] == [(UNLABELLED, 3)]
-
-
-def test_a_bundle_exactly_as_long_as_the_regime_warm_up_labels_its_last_bar():
-    closes = [30000 + 100 * i for i in range(MIN_INDICATOR_LOOKBACK)]
+    # Past the classifier's own warm-up but short of the frame's window: still
+    # unlabelled, and not the frame's refusal of a column with no value anywhere.
+    closes = [30000 + 100 * i for i in range(MIN_INDICATOR_LOOKBACK + 10)]
     result = _run(_spec(), _bundle(closes))
+    assert [(b.label, b.bars) for b in result.regime_buckets] == [(UNLABELLED, len(closes))]
+
+
+def test_the_first_labelled_close_files_only_the_bar_after_it():
+    closes = [30000 + 100 * i for i in range(MIN_INDICATOR_LOOKBACK + 1)]
+    result = _run(_spec(), _bundle(closes), lookback=MIN_INDICATOR_LOOKBACK)
     labelled = [b for b in result.regime_buckets if b.label != UNLABELLED]
     assert labelled and sum(b.bars for b in labelled) == 1
     assert sum(b.bars for b in result.regime_buckets) == result.bars
@@ -656,8 +677,13 @@ def test_a_trade_carries_its_invariants():
         Trade(side="long", exit_reason="exit_rule", **{**body, "entry_price": math.inf})
     # Funding is signed — a short receives — but it has to be a number.
     assert Trade(side="short", exit_reason="exit_rule", **{**body, "funding": -0.5}).funding == -0.5
-    with pytest.raises(ValueError, match="Trade.funding must be a finite number"):
-        Trade(side="long", exit_reason="exit_rule", **{**body, "funding": math.nan})
+    for funding in (math.nan, True, "0.1", 10**400):
+        with pytest.raises(ValueError, match="Trade.funding must be a finite number"):
+            Trade(side="long", exit_reason="exit_rule", **{**body, "funding": funding})
+    bad_indices = (("entry_index", 1.5), ("entry_index", True), ("entry_index", -1), ("exit_index", 3.5))
+    for name, index in bad_indices:
+        with pytest.raises(ValueError, match=f"Trade.{name} must be a bar index"):
+            Trade(side="long", exit_reason="exit_rule", **{**body, name: index})
 
 
 # -- the refusals ------------------------------------------------------------
@@ -731,6 +757,22 @@ def test_a_window_the_funding_series_does_not_cover_is_refused():
         match="should hold 20 hourly funding settlements and the store has 8",
     ):
         _run(_spec(), _bundle(closes, funding=_funding(5, hours=8)))
+
+
+def test_a_funding_stamp_off_the_hourly_grid_is_refused_rather_than_counted():
+    """Counted alone, a stray stamp fills in for a missing hour: the report said
+    nothing was missing while the stray rate was charged as that hour's carry."""
+    closes = [110, 120, 130, 140, 150]
+    points = _funding(5)
+    missing = points.pop(5)
+    stray = FundingPoint(time=missing.time - 30 * 60_000, rate=Decimal("0.01"))
+    points.insert(5, stray)
+    with pytest.raises(EvaluationError, match=r"not on the hourly grid .*1 off-grid"):
+        _run(_spec(), _bundle(closes, funding=points))
+    second = FundingPoint(time=_funding(5)[8].time + 2_000, rate=Decimal("0.01"))
+    doubled = [p for p in _funding(5) if p.time != missing.time] + [second]
+    with pytest.raises(EvaluationError, match=r"not on the hourly grid .*1 duplicate"):
+        _run(_spec(), _bundle(closes, funding=sorted(doubled, key=lambda p: p.time)))
 
 
 def test_a_settlement_or_two_missing_is_reported_rather_than_refused():
@@ -946,11 +988,28 @@ def test_load_bundle_reads_nothing_past_the_bound(store):
     everything = load_bundle(store, coin="BTC", interval="4h")
     assert len(everything.bars) == 30
     assert len(everything.funding) == 120
+    # Written OVER the exact stamps, the late ones are a second settlement in
+    # every hour: counted, that store read as covered and charged each hour's
+    # carry twice. The scan refuses it.
+    late_points = [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(30)]
+    store.upsert_funding("BTC", late_points)
+    doubled = load_bundle(store, coin="BTC", interval="4h", until_ms=split.loadable_until())
+    with pytest.raises(EvaluationError, match=r"not on the hourly grid \(24 duplicate"):
+        evaluate_segment(
+            _spec(), FeatureFrame(doubled), split.validation, _COSTS, interval="4h"
+        )
     # The settlement DUE at the bound's last close posts 57 ms after it and is
     # read; the one due an hour later is not. Measured on the window: no
     # settlement missing, which a bound at the exact close got wrong.
-    store.upsert_funding("BTC", [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(30)])
-    late = load_bundle(store, coin="BTC", interval="4h", until_ms=split.loadable_until())
+    from contrib.autoresearch.store import ResearchStore
+
+    with ResearchStore() as venue:
+        venue.upsert_candles("BTC", "4h", candles(_wander(30)))
+        venue.upsert_candles(
+            "BTC", "1d", candles([1000, 1001, 1002, 1003, 1004], start_ms=ANCHOR_MS, step_ms=_DAY)
+        )
+        venue.upsert_funding("BTC", late_points)
+        late = load_bundle(venue, coin="BTC", interval="4h", until_ms=split.loadable_until())
     assert late.funding[-1].time == late.bars[-1].close_time + 57
     result = evaluate_segment(_spec(), FeatureFrame(late), split.validation, _COSTS, interval="4h")
     assert result.funding_settlements_missing == 0

@@ -178,7 +178,10 @@ feature 都有值，否則一整排 `None` 會跟自己完美相符。
 window 的**起點**則是另一件事：它往回 `indicator_lookback` 根，**預設** 200＝實盤每個 cycle
 去 fetch 的根數（`candle_lookback`），同一根 bar 因此在這裡與那裡拿到同一個 EMA——而這句話
 只在預設下成立：實盤的值是 gitignored 的 `local.yaml` 可以改的，所以 A3 把它做成 frame 的
-參數、報表印出用的是哪個（計畫 §10.3）。順帶一提，固定 window 也讓成本從
+參數、報表印出用的是哪個（計畫 §10.3）。**不滿一個完整 window 之前，每個 indicator 與
+regime 都是 `None`**（2026-09-14 拍板）：短 window 算出來的 EMA 不是實盤那個數，而且日後
+回補更舊的歷史會讓同一個 split 量出來的數字悄悄改變；現在它們跟其他 feature 一樣暖機、
+在窗口第一根被具名拒絕。順帶一提，固定 window 也讓成本從
 平方變回線性——引擎每次呼叫都重建 frame，餵不斷變長的 prefix 到第 5000 根本機實測
 12 ms/bar，固定 window 是大約 2.5 ms。
 
@@ -219,7 +222,9 @@ A2 的 parser 留了四個語意缺口（計畫 §10.1），這裡一次定死�
 | `filters` | **只擋進場**（含反手），變 false 不平倉；擋住的 bar 上 entry 條件照讀、`bars_conflicting`／`bars_unevaluable` 照計 | 想「regime 翻了就平」的規則寫在 `exit`，read-back 看得到；read-back 現在印 `enter only while:`。計數是訊號的性質不是閘門的（2026-09-14 拍板），否則把一條 clause 從 `entry.long` 搬到 `filters` 會改變長單策略沒變的計數 |
 | 持倉中 exit／filter 的 feature 是 `None` | **不觸發，續抱，並計數**（`bars_unevaluable`） | `features.py` 對 entry 的讀法就是「None＝這裡不觸發」；exit 反過來 fail-closed 等於同一個值兩種讀法。計數是為了讓「一條規則安靜了一個月」變成數字而不是一次 hold |
 
-其他形狀：同向 entry 持倉中不加碼；long／short 同根同時成立不進場、計數
+其他形狀：同向 entry 持倉中不加碼；持倉的 `exit`／`max_bars` 觸發時同向 entry 仍成立，
+**exit 優先**——下一根開盤平倉、那根空手、再下一根才重新進場（多付一趟來回；反向 entry
+則同一次成交反手、不空手，2026-09-14 拍板保留）；long／short 同根同時成立不進場、計數
 （`bars_conflicting`）；**每個窗口各自獨立**——第一根必然空手（能在那裡成交的決策是前一根
 收盤的事，窗口不讀它），最後一根收盤**強制平倉**（付成本），所以一個窗口永遠不讀下一個
 窗口的 bar——holdout 鎖就靠這一點；代價是 always-in 規則每個段界付一趟來回、exposure 是
@@ -233,14 +238,16 @@ A2 的 parser 留了四個語意缺口（計畫 §10.1），這裡一次定死�
 被具名拒絕，句子裡帶著它第幾根才有值——要嘛把窗口往後移，要嘛抓更舊的歷史。
 
 **成本**（計畫 §3.7）：gross＝mid 到 mid 的價差；net 再扣每次成交的 fee＋slippage（算在 mid
-名目上，跟實盤「fee 算在滑價後的價格」差 fee×slippage，預設下是名目的五億分之一）與持倉
+名目上，跟實盤「fee 算在滑價後的價格」差 fee×slippage，預設下是 0.00045×0.0005＝名目的千萬分之 2.25）與持倉
 期間每個**逐小時** settlement 的 funding（正負號同 paper ledger：long 在正費率**付**）。
 兩組都印，因為「gross 好看、net 不好看」是假說迴圈最常生出來的東西。`indicator_lookback`
 現在是 frame 的參數（預設仍是實盤的 200），報表會印出用的是哪個（計畫 §10.3）。
 
 **指標**（計畫 §3.9）：total return、Sharpe（bar 報酬年化，報表明寫 `sqrt(2190 bars/year)`）、
 max drawdown、hit rate 各算 gross／net 一組；exposure、turnover（名目成交／平均權益）、
-fees／slippage／funding 各自的總額、每個 regime 的 net return 分桶。always-flat 各指標是
+fees／slippage／funding 各自的總額、每個 regime 的 net return 分桶（一根的報酬歸到**前一根**收盤的 regime＝決定持倉當下已知
+的那個；歸到自己收盤的 regime，會讓造成翻轉的那根大跌把虧損記進它剛造成的 bear，
+2026-09-14 拍板）。always-flat 各指標是
 **0 不是 NaN**（計畫 §6.6）。標準差為 0 時 Sharpe 一律報 0，所以 **Sharpe 0 不等於沒交易**：
 每根都虧同樣金額的序列也是 0，要跟 total return 與交易數一起讀（2026-09-14 拍板，不報 ±inf）。
 `ruined` 為真的窗口先濾掉再看任何比率。
@@ -304,8 +311,9 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
   差的只有成本項，這才是「gross 好看、net 不好看」要比的東西。
 - **`_notional` 的 `None` 分支實務上到不了**：`realized_vol_N` 只在 warm-up 是 `None`，而
   warm-up 在窗口第一根就被拒絕；留著是型別上的完整，不是行為。
-- **短於 50 根的 bundle，regime 分桶全記 `unlabelled`**：那是 report 的維度不是 spec 的
-  feature，對它套「整欄 None 就拒絕」會讓每個小測試都得先餵 50 根。
+- **短於 `indicator_lookback` 根（預設 200）的 bundle，regime 分桶全記 `unlabelled`**：那是
+  report 的維度不是 spec 的 feature，對它套「整欄 None 就拒絕」會讓每個小測試都得先餵一整個
+  window。
 - **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批
   rows，`load_bundle` 直接拿 bars 當 backdrop，不讀第二次）；parser 看不到 interval 所以擋不了
   （承 A2 §10.8）。

@@ -38,7 +38,9 @@ Breaking changes within the 0.x line are called out explicitly.
   properties of the signal, not of the gate. And a feature that is
   `None` at a bar does not fire, for exits exactly as for entries - one value,
   one reading - with the bars where a consulted rule had no value COUNTED, so
-  a rule that went silent for a month is a number rather than a hold.
+  a rule that went silent for a month is a number rather than a hold. An
+  exit that fires while the same-side entry still holds wins: the position
+  is flat for a bar before that entry can reopen it.
 
   THE WINDOW IS THE MEASURED SPAN for every spec (plan §10.2), so exposure and
   hit rate share a denominator whichever hypothesis is scored. Warm-up is not
@@ -63,11 +65,16 @@ Breaking changes within the 0.x line are called out explicitly.
   switch and changes the fee alone: zeroing slippage would price in the fill
   and ignore the miss. The indicator window is now a frame parameter with
   the live 200 as its default and the engine's warm-up as its floor, and the
-  report prints which was used (plan §10.3).
+  report prints which was used (plan §10.3). No indicator, and no regime, is
+  read before the engine is shown that full window: a shorter one is a
+  different number from the live one, and backfilling older history would
+  change it, so it warms up like any other feature.
 
   Refused by name (`EvaluationError`): a window with a hole in its bars (plan
   §3.4), one the store only partly covers, one shorter than two bars, one
-  whose funding series covers under ninety percent of it, one a spec's
+  whose funding series covers under ninety percent of it or holds a
+  settlement off the hourly grid or two in one hour (counted alone, such a
+  stamp stood in for a missing hour and was charged as its carry), one a spec's
   feature has not warmed up for, and one whose edge is off the store's bar
   grid (a hand-built or ledger-read segment; `by_shares` snaps its cuts). A
   bundle holding a funding rate, or a bar or daily-bar price, that is not a
@@ -90,8 +97,9 @@ Breaking changes within the 0.x line are called out explicitly.
 
   Known trade-offs, recorded rather than filed: the indicator pass still
   computes all four names whatever a spec asks for (plan §10.5); regime
-  buckets on a bundle shorter than the engine's warm-up are all
-  `unlabelled`; on a `1d` experiment the backdrop is the decision series
+  buckets on a bundle shorter than the indicator window are all
+  `unlabelled`, and a bar's return is filed under the regime known at the
+  close before it; on a `1d` experiment the backdrop is the decision series
   itself (read once), so `close_1d` degenerates to `close`; `vol_target`
   sizes at entry and does not re-size a held position; a Sharpe of 0 means
   a series with no deviation, which a run that lost the same amount at every

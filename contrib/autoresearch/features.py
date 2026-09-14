@@ -14,7 +14,12 @@ that is a decision about COMPARABILITY, taken down to the window each one
 sees. The indicator engine is handed the last ``indicator_lookback`` closed
 bars — by default :data:`LIVE_CANDLE_LOOKBACK`, the count the trader's own
 fetch asks for every cycle, read off that config's default rather than
-written down again here — and asked for the latest value. The regime label comes from the
+written down again here — and asked for the latest value. Before a bar has
+that many closed bars behind it, every indicator and the regime are ``None``:
+a shorter window is a different EMA from the one the live path computes, and
+backfilling older history would silently change a figure measured on it —
+so it warms up, and is refused at a window's first bar, like any other
+feature. The regime label comes from the
 borrowed classifier over those indicators. The funding z-score is the
 borrowed function over the stored settlements, with the rate being scored
 kept OUT of the window it is scored against, because the live caller passes a
@@ -129,6 +134,8 @@ _ANALYTICS: Final = context_analytics()
 # unioned with ``REGIME_INDICATORS`` because the regime needs its three whether
 # or not a spec refers to them.
 _INDICATOR_KINDS: Final = (FeatureKind.EMA, FeatureKind.RSI, FeatureKind.ATR)
+# Every kind the engine walk answers: the indicators, and the regime built on them.
+_ENGINE_KINDS: Final = frozenset((*_INDICATOR_KINDS, FeatureKind.REGIME))
 _FEATURE_INDICATORS: Final[dict[str, tuple[FeatureKind, int]]] = {
     f"{kind.value}_{period}": (kind, period)
     for kind in _INDICATOR_KINDS
@@ -367,8 +374,12 @@ def _is_finite_number(value: object) -> bool:
     every reader in this module takes it. The DTOs annotate a ``Decimal``
     without enforcing it, and a hand-built bundle with float values has always
     worked. A signalling NaN, or text that is not a number, cannot be
-    converted at all, and is refused like any other non-finite value.
+    converted at all, and is refused like any other non-finite value. A
+    ``bool`` converts to ``1.0`` and is refused anyway, as
+    :func:`~.vocabulary.require_number` refuses it: ``True`` is not a price.
     """
+    if isinstance(value, bool):
+        return False
     try:
         return math.isfinite(float(value))  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
@@ -501,8 +512,14 @@ class FeatureFrame:
             return
         bars = self.bundle.bars
         span = f"{from_epoch_ms(bars[0].close_time):%Y-%m-%d} to {from_epoch_ms(bars[-1].close_time):%Y-%m-%d}"
+        short = (
+            f" (an indicator is read only once the engine is shown a full "
+            f"{self.indicator_lookback}-bar window)"
+            if ref.kind in _ENGINE_KINDS and len(bars) < self.indicator_lookback
+            else ""
+        )
         raise FeatureError(
-            f"{ref.name} has no value at any of this bundle's {len(bars)} bars ({span}), so a "
+            f"{ref.name} has no value at any of this bundle's {len(bars)} bars ({span}){short}, so a "
             f"spec reading it cannot be evaluated here — it would score as a strategy that "
             f"never fired. Fetch more history, or measure a spec this store can answer."
         )
@@ -524,7 +541,7 @@ class FeatureFrame:
     # -- the computations --------------------------------------------------
 
     def _compute(self, kind: FeatureKind, period: int | None) -> tuple[FeatureValue, ...]:
-        if kind in _INDICATOR_KINDS or kind is FeatureKind.REGIME:
+        if kind in _ENGINE_KINDS:
             self._indicator_pass()
             return self._cache[(kind, period)]
         return _BUILDERS[kind](self, period)
@@ -551,9 +568,16 @@ class FeatureFrame:
         values at the same bar.
         """
         bars = self.bundle.bars
-        columns: dict[str, list[FeatureValue]] = {name: [] for name in _INDICATOR_NAMES}
-        regimes: list[FeatureValue] = []
-        for index, bar in enumerate(bars):
+        # Before a full window every value is warm-up, not a shorter window: a
+        # shorter one is a different number from the live one, and one a
+        # backfill of older history would move.
+        warm = min(len(bars), self.indicator_lookback - 1)
+        columns: dict[str, list[FeatureValue]] = {
+            name: [None] * warm for name in _INDICATOR_NAMES
+        }
+        regimes: list[FeatureValue] = [None] * warm
+        for index in range(warm, len(bars)):
+            bar = bars[index]
             # The window ENDS at this bar, which is the whole no-look-ahead
             # guarantee: the engine cannot see further because it was never
             # given further. It BEGINS ``indicator_lookback`` bars earlier,
@@ -562,7 +586,7 @@ class FeatureFrame:
             # same indicator here and there; at any other value the frame is
             # measuring against a server that fetches that other count, and
             # the report says which.
-            window = bars[max(0, index + 1 - self.indicator_lookback) : index + 1]
+            window = bars[index + 1 - self.indicator_lookback : index + 1]
             values = _ANALYTICS.compute_indicators(window, _INDICATOR_NAMES)
             for name in _INDICATOR_NAMES:
                 columns[name].append(values.get(name))
@@ -589,14 +613,16 @@ class FeatureFrame:
         warm-up, and every strategy touching it would be scored as tried.
 
         Warm-up is the one thing that CAN legitimately empty a column, so the
-        threshold is the engine's own minimum for that indicator (borrowed,
-        not guessed). Past it, an all-empty column is not a market fact.
+        threshold is the frame's lookback: no indicator is read before a full
+        window, and the constructor holds the lookback at or above every
+        indicator's own minimum (the engine's warm-up table, borrowed, not
+        guessed). Past it, an all-empty column is not a market fact.
         """
         bar_count = len(self.bundle.bars)
+        if bar_count < self.indicator_lookback:
+            return
         dead = sorted(
-            name
-            for name, column in columns.items()
-            if bar_count >= required_candles([name]) and all(value is None for value in column)
+            name for name, column in columns.items() if all(value is None for value in column)
         )
         if dead:
             raise FeatureError(
@@ -895,7 +921,7 @@ _BUILDERS: Final[dict[FeatureKind, Callable[[FeatureFrame, int | None], tuple[Fe
     FeatureKind.FUNDING_CUM: FeatureFrame._funding_cum,
 }
 
-if set(_BUILDERS) | set(_INDICATOR_KINDS) | {FeatureKind.REGIME} != set(FeatureKind):
+if set(_BUILDERS) | _ENGINE_KINDS != set(FeatureKind):
     # Raised rather than asserted — see the note in ``vocabulary``: under
     # ``python -O`` an assert here would let a kind with nothing to compute it
     # reach a trial as a ``KeyError``.

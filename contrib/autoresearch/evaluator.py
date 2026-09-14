@@ -86,9 +86,10 @@ from .constants import (
     MS_PER_DAY,
 )
 from .costs import CostModel, require_amount
-from .dsl import Condition, Op, Side, SizingMode, StrategySpec, describe_spec
+from .dsl import Condition, Op, Side, SizingMode, StrategySpec
 from .features import FeatureFrame, FeatureValue, SeriesBundle, window_is_covered
 from .gaps import scan_stamps
+from .metrics import RegimeBucket, SegmentMetrics, Tally, describe_measurement
 from .split import Segment, Split, studied_interval
 from .store import ResearchStore
 from .upstream import (
@@ -245,40 +246,6 @@ class Trade:
 
 
 @dataclass(frozen=True)
-class Tally:
-    """The four statistics computed once GROSS and once NET (plan §3.9).
-
-    Both are built from per-bar returns on the SAME denominator — the equity
-    actually deployed, which is the net path — so the gross figures are "the
-    price move, on the capital the strategy really had", compounded. A
-    strategy that has lost half its equity to costs and then makes a bar's
-    move of one hundredth of its starting stake is booked as a 2% gross bar,
-    not 1%: that is the return the position earned, and it is why
-    ``gross.total_return`` is not the plain sum of the trades' ``gross_pnl``.
-    """
-
-    total_return: float
-    sharpe: float
-    max_drawdown: float
-    hit_rate: float
-
-    def describe(self, label: str) -> str:
-        return (
-            f"{label}: return {self.total_return:+.2%}, sharpe {self.sharpe:.2f}, "
-            f"max drawdown {self.max_drawdown:.2%}, hit rate {self.hit_rate:.0%}"
-        )
-
-
-@dataclass(frozen=True)
-class RegimeBucket:
-    """Net bar returns summed over the bars carrying one regime label (plan §3.9)."""
-
-    label: str
-    bars: int
-    net_return: float
-
-
-@dataclass(frozen=True)
 class SegmentResult:
     """Everything one window said about one spec under one cost model.
 
@@ -314,33 +281,8 @@ class SegmentResult:
     net_bar_returns: tuple[float, ...]
 
     def describe(self) -> list[str]:
-        lines = [
-            f"{self.segment}: {self.bars} bars, {len(self.trades)} trades, "
-            f"exposure {self.exposure:.0%}, turnover {self.turnover:.2f}x"
-            + (" — RUINED" if self.ruined else ""),
-            "  " + self.gross.describe("gross"),
-            "  " + self.net.describe("net  "),
-            f"  costs: fees {self.fees_paid:.4f}, slippage {self.slippage_paid:.4f}, "
-            f"funding {self.funding_paid:+.4f} (positive = paid)",
-        ]
-        if self.regime_buckets:
-            lines.append(
-                "  by regime (net bar returns summed): "
-                + ", ".join(
-                    f"{bucket.label} {bucket.net_return:+.2%} over {bucket.bars} bars"
-                    for bucket in self.regime_buckets
-                )
-            )
-        notes = []
-        if self.bars_unevaluable:
-            notes.append(f"{self.bars_unevaluable} bars where a consulted rule had no value")
-        if self.bars_conflicting:
-            notes.append(f"{self.bars_conflicting} bars where long and short both fired")
-        if self.funding_settlements_missing:
-            notes.append(f"{self.funding_settlements_missing} funding settlements missing")
-        if notes:
-            lines.append("  note: " + "; ".join(notes))
-        return lines
+        """Rendered from the ledger's record of this result, so ``evaluate`` and ``report`` agree."""
+        return SegmentMetrics.from_result(self).describe()
 
 
 @dataclass(frozen=True)
@@ -1072,19 +1014,14 @@ def load_bundle(
 
 
 def describe_result(result: SplitResult) -> list[str]:
-    """The result as lines to print — what PR A4's ``report`` command will show."""
-    lines = list(describe_spec(result.spec))
-    lines.append(result.costs.describe())
-    lines.append(
-        f"indicator window: {result.indicator_lookback} bars; sharpe annualised by "
-        f"sqrt({result.train.bars_per_year:.0f} bars/year)"
+    """The result as lines to print — the same text ``report`` prints from the ledger."""
+    return describe_measurement(
+        result.spec,
+        result.costs,
+        result.split,
+        result.indicator_lookback,
+        [SegmentMetrics.from_result(segment) for segment in result.results],
     )
-    lines += result.split.describe()
-    for segment_result in result.results:
-        lines += segment_result.describe()
-    if result.holdout is None:
-        lines.append(f"{result.split.holdout.name.value}: withheld (not promoted)")
-    return lines
 
 
 # Import-time check, in the style of the sibling modules: every ordering

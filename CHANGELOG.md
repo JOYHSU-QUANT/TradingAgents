@@ -10,6 +10,81 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **autoresearch: a ledger that scores many hypotheses without letting the search
+  cheat, and the baselines that show the scorer is not fooled** (plan PR A4, the
+  end of Phase A). Five commands - `experiment`, `evaluate`, `promote`, `report`,
+  `calibrate` - over two new tables in the research store (schema v2,
+  `experiments` and `trials`). `contrib/hyperliquid_perp` is untouched.
+
+  AN EXPERIMENT IS WRITTEN ONCE: its cost model, its split, the indicator
+  window and the promote penalty are one row, and every trial inside it is
+  measured under them. Its train window starts where it is MEASURED to start -
+  the first bar at which every column of the vocabulary has a value, plus the
+  deepest offset a reference may carry - so no legal spec is refused for
+  warm-up and a warm-up refusal is never filed as a result.
+
+  THE HOLDOUT IS ONE WINDOW PER COIN. The first experiment cuts it by share
+  and snaps it to a UTC midnight; every later experiment must start its
+  holdout at exactly that instant, and may only extend it. The plan first
+  wrote "no earlier"; exactly is what it needs - a later start would put the
+  old holdout inside the new validation, an earlier one would put bars trials
+  were chosen on inside the new holdout. `evaluate` reads a bundle bounded at
+  the validation's last bar; the holdout bound is written in one place, after
+  the promote gate; a trial is promoted once, and the table itself refuses
+  holdout figures on a row that is not promoted.
+
+  THE PENALTY COUNTS LOOKS, NOT LABELS. The promote threshold is
+  `1.0 + 0.25 ln(n)`, with `n` every trial in the experiment at promote time -
+  not per family (relabelling is free, plan §10.6), and not the trial's own
+  ordinal (a rule promoted after five hundred others were measured was chosen
+  from five hundred and one). A rule already measured is not another trial:
+  the hash is of the rule, blind to clause order, parameter names, the family
+  label, the side a feature comparison was written from and the spelling of a
+  number, and a duplicate is answered with the earlier trial without being
+  measured again. The gate lists every blocker - already promoted, ruined, no
+  trades, a return that is not positive, a Sharpe under the threshold.
+
+  PROMOTE RE-MEASURES WHAT IT WAS GATED ON. Train and validation are measured
+  again on the holdout-bound bundle and must equal the filed figures before
+  the holdout is scored; the only way they differ is a store revised since,
+  which is refused by name. Before any measurement the warm-up bars and the
+  daily bars a feature can reach are scanned for holes (plan §11) - the
+  evaluator's own window check cannot see behind the window. Funding holes are
+  counted, within the features' coverage policy; a duplicate or off-grid
+  settlement is refused.
+
+  CALIBRATION (plan §6.6). Buy-and-hold, always-flat and a high-turnover noise
+  rule are documents in the language, which `calibrate` scores on an
+  experiment's windows without filing a trial. The tests score them on
+  synthetic driftless markets, where the answers are known in advance: seeded
+  random rules have a median gross Sharpe within three standard errors of
+  zero and keep less net than gross; the noise rule pays for every round trip;
+  buy-and-hold earns exactly the window's price move; always-flat is zeros,
+  never NaN.
+
+  A FUNDING SETTLEMENT MAY POST UP TO TWENTY MINUTES LATE and still be its
+  hour's (was five seconds). Found by running the ledger against the real
+  store: of 22,254 mainnet BTC settlements from 2024-03-01, two posted late -
+  2025-07-19 10:14:47 and 2025-07-27 12:01:50 - each alone in an hour whose
+  on-time slot is empty. At five seconds both were off-grid, and since a
+  window holding an off-grid settlement is refused, no experiment could be
+  opened on the real store at all; a re-fetch cannot repair it. `gaps` now
+  reports that history as one hole and nothing off-grid. A stamp in the
+  middle of an hour is still off-grid and a late post into an hour that has
+  its settlement is still a duplicate; the funding read bound and the stale-
+  rate bound, both derived from the tolerance, move with it.
+
+  `report` reads the ledger alone and loads no part of the feature stack, and
+  the measurement text it prints comes from the renderer `evaluate` uses, so
+  the two cannot drift apart. `EvaluationError` and `FeatureError` now exit 1
+  by name; any other `RuntimeError` still propagates.
+
+  Known trade-offs, recorded rather than filed: `spec_hash` knows the grammar
+  and not the evaluator's semantics, so a long-only clause moved from `entry`
+  to `filters` is a second trial; one holdout per coin, growing only at its
+  far end, means validation never gains new bars; `experiment` reads the
+  holdout rows once, to measure the span, and scores nothing on them.
+
 - **autoresearch: an evaluator that decides at a close, fills at the next open,
   and withholds the holdout** (plan PR A3). The bar-level simulation, the cost
   model it charges, the fixed split it measures on, and the metrics it hands

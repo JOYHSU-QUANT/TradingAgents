@@ -168,6 +168,40 @@ def test_a_stamp_past_the_tolerance_is_still_named(store):
     assert report.misaligned_ms == (points[1].time,)
 
 
+def test_a_settlement_posted_minutes_late_into_an_empty_hour_is_that_hour_s(store):
+    """Measured 2026-09-14: two of 22,254 mainnet settlements posted 14m47s and 1m51s late.
+
+    Each was alone in its hour. Read at the five-second tolerance this first
+    had, both were off-grid — and a window holding an off-grid settlement is
+    refused, so no experiment could be opened on the real store at all. The
+    tolerance is for lateness, though, not for another cadence: a stamp in the
+    middle of an hour is still named, and a late post into an hour that
+    already has its settlement is still a duplicate.
+    """
+    hour = [ANCHOR_MS + i * MS_PER_HOUR for i in range(6)]
+    stamps = [
+        hour[0] + 57,
+        hour[1] + 30,
+        hour[2] + 14 * 60_000 + 47_645,  # 2025-07-19 10:14:47.645
+        hour[3] + 60_000 + 50_963,  # 2025-07-27 12:01:50.963
+        hour[4] + 2,
+        hour[5] + 99,
+    ]
+    store.upsert_funding("BTC", [FundingPoint(time=t, rate=Decimal("0.00001")) for t in stamps])
+    report = scan_funding(store, coin="BTC")
+    assert report.complete, render_report(report)
+
+    mid_hour = hour[5] + 30 * 60_000
+    second_post = hour[1] + 10 * 60_000
+    store.upsert_funding(
+        "BTC",
+        [FundingPoint(time=t, rate=Decimal("0.00001")) for t in (mid_hour, second_post)],
+    )
+    report = scan_funding(store, coin="BTC")
+    assert report.misaligned_ms == (mid_hour,)
+    assert report.duplicate_ms == (second_post,)
+
+
 def test_funding_is_scanned_on_the_hourly_settlement_grid(store):
     store.upsert_funding("BTC", funding_points(48))
     report = scan_funding(store, coin="BTC")
@@ -245,7 +279,9 @@ def test_a_settlement_stamped_slightly_EARLY_lands_in_the_hour_it_belongs_to(sto
 def test_a_wall_of_off_grid_stamps_is_summarised_too(store):
     """The shared list renderer, which only the gap list exercised."""
     strays = [
-        FundingPoint(time=ANCHOR_MS + i * MS_PER_HOUR + 40 * 60_000, rate=Decimal("0.00001"))
+        # Half past each hour: as far from a slot as a stamp can be, so off-grid
+        # at any tolerance a posting delay could justify.
+        FundingPoint(time=ANCHOR_MS + i * MS_PER_HOUR + 30 * 60_000, rate=Decimal("0.00001"))
         for i in range(14)
     ]
     store.upsert_funding("BTC", [FundingPoint(time=ANCHOR_MS, rate=Decimal("0.00001")), *strays])

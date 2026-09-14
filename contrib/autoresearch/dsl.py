@@ -67,6 +67,7 @@ free.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -101,6 +102,8 @@ __all__ = [
     "describe_spec",
     "load_spec",
     "parse_spec",
+    "spec_hash",
+    "spec_to_document",
 ]
 
 
@@ -981,3 +984,127 @@ def describe_spec(spec: StrategySpec) -> list[str]:
 def _joined(conditions: Sequence[Condition]) -> str:
     """Conditions are ANDed; the rendering says so rather than leaving it implied."""
     return " AND ".join(str(condition) for condition in conditions)
+
+
+# -- the record a ledger keeps ---------------------------------------------
+
+
+def spec_to_document(spec: StrategySpec) -> dict[str, object]:
+    """The spec as a JSON document that :func:`parse_spec` reads back to an EQUAL spec.
+
+    What a trial row stores (plan §3.3 ``spec_json``). Written from the PARSED
+    object, not kept from the text a model sent: a default the parser filled
+    in (a vol target's ``max_fraction``) is written out, so a spec read back
+    after the default changes is still the spec that was measured. The
+    author's clause order and parameter names are kept — the report shows
+    them — which is why this is not what trials are deduplicated on; that is
+    :func:`spec_hash`.
+    """
+    document: dict[str, object] = {"family": spec.family.value}
+    document["entry"] = {
+        side.value: [_condition_document(c) for c in spec.entries(side)]
+        for side in Side
+        if spec.entries(side)
+    }
+    exits: dict[str, object] = {
+        side.value: [_condition_document(c) for c in spec.exits(side)]
+        for side in Side
+        if spec.exits(side)
+    }
+    if spec.max_bars is not None:
+        exits["max_bars"] = spec.max_bars
+    if exits:
+        document["exit"] = exits
+    if spec.filters:
+        document["filters"] = [_condition_document(c) for c in spec.filters]
+    document["sizing"] = _sizing_document(spec.sizing)
+    if spec.params:
+        document["params"] = dict(spec.params)
+    return document
+
+
+def spec_hash(spec: StrategySpec) -> str:
+    """The identity of the RULE a spec states, as hex — what a ledger deduplicates trials on.
+
+    Computed from the parsed object (plan §10.7), and blind on purpose to the
+    things that change a document without changing what gets traded:
+
+    - the ``family`` — relabelling is free (plan §10.6), so a label must not be
+      a way to measure the same rule twice;
+    - parameter NAMES — ``rsi_14 < oversold (30)`` is ``rsi_14 < 30``;
+    - the order of the clauses inside one AND, and a clause written twice;
+    - which side of a feature-to-feature comparison came first —
+      ``close > sma_20`` is ``sma_20 < close``;
+    - the spelling of a number (``30`` and ``30.0`` parse to one float, and
+      ``-0.0`` is ``0.0``).
+
+    Not blind to anything else, and that is a choice with a known edge: a
+    clause under ``filters`` and the same clause under ``entry.long`` are the
+    same trades for a long-only spec, and hash apart. Normalising that needs
+    the evaluator's semantics, not the grammar's, so it is left as a second
+    trial rather than guessed at.
+    """
+    identity = {
+        "entry": {side.value: _clause_keys(spec.entries(side)) for side in Side},
+        "exit": {side.value: _clause_keys(spec.exits(side)) for side in Side},
+        "filters": _clause_keys(spec.filters),
+        "max_bars": spec.max_bars,
+        "sizing": {
+            key: value + 0.0 if isinstance(value, float) else value
+            for key, value in _sizing_document(spec.sizing).items()
+        },
+    }
+    text = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# A feature-to-feature comparison read from the other side.
+_MIRRORED: Final = {Op.GT: Op.LT, Op.LT: Op.GT, Op.GE: Op.LE, Op.LE: Op.GE}
+
+
+def _clause_keys(conditions: Sequence[Condition]) -> list[str]:
+    return sorted({_clause_key(condition) for condition in conditions})
+
+
+def _clause_key(condition: Condition) -> str:
+    left, op, right = condition.left, condition.op, condition.right
+    if isinstance(right, FeatureRef) and _ref_order(right) < _ref_order(left):
+        left, op, right = right, _MIRRORED[op], left
+    if isinstance(right, FeatureRef):
+        shown = str(right)
+    elif isinstance(right, MarketRegime):
+        shown = right.value
+    else:
+        shown = repr(right + 0.0)
+    return f"{left} {op.value} {shown}"
+
+
+_KIND_ORDER: Final = {kind: index for index, kind in enumerate(FeatureKind)}
+
+
+def _ref_order(ref: FeatureRef) -> tuple[int, int, int]:
+    return (_KIND_ORDER[ref.kind], ref.period or 0, ref.offset)
+
+
+def _ref_document(ref: FeatureRef) -> object:
+    return ref.name if ref.offset == 0 else {"feature": ref.name, "offset": ref.offset}
+
+
+def _condition_document(condition: Condition) -> dict[str, object]:
+    right: object
+    if isinstance(condition.right, FeatureRef):
+        right = _ref_document(condition.right)
+    elif isinstance(condition.right, MarketRegime):
+        right = condition.right.value
+    elif condition.right_param is not None:
+        right = {"param": condition.right_param}
+    else:
+        right = condition.right
+    return {"left": _ref_document(condition.left), "op": condition.op.value, "right": right}
+
+
+def _sizing_document(sizing: Sizing) -> dict[str, object]:
+    body: dict[str, object] = {"mode": sizing.mode.value}
+    for name in _SIZING_FIELDS[sizing.mode]:
+        body[_SIZING_KEYS.get(name, name)] = getattr(sizing, name)
+    return body

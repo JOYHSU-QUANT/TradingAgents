@@ -127,13 +127,13 @@ def test_a_v1_store_migrates_forward_and_keeps_its_history(tmp_path):
     conn.commit()
     conn.close()
     with ResearchStore(path) as opened:
-        assert opened.version == SCHEMA_VERSION == 2
+        assert opened.version == SCHEMA_VERSION == 3
         assert opened.count_candles("BTC", "4h") == 1
         tables = {
             row[0]
             for row in opened.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        assert {"experiments", "trials"} <= tables
+        assert {"experiments", "trials", "proposals"} <= tables
         assert Ledger(opened).experiments() == []
 
 

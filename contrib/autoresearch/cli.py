@@ -38,6 +38,16 @@ Five are the LEDGER (plan PR A4), and every one of them reads a store:
   always-flat, a high-turnover noise rule) on the experiment's windows,
   filing nothing.
 
+One is the SEARCH (plan PR B1), and it is the only command that talks to a
+model:
+
+- ``research --experiment btc-4h --provider anthropic --model ... [--max-trials 10]``
+  — ask a model for one rule at a time, score each through the same parser and
+  evaluator ``evaluate`` uses, and show the next round what the last one scored
+  or why it was refused. The budget counts ANSWERS: a refused answer and a rule
+  already tried each spend one. It never reads the holdout and never promotes.
+  ``--dry-run`` prints the exact prompt and asks nothing of any model.
+
 Exit codes, kept in step with the perp package's CLI so an operator's habits
 carry across: ``0`` the command did what it says, ``1`` a named operator,
 store, venue, spec, measurement or ledger failure (the sentence on stderr
@@ -62,7 +72,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .constants import STUDIED_INTERVALS
+from .constants import DEFAULT_MAX_TRIALS, STUDIED_INTERVALS
 from .costs import (
     LIVE_LEVERAGE,
     LIVE_SLIPPAGE_BPS,
@@ -93,6 +103,7 @@ from .ledger import (
     Verdict,
 )
 from .metrics import describe_measurement
+from .ports import HypothesistError
 from .split import DEFAULT_TRAIN_SHARE, DEFAULT_VALIDATION_SHARE
 from .store import (
     DB_FILENAME,
@@ -279,6 +290,43 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     calibrate_cmd.add_argument("--experiment", required=True)
     add_db(calibrate_cmd)
+
+    research_cmd = subparsers.add_parser(
+        "research", help="ask a model for rules, score each one, and file what it answered"
+    )
+    research_cmd.add_argument("--experiment", required=True)
+    research_cmd.add_argument(
+        "--max-trials",
+        type=int,
+        default=DEFAULT_MAX_TRIALS,
+        help=(
+            f"answers to spend this run (default: {DEFAULT_MAX_TRIALS}). A refused answer "
+            f"and a rule already tried each spend one"
+        ),
+    )
+    # No default provider or model, and the absence is deliberate: WHICH model
+    # proposed a rule is part of what an experiment's results mean, and a
+    # command quietly falling back to some configured default would file trials
+    # from a model nobody chose. Refused by name in the command unless
+    # --dry-run, which asks nothing of any model.
+    research_cmd.add_argument("--provider", default=None, help="LLM provider (e.g. anthropic)")
+    research_cmd.add_argument("--model", default=None, help="model name for that provider")
+    research_cmd.add_argument("--base-url", default=None, help="override the provider endpoint")
+    research_cmd.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="sampling temperature, if this model takes one",
+    )
+    research_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "print the prompt this experiment would send and stop; no model is asked and "
+            "nothing is filed"
+        ),
+    )
+    add_db(research_cmd)
     return parser
 
 
@@ -604,6 +652,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             return 0
         print(experiment.penalty.describe(ledger.rules_tried(experiment.coin)))
         print(_looks(ledger, experiment.coin))
+        _print_answers(ledger, experiment.experiment_id)
         families = Counter(trial.family for trial in trials)
         print("by family: " + ", ".join(f"{name} {n}" for name, n in sorted(families.items())))
         for trial in sorted(trials, key=_rank):
@@ -621,6 +670,79 @@ def _cmd_report(args: argparse.Namespace) -> int:
                     f"net {trial.holdout.net.total_return:+.2%} (promoted)"
                 )
             print(line)
+    return 0
+
+
+# How many refused answers ``report`` shows. Fewer than the loop's own prompt
+# carries: this is an operator glancing at what a model keeps getting wrong,
+# not the feedback the model is steered by.
+_REFUSALS_IN_REPORT = 3
+
+
+def _print_answers(ledger: Ledger, experiment_id: str) -> None:
+    """What a hypothesis loop has answered against this experiment, if anything.
+
+    Printed by ``report`` because the trials list structurally cannot show it:
+    an answer the parser refused never became a trial, so an experiment where a
+    model produced forty malformed answers and two rules looks, in the trials
+    list, exactly like one where it produced two rules and nothing else.
+    """
+    counts = ledger.proposal_counts(experiment_id)
+    if not sum(counts.values()):
+        return
+    print(
+        "answers from a hypothesis loop: "
+        + ", ".join(f"{count} {outcome.value}" for outcome, count in counts.items())
+    )
+    for refusal in ledger.refusals(experiment_id, _REFUSALS_IN_REPORT):
+        print(f"  refused: {refusal.refusal}")
+
+
+def _cmd_research(args: argparse.Namespace) -> int:
+    # Imported inside the command: the loop reaches the evaluator, so importing
+    # it at module scope would put pandas behind ``vocab`` and ``report``.
+    from .hypothesis import ChatHypothesist, build_system_prompt, build_user_prompt, search
+
+    store, ledger = _open_ledger(args)
+    with store:
+        experiment = ledger.experiment(args.experiment)
+        if args.dry_run:
+            print(build_system_prompt())
+            print()
+            print(build_user_prompt(ledger, experiment))
+            print()
+            print("dry run: no model was asked, and nothing was filed")
+            return 0
+        missing = [name for name in ("provider", "model") if getattr(args, name) is None]
+        if missing:
+            raise ValueError(
+                f"`research` needs {' and '.join('--' + name for name in missing)} \u2014 which "
+                f"model proposed a rule is part of what the trial means, so there is no "
+                f"default. Use --dry-run to see the prompt without asking a model."
+            )
+        extra = {} if args.temperature is None else {"temperature": args.temperature}
+        hypothesist = ChatHypothesist.build(args.provider, args.model, args.base_url, **extra)
+        report = search(
+            ledger,
+            experiment,
+            hypothesist,
+            model=f"{args.provider}/{args.model}",
+            max_trials=args.max_trials,
+            # Printed as each round lands rather than at the end: a ten-round
+            # run is minutes of model calls, and an operator watching it should
+            # not have to wait for the summary to learn the first answer was
+            # refused for a reason they could have fixed.
+            on_round=lambda completed: print(completed.describe()),
+        )
+        for line in report.describe():
+            print(line)
+        print(_looks(ledger, experiment.coin))
+        if report.stopped is not None:
+            # The rounds that filed are reported above and their rows are in the
+            # store; the command still fails, because the run did not do what it
+            # was asked to do.
+            print(f"error: {report.stopped}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -649,6 +771,7 @@ _COMMANDS = {
     "promote": _cmd_promote,
     "report": _cmd_report,
     "calibrate": _cmd_calibrate,
+    "research": _cmd_research,
 }
 
 # The two refusals that live beside the feature stack, named by module and
@@ -677,10 +800,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (StoreError, ExchangeError, LedgerError, ValueError) as exc:
+    except (StoreError, ExchangeError, HypothesistError, LedgerError, ValueError) as exc:
         # The families a well-formed invocation can still meet: this store
-        # cannot be operated on, the venue failed, the ledger refused, or an
-        # argument named a window, a spec or a split that is not one. Each
+        # cannot be operated on, the venue failed, the model seam failed, the
+        # ledger refused, or an argument named a window, a spec or a split that
+        # is not one. Each
         # already carries a sentence written for an operator, so it is printed
         # as-is rather than wrapped.
         print(f"error: {exc}", file=sys.stderr)

@@ -25,6 +25,14 @@ already in the experiment is not a second trial: the evaluator is
 deterministic, so it would be the same numbers, not another look. The ledger
 refuses the duplicate row, and the caller reports the trial it duplicates.
 
+**What was tried that never became a rule?** A model's answer that the parser
+refused was never a trial, and filing it as one would raise the promote
+threshold for a rule nobody measured. It is still a fact about the search, and
+this is the only place it is written down: :class:`Proposal` records every
+answer a hypothesis loop got back - measured, duplicate, or refused with the
+sentence that refused it - so a later run can be shown what has already failed
+instead of spending its budget rediscovering it.
+
 **Who may see the holdout?** Nobody, until a trial passes the gate and an
 operator promotes it — once (plan §3.8). The store enforces the shape:
 holdout figures exist on a row if and only if it is promoted. And the holdout
@@ -75,7 +83,10 @@ __all__ = [
     "Experiment",
     "Ledger",
     "LedgerError",
+    "Answer",
     "Penalty",
+    "Proposal",
+    "ProposalOutcome",
     "SearchTrial",
     "Trial",
     "TrialStatus",
@@ -288,9 +299,112 @@ class SearchTrial:
     validation: SegmentMetrics
     created_at: str
 
+    def __post_init__(self) -> None:
+        # The same check ``Trial`` makes, for the same reason: ``family`` is a
+        # copy of the spec's, and a value whose two disagree would be shown to a
+        # search under a label its rule does not carry. Not reachable through
+        # ``Trial.for_search`` (it copies from a validated trial), which is why
+        # this was missing - and exactly why it belongs here, since the point of
+        # a guard is to hold for a value built anywhere, a test included.
+        if self.family != self.spec.family.value:
+            raise ValueError(
+                f"a search trial's family column says {self.family!r} and its spec says "
+                f"{self.spec.family.value!r}"
+            )
+
     @property
     def segments(self) -> tuple[SegmentMetrics, ...]:
         return (self.train, self.validation)
+
+
+@dataclass(frozen=True)
+class Answer:
+    """What a model said and who said it: the half of a proposal known before a trial exists.
+
+    A trial's row and the row saying where it came from are written in ONE
+    transaction (:meth:`Ledger.record_trial`), and this is what the caller
+    hands over to make that possible - the outcome is necessarily "measured"
+    and the trial id is only known after the insert, so neither is here.
+    """
+
+    response: str
+    model: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.response, str):
+            raise ValueError(f"an answer's response is the model's text, got {self.response!r}")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError(
+                f"an answer names the model that gave it, got {self.model!r} - a store searched "
+                f"with two models is unattributable for good, an append-only ledger having no "
+                f"later chance to say which"
+            )
+
+
+class ProposalOutcome(VocabEnum, noun="proposal outcome"):
+    """What became of one answer from a model.
+
+    ``refused`` is the one that carries no trial: the parser would not read the
+    answer as a rule. ``duplicate`` means it parsed into a rule the experiment
+    already held, which is not a second look at the validation window and so is
+    not a second trial - but it IS a spent round, and saying so is the whole
+    reason this is three values rather than two.
+    """
+
+    MEASURED = "measured"
+    DUPLICATE = "duplicate"
+    REFUSED = "refused"
+
+
+@dataclass(frozen=True)
+class Proposal:
+    """One answer from a model, and what became of it.
+
+    ``response`` is the text as it arrived. For a refused answer nothing else in
+    the store holds what was actually written - the refusal names the mistake,
+    the text is the evidence for it - and for an accepted one it is what lets a
+    reader see the difference between what the model wrote and the parsed rule
+    the ledger kept.
+    """
+
+    proposal_id: int
+    experiment_id: str
+    outcome: ProposalOutcome
+    response: str
+    model: str
+    spec_hash: str | None
+    trial_id: int | None
+    refusal: str | None
+    created_at: str
+
+    def __post_init__(self) -> None:
+        # The table's three CHECKs, held by the value as well, for the reason
+        # ``Trial`` holds its two: a Proposal built by hand must not be able to
+        # say "refused" while pointing at a trial, and a reader may branch on
+        # either half.
+        if not isinstance(self.outcome, ProposalOutcome):
+            raise ValueError(f"a proposal's outcome is a ProposalOutcome, got {self.outcome!r}")
+        refused = self.outcome is ProposalOutcome.REFUSED
+        if refused != (self.refusal is not None):
+            raise ValueError(
+                f"a proposal carries a refusal if and only if it was refused; got outcome "
+                f"{self.outcome.value} with refusal {self.refusal!r}"
+            )
+        if refused != (self.spec_hash is None) or refused != (self.trial_id is None):
+            raise ValueError(
+                f"a proposal names a rule and a trial if and only if it was not refused; got "
+                f"outcome {self.outcome.value} with spec_hash {self.spec_hash!r} and "
+                f"trial_id {self.trial_id!r}"
+            )
+        # Delegated to ``Answer``, so the text-and-author rules are stated once
+        # and a proposal cannot be built with an author its answer could not have.
+        Answer(response=self.response, model=self.model)
+
+    def describe(self) -> str:
+        """One line: what happened to this answer, and why if it was refused."""
+        if self.outcome is ProposalOutcome.REFUSED:
+            return f"refused: {self.refusal}"
+        return f"{self.outcome.value} as trial #{self.trial_id}"
 
 
 @dataclass(frozen=True)
@@ -527,8 +641,18 @@ class Ledger:
         spec: StrategySpec,
         train: SegmentMetrics,
         validation: SegmentMetrics,
+        answer: Answer | None = None,
     ) -> Trial:
-        """Write one measured trial; refuse figures for other windows, and a rule measured already."""
+        """Write one measured trial; refuse figures for other windows, and a rule measured already.
+
+        ``answer`` files the model's answer in the SAME transaction as the
+        trial. The two were written separately at first, and a failure between
+        them left a trial that counts toward the coin's rule count with nothing
+        saying where it came from - the count stays right, since the rule really
+        was measured, but the audit link is gone and ``report`` then undercounts
+        answers against trials. One transaction is the only version of this that
+        cannot diverge (decided 2026-09-14).
+        """
         _require_window(experiment, train, experiment.split.train)
         _require_window(experiment, validation, experiment.split.validation)
         digest = spec_hash(spec)
@@ -568,6 +692,15 @@ class Ledger:
                     f"this rule was already measured in {experiment.experiment_id} as trial "
                     f"#{existing[0]}; measuring it again is the same numbers, not another trial"
                 ) from exc
+            if answer is not None:
+                self._write_proposal(
+                    conn,
+                    experiment_id=experiment.experiment_id,
+                    outcome=ProposalOutcome.MEASURED,
+                    answer=answer,
+                    spec_hash=digest,
+                    trial_id=int(cursor.lastrowid),
+                )
         return self.trial(experiment.experiment_id, int(cursor.lastrowid))
 
     def trial(self, experiment_id: str, trial_id: int) -> Trial:
@@ -623,6 +756,132 @@ class Ledger:
             " WHERE experiments.coin = ? AND trials.status = ?",
             (canonical_coin(coin), TrialStatus.PROMOTED.value),
         ).fetchone()[0]
+
+    # -- proposals ---------------------------------------------------------
+
+    def record_proposal(
+        self,
+        experiment: Experiment,
+        *,
+        outcome: ProposalOutcome,
+        response: str,
+        model: str,
+        spec_hash: str | None = None,
+        trial_id: int | None = None,
+        refusal: str | None = None,
+    ) -> Proposal:
+        """File one answer from a model against the experiment it was asked for.
+
+        Append-only, and never deduplicated: two identical refusals are two
+        rounds that were spent, which is exactly what a budget is counted in.
+        The value is built BEFORE the insert, so its guards refuse an
+        inconsistent proposal with this module's sentence rather than leaving
+        sqlite to refuse it with a CHECK constraint's.
+        """
+        with self.store.transaction() as conn:
+            self._require_stored(conn, experiment)
+            return self._write_proposal(
+                conn,
+                experiment_id=experiment.experiment_id,
+                outcome=outcome,
+                answer=Answer(response=response, model=model),
+                spec_hash=spec_hash,
+                trial_id=trial_id,
+                refusal=refusal,
+            )
+
+    def _write_proposal(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        experiment_id: str,
+        outcome: ProposalOutcome,
+        answer: Answer,
+        spec_hash: str | None = None,
+        trial_id: int | None = None,
+        refusal: str | None = None,
+    ) -> Proposal:
+        """Insert one proposal on an OPEN transaction; the value's guards run first.
+
+        Taking the connection rather than opening one is what lets a measured
+        answer be written beside its trial atomically. The value is built before
+        the insert so an inconsistent proposal is refused with this module's
+        sentence rather than by a CHECK constraint.
+        """
+        proposal = Proposal(
+            proposal_id=0,
+            experiment_id=experiment_id,
+            outcome=outcome,
+            response=answer.response,
+            model=answer.model,
+            spec_hash=spec_hash,
+            trial_id=trial_id,
+            refusal=refusal,
+            created_at=_utcnow_iso(),
+        )
+        cursor = conn.execute(
+            "INSERT INTO proposals (experiment_id, outcome, response, model, spec_hash,"
+            " trial_id, refusal, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                proposal.experiment_id,
+                proposal.outcome.value,
+                proposal.response,
+                proposal.model,
+                proposal.spec_hash,
+                proposal.trial_id,
+                proposal.refusal,
+                proposal.created_at,
+            ),
+        )
+        return replace(proposal, proposal_id=int(cursor.lastrowid))
+
+    def proposal_for_trial(self, experiment_id: str, trial_id: int) -> Proposal | None:
+        """The answer a trial was filed from, or ``None`` for one filed without an answer.
+
+        ``None`` is the ordinary case for a trial written by ``evaluate``: an
+        operator's hand-written spec has no model behind it.
+        """
+        row = self.store.conn.execute(
+            "SELECT * FROM proposals WHERE experiment_id = ? AND trial_id = ? AND outcome = ?"
+            " ORDER BY proposal_id LIMIT 1",
+            (experiment_id, trial_id, ProposalOutcome.MEASURED.value),
+        ).fetchone()
+        return None if row is None else self._proposal(row)
+
+    def proposals(self, experiment_id: str) -> list[Proposal]:
+        """Every answer filed against the experiment, oldest first."""
+        rows = self.store.conn.execute(
+            "SELECT * FROM proposals WHERE experiment_id = ? ORDER BY proposal_id",
+            (experiment_id,),
+        ).fetchall()
+        return [self._proposal(row) for row in rows]
+
+    def refusals(self, experiment_id: str, limit: int) -> list[Proposal]:
+        """The most recent refused answers, oldest first - what a next round is shown.
+
+        The most recent rather than the first, because the ones worth showing
+        are the mistakes a model is making NOW: an early run's refusals are ones
+        later prompts already steered it off, and a prompt that carried every
+        refusal forever would grow without bound.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError(f"a refusal limit is a whole number of rows, got {limit!r}")
+        rows = self.store.conn.execute(
+            "SELECT * FROM proposals WHERE experiment_id = ? AND outcome = ?"
+            " ORDER BY proposal_id DESC LIMIT ?",
+            (experiment_id, ProposalOutcome.REFUSED.value, limit),
+        ).fetchall()
+        return [self._proposal(row) for row in reversed(rows)]
+
+    def proposal_counts(self, experiment_id: str) -> dict[ProposalOutcome, int]:
+        """How many answers of each outcome the experiment holds; every outcome present."""
+        counts = dict.fromkeys(ProposalOutcome, 0)
+        for row in self.store.conn.execute(
+            "SELECT outcome, COUNT(*) FROM proposals WHERE experiment_id = ? GROUP BY outcome",
+            (experiment_id,),
+        ):
+            counts[ProposalOutcome(row[0])] = row[1]
+        return counts
 
     def verdict(self, experiment: Experiment, trial: Trial) -> Verdict:
         """:func:`promotion_verdict` at the coin's CURRENT rule count — the one gate call."""
@@ -685,6 +944,25 @@ class Ledger:
         except ValueError as exc:
             raise LedgerError(
                 f"experiment {name}'s record cannot be read by this build: {exc}"
+            ) from exc
+
+    def _proposal(self, row: sqlite3.Row) -> Proposal:
+        try:
+            return Proposal(
+                proposal_id=row["proposal_id"],
+                experiment_id=row["experiment_id"],
+                outcome=ProposalOutcome(row["outcome"]),
+                response=row["response"],
+                model=row["model"],
+                spec_hash=row["spec_hash"],
+                trial_id=row["trial_id"],
+                refusal=row["refusal"],
+                created_at=row["created_at"],
+            )
+        except ValueError as exc:
+            raise LedgerError(
+                f"proposal #{row['proposal_id']} of {row['experiment_id']} cannot be read by "
+                f"this build: {exc}"
             ) from exc
 
     def _trial(self, row: sqlite3.Row) -> Trial:

@@ -78,6 +78,7 @@ from typing import Final
 
 from .upstream import MarketRegime, VocabEnum
 from .vocabulary import (
+    MAX_OFFSET_BARS,
     FeatureKind,
     FeatureRef,
     FeatureUnit,
@@ -99,6 +100,7 @@ __all__ = [
     "SizingMode",
     "SpecError",
     "StrategySpec",
+    "describe_language",
     "describe_spec",
     "load_spec",
     "parse_spec",
@@ -226,6 +228,7 @@ _PARAM_NAME: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")
 MAX_HOLD_BARS: Final = 1000
 
 _TOP_LEVEL: Final = ("family", "entry", "exit", "filters", "sizing", "params")
+_REQUIRED_TOP_LEVEL: Final = ("family", "entry", "sizing")
 
 
 def _number_text(value: float) -> str:
@@ -508,7 +511,7 @@ def parse_spec(payload: object) -> StrategySpec:
             "the disagreement is silent: too few and a rule reads a feature nothing computed, "
             "too many and the spec warms up longer than it needs to."
         )
-    _check_keys(body, "spec", allowed=_TOP_LEVEL, required=("family", "entry", "sizing"))
+    _check_keys(body, "spec", allowed=_TOP_LEVEL, required=_REQUIRED_TOP_LEVEL)
     family = _enum(Family, body["family"], "spec.family")
     params = _parse_params(body.get("params"), "spec.params")
 
@@ -978,6 +981,83 @@ def describe_spec(spec: StrategySpec) -> list[str]:
         lines.append(f"enter only while: {_joined(spec.filters)}")
     lines.append(f"sizing: {spec.sizing}")
     lines.append(f"features used: {', '.join(str(ref) for ref in spec.features)}")
+    return lines
+
+
+def describe_language() -> list[str]:
+    """The grammar as lines: read from the parser's tables where there is one, restated where there is not.
+
+    What plan §3.11's prompt hands a model beside the feature vocabulary. Most
+    of it is generated for the reason
+    :func:`~contrib.autoresearch.vocabulary.describe_vocabulary` is: a
+    transcribed grammar drifts from the parser, and it drifts in the direction
+    that costs most, since a model asked for a shape the parser then refuses
+    spends a trial on the mismatch. Read from tables here: ``_TOP_LEVEL``,
+    ``_REQUIRED_TOP_LEVEL``, :class:`Family`, :class:`Op`, :class:`SizingMode`
+    with ``_SIZING_FIELDS``, :data:`MAX_HOLD_BARS`, ``MAX_OFFSET_BARS`` and
+    :class:`MarketRegime` — so a family or a sizing field added to one of those
+    reaches the model the day it is added.
+
+    FOUR CLAUSES ARE HAND-WRITTEN, and they are marked below. Each restates a
+    rule the parser enforces in CODE rather than in a table — the three family
+    claims (:func:`_check_family`), the entry-before-exit rule and the
+    unused-parameter refusal (:func:`_check_structure`), and the no-stop-loss
+    consequence of the fill model (this module's docstring). A docstring
+    claiming the whole thing was generated would be the more comfortable one
+    and the false one: nothing makes these four follow their checks, so
+    changing one of those functions means changing the sentence here too.
+
+    It states the refusals as well as the shape. A model cannot be told only
+    what is legal — the predictable answers here are a stop-loss, an ``or``
+    between two conditions, and arithmetic between two features, none of which
+    this language has — so the sentences that would otherwise be discovered one
+    refusal at a time are said up front.
+    """
+    regimes = ", ".join(regime.value for regime in MarketRegime)
+    orderings = " ".join(op.value for op in _ORDERINGS)
+    equalities = " ".join(op.value for op in _EQUALITIES)
+    optional = [key for key in _TOP_LEVEL if key not in _REQUIRED_TOP_LEVEL]
+    lines = [
+        "A hypothesis is one JSON object. Reply with that object and nothing else.",
+        f"Required keys: {', '.join(_REQUIRED_TOP_LEVEL)}. Optional: {', '.join(optional)}. "
+        f"Any other key is refused by name.",
+        # Hand-written: restates ``_check_family``'s three claims.
+        f"family: one of {', '.join(family.value for family in Family)}. "
+        f"{Family.REGIME_FILTER.value} must read the regime, {Family.FUNDING_FILTER.value} "
+        f"must read a funding feature, and {Family.VOL_TARGETING.value} must size by "
+        f"volatility; the other two are labels for what you meant.",
+        'entry: {"long": [condition, ...], "short": [condition, ...]} — at least one side, '
+        "and the conditions on a side are ANDed. There is no 'or', and no arithmetic "
+        "between features.",
+        # Hand-written: the second sentence restates ``_check_structure``'s
+        # exits-need-entries loop.
+        'exit: the same two sides, plus an optional "max_bars": 1..'
+        f"{MAX_HOLD_BARS}. A side may only have exits if it has entries. With no exit a "
+        "position is held until the opposite entry fires or the window ends.",
+        "filters: conditions that gate ENTRY only; one turning false does not close a "
+        "position.",
+        'A condition is {"left": feature, "op": op, "right": feature | number | '
+        '{"param": name}} and nothing else.',
+        f"op on a number is one of {orderings}. Exact equality ({equalities}) is only for "
+        f"the regime, which is compared against one of: {regimes}. Both sides of a "
+        f"comparison must be the same unit (the 'unit' column above).",
+        'A feature is its name, or {"feature": name, "offset": n} to read n bars back: '
+        f"0 is this bar, 1 the one before it, up to {MAX_OFFSET_BARS}. There is no "
+        "negative offset — the bar it would name has not closed when the decision is made.",
+    ]
+    for mode in SizingMode:
+        fields = [_SIZING_KEYS.get(name, name) for name in _SIZING_FIELDS[mode]]
+        lines.append(f'sizing {{"mode": "{mode.value}", ...}} reads exactly: {", ".join(fields)}.')
+    lines += [
+        # Hand-written: restates ``_check_structure``'s unused-parameter refusal.
+        "params: named numbers, each referred to by at least one condition via "
+        '{"param": name}. A declared knob no condition reads is refused.',
+        # Hand-written: restates this module's docstring on the fill model.
+        "There is NO stop-loss and NO take-profit: a decision is made at a bar's close and "
+        "filled at the next bar's open, so an intrabar exit cannot be honoured. An exit is a "
+        "feature comparison or max_bars.",
+        "Do not declare a 'features' list: the feature set is derived from the conditions.",
+    ]
     return lines
 
 

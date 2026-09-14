@@ -89,10 +89,15 @@ def test_a_funding_rate_that_is_not_a_finite_number_is_refused():
     ``"NaN"``; nothing upstream checks the rate itself."""
     ordered = candles([100, 101, 102])
     points = funding_points(3)
-    for rate in ("NaN", "Infinity", "-Infinity"):
+    for rate in ("NaN", "sNaN", "Infinity", "-Infinity", "1E+400"):
         broken = points[:1] + [FundingPoint(time=points[1].time, rate=Decimal(rate))] + points[2:]
         with pytest.raises(FeatureError, match=r"rate .* is not a finite number"):
             SeriesBundle(ordered, funding=broken)
+    # Not a type check: the DTO annotates a Decimal without enforcing it, and a
+    # hand-built float rate (or a negative one — a short receives) still reads.
+    for rate in (0.0001, Decimal("-0.0003"), Decimal("0")):
+        fine = points[:1] + [FundingPoint(time=points[1].time, rate=rate)] + points[2:]
+        assert SeriesBundle(ordered, funding=fine).funding[1].rate == rate
 
 
 def test_a_series_whose_closes_are_out_of_order_is_refused_too():

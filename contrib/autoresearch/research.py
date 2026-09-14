@@ -48,7 +48,6 @@ from .ledger import (
     SearchTrial,
     Trial,
     Verdict,
-    _penalty_moved,
 )
 from .metrics import SegmentMetrics
 from .split import (
@@ -60,15 +59,16 @@ from .split import (
     SplitError,
     studied_interval,
 )
-from .store import canonical_coin
 from .upstream import from_epoch_ms, interval_to_ms
 from .vocabulary import (
     MAX_OFFSET_BARS,
     FeatureKind,
     FeatureRef,
+    SeriesSource,
     feature_names,
     parse_feature_name,
     periods_for,
+    spec_of,
 )
 
 __all__ = [
@@ -217,17 +217,34 @@ def require_measurable_tail(frame: FeatureFrame) -> None:
     """
     bars = len(frame.bundle.bars)
     tail = range(max(0, bars - MAX_OFFSET_BARS - 1), bars)
-    missing = [
-        name for name, column in _vocabulary_columns(frame) if any(column[i] is None for i in tail)
-    ]
+    missing: dict[SeriesSource, list[str]] = {}
+    for name, column in _vocabulary_columns(frame):
+        if any(column[i] is None for i in tail):
+            kind, _period = parse_feature_name(name)
+            missing.setdefault(spec_of(kind).source, []).append(name)
     if missing:
         last = from_epoch_ms(frame.bundle.bars[-1].open_time).isoformat()
-        raise EvaluationError(
-            f"{len(missing)} feature(s) of the vocabulary have no value on the last "
-            f"{len(tail)} bars (to {last}): {', '.join(missing)}. The series they read stop "
-            f"short of the decision bars — `fetch` the 1d bars and the funding up to the same "
-            f"end, then try again; the end of the span is the holdout."
+        count = sum(len(names) for names in missing.values())
+        reasons = "; ".join(
+            f"{', '.join(names)} ({_TAIL_REMEDY[source]})" for source, names in missing.items()
         )
+        raise EvaluationError(
+            f"{count} feature(s) of the vocabulary have no value on the last {len(tail)} bars "
+            f"(to {last}): {reasons}. The end of the span is the holdout."
+        )
+
+
+# What to do about a feature with no value at the end, by the series it reads:
+# a daily or settlement series stops short when it was fetched earlier than the
+# decision bars; a bar feature has no such excuse, since its series IS the bars.
+_TAIL_REMEDY: Final = {
+    SeriesSource.DAILY: "read from the 1d bars — `fetch --interval 1d` up to the same end",
+    SeriesSource.FUNDING: "read from the funding settlements — `fetch` them up to the same end",
+    SeriesSource.BARS: (
+        "read from the decision bars themselves, so no fetch supplies it — an indicator "
+        "that stopped answering at the end; run `gaps` and look at the last bars"
+    ),
+}
 
 
 def _vocabulary_columns(frame: FeatureFrame) -> list[tuple[str, tuple]]:
@@ -317,11 +334,10 @@ def plan_experiment(
     prints; :func:`open_experiment` writes it.
     """
     key = studied_interval(interval)
-    # Refused before the store is read, so a dry run says it too; the write
-    # checks it again inside its transaction.
-    pinned_penalty = ledger.penalty_pin(coin)
-    if pinned_penalty is not None and penalty != pinned_penalty:
-        raise LedgerError(_penalty_moved(canonical_coin(coin), pinned_penalty, penalty))
+    # Refused before the store is read, so a dry run refuses what the write
+    # would; the write checks both again inside its transaction.
+    ledger.require_unused_name(experiment_id)
+    ledger.require_pinned_penalty(coin, penalty)
     bundle = load_bundle(ledger.store, coin=coin, interval=key)
     require_clean_history(bundle, key)
     frame = FeatureFrame(bundle, indicator_lookback=indicator_lookback)

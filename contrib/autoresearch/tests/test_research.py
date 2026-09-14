@@ -220,6 +220,26 @@ def test_train_starts_after_every_bar_an_offset_can_reach_has_every_value():
         first_measurable_index(_frame_with_a_hole(40, hole_at=20))
 
 
+def test_a_tail_refusal_says_what_each_missing_feature_reads():
+    """A bar feature missing at the end is not a daily or funding fetch to go and run."""
+    from types import SimpleNamespace
+
+    def series(ref):
+        column = [1.0] * 40
+        if ref.name in ("rsi_14", "sma_1d_200"):
+            column[-1] = None
+        return tuple(column)
+
+    bars = [SimpleNamespace(open_time=_START + i * _STEP) for i in range(40)]
+    frame = SimpleNamespace(bundle=SimpleNamespace(bars=bars), series=series)
+    with pytest.raises(EvaluationError) as refused:
+        research.require_measurable_tail(frame)
+    text = str(refused.value)
+    assert "rsi_14 (read from the decision bars" in text
+    assert "sma_1d_200 (read from the 1d bars" in text
+    assert "funding" not in text
+
+
 def test_every_later_experiment_withholds_the_holdout_the_first_one_pinned(ledger):
     first = ledger.experiment("btc-4h")
     second = _open(ledger, "btc-4h-wider-train", train_share=0.5, validation_share=0.3)
@@ -466,6 +486,9 @@ def test_the_commands_walk_an_experiment_from_creation_to_promotion(history, tmp
     assert "now pinned for every later experiment on BTC" in created
     assert "dry run" not in created
     assert _conditions(created) == _conditions(dry)
+    # A dry run is refused for what the write would refuse, not only for the store's history.
+    assert main([*create, "--dry-run"]) == 1
+    assert "already has an experiment named 'btc-4h'" in capsys.readouterr().err
 
     assert main(["evaluate", *experiment, "--spec", str(buy), *store]) == 0
     evaluated = capsys.readouterr().out

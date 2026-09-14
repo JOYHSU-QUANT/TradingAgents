@@ -434,6 +434,20 @@ class Ledger:
                 f"the one that pins {coin}'s holdout: {exc}"
             ) from exc
 
+    def require_unused_name(self, experiment_id: str) -> None:
+        """Refuse a name this store already has — the check a plan must share with the write."""
+        taken = self.store.conn.execute(
+            "SELECT 1 FROM experiments WHERE experiment_id = ?", (experiment_id,)
+        ).fetchone()
+        if taken is not None:
+            raise LedgerError(_name_taken(experiment_id))
+
+    def require_pinned_penalty(self, coin: str, penalty: Penalty) -> None:
+        """Refuse a penalty other than the one the first experiment on ``coin`` pinned."""
+        pinned = self.penalty_pin(coin)
+        if pinned is not None and penalty != pinned:
+            raise LedgerError(_penalty_moved(canonical_coin(coin), pinned, penalty))
+
     def penalty_pin(self, coin: str) -> Penalty | None:
         """The promote penalty the first experiment on ``coin`` fixed, or ``None`` if none exists.
 

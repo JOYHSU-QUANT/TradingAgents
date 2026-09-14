@@ -47,6 +47,7 @@ __all__ = [
     "VENUE_BASE_MAKER_FEE_RATE",
     "CostModel",
     "FillRole",
+    "require_amount",
 ]
 
 # The paper run's own execution assumptions (``PaperExecutionConfig``,
@@ -64,20 +65,22 @@ VENUE_BASE_MAKER_FEE_RATE: Final = 0.00015
 _BPS: Final = 10_000.0
 
 
-def _cost(value: object, name: str, *, positive: bool = False) -> float:
-    """A cost field: a finite number that is not negative (and not zero, if ``positive``).
+def require_amount(value: object, what: str, *, positive: bool = False) -> float:
+    """A money-side field: a finite number that is not negative (and not zero, if ``positive``).
 
     Through the vocabulary's one numeric guard, then re-raised as a plain
     ``ValueError`` naming the field: ``SpecError`` means "the hypothesis said
-    something the language does not contain", and a bad fee is not that.
+    something the language does not contain", and a bad fee — or a trade
+    record with an infinite price — is not that. The cost model's fields and
+    the evaluator's :class:`~.evaluator.Trade` both come through here.
     """
     try:
-        number = require_number(value, f"CostModel.{name}")
+        number = require_number(value, what)
     except SpecError as exc:
         raise ValueError(str(exc)) from exc
     if number < 0 or (positive and number == 0):
         bound = "> 0" if positive else ">= 0"
-        raise ValueError(f"CostModel.{name} must be a number {bound}, got {value!r}")
+        raise ValueError(f"{what} must be a number {bound}, got {value!r}")
     return number
 
 
@@ -107,8 +110,10 @@ class CostModel:
     def __post_init__(self) -> None:
         object.__setattr__(self, "fill_role", FillRole(self.fill_role))
         for name in ("taker_fee_rate", "maker_fee_rate", "slippage_bps"):
-            object.__setattr__(self, name, _cost(getattr(self, name), name))
-        object.__setattr__(self, "leverage", _cost(self.leverage, "leverage", positive=True))
+            object.__setattr__(self, name, require_amount(getattr(self, name), f"CostModel.{name}"))
+        object.__setattr__(
+            self, "leverage", require_amount(self.leverage, "CostModel.leverage", positive=True)
+        )
 
     @property
     def fee_rate(self) -> float:

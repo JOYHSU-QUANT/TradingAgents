@@ -313,7 +313,8 @@ class SeriesBundle:
         # different ones: the lookbacks index bars in ``open_time`` order,
         # while every alignment (the daily pointer, the funding bisects) is
         # cut at ``close_time``. Venue rows have the second following the first
-        # by one interval, so on real data the two checks agree — and a
+        # by a fixed offset (one interval less a millisecond, see
+        # ``constants``), so on real data the two checks agree — and a
         # hand-assembled bundle mixing intervals is exactly the case where they
         # would not, and where the daily pointer would stall silently rather
         # than refuse.
@@ -492,8 +493,10 @@ class FeatureFrame:
         against one bundle), so the union is wanted sooner or later, while a
         demand-driven set that re-walks per newly-requested name costs twice
         the single walk in the worst case. A frame told its feature set up
-        front could have both, and that is A3's to give — it knows every
-        spec's features before scoring starts.
+        front could have both; the evaluator (PR A3) declined to, because its
+        regime buckets ask for the regime column on every window anyway, so
+        the walk is paid once per frame whatever the spec reads — recorded as
+        a trade-off in the README rather than filed.
 
         The regime rides along because it is a function of three of those same
         values at the same bar.

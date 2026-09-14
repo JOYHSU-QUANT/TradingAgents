@@ -43,10 +43,14 @@ Two things the window itself guarantees. The window is the measured span
 for EVERY spec (plan §10.2) — exposure and hit rate are ratios over the same
 denominator whichever hypothesis is scored — so a store that only partly
 covers it, and a spec whose features have no value at its first bar, are
-both refused by name rather than measured over less. And a position still
-open at the window's last bar is flattened at that bar's close: the window
-never reads a bar that belongs to the next one, which is the property the
-holdout lock (:mod:`.split`) rests on.
+both refused by name rather than measured over less. And every window is an
+island: its first bar is always flat, because the decision that would fill
+there was the previous bar's to take and the window does not read it, and a
+position still open at the window's last bar is flattened at that bar's
+close. The window never reads a bar that belongs to the next one, which is
+the property the holdout lock (:mod:`.split`) rests on; the price is that an
+always-in rule pays a round trip at every window edge and its exposure is
+``(bars − 1) / bars``, the same for every window and every spec.
 
 Costs follow plan §3.7. Gross is the price move, mid to mid; net subtracts
 the fee and slippage of every fill (charged on the mid notional, see
@@ -81,7 +85,7 @@ from .constants import (
     FUNDING_STAMP_TOLERANCE_MS,
     MS_PER_DAY,
 )
-from .costs import CostModel
+from .costs import CostModel, require_amount
 from .dsl import Condition, Op, Side, SizingMode, StrategySpec, describe_spec
 from .features import FeatureFrame, FeatureValue, SeriesBundle, window_is_covered
 from .gaps import scan_stamps
@@ -182,6 +186,27 @@ class Trade:
     slippage: float
     funding: float  # positive = paid
     exit_reason: ExitReason
+
+    def __post_init__(self) -> None:
+        # Its invariants live on the type, as the sibling records' do: the
+        # loop is its only builder today, but ``signed_size`` reads the side
+        # by identity, so a string side would price a winning long as a
+        # losing short rather than refuse.
+        object.__setattr__(self, "side", Side(self.side))
+        object.__setattr__(self, "exit_reason", ExitReason(self.exit_reason))
+        if self.exit_index < self.entry_index:
+            raise ValueError(
+                f"a trade exits at bar {self.exit_index}, before it entered at {self.entry_index}"
+            )
+        for name, positive in (
+            ("entry_price", True),
+            ("exit_price", True),
+            ("size", True),
+            ("notional", True),
+            ("fees", False),
+            ("slippage", False),
+        ):
+            require_amount(getattr(self, name), f"Trade.{name}", positive=positive)
 
     @property
     def signed_size(self) -> float:
@@ -449,15 +474,20 @@ class _Reader:
         The one place the "filters pass → entry holds → size it → a rule that
         cannot size does not fire" chain is written, so the flat decision and
         the reversal decision cannot read it differently.
+
+        The filters and both entries are read whatever the filters said: the
+        conflict and the unevaluable counts are properties of the signal and
+        the history, and a filter that stopped the entries being read would
+        be the lazy AND :meth:`holds` refuses, one level up — moving a clause
+        from ``entry.long`` to ``filters`` would change the counts of a
+        long-only rule it did not change.
         """
-        if not self.passes(index):
-            return None, False
+        passes = self.passes(index)
         long_fires = self.holds(self.spec.entry_long, index)
         short_fires = self.holds(self.spec.entry_short, index)
-        if long_fires and short_fires:
-            return None, True
-        if not (long_fires or short_fires):
-            return None, False
+        both = long_fires and short_fires
+        if not passes or both or not (long_fires or short_fires):
+            return None, both
         notional = self.notional(index, equity, costs)
         if notional is None:
             return None, False
@@ -557,25 +587,29 @@ def evaluate_segment(
             paid = settlements.due(bar, held.signed_size * close_price)
             held.funding += paid
             running.cost += paid
-            if last:
-                # The window's last bar: flatten at its close so the window
-                # reads nothing of the next one. Costed like any other fill.
-                trades.append(
-                    _close(held, index, close_price, ExitReason.SEGMENT_END, costs, running)
-                )
-                held = None
 
-        # 3. Book the bar.
+        # 3. Book the bar. Ruin is read off the EQUITY, not off whether a
+        # position is still open at this point: the loss that empties the
+        # account may have been realised by the fill at this bar's open (a
+        # pending close, so nothing is held by now), and the window's last
+        # bar flattens whatever is held either way. Whatever is still held is
+        # closed at this close like any other fill — its costs are real —
+        # and the window is over. The bars after it are booked flat; the
+        # equity path is not padded, so the mean equity turnover is measured
+        # against is the equity that traded.
         before = equity
-        if held is not None and before + running.gross - running.cost <= 0:
-            # Ruin: the position is closed at this close like any other fill
-            # — its costs are real — and the window is over. The bars after
-            # it are booked flat; the equity path is not padded, so the mean
-            # equity turnover is measured against is the equity that traded.
-            ruined = True
-            trades.append(_close(held, index, close_price, ExitReason.RUIN, costs, running))
+        ruined = before + running.gross - running.cost <= 0
+        if held is not None and (ruined or last):
+            # The window's last bar flattens at its close so the window reads
+            # nothing of the next one; a ruin on that bar is still a ruin.
+            reason = ExitReason.RUIN if ruined else ExitReason.SEGMENT_END
+            trades.append(_close(held, index, close_price, reason, costs, running))
             held = None
         equity += running.gross - running.cost
+        # The flatten's own fill costs can be what empties the account; then
+        # the trade reads ``segment_end`` (that is why it closed) and the run
+        # still reads ruined (that is what it left).
+        ruined = ruined or equity <= 0
         gross_returns.append(running.gross / before)
         net_returns.append((running.gross - running.cost) / before)
         equity_path.append(equity)
@@ -803,6 +837,21 @@ def _require_measurable(
             f"two — a decision, and the bar it fills in"
         )
     stamps = [bar.open_time for bar in bars[first:stop]]
+    # An edge off the store's grid first, by name: ``by_shares`` snaps its
+    # cuts, but a hand-built or ledger-read segment need not be snapped, and
+    # such an edge would otherwise be reported below as history the store
+    # lacks — a sentence that sends the operator to fetch what is there.
+    off_grid = [
+        f"{name} {from_epoch_ms(edge).isoformat()}"
+        for name, edge in (("start", segment.start_ms), ("end", segment.end_ms))
+        if (edge - bars[0].open_time) % step
+    ]
+    if off_grid:
+        raise EvaluationError(
+            f"{segment}: its {' and '.join(off_grid)} {'is' if len(off_grid) == 1 else 'are'} "
+            f"not on the store's {step} ms grid, so no bar opens there — cut the split on "
+            f"the grid."
+        )
     missing_edges = []
     if stamps[0] != segment.start_ms:
         missing_edges.append(f"begins at {from_epoch_ms(stamps[0]).isoformat()}")
@@ -941,7 +990,9 @@ def load_bundle(
         # read, not a second scan of the same rows.
         daily = bars
     else:
-        daily = list(store.iter_candles(coin, daily_key, until_ms=until_ms and last_close))
+        daily = list(
+            store.iter_candles(coin, daily_key, until_ms=None if until_ms is None else last_close)
+        )
     if until_ms is not None:
         daily = [bar for bar in daily if bar.close_time <= last_close]
     funding_until = None if until_ms is None else last_close + FUNDING_STAMP_TOLERANCE_MS

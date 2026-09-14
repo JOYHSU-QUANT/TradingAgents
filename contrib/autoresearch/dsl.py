@@ -380,7 +380,7 @@ class Sizing:
         if self.mode is SizingMode.FIXED_MARGIN_FRACTION:
             return f"{self.mode.value}: {_number_text(self.fraction)} of equity as margin"
         return (
-            f"{self.mode.value}: aim at a per-bar deviation of "
+            f"{self.mode.value}: sized at entry to aim at a per-bar deviation of "
             f"{_number_text(self.target_vol)} measured by realized_vol_{self.vol_lookback}, "
             f"never above {_number_text(self.max_fraction)} of equity as margin"
         )

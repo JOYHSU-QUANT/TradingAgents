@@ -216,13 +216,16 @@ A2 的 parser 留了四個語意缺口（計畫 §10.1），這裡一次定死�
 |---|---|---|
 | 空的 `exit`、也沒 `max_bars` | **抱到反向 entry 反手，或抱到窗口結束** | 「entry 不再成立就平」會讓每個沒寫 exit 的 breakout 進場下一根就出場；parser 給 `max_bars` 設上限時已經假設「never exit」是評估器認得的東西 |
 | 持倉中反向 entry 成立 | **反手**（同一次成交平掉再開反向） | 最有訊號的讀法，也是 always-in 規則寫得出來的唯一讀法 |
-| `filters` | **只擋進場**（含反手），變 false 不平倉 | 想「regime 翻了就平」的規則寫在 `exit`，read-back 看得到；read-back 現在印 `enter only while:` |
+| `filters` | **只擋進場**（含反手），變 false 不平倉；擋住的 bar 上 entry 條件照讀、`bars_conflicting`／`bars_unevaluable` 照計 | 想「regime 翻了就平」的規則寫在 `exit`，read-back 看得到；read-back 現在印 `enter only while:`。計數是訊號的性質不是閘門的（2026-09-14 拍板），否則把一條 clause 從 `entry.long` 搬到 `filters` 會改變長單策略沒變的計數 |
 | 持倉中 exit／filter 的 feature 是 `None` | **不觸發，續抱，並計數**（`bars_unevaluable`） | `features.py` 對 entry 的讀法就是「None＝這裡不觸發」；exit 反過來 fail-closed 等於同一個值兩種讀法。計數是為了讓「一條規則安靜了一個月」變成數字而不是一次 hold |
 
 其他形狀：同向 entry 持倉中不加碼；long／short 同根同時成立不進場、計數
-（`bars_conflicting`）；窗口最後一根收盤**強制平倉**（付成本），所以一個窗口永遠不讀下一個
-窗口的 bar——holdout 鎖就靠這一點；權益歸零記 `ruined`、停止，不做 liquidation 引擎；
-DSL 本來就沒有停損停利。
+（`bars_conflicting`）；**每個窗口各自獨立**——第一根必然空手（能在那裡成交的決策是前一根
+收盤的事，窗口不讀它），最後一根收盤**強制平倉**（付成本），所以一個窗口永遠不讀下一個
+窗口的 bar——holdout 鎖就靠這一點；代價是 always-in 規則每個段界付一趟來回、exposure 是
+`(bars − 1) / bars`，對每段每個 spec 都一樣（2026-09-14 拍板保留）；`vol_target` 只在進場時
+定名目、持倉中不重新調整；權益歸零記 `ruined`、停止（看的是權益不是有沒有持倉：出場成交
+那根或末根強平把權益打到零也算），不做 liquidation 引擎；DSL 本來就沒有停損停利。
 
 **窗口就是量測範圍，對每個 spec 一樣**（計畫 §10.2）：exposure／hit rate 的分母對每個
 假說都相同。warm-up 不是從 spec 推出來的（那得混 bar、day、`MAX_OFFSET_BARS`、上游
@@ -243,7 +246,8 @@ fees／slippage／funding 各自的總額、每個 regime 的 net return 分桶�
 **會被具名拒絕的窗口**（`EvaluationError`）：bar 有洞（計畫 §3.4：一個洞讀成格線就是兩根
 相鄰 bar 之間一次巨大報酬）、少於兩根、funding 覆蓋不到九成（成本模型逐小時結算，缺 settlement
 會低估 carry 而看起來完全正常；缺一兩筆則只回報 `funding_settlements_missing`）、
-spec 的 feature 在第一根沒有值。這三種都是「換窗口或補資料」的事，不是改 spec 的事。
+spec 的 feature 在第一根沒有值、窗口邊界不在 store 的格線上（手寫或 ledger 讀回的
+segment 才會；`by_shares` 會貼格線）。這幾種都是「換窗口或補資料」的事，不是改 spec 的事。
 
 ## store 路徑與拒絕
 

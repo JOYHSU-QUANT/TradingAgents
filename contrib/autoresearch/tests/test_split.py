@@ -92,11 +92,15 @@ def test_segments_are_held_to_their_own_names_and_order():
         ({"train_share": 0}, "train_share is a share"),
         ({"validation_share": 1.5}, "validation_share is a share"),
         ({"train_share": 0.8, "validation_share": 0.2}, "leave room for a holdout"),
+        # 0.6 + 0.35 leaves room on paper; on ten bars it rounds to 6/4/0.
+        ({"bars": 10, "train_share": 0.6, "validation_share": 0.35}, "round to 6/4/0 bars"),
+        ({"bars": 10, "train_share": 0.94, "validation_share": 0.03}, "round to 9/1/0 bars"),
     ],
 )
 def test_shares_that_leave_no_room_for_three_windows_are_refused(kwargs, message):
+    bars = kwargs.pop("bars", 100)
     with pytest.raises(SplitError, match=message):
-        _split(100, **kwargs)
+        _split(bars, **kwargs)
 
 
 def test_an_empty_or_backwards_segment_is_refused():

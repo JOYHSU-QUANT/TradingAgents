@@ -392,6 +392,27 @@ def test_long_and_short_firing_together_enter_nothing_and_are_counted():
     assert "4 bars where long and short both fired" in "\n".join(result.describe())
 
 
+def test_the_counts_are_taken_on_bars_a_filter_blocked_too():
+    """The counts are properties of the signal, not of the gate: a filter that
+    is false does not stop the entries being read, so a conflict under it is
+    still a conflict and an unreadable entry under it is still counted — else
+    moving a clause from ``entry.long`` to ``filters`` would change the counts
+    of a long-only rule it did not change."""
+    never = [{"left": "close", "op": ">", "right": 500}]
+    both = {
+        "long": [{"left": "close", "op": ">", "right": 50}],
+        "short": [{"left": "close", "op": "<", "right": 150}],
+    }
+    blocked = _run(_spec(entry=both, filters=never), _bundle([100.0] * 5))
+    assert blocked.trades == () and blocked.bars_conflicting == 4
+    # The daily backdrop goes stale after bar 5, as in the test above: the
+    # entry reading it is silent at bars 6, 7, 8 — under a filter too.
+    daily = candles([50.0], start_ms=ANCHOR_MS + _STEP - _DAY, step_ms=_DAY)
+    stale = _spec(entry={"long": [{"left": "close_1d", "op": ">", "right": 10}]}, filters=never)
+    silent = _run(stale, _bundle([110.0] * 10, daily=daily))
+    assert silent.trades == () and silent.bars_unevaluable == 3
+
+
 def test_both_entries_firing_while_held_is_a_conflict_too_not_a_reversal():
     """The same signal state means the same thing flat or held."""
     closes = [110, 100, 100, 100]
@@ -516,6 +537,25 @@ def test_a_bundle_too_short_for_the_regime_reports_its_bars_unlabelled():
     assert [(b.label, b.bars) for b in result.regime_buckets] == [(UNLABELLED, 3)]
 
 
+def test_a_bundle_exactly_as_long_as_the_regime_warm_up_labels_its_last_bar():
+    closes = [30000 + 100 * i for i in range(MIN_INDICATOR_LOOKBACK)]
+    result = _run(_spec(), _bundle(closes))
+    labelled = [b for b in result.regime_buckets if b.label != UNLABELLED]
+    assert labelled and sum(b.bars for b in labelled) == 1
+    assert sum(b.bars for b in result.regime_buckets) == result.bars
+
+
+def test_a_missing_settlement_is_counted_on_venue_shaped_bars_too():
+    """A venue span of N bars is N × 4 hours less a millisecond; rounded, it
+    expects N × 4 settlements, and one deleted is one missing. Floored it would
+    expect one fewer and read the deletion as complete."""
+    bars = _venue_shaped(candles([110.0] * 5))
+    points = [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(5)]
+    del points[7]
+    result = _run(_spec(), SeriesBundle(bars, funding=points))
+    assert result.funding_settlements_missing == 1
+
+
 def test_a_run_that_loses_everything_is_marked_ruined_and_stops():
     closes = [100, 90, 80, 70, 60]
     opens = [100, 100, 90, 80, 70]
@@ -526,10 +566,89 @@ def test_a_run_that_loses_everything_is_marked_ruined_and_stops():
     result = _run(spec, _bundle(closes, opens=opens), costs=CostModel(leverage=20))
     assert result.ruined
     assert result.trades[-1].exit_reason is ExitReason.RUIN
+    # Filled at bar 1's open and ruined at its close: held through one close.
+    assert result.trades[-1].bars_held == 1
+    assert result.exposure == pytest.approx(1 / 5)
     assert len(result.net_bar_returns) == result.bars
     assert result.net_bar_returns[-1] == 0.0
     assert result.net.total_return <= -1
     assert "RUINED" in result.describe()[0]
+
+
+def test_a_ruin_realised_by_the_exit_fill_is_a_ruin_too():
+    """The wipe-out lands on the fill at bar 2's open — a pending close, so
+    nothing is held when the bar is booked. It is still the account reaching
+    zero: the run stops, and no entry is sized off negative equity."""
+    closes = [110, 110, 50, 150]
+    opens = [110, 112, 20, 140]
+    spec = _spec(
+        exit={"max_bars": 1},
+        sizing={"mode": "fixed_margin_fraction", "fraction": 1.0},
+    )
+    result = _run(
+        spec,
+        _bundle(closes, opens=opens),
+        costs=CostModel(leverage=10, taker_fee_rate=0.001, slippage_bps=0),
+    )
+    assert result.ruined
+    assert [t.exit_reason for t in result.trades] == [ExitReason.MAX_BARS]
+    assert result.net_bar_returns[2] < -1
+    assert result.net_bar_returns[3] == 0.0
+    assert all(t.size > 0 for t in result.trades)
+
+
+def test_a_ruin_on_the_window_s_last_bar_reads_ruin_not_segment_end():
+    closes = [110, 110, 20]
+    result = _run(
+        _spec(sizing={"mode": "fixed_margin_fraction", "fraction": 1.0}),
+        _bundle(closes),
+        costs=CostModel(leverage=20),
+    )
+    assert result.ruined
+    assert result.trades[-1].exit_reason is ExitReason.RUIN
+    assert "RUINED" in result.describe()[0]
+
+
+def test_the_flatten_s_own_fee_can_be_what_ruins_the_run():
+    """Flat market, absurd fee: the position is solvent at the last close and
+    the forced flatten's fee is what empties the account. The trade closed
+    because the window ended; the run is still ruined."""
+    closes = [110, 110, 110]
+    result = _run(
+        _spec(sizing={"mode": "fixed_margin_fraction", "fraction": 1.0}),
+        _bundle(closes, rate=0.0),
+        costs=CostModel(leverage=20, taker_fee_rate=0.03, slippage_bps=0),
+    )
+    # Notional 20 at fee 3%: 0.6 to open, 0.6 to flatten — 1.2 of equity 1.0.
+    assert result.trades[-1].exit_reason is ExitReason.SEGMENT_END
+    assert result.ruined
+    assert result.net.total_return == pytest.approx(-1.2)
+
+
+def test_a_trade_carries_its_invariants():
+    from contrib.autoresearch.dsl import Side
+    from contrib.autoresearch.evaluator import Trade
+
+    body = {
+        "entry_index": 1,
+        "exit_index": 3,
+        "entry_price": 100.0,
+        "exit_price": 110.0,
+        "size": 1.0,
+        "notional": 100.0,
+        "fees": 0.1,
+        "slippage": 0.1,
+        "funding": 0.0,
+    }
+    trade = Trade(side="long", exit_reason="exit_rule", **body)
+    assert trade.side is Side.LONG and trade.exit_reason is ExitReason.EXIT_RULE
+    assert trade.gross_pnl == pytest.approx(10.0)
+    with pytest.raises(ValueError, match="before it entered"):
+        Trade(side="long", exit_reason="exit_rule", **{**body, "exit_index": 0})
+    with pytest.raises(ValueError, match="Trade.size must be a number > 0"):
+        Trade(side="long", exit_reason="exit_rule", **{**body, "size": 0.0})
+    with pytest.raises(ValueError, match="unsupported side 'up'"):
+        Trade(side="up", exit_reason="exit_rule", **body)
 
 
 # -- the refusals ------------------------------------------------------------
@@ -560,6 +679,15 @@ def test_a_window_off_its_grid_is_refused_as_the_scanner_would_report_it():
     bundle = SeriesBundle([bars[0], bars[1], nudged, bars[3]], funding=_funding(4))
     with pytest.raises(EvaluationError, match="not on the 14400000 ms grid .*1 off-grid"):
         evaluate_segment(_spec(), FeatureFrame(bundle), _segment(0, 4), _COSTS, interval="4h")
+
+
+def test_a_window_whose_edge_is_off_the_store_s_grid_is_refused_by_that_name():
+    """``by_shares`` snaps its cuts; a hand-built or ledger-read segment need not
+    be snapped, and the refusal has to blame the edge, not the store."""
+    bundle = _bundle([110, 120, 130, 140])
+    segment = Segment(SegmentName.TRAIN, ANCHOR_MS, ANCHOR_MS + 2 * _STEP + _STEP // 2)
+    with pytest.raises(EvaluationError, match=r"its end .* not on the store's 14400000 ms grid"):
+        evaluate_segment(_spec(), FeatureFrame(bundle), segment, _COSTS, interval="4h")
 
 
 def test_a_window_of_one_bar_is_refused():
@@ -774,7 +902,9 @@ def test_a_ruined_run_pays_for_its_last_fill_and_measures_turnover_on_the_equity
     trade = result.trades[-1]
     assert trade.exit_reason is ExitReason.RUIN
     assert trade.fees == pytest.approx(0.001 * (20 + trade.size * 90))
-    assert result.turnover > 0
+    # Filled 20 in and 0.2 × 90 out, over the one bar of equity (1.0) that
+    # traded — not over the whole path, whose mean is negative.
+    assert result.turnover == pytest.approx(38.0)
 
 
 def test_a_zero_realized_vol_cannot_be_targeted():

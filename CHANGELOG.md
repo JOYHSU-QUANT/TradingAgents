@@ -70,10 +70,23 @@ Breaking changes within the 0.x line are called out explicitly.
   wider than the two this package studies and the CLI's `choices` was the
   only thing saying so.
 
+  Every window is an island: its first bar is always flat (the decision that
+  would fill there belongs to the bar before the window) and its last bar
+  flattens, so an always-in rule pays a round trip at each window edge and
+  its exposure reads `(bars − 1) / bars` — the same for every window and
+  spec, kept on purpose so train, validation and holdout are independent
+  measurements. Ruin is read off the equity, not off whether a position is
+  still open: the loss that empties the account can be realised by the fill
+  at a bar's open, or on the window's last bar, and a first cut only looked
+  while a position was held — the run then went on sizing entries off
+  negative equity.
+
   Known trade-offs, recorded rather than filed: the indicator pass still
   computes all four names whatever a spec asks for (plan §10.5); regime
   buckets on a bundle shorter than the engine's warm-up are all
-  `unlabelled`; a `1d` experiment reads the daily rows twice.
+  `unlabelled`; on a `1d` experiment the backdrop is the decision series
+  itself (read once), so `close_1d` degenerates to `close`; `vol_target`
+  sizes at entry and does not re-size a held position.
 
 - **autoresearch: the language a hypothesis is written in, and a guarantee that
   it saw no future** (plan PR A2). A closed feature vocabulary, a declarative

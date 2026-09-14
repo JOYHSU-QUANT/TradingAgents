@@ -246,6 +246,17 @@ class Split:
         end_ms = start_ms + span
         first_cut = start_ms + step * round(span * train_share / step)
         second_cut = start_ms + step * round(span * (train_share + validation_share) / step)
+        if not start_ms < first_cut < second_cut < end_ms:
+            # The share check above ran on the fractions; the rounding runs
+            # on the bars, and on a short span it can hand a segment nothing
+            # — refused here by the shares that did it, not below by the
+            # segment's own "ends before it starts".
+            raise SplitError(
+                f"shares {train_share:g}/{validation_share:g} of a {span // step}-bar span "
+                f"round to {(first_cut - start_ms) // step}/"
+                f"{(second_cut - first_cut) // step}/{(end_ms - second_cut) // step} bars; "
+                f"every segment needs at least one"
+            )
         return cls(
             interval=key,
             train=Segment(SegmentName.TRAIN, start_ms, first_cut),

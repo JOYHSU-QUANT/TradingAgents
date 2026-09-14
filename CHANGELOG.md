@@ -73,12 +73,16 @@ Breaking changes within the 0.x line are called out explicitly.
   rule does not print its holdout. `promote` and `report` say how many times
   the coin's holdout has been measured, across experiments - a count, not a
   limit. `experiment --dry-run` prints the split, its actual shares and
-  whether it would pin the holdout, and writes no experiment; a pinned coin's
+  whether it would pin the holdout, and writes no experiment; it refuses what
+  the write would refuse (a name already used, a penalty other than the coin's
+  pinned one), so a clean dry run is not a false all-clear. A pinned coin's
   share flags only divide train from validation, and the actual shares say so.
   An experiment whose LAST bars lack a value of the vocabulary - a daily or
   funding series fetched short of the decision bars - is refused at creation
   and again at promote: past a series' end the features read "no value", which
-  would sit a rule that reads it flat through its holdout.
+  would sit a rule that reads it flat through its holdout. The refusal groups
+  the missing features by the series each reads, because a bar feature missing
+  at the end is an indicator that stopped answering, not a fetch to go and run.
 
   The store now turns SQLite's foreign keys on, so a trial filed under an
   experiment the store does not hold is refused by name instead of written

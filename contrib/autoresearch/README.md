@@ -86,6 +86,9 @@ python -m contrib.autoresearch validate-spec --spec rule.json
 # （4h、1d、funding 三條都要先 fetch 過）
 python -m contrib.autoresearch experiment --name btc-4h --interval 4h
 
+# 先看會切成什麼樣子：印切分與實際占比，什麼都不寫（第一個 experiment 會永久 pin holdout）
+python -m contrib.autoresearch experiment --name btc-4h --interval 4h --dry-run
+
 # 替一條規則打分（train＋validation），記成一個 trial；holdout 一列都不讀
 python -m contrib.autoresearch evaluate --experiment btc-4h --spec rule.json
 

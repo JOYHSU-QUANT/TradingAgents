@@ -83,7 +83,8 @@ __all__ = [
     "promotion_verdict",
 ]
 
-# Plan §3.10's starting values. Overridable per experiment, and recorded there
+# Plan §3.10's starting values. Chosen by the FIRST experiment on a coin, which
+# pins them for every later one (:meth:`Ledger.penalty_pin`), and recorded there
 # when they are, because a threshold is part of what "promoted" meant.
 SHARPE_BASE: Final = 1.0
 PENALTY_K: Final = 0.25

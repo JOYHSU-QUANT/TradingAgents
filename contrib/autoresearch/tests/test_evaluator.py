@@ -405,7 +405,8 @@ def test_the_counts_are_taken_on_bars_a_filter_blocked_too():
     }
     blocked = _run(_spec(entry=both, filters=never), _bundle([100.0] * 5))
     assert blocked.trades == () and blocked.bars_conflicting == 4
-    # The daily backdrop goes stale after bar 5, as in the test above: the
+    # The daily backdrop goes stale after bar 5, as in
+    # test_a_rule_whose_feature_has_no_value_does_not_fire_and_is_counted: the
     # entry reading it is silent at bars 6, 7, 8 — under a filter too.
     daily = candles([50.0], start_ms=ANCHOR_MS + _STEP - _DAY, step_ms=_DAY)
     stale = _spec(entry={"long": [{"left": "close_1d", "op": ">", "right": 10}]}, filters=never)
@@ -579,12 +580,14 @@ def test_a_ruin_realised_by_the_exit_fill_is_a_ruin_too():
     """The wipe-out lands on the fill at bar 2's open — a pending close, so
     nothing is held when the bar is booked. It is still the account reaching
     zero: the run stops, and no entry is sized off negative equity."""
-    closes = [110, 110, 50, 150]
-    opens = [110, 112, 20, 140]
+    closes = [110, 110, 50, 150, 150]
+    opens = [110, 112, 20, 140, 150]
     spec = _spec(
         exit={"max_bars": 1},
         sizing={"mode": "fixed_margin_fraction", "fraction": 1.0},
     )
+    # Bar 3 fires the entry again; sized off the negative equity the old
+    # reading left, it would be a "long" of negative size at bar 4's open.
     result = _run(
         spec,
         _bundle(closes, opens=opens),
@@ -593,8 +596,8 @@ def test_a_ruin_realised_by_the_exit_fill_is_a_ruin_too():
     assert result.ruined
     assert [t.exit_reason for t in result.trades] == [ExitReason.MAX_BARS]
     assert result.net_bar_returns[2] < -1
-    assert result.net_bar_returns[3] == 0.0
-    assert all(t.size > 0 for t in result.trades)
+    assert result.net_bar_returns[3:] == (0.0, 0.0)
+    assert len(result.trades) == 1
 
 
 def test_a_ruin_on_the_window_s_last_bar_reads_ruin_not_segment_end():
@@ -649,6 +652,12 @@ def test_a_trade_carries_its_invariants():
         Trade(side="long", exit_reason="exit_rule", **{**body, "size": 0.0})
     with pytest.raises(ValueError, match="unsupported side 'up'"):
         Trade(side="up", exit_reason="exit_rule", **body)
+    with pytest.raises(ValueError, match="Trade.entry_price: expected a finite number"):
+        Trade(side="long", exit_reason="exit_rule", **{**body, "entry_price": math.inf})
+    # Funding is signed — a short receives — but it has to be a number.
+    assert Trade(side="short", exit_reason="exit_rule", **{**body, "funding": -0.5}).funding == -0.5
+    with pytest.raises(ValueError, match="Trade.funding must be a finite number"):
+        Trade(side="long", exit_reason="exit_rule", **{**body, "funding": math.nan})
 
 
 # -- the refusals ------------------------------------------------------------

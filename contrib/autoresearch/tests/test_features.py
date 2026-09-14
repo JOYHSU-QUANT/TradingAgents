@@ -84,6 +84,17 @@ def test_a_series_out_of_order_is_refused_naming_the_pair():
         SeriesBundle(ordered, funding=list(reversed(funding_points(3))))
 
 
+def test_a_funding_rate_that_is_not_a_finite_number_is_refused():
+    """The store reads the rate column back with ``Decimal(text)``, which parses
+    ``"NaN"``; nothing upstream checks the rate itself."""
+    ordered = candles([100, 101, 102])
+    points = funding_points(3)
+    for rate in ("NaN", "Infinity", "-Infinity"):
+        broken = points[:1] + [FundingPoint(time=points[1].time, rate=Decimal(rate))] + points[2:]
+        with pytest.raises(FeatureError, match=r"rate .* is not a finite number"):
+            SeriesBundle(ordered, funding=broken)
+
+
 def test_a_series_whose_closes_are_out_of_order_is_refused_too():
     """The stamp the ALIGNMENTS read, which is not the one the lookbacks read.
 

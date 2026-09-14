@@ -324,6 +324,18 @@ class SeriesBundle:
         _require_ascending([bar.close_time for bar in self.daily], what="daily bar closes")
         _require_daily_cadence(self.daily)
         _require_ascending([point.time for point in self.funding], what="funding settlements")
+        # The rate is the one stored number no DTO checks: ``FundingPoint``
+        # validates its stamp, and the store reads the column back with
+        # ``Decimal(text)``, which parses ``"NaN"``. A non-finite rate would be
+        # a feature value every comparison reads as false and a funding charge
+        # that turns a trial's statistics into an exception from inside
+        # ``statistics`` — refused here, where both of them come from.
+        bad = next((p for p in self.funding if not p.rate.is_finite()), None)
+        if bad is not None:
+            raise FeatureError(
+                f"the funding settlement at {bad.time} ms has rate {bad.rate}, which is not a "
+                f"finite number — re-fetch that window"
+            )
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,9 @@ Breaking changes within the 0.x line are called out explicitly.
   breakout spec without an exit leave a bar after it entered. An opposite
   entry REVERSES at one fill; it is the reading that makes an always-in rule
   writable. Filters gate ENTRIES only, reversals included, and the read-back
-  now says `enter only while:` so that is visible. And a feature that is
+  now says `enter only while:` so that is visible — the entries are still
+  read on a bar the filter blocked, so the conflict and no-value counts are
+  properties of the signal, not of the gate. And a feature that is
   `None` at a bar does not fire, for exits exactly as for entries - one value,
   one reading - with the bars where a consulted rule had no value COUNTED, so
   a rule that went silent for a month is a number rather than a hold.
@@ -64,11 +66,16 @@ Breaking changes within the 0.x line are called out explicitly.
   report prints which was used (plan §10.3).
 
   Refused by name (`EvaluationError`): a window with a hole in its bars (plan
-  §3.4), one shorter than two bars, one whose funding series covers under
-  ninety percent of it, one a spec's feature has not warmed up for. A window
-  over `1h` bars is refused at the split, since the venue's interval enum is
-  wider than the two this package studies and the CLI's `choices` was the
-  only thing saying so.
+  §3.4), one the store only partly covers, one shorter than two bars, one
+  whose funding series covers under ninety percent of it, one a spec's
+  feature has not warmed up for, and one whose edge is off the store's bar
+  grid (a hand-built or ledger-read segment; `by_shares` snaps its cuts). A
+  bundle holding a funding rate that is not a finite number is refused when
+  it is built (`FeatureError`). A window over `1h` bars is refused at the
+  split, since the venue's interval enum is wider than the two this package
+  studies and the CLI's `choices` was the only thing saying so; so are span
+  edges that are not whole epoch ms, and shares that round a segment down to
+  no bars on a short span.
 
   Every window is an island: its first bar is always flat (the decision that
   would fill there belongs to the bar before the window) and its last bar

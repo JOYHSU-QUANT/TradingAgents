@@ -86,6 +86,13 @@ def test_segments_are_held_to_their_own_names_and_order():
         Split("4h", validation, train, holdout)
 
 
+def test_a_span_edge_that_is_not_whole_epoch_ms_is_refused_before_the_arithmetic():
+    with pytest.raises(SplitError, match=r"start_ms: a split's span edge is epoch ms, got 1\.5"):
+        Split.by_shares("4h", start_ms=1.5, end_ms=ANCHOR_MS + 100 * _STEP)
+    with pytest.raises(SplitError, match="end_ms: a split's span edge is epoch ms, got True"):
+        Split.by_shares("4h", start_ms=ANCHOR_MS, end_ms=True)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

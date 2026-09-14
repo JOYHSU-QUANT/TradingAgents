@@ -226,6 +226,13 @@ class Split:
         """
         key = studied_interval(interval)
         step = interval_to_ms(key)
+        for name, edge in (("start_ms", start_ms), ("end_ms", end_ms)):
+            # The same refusal ``Segment`` makes, made before the arithmetic:
+            # the refusals below print bar counts computed from these, and a
+            # float edge would print "24.0 bars" in a sentence ``Segment``
+            # never gets to correct.
+            if isinstance(edge, bool) or not isinstance(edge, int):
+                raise SplitError(f"{name}: a split's span edge is epoch ms, got {edge!r}")
         for name, share in (("train_share", train_share), ("validation_share", validation_share)):
             if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share < 1:
                 raise SplitError(

@@ -207,6 +207,10 @@ class Trade:
             ("slippage", False),
         ):
             require_amount(getattr(self, name), f"Trade.{name}", positive=positive)
+        # Funding is signed (a short at a positive rate receives), so it is
+        # held to finiteness alone.
+        if not math.isfinite(self.funding):
+            raise ValueError(f"Trade.funding must be a finite number, got {self.funding!r}")
 
     @property
     def signed_size(self) -> float:
@@ -273,7 +277,17 @@ class RegimeBucket:
 
 @dataclass(frozen=True)
 class SegmentResult:
-    """Everything one window said about one spec under one cost model."""
+    """Everything one window said about one spec under one cost model.
+
+    ``ruined`` is the fact to read, not something to infer from the trades:
+    the last trade's ``exit_reason`` is ``ruin`` only when a position was
+    still held when the account emptied. The fill that empties it can be a
+    pending close (``exit_rule``, ``max_bars``, ``reversal``) or the window's
+    own flatten (``segment_end``). After a ruin the remaining bars are booked
+    flat, so every statistic is still over the whole window — the same
+    denominator as every other spec — and a Sharpe of an early ruin is diluted
+    by the flat bars after it. Rank or filter on ``ruined`` before any ratio.
+    """
 
     segment: Segment
     bars: int
@@ -692,7 +706,11 @@ class _Settlements:
     A settlement belongs to the bar whose ``(open, close]`` it falls in, on
     EXACT edges — the same rule :mod:`.features` reads settlements by (its
     rate is the last one stamped at or before the close; its ``funding_cum``
-    sums ``(previous close, close]``). One rule, because a spec that reads
+    sums ``(previous close, close]``) wherever a settlement posts after the
+    hour, as the venue's do. The two differ only for a stamp EXACTLY on a
+    venue bar's open, which sits a millisecond past the previous close:
+    ``funding_cum`` counts it and this slice does not. One rule, because a
+    spec that reads
     ``funding_cum_1`` and pays funding over the same bar must be looking at
     the same four settlements. It is also the physically right rule for the
     fill model: the venue stamps a settlement a few ms AFTER the hour, and a

@@ -42,10 +42,22 @@ FUNDING_INTERVAL_MS = 60 * 60_000
 # carried offsets of 2ms to 99ms (e.g. 01:00:00.057, 02:00:00.030). Judged on
 # an exact grid, 524 of those 531 read as off-grid — a report that flags
 # everything answers nothing, which is the same failure the grid's anchoring
-# choice exists to avoid. Five seconds is fifty times the jitter observed and
-# one seven-hundred-and-twentieth of the step, so it absorbs posting latency
-# while leaving any stamp genuinely in the wrong slot to be named.
-FUNDING_STAMP_TOLERANCE_MS = 5_000
+# choice exists to avoid.
+#
+# Twenty minutes, not the five seconds this first was — also a measurement.
+# The whole mainnet BTC history from 2024-03-01 (22,254 settlements, read
+# 2026-09-14) holds two that posted LATE: 2025-07-19 10:14:47.645 and
+# 2025-07-27 12:01:50.963, each alone in an hour whose on-time slot is empty.
+# They are those hours' settlements, not strays. Judged at five seconds they
+# were off-grid, and because a window holding an off-grid stamp is refused
+# (a stray standing in for a missing hour would be charged as its carry), no
+# experiment could be opened on the real store at all. Twenty minutes holds
+# the latest post seen with room to spare and is still a third of the step:
+# a stamp in the middle of an hour — another cadence written into the series
+# — is still named, and a late post into an hour that already has its
+# settlement is still a duplicate. The bound a bundle is read to, and how old
+# a rate may be before it is stale, are derived from this, and move with it.
+FUNDING_STAMP_TOLERANCE_MS = 20 * 60_000
 
 # Candle stamps get NO tolerance, and that is a measurement rather than an
 # oversight: the venue's ``open_time`` stamps are the grid, confirmed on the

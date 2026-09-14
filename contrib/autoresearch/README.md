@@ -16,10 +16,13 @@ memory `hyperliquid-autoresearch-mvp-direction`。
 
 ## 現況
 
-**PR A1＝資料落地層、PR A2＝假說寫得出來的那套語言、PR A3（本次）＝替假說打分的評估器。**
+**PR A1＝資料落地層、PR A2＝假說寫得出來的那套語言、PR A3＝替假說打分的評估器、
+PR A4（本次）＝把打分變成實驗紀錄：ledger、trial penalty、五個指令、baseline 校準。
+A4 是計畫的 Phase A 完成點。**
 已經有的東西：
 
-- 自己的 store `autoresearch.sqlite`（schema v1：`candles`、`funding`、`series_state`）。
+- 自己的 store `autoresearch.sqlite`（schema v2：歷史的 `candles`、`funding`、`series_state`，
+  加上 ledger 的 `experiments`、`trials`）。
 - `series_state`：每條序列一列，記上一跑 fetch **實際抽到哪、為什麼停在那**。gap 掃描回答不了這件事：它以第一個 stamp 當格線原點，所以前端被截掉的序列掃起來「完全沒洞」——跟交易所真的沒更舊資料長得一模一樣。
 - `fetch` 指令：由新往舊分頁抓 candles、由舊往新分頁抓 funding history，全部 upsert。
 - gap 檢查：把每個時間戳指派到最近的格位，分開回報**三種**發現——
@@ -45,14 +48,13 @@ memory `hyperliquid-autoresearch-mvp-direction`。
 - **bar 級評估器**（`evaluator.py`）：t 收盤決策、t+1 開盤成交、gross／net 兩組指標、
   regime 分桶；空的 `exit`、反向 entry、filter、`None` 四題的語意在這裡定（見下面）。
 
-**還沒有的東西**（依計畫 §5 的順序）：`experiments`／`trials` ledger、trial penalty、
-`evaluate`／`promote`／`report` 指令與 baseline 校準（A4）、LLM 假說迴圈（B1）、
-context bridge（C1，排 run 6）。**現在還沒有任何指令會跑評估器**——A3 是函式庫，
-`tests/test_evaluator.py` 是它唯一的呼叫端；接指令時記得把 `EvaluationError`／
-`FeatureError` 加進 CLI 的 exit-1 lane（兩個都是 `RuntimeError`，現在的 lane 接不到）。
+- **實驗 ledger**（`ledger.py`、`research.py`）：一個 experiment 寫死一次成本、切分、
+  indicator window 與 penalty；每條**不同的規則**是一個 trial；promote 門檻隨 trial 數的
+  `ln(n)` 上升；holdout 只有 promote 過的 trial 看得到，而且一次。見下面「ledger」段。
+- **baseline 校準**（`baselines.py`、`tests/test_calibration.py`）：buy-and-hold、always-flat、
+  高換手雜訊三個寫成本套件語言的文件，加上只能在測試裡抽的 seeded random entries（計畫 §6.6）。
 
-`experiments`／`trials` 兩張表**故意還沒建**：等 A4 把寫它們、讀它們的程式一起帶進來。
-現在先建好，只會多兩張沒有生產者也沒有消費者的表。
+**還沒有的東西**（依計畫 §5 的順序）：LLM 假說迴圈（B1）、context bridge（C1，排 run 6）。
 
 ## 用法
 
@@ -79,6 +81,26 @@ python -m contrib.autoresearch vocab
 
 # 這份 spec 合不合法？合法的話它到底在說什麼？
 python -m contrib.autoresearch validate-spec --spec rule.json
+
+# 開一個 experiment：量出 train 從哪根開始、切 train／validation／holdout、寫死成本
+# （4h、1d、funding 三條都要先 fetch 過）
+python -m contrib.autoresearch experiment --name btc-4h --interval 4h
+
+# 先看會切成什麼樣子：印切分與實際占比，什麼都不寫（第一個 experiment 會永久 pin holdout）
+python -m contrib.autoresearch experiment --name btc-4h --interval 4h --dry-run
+
+# 替一條規則打分（train＋validation），記成一個 trial；holdout 一列都不讀
+python -m contrib.autoresearch evaluate --experiment btc-4h --spec rule.json
+
+# 過了門檻才量 holdout，一個 trial 一次
+python -m contrib.autoresearch promote --experiment btc-4h --trial 3
+
+# 讀 ledger：不重算、不載入 pandas
+python -m contrib.autoresearch report
+python -m contrib.autoresearch report --experiment btc-4h --trial 3
+
+# 三個 baseline 在這個 experiment 的窗口上拿幾分（不記成 trial）
+python -m contrib.autoresearch calibrate --experiment btc-4h
 ```
 
 ### 交易所只給得起這麼多歷史（2026-09-11 實測）
@@ -105,6 +127,15 @@ data」，不會靜默地裝作抓完了。
 close 跟 open 或跟 interval 混著算的算式都得說清楚用的是哪一個：評估器算「這段該有幾筆
 settlement」用 round 不用 floor，日線 backdrop 用日 K **自己的** close 過濾而不是從 open 推。
 測試用的 `candles()` 工廠是 `close = open + step`，所以碰邊界的測試要自己造 venue 形狀的 bar。
+
+### funding 偶爾晚好幾分鐘才落（2026-09-14 實測）
+
+settlement 平常晚整點 2–99 ms 落，但 2024-03-01 起的 22,254 筆裡有兩筆晚了幾分鐘：
+2025-07-19 10:14:47、2025-07-27 12:01:50，各自是那一小時唯一的一筆（整點那格是空的）。
+格線容忍原本是 5 秒，這兩筆因此算「不在格線上」，而含有不在格線 settlement 的窗口會被拒絕
+——真實 store 上**任何 experiment 都開不起來**，重抓也修不好。現在容忍是 **20 分鐘**：這兩筆
+回到自己那一小時，`gaps` 對這段歷史只剩一個真正缺的洞（2024-08-15）。小時中間的 stamp
+（例如另一種節奏混進來）仍然是不在格線，已經有 settlement 的小時再晚來一筆仍然是重複格位。
 
 ### 掃描輸出跟 `reach:` 那一行
 
@@ -258,6 +289,65 @@ fees／slippage／funding 各自的總額、每個 regime 的 net return 分桶�
 spec 的 feature 在第一根沒有值、窗口邊界不在 store 的格線上（手寫或 ledger 讀回的
 segment 才會；`by_shares` 會貼格線）。這幾種都是「換窗口或補資料」的事，不是改 spec 的事。
 
+### ledger：一個 experiment、很多 trial、一段 holdout（A4）
+
+評估器回答「這條規則在這個窗口拿幾分」；ledger 回答**搜尋**規則時才冒出來的問題。
+
+- **experiment 寫死一次**：成本（`CostModel.to_dict`）、切分（`Split.to_dict`）、
+  `indicator_lookback`、penalty 參數是 `experiments` 的一列，這個 experiment 裡每個 trial 都在
+  同一組條件下量。計畫 §3.3 列的 `family` 欄**沒放**（§10.6：改標籤免費，family 是 trial 的
+  報表維度）；`indicator_lookback` 與 `coin` 是計畫沒列、這裡加的——兩個只差 lookback 的
+  experiment 否則會寫出一模一樣的列。
+- **train 從哪根開始是量的**：store 上**整張詞彙表**每一欄第一次同時有值的那根，再往後
+  `MAX_OFFSET_BARS`（24）根。任何合法 spec 在 train 第一根都量得到，所以暖機拒絕永遠不會
+  被當成結果記進 ledger（計畫 §11）。這需要 4h、1d、funding 三條都抓過：`sma_1d_200` 要
+  約 200 天日線，`funding_zscore_30` 要 30 天 funding。
+- **每個 coin 只有一段 holdout**：第一個 experiment 按比例切，再貼到最近的 UTC 午夜（4h 與 1d
+  兩種格線都有這個點）；之後每個 experiment 的 holdout **一定從同一刻開始**，只能往後長。
+  計畫 §11 原本寫「不得更早」，這裡改成**完全相同**：更晚的起點會把舊 holdout 放進新的
+  validation，更早的起點會把舊 trial 挑選時看過的 validation 放進新的 holdout——兩邊都讓
+  holdout 不再是「沒有被挑選過的歷史」。
+- **門檻＝`sharpe_base + k·ln(n)`**（預設 1.0、0.25），`n` 是**這個 coin 所有 experiment**
+  在 **promote 當下**試過的**不同規則**數（按 `spec_hash` 去重，`Ledger.rules_tried`）。不按
+  family 算（改標籤就能歸零）、不按 experiment 算（holdout 每個 coin 一個 pin，store 沒變時換個
+  名字開新 experiment 切出來是同一組窗口，n 卻會歸零；2026-09-14 拍板），也不用 trial 自己的序號
+  （第 1 個 trial 在試了 500 條之後才 promote，它是從 501 條裡挑出來的）。同一條規則換成本在另一個
+  experiment 重量，在那裡是一個 trial，但仍是一條規則、`n` 不加。**`sharpe_base`／`k` 也按 coin
+  pin**：第一個 experiment 定下之後，同 coin 的 experiment 帶不同的 penalty 會被具名拒絕（`--dry-run`
+  也會），否則 `--penalty-k 0` 就能繞過跨 experiment 的 `n`。
+- **同一條規則只是一個 trial**：`spec_hash` 看規則不看文件——clause 順序、重複 clause、param
+  名字、family 標籤、feature 對 feature 的比較寫在哪一邊、`30` 或 `30.0` 都不影響；門檻、op、
+  offset、side、`max_bars`、sizing 會。重複的規則 `evaluate` 直接回報舊 trial，不重算、`n`
+  不加（評估器是確定性的，重跑不是多看一眼）。
+- **promote 門檻全部列出、不只第一個**：沒 promote 過、validation 沒 ruined、至少一筆交易、
+  net 報酬 > 0、net Sharpe ≥ 門檻。Sharpe 旁邊一定讀報酬與交易數（Sharpe 0 不等於沒交易）。
+  **沒有** train→validation 的退化門檻：總量指標不跨窗口比，`report` 並排印兩個 Sharpe。
+- **promote 會把 train／validation 再量一次**，要跟記下來的一模一樣才去量 holdout。同一批
+  bar、feature 不往後讀，所以唯一會不同的情況是 store 事後被重抓或修正——那等於門檻是用現在
+  重現不出來的數字過的，具名拒絕。
+- **holdout 鎖從頭到尾**：`evaluate` 讀的 bundle 只到 validation 最後一根
+  （`loadable_until(holdout=False)`）；`holdout=True` 整個套件只寫在 `research.promote` 過了
+  門檻之後那一處。唯一讀整個 store 的是 `experiment`——它要知道 span 才能切，而且不算任何窗口
+  的分數。資料表本身也守著：`holdout_metrics_json` 有值 ⇔ `status = promoted`。
+- **量之前先掃歷史**（計畫 §11）：4h bar（含窗口前的暖機）與 `sma_1d_200` 讀得到的日線，有任何
+  洞／重複／不在格線就拒絕——評估器自己的窗口檢查看不到暖機。funding 的重複與不在格線拒絕，
+  **洞只計數**（跟 feature 的 90% 覆蓋政策一致，交易所偶爾真的少一筆）。
+- **span 的尾端也是量的**：最後 `MAX_OFFSET_BARS + 1` 根只要有任何一欄詞彙沒有值（1d 或
+  funding 比 4h 早抓、停在決策 bar 之前）就拒絕，建立 experiment 時一次、promote 時在含 holdout
+  的 frame 上再一次。窗口中段的「沒有值」是不觸發、不拒絕，而尾端正是 holdout——讀日線的規則
+  會悄悄空手度過 holdout，不讀的不會。
+- **搜尋看得到什麼**：`Ledger.search_trials` 與 `evaluate` 回報重複規則時給的是
+  `SearchTrial`——只有 train／validation，**沒有** holdout 欄位（計畫 §3.11）。重送一條已
+  promote 的規則不會印出它的 holdout；`report` 是操作者的視圖，照印。promote 本身是 CLI 動作。
+- **holdout 被看過幾次會印出來**：`promote` 與 `report` 印「這個 coin 的 holdout 已被量過
+  k 次（跨 experiment）」。只計數、不設上限；每 promote 一次就是多看一眼同一段窗口。
+- **`experiment --dry-run`**：印切分、實際各窗口占比、會不會建立 pin，不寫 experiment
+  （開 store 仍會把 schema 升到最新）。coin 已有 pin 時 share 旗標只決定 train:validation，
+  「actual shares」那行會照實印出。
+- **baseline 不是 trial**：`calibrate` 什麼都不記，門檻不動。
+- **`report` 只讀 ledger**，不重算、不載入 pandas（`test_upstream.py` 的 subprocess 測試守著）；
+  它印的量測文字和 `evaluate` 當下印的是同一個函式（`metrics.describe_measurement`）產生的。
+
 ## store 路徑與拒絕
 
 預設在 repo root 的 `data/autoresearch.sqlite`，用 `--db` 改路徑。四種會被**具名拒絕**的情況：
@@ -269,8 +359,8 @@ segment 才會；`by_shares` 會貼格線）。這幾種都是「換窗口或補
    自己的診斷，而不是一堆 traceback。
 4. 被**更新版本的 build** 寫過的 store（schema 版本比本 build 新）。
 
-離開碼：`0` 成功、`1` 具名的操作／store／交易所／**spec** 失敗、`2` argparse 自己的用法
-錯誤（例如 `--interval 1h`）、`130` 中斷。**store 有洞不算失敗**：掃到洞是成功掃描的結果，
+離開碼：`0` 成功、`1` 具名的操作／store／交易所／**spec**／量測／ledger 失敗（被 promote
+門檻擋下的 trial 也是）、`2` argparse 自己的用法錯誤（例如 `--interval 1h`）、`130` 中斷。**store 有洞不算失敗**：掃到洞是成功掃描的結果，
 exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本身就是輸入，parser 不收的 spec
 是不值得花一次 trial 的 spec，所以 exit 1。
 
@@ -314,6 +404,16 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
 - **短於 `indicator_lookback` 根（預設 200）的 bundle，regime 分桶全記 `unlabelled`**：那是
   report 的維度不是 spec 的 feature，對它套「整欄 None 就拒絕」會讓每個小測試都得先餵一整個
   window。
+- **`spec_hash` 懂文法、不懂評估器語意**：只做多的 spec 把一條 clause 從 `entry.long` 搬到
+  `filters`，交易一模一樣，hash 卻不同。要正規化這個得用評估器的語意，留成「第二個 trial」。
+- **每個 coin 只有一段 holdout，而且只往後長**：validation 永遠拿不到新的 bar。要換一段
+  holdout 是另開一個 store 的事，這裡不提供輪替。
+- **`experiment` 會讀到 holdout 的 rows**（量 span 與暖機要用），不算任何窗口的分數；鎖擋的是
+  trial 的量測。
+- **`SearchTrial` 不藏 promote 狀態**：gate 的 blocker 會說「已經 promote 過」；要不要連這個
+  也對搜尋隱藏，留給 B1。
+- **CLI 認 `EvaluationError`／`FeatureError` 是查 `sys.modules`**：直接 import 會讓每個指令付
+  pandas 的錢；它們被 raise 出來，就代表定義它們的模組已經載入。
 - **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批
   rows，`load_bundle` 直接拿 bars 當 backdrop，不讀第二次）；parser 看不到 interval 所以擋不了
   （承 A2 §10.8）。

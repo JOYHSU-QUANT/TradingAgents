@@ -16,18 +16,19 @@ side by side in a post-mortem and a second convention would be a trap:
   venue sends and the form :func:`~contrib.autoresearch.upstream.from_epoch_ms`
   decodes exactly.
 
-Only the two HISTORY tables exist at v1. The plan's ``experiments`` and
-``trials`` ledger arrives with the code that writes and reads it (plan §5,
-PR A4). Creating them now would add two tables with no producer and no
-reader — a lane nothing populates reads to a later maintainer as a feature
-that broke, not as one that has not been built.
+v1 is the HISTORY (candles, funding, what each backfill reached). v2 is the
+LEDGER (plan §3.3, PR A4): the experiments trials are measured inside, and the
+trials themselves. It arrived with :mod:`~contrib.autoresearch.ledger`, the
+code that writes and reads it, rather than beside the history tables in v1 —
+two tables with no producer read to a later maintainer as a feature that
+broke, not as one that had not been built.
 """
 
 from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION", "SCHEMA_VERSION_DDL"]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Created by ``store.apply_migrations`` before any migration runs, so it is
 # kept out of the versioned list below (it is the bookkeeping, not a step).
@@ -109,7 +110,64 @@ CREATE TABLE series_state (
 )
 """
 
+# One row per experiment: the fixed conditions every trial inside it is measured
+# under, written ONCE (plan §3.7, §3.8). The JSON columns are exactly what
+# ``CostModel.to_dict`` / ``Split.to_dict`` / ``Penalty.to_dict`` produce, and each
+# ``from_dict`` refuses a record with a key missing or extra.
+#
+# Two departures from the plan's column list, both on purpose. There is no
+# ``family``: plan §10.6 found that two of the five families are an author's
+# intent and relabelling is free, so the trial penalty counts distinct rules
+# (on the coin, across its experiments — see ``ledger``) and family is a report
+# dimension on the TRIAL. And
+# ``indicator_lookback`` is here because it changes every indicator a trial
+# reads (plan §11): two experiments differing only in it would otherwise write
+# identical rows. ``coin`` is here because nothing else in the row names the
+# market the split is a window over.
+_EXPERIMENTS = """
+CREATE TABLE experiments (
+    experiment_id      TEXT    PRIMARY KEY,
+    coin               TEXT    NOT NULL,
+    created_at         TEXT    NOT NULL,
+    cost_params_json   TEXT    NOT NULL,
+    split_json         TEXT    NOT NULL,
+    indicator_lookback INTEGER NOT NULL,
+    penalty_json       TEXT    NOT NULL,
+    notes              TEXT    NOT NULL
+)
+"""
+
+# One row per DISTINCT rule measured inside an experiment. ``spec_hash`` is
+# unique per experiment: measuring the same rule twice is not a second look at
+# the validation window (the evaluator is deterministic), so it is not a second
+# trial and does not raise the penalty.
+#
+# The holdout lock, as a constraint: a trial has holdout metrics if and only if
+# it has been promoted, and it is promoted at most once (``measured`` ->
+# ``promoted``, never back). A row that disagreed — holdout figures on a
+# measured trial — is the one state no code path here writes, so the store
+# refuses it rather than trusting every future writer to.
+_TRIALS = """
+CREATE TABLE trials (
+    trial_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id           TEXT    NOT NULL REFERENCES experiments (experiment_id),
+    family                  TEXT    NOT NULL,
+    spec_json               TEXT    NOT NULL,
+    spec_hash               TEXT    NOT NULL,
+    train_metrics_json      TEXT    NOT NULL,
+    validation_metrics_json TEXT    NOT NULL,
+    holdout_metrics_json    TEXT,
+    status                  TEXT    NOT NULL CHECK (status IN ('measured', 'promoted')),
+    created_at              TEXT    NOT NULL,
+    promoted_at             TEXT,
+    UNIQUE (experiment_id, spec_hash),
+    CHECK ((status = 'promoted') = (holdout_metrics_json IS NOT NULL)),
+    CHECK ((status = 'promoted') = (promoted_at IS NOT NULL))
+)
+"""
+
 # version -> ordered DDL statements applied in one transaction for that version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (_CANDLES, _FUNDING, _SERIES_STATE),
+    2: (_EXPERIMENTS, _TRIALS),
 }

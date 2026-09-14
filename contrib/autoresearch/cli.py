@@ -19,17 +19,37 @@ store or a socket:
   the same parser the hypothesis loop will run, so a spec that passes here is
   one a trial can be spent on.
 
+Five are the LEDGER (plan PR A4), and every one of them reads a store:
+
+- ``experiment --name btc-4h --interval 4h`` — measure where the store's
+  history is fit to measure on, cut train / validation / holdout, and write
+  the conditions every trial in it will be measured under. The first one on a
+  coin pins its holdout for good, so ``--dry-run`` prints the same split and
+  writes no experiment.
+- ``evaluate --experiment btc-4h --spec rule.json`` — score one rule on train
+  and validation and file it as a trial. The holdout is not read, and a rule
+  already filed is answered without its holdout even if it was promoted.
+- ``promote --experiment btc-4h --trial 3`` — apply the gate, and only then
+  measure that one trial's holdout. Once per trial; and every promotion on a
+  coin is counted, because each is another look at the same window.
+- ``report [--experiment btc-4h [--trial 3]]`` — read the ledger back. Reads
+  nothing else, and loads no part of the feature stack.
+- ``calibrate --experiment btc-4h`` — score the baselines (buy-and-hold,
+  always-flat, a high-turnover noise rule) on the experiment's windows,
+  filing nothing.
+
 Exit codes, kept in step with the perp package's CLI so an operator's habits
 carry across: ``0`` the command did what it says, ``1`` a named operator,
-store, venue or spec failure (the sentence on stderr says which), ``2``
-argparse's own usage errors (a malformed argv, or an ``--interval`` outside
-the two this package studies), ``130`` interrupted. Note what ``1`` does NOT
-mean here: a store with gaps in it is a successful scan, reported and exited
-``0``. Gaps are a fact about the venue's history, not a failure of the
-command that found them — and the command that fills them is ``fetch``, which
-an operator reads this report to decide about. A REFUSED SPEC is the other
-way round: the document was the input, and a spec this parser will not accept
-is one no trial should be spent on, so it exits ``1``.
+store, venue, spec, measurement or ledger failure (the sentence on stderr
+says which), ``2`` argparse's own usage errors (a malformed argv, or an
+``--interval`` outside the two this package studies), ``130`` interrupted.
+Note what ``1`` does NOT mean here: a store with gaps in it is a successful
+scan, reported and exited ``0``. Gaps are a fact about the venue's history,
+not a failure of the command that found them — and the command that fills
+them is ``fetch``, which an operator reads this report to decide about. A
+REFUSED SPEC is the other way round: the document was the input, and a spec
+this parser will not accept is one no trial should be spent on, so it exits
+``1``. So is a trial the gate refuses to promote.
 """
 
 from __future__ import annotations
@@ -38,11 +58,20 @@ import argparse
 import logging
 import re
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import STUDIED_INTERVALS
-from .dsl import SpecError, describe_spec, load_spec
+from .costs import (
+    LIVE_LEVERAGE,
+    LIVE_SLIPPAGE_BPS,
+    LIVE_TAKER_FEE_RATE,
+    VENUE_BASE_MAKER_FEE_RATE,
+    CostModel,
+    FillRole,
+)
+from .dsl import SpecError, StrategySpec, describe_spec, load_spec
 from .fetch import (
     FUNDING_SERIES,
     StopReason,
@@ -51,6 +80,20 @@ from .fetch import (
     render_fetch,
 )
 from .gaps import render_report, scan_candles, scan_funding
+from .ledger import (
+    PENALTY_K,
+    SHARPE_BASE,
+    Experiment,
+    Ledger,
+    LedgerError,
+    Penalty,
+    SearchTrial,
+    Trial,
+    TrialStatus,
+    Verdict,
+)
+from .metrics import describe_measurement
+from .split import DEFAULT_TRAIN_SHARE, DEFAULT_VALIDATION_SHARE
 from .store import (
     DB_FILENAME,
     ResearchStore,
@@ -117,6 +160,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    def add_db(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument(
+            "--db", default=None, help=f"store path (default: <repo>/data/{DB_FILENAME})"
+        )
+
     def add_common(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--coin", default="BTC", help="perp coin symbol (default: BTC)")
         sub.add_argument(
@@ -125,9 +173,7 @@ def _build_parser() -> argparse.ArgumentParser:
             choices=_INTERVALS,
             help=f"candle interval (default: {_INTERVALS[0]})",
         )
-        sub.add_argument(
-            "--db", default=None, help=f"store path (default: <repo>/data/{DB_FILENAME})"
-        )
+        add_db(sub)
 
     fetch_cmd = subparsers.add_parser(
         "fetch", help="walk venue history into the store, then scan it for holes"
@@ -165,6 +211,74 @@ def _build_parser() -> argparse.ArgumentParser:
         "validate-spec", help="parse a strategy spec and read it back, or refuse it by name"
     )
     spec_cmd.add_argument("--spec", required=True, help="path to a JSON strategy spec")
+
+    experiment_cmd = subparsers.add_parser(
+        "experiment",
+        help="cut train/validation/holdout over the store and write an experiment's conditions",
+    )
+    add_common(experiment_cmd)
+    experiment_cmd.add_argument("--name", required=True, help="the experiment's name")
+    experiment_cmd.add_argument(
+        "--fill-role",
+        default=FillRole.TAKER.value,
+        choices=[role.value for role in FillRole],
+        help="which fee a fill pays (default: taker, the paper run's)",
+    )
+    for flag, default, what in (
+        ("--taker-fee-rate", LIVE_TAKER_FEE_RATE, "taker fee, a fraction of notional"),
+        ("--maker-fee-rate", VENUE_BASE_MAKER_FEE_RATE, "maker fee, a fraction of notional"),
+        ("--slippage-bps", LIVE_SLIPPAGE_BPS, "adverse slippage per fill, basis points"),
+        ("--leverage", LIVE_LEVERAGE, "notional per unit of margin"),
+        ("--train-share", DEFAULT_TRAIN_SHARE, "train's share of the measurable span"),
+        ("--validation-share", DEFAULT_VALIDATION_SHARE, "validation's share of it"),
+        ("--sharpe-base", SHARPE_BASE, "the promote threshold at one trial"),
+        ("--penalty-k", PENALTY_K, "how much each ln(trials) raises it"),
+    ):
+        experiment_cmd.add_argument(
+            flag, type=float, default=default, help=f"{what} (default: {default:g})"
+        )
+    experiment_cmd.add_argument(
+        "--indicator-lookback",
+        type=int,
+        default=None,
+        help="bars the indicator engine is shown at each bar (default: the live candle_lookback)",
+    )
+    experiment_cmd.add_argument("--notes", default="", help="free text stored with the experiment")
+    experiment_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "print the split and whether it would pin the coin's holdout, and write no "
+            "experiment (opening the store still brings its schema up to date)"
+        ),
+    )
+
+    evaluate_cmd = subparsers.add_parser(
+        "evaluate", help="score a spec on train and validation and file it as a trial"
+    )
+    evaluate_cmd.add_argument("--experiment", required=True)
+    evaluate_cmd.add_argument("--spec", required=True, help="path to a JSON strategy spec")
+    add_db(evaluate_cmd)
+
+    promote_cmd = subparsers.add_parser(
+        "promote", help="apply the gate, then measure one trial's holdout (once)"
+    )
+    promote_cmd.add_argument("--experiment", required=True)
+    promote_cmd.add_argument("--trial", required=True, type=int, help="the trial's number")
+    add_db(promote_cmd)
+
+    report_cmd = subparsers.add_parser(
+        "report", help="read the ledger back: experiments, trials, one trial in full"
+    )
+    report_cmd.add_argument("--experiment", default=None)
+    report_cmd.add_argument("--trial", default=None, type=int, help="needs --experiment")
+    add_db(report_cmd)
+
+    calibrate_cmd = subparsers.add_parser(
+        "calibrate", help="score the baselines on an experiment's windows, filing nothing"
+    )
+    calibrate_cmd.add_argument("--experiment", required=True)
+    add_db(calibrate_cmd)
     return parser
 
 
@@ -279,8 +393,8 @@ def _cmd_vocab(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_validate_spec(args: argparse.Namespace) -> int:
-    path = Path(args.spec)
+def _read_spec(path_text: str) -> StrategySpec:
+    path = Path(path_text)
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -290,8 +404,238 @@ def _cmd_validate_spec(args: argparse.Namespace) -> int:
         # traceback, which reads as a defect in this package rather than as
         # the mistyped path it is.
         raise SpecError(f"cannot read --spec {path}: {exc}") from exc
-    for line in describe_spec(load_spec(text)):
+    return load_spec(text)
+
+
+def _cmd_validate_spec(args: argparse.Namespace) -> int:
+    for line in describe_spec(_read_spec(args.spec)):
         print(line)
+    return 0
+
+
+# -- the ledger commands -----------------------------------------------------
+
+
+def _open_ledger(args: argparse.Namespace) -> tuple[ResearchStore, Ledger]:
+    store = ResearchStore(_store_path(args))
+    print(f"store: {store.path} (schema v{store.version})")
+    return store, Ledger(store)
+
+
+def _cmd_experiment(args: argparse.Namespace) -> int:
+    # The feature stack is imported here, inside the command that computes:
+    # ``report`` and the language commands must not pay for pandas.
+    from .features import LIVE_CANDLE_LOOKBACK
+    from .research import plan_experiment
+
+    costs = CostModel(
+        taker_fee_rate=args.taker_fee_rate,
+        maker_fee_rate=args.maker_fee_rate,
+        slippage_bps=args.slippage_bps,
+        fill_role=FillRole(args.fill_role),
+        leverage=args.leverage,
+    )
+    penalty = Penalty(sharpe_base=args.sharpe_base, k=args.penalty_k)
+    lookback = LIVE_CANDLE_LOOKBACK if args.indicator_lookback is None else args.indicator_lookback
+    store, ledger = _open_ledger(args)
+    with store:
+        pinned = ledger.holdout_pin(_coin(args))
+        experiment = plan_experiment(
+            ledger,
+            experiment_id=args.name,
+            coin=_coin(args),
+            interval=args.interval,
+            costs=costs,
+            indicator_lookback=lookback,
+            penalty=penalty,
+            train_share=args.train_share,
+            validation_share=args.validation_share,
+            notes=args.notes,
+        )
+        if not args.dry_run:
+            experiment = ledger.create_experiment(experiment)
+        for line in experiment.describe():
+            print(line)
+        print(_shares(experiment))
+        holdout = from_epoch_ms(experiment.split.holdout.start_ms).isoformat()
+        if pinned is not None:
+            pin = (
+                "the start every experiment on this coin already withholds — the share flags "
+                "only divide train from validation before it"
+            )
+        elif args.dry_run:
+            pin = f"which this experiment would pin for every later one on {experiment.coin}"
+        else:
+            pin = f"now pinned for every later experiment on {experiment.coin}"
+        print(f"holdout begins at {holdout}, {pin}")
+        print(
+            "train begins at the first bar every feature of the vocabulary has a value "
+            "(with room for the deepest offset), so no legal spec is refused for warm-up"
+        )
+        if args.dry_run:
+            print("dry run: no experiment was written, and no holdout was pinned")
+    return 0
+
+
+def _shares(experiment: Experiment) -> str:
+    """The shares the split actually has, in bars — under a pin they are not the flags'."""
+    windows = experiment.split.ordered
+    total = windows[-1].end_ms - windows[0].start_ms
+    return "actual shares of the span: " + ", ".join(
+        f"{window.name.value} {(window.end_ms - window.start_ms) / total:.1%}" for window in windows
+    )
+
+
+def _describe_trial(experiment: Experiment, trial: Trial | SearchTrial) -> list[str]:
+    """One trial as lines; a search view says its holdout is withheld, never "not promoted"."""
+    head = f"trial #{trial.trial_id} of {experiment.experiment_id} ("
+    if isinstance(trial, Trial):
+        head += f"{trial.status.value}, measured {trial.created_at}"
+        if trial.promoted_at:
+            head += f", promoted {trial.promoted_at}"
+        because = "not promoted"
+    else:
+        head += f"measured {trial.created_at}"
+        because = "not shown to a search; `report` shows a promoted trial's"
+    return [head + ")"] + describe_measurement(
+        trial.spec,
+        experiment.costs,
+        experiment.split,
+        experiment.indicator_lookback,
+        trial.segments,
+        withheld_because=because,
+    )
+
+
+def _describe_verdict(experiment: Experiment, verdict: Verdict) -> list[str]:
+    lines = [experiment.penalty.describe(verdict.trials)]
+    if verdict.eligible:
+        lines.append("eligible: `promote` would measure its holdout")
+    else:
+        lines += [f"not eligible: {blocker}" for blocker in verdict.blockers]
+    return lines
+
+
+def _cmd_evaluate(args: argparse.Namespace) -> int:
+    from .evaluator import describe_result
+    from .research import measure
+
+    spec = _read_spec(args.spec)
+    store, ledger = _open_ledger(args)
+    with store:
+        experiment = ledger.experiment(args.experiment)
+        measurement = measure(ledger, experiment, spec)
+        if measurement.duplicate:
+            print(
+                f"this rule was already measured in {experiment.experiment_id} as trial "
+                f"#{measurement.trial.trial_id}; nothing was measured or filed"
+            )
+            # The search view: resubmitting a rule is not a way to read its holdout.
+            lines = _describe_trial(experiment, measurement.trial)
+        else:
+            lines = describe_result(measurement.result)
+            lines.append(
+                f"filed as trial #{measurement.trial.trial_id} of {experiment.experiment_id}"
+            )
+            if measurement.funding_holes:
+                lines.append(
+                    f"note: {measurement.funding_holes} hole(s) in the funding settlements this "
+                    f"measurement reads, within the coverage the features allow"
+                )
+        for line in lines + _describe_verdict(experiment, measurement.verdict):
+            print(line)
+    return 0
+
+
+def _cmd_promote(args: argparse.Namespace) -> int:
+    from .research import promote
+
+    store, ledger = _open_ledger(args)
+    with store:
+        experiment = ledger.experiment(args.experiment)
+        trial = promote(ledger, experiment, args.trial)
+        print(f"promoted trial #{trial.trial_id}; its holdout was measured once, below")
+        for line in _describe_trial(experiment, trial):
+            print(line)
+        print(_looks(ledger, experiment.coin))
+    return 0
+
+
+def _looks(ledger: Ledger, coin: str) -> str:
+    looks = ledger.holdout_looks(coin)
+    return (
+        f"{coin}'s holdout has been measured {looks} time(s), across every experiment on it; "
+        f"each promotion is another look at the same window"
+    )
+
+
+def _rank(trial: Trial) -> tuple[bool, float, int]:
+    """Ruined last, whatever its ratios; then validation net Sharpe, best first."""
+    return (trial.validation.ruined, -trial.validation.net.sharpe, trial.trial_id)
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    if args.trial is not None and args.experiment is None:
+        raise ValueError("--trial names a trial inside an experiment; give --experiment too")
+    store, ledger = _open_ledger(args)
+    with store:
+        if args.experiment is None:
+            experiments = ledger.experiments()
+            if not experiments:
+                print("no experiments in this store — `experiment` creates one")
+            for experiment in experiments:
+                count, promoted = ledger.trial_counts(experiment.experiment_id)
+                print(
+                    f"{experiment.experiment_id}: {experiment.coin} {experiment.split.interval}, "
+                    f"{count} trial(s), {promoted} promoted, created {experiment.created_at}"
+                )
+            return 0
+        experiment = ledger.experiment(args.experiment)
+        if args.trial is not None:
+            trial = ledger.trial(experiment.experiment_id, args.trial)
+            for line in _describe_trial(experiment, trial):
+                print(line)
+            return 0
+        for line in experiment.describe():
+            print(line)
+        trials = ledger.trials(experiment.experiment_id)
+        if not trials:
+            print("no trials yet — `evaluate` files one")
+            return 0
+        print(experiment.penalty.describe(ledger.rules_tried(experiment.coin)))
+        print(_looks(ledger, experiment.coin))
+        families = Counter(trial.family for trial in trials)
+        print("by family: " + ", ".join(f"{name} {n}" for name, n in sorted(families.items())))
+        for trial in sorted(trials, key=_rank):
+            validation = trial.validation
+            line = (
+                f"  #{trial.trial_id} {trial.family}: train sharpe {trial.train.net.sharpe:.2f}, "
+                f"validation sharpe {validation.net.sharpe:.2f} net "
+                f"{validation.net.total_return:+.2%} over {validation.trades} trades"
+            )
+            if validation.ruined:
+                line += " — RUINED"
+            if trial.status is TrialStatus.PROMOTED and trial.holdout is not None:
+                line += (
+                    f"; holdout sharpe {trial.holdout.net.sharpe:.2f} "
+                    f"net {trial.holdout.net.total_return:+.2%} (promoted)"
+                )
+            print(line)
+    return 0
+
+
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    from .baselines import describe_calibration
+    from .research import calibrate
+
+    store, ledger = _open_ledger(args)
+    with store:
+        experiment = ledger.experiment(args.experiment)
+        for line in experiment.describe():
+            print(line)
+        for line in describe_calibration(calibrate(ledger, experiment)):
+            print(line)
+        print("baselines are not trials: nothing was filed, and the promote threshold is unchanged")
     return 0
 
 
@@ -300,7 +644,29 @@ _COMMANDS = {
     "gaps": _cmd_gaps,
     "vocab": _cmd_vocab,
     "validate-spec": _cmd_validate_spec,
+    "experiment": _cmd_experiment,
+    "evaluate": _cmd_evaluate,
+    "promote": _cmd_promote,
+    "report": _cmd_report,
+    "calibrate": _cmd_calibrate,
 }
+
+# The two refusals that live beside the feature stack, named by module and
+# class rather than imported: importing them here would make every command
+# pay for pandas. A raised one means its module is already loaded, so looking
+# it up in ``sys.modules`` finds exactly the class that was raised.
+_MEASUREMENT_ERRORS = (
+    ("contrib.autoresearch.evaluator", "EvaluationError"),
+    ("contrib.autoresearch.features", "FeatureError"),
+)
+
+
+def _is_named_measurement_failure(exc: BaseException) -> bool:
+    for module_name, class_name in _MEASUREMENT_ERRORS:
+        module = sys.modules.get(module_name)
+        if module is not None and isinstance(exc, getattr(module, class_name)):
+            return True
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -311,10 +677,19 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (StoreError, ExchangeError, ValueError) as exc:
-        # The three families a well-formed invocation can still meet: this
-        # store cannot be operated on, the venue failed, or an argument named
-        # a window that is not one. Each already carries a sentence written
-        # for an operator, so it is printed as-is rather than wrapped.
+    except (StoreError, ExchangeError, LedgerError, ValueError) as exc:
+        # The families a well-formed invocation can still meet: this store
+        # cannot be operated on, the venue failed, the ledger refused, or an
+        # argument named a window, a spec or a split that is not one. Each
+        # already carries a sentence written for an operator, so it is printed
+        # as-is rather than wrapped.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
+        # A history that cannot be measured on (``EvaluationError``) or a
+        # feature the store cannot answer (``FeatureError``) is the same kind
+        # of named refusal; any other RuntimeError is a defect and propagates.
+        if not _is_named_measurement_failure(exc):
+            raise
         print(f"error: {exc}", file=sys.stderr)
         return 1

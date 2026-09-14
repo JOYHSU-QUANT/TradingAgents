@@ -140,7 +140,7 @@ def test_upstream_imports_nothing_it_has_not_declared():
     assert actual == declared
 
 
-def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack():
+def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack(tmp_path):
     """The deferred imports, checked by what is actually in ``sys.modules``.
 
     Two of the borrowed names are built inside a call rather than imported at
@@ -151,6 +151,11 @@ def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack():
     ``from .features import ...`` line to ``cli.py`` made ``gaps`` pay the
     pandas cost with every test still green.
 
+    ``report`` is held to it too, and it is the one that most easily slips:
+    the ledger it reads is filled by the commands that DO compute, and a
+    helper imported from the evaluator for its rendering would drag the whole
+    stack in behind a command that computes nothing.
+
     Checked in a SUBPROCESS because this one cannot be undone in-process —
     by the time the suite runs, ``test_features`` has imported pandas for its
     own reasons, and ``sys.modules`` never forgets.
@@ -158,12 +163,13 @@ def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack():
     probe = (
         "import sys; import contrib.autoresearch.cli as cli; "
         "from contrib.autoresearch.cli import main; main(['vocab']); "
+        "main(['report', '--db', sys.argv[1]]); "
         "heavy = sorted(m for m in ('pandas', 'stockstats', 'hyperliquid') if m in sys.modules); "
         "print(heavy)"
     )
     root = Path(upstream.__file__).resolve().parents[2]
     result = subprocess.run(
-        [sys.executable, "-c", probe],
+        [sys.executable, "-c", probe, str(tmp_path / "autoresearch.sqlite")],
         capture_output=True,
         text=True,
         cwd=root,

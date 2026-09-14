@@ -206,6 +206,11 @@ class ResearchStore:
             # arrived with the check: on the separate connection it used to
             # run on, nothing of ours had been opened yet.
             self.conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+            # A connection setting, off by default in SQLite: without it the
+            # ledger's ``REFERENCES`` is decoration, and a trial filed under an
+            # experiment this store does not hold is written and then listed by
+            # nothing. It writes no file, so it may precede the foreign check.
+            self.conn.execute("PRAGMA foreign_keys = ON")
             if not in_memory and _is_foreign(self.conn):
                 raise StoreError(
                     f"{path} is a SQLite database but not an AutoResearch store "

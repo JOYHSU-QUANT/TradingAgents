@@ -54,6 +54,7 @@ __all__ = [
     "render_report",
     "scan_candles",
     "scan_funding",
+    "scan_stamps",
 ]
 
 # How many findings of one kind a rendered report lists before summarising the
@@ -117,8 +118,12 @@ class GapReport:
         return sum(gap.missing for gap in self.gaps)
 
 
-def _scan(label: str, step_ms: int, tolerance_ms: int, stamps: Sequence[int]) -> GapReport:
+def scan_stamps(label: str, step_ms: int, tolerance_ms: int, stamps: Sequence[int]) -> GapReport:
     """The one scan both series go through, over already-sorted, unique stamps.
+
+    Public, because it is the DEFINITION of a hole: the evaluator refuses to
+    measure a window across one (plan §3.4), and a second definition there
+    would let ``gaps`` call a series complete that the evaluator refuses.
 
     Sorted and unique is a fact about the readers, not a hope: each table's
     primary key makes the stamp unique within a series, and both readers
@@ -191,13 +196,15 @@ def scan_candles(store: ResearchStore, *, coin: str, interval: str) -> GapReport
     """
     key = parse_interval(interval).value
     stamps = [c.open_time for c in store.iter_candles(coin, key)]
-    return _scan(f"{coin} {key} candles", interval_to_ms(key), CANDLE_STAMP_TOLERANCE_MS, stamps)
+    return scan_stamps(
+        f"{coin} {key} candles", interval_to_ms(key), CANDLE_STAMP_TOLERANCE_MS, stamps
+    )
 
 
 def scan_funding(store: ResearchStore, *, coin: str) -> GapReport:
     """Scan ``coin``'s funding series on the venue's hourly settlement grid."""
     stamps = [p.time for p in store.iter_funding(coin)]
-    return _scan(f"{coin} funding", FUNDING_INTERVAL_MS, FUNDING_STAMP_TOLERANCE_MS, stamps)
+    return scan_stamps(f"{coin} funding", FUNDING_INTERVAL_MS, FUNDING_STAMP_TOLERANCE_MS, stamps)
 
 
 def _stamp(ms: int) -> str:

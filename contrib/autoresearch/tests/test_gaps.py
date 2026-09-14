@@ -276,7 +276,7 @@ def test_a_report_that_contradicts_itself_is_refused_where_it_is_built(
 ):
     """A report is read as authoritative, so it may not disagree with itself.
 
-    Only ``_scan`` builds these today and it always builds them consistently,
+    Only ``scan_stamps`` builds these today and it always builds them consistently,
     which is exactly why the coupling needs saying out loud: the type is
     exported, and the first hand-built one would otherwise fail somewhere
     downstream - rendering a span it does not have - rather than here.

@@ -50,6 +50,7 @@ funding_rate`` fired at 276 bars out of 276. ``RATE_SUM`` separates those.
 from __future__ import annotations
 
 import difflib
+import math
 from dataclasses import dataclass
 from typing import Final
 
@@ -66,6 +67,7 @@ __all__ = [
     "feature_names",
     "parse_feature_name",
     "periods_for",
+    "require_number",
     "spec_of",
 ]
 
@@ -83,6 +85,38 @@ class SpecError(ValueError):
     A ``ValueError`` because that is what it is — a value outside its domain —
     and because the CLI's existing exit-1 lane already catches that family.
     """
+
+
+def require_number(value: object, what: str) -> float:
+    """A finite number, refused as a :class:`SpecError` rather than a ``TypeError``.
+
+    THE one numeric guard, reached from every direction: the parser passes the
+    document path as ``what``, a type guard passes a noun, the cost model its
+    field. It was two guards for one round, and they immediately disagreed —
+    the parser's caught the huge-integer ``OverflowError`` while the type
+    seam's let it out, which is the same escape, at the layer written to
+    close it. A third copy in the cost model then lost the finiteness check,
+    and ``CostModel(taker_fee_rate=float("nan"))`` constructed — a NaN fee is
+    a NaN Sharpe on a trial filed as measured. It lives here, beside the error
+    it raises, so every module that checks a number checks it the same way.
+
+    Three refusals, and none of them is a technicality. ``True`` is not a
+    number, because ``isinstance(True, int)`` is true and a threshold of
+    ``True`` would read as ``1.0`` — a plausible bound on anything scaled near
+    unity. An integer too large for a float is not one either: JSON puts no
+    limit on an integer literal, and ``float()`` raises an ``ArithmeticError``,
+    which is outside the ``ValueError`` lane every refusal here travels in. And
+    a non-finite float is not a number a rule can be written against.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SpecError(f"{what}: expected a number, got {value!r}")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise SpecError(f"{what}: {value!r} is too large to be a number") from exc
+    if not math.isfinite(number):
+        raise SpecError(f"{what}: expected a finite number, got {value!r}")
+    return number
 
 
 # How far back a condition may reach with an explicit offset, in bars.

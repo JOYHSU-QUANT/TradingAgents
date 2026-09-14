@@ -11,10 +11,15 @@ a check on the construction, not the guarantee itself.
 
 The three borrowed analytics are used the way the live path uses them, and
 that is a decision about COMPARABILITY, taken down to the window each one
-sees. The indicator engine is handed the last
-:data:`LIVE_CANDLE_LOOKBACK` closed bars — the count the trader's own fetch
-asks for every cycle, read off that config's default rather than written down
-again here — and asked for the latest value. The regime label comes from the
+sees. The indicator engine is handed the last ``indicator_lookback`` closed
+bars — by default :data:`LIVE_CANDLE_LOOKBACK`, the count the trader's own
+fetch asks for every cycle, read off that config's default rather than
+written down again here — and asked for the latest value. Before a bar has
+that many closed bars behind it, every indicator and the regime are ``None``:
+a shorter window is a different EMA from the one the live path computes, and
+backfilling older history would silently change a figure measured on it —
+so it warms up, and is refused at a window's first bar, like any other
+feature. The regime label comes from the
 borrowed classifier over those indicators. The funding z-score is the
 borrowed function over the stored settlements, with the rate being scored
 kept OUT of the window it is scored against, because the live caller passes a
@@ -48,7 +53,7 @@ A windowed number carries the name it is filed under or it is not reported: a
 small when the settlements were simply absent, and a ``funding_zscore_30``
 standardised against one day would be a different measurement wearing the same
 name. So the occupancy of each window is COUNTED (see
-:func:`_window_is_covered`), not inferred from where the series begins — the
+:func:`window_is_covered`), not inferred from where the series begins — the
 front-edge test that preceded it could see only a series starting inside the
 window, and was blind to every hole that did not touch the edge.
 
@@ -95,10 +100,13 @@ from .vocabulary import FeatureKind, FeatureRef, SeriesSource, spec_of
 
 __all__ = [
     "LIVE_CANDLE_LOOKBACK",
+    "MIN_INDICATOR_LOOKBACK",
+    "MIN_WINDOW_COVERAGE",
     "FeatureError",
     "FeatureFrame",
     "FeatureValue",
     "SeriesBundle",
+    "window_is_covered",
 ]
 
 # How many closed bars the indicator engine is shown at each bar — the count
@@ -109,11 +117,10 @@ __all__ = [
 # The default is as far as this reaches, and the limit is worth stating: the
 # running value is a YAML key an operator may set, in a file that is
 # deliberately not in the repository. So "the same bar gets the same
-# indicator here and there" holds while the server sits at the default, and a
-# server fetching a different number would make research indicators
-# incomparable with nothing going red. Closing that needs the lookback to
-# become an argument to the frame rather than a constant, which is PR A3's to
-# do when it learns where an experiment's parameters come from.
+# indicator here and there" holds while the server sits at the default. It is
+# therefore the DEFAULT of the frame's ``indicator_lookback`` rather than the
+# rule: an experiment measured against a server fetching a different count
+# passes that count in, and the report says which was used.
 LIVE_CANDLE_LOOKBACK: Final = MarketDataConfig().candle_lookback
 
 # Bound once, at import: ``context_analytics`` imports pandas and stockstats
@@ -127,6 +134,8 @@ _ANALYTICS: Final = context_analytics()
 # unioned with ``REGIME_INDICATORS`` because the regime needs its three whether
 # or not a spec refers to them.
 _INDICATOR_KINDS: Final = (FeatureKind.EMA, FeatureKind.RSI, FeatureKind.ATR)
+# Every kind the engine walk answers: the indicators, and the regime built on them.
+_ENGINE_KINDS: Final = frozenset((*_INDICATOR_KINDS, FeatureKind.REGIME))
 _FEATURE_INDICATORS: Final[dict[str, tuple[FeatureKind, int]]] = {
     f"{kind.value}_{period}": (kind, period)
     for kind in _INDICATOR_KINDS
@@ -135,6 +144,13 @@ _FEATURE_INDICATORS: Final[dict[str, tuple[FeatureKind, int]]] = {
 _INDICATOR_NAMES: Final[tuple[str, ...]] = tuple(
     dict.fromkeys(list(_FEATURE_INDICATORS) + list(REGIME_INDICATORS))
 )
+
+# The fewest bars the engine can be shown and still answer for every
+# indicator this vocabulary reads (the engine's own warm-up table, borrowed).
+# A frame with a lookback below it is not a stricter window — it is one on
+# which ``ema_50`` is ``None`` at every bar, which ``_require_a_working_engine``
+# would then report as the engine failing.
+MIN_INDICATOR_LOOKBACK: Final = required_candles(_INDICATOR_NAMES)
 
 # How old the last settlement may be and still be THIS bar's funding rate: one
 # interval, plus the jitter the venue posts with (see ``constants``). A bar
@@ -183,10 +199,10 @@ _DAILY_STALE_MS: Final = MS_PER_DAY - CANDLE_STAMP_TOLERANCE_MS
 # It is a POLICY, not a fact about the market, and it is the only one in this
 # module: a hole big enough to breach it is a store problem, which the gap
 # scan reports and a re-fetch fixes.
-_MIN_WINDOW_COVERAGE: Final = 0.9
+MIN_WINDOW_COVERAGE: Final = 0.9
 
 
-def _window_is_covered(observed: int, expected: float) -> bool:
+def window_is_covered(observed: int, expected: float) -> bool:
     """Did a window that should hold ``expected`` observations hold enough of them?
 
     Counted rather than inferred from where the series starts. The front-edge
@@ -208,7 +224,7 @@ def _window_is_covered(observed: int, expected: float) -> bool:
     hour would have required none at all, reporting a carry of zero from no
     settlements whatever.
     """
-    return observed >= math.ceil(expected * _MIN_WINDOW_COVERAGE)
+    return observed >= math.ceil(expected * MIN_WINDOW_COVERAGE)
 
 
 # What a computed feature is: a number, a regime label, or "not available at
@@ -304,7 +320,8 @@ class SeriesBundle:
         # different ones: the lookbacks index bars in ``open_time`` order,
         # while every alignment (the daily pointer, the funding bisects) is
         # cut at ``close_time``. Venue rows have the second following the first
-        # by one interval, so on real data the two checks agree — and a
+        # by a fixed offset (one interval less a millisecond, see
+        # ``constants``), so on real data the two checks agree — and a
         # hand-assembled bundle mixing intervals is exactly the case where they
         # would not, and where the daily pointer would stall silently rather
         # than refuse.
@@ -314,6 +331,59 @@ class SeriesBundle:
         _require_ascending([bar.close_time for bar in self.daily], what="daily bar closes")
         _require_daily_cadence(self.daily)
         _require_ascending([point.time for point in self.funding], what="funding settlements")
+        # The rate is the one stored number no DTO checks: ``FundingPoint``
+        # validates its stamp, and the store reads the column back with
+        # ``Decimal(text)``, which parses ``"NaN"``. A non-finite rate would be
+        # a feature value every comparison reads as false and a funding charge
+        # that turns a trial's statistics into an exception from inside
+        # ``statistics`` — refused here, where both of them come from.
+        bad = next((p for p in self.funding if not _is_finite_number(p.rate)), None)
+        if bad is not None:
+            raise FeatureError(
+                f"the funding settlement at {bad.time} ms has rate {bad.rate}, which is not a "
+                f"finite number — re-fetch that window"
+            )
+        # The same hole on the prices: ``Candle`` checks ``low <= open, close <=
+        # high`` and ``low > 0``, and an all-Infinity bar passes both. A held
+        # position marked to it books an infinite return that never ruins (a
+        # gain), and the window ends as the same exception from ``statistics``.
+        for what, series in (("bar", self.bars), ("daily bar", self.daily)):
+            broken = next(
+                (
+                    bar
+                    for bar in series
+                    if not all(_is_finite_number(getattr(bar, f)) for f in _PRICE_FIELDS)
+                ),
+                None,
+            )
+            if broken is not None:
+                raise FeatureError(
+                    f"the {what} opening at {broken.open_time} ms has a price that is not a "
+                    f"finite number (open {broken.open}, high {broken.high}, low {broken.low}, "
+                    f"close {broken.close}) — re-fetch that window"
+                )
+
+
+_PRICE_FIELDS: Final = ("open", "high", "low", "close")
+
+
+def _is_finite_number(value: object) -> bool:
+    """Whether a stored ``value`` (a rate, a price) is a number every reader of it can use.
+
+    Through ``float`` rather than ``Decimal.is_finite``, because that is how
+    every reader in this module takes it. The DTOs annotate a ``Decimal``
+    without enforcing it, and a hand-built bundle with float values has always
+    worked. A signalling NaN, or text that is not a number, cannot be
+    converted at all, and is refused like any other non-finite value. A
+    ``bool`` converts to ``1.0`` and is refused anyway, as
+    :func:`~.vocabulary.require_number` refuses it: ``True`` is not a price.
+    """
+    if isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -323,9 +393,9 @@ class FeatureFrame:
     One frame per experiment, not one per trial: the arrays depend on the
     history alone, so a hypothesis loop scoring fifty specs over the same
     bundle computes them once. That matters most for the borrowed indicator
-    engine, which is asked for its latest value once per bar — measured at
-    about 2.5 ms a bar on this box, so a 5000-bar series is some thirteen
-    seconds paid once rather than thirteen seconds a trial.
+    engine, which is asked for its latest value once per bar past its warm-up —
+    measured at about 2.5 ms a bar on this box, so a 5000-bar series is about
+    twelve seconds paid once rather than twelve seconds a trial.
 
     Frozen so the bundle cannot be swapped out from under the cache. The cache
     itself is a plain dict that is mutated, never rebound: an assignable
@@ -335,6 +405,12 @@ class FeatureFrame:
     """
 
     bundle: SeriesBundle
+    # How many closed bars the indicator engine is shown at each bar. An
+    # experiment parameter, not a constant (plan §10.3): the live value is a
+    # YAML key an operator may set in a file that is not in the repository,
+    # so a frame measured against a server running a different count is told
+    # that count, and the report states it.
+    indicator_lookback: int = LIVE_CANDLE_LOOKBACK
     _cache: dict[tuple[FeatureKind, int | None], tuple[FeatureValue, ...]] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
@@ -345,6 +421,19 @@ class FeatureFrame:
     _alignments: dict[str, list] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+
+    def __post_init__(self) -> None:
+        lookback = self.indicator_lookback
+        if isinstance(lookback, bool) or not isinstance(lookback, int):
+            raise FeatureError(
+                f"indicator_lookback is a whole number of bars, got {lookback!r}"
+            )
+        if lookback < MIN_INDICATOR_LOOKBACK:
+            raise FeatureError(
+                f"indicator_lookback {lookback} is below the {MIN_INDICATOR_LOOKBACK} bars the "
+                f"engine needs to answer for every indicator in the vocabulary; a shorter "
+                f"window is not stricter, it is a frame on which those features never warm up"
+            )
 
     # -- the two public verbs ---------------------------------------------
 
@@ -423,8 +512,14 @@ class FeatureFrame:
             return
         bars = self.bundle.bars
         span = f"{from_epoch_ms(bars[0].close_time):%Y-%m-%d} to {from_epoch_ms(bars[-1].close_time):%Y-%m-%d}"
+        short = (
+            f" (an indicator is read only once the engine is shown a full "
+            f"{self.indicator_lookback}-bar window)"
+            if ref.kind in _ENGINE_KINDS and len(bars) < self.indicator_lookback
+            else ""
+        )
         raise FeatureError(
-            f"{ref.name} has no value at any of this bundle's {len(bars)} bars ({span}), so a "
+            f"{ref.name} has no value at any of this bundle's {len(bars)} bars ({span}){short}, so a "
             f"spec reading it cannot be evaluated here — it would score as a strategy that "
             f"never fired. Fetch more history, or measure a spec this store can answer."
         )
@@ -446,7 +541,7 @@ class FeatureFrame:
     # -- the computations --------------------------------------------------
 
     def _compute(self, kind: FeatureKind, period: int | None) -> tuple[FeatureValue, ...]:
-        if kind in _INDICATOR_KINDS or kind is FeatureKind.REGIME:
+        if kind in _ENGINE_KINDS:
             self._indicator_pass()
             return self._cache[(kind, period)]
         return _BUILDERS[kind](self, period)
@@ -464,23 +559,34 @@ class FeatureFrame:
         against one bundle), so the union is wanted sooner or later, while a
         demand-driven set that re-walks per newly-requested name costs twice
         the single walk in the worst case. A frame told its feature set up
-        front could have both, and that is A3's to give — it knows every
-        spec's features before scoring starts.
+        front could have both; the evaluator (PR A3) declined to, because its
+        regime buckets ask for the regime column on every window anyway, so
+        the walk is paid once per frame whatever the spec reads — recorded as
+        a trade-off in the README rather than filed.
 
         The regime rides along because it is a function of three of those same
         values at the same bar.
         """
         bars = self.bundle.bars
-        columns: dict[str, list[FeatureValue]] = {name: [] for name in _INDICATOR_NAMES}
-        regimes: list[FeatureValue] = []
-        for index, bar in enumerate(bars):
+        # Before a full window every value is warm-up, not a shorter window: a
+        # shorter one is a different number from the live one, and one a
+        # backfill of older history would move.
+        warm = min(len(bars), self.indicator_lookback - 1)
+        columns: dict[str, list[FeatureValue]] = {
+            name: [None] * warm for name in _INDICATOR_NAMES
+        }
+        regimes: list[FeatureValue] = [None] * warm
+        for index in range(warm, len(bars)):
+            bar = bars[index]
             # The window ENDS at this bar, which is the whole no-look-ahead
             # guarantee: the engine cannot see further because it was never
-            # given further. It BEGINS a fixed lookback earlier, which is the
-            # comparability one — the live path fetches exactly that many bars
-            # per cycle, so the same bar gets the same indicator here and
-            # there.
-            window = bars[max(0, index + 1 - LIVE_CANDLE_LOOKBACK) : index + 1]
+            # given further. It BEGINS ``indicator_lookback`` bars earlier,
+            # which is the comparability one — at the default, that is the
+            # count the live path fetches per cycle, so the same bar gets the
+            # same indicator here and there; at any other value the frame is
+            # measuring against a server that fetches that other count, and
+            # the report says which.
+            window = bars[index + 1 - self.indicator_lookback : index + 1]
             values = _ANALYTICS.compute_indicators(window, _INDICATOR_NAMES)
             for name in _INDICATOR_NAMES:
                 columns[name].append(values.get(name))
@@ -507,14 +613,16 @@ class FeatureFrame:
         warm-up, and every strategy touching it would be scored as tried.
 
         Warm-up is the one thing that CAN legitimately empty a column, so the
-        threshold is the engine's own minimum for that indicator (borrowed,
-        not guessed). Past it, an all-empty column is not a market fact.
+        threshold is the frame's lookback: no indicator is read before a full
+        window, and the constructor holds the lookback at or above every
+        indicator's own minimum (the engine's warm-up table, borrowed, not
+        guessed). Past it, an all-empty column is not a market fact.
         """
         bar_count = len(self.bundle.bars)
+        if bar_count < self.indicator_lookback:
+            return
         dead = sorted(
-            name
-            for name, column in columns.items()
-            if bar_count >= required_candles([name]) and all(value is None for value in column)
+            name for name, column in columns.items() if all(value is None for value in column)
         )
         if dead:
             raise FeatureError(
@@ -629,7 +737,7 @@ class FeatureFrame:
         for bar, count in zip(self.bundle.bars, self._daily_counts(), strict=True):
             opened = bar.close_time - period * MS_PER_DAY
             first = bisect_right(stamps, opened, hi=count)
-            if count == 0 or not _window_is_covered(count - first, period):
+            if count == 0 or not window_is_covered(count - first, period):
                 out.append(None)
                 continue
             out.append(statistics.fmean(closes[first:count]))
@@ -684,7 +792,7 @@ class FeatureFrame:
             # one-day z-score under a name that says thirty. The live path
             # prints that count into the prompt beside the number; here there
             # is no reader to print it to.
-            out.append(score if _window_is_covered(samples, period * 24) else None)
+            out.append(score if window_is_covered(samples, period * 24) else None)
         return tuple(out)
 
     def _funding_cum(self, period: int | None) -> tuple[FeatureValue, ...]:
@@ -710,7 +818,7 @@ class FeatureFrame:
             # re-derived with a second bisect that could drift from it.
             first = bisect_right(times, opened)
             expected = (bars[index].close_time - opened) / FUNDING_INTERVAL_MS
-            if not _window_is_covered(found + 1 - first, expected):
+            if not window_is_covered(found + 1 - first, expected):
                 out.append(None)
                 continue
             out.append(totals[found + 1] - totals[first])
@@ -813,7 +921,7 @@ _BUILDERS: Final[dict[FeatureKind, Callable[[FeatureFrame, int | None], tuple[Fe
     FeatureKind.FUNDING_CUM: FeatureFrame._funding_cum,
 }
 
-if set(_BUILDERS) | set(_INDICATOR_KINDS) | {FeatureKind.REGIME} != set(FeatureKind):
+if set(_BUILDERS) | _ENGINE_KINDS != set(FeatureKind):
     # Raised rather than asserted — see the note in ``vocabulary``: under
     # ``python -O`` an assert here would let a kind with nothing to compute it
     # reach a trial as a ``KeyError``.

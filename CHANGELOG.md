@@ -1631,11 +1631,12 @@ Breaking changes within the 0.x line are called out explicitly.
   the platform integer range", and that bound is NEW for the retry knob:
   `llm_max_retries=2**70` used to be forwarded as-is.
 
-  The two "absurd Decimal exponent" tests ran the probe in a thread with a
+  The cap's "absurd Decimal exponent" test ran the probe in a thread with a
   join deadline and claimed a regression would fail rather than hang; it
   hangs, because `int()` on that Decimal never releases the GIL (measured
-  with the range check removed). One child interpreter now covers both knobs
-  under a process deadline (`tests/conftest.run_child_under_deadline`).
+  with the range check removed). The retry knob had no such test at all. One
+  child interpreter now covers both knobs, both exponent signs, under a
+  process deadline (`tests/conftest.run_child_under_deadline`).
 
   #263 suspected langchain-aws's `ChatBedrockConverse` silently dropped the
   forwarded `max_retries` (no field, `extra="ignore"`). Checked by hand at

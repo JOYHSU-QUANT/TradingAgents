@@ -864,8 +864,8 @@ def _require_measurable(
         raise EvaluationError(
             f"{segment} holds {len(report.misshapen)} bar(s) whose close disagrees with the "
             f"{step} ms interval, the first opening at {from_epoch_ms(bar.open_ms).isoformat()} "
-            f"and lasting {bar.close_ms - bar.open_ms} ms - another cadence written into this "
-            f"series. Run `gaps`, then `fetch` the window at its own interval."
+            f"and lasting {bar.close_ms - bar.open_ms} ms - not the venue's bar shape. Run "
+            f"`gaps`; a re-fetch at this interval overwrites a bar another cadence wrote here."
         )
     if report.duplicate_ms or report.misaligned_ms:
         # Named before any hole: a stamp the scanner could not place on the

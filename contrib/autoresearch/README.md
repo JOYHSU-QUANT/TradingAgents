@@ -136,7 +136,7 @@ gap 掃描拿這個形狀當檢查（`constants.CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS
 不等於 `open_time + interval − 1` 的 bar 是第四種發現 **misshapen**，experiment 的暖機
 檢查也照樣拒絕。測試夾具 `bars()`／`candles()` 從此就是這個形狀——原本是
 `close = open + step`，碰邊界的測試各自手工減 1 ms，而整點 `.000` 的 settlement 正好
-正好落在下一根的 open 上（見下面「已知取捨」）。
+落在下一根的 open 上（見下面「已知取捨」）。
 
 ### funding 偶爾晚好幾分鐘才落（2026-09-14 實測）
 

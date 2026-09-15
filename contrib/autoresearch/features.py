@@ -155,7 +155,7 @@ MIN_INDICATOR_LOOKBACK: Final = required_candles(_INDICATOR_NAMES)
 # How old the last settlement may be and still be THIS bar's funding rate: one
 # interval, plus the jitter the venue posts with (see ``constants``). A bar
 # closing at 03:59:59.999 whose 04:00 settlement was stamped 57 ms late reads
-# the 03:00 one, which is exactly one interval old and correct.
+# the 03:00 one, which is just under one interval old and correct.
 #
 # This answers one question only — is the last settlement still this bar's
 # rate. It was briefly also the slack allowed at a window's START, on the

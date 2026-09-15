@@ -411,10 +411,10 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
         if not args.skip_funding:
             start = _funding_start(store, coin=coin, since=since, resume=args.resume)
             if start >= end:
-                # Only a resume can land here (a --since past the clock was refused
-                # by the candle walk above): the newest stored settlement is at
-                # the venue clock, and the walk's own refusal would blame a
-                # --since the operator never typed.
+                # Only a resume can land here (a --since at or past the clock was
+                # refused by the candle walk above): the newest stored settlement
+                # is at or past the venue clock, and the walk's own refusal would
+                # blame a --since the operator never typed.
                 print(
                     "funding: the store already holds every settlement up to the venue "
                     "clock; nothing to walk"

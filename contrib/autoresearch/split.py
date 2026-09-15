@@ -80,6 +80,9 @@ def studied_interval(interval: str) -> str:
 # rather than as a refusal at the first split built on it.
 if any(parse_interval(interval).value != interval for interval in STUDIED_INTERVALS):
     raise RuntimeError("STUDIED_INTERVALS must be spelled the way the venue spells them")
+# The daily backdrop is also a decision series (``evaluator.load_bundle`` reads
+# it as its own backdrop when it is the interval studied), so it has to be one
+# the split can be built on.
 if DAILY_INTERVAL not in STUDIED_INTERVALS:
     raise RuntimeError("DAILY_INTERVAL must be one of STUDIED_INTERVALS")
 

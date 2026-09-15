@@ -19,7 +19,7 @@ what can go wrong with that assignment; the fourth is about a bar, not a stamp:
   of that hour, and the row count looks healthier for it.
 - a **misalignment** — a stamp too far from any slot to be in one. No
   re-fetch repairs this; it means the venue changed cadence, or two cadences
-  were written into one series (a ``1d`` page landing in the ``4h`` rows).
+  were written into one series (a ``1h`` page landing in the ``4h`` rows).
 - a **misshapen bar** — bars only: a bar whose ``close_time`` is not where
   its interval says it ends. The stamp scan cannot see this one, because a
   daily bar written into the 4h series sits exactly on a 4h slot and is
@@ -227,9 +227,9 @@ def scan_bars(label: str, step_ms: int, tolerance_ms: int, bars: Iterable[Candle
     measured). A bar that says otherwise is **misshapen**: it came from
     another cadence - a daily bar written into the 4h series sits exactly on
     a 4h slot, so the stamp scan calls it aligned - or the venue changed what
-    a bar is. Re-fetching the window at its own cadence overwrites it (the
-    store keys a bar by its open); until this check such a bar was stored
-    faithfully and never mentioned.
+    a bar is. When its open sits on the grid, re-fetching the window at its
+    own cadence overwrites it (the store keys a bar by its open); until this
+    check such a bar was stored faithfully and never mentioned.
 
     The evaluator's history check comes through here too, so the series it
     refuses to measure on and the series ``gaps`` reports are the same one.

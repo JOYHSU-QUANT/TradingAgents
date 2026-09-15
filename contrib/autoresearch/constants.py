@@ -1,4 +1,4 @@
-"""Venue cadence facts more than one module here has to agree on.
+"""Facts more than one module here has to agree on.
 
 Small enough to inline at each use, which is exactly why they are not: the
 funding step is asserted by the gap scan and assumed by the backfill's page
@@ -12,6 +12,7 @@ __all__ = [
     "CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS",
     "CANDLE_STAMP_TOLERANCE_MS",
     "DAILY_INTERVAL",
+    "DEFAULT_MAX_TRIALS",
     "FUNDING_INTERVAL_MS",
     "FUNDING_STAMP_TOLERANCE_MS",
     "MS_PER_DAY",
@@ -20,6 +21,13 @@ __all__ = [
 ]
 
 MS_PER_DAY = 24 * 60 * 60_000
+
+# Plan §3.11's budget for one run of the hypothesis loop, counted in ANSWERS
+# from the model rather than in trials filed (a refusal and a rule already
+# tried each spend one). Here rather than beside the loop because ``cli``
+# prints it as a flag default, and importing the loop to read it would put
+# the pandas stack behind every command that merely builds the parser.
+DEFAULT_MAX_TRIALS = 10
 
 # The candle intervals this package studies, NOT the venue's whole vocabulary.
 # Plan §1 names 4h (the paper cycle) and 1d (the daily backdrop) and nothing

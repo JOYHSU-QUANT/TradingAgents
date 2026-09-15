@@ -41,10 +41,12 @@ from .evaluator import EvaluationError, SplitResult, evaluate_split, load_bundle
 from .features import FeatureFrame, SeriesBundle
 from .gaps import GapReport, scan_bars, scan_stamps
 from .ledger import (
+    Answer,
     Experiment,
     Ledger,
     LedgerError,
     Penalty,
+    Proposal,
     SearchTrial,
     Trial,
     Verdict,
@@ -108,6 +110,10 @@ class Measurement:
     verdict: Verdict
     result: SplitResult | None
     funding_holes: int = 0
+    # The answer this measurement was filed from, when it came from one. Written
+    # in the same transaction as the trial, so a Measurement carrying a trial and
+    # no proposal means none was offered - never that one was lost.
+    proposal: Proposal | None = None
 
     @property
     def duplicate(self) -> bool:
@@ -388,7 +394,12 @@ def _frame(ledger: Ledger, experiment: Experiment, *, holdout: bool) -> tuple[Fe
     return FeatureFrame(bundle, indicator_lookback=experiment.indicator_lookback), holes
 
 
-def measure(ledger: Ledger, experiment: Experiment, spec: StrategySpec) -> Measurement:
+def measure(
+    ledger: Ledger,
+    experiment: Experiment,
+    spec: StrategySpec,
+    answer: Answer | None = None,
+) -> Measurement:
     """Score ``spec`` on train and validation, file it as a trial, and say where it stands.
 
     A rule already in the experiment is not measured again (see
@@ -412,10 +423,17 @@ def measure(ledger: Ledger, experiment: Experiment, spec: StrategySpec) -> Measu
         spec,
         SegmentMetrics.from_result(result.train),
         SegmentMetrics.from_result(result.validation),
+        answer=answer,
     )
     verdict = ledger.verdict(experiment, trial)
     return Measurement(
-        trial=trial.for_search(), verdict=verdict, result=result, funding_holes=holes
+        trial=trial.for_search(),
+        verdict=verdict,
+        result=result,
+        funding_holes=holes,
+        proposal=None
+        if answer is None
+        else ledger.proposal_for_trial(experiment.experiment_id, trial.trial_id),
     )
 
 

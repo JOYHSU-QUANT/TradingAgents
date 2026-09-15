@@ -65,6 +65,83 @@ Breaking changes within the 0.x line are called out explicitly.
   late), the evaluator's docstring records the difference, and the evaluator
   fixtures stamp none (`funding_points` still stamps on the hour; the feature
   tests pin the window edge with it).
+- **autoresearch: a loop that lets a model propose the hypotheses, and a record of
+  everything it answered** (plan PR B1, the end of Phase B). One new command,
+  `research`, over one new table in the research store (schema v3, `proposals`).
+  `contrib/hyperliquid_perp` is untouched.
+
+  THE BUDGET COUNTS ANSWERS, NOT TRIALS. `--max-trials` (default 10) is spent by
+  every answer the model gives: one the parser refuses costs a round, and so does
+  one proposing a rule the experiment already holds. A budget counting only
+  accepted rules would not terminate - a model repeating one malformed answer
+  would loop forever - and it is the LOOKING that the multiple-comparison penalty
+  exists to charge for. A seam failure is the exception, because it is not an
+  answer at all: a timeout, a 401 or a reply that is not text spends nothing and
+  stops the run, so a bad key cannot quietly burn a run's trials and then report a
+  search that never happened.
+
+  THE PROMPT CARRIES NO CALENDAR DATE. The windows are given in BARS. This is the
+  leak the holdout lock cannot close by itself: a model has its own memory of what
+  BTC did, so naming the validation window's dates invites a rule fitted from
+  outside knowledge rather than from the search, and a penalty that charges for
+  rules tried cannot price that at all. The three windows are contiguous, so
+  naming validation's end would name the holdout's start. Every figure shown comes
+  from `SearchTrial`, which has no holdout field; promotion STATUS is withheld
+  too, decided here, since "this one was promoted" is not a fact needed to propose
+  the next rule. The loop reaches the ledger through `research.measure` alone and
+  never `research.promote`, asserted off the parsed import graph rather than by
+  searching the source for a word this module's own docstring discusses at length.
+
+  AN ANSWER IS TEXT UNTIL THE PARSER SAYS OTHERWISE. What comes back goes through
+  the same `load_spec` an operator's hand-written spec goes through, so a model
+  cannot widen the language by writing confidently. One markdown fence WRAPPING
+  the whole answer is stripped, because that is a wrapper the chat format adds
+  around an answer that is otherwise exactly right; prose around JSON, two fenced
+  blocks and an unclosed fence are passed through and refused, because past that
+  shape there is a choice of text and an extractor would be guessing which.
+
+  WHAT WAS TRIED IS WRITTEN DOWN. Every answer becomes a `proposals` row -
+  measured, duplicate, or refused with the sentence that refused it and the text
+  as the evidence - so the next run is shown what already failed instead of paying
+  to rediscover it, and `report` can say that forty malformed answers and two
+  rules is not the same search as two rules. Refusals are never trials and never
+  raise the promote threshold. `research --dry-run` prints the exact prompt and
+  asks no model; `research` has no default provider or model, because which model
+  proposed a rule is part of what the trial means.
+
+  EVERY ANSWER NAMES ITS AUTHOR, AND IS WRITTEN BESIDE ITS TRIAL. `proposals`
+  carries a `model` column, because the reason `research` refuses to guess a
+  provider and a model is exactly the reason the store has to remember which one
+  answered: an append-only ledger searched by two models has no later chance to
+  say which rule came from which. A new rule's trial and the row recording the
+  answer it came from are written in ONE transaction - they were two, and a
+  failure between them left a trial that counts toward the coin's rule count
+  with nothing explaining it, so `report` would undercount answers against
+  trials. A duplicate or a refusal writes no trial, so its row is filed alone.
+  A seam failure now returns the report instead of throwing it away: a run that
+  dies at round seven still prints what the first six bought, and still exits 1.
+  An interrupt keeps its partial report too and still exits 130, the code the
+  command gives a Ctrl-C landing anywhere else in it: catching the interrupt to
+  save the report must not also reclassify a cancellation as a failure.
+  The prompt lists every rule already tried, with figures for the best twelve
+  only - the budget charges a round for a duplicate, and showing a truncated
+  list would charge the model for the prompt's omission rather than its own
+  mistake.
+
+  SCHEMA v3 IS A ONE-WAY DOOR. A v2 store upgrades with every row intact
+  (verified on a real one: candles, funding, experiments and trials preserved,
+  `integrity_check` ok, migration 3 is a `CREATE TABLE` and rewrites no data).
+  But once a v3 build has opened a store, a checkout that knows only v2 refuses
+  it outright - including read-only `report`. Unlike the migration in #239 the
+  backup protects the option of rolling back, not the data; copy the store
+  before moving between builds.
+
+  Known trade-offs, recorded rather than filed: the no-dates rule also denies the
+  model any sense of which market era it is in; `--max-trials` is one invocation's
+  own count and does not accumulate across runs; the chat adapter catches the
+  whole `Exception` family, there being no common base class across half a dozen
+  provider SDKs over httpx, and not `BaseException`, so an interrupt still stops
+  the run.
 
 - **autoresearch: a ledger that scores many hypotheses without letting the search
   cheat, and the baselines that show the scorer is not fooled** (plan PR A4, the

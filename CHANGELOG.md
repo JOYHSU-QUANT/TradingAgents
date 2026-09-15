@@ -10,6 +10,55 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **autoresearch: the store follow-ups from PR #255 (#256)** - the scan holds
+  every bar to the venue's shape, `fetch --resume`, the daily backdrop beside
+  every scan, and the research suite in CI. `contrib/hyperliquid_perp` is
+  untouched but for its docs' project tree.
+
+  A FOURTH FINDING, BARS ONLY. `close_time` was stored as the venue's own
+  statement of where a bar ends and never compared with anything: a daily bar
+  written into the 4h series sits exactly on a 4h slot, and was kept
+  faithfully and never mentioned. `scan_bars` now names a bar whose close is
+  not `open + interval - 1` (the millisecond measured on 2026-09-12) as
+  MISSHAPEN; `gaps` and `fetch` list them beside the other three findings, and
+  the experiment's history check refuses on them as on any other bar finding -
+  it shares the scan, so the series it refuses and the series `gaps` reports
+  are one. The test fixtures close the venue's way too now. They were
+  `open + step`, every test that touched the boundary rebuilt the venue's
+  shape by hand, and a fixture closing AT the next open would be a misshapen
+  bar in every test that expects a clean series.
+
+  `fetch --resume` starts the funding walk just past the newest stored
+  settlement instead of at `--since`. Not the default: the full re-walk is
+  the one that fills holes, but at twenty days a page it is forty-odd
+  requests for the 4h span - past where the venue starts throttling - and a
+  resume is one. Candles are always re-walked (five pages to the depth wall).
+
+  THE DAILY BACKDROP IS SCANNED BESIDE WHATEVER WAS ASKED FOR. Every
+  experiment reads `close_1d` / `sma_1d_*`, so a store holding a clean 4h
+  series and no daily one scanned as fit to measure on. `gaps` and `fetch`
+  print the 1d series' report and reach under the requested interval's, and
+  say what lands it when it is absent.
+
+  `StopReason`'s values are tokens; the sentences an operator reads come from
+  `describe_stop`, a table beside `render_fetch`, printed verbatim as before, so a
+  rewording is no longer a change of vocabulary and a substring pin no
+  longer reads a behaviour change and a wording touch-up the same way. `Gap`
+  and `SeriesFetch` refuse a value no scan or walk could produce (a hole
+  running backwards, a store that shrank across a walk that only upserts).
+  CI runs `contrib/autoresearch/tests` in its own job, installing
+  `requirements.txt` for the venue SDK the pin tests import. The perp docs'
+  project tree lists both `contrib/` packages. The multi-version migration
+  loop (#256's seventh item) was already covered by PR #259's v1-to-v2 test.
+
+  Known trade-offs: `fetch-candles` / `fetch-funding` were not split out
+  (`--skip-funding` stays, and `--resume` is funding-only). A settlement
+  stamped exactly on a venue bar's open falls in the millisecond between
+  `_Settlements.due`'s `(open, close]` and the features' `(previous close,
+  close]`; the venue has never stamped one (531 of 531 measured were 2-99 ms
+  late), the evaluator's docstring records the difference, and the fixtures
+  stamp none.
+
 - **autoresearch: a ledger that scores many hypotheses without letting the search
   cheat, and the baselines that show the scorer is not fooled** (plan PR A4, the
   end of Phase A). Five commands - `experiment`, `evaluate`, `promote`, `report`,

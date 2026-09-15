@@ -81,6 +81,7 @@ from typing import Final
 
 from .constants import (
     CANDLE_STAMP_TOLERANCE_MS,
+    DAILY_INTERVAL,
     FUNDING_INTERVAL_MS,
     FUNDING_STAMP_TOLERANCE_MS,
     MS_PER_DAY,
@@ -94,7 +95,6 @@ from .split import Segment, Split, studied_interval
 from .store import ResearchStore
 from .upstream import (
     Candle,
-    CandleInterval,
     MarketRegime,
     VocabEnum,
     from_epoch_ms,
@@ -989,7 +989,7 @@ def load_bundle(
     holdout lock is the reason.
     """
     key = studied_interval(interval)
-    daily_key = CandleInterval.D1.value
+    daily_key = DAILY_INTERVAL
     bars = list(store.iter_candles(coin, key, until_ms=until_ms))
     if not bars:
         raise EvaluationError(f"the store holds no {key} bars for {coin} in that span")

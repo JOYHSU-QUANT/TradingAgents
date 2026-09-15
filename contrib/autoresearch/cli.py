@@ -4,10 +4,12 @@ Two of them are about the store:
 
 - ``fetch --coin BTC --interval 4h --since 2023-01-01`` — walk that candle
   series and the coin's funding history into the store, then scan what landed
-  for holes.
+  for holes. ``--resume`` starts the funding walk just past the newest
+  settlement already stored instead of at ``--since``.
 - ``gaps --coin BTC --interval 4h`` — re-run that scan over what is already
   stored. No network, so it is the command to reach for when judging a store
-  rather than filling one.
+  rather than filling one. Both scans also cover the daily backdrop, which
+  every experiment reads whatever its interval.
 
 Two are about the LANGUAGE a hypothesis is written in, and neither opens a
 store or a socket:
@@ -62,7 +64,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .constants import STUDIED_INTERVALS
+from .constants import DAILY_INTERVAL, STUDIED_INTERVALS
 from .costs import (
     LIVE_LEVERAGE,
     LIVE_SLIPPAGE_BPS,
@@ -77,6 +79,8 @@ from .fetch import (
     StopReason,
     backfill_candles,
     backfill_funding,
+    describe_stop,
+    funding_resume_start,
     render_fetch,
 )
 from .gaps import render_report, scan_candles, scan_funding
@@ -190,6 +194,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "only walk the candle series. Funding is not interval-scoped, so a second "
             "fetch at another interval would re-walk it for nothing; this skips that pass."
+        ),
+    )
+    fetch_cmd.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "start the funding walk just past the newest settlement already stored, not "
+            "at --since. A walk from --since re-covers every window and so fills holes; a "
+            "resume fills nothing behind it, but costs one request instead of one per "
+            "twenty days since --since (about forty for the 4h span, past where the venue "
+            "starts throttling). Candles are always re-walked: five pages to the venue's "
+            "depth wall, and the re-walk is what fills their holes."
         ),
     )
 
@@ -328,7 +344,7 @@ def _print_reach(store: ResearchStore, *, coin: str, series: str) -> None:
     stopped = state["stopped"]
     known = StopReason.__members__.get(stopped)
     print(
-        f"  reach: stopped because {known.value if known else stopped}"
+        f"  reach: stopped because {describe_stop(known) if known else stopped}"
         f" (asked from {from_epoch_ms(state['since_ms']).isoformat()},"
         f" venue clock {from_epoch_ms(state['venue_clock_ms']).isoformat()})"
     )
@@ -341,14 +357,30 @@ def _print_scans(store: ResearchStore, *, coin: str, interval: str, funding: boo
     answer different halves of "is this store fit to measure on": the scan
     says whether what is here is a grid, the reach says whether it is the span
     that was asked for.
+
+    The daily backdrop is scanned beside whichever interval was asked for,
+    because every experiment reads it: ``close_1d`` and ``sma_1d_*`` are daily
+    features whatever the decision interval. A store holding a clean 4h series
+    and no daily one is not fit to measure on, and a scan of the 4h series
+    alone said "no gaps" about it. When the backdrop is absent the line says
+    what lands it, since "no rows stored" under a series nobody asked about
+    would read as noise.
     """
+    backdrop = interval != DAILY_INTERVAL
     series = [(scan_candles(store, coin=coin, interval=interval), interval)]
+    if backdrop:
+        series.append((scan_candles(store, coin=coin, interval=DAILY_INTERVAL), DAILY_INTERVAL))
     if funding:
         series.append((scan_funding(store, coin=coin), FUNDING_SERIES))
     for report, name in series:
         for line in render_report(report):
             print(line)
         _print_reach(store, coin=coin, series=name)
+        if backdrop and name == DAILY_INTERVAL and report.rows == 0:
+            print(
+                "  every experiment reads the daily backdrop (close_1d, sma_1d_*); "
+                f"`fetch --coin {coin} --interval {DAILY_INTERVAL} --skip-funding` lands it"
+            )
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
@@ -373,11 +405,32 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
             )
         ]
         if not args.skip_funding:
-            results.append(backfill_funding(market, store, coin=coin, since=since, end=end))
+            start = _funding_start(store, coin=coin, since=since, resume=args.resume)
+            results.append(backfill_funding(market, store, coin=coin, since=start, end=end))
         for result in results:
             print(render_fetch(result))
         _print_scans(store, coin=coin, interval=args.interval, funding=not args.skip_funding)
     return 0
+
+
+def _funding_start(
+    store: ResearchStore, *, coin: str, since: datetime, resume: bool
+) -> datetime:
+    """``--since``, or under ``--resume`` the start the walk's own rule picks - said either way.
+
+    Said, because the recorded reach will name this start as what was asked
+    from, and an operator reading "asked from" a date they never typed
+    should have seen where it came from. The trade-off between the two
+    starts is the flag's help text.
+    """
+    if not resume:
+        return since
+    start = funding_resume_start(store, coin=coin, since=since)
+    if start == since:
+        print("funding: nothing newer than --since is stored; walking from --since")
+    else:
+        print(f"funding: resuming from {start.isoformat()}, just past the newest stored settlement")
+    return start
 
 
 def _cmd_gaps(args: argparse.Namespace) -> int:

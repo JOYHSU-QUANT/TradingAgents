@@ -9,9 +9,11 @@ import pytest
 
 from contrib.autoresearch import fetch as fetch_module
 from contrib.autoresearch.fetch import (
+    SeriesFetch,
     StopReason,
     backfill_candles,
     backfill_funding,
+    describe_stop,
     render_fetch,
 )
 from contrib.autoresearch.gaps import scan_candles, scan_funding
@@ -279,7 +281,7 @@ def test_the_rendered_line_says_both_what_was_written_and_what_was_new(store):
     line = render_fetch(result)
     assert "10 row(s) written" in line
     assert "10 new" in line
-    assert StopReason.REACHED_SINCE.value in line
+    assert describe_stop(StopReason.REACHED_SINCE) in line
 
 
 # -- waiting out a venue throttle -----------------------------------------
@@ -710,3 +712,38 @@ def test_funding_that_posted_while_the_walk_ran_is_not_stored(store):
     stored = [p.time for p in store.iter_funding("BTC")]
     assert stored == [p.time for p in inside]
     assert max(stored) < epoch_ms(market.clock, what="test")
+
+
+# -- what a walk reports ---------------------------------------------------
+
+
+def test_every_ending_has_a_sentence_and_the_value_is_a_token_nobody_prints():
+    """The wording table is complete, and a rewording is not a change of vocabulary.
+
+    The sentences were once the members' values, so a test pinning a phrase
+    by substring could not tell a wording touch-up from a behaviour change.
+    """
+    for stopped in StopReason:
+        sentence = describe_stop(stopped)  # a member without wording fails here, by KeyError
+        assert sentence and sentence != stopped.value
+        assert " " not in stopped.value
+
+
+@pytest.mark.parametrize(
+    ("rows_before", "rows_after", "rows_written"),
+    [(10, 3, 0), (0, 5, 4)],
+    ids=["the store shrank", "more rows are new than were written"],
+)
+def test_a_fetch_result_no_walk_could_produce_is_refused_where_it_is_built(
+    rows_before, rows_after, rows_written
+):
+    """A walk only upserts; a result saying otherwise is hand-built, and fails here."""
+    with pytest.raises(ValueError, match=r"only upserts|were written"):
+        SeriesFetch(
+            label="BTC 4h candles",
+            pages=1,
+            rows_written=rows_written,
+            rows_before=rows_before,
+            rows_after=rows_after,
+            stopped=StopReason.REACHED_SINCE,
+        )

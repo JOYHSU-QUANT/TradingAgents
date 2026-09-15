@@ -56,16 +56,28 @@ _COSTS = CostModel(taker_fee_rate=0.001, slippage_bps=10, leverage=1)
 _FREE = CostModel(taker_fee_rate=0, slippage_bps=0, leverage=1)
 
 
-def _funding(bars: int, *, rate: float = 0.0001, hours: int | None = None) -> list[FundingPoint]:
-    """Hourly settlements from one hour after the anchor, covering ``bars`` 4h bars exactly.
+# How late the venue posts a settlement after its hour, in the shape this suite
+# stamps them: inside the 2-99 ms measured on mainnet (see ``constants``).
+_JITTER_MS = 57
 
-    Starts an hour in because a settlement stamped ON a bar's open belongs
-    to the bar before it; from there the four stamps of each bar sit at
-    open + 1h .. open + 4h, and the last one lands on the close.
+
+def _funding(bars: int, *, rate: float = 0.0001, hours: int | None = None) -> list[FundingPoint]:
+    """Hourly settlements from an hour after the anchor, covering ``bars`` 4h bars exactly.
+
+    Stamped the way the venue stamps them: ``_JITTER_MS`` after the hour. Starts
+    an hour in because the span a measurement checks for coverage runs from
+    just past the first open to just past the last close - the settlement due
+    ON the first open is the bar before's, and the one due at the last close
+    posts after it and is the span's last. From there the four a bar pays sit
+    just inside its ``(open, close]``: its own open hour's (every bar after the
+    first), then one, two and three hours later; the one due at its close
+    posts into the next bar. A stamp exactly ON an hour is a shape the venue
+    has never produced, and one the charging rule leaves in the crack between
+    two venue bars (see ``_Settlements``), so no fixture here stamps one.
     """
     count = bars * 4 if hours is None else hours
     return [
-        FundingPoint(time=ANCHOR_MS + (i + 1) * MS_PER_HOUR, rate=Decimal(str(rate)))
+        FundingPoint(time=ANCHOR_MS + (i + 1) * MS_PER_HOUR + _JITTER_MS, rate=Decimal(str(rate)))
         for i in range(count)
     ]
 
@@ -98,11 +110,6 @@ def _run(
     step = interval_to_ms(interval)
     frame = FeatureFrame(bundle, indicator_lookback=lookback)
     return evaluate_segment(spec, frame, _segment(first, stop, step=step), costs, interval=interval)
-
-
-def _venue_shaped(bars):
-    """Bars whose close is a millisecond before the next open — the venue's real stamps."""
-    return [dataclasses.replace(bar, close_time=bar.close_time - 1) for bar in bars]
 
 
 def _equity_before(result: SegmentResult, index: int) -> float:
@@ -160,16 +167,14 @@ def test_a_settlement_posted_just_after_a_close_belongs_to_the_next_bar():
     at that hour's open exists when it posts; one flattened at that hour's
     close does not — and it is the rule the feature module reads by."""
     closes = [110, 120, 130]
-    late = [
-        FundingPoint(time=point.time + 57, rate=point.rate) for point in _funding(3, rate=0.001)
-    ]
-    result = _run(_spec(), _bundle(closes, funding=late), costs=_FREE)
+    result = _run(_spec(), _bundle(closes, rate=0.001), costs=_FREE)
     trade = result.trades[0]
-    # Filled at bar 1's open: the settlement stamped 57 ms after bar 0's close
-    # (= bar 1's open) is paid, and so is the one 57 ms after bar 1's close;
-    # the one 57 ms after bar 2's close, where the position was flattened, is
-    # not. Four settlements a bar either way — and none reported missing,
-    # since the span's last one exists, it just posts after the close.
+    # Filled at bar 1's open: the settlement due at bar 0's close posts 57 ms
+    # after it, a millisecond and 57 into bar 1, and is paid; so is the one
+    # due at bar 1's close. The one due at bar 2's close, where the position
+    # was flattened, posts after that close and is not. Four settlements a
+    # bar — and none reported missing, since the span's last one exists, it
+    # just posts after the close.
     size = 0.5 / 120
     assert trade.funding == pytest.approx(0.001 * size * (4 * 120 + 4 * 130))
     assert result.funding_settlements_missing == 0
@@ -567,14 +572,13 @@ def test_the_first_labelled_close_files_only_the_bar_after_it():
     assert sum(b.bars for b in result.regime_buckets) == result.bars
 
 
-def test_a_missing_settlement_is_counted_on_venue_shaped_bars_too():
+def test_a_span_a_millisecond_short_of_its_hours_still_expects_every_settlement():
     """A venue span of N bars is N × 4 hours less a millisecond; rounded, it
     expects N × 4 settlements, and one deleted is one missing. Floored it would
     expect one fewer and read the deletion as complete."""
-    bars = _venue_shaped(candles([110.0] * 5))
-    points = [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(5)]
+    points = _funding(5)
     del points[7]
-    result = _run(_spec(), SeriesBundle(bars, funding=points))
+    result = _run(_spec(), SeriesBundle(candles([110.0] * 5), funding=points))
     assert result.funding_settlements_missing == 1
 
 
@@ -906,15 +910,15 @@ def test_the_report_states_the_parameters_the_numbers_depend_on():
     assert "gross: return" in text and "net  : return" in text
 
 
-def test_venue_shaped_stamps_count_and_align_the_same_as_the_test_shaped_ones(store):
+def test_the_day_closing_with_the_bar_is_loaded_and_the_millisecond_loses_no_settlement(store):
     """The venue closes a bar one millisecond before the next open. The expected
     settlement count must not lose one to that millisecond, and the daily bar
     whose close is exactly the last 4h close must still be loaded."""
-    bars = _venue_shaped(candles([110.0] * 12))
-    daily = _venue_shaped(candles([1000.0, 1001.0], start_ms=ANCHOR_MS, step_ms=_DAY))
+    bars = candles([110.0] * 12)
+    daily = candles([1000.0, 1001.0], start_ms=ANCHOR_MS, step_ms=_DAY)
     store.upsert_candles("BTC", "4h", bars)
     store.upsert_candles("BTC", "1d", daily)
-    store.upsert_funding("BTC", [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(12)])
+    store.upsert_funding("BTC", _funding(12))
     # Bound at the fifth bar: the first day is still open, so no daily bar...
     five = load_bundle(store, coin="BTC", interval="4h", until_ms=bars[4].open_time)
     assert five.daily == ()
@@ -981,37 +985,27 @@ def test_load_bundle_reads_nothing_past_the_bound(store):
     bundle = load_bundle(store, coin="BTC", interval="4h", until_ms=split.loadable_until())
     assert bundle.bars[-1].open_time == split.validation.end_ms - _STEP
     assert bundle.bars[-1].open_time < split.holdout.start_ms
-    assert bundle.funding[-1].time <= bundle.bars[-1].close_time
+    # The settlement due at the bound's last close posts after it and is read
+    # - a fact about that close - and the one due an hour later is not.
+    assert bundle.funding[-1].time == bundle.bars[-1].close_time + 1 + _JITTER_MS
     # A day that CLOSES inside the holdout is not held, even if it opened before.
     assert bundle.daily[-1].close_time <= bundle.bars[-1].close_time
     assert len(bundle.daily) == 4
     everything = load_bundle(store, coin="BTC", interval="4h")
     assert len(everything.bars) == 30
     assert len(everything.funding) == 120
-    # Written OVER the exact stamps, the late ones are a second settlement in
-    # every hour: counted, that store read as covered and charged each hour's
-    # carry twice. The scan refuses it.
-    late_points = [FundingPoint(time=p.time + 57, rate=p.rate) for p in _funding(30)]
+    # A second post in every hour, 57 ms after the first: counted, that store
+    # read as covered and charged each hour's carry twice. The scan refuses it.
+    late_points = [FundingPoint(time=p.time + _JITTER_MS, rate=p.rate) for p in _funding(30)]
     store.upsert_funding("BTC", late_points)
     doubled = load_bundle(store, coin="BTC", interval="4h", until_ms=split.loadable_until())
     with pytest.raises(EvaluationError, match=r"not on the hourly grid \(24 duplicate"):
         evaluate_segment(
             _spec(), FeatureFrame(doubled), split.validation, _COSTS, interval="4h"
         )
-    # The settlement DUE at the bound's last close posts 57 ms after it and is
-    # read; the one due an hour later is not. Measured on the window: no
-    # settlement missing, which a bound at the exact close got wrong.
-    from contrib.autoresearch.store import ResearchStore
-
-    with ResearchStore() as venue:
-        venue.upsert_candles("BTC", "4h", candles(_wander(30)))
-        venue.upsert_candles(
-            "BTC", "1d", candles([1000, 1001, 1002, 1003, 1004], start_ms=ANCHOR_MS, step_ms=_DAY)
-        )
-        venue.upsert_funding("BTC", late_points)
-        late = load_bundle(venue, coin="BTC", interval="4h", until_ms=split.loadable_until())
-    assert late.funding[-1].time == late.bars[-1].close_time + 57
-    result = evaluate_segment(_spec(), FeatureFrame(late), split.validation, _COSTS, interval="4h")
+    # Measured on the bounded window: no settlement missing, which a bound at
+    # the exact close got wrong.
+    result = evaluate_segment(_spec(), FeatureFrame(bundle), split.validation, _COSTS, interval="4h")
     assert result.funding_settlements_missing == 0
     with pytest.raises(EvaluationError, match="holds no 1d bars for ETH"):
         load_bundle(store, coin="ETH", interval="1d")

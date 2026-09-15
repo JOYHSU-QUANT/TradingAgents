@@ -39,7 +39,7 @@ from .costs import CostModel
 from .dsl import StrategySpec, spec_hash
 from .evaluator import EvaluationError, SplitResult, evaluate_split, load_bundle
 from .features import FeatureFrame, SeriesBundle
-from .gaps import GapReport, scan_stamps
+from .gaps import GapReport, scan_bars, scan_stamps
 from .ledger import (
     Experiment,
     Ledger,
@@ -128,7 +128,9 @@ def require_clean_history(bundle: SeriesBundle, interval: str) -> int:
     over a stamp nothing looks at.
 
     Bars and daily bars are refused on ANY finding: a hole there makes a
-    windowed mean span more calendar than its name. Settlements are refused
+    windowed mean span more calendar than its name, and a misshapen bar (one
+    whose close disagrees with its interval) is another cadence written into
+    the series. Settlements are refused
     on a duplicate or off-grid stamp — counted, it stands in for a missing
     hour — and their HOLES are counted and returned rather than refused,
     because that is the coverage policy the features already apply
@@ -138,14 +140,12 @@ def require_clean_history(bundle: SeriesBundle, interval: str) -> int:
     key = studied_interval(interval)
     step = interval_to_ms(key)
     first_close = bundle.bars[0].close_time
-    bars = scan_stamps(
-        f"{key} bars", step, CANDLE_STAMP_TOLERANCE_MS, [bar.open_time for bar in bundle.bars]
-    )
-    daily = scan_stamps(
+    bars = scan_bars(f"{key} bars", step, CANDLE_STAMP_TOLERANCE_MS, bundle.bars)
+    daily = scan_bars(
         "1d bars",
         MS_PER_DAY,
         CANDLE_STAMP_TOLERANCE_MS,
-        [day.open_time for day in bundle.daily if day.close_time >= first_close - _DAILY_REACH_MS],
+        [day for day in bundle.daily if day.close_time >= first_close - _DAILY_REACH_MS],
     )
     funding = scan_stamps(
         "funding settlements",
@@ -154,17 +154,23 @@ def require_clean_history(bundle: SeriesBundle, interval: str) -> int:
         [point.time for point in bundle.funding if point.time >= first_close - _FUNDING_REACH_MS],
     )
     for report, holes_allowed in ((bars, False), (daily, False), (funding, True)):
-        if report.duplicate_ms or report.misaligned_ms or (report.gaps and not holes_allowed):
+        beyond_holes = report.duplicate_ms or report.misaligned_ms or report.misshapen
+        if beyond_holes or (report.gaps and not holes_allowed):
             raise EvaluationError(_unclean(report))
     return len(funding.gaps)
 
 
 def _unclean(report: GapReport) -> str:
-    stamps = [gap.after_ms for gap in report.gaps] + list(report.duplicate_ms + report.misaligned_ms)
+    stamps = (
+        [gap.after_ms for gap in report.gaps]
+        + list(report.duplicate_ms + report.misaligned_ms)
+        + [bar.open_ms for bar in report.misshapen]
+    )
     return (
         f"the {report.label} this measurement reads are not a grid: {len(report.gaps)} hole(s), "
         f"{len(report.duplicate_ms)} duplicate slot(s), {len(report.misaligned_ms)} off-grid "
-        f"stamp(s), the earliest at {from_epoch_ms(min(stamps)).isoformat()}. A feature reading "
+        f"stamp(s), {len(report.misshapen)} misshapen bar(s), the earliest at "
+        f"{from_epoch_ms(min(stamps)).isoformat()}. A feature reading "
         f"across a hole covers more calendar than its name says — run `gaps`, then `fetch` "
         f"the span."
     )

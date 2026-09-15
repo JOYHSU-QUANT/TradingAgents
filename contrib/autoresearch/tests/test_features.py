@@ -300,7 +300,7 @@ def test_a_daily_close_one_millisecond_into_the_future_is_invisible():
     # one millisecond BEFORE the second day does and the next closes after it.
     daily = candles([1000, 2000], start_ms=ANCHOR_MS, step_ms=_DAY_MS)
     just_before = daily[1].close_time - 1
-    bars = candles([100, 110], start_ms=just_before - _STEP_MS, step_ms=_STEP_MS)
+    bars = candles([100, 110], start_ms=daily[1].close_time - _STEP_MS, step_ms=_STEP_MS)
     assert bars[0].close_time == just_before
     series = _column(FeatureFrame(SeriesBundle(bars, daily=daily)), "close_1d")
     assert series[0] == pytest.approx(1000.0)  # the second day closes 1 ms too late
@@ -349,17 +349,18 @@ def test_a_daily_feature_without_a_daily_series_is_refused_by_name():
 def test_the_funding_rate_is_the_settlement_in_force_at_the_close():
     bundle = SeriesBundle(candles([100, 110]), funding=funding_points(12))
     series = _column(FeatureFrame(bundle), "funding_rate")
-    # Bar 0 closes four hours in, so the settlement stamped at that instant is
-    # the fifth one; bar 1 closes four hours later again.
-    assert series[0] == pytest.approx(float(Decimal("0.00001") * 5))
-    assert series[1] == pytest.approx(float(Decimal("0.00001") * 9))
+    # Bar 0 closes a millisecond before the fourth hour, so the settlement due
+    # on that hour has not posted yet: the one in force is the fourth, stamped
+    # three hours in. Bar 1 closes four hours later again: the eighth.
+    assert series[0] == pytest.approx(float(Decimal("0.00001") * 4))
+    assert series[1] == pytest.approx(float(Decimal("0.00001") * 8))
 
 
 def test_a_funding_series_that_stops_early_does_not_carry_its_last_rate_forward():
     """Carrying it would price weeks of funding off one observation."""
     bundle = SeriesBundle(candles([100, 110, 120]), funding=funding_points(5))
     series = _column(FeatureFrame(bundle), "funding_rate")
-    assert series[0] == pytest.approx(float(Decimal("0.00001") * 5))
+    assert series[0] == pytest.approx(float(Decimal("0.00001") * 4))
     assert series[1] is None
     assert series[2] is None
 
@@ -368,8 +369,10 @@ def test_cumulative_funding_sums_the_settlements_inside_the_bars_it_names():
     bundle = SeriesBundle(candles([100, 110, 120]), funding=funding_points(12))
     series = _column(FeatureFrame(bundle), "funding_cum_1")
     assert series[0] is None  # there is no previous bar to open the window
-    # Bar 1's window is the four settlements after bar 0's close: numbers 6..9.
-    assert series[1] == pytest.approx(float(Decimal("0.00001") * (6 + 7 + 8 + 9)))
+    # Bar 1's window is (bar 0's close, bar 1's close]: the settlements four,
+    # five, six and seven hours in - numbers 5..8. The one eight hours in
+    # posts a millisecond after bar 1 closes and is bar 2's.
+    assert series[1] == pytest.approx(float(Decimal("0.00001") * (5 + 6 + 7 + 8)))
 
 
 @pytest.mark.parametrize(
@@ -407,13 +410,12 @@ def test_cumulative_funding_is_none_when_the_series_starts_inside_the_window():
     """A sum missing part of its window is understated and does not look wrong.
 
     Bar 1's window runs from bar 0's close to its own, and the settlements it
-    should hold are the ones an hour, two, three and four after that opening.
-    A series starting three hours in holds only the last two of them, so the
-    carry it would report is a little over half the real one — which is why
-    this is ``None`` rather than a sum. The neighbouring test covers the case
-    that looks the same and is not: a series starting exactly one hour in
-    misses nothing, because the settlement ON the boundary belongs to the
-    previous window.
+    should hold are the ones on the hour bar 0 closes at (a millisecond after
+    the close) and one, two and three hours later. A series starting three
+    hours in holds only the last of them, so the carry it would report is a
+    fraction of the real one — which is why this is ``None`` rather than a
+    sum. The neighbouring test covers the case that looks the same and is
+    not: a series starting exactly on that hour misses nothing.
     """
     late = funding_points(12, start_ms=ANCHOR_MS + 7 * MS_PER_HOUR)
     bundle = SeriesBundle(candles([100, 110, 120]), funding=late)
@@ -423,11 +425,11 @@ def test_cumulative_funding_is_none_when_the_series_starts_inside_the_window():
 def test_cumulative_funding_still_sums_a_series_that_starts_on_the_window_edge():
     """The boundary the guard above must not over-refuse.
 
-    The window is half-open — the settlement at bar 0's close is that bar's,
-    not bar 1's — so a series whose first point lands one hour after bar 0
-    closes covers bar 1 completely.
+    The window is half-open at bar 0's close, which is a millisecond before
+    the fourth hour — so the settlement stamped ON that hour is bar 1's first,
+    and a series whose first point lands there covers bar 1 completely.
     """
-    edge = funding_points(12, start_ms=ANCHOR_MS + 5 * MS_PER_HOUR)
+    edge = funding_points(12, start_ms=ANCHOR_MS + 4 * MS_PER_HOUR)
     bundle = SeriesBundle(candles([100, 110, 120]), funding=edge)
     summed = _column(FeatureFrame(bundle), "funding_cum_1")[1]
     assert summed == pytest.approx(float(Decimal("0.00001") * (1 + 2 + 3 + 4)))

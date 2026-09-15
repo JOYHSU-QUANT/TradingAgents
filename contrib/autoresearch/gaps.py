@@ -20,6 +20,10 @@ what can go wrong with that assignment:
 - a **misalignment** — a stamp too far from any slot to be in one. No
   re-fetch repairs this; it means the venue changed cadence, or two cadences
   were written into one series (a ``1d`` page landing in the ``4h`` rows).
+- a **misshapen bar** — bars only: a bar whose ``close_time`` is not where
+  its interval says it ends. The stamp scan cannot see this one, because a
+  daily bar written into the 4h series sits exactly on a 4h slot and is
+  wrong only in how long it says it lasted. See :func:`scan_bars`.
 
 "Too far" is a per-series tolerance rather than exact equality, because the
 venue stamps its two series differently and measuring both as exact was wrong
@@ -37,21 +41,24 @@ and the whole point of the scan is to be the thing that cannot.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 
 from .constants import (
     CANDLE_STAMP_TOLERANCE_MS,
     FUNDING_INTERVAL_MS,
     FUNDING_STAMP_TOLERANCE_MS,
+    bar_span_ms,
 )
 from .store import ResearchStore
-from .upstream import from_epoch_ms, interval_to_ms, parse_interval
+from .upstream import Candle, from_epoch_ms, interval_to_ms, parse_interval
 
 __all__ = [
     "Gap",
     "GapReport",
+    "Misshapen",
     "render_report",
+    "scan_bars",
     "scan_candles",
     "scan_funding",
     "scan_stamps",
@@ -72,6 +79,25 @@ class Gap:
     before_ms: int
     missing: int
 
+    def __post_init__(self) -> None:
+        # Checked where the value is built, for the reason ``GapReport`` gives
+        # below: a hole that runs backwards, or one missing nothing, is not a
+        # finding anyone can act on. The scan never builds one, so the first
+        # hand-built one should fail here and not in a rendered report.
+        if self.after_ms >= self.before_ms or self.missing < 1:
+            raise ValueError(
+                f"Gap is not a hole: after={self.after_ms} before={self.before_ms} "
+                f"missing={self.missing}"
+            )
+
+
+@dataclass(frozen=True)
+class Misshapen:
+    """One bar whose ``close_time`` is not where its interval says it ends."""
+
+    open_ms: int
+    close_ms: int
+
 
 @dataclass(frozen=True)
 class GapReport:
@@ -91,6 +117,9 @@ class GapReport:
     gaps: tuple[Gap, ...]
     duplicate_ms: tuple[int, ...]
     misaligned_ms: tuple[int, ...]
+    # Bars only. A stamp scan cannot see it, so ``scan_stamps`` leaves it
+    # empty and ``scan_bars`` fills it; a funding report never carries one.
+    misshapen: tuple[Misshapen, ...] = ()
 
     def __post_init__(self) -> None:
         # The one coupling this object has, checked where it is built rather
@@ -110,7 +139,7 @@ class GapReport:
 
     @property
     def complete(self) -> bool:
-        return not (self.gaps or self.duplicate_ms or self.misaligned_ms)
+        return not (self.gaps or self.duplicate_ms or self.misaligned_ms or self.misshapen)
 
     @property
     def missing_rows(self) -> int:
@@ -185,6 +214,34 @@ def scan_stamps(label: str, step_ms: int, tolerance_ms: int, stamps: Sequence[in
     )
 
 
+def scan_bars(label: str, step_ms: int, tolerance_ms: int, bars: Iterable[Candle]) -> GapReport:
+    """:func:`scan_stamps` over the bars' opens, plus the one finding only a bar can have.
+
+    A bar's ``close_time`` is the venue's own statement of where it ended, and
+    on this venue that is one millisecond before the next open
+    (:data:`~contrib.autoresearch.constants.CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS`,
+    measured). A bar that says otherwise is **misshapen**: it came from
+    another cadence - a daily bar written into the 4h series sits exactly on
+    a 4h slot, so the stamp scan calls it aligned - or the venue changed what
+    a bar is. Neither is repaired by re-fetching the window, and until this
+    check such a bar was stored faithfully and never mentioned.
+
+    The evaluator's history check comes through here too, so the series it
+    refuses to measure on and the series ``gaps`` reports are the same one.
+    """
+    # One pass, so a store cursor can be handed in as it is rather than
+    # materialised: the reach the scan is asked about is thousands of bars.
+    span = bar_span_ms(step_ms)
+    stamps: list[int] = []
+    misshapen: list[Misshapen] = []
+    for bar in bars:
+        stamps.append(bar.open_time)
+        if bar.close_time - bar.open_time != span:
+            misshapen.append(Misshapen(open_ms=bar.open_time, close_ms=bar.close_time))
+    report = scan_stamps(label, step_ms, tolerance_ms, stamps)
+    return replace(report, misshapen=tuple(misshapen))
+
+
 def scan_candles(store: ResearchStore, *, coin: str, interval: str) -> GapReport:
     """Scan the ``coin``/``interval`` candle series on its own interval grid.
 
@@ -195,9 +252,11 @@ def scan_candles(store: ResearchStore, *, coin: str, interval: str) -> GapReport
     instead of surviving behind a clean-looking gap report.
     """
     key = parse_interval(interval).value
-    stamps = [c.open_time for c in store.iter_candles(coin, key)]
-    return scan_stamps(
-        f"{coin} {key} candles", interval_to_ms(key), CANDLE_STAMP_TOLERANCE_MS, stamps
+    return scan_bars(
+        f"{coin} {key} candles",
+        interval_to_ms(key),
+        CANDLE_STAMP_TOLERANCE_MS,
+        store.iter_candles(coin, key),
     )
 
 
@@ -212,12 +271,12 @@ def _stamp(ms: int) -> str:
     return from_epoch_ms(ms).isoformat()
 
 
-def _listed(lines: list[str], stamps: Sequence[int], *, prefix: str, noun: str) -> None:
-    """Append at most :data:`_MAX_LISTED` stamps, then say how many were left out."""
-    for stamp in stamps[:_MAX_LISTED]:
-        lines.append(f"  {prefix}: {_stamp(stamp)}")
-    if len(stamps) > _MAX_LISTED:
-        lines.append(f"  ... and {len(stamps) - _MAX_LISTED} more {noun}")
+def _listed(lines: list[str], items: Sequence[str], *, noun: str) -> None:
+    """Append at most :data:`_MAX_LISTED` rendered findings, then say how many were left out."""
+    for item in items[:_MAX_LISTED]:
+        lines.append(f"  {item}")
+    if len(items) > _MAX_LISTED:
+        lines.append(f"  ... and {len(items) - _MAX_LISTED} more {noun}")
 
 
 def render_report(report: GapReport) -> list[str]:
@@ -237,17 +296,36 @@ def render_report(report: GapReport) -> list[str]:
     head = f"{report.label}: {report.rows} rows, {span}"
     if report.complete:
         return [f"{head} - no gaps"]
+    # The three stamp findings are always counted, zero included, so a reader
+    # sees the whole taxonomy. Misshapen bars are counted only when there are
+    # any: a settlement has no shape, and a funding line reading "0 misshapen
+    # bar(s)" would name a finding that series can never have.
     lines = [
         f"{head} - {len(report.gaps)} gap(s), {report.missing_rows} row(s) missing,"
         f" {len(report.duplicate_ms)} duplicate slot(s),"
         f" {len(report.misaligned_ms)} off-grid stamp(s)"
+        + (f", {len(report.misshapen)} misshapen bar(s)" if report.misshapen else "")
     ]
-    for gap in report.gaps[:_MAX_LISTED]:
-        lines.append(
-            f"  gap: {_stamp(gap.after_ms)} -> {_stamp(gap.before_ms)} ({gap.missing} missing)"
-        )
-    if len(report.gaps) > _MAX_LISTED:
-        lines.append(f"  ... and {len(report.gaps) - _MAX_LISTED} more gap(s)")
-    _listed(lines, report.duplicate_ms, prefix="duplicate slot", noun="duplicate slot(s)")
-    _listed(lines, report.misaligned_ms, prefix="off-grid", noun="off-grid stamp(s)")
+    expected = bar_span_ms(report.step_ms)
+    _listed(
+        lines,
+        [
+            f"gap: {_stamp(gap.after_ms)} -> {_stamp(gap.before_ms)} ({gap.missing} missing)"
+            for gap in report.gaps
+        ],
+        noun="gap(s)",
+    )
+    _listed(
+        lines, [f"duplicate slot: {_stamp(s)}" for s in report.duplicate_ms], noun="duplicate slot(s)"
+    )
+    _listed(lines, [f"off-grid: {_stamp(s)}" for s in report.misaligned_ms], noun="off-grid stamp(s)")
+    _listed(
+        lines,
+        [
+            f"misshapen: {_stamp(bar.open_ms)} closes {bar.close_ms - bar.open_ms} ms after "
+            f"it opens, not {expected}"
+            for bar in report.misshapen
+        ],
+        noun="misshapen bar(s)",
+    )
     return lines

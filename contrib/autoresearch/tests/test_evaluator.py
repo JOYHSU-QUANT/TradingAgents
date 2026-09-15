@@ -171,11 +171,10 @@ def test_a_settlement_posted_just_after_a_close_belongs_to_the_next_bar():
     trade = result.trades[0]
     # Filled at bar 1's open: the settlement due at bar 0's close posts 58 ms
     # after it (a millisecond past the close is bar 1's open, then the jitter)
-    # and is paid; so is the one
-    # due at bar 1's close. The one due at bar 2's close, where the position
-    # was flattened, posts after that close and is not. Four settlements a
-    # bar — and none reported missing, since the span's last one exists, it
-    # just posts after the close.
+    # and is paid; so is the one due at bar 1's close. The one due at bar 2's
+    # close, where the position was flattened, posts after that close and is
+    # not. Four settlements a bar — and none reported missing, since the
+    # span's last one exists, it just posts after the close.
     size = 0.5 / 120
     assert trade.funding == pytest.approx(0.001 * size * (4 * 120 + 4 * 130))
     assert result.funding_settlements_missing == 0

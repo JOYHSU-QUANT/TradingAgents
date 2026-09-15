@@ -859,6 +859,18 @@ def _require_measurable(
     # one finding a stamp scan cannot make, a bar whose close disagrees with
     # the interval, which ``scan_bars`` adds over the same stamps.
     report = scan_bars(str(segment), step, CANDLE_STAMP_TOLERANCE_MS, bars[first:stop])
+    if report.duplicate_ms or report.misaligned_ms:
+        # Named before any hole: a stamp the scanner could not place on the
+        # grid leaves its slot empty, so the same series also reads as having
+        # a hole there, and the hole is the consequence rather than the fact.
+        # And before a misshapen bar: an off-grid bar is misshapen too when it
+        # came from another cadence, but no re-fetch repairs it, while the
+        # shape refusal below promises one.
+        raise EvaluationError(
+            f"{segment} is not on the {step} ms grid ({len(report.duplicate_ms)} duplicate "
+            f"slot(s), {len(report.misaligned_ms)} off-grid stamp(s)); a re-fetch does not "
+            f"repair this — run `gaps` to see which stamps."
+        )
     if report.misshapen:
         bar = report.misshapen[0]
         raise EvaluationError(
@@ -866,15 +878,6 @@ def _require_measurable(
             f"{step} ms interval, the first opening at {from_epoch_ms(bar.open_ms).isoformat()} "
             f"and lasting {bar.close_ms - bar.open_ms} ms - not the venue's bar shape. Run "
             f"`gaps`; a re-fetch at this interval overwrites a bar another cadence wrote here."
-        )
-    if report.duplicate_ms or report.misaligned_ms:
-        # Named before any hole: a stamp the scanner could not place on the
-        # grid leaves its slot empty, so the same series also reads as having
-        # a hole there, and the hole is the consequence rather than the fact.
-        raise EvaluationError(
-            f"{segment} is not on the {step} ms grid ({len(report.duplicate_ms)} duplicate "
-            f"slot(s), {len(report.misaligned_ms)} off-grid stamp(s)); a re-fetch does not "
-            f"repair this — run `gaps` to see which stamps."
         )
     if report.gaps:
         gap = report.gaps[0]

@@ -409,17 +409,8 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
             )
         ]
         if not args.skip_funding:
-            start = _funding_start(store, coin=coin, since=since, resume=args.resume)
-            if start >= end:
-                # Only a resume can land here (a --since at or past the clock was
-                # refused by the candle walk above): the newest stored settlement
-                # is at or past the venue clock, and the walk's own refusal would
-                # blame a --since the operator never typed.
-                print(
-                    "funding: the store already holds every settlement up to the venue "
-                    "clock; nothing to walk"
-                )
-            else:
+            start = _funding_start(store, coin=coin, since=since, end=end, resume=args.resume)
+            if start is not None:
                 results.append(
                     backfill_funding(market, store, coin=coin, since=start, end=end)
                 )
@@ -430,18 +421,31 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
 
 
 def _funding_start(
-    store: ResearchStore, *, coin: str, since: datetime, resume: bool
-) -> datetime:
+    store: ResearchStore, *, coin: str, since: datetime, end: datetime, resume: bool
+) -> datetime | None:
     """``--since``, or under ``--resume`` the start the walk's own rule picks - said either way.
 
     Said, because the recorded reach will name this start as what was asked
     from, and an operator reading "asked from" a date they never typed
     should have seen where it came from. The trade-off between the two
     starts is the flag's help text.
+
+    ``None`` when there is nothing to walk: only a resume can get there (a
+    ``--since`` at or past the clock is refused by the candle walk first),
+    when the newest stored settlement is at or past the venue clock. Said
+    here as one line, because the walk's own refusal would blame a
+    ``--since`` the operator never typed, and the funding scan printed after
+    it then describes the previous walk.
     """
     if not resume:
         return since
     start = funding_resume_start(store, coin=coin, since=since)
+    if start >= end:
+        print(
+            "funding: the store already holds every settlement up to the venue clock; "
+            "nothing to walk (the funding scan and reach below are the previous walk's)"
+        )
+        return None
     if start == since:
         print("funding: nothing newer than --since is stored; walking from --since")
     else:

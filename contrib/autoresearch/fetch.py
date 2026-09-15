@@ -214,19 +214,16 @@ class SeriesFetch:
     stopped: StopReason
 
     def __post_init__(self) -> None:
-        # A walk only upserts, so across one the store cannot shrink, and a row
-        # cannot be new without having been written. Neither is an outcome a
-        # walk can produce; a value that says otherwise is hand-built, and the
-        # first one should fail here and not render as a plausible line.
+        # A walk only upserts, so across one the store cannot shrink; a value
+        # that says it did is hand-built, and the first one should fail here
+        # rather than render as a plausible line. Deliberately NOT also "no
+        # more rows new than written": funding is not interval-scoped, so a
+        # second fetch in another terminal lands rows this walk then counts as
+        # new, and a successful fetch must not exit on another writer's work.
         if self.rows_after < self.rows_before:
             raise ValueError(
                 f"{self.label}: rows fell from {self.rows_before} to {self.rows_after} "
                 f"across a walk that only upserts"
-            )
-        if self.rows_added > self.rows_written:
-            raise ValueError(
-                f"{self.label}: {self.rows_added} row(s) are new but only "
-                f"{self.rows_written} were written"
             )
 
     @property

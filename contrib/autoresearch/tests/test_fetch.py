@@ -729,21 +729,28 @@ def test_every_ending_has_a_sentence_and_the_value_is_a_token_nobody_prints():
         assert " " not in stopped.value
 
 
-@pytest.mark.parametrize(
-    ("rows_before", "rows_after", "rows_written"),
-    [(10, 3, 0), (0, 5, 4)],
-    ids=["the store shrank", "more rows are new than were written"],
-)
-def test_a_fetch_result_no_walk_could_produce_is_refused_where_it_is_built(
-    rows_before, rows_after, rows_written
-):
-    """A walk only upserts; a result saying otherwise is hand-built, and fails here."""
-    with pytest.raises(ValueError, match=r"only upserts|were written"):
+def test_a_fetch_result_whose_store_shrank_is_refused_where_it_is_built():
+    """A walk only upserts; a result saying the store shrank is hand-built, and fails here.
+
+    Not also "more rows new than written": funding is not interval-scoped, so
+    a second fetch in another terminal lands rows this walk then counts as
+    new, and a successful fetch must not exit on another writer's work.
+    """
+    with pytest.raises(ValueError, match="only upserts"):
         SeriesFetch(
             label="BTC 4h candles",
             pages=1,
-            rows_written=rows_written,
-            rows_before=rows_before,
-            rows_after=rows_after,
+            rows_written=0,
+            rows_before=10,
+            rows_after=3,
             stopped=StopReason.REACHED_SINCE,
         )
+    shared = SeriesFetch(
+        label="BTC funding",
+        pages=1,
+        rows_written=4,
+        rows_before=0,
+        rows_after=5,
+        stopped=StopReason.REACHED_END,
+    )
+    assert shared.rows_added == 5

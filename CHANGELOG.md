@@ -21,9 +21,11 @@ Breaking changes within the 0.x line are called out explicitly.
   faithfully and never mentioned. `scan_bars` now names a bar whose close is
   not `open + interval - 1` (the millisecond measured on 2026-09-12) as
   MISSHAPEN; `gaps` and `fetch` list them beside the other three findings, and
-  the experiment's history check refuses on them as on any other bar finding -
-  it shares the scan, so the series it refuses and the series `gaps` reports
-  are one. The test fixtures close the venue's way too now. They were
+  the experiment's history check and the evaluator's window check refuse on
+  them as on any other bar finding - both share the scan, so the series they
+  refuse and the series `gaps` reports are one. `GapReport.misshapen` is a
+  required field, so a hand-built bar report has to say it checked. The test
+  fixtures close the venue's way too now. They were
   `open + step`, every test that touched the boundary rebuilt the venue's
   shape by hand, and a fixture closing AT the next open would be a misshapen
   bar in every test that expects a clean series.
@@ -46,7 +48,10 @@ Breaking changes within the 0.x line are called out explicitly.
   rewording is no longer a change of vocabulary and a substring pin no
   longer reads a behaviour change and a wording touch-up the same way. `Gap`
   and `SeriesFetch` refuse a value no scan or walk could produce (a hole
-  running backwards, a store that shrank across a walk that only upserts).
+  running backwards, a store that shrank across a walk that only upserts) -
+  and not "more rows new than written", which a second fetch in another
+  terminal makes true of a successful walk. The wording table's completeness
+  and `DAILY_INTERVAL` being a studied interval are checked at import.
   CI runs `contrib/autoresearch/tests` in its own job, installing
   `requirements.txt` for the venue SDK the pin tests import. The perp docs'
   project tree lists both `contrib/` packages. The multi-version migration

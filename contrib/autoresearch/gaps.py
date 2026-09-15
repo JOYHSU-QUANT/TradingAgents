@@ -227,12 +227,14 @@ def scan_bars(label: str, step_ms: int, tolerance_ms: int, bars: Iterable[Candle
     measured). A bar that says otherwise is **misshapen**: it came from
     another cadence - a daily bar written into the 4h series sits exactly on
     a 4h slot, so the stamp scan calls it aligned - or the venue changed what
-    a bar is. When its open sits on the grid, re-fetching the window at its
-    own cadence overwrites it (the store keys a bar by its open); until this
-    check such a bar was stored faithfully and never mentioned.
+    a bar is. When its open sits on the grid, re-fetching the window at the
+    series' cadence overwrites it (the store keys a bar by its open); until
+    this check such a bar was stored faithfully and never mentioned.
 
-    The evaluator's history check comes through here too, so the series it
-    refuses to measure on and the series ``gaps`` reports are the same one.
+    The evaluator's checks come through here too, so the decision series they
+    refuse to measure on and the series ``gaps`` reports are the same one. (A
+    misshapen DAILY bar is refused earlier, by the bundle's own cadence check,
+    in that check's words.)
     """
     # One pass, so a store cursor can be handed in as it is rather than
     # materialised: the reach the scan is asked about is thousands of bars.

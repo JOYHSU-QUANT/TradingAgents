@@ -237,7 +237,8 @@ def test_a_resume_with_nothing_past_the_venue_clock_says_so_instead_of_blaming_s
     )
     assert main(["fetch", "--since", "2023-01-01", "--db", str(path), "--resume"]) == 0
     out = capsys.readouterr().out
-    assert "nothing to walk" in out
+    assert "nothing to walk (the funding scan and reach below are the previous walk's)" in out
+    assert "resuming from" not in out  # one line, not a promise and a retraction
     assert market.funding_calls == []
     assert "BTC funding: 48 rows" in out
 

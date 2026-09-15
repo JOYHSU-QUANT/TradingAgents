@@ -474,10 +474,10 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # and nothing is refused by name: any engine that just imported the
     # validator carries the key, and read tolerantly, an absent key would
     # mean "forward nothing", each provider's own SDK default.
-    # ``is not None``/blank mirrors the graph's own forwarding guard;
-    # the graph's validator, so the value accepted here is by construction
-    # the value ``build_graph`` accepts, and the int it yields is what the
-    # graph forwards.
+    # ``is not None``/blank mirrors the graph's own forwarding guard, and
+    # the graph's own validator does the check, so the value accepted here
+    # is by construction the value ``build_graph`` accepts, and the int it
+    # yields is what the graph forwards.
     raw_retries = engine_config.get("llm_max_retries")
     if raw_retries is not None and raw_retries != "":
         try:

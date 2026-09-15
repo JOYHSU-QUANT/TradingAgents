@@ -218,6 +218,26 @@ def test_build_engine_config_leaves_an_unset_retry_budget_alone(monkeypatch, cap
     engine_config, _ = bridge_mod._build_engine_config({})
     assert "llm_max_retries" not in engine_config
 
+
+def test_build_engine_config_names_a_stale_engine_lacking_the_retry_validator(monkeypatch):
+    # The first line against a stale tradingagents shadowing the checkout
+    # (PR #109's shape) is now the bridge's own import: an engine whose
+    # default_config imports fine but predates #266 has no
+    # ``_coerce_max_retries``, and that partial-name ImportError must ride
+    # the named EngineImportError lane and say "stale" — not escape as a
+    # bare ImportError past callers that catch only EngineConfigError, and
+    # not fall through to the cap's by-name refusal (the stand-in below even
+    # carries the cap key, so only the import can be what refused).
+    import sys
+    from types import ModuleType
+
+    stale = ModuleType("tradingagents.default_config")
+    stale.DEFAULT_CONFIG = {"max_tokens": None}
+    monkeypatch.setitem(sys.modules, "tradingagents.default_config", stale)
+    with pytest.raises(bridge_mod.EngineImportError, match="_coerce_max_retries.*stale"):
+        bridge_mod._build_engine_config({})
+
+
 def test_build_engine_config_refuses_an_engine_that_cannot_carry_the_cap(monkeypatch):
     """A missing engine ``max_tokens`` key must refuse by name, not default.
 

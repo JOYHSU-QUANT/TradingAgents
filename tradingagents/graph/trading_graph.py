@@ -39,8 +39,9 @@ from tradingagents.dataflows.utils import (
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
     DEFAULT_MAX_TOKENS,
-    _coerce_max_retries,  # housed there since #266; on an upstream sync, port edits THERE
-    _coerce_max_tokens,  # both re-exported: upstream tests import them from this module
+    _coerce_max_retries,  # noqa: F401 — housed there since #266; on an upstream sync, port edits THERE
+    _coerce_max_tokens,  # noqa: F401 — both re-exported: upstream tests import them from this module
+    validate_llm_knobs,
 )
 from tradingagents.llm_clients import create_llm_client, is_gateway_provider
 from tradingagents.reporting import write_report_tree
@@ -173,27 +174,23 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
-        # Sampling temperature is cross-provider: forward it whenever set.
-        # float() here so a value coming from a TRADINGAGENTS_TEMPERATURE env
-        # string ("0.2") works the same as a programmatic float.
-        temperature = self.config.get("temperature")
-        if temperature is not None and temperature != "":
-            kwargs["temperature"] = float(temperature)
-
-        # SDK retry budget is cross-provider. Forward it only when explicitly set
-        # so each provider keeps its own default (usually 2) otherwise (#1091).
-        max_retries = self.config.get("llm_max_retries")
-        if max_retries is not None and max_retries != "":
-            kwargs["max_retries"] = _coerce_max_retries(max_retries)
-
-        # Completion cap is cross-provider too; Gemini names it
-        # ``max_output_tokens``, so it goes under the right key per provider
-        # (#1204). Validated, not just coerced — see
-        # default_config._coerce_config_int.
-        max_tokens = self.config.get("max_tokens")
-        if max_tokens is not None and max_tokens != "":
+        # The cross-provider knobs — sampling temperature, the SDK retry budget
+        # (#1091) and the completion cap — are forwarded only when explicitly
+        # set, so each provider keeps its own default otherwise, and validated
+        # (not just coerced) by the one family validator the perp bridge also
+        # gates them through at startup, so an env string ("0.2", "8192")
+        # works the same as a programmatic value and a junk one is refused by
+        # name here and there alike — see default_config.validate_llm_knobs.
+        knobs = validate_llm_knobs(self.config)
+        if "temperature" in knobs:
+            kwargs["temperature"] = knobs["temperature"]
+        if "llm_max_retries" in knobs:
+            kwargs["max_retries"] = knobs["llm_max_retries"]
+        if "max_tokens" in knobs:
+            # Gemini names the cap ``max_output_tokens``, so it goes under the
+            # right key per provider (#1204).
             key = "max_output_tokens" if provider == "google" else "max_tokens"
-            kwargs[key] = _coerce_max_tokens(max_tokens)
+            kwargs[key] = knobs["max_tokens"]
         elif is_gateway_provider(provider, base_url=self.config.get("backend_url")):
             # Uncapped through a gateway is the #177 shape: some upstreams
             # substitute the model's full context for a missing cap and

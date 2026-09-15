@@ -62,7 +62,7 @@ from ..conftest import (
     unwritable,
     write_payload,
 )
-from ..live.test_startup import _clearinghouse
+from ..live.test_startup import _btc_position, _clearinghouse
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -2087,19 +2087,24 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
     assert "protection-only" in err
 
 
-@pytest.mark.parametrize(
-    "key,bad,env",
-    [
-        ("max_tokens", "8k", "TRADINGAGENTS_MAX_TOKENS"),
-        ("llm_max_retries", "abc", "TRADINGAGENTS_LLM_MAX_RETRIES"),
-    ],
-)
+# The env knob family the bridge gates at startup, one bad value each: the
+# cap (#177), the retry budget (#266) and the temperature (#269). Both paper
+# lane tests below and the live lane tests further down parametrize over it.
+_BAD_ENGINE_ENV_KNOBS = [
+    ("max_tokens", "8k", "TRADINGAGENTS_MAX_TOKENS"),
+    ("llm_max_retries", "abc", "TRADINGAGENTS_LLM_MAX_RETRIES"),
+    ("temperature", "abc", "TRADINGAGENTS_TEMPERATURE"),
+]
+
+
+@pytest.mark.parametrize("key,bad,env", _BAD_ENGINE_ENV_KNOBS)
 def test_paper_restart_bad_engine_env_knob_with_live_work_enters_protection_only(
     tmp_path, capsys, monkeypatch, paper_seams, key, bad, env
 ):
     """A rejected engine env knob must degrade like a failed import, not exit.
 
-    The cap (issue #177) and the retry budget (issue #266) are validated at
+    The cap (issue #177), the retry budget (issue #266) and the temperature
+    (issue #269) are validated at
     startup so a typo cannot stall every cycle unclassified. But raising
     over a live position must NOT kill
     the process: that would leave the position with nobody watching SL/TP —
@@ -2146,6 +2151,7 @@ def test_paper_restart_bad_engine_env_knob_with_live_work_enters_protection_only
         seen["engine_active"] = engine.has_active_work()
         seen["trading_halted"] = kwargs["trading_halted"]
         seen["halt_reason"] = kwargs["halt_reason"]
+        seen["halt_cause"] = kwargs["halt_cause"]
         return 0
 
     monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
@@ -2154,18 +2160,121 @@ def test_paper_restart_bad_engine_env_knob_with_live_work_enters_protection_only
     assert seen["engine_active"] is True  # the seeded live position
     assert seen["trading_halted"] is True
     assert seen["halt_reason"] == "engine-config-error"
+    assert env in seen["halt_cause"]  # the refusal text, for the settle-exit line
     err = capsys.readouterr().err
     assert env in err  # the fixable cause is named
     assert "protection-only" in err
 
 
-@pytest.mark.parametrize(
-    "key,bad,env",
-    [
-        ("max_tokens", "8k", "TRADINGAGENTS_MAX_TOKENS"),
-        ("llm_max_retries", "abc", "TRADINGAGENTS_LLM_MAX_RETRIES"),
-    ],
-)
+def test_paper_restart_treats_an_unreadable_book_as_live_work(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    """The paper side of ``holds_live_work`` (#270 review): the "anything to
+    guard?" read raising (a locked store, or the engine's own halted guard)
+    on an engine-config-error restart enters protection-only, not a crash
+    over a position nobody watches — the live loop's twin pin is
+    test_the_live_loop_treats_an_unreadable_book_as_live_work. The keyless
+    restart makes the same call, so it is driven too.
+    """
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    path, db = _seed_db(tmp_path)  # a FLAT book: only the raise makes it "live"
+    db.close()
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+
+    def _locked(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(PaperExecutionEngine, "has_active_work", _locked)
+    seen: dict[str, object] = {}
+
+    def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
+        seen["halt_reason"] = kwargs["halt_reason"]
+        return 0
+
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    # Engine-config-error restart.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setitem(DEFAULT_CONFIG, "temperature", "abc")
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["halt_reason"] == "engine-config-error"
+    assert "protection-only" in capsys.readouterr().err
+    # Keyless restart: the same decision, the same fail-toward-guarding.
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    monkeypatch.delitem(DEFAULT_CONFIG, "temperature")
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    assert seen["halt_reason"] == "missing-key"
+    assert "protection-only" in capsys.readouterr().err
+
+
+def test_paper_protection_only_survives_a_broken_stranded_attempt_lookup(
+    tmp_path, capsys, monkeypatch, paper_seams
+):
+    # The stranded-attempt note's lookup is best-effort on paper too (#270
+    # review): a store holding two in-progress rows makes it raise by design,
+    # and before the shared helper that raise crashed the restart over the
+    # live position it was about to guard.
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from contrib.hyperliquid_perp.cli import _common as common_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    path = tmp_path / "cli.db"
+    db = Database(path)
+    accounting.initialize_run(
+        db,
+        run_id="r",
+        mode="paper",
+        initial_balance_usdc=D(1000),
+        schema_version=1,
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    db.close()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setitem(DEFAULT_CONFIG, "llm_max_retries", "abc")
+    monkeypatch.setattr(
+        reconcile_mod,
+        "reconcile_on_restart",
+        lambda db_, *, run_id, now, funding_source: RestartReconciliation(
+            canceled_plan_ids=(),
+            canceled_order_ids=(),
+            funding_posted=0,
+            funding_still_pending=0,
+            forced_immediate_cycle=False,
+            replay_error=None,
+            replay_status="ok",
+        ),
+    )
+
+    def _wedged(conn, run_id):
+        raise ValueError(f"run {run_id!r} has 2 in-progress attempts")
+
+    monkeypatch.setattr(common_mod.repo, "find_in_progress_attempt", _wedged)
+    monkeypatch.setattr(cli_mod.paper, "_paper_loop", lambda *a, **kw: 0)
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 0
+    err = capsys.readouterr().err
+    assert "protection-only" in err
+    assert "note: decision attempt" not in err
+
+
+@pytest.mark.parametrize("key,bad,env", _BAD_ENGINE_ENV_KNOBS)
 def test_paper_bad_engine_env_knob_with_no_live_work_is_a_named_exit_1(
     tmp_path, capsys, monkeypatch, paper_seams, key, bad, env
 ):
@@ -2176,7 +2285,7 @@ def test_paper_bad_engine_env_knob_with_no_live_work_is_a_named_exit_1(
     .env is not bounced as "already exists"); the healthy-restart lane with
     an empty book exits by name instead of entering protection-only. The
     test above pins the live-position half of ``except EngineConfigError``;
-    this pins the other half, for both env int knobs.
+    this pins the other half, for every env knob in the family.
     """
     import contrib.hyperliquid_perp.cli as cli_mod
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -3760,10 +3869,12 @@ def test_paper_loop_engine_config_error_settle_exit_names_the_cause(tmp_path, mo
         funding_source=None,
         trading_halted=True,
         halt_reason="engine-config-error",
+        halt_cause="config key 'temperature' (TRADINGAGENTS_TEMPERATURE) must be a number",
     )
     assert rc == 1
     err = capsys.readouterr().err
     assert "the engine could not be built" in err
+    assert "(TRADINGAGENTS_TEMPERATURE)" in err  # the cause itself, not a pointer to the log
     assert "books never re-verified" not in err
     assert "OPENROUTER_API_KEY" not in err
     db.close()
@@ -5763,6 +5874,231 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     assert "2026-07-20" in err  # names the oldest pass
 
 
+def _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, *, loop):
+    """``live --loop`` offline, up to and past ``_run_live_loop``'s call site.
+
+    The smoke gate is seeded open, the §19.1 recovery is scripted as a pass
+    (its real arming needs a live exchange), and the loop itself is replaced
+    by ``loop`` — so what runs for real is ``_cmd_live``'s handling of what
+    the loop raises or returns: the exit line and the exit code (issue #268).
+    The ``finally`` sweep runs over the seams' flat account with the switch
+    never armed, which is the shape of a flat-book exit; its §12.2
+    pre-shutdown reconcile is scripted clean too, since the signed double has
+    no REST and an unclean pass would latch safe mode — the exit-4 lane this
+    drive must be able to tell apart from protection-only's.
+    """
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import reconcile as reconcile_mod, startup as startup_mod
+    from contrib.hyperliquid_perp.live.startup import StartupResult
+
+    monkeypatch.setattr(
+        reconcile_mod.LiveReconciler, "reconcile_and_apply", lambda self, *a, **kw: None
+    )
+
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
+    _open_smoke_gate(dbp)
+    passed = StartupResult(report=SimpleNamespace(clean=True), safe_mode_active=False)
+    monkeypatch.setattr(startup_mod, "run_startup_recovery", lambda **kwargs: passed)
+    monkeypatch.setattr(cli_mod.live, "_run_live_loop", loop)
+    return cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp), "--loop"])
+
+
+def test_cmd_live_names_the_engine_refusal_over_a_flat_book_as_exit_1(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The loop re-raises the bridge's refusal when the book is flat (issue
+    # #268); ``_cmd_live`` must print it by name and exit 1 — the paper
+    # lane's code — not file it under the generic "startup recovery failed".
+    from contrib.hyperliquid_perp.engine_bridge import EngineConfigError
+
+    def _refuse(**kwargs):
+        raise EngineConfigError(
+            "config key 'temperature' (TRADINGAGENTS_TEMPERATURE) must be a finite, "
+            "non-negative number, got 'abc'"
+        )
+
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_refuse)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error: config key 'temperature' (TRADINGAGENTS_TEMPERATURE)" in err
+    assert "startup recovery failed" not in err
+
+
+def test_cmd_live_flat_refusal_names_itself_when_the_shutdown_reread_fails(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The flat-book refusal raises out of the loop, so ``loop_raised`` stays
+    # True; when the shutdown position re-read ALSO fails (unknown ≠ flat →
+    # keep), the sweep's note must point at the error already printed, not
+    # file it as an unaccounted-for raise (exit-check review).
+    from contrib.hyperliquid_perp.engine_bridge import EngineConfigError
+
+    def _refuse(**kwargs):
+        raise EngineConfigError("config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...")
+
+    live_seams.clearinghouse = None  # map_account_snapshot(None) raises → fresh_positions None
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_refuse)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error: config key 'temperature' (TRADINGAGENTS_TEMPERATURE)" in err
+    assert "could NOT be re-read at shutdown" in err
+    assert "the engine could not be built (see the error above)" in err
+    assert "raised instead of returning" not in err
+
+
+def test_cmd_live_exits_1_when_protection_only_has_nothing_left_to_protect(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The loop's settle-exit: the position closed under protection-only. Exit
+    # 1 like the paper loop's settle-exit, naming the cause the operator has
+    # to fix — a supervisor's restart then meets the flat-book refusal above.
+    from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
+
+    settled = ProtectionOnlyExit(cause="config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) ...", settled=True)
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=lambda **kwargs: settled)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "nothing left to protect" in err
+    assert "TRADINGAGENTS_MAX_TOKENS" in err
+    assert "live loop exited — §18.2 shutdown sweep done" not in err  # not the all-quiet line
+    # Flat: the protection-only "unclean" term keeps nothing (the AND with
+    # the position re-read), so no STANDING line and no unclean sweep.
+    assert "STANDING" not in err
+    assert "§18.2 shutdown unclean" not in err
+
+
+def test_cmd_live_exits_4_when_stopped_in_protection_only(tmp_path, capsys, live_seams, monkeypatch):
+    # Ctrl-C / SIGTERM while protection-only: "executed, not clean" — the same
+    # 4 a stop in safe mode returns, never 0 ("all quiet") for a run whose
+    # decision cycles never ran. The cause rides in the exit line.
+    from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
+
+    stopped = ProtectionOnlyExit(
+        cause="config key 'llm_max_retries' (TRADINGAGENTS_LLM_MAX_RETRIES) ...", settled=False
+    )
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=lambda **kwargs: stopped)
+    err = capsys.readouterr().err
+    assert rc == 4
+    assert "exited from protection-only mode" in err
+    assert "TRADINGAGENTS_LLM_MAX_RETRIES" in err
+
+
+def test_cmd_live_keeps_sl_tp_standing_when_the_loop_raises_over_a_live_position(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    """The class behind #268, not just its provider-construction instance: the
+    §18.2 sweep keyed "clean" off the BOOT verdict, so ANY raise out of the
+    loop after a pass (a REST read in construction, a store read, an import)
+    stripped the resting SL/TP over a live position. The sweep now also asks
+    whether the loop RETURNED; a raise keeps the SL/TP standing and says so.
+    The control below — the same position, a loop that returns — shows the
+    flag is what flips the outcome.
+    """
+    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+
+    def _boom(**kwargs):
+        raise RuntimeError("a REST read in loop construction timed out")
+
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_boom)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "startup recovery failed" in err  # the generic lane, as before
+    assert "leaves the bot's resting SL/TP STANDING" in err
+    assert "the live loop raised instead of returning" in err
+    assert "UNPROTECTED after exit" not in err
+
+    control = tmp_path / "control"
+    control.mkdir()
+    rc = _drive_cmd_live_loop_to_its_exit(control, monkeypatch, loop=lambda **kwargs: None)
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "UNPROTECTED after exit" in err  # a clean loop exit: §18.2 semantics stand
+    assert "STANDING" not in err
+    # And the all-quiet exit line, untouched by the protection-only branches.
+    assert "live loop exited — §18.2 shutdown sweep done" in err
+    assert "protection-only" not in err
+
+
+def test_cmd_live_protection_only_stop_keeps_sl_tp_standing(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # A deliberate stop of a protection-only loop is an unclean end (#270
+    # review): the environment is wrong and the next start meets the same
+    # refusal, so the sweep leaves the reduce-only SL/TP standing for the
+    # fixed restart to adopt — stripping them on the operator's way to fixing
+    # .env would be the front-gate hole the mode exists to close.
+    from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
+
+    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+    stopped = ProtectionOnlyExit(cause="config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...", settled=False)
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=lambda **kwargs: stopped)
+    err = capsys.readouterr().err
+    assert rc == 4
+    assert "leaves the bot's resting SL/TP STANDING" in err
+    assert "the loop ran in protection-only mode" in err
+    assert "exited from protection-only mode" in err
+    # The cause line leads; the sweep's WARNING follows it.
+    assert err.index("exited from protection-only mode") < err.index("SL/TP STANDING")
+
+
+def test_cmd_live_unclean_sweep_outranks_the_code_but_not_the_cause(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # An unclean §18.2 sweep (the switch left armed) is always exit 4 — the
+    # wallet-wide trigger may still fire — but the protection-only cause the
+    # operator has to fix must still reach the output (#270 review).
+    from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
+    from contrib.hyperliquid_perp.live import kill_switch as ks_mod
+
+    monkeypatch.setattr(ks_mod.KillSwitchManager, "armed", property(lambda self: True))
+    monkeypatch.setattr(ks_mod.KillSwitchManager, "shutdown", lambda self, *, keep_protective: None)
+    settled = ProtectionOnlyExit(cause="config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) ...", settled=True)
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=lambda **kwargs: settled)
+    err = capsys.readouterr().err
+    assert rc == 4
+    assert "§18.2 shutdown unclean" in err
+    assert "nothing left to protect" in err
+    assert "TRADINGAGENTS_MAX_TOKENS" in err
+    # ORDER, not just membership: the cause line comes first, ahead of the
+    # unclean-sweep line the ``finally`` prints (round 2: the earlier
+    # placement after the try/finally printed it last).
+    assert err.index("nothing left to protect") < err.index("§18.2 shutdown unclean")
+
+
+def test_cmd_live_settled_protection_only_outranks_a_safe_mode_latch(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # A tick error can latch recoverable safe mode while protection-only
+    # runs; when the position then closes, the exit must still name the
+    # cause the operator has to fix and exit 1 (the ``safe_mode:`` line
+    # printed above reports the latch), not vanish behind the safe-mode 4.
+    from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
+    from contrib.hyperliquid_perp.live.safe_mode import (
+        REASON_LIVE_TICK_ERROR,
+        SAFE_MODE_RECOVERABLE,
+        SafeModeManager,
+    )
+
+    def _latch_then_settle(**kwargs):
+        SafeModeManager(db=kwargs["db"], run_id="r1", gate=None).enter(
+            SAFE_MODE_RECOVERABLE, REASON_LIVE_TICK_ERROR, detail="scripted"
+        )
+        return ProtectionOnlyExit(cause="config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...", settled=True)
+
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_latch_then_settle)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "nothing left to protect" in captured.err
+    assert "TRADINGAGENTS_TEMPERATURE" in captured.err
+    assert "safe_mode: recoverable" in captured.out  # the latch is still reported
+
+
 @pytest.mark.parametrize("behind_version", _BEHIND_VERSIONS)
 def test_live_lease_conflict_leaves_a_behind_store_unmigrated(
     tmp_path, capsys, live_seams, monkeypatch, behind_version
@@ -6541,8 +6877,20 @@ def _drive_live_loop_construction(
     arm_pending_fail=False,
     pump_raises=None,
     tick_results=(),
+    provider_raises=None,
+    initial_positions=(),
+    expect_return=False,
 ):
     """Build ``_run_live_loop``'s components and stop; return what it built with.
+
+    ``provider_raises`` makes the provider's construction raise it (the
+    bridge's startup gate refusing an env knob, issue #268) instead of
+    stopping the drive; ``initial_positions`` seeds the run's books so the
+    engine has live work. Together they drive the protection-only lane —
+    ``expect_return`` then says the loop is expected to RETURN (its
+    settle-exit) rather than end on a sentinel, and ``built.returned`` holds
+    what it returned. A refusing provider over a FLAT book propagates out of
+    the loop, so that drive ends on the refusal itself.
 
     With ``adoption_raises`` or ``pump_raises`` the drive goes FURTHER, into the
     loop body: the provider stops being the stopping point and becomes a stub,
@@ -6593,7 +6941,10 @@ def _drive_live_loop_construction(
     from contrib.hyperliquid_perp.live.venue_identity import VenueIdentityMonitor
 
     reach_loop_body = (
-        adoption_raises is not None or pump_raises is not None or bool(tick_results)
+        adoption_raises is not None
+        or pump_raises is not None
+        or bool(tick_results)
+        or (provider_raises is not None and bool(initial_positions))
     )
 
     class _FakeMarket:
@@ -6620,6 +6971,7 @@ def _drive_live_loop_construction(
         identity=None,
         ticks=0,
         db_path=None,
+        returned=None,
     )
 
     def _recorder(module, name, field):
@@ -6642,6 +6994,8 @@ def _drive_live_loop_construction(
             # constructing through the real class.
             inspect.signature(real_provider).bind(*args, **kwargs)
             built.provider = kwargs
+            if provider_raises is not None:
+                raise provider_raises
             if not reach_loop_body:
                 raise _StopBeforeTheLoop
             # Loop-body drive: stand in for the provider instead of stopping.
@@ -6656,7 +7010,12 @@ def _drive_live_loop_construction(
     built.db_path = dbp
     db = Database(dbp)
     accounting.initialize_run(
-        db, run_id="r1", mode="live", initial_balance_usdc=D(200), schema_version=SCHEMA_VERSION
+        db,
+        run_id="r1",
+        mode="live",
+        initial_balance_usdc=D(200),
+        schema_version=SCHEMA_VERSION,
+        initial_positions=list(initial_positions),
     )
     if reach_loop_body:
         from contrib.hyperliquid_perp.live.decision import LiveDecisionDriver
@@ -6733,27 +7092,37 @@ def _drive_live_loop_construction(
         run_id="r1",
         symbol="BTC",
     )
-    stop_at = _StopTheLoop if reach_loop_body else _StopBeforeTheLoop
+    if provider_raises is not None and not reach_loop_body:
+        stop_at = type(provider_raises)  # flat: the refusal propagates out
+    else:
+        stop_at = _StopTheLoop if reach_loop_body else _StopBeforeTheLoop
+
+    def _drive():
+        return cli_mod._run_live_loop(
+            cfgs=(RiskConfig(leverage=D(1), max_target_margin_pct=60), DecisionConfig()),
+            db=db,
+            run_id="r1",
+            coin="BTC",
+            config={},
+            live_cfg=live_cfg,
+            client=SimpleNamespace(),
+            signed=SimpleNamespace(open_orders=lambda: []),
+            gate=gate,
+            kill_switch=built.kill_switch,
+            safe_mode=SafeModeManager(db=db, run_id="r1", gate=gate),
+            reconciler=SimpleNamespace(),
+            processor=SimpleNamespace(),
+            payload_dir=tmp_path / "payloads",
+            fetch_clearinghouse=fetch_clearinghouse,
+            identity=built.identity,
+        )
+
     try:
-        with pytest.raises(stop_at):
-            cli_mod._run_live_loop(
-                cfgs=(RiskConfig(leverage=D(1), max_target_margin_pct=60), DecisionConfig()),
-                db=db,
-                run_id="r1",
-                coin="BTC",
-                config={},
-                live_cfg=live_cfg,
-                client=SimpleNamespace(),
-                signed=SimpleNamespace(open_orders=lambda: []),
-                gate=gate,
-                kill_switch=built.kill_switch,
-                safe_mode=SafeModeManager(db=db, run_id="r1", gate=gate),
-                reconciler=SimpleNamespace(),
-                processor=SimpleNamespace(),
-                payload_dir=tmp_path / "payloads",
-                fetch_clearinghouse=fetch_clearinghouse,
-                identity=built.identity,
-            )
+        if expect_return:
+            built.returned = _drive()
+        else:
+            with pytest.raises(stop_at):
+                _drive()
     finally:
         db.close()
     for field in ("protection", "guards", "provider"):
@@ -6831,6 +7200,249 @@ def test_the_live_loop_takes_the_day_baseline_from_the_clearinghouse(tmp_path, m
     # so it refreshes across itself. A delta rather than a floor: the drive is
     # free to grow refreshes of its own without quietly retiring this one.
     assert built.kill_switch.ticks == before + 1
+
+
+def _forbid_the_decision_driver(monkeypatch):
+    """Protection-only never builds the decision stack; make building it fail."""
+    from contrib.hyperliquid_perp.live import decision as decision_mod
+
+    def _forbidden(self, *args, **kwargs):
+        raise AssertionError("protection-only must not build the decision worker/driver")
+
+    monkeypatch.setattr(decision_mod.LiveDecisionWorker, "__init__", _forbidden)
+    monkeypatch.setattr(decision_mod.LiveDecisionDriver, "__init__", _forbidden)
+
+
+def _refused_knob(key: str, env: str):
+    """The bridge's refusal for a bad env knob, as ``_build_engine_config`` raises it."""
+    from contrib.hyperliquid_perp.engine_bridge import EngineConfigError
+
+    return EngineConfigError(f"config key '{key}' ({env}) must be a number, got 'abc'")
+
+
+@pytest.mark.parametrize("key,bad,env", _BAD_ENGINE_ENV_KNOBS)
+def test_the_live_loop_enters_protection_only_when_the_engine_cannot_be_built_over_a_position(
+    tmp_path, monkeypatch, capsys, key, bad, env
+):
+    """Issue #268: a rejected engine env knob over a live position must NOT
+    leave the loop.
+
+    The bridge gates the env knobs at startup (#177, #266, #269) and the
+    ``paper`` command catches the refusal around provider construction; the
+    live loop did not. The refusal then crossed ``_run_live_loop`` into the
+    caller's ``except Exception`` with a PASSING verdict recorded, so the
+    §18.2 shutdown sweep ran with ``keep_protective=False`` — cancelling the
+    bot's own SL/TP over the live position, then a crash-loop under
+    ``Restart=`` into the same refusal. This pins the containment: the loop
+    starts, ticks (the kill-switch refresh and SL/TP repair live in the
+    tick), never pumps, never builds the decision stack, and does not enter
+    safe mode (nothing failed; the environment is wrong).
+    """
+    from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
+    from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
+
+    _forbid_the_decision_driver(monkeypatch)
+    quiet = LiveTickResult(at=_T0, status=TickStatus.OK)
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        provider_raises=_refused_knob(key, env),
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+        # Two clean ticks, then the sentinel: the loop must survive an
+        # iteration with no driver (the pump seam is where it used to reach
+        # for one) and come back for the next tick.
+        tick_results=(quiet, quiet),
+    )
+    assert built.ticks == 3, "the loop did not keep ticking without a decision driver"
+    assert _contained_details(built.db_path) == []
+    err = capsys.readouterr().err
+    assert env in err  # the fixable cause is named
+    assert "protection-only" in err
+    assert "in protection-only mode" in err  # the startup line says so too
+    db = Database(built.db_path)
+    try:
+        assert SafeModeManager(db=db, run_id="r1", gate=None).current() is None
+    finally:
+        db.close()
+
+
+def test_the_live_loop_raises_the_engine_refusal_over_a_flat_book(tmp_path, monkeypatch, capsys):
+    """Flat, there is nothing to guard: the refusal propagates OUT of the loop
+    by name (the caller's ``except EngineConfigError`` makes it exit 1), and
+    protection-only is never entered — the paper lane's empty-book rule.
+    """
+    _forbid_the_decision_driver(monkeypatch)
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        provider_raises=_refused_knob("llm_max_retries", "TRADINGAGENTS_LLM_MAX_RETRIES"),
+    )
+    # The harness pinned the raise's type (the bridge's own, unwrapped).
+    assert built.ticks == 0, "a flat refusal must not start the loop"
+    assert "protection-only" not in capsys.readouterr().err
+
+
+def _scripted_active_work(monkeypatch, answers):
+    """``LiveExecutionEngine.has_active_work`` answering from ``answers`` in
+    order — a bool is returned, an exception instance is raised."""
+    from contrib.hyperliquid_perp.live.engine import LiveExecutionEngine
+
+    queue = iter(answers)
+
+    def _answer(self):
+        item = next(queue)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(LiveExecutionEngine, "has_active_work", _answer)
+
+
+def test_the_live_loop_protection_only_ends_itself_once_the_position_closes(
+    tmp_path, monkeypatch, capsys
+):
+    """Protection-only exists for a live position; once it is closed, no later
+    tick can do anything, and a zombie would hold the lease and refresh the
+    switch for days. The loop must return its settle-exit record instead —
+    the caller then exits 1, the paper loop's settle-exit code — with the
+    cause the operator has to fix.
+    """
+    from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
+    from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
+
+    _forbid_the_decision_driver(monkeypatch)
+    # The engine's own answer, scripted: live work at the provider refusal,
+    # flat after the first tick (an SL filled).
+    _scripted_active_work(monkeypatch, [True, False])
+    quiet = LiveTickResult(at=_T0, status=TickStatus.OK)
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        provider_raises=_refused_knob("temperature", "TRADINGAGENTS_TEMPERATURE"),
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+        tick_results=(quiet,),
+        expect_return=True,
+    )
+    assert built.ticks == 1
+    assert built.returned == ProtectionOnlyExit(
+        cause=str(_refused_knob("temperature", "TRADINGAGENTS_TEMPERATURE")), settled=True
+    )
+    assert "protection-only" in capsys.readouterr().err
+
+
+def test_the_live_loop_treats_an_unreadable_book_as_live_work(tmp_path, monkeypatch, capsys):
+    """Unknown ≠ flat (#268 review): the "anything to guard?" read inside the
+    refusal handler is a store read, and a raise there (an operator's
+    export/validate holding the lock) used to leave the loop through the
+    generic handler — passing verdict on record, sweep strips SL/TP. It must
+    fail toward guarding: protection-only, not an exit.
+    """
+    from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
+
+    _forbid_the_decision_driver(monkeypatch)
+    _scripted_active_work(monkeypatch, [sqlite3.OperationalError("database is locked"), True])
+    quiet = LiveTickResult(at=_T0, status=TickStatus.OK)
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        provider_raises=_refused_knob("temperature", "TRADINGAGENTS_TEMPERATURE"),
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+        tick_results=(quiet,),
+    )
+    assert built.ticks == 2, "the unreadable book ended the loop instead of guarding"
+    assert "protection-only" in capsys.readouterr().err
+
+
+def test_the_live_loop_protection_only_survives_a_broken_stranded_attempt_lookup(
+    tmp_path, monkeypatch, capsys
+):
+    """The stranded-attempt note is a courtesy; its lookup is fail-loud on a
+    store holding two in-progress rows (the wedge the healthy lane escalates
+    by name). Raised from inside the refusal handler it used to leave the
+    loop over the live position (#268 review) — now logged, the note simply
+    not printed, and the loop starts.
+    """
+    from contrib.hyperliquid_perp.cli import _common as common_mod
+
+    _forbid_the_decision_driver(monkeypatch)
+
+    def _wedged(conn, run_id):
+        raise ValueError(f"run {run_id!r} has 2 in-progress attempts")
+
+    monkeypatch.setattr(common_mod.repo, "find_in_progress_attempt", _wedged)
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        provider_raises=_refused_knob("max_tokens", "TRADINGAGENTS_MAX_TOKENS"),
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+    )
+    assert built.ticks == 1, "the broken lookup ended the loop before its first tick"
+    err = capsys.readouterr().err
+    assert "protection-only" in err
+    assert "note: decision attempt" not in err
+
+
+def test_a_raising_settle_check_is_contained_under_its_own_phase(tmp_path, monkeypatch):
+    # The settle check is a store read AFTER engine.tick() has returned. A
+    # raise from it (a locked store) is contained like any loop-body fault —
+    # the loop keeps ticking, recoverable safe mode latched so a lock that
+    # PERSISTS is visible to `safe-mode --status`/`validate` rather than only
+    # as a ~10s ERROR storm (#270 review, round 2) — and it is recorded under
+    # its own phase, not as "live tick raised" (#238). The STARTUP read is
+    # the one that never latches (test_the_live_loop_treats_an_unreadable_book_as_live_work).
+    from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_LIVE_TICK_ERROR, SafeModeManager
+
+    _forbid_the_decision_driver(monkeypatch)
+    _scripted_active_work(monkeypatch, [True, sqlite3.OperationalError("database is locked")])
+    quiet = LiveTickResult(at=_T0, status=TickStatus.OK)
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        provider_raises=_refused_knob("llm_max_retries", "TRADINGAGENTS_LLM_MAX_RETRIES"),
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+        tick_results=(quiet,),
+    )
+    assert built.ticks == 2
+    assert _contained_details(built.db_path) == [
+        "live protection-only settle check raised (see log)"
+    ]
+    db = Database(built.db_path)
+    try:
+        state = SafeModeManager(db=db, run_id="r1", gate=None).current()
+        assert state is not None and not state.is_manual
+        assert state.reason == REASON_LIVE_TICK_ERROR
+    finally:
+        db.close()
+
+
+def test_the_live_loop_protection_only_reports_an_operator_stop(tmp_path, monkeypatch):
+    """Ctrl-C / SIGTERM in protection-only returns the record with
+    ``settled=False`` (the caller exits 4, "executed, not clean" — never 0
+    for a run that was not trading) and skips the decision-stack teardown
+    it never built.
+    """
+    from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
+
+    _forbid_the_decision_driver(monkeypatch)
+    built = _drive_live_loop_construction(
+        tmp_path,
+        monkeypatch,
+        fetch_clearinghouse=lambda: _clearinghouse(),
+        provider_raises=_refused_knob("max_tokens", "TRADINGAGENTS_MAX_TOKENS"),
+        initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
+        tick_results=(KeyboardInterrupt(),),
+        expect_return=True,
+    )
+    assert built.returned == ProtectionOnlyExit(
+        cause=str(_refused_knob("max_tokens", "TRADINGAGENTS_MAX_TOKENS")), settled=False
+    )
 
 
 def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_path, monkeypatch):

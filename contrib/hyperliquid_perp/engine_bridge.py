@@ -73,19 +73,32 @@ _DEFAULT_ANALYSTS = ("market", "social", "news")
 # logged at build time so the number that actually applied is recoverable.
 _DEFAULT_MAX_COMPLETION_TOKENS = 8192
 
+# The prefix ``default_config._apply_env_overrides`` puts on its refusal
+# (``Invalid value for TRADINGAGENTS_X: ...``): the one ValueError the bridge
+# claims as "an environment override was refused" (see _build_engine_config).
+_ENV_OVERLAY_REFUSAL_PREFIX = "Invalid value for TRADINGAGENTS_"
+
 
 def _resolve_completion_cap(yaml_value: object, env_value: object) -> tuple[int, str]:
     """Resolve the effective completion cap, and name where it came from.
 
-    ``load_config`` validates the YAML key, but ``TRADINGAGENTS_MAX_TOKENS``
-    reaches here unchecked — env overrides are coerced against the type of the
-    engine default, which is ``None``, so any string rides through. Left to
-    the graph, a junk value raises inside ``build_graph`` on every cycle:
-    outside the retry classification, so the daemon logs an unclassified
-    ``api_failed``, keeps running, and holds the position on SL/TP alone —
-    the #177 stall shape, relocated from the vendor to the config. Checking
-    here fails the daemon at startup instead, in the same operator-fixable
-    lane as a bad YAML value.
+    Precedence: YAML ``engine.max_completion_tokens`` > ``TRADINGAGENTS_MAX_TOKENS``
+    > the perp default — and a shadowed source is never looked at, so a
+    junk env value under a YAML cap does not refuse a daemon whose cap it
+    would not have set (#270 review). ``load_config`` validates the YAML
+    key, but ``TRADINGAGENTS_MAX_TOKENS`` reaches here unchecked — env
+    overrides are coerced against the type of the engine default, which is
+    ``None``, so any string rides through. Left to the graph, a junk value
+    raises inside ``build_graph`` on every cycle: outside the retry
+    classification, so the daemon logs an unclassified ``api_failed``, keeps
+    running, and holds the position on SL/TP alone — the #177 stall shape,
+    relocated from the vendor to the config. Checking here fails the daemon
+    at startup instead, in the same operator-fixable lane as a bad YAML
+    value; the resolved int then passes the graph's own family validator
+    (``validate_llm_knobs``, #269) unchanged, which is what makes the value
+    accepted here the value ``build_graph`` accepts. ``int_from_yaml``
+    carries the platform-range bound, so neither source can pass an int the
+    graph's validator would refuse.
     """
     # ``is None``/blank, not falsiness: an explicit 0 must reach the rejection
     # below (this cap deliberately has no "off" sentinel — off IS the bug),
@@ -384,10 +397,11 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     to ``False`` here (the engine default is on) — see RUNBOOK §7.
     """
     try:
-        # ``_coerce_max_retries`` is the graph's own validator for the retry
-        # budget (one policy for the integer LLM knobs, #264), housed in
-        # default_config so this import stays as light as it was (#266).
-        from tradingagents.default_config import DEFAULT_CONFIG, _coerce_max_retries
+        # ``validate_llm_knobs`` is the graph's own validation of the
+        # cross-provider LLM knobs (one policy per knob, #264; the family in
+        # one call, #269), housed in default_config so this import stays as
+        # light as it was (#266).
+        from tradingagents.default_config import DEFAULT_CONFIG, validate_llm_knobs
     except ImportError as exc:
         # Deferred so --context-only stays import-light, but if the engine package is
         # missing/moved this surfaces a clear cause instead of a generic top-level
@@ -409,6 +423,30 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         raise EngineImportError(
             f"importing tradingagents failed, most likely while its package "
             f"init read a repo .env file: {exc} — is the file saved as UTF-8?"
+        ) from exc
+    except ValueError as exc:
+        # ``default_config`` applies the TRADINGAGENTS_* env overlay at import
+        # and refuses a value it cannot coerce to the default's type
+        # (``TRADINGAGENTS_MAX_DEBATE_ROUNDS=abc``, ``..._CHECKPOINT_ENABLED=treu``)
+        # with a bare ValueError — the same operator-fixable family as the
+        # knobs gated below, reaching the CLI lanes untyped: over a live
+        # position the paper lane would crash instead of entering
+        # protection-only, and the live lane's sweep would strip SL/TP
+        # (issue #268 review). Named here, once, for the whole overlay table.
+        # Every import-time ValueError takes this lane — over a live
+        # position the alternative is the crash-loop the lane exists to
+        # prevent, on paper with nobody watching SL/TP at all — but only
+        # the overlay's own (its message prefix) is CALLED an environment
+        # override; any other (an upstream change) is reported as what it
+        # is, so the operator is not sent to an env var they never set.
+        if str(exc).startswith(_ENV_OVERLAY_REFUSAL_PREFIX):
+            raise EngineConfigError(
+                f"the tradingagents engine refused an environment override at "
+                f"import: {exc} — fix the TRADINGAGENTS_* value named and restart"
+            ) from exc
+        raise EngineConfigError(
+            f"importing tradingagents raised at import: {exc} — not an "
+            "environment override this adapter knows; see the traceback in the log"
         ) from exc
 
     # The block projected onto ``ENGINE_KEYS`` (the set ``load_config`` warns
@@ -443,9 +481,11 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # beats both a bare KeyError (exit 2 "unexpected error") and, worse,
     # logging a cap that was never sent. Since #266 the import above is the
     # first line against a stale engine (one old enough to lack the cap key
-    # also lacks ``_coerce_max_retries``, and fails there, by name); this
+    # also lacks ``validate_llm_knobs``, and fails there, by name); this
     # stays as the second, for an engine that has the validator but not the
-    # key — defence in depth, not the expected path.
+    # key — defence in depth, not the expected path. (``validate_llm_knobs``
+    # itself reads the key tolerantly, so this by-name refusal is the only
+    # place the absence is caught.)
     if "max_tokens" not in engine_config:
         raise EngineConfigError(
             "the imported tradingagents engine has no 'max_tokens' config key, "
@@ -465,31 +505,45 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         engine_config["max_tokens"],
         cap_source,
     )
-    # The retry budget (``TRADINGAGENTS_LLM_MAX_RETRIES``, upstream #1091) is
-    # the cap's sibling env int knob, rides DEFAULT_CONFIG the same unchecked
-    # way, and a junk value has the cap's exact per-cycle failure shape — see
-    # ``_resolve_completion_cap`` — so it gets the same startup gate (#266).
-    # Two differences from the cap, both deliberate: there is no perp
-    # default (unset is not a bug here — off IS a valid budget, ``0``),
-    # and nothing is refused by name: any engine that just imported the
-    # validator carries the key, and read tolerantly, an absent key would
-    # mean "forward nothing", each provider's own SDK default.
-    # ``is not None``/blank mirrors the graph's own forwarding guard, and
-    # the graph's own validator does the check, so the value accepted here
-    # is by construction the value ``build_graph`` accepts, and the int it
-    # yields is what the graph forwards.
-    raw_retries = engine_config.get("llm_max_retries")
-    if raw_retries is not None and raw_retries != "":
-        try:
-            engine_config["llm_max_retries"] = _coerce_max_retries(raw_retries)
-        except ValueError as exc:
-            # The validator's message already names the config key AND the
-            # env var; the cap's ``config key '...'`` prefix would name it
-            # twice.
-            raise EngineConfigError(str(exc)) from None
+    # The cap's sibling env knobs — the retry budget
+    # (``TRADINGAGENTS_LLM_MAX_RETRIES``, upstream #1091) and the sampling
+    # temperature (``TRADINGAGENTS_TEMPERATURE``) — ride DEFAULT_CONFIG the
+    # same unchecked way, and a junk value in either has the cap's exact
+    # per-cycle failure shape (see ``_resolve_completion_cap``), so they get
+    # the same startup gate (#266, #269): ONE call into the graph's own
+    # family validator, AFTER the cap is resolved — the cap in
+    # ``engine_config`` is by now the resolved int, which passes through
+    # unchanged (so a YAML-shadowed junk env cap is never seen, as the
+    # resolver's precedence says), and the two others are validated under
+    # their env var's name. What is accepted here is by construction what
+    # ``build_graph`` accepts, and the value it yields is what the graph
+    # forwards. Two differences from the cap, both deliberate: no perp
+    # default (unset is not a bug — off IS a valid budget, ``0``, and an
+    # unset temperature is each provider's own), and nothing refused by
+    # name: any engine that just imported the validator carries the keys,
+    # and read tolerantly, an absent key means "forward nothing", each
+    # provider's own SDK default.
+    try:
+        knobs = validate_llm_knobs(engine_config)
+    except ValueError as exc:
+        # The validator's message already names the config key AND the
+        # env var; the cap's ``config key '...'`` prefix would name it
+        # twice.
+        raise EngineConfigError(str(exc)) from None
+    # The two are written back so the graph forwards the number, not the env
+    # string, each with its own startup line beside the cap's ("which value
+    # actually applied" is answerable from the log).
+    if "llm_max_retries" in knobs:
+        engine_config["llm_max_retries"] = knobs["llm_max_retries"]
         logger.info(
             "engine LLM retry budget: %d (TRADINGAGENTS_LLM_MAX_RETRIES)",
             engine_config["llm_max_retries"],
+        )
+    if "temperature" in knobs:
+        engine_config["temperature"] = knobs["temperature"]
+        logger.info(
+            "engine sampling temperature: %s (TRADINGAGENTS_TEMPERATURE)",
+            engine_config["temperature"],
         )
     # Perp runs default structured output OFF (the engine default is on): the
     # Phase 2 target JSON contract is injected as prompt text and can only

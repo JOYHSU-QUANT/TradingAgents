@@ -23,7 +23,13 @@ from typing import Any
 import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 
-from tradingagents.default_config import DEFAULT_CONFIG, DEFAULT_MAX_TOKENS, _apply_env_overrides
+from tradingagents.default_config import (
+    _LLM_KNOB_VALIDATORS,
+    DEFAULT_CONFIG,
+    DEFAULT_MAX_TOKENS,
+    _apply_env_overrides,
+    validate_llm_knobs,
+)
 from tradingagents.llm_clients.base_client import _COMMON_PASSTHROUGH_KWARGS
 from tradingagents.llm_clients.factory import create_llm_client
 
@@ -308,10 +314,41 @@ class TestProviderKwargs:
         # a bare int() ValueError with no key name. A programmatic 4096.7 (or
         # any non-integral numeric, Decimal included) must not be silently
         # int()-truncated either, and inf as an "unlimited" spelling must not
-        # leak a bare OverflowError. Temperature has no such gate: 0.0 is a
-        # legal value there.
+        # leak a bare OverflowError. Temperature's gate is looser (0.0 is a
+        # legal value there) — see the two tests below.
         with pytest.raises(ValueError, match="max_tokens"):
             _provider_kwargs(max_tokens=bad)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "abc", "nan", "inf", "-inf", "-0.5", " ", "1e999", True, -1, float("nan"),
+            float("inf"), Decimal("NaN"), Decimal("1E999999999"), Decimal("-1E999999999"),
+        ],
+    )
+    def test_junk_temperature_rejected_naming_the_key(self, bad):
+        # #269: the third env knob on the same unchecked path. A non-number,
+        # a non-finite spelling (NaN/inf as a string, a float, a Decimal, or
+        # an exponent that converts to inf) and a negative are refused by
+        # name — no provider accepts them, and left to build_graph the bare
+        # float() ValueError landed per cycle, unclassified. A bool is not a
+        # temperature either. Unlike the int knobs the Decimal exponents need
+        # no pre-conversion guard: float() of them returns ±inf or raises,
+        # it never hangs.
+        with pytest.raises(ValueError, match=r"'temperature' \(TRADINGAGENTS_TEMPERATURE\)"):
+            _provider_kwargs(temperature=bad)
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [("0", 0.0), (0, 0.0), ("0.0", 0.0), ("1e-3", 0.001), (Decimal("0.7"), 0.7), (2, 2.0)],
+    )
+    def test_temperature_accepts_any_finite_non_negative_number(self, value, expected):
+        # Deliberately no upper bound: the ceiling is per provider (1 on
+        # Anthropic, 2 on OpenAI/Gemini) and a value above it is that
+        # provider's own named 400, not a silent mis-setting.
+        forwarded = _provider_kwargs(temperature=value)["temperature"]
+        assert forwarded == expected
+        assert isinstance(forwarded, float)
 
     def test_an_absurd_decimal_exponent_is_refused_without_hanging(self):
         # int(Decimal("1E999999999")) never returns (PR #207's shape), and a
@@ -340,13 +377,80 @@ class TestProviderKwargs:
 
 
 @pytest.mark.unit
+class TestValidateLlmKnobs:
+    """``validate_llm_knobs`` is the family's one entry point (#269).
+
+    The graph forwards what it returns; the perp bridge gates the env values
+    through it once at daemon startup. One call, the whole family: a fourth
+    cross-provider knob is a row in ``_LLM_KNOB_VALIDATORS``, not a new
+    bridge gate and a new graph branch.
+    """
+
+    def test_returns_only_the_set_knobs_under_their_config_keys(self):
+        # Config keys, not wire names (``llm_max_retries`` not ``max_retries``;
+        # ``max_tokens`` even for google) — renaming for the wire is the
+        # graph's job, and the bridge writes these back under the same keys.
+        knobs = validate_llm_knobs(
+            {"temperature": "0.3", "llm_max_retries": "4", "max_tokens": 1234, "llm_provider": "google"}
+        )
+        assert knobs == {"temperature": 0.3, "llm_max_retries": 4, "max_tokens": 1234}
+
+    # The family, from the table itself — this class pins all of it, not the
+    # two knobs the module's KNOBS table (payload-level pins) covers.
+    FAMILY = [key for key, _ in _LLM_KNOB_VALIDATORS]
+
+    @pytest.mark.parametrize("key", FAMILY)
+    @pytest.mark.parametrize("absent", [None, ""])
+    def test_unset_and_blank_are_omitted(self, key, absent):
+        assert key not in validate_llm_knobs({key: absent})
+
+    def test_an_absent_key_is_unset(self):
+        # Read tolerantly: a stale engine lacking a key forwards nothing for
+        # it rather than failing here (the bridge refuses the cap's absence
+        # by name itself).
+        assert validate_llm_knobs({}) == {}
+
+    @pytest.mark.parametrize(
+        "key,env,bad",
+        [
+            ("temperature", "TRADINGAGENTS_TEMPERATURE", "abc"),
+            ("llm_max_retries", "TRADINGAGENTS_LLM_MAX_RETRIES", "-1"),
+            ("max_tokens", "TRADINGAGENTS_MAX_TOKENS", "8k"),
+        ],
+    )
+    def test_each_refusal_names_the_key_and_the_env_var(self, key, env, bad):
+        assert key in self.FAMILY  # the hand-listed rows are the table's rows
+        with pytest.raises(ValueError, match=rf"'{key}' \({env}\)"):
+            validate_llm_knobs({key: bad})
+
+    def test_the_refusal_table_covers_the_whole_family(self):
+        listed = {"temperature", "llm_max_retries", "max_tokens"}
+        assert listed == set(self.FAMILY)
+
+    def test_the_graph_forwards_exactly_what_the_family_validates(self):
+        # Google is the provider that renames the cap on the way out, so it
+        # is the one where "the graph forwards the validated value" and "the
+        # graph forwards it under the right key" are different claims.
+        kwargs = _provider_kwargs(
+            provider="google", temperature="0.3", llm_max_retries="4", max_tokens="1234"
+        )
+        assert (kwargs["temperature"], kwargs["max_retries"], kwargs["max_output_tokens"]) == (
+            0.3,
+            4,
+            1234,
+        )
+        assert "max_tokens" not in kwargs
+
+
+@pytest.mark.unit
 class TestKnobValidatorHome:
-    """The integer-knob validators live in ``default_config`` (#266).
+    """The cross-provider knob validators live in ``default_config`` (#266, #269).
 
     The perp bridge gates the env values at daemon startup; reached through
     ``graph.trading_graph`` that import would pull the whole engine tree
-    into provider construction. The graph re-exports them so upstream's
-    tests keep importing the names from it.
+    into provider construction. The graph re-exports the int validators so
+    upstream's tests keep importing the names from it, and imports the
+    family entry point from the same home.
     """
 
     def test_the_graph_re_exports_the_default_config_validators(self):
@@ -356,7 +460,7 @@ class TestKnobValidatorHome:
         # By home module, not identity: sibling test files reload
         # default_config to test the env overlay, which mints new function
         # objects while the graph keeps the ones it imported.
-        for name in ("_coerce_max_retries", "_coerce_max_tokens"):
+        for name in ("_coerce_max_retries", "_coerce_max_tokens", "validate_llm_knobs"):
             assert getattr(trading_graph, name).__module__ == dc.__name__
 
     def test_default_config_carries_the_validators_without_the_graph(self):
@@ -365,8 +469,12 @@ class TestKnobValidatorHome:
         # tradingagents.graph module.
         done = run_child_under_deadline(
             "import sys\n"
-            "from tradingagents.default_config import _coerce_max_retries, _coerce_max_tokens\n"
+            "from tradingagents.default_config import ("
+            "_coerce_max_retries, _coerce_max_tokens, _coerce_temperature, validate_llm_knobs)\n"
             "assert _coerce_max_retries('0') == 0 and _coerce_max_tokens('1') == 1\n"
+            "assert _coerce_temperature('0.2') == 0.2\n"
+            "assert validate_llm_knobs({'temperature': '0', 'max_tokens': '8'}) == "
+            "{'temperature': 0.0, 'max_tokens': 8}\n"
             "loaded = sorted(m for m in sys.modules if m.startswith('tradingagents.graph'))\n"
             "print('graph modules loaded:', loaded)\n"
             "raise SystemExit(1 if loaded else 0)\n",

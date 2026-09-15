@@ -81,6 +81,31 @@ def test_construction_when_extra_installed(monkeypatch):
 
 
 @pytest.mark.unit
+def test_a_forwarded_max_retries_reaches_the_botocore_retry_config(monkeypatch):
+    # #263 asked whether ChatBedrockConverse drops a forwarded ``max_retries``
+    # the way the #177/#212 knobs were dropped. It does not: langchain-aws
+    # declares the field (at 1.5.0, the pin floor, as now) and folds it into
+    # the botocore ``Config`` both of its boto clients are built with, and its
+    # model config is ``extra="forbid"``, so an unknown kwarg would raise
+    # rather than vanish. Pinned through the REAL class and the REAL boto
+    # client it builds (constructing one needs no credentials and makes no
+    # call), so a langchain-aws release that moves the knob fails here
+    # instead of silently reverting a Bedrock deployment to the SDK default.
+    pytest.importorskip("langchain_aws")
+    import tradingagents.llm_clients.bedrock_client as bc
+
+    monkeypatch.setattr(bc, "_BEDROCK_CLASS", None)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    # A named-but-absent profile in the developer shell would fail boto3's
+    # session build before the assertion; credentials themselves are not needed.
+    for var in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_REGION"):
+        monkeypatch.delenv(var, raising=False)
+    llm = create_llm_client("bedrock", "us.anthropic.claude-sonnet-5", max_retries=8).get_llm()
+    # botocore counts the first attempt too: max_attempts=8 is 9 attempts in all.
+    assert llm.client.meta.config.retries["total_max_attempts"] == 9
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("stop_reason", "truncated"), [("max_tokens", True), ("end_turn", False)]
 )

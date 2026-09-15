@@ -49,8 +49,9 @@ class BedrockClient(BaseLLMClient):
     cross-region inference profile ID, e.g. ``us.anthropic.claude-opus-4-8-v1:0``.
     """
 
-    # ChatBedrockConverse takes no ``timeout``/``api_key`` (auth is the AWS
-    # credential chain), so only the cross-provider set is forwarded.
+    # Auth is the AWS credential chain (``api_key`` is set from the env
+    # below), so only the cross-provider set is forwarded. ``max_retries``
+    # reaches botocore's ``Config`` (tests/test_bedrock_provider.py, #263).
     _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS
 
     def get_llm(self) -> Any:

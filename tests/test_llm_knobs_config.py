@@ -27,7 +27,7 @@ from tradingagents.default_config import DEFAULT_CONFIG, DEFAULT_MAX_TOKENS, _ap
 from tradingagents.llm_clients.base_client import _COMMON_PASSTHROUGH_KWARGS
 from tradingagents.llm_clients.factory import create_llm_client
 
-from .conftest import provider_kwargs_for
+from .conftest import provider_kwargs_for, run_child_under_deadline
 
 # A RuntimeWarning is a failure here, not noise: the model IDs below are
 # catalog entries (``model_catalog.MODEL_OPTIONS``), and the one RuntimeWarning
@@ -315,23 +315,24 @@ class TestProviderKwargs:
 
     def test_an_absurd_decimal_exponent_is_refused_without_hanging(self):
         # int(Decimal("1E999999999")) never returns (PR #207's shape), so the
-        # range check has to run before the conversion. Run in a thread with a
-        # deadline: a regression must fail this test, not hang the suite.
-        import threading
-
-        outcome: dict = {}
-
-        def attempt():
-            try:
-                _provider_kwargs(max_tokens=Decimal("1E999999999"))
-            except ValueError as exc:
-                outcome["error"] = str(exc)
-
-        worker = threading.Thread(target=attempt, daemon=True)
-        worker.start()
-        worker.join(timeout=5)
-        assert not worker.is_alive(), "int() on the absurd Decimal hung"
-        assert "max_tokens" in outcome["error"]
+        # range check has to run before the conversion. Both knobs share the
+        # validator, so one child interpreter (one graph import) covers both;
+        # a process deadline, because a thread cannot time this hang out
+        # (see run_child_under_deadline).
+        done = run_child_under_deadline(
+            "from decimal import Decimal\n"
+            "from tradingagents.graph.trading_graph import _coerce_max_retries, _coerce_max_tokens\n"
+            "for coerce in (_coerce_max_tokens, _coerce_max_retries):\n"
+            "    try:\n"
+            "        coerce(Decimal('1E999999999'))\n"
+            "    except ValueError as exc:\n"
+            "        print(exc)\n"
+            "    else:\n"
+            "        raise SystemExit(coerce.__name__ + ' accepted it')\n"
+        )
+        assert done.returncode == 0, done.stderr
+        assert "'max_tokens' (TRADINGAGENTS_MAX_TOKENS)" in done.stdout
+        assert "'llm_max_retries' (TRADINGAGENTS_LLM_MAX_RETRIES)" in done.stdout
 
 
 @pytest.mark.unit

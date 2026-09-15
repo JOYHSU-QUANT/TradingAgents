@@ -1,6 +1,9 @@
 """Shared pytest fixtures that prevent CI hangs when API keys are absent."""
 
 import os
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -254,6 +257,34 @@ def llm_result_of(chat_result):
     from langchain_core.outputs import LLMResult
 
     return LLMResult(generations=[chat_result.generations], llm_output=chat_result.llm_output)
+
+
+def run_child_under_deadline(source: str, *, seconds: float = 45) -> subprocess.CompletedProcess:
+    """Run ``source`` in a child interpreter from the repo root, or fail on the deadline.
+
+    For the ``int(Decimal("1E999999999"))`` shape: that conversion never
+    returns AND never releases the GIL, so a thread with ``join(timeout=)``
+    cannot time it out — the joining thread never runs again, and a
+    regression HANGS the suite instead of failing it (measured: a mutant
+    with the range check removed sat for two minutes under the thread form).
+    A child process can be killed, so a regression fails here within
+    ``seconds``. The child pays the ``tradingagents.graph`` import (3–10 s
+    measured), hence the deadline. Decoded as UTF-8 with replacement: the
+    parent's locale codepage (cp950 here) would raise on a dependency's
+    em dash in stderr and fail the test for the wrong reason.
+    """
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", source],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=seconds,
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"the child interpreter did not return within {seconds}s: int() hung")
 
 
 def provider_kwargs_for(config: dict) -> dict:

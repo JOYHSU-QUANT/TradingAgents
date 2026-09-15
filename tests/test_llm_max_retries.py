@@ -7,6 +7,8 @@ opt-in llm_max_retries knob forwarded to every provider chat client.
 from __future__ import annotations
 
 import importlib
+import sys
+from decimal import Decimal
 
 import pytest
 
@@ -42,6 +44,32 @@ def test_coerce_rejects_non_integers(bad):
         _coerce_max_retries(bad)
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad",
+    [
+        2.7,
+        Decimal("2.5"),
+        Decimal("NaN"),
+        float("inf"),
+        float("nan"),
+        2**70,
+        str(sys.maxsize + 1),
+        str(-sys.maxsize - 1),
+    ],
+)
+def test_coerce_refuses_a_fractional_or_unbounded_numeric_instead_of_truncating(bad):
+    # ``int(2.7)`` is 2: a programmatic ``llm_max_retries=2.7`` used to pass
+    # as a budget the caller never asked for, while ``max_tokens=4096.7``
+    # twenty lines away was refused. One policy for the family now (#264);
+    # the message names the key and the env var, like the cap's does.
+    # ``Decimal("NaN")`` used to leak a raw ``decimal.InvalidOperation`` from
+    # the range comparison, and an env string beyond ``sys.maxsize`` skipped
+    # the range check a programmatic numeric got.
+    with pytest.raises(ValueError, match=r"'llm_max_retries' \(TRADINGAGENTS_LLM_MAX_RETRIES\)"):
+        _coerce_max_retries(bad)
+
+
 # --- forwarding into provider kwargs --------------------------------------
 
 def _bare_graph(config):
@@ -57,7 +85,7 @@ def test_not_forwarded_when_unset():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("provider", ["openai", "anthropic", "google"])
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "google", "bedrock"])
 def test_forwarded_across_providers(provider):
     kwargs = _bare_graph({"llm_provider": provider, "llm_max_retries": 6})._get_provider_kwargs()
     assert kwargs["max_retries"] == 6

@@ -51,57 +51,61 @@ from .signal_processing import SignalProcessor
 logger = logging.getLogger(__name__)
 
 
-def _coerce_max_retries(value):
-    """Validate an ``llm_max_retries`` value to a non-negative int.
+def _coerce_config_int(value, *, key, env, minimum, bound):
+    """Validate an integer config knob, or raise ``ValueError`` naming ``key`` and ``env``.
 
-    Accepts an int or a numeric string (env vars arrive as strings). Rejects
-    booleans and negatives loudly so a misconfiguration fails at startup rather
-    than silently disabling retries.
+    One policy for the family (``max_tokens``, ``llm_max_retries``; #264):
+    an int or a numeric string is accepted; a bool, a non-integral numeric
+    (``4096.7``, ``Decimal("2.5")``), a value below ``minimum`` or beyond
+    ``sys.maxsize`` is refused. Numerics are range-checked BEFORE ``int()``
+    because ``int(Decimal("1E999999999"))`` hangs rather than raising (#177);
+    a string is bounded after parsing, since ``int()`` caps its digits.
+    ``bound`` is the worded rule for the message and must describe
+    ``minimum`` ("a positive integer (> 0)" for 1); nothing checks the pair.
     """
-    if isinstance(value, bool):
-        raise ValueError(f"llm_max_retries must be an integer, not a boolean: {value!r}")
-    try:
-        n = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"llm_max_retries must be an integer, got {value!r}") from exc
-    if n < 0:
-        raise ValueError(f"llm_max_retries must be >= 0, got {n}")
-    return n
-
-
-def _coerce_max_tokens(value):
-    """Validate a ``max_tokens`` cap to a positive int, or raise ``ValueError``.
-
-    Env-sourced values are strings and bypass every YAML-side check, and
-    forwarding 0 or a negative cap is a deterministic provider 400 on every
-    call — the #177 stall shape — so the value is validated here, not just
-    coerced. ``bool`` is an ``int`` subclass (``True`` would pass as a 1-token
-    cap that truncates every completion with nothing raised anywhere); a
-    programmatic ``4096.7`` (or ``Decimal`` / ``Fraction``) must not
-    ``int()``-truncate to a cap the caller never asked for; and numerics are
-    range-checked BEFORE ``int()`` because ``int(Decimal("1E999999999"))`` is a
-    hang, not an exception. A numeric string goes straight to ``int()``.
-    """
-    base = "config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) must be a positive integer"
+    base = f"config key '{key}' ({env}) must be {bound}"
     if isinstance(value, bool):
         raise ValueError(f"{base}, not a boolean: {value!r}")
     try:
-        if not isinstance(value, str):
-            # Bound both sides: a huge negative exponent hangs int() just as a
-            # huge positive one does; positivity is judged after parsing so the
-            # message can name it.
-            if not (-sys.maxsize <= value <= sys.maxsize):
+        if isinstance(value, str):
+            parsed = int(value)
+        elif not (-sys.maxsize <= value <= sys.maxsize):
+            parsed = None  # int() of a huge exponent, either sign, never returns
+        else:
+            parsed = int(value)
+            if parsed != value:
                 raise ValueError
-            if int(value) != value:
-                raise ValueError
-        parsed = int(value)
-    # OverflowError kept for belt-and-braces: the range check above already
-    # refuses inf, but a bad cap must never leak raw.
-    except (TypeError, ValueError, OverflowError):
+    # ArithmeticError covers Decimal("NaN"), whose ordering comparison signals
+    # InvalidOperation, and OverflowError: a bad value must never leak raw.
+    except (TypeError, ValueError, ArithmeticError):
         raise ValueError(f"{base}, got {value!r}") from None
-    if parsed <= 0:
-        raise ValueError(f"{base} (> 0), got {value!r}")
+    if parsed is None or not (-sys.maxsize <= parsed <= sys.maxsize):
+        raise ValueError(f"{base} within the platform integer range, got {value!r}")
+    if parsed < minimum:
+        raise ValueError(f"{base}, got {value!r}")
     return parsed
+
+
+def _coerce_max_retries(value):
+    """``llm_max_retries``: the SDK retry budget; 0 disables retries (#1091)."""
+    return _coerce_config_int(
+        value,
+        key="llm_max_retries",
+        env="TRADINGAGENTS_LLM_MAX_RETRIES",
+        minimum=0,
+        bound="a non-negative integer (>= 0)",
+    )
+
+
+def _coerce_max_tokens(value):
+    """``max_tokens``: the completion cap; 0 is a provider 400 on every call (#177)."""
+    return _coerce_config_int(
+        value,
+        key="max_tokens",
+        env="TRADINGAGENTS_MAX_TOKENS",
+        minimum=1,
+        bound="a positive integer (> 0)",
+    )
 
 
 class TradingAgentsGraph:
@@ -237,7 +241,7 @@ class TradingAgentsGraph:
 
         # Completion cap is cross-provider too; Gemini names it
         # ``max_output_tokens``, so it goes under the right key per provider
-        # (#1204). Validated, not just coerced — see _coerce_max_tokens.
+        # (#1204). Validated, not just coerced — see _coerce_config_int.
         max_tokens = self.config.get("max_tokens")
         if max_tokens is not None and max_tokens != "":
             key = "max_output_tokens" if provider == "google" else "max_tokens"

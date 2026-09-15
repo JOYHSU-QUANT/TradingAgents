@@ -182,8 +182,8 @@ def create_news_analyst(llm):
 
         tools = [get_news, get_global_news]
         base_hints = [
-            f"get_news(query, start_date, end_date) for {asset_label}-specific or "
-            f"targeted news searches",
+            f"get_news(ticker, start_date, end_date) for {asset_label}-specific news "
+            f"by ticker symbol",
             "get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news",
         ]
         calendar_messages = []

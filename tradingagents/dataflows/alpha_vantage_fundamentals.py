@@ -12,11 +12,11 @@ from .alpha_vantage_common import (
     _served_body,
     _with_freshness_note,
 )
+from .date_window import withhold_live_profile
 from .errors import NoMarketDataError, WiringGapError
 from .utils import (
     data_lag_note,
     date_refusal,
-    live_snapshot_note,
     normalize_iso_date,
     statement_lag_bound,
 )
@@ -304,13 +304,15 @@ def _filter_response_json(result, curr_date, freq, label, symbol):
 
 
 def _annotate_live_snapshot(result, curr_date, symbol):
-    """Disclose that an OVERVIEW payload is today's state, not ``curr_date``'s.
+    """Serve an OVERVIEW payload, refusing a ``curr_date`` it cannot judge.
 
     OVERVIEW carries current-state ratios with no historical form — the same
-    live-only shape as yfinance's ``info`` — so when the analysis date sits
-    behind the wall clock (a backtest), today's market cap and P/E would
-    otherwise read as that date's (#30). The same tool routes to either vendor,
-    so the disclosure cannot depend on which one ``data_vendors`` picked (#58).
+    live-only shape as yfinance's ``info``. A usable PAST analysis date never
+    reaches here: ``get_fundamentals`` withholds the profile before the
+    request (``date_window.withhold_live_profile``, #1300), the one rule both
+    vendors share so the tool cannot leak by which one ``data_vendors``
+    picked (#58). What is still judged here is the body's shape, and a
+    curr_date that is not a date at all.
 
     Serves the body as it arrived (bar a vendor-supplied freshness key) when
     there is nothing to disclose, when it is not a JSON object, or when the
@@ -348,31 +350,39 @@ def _annotate_live_snapshot(result, curr_date, symbol):
         refusal := date_refusal(curr_date, what="fundamentals", kind="disclosure", omitted_ok=True)
     ) is not None:
         return refusal
-    note = live_snapshot_note(curr_date, "these fundamentals are")
-    if not note:
-        return _served_body(result, parsed)
-    return _with_freshness_note(parsed, note)
+    # Nothing left to disclose: a usable past curr_date was withheld before
+    # the request (date_window.withhold_live_profile, #1300), so a body that
+    # reaches here was asked for today and is served as it arrived.
+    return _served_body(result, parsed)
 
 
 def get_fundamentals(ticker: str, curr_date: str = None) -> str:
     """
     Retrieve comprehensive fundamental data for a given ticker symbol using Alpha Vantage.
 
+    OVERVIEW serves only present-day values and carries no historical vintage, so
+    a past ``curr_date`` withholds it rather than leaking post-decision figures
+    into a backtest (#1300); the statement endpoints below stay point-in-time via
+    ``_filter_reports_by_date``.
+
     Args:
         ticker (str): Ticker symbol of the company
         curr_date (str): Current date you are trading at, yyyy-mm-dd. Alpha
-            Vantage has no historical OVERVIEW, so this does not bound the
-            data — it decides whether the report discloses that the values are
-            live as of the fetch.
+            Vantage has no historical OVERVIEW, so a past date does not bound
+            the data — it withholds the profile (#1300).
 
     Returns:
-        str: Company overview data including financial ratios and key metrics,
-            carrying a live-snapshot disclosure when curr_date sits behind the
-            wall clock. In place of that it may return the vendor's own prose or
+        str: Company overview data including financial ratios and key metrics
+            on a live date; the withheld notice on a past one. In place of
+            those it may return the vendor's own prose or
             failure-envelope body, or the ``INVALID_CURR_DATE`` sentinel when a
             supplied curr_date is not a usable date. See the module's error
             contract note for what every fundamentals getter can raise.
     """
+    withheld = withhold_live_profile(curr_date, ticker)
+    if withheld:
+        return withheld
+
     params = {
         "symbol": ticker,
     }

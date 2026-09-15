@@ -14,11 +14,15 @@ network call succeeded.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import logging
+from datetime import datetime
 from urllib.request import Request, urlopen
 
+from .date_window import in_window
+from .symbol_utils import crypto_base
 from .utils import (
     MAX_UNTRUSTED_CHARS,
     data_lag_note,
@@ -82,11 +86,47 @@ def _symbols_match(requested: str, echoed: str) -> bool:
     return r == e or e == f"{r}.X" or r == f"{e}.X"
 
 
+def _within_window(messages, start_date, end_date):
+    """Keep only messages published in [start_date, end_date] (look-ahead safe).
+
+    No window (both None) leaves the list untouched for live callers. A message
+    whose ``created_at`` (ISO 8601) is unparseable is dropped in a historical
+    window, since we can't prove it isn't from after the as-of date (#1220).
+    """
+    if not (start_date and end_date):
+        return messages
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    kept = []
+    for m in messages:
+        created = None
+        raw = m.get("created_at")
+        if raw:
+            with contextlib.suppress(ValueError, TypeError):
+                created = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if in_window(created, start_dt, end_dt):
+            kept.append(m)
+    return kept
+
+
+def _stocktwits_symbol(ticker: str) -> str:
+    """Map a crypto pair to StockTwits' ``<BASE>.X`` convention.
+
+    StockTwits lists crypto as ``BTC.X`` (Yahoo's ``BTC-USD`` form 404s), so any
+    crypto symbol resolves to its base plus ``.X``; other symbols pass through
+    upper-cased.
+    """
+    base = crypto_base(ticker)
+    return f"{base}.X" if base else ticker.strip().upper()
+
+
 def fetch_stocktwits_messages(
     ticker: str,
     limit: int = 30,
     timeout: float = 10.0,
     curr_date: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> str:
     """Fetch recent StockTwits messages for ``ticker`` and return them as a
     formatted plaintext block ready for prompt injection.
@@ -99,12 +139,21 @@ def fetch_stocktwits_messages(
     MAX_MESSAGE_LAG_DAYS, it leads with a data-lag disclosure so a stalled
     stream cannot read as current sentiment (#30). ``None`` skips both checks
     (legacy callers).
+    When ``start_date``/``end_date`` (yyyy-mm-dd) are given, messages are trimmed
+    to that window. The StockTwits public stream only serves recent messages, so
+    for a historical run they all fall after the window and a clear placeholder
+    is returned rather than leaking today's chatter into a backtest (#1220).
 
     Returns a placeholder string when the endpoint is unreachable, the
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
     """
-    url = _API.format(ticker=ticker.upper())
+    # The symbol StockTwits is asked for: a crypto pair becomes ``<BASE>.X``
+    # (#1113). The identity echo below is judged against THIS spelling, not
+    # the caller's - the venue echoes what it was asked for, so comparing the
+    # echo with the pair read every successful crypto answer as a mismatch.
+    requested = _stocktwits_symbol(ticker)
+    url = _API.format(ticker=requested)
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:
@@ -125,10 +174,10 @@ def fetch_stocktwits_messages(
     # must degrade, never raise.
     symbol_env = data.get("symbol")
     echoed = symbol_env.get("symbol") if isinstance(symbol_env, dict) else None
-    if isinstance(echoed, str) and not _symbols_match(ticker, echoed):
+    if isinstance(echoed, str) and not _symbols_match(requested, echoed):
         logger.warning(
             "StockTwits symbol mismatch: requested %s, response is for %s",
-            ticker.upper(),
+            requested,
             echoed.upper(),
         )
         # BOTH spellings inside repr's own quotes, the vendor's included. The
@@ -141,7 +190,7 @@ def fetch_stocktwits_messages(
         # CONTRASTED with an argument, character for character.
         return (
             f"<stocktwits unavailable: symbol mismatch "
-            f"(requested {quote_argument(ticker.upper())}, response is for "
+            f"(requested {quote_argument(requested)}, response is for "
             f"{quote_argument(echoed.upper())})>"
         )
 
@@ -164,7 +213,16 @@ def fetch_stocktwits_messages(
             ticker.upper(),
         )
     messages = dict_messages
+    # Trim to the analysis window BEFORE the empty check, so a historical run
+    # whose window the live-only stream cannot reach answers with the windowed
+    # placeholder rather than leaking today's chatter into a backtest (#1220).
+    messages = _within_window(messages, start_date, end_date)
     if not messages:
+        if start_date and end_date:
+            return (
+                f"<no StockTwits messages for ${echo_argument(ticker.upper())} within "
+                f"{start_date}..{end_date} (public stream serves only recent messages)>"
+            )
         return f"<no StockTwits messages found for ${echo_argument(ticker.upper())}>"
 
     lines = []

@@ -11,6 +11,7 @@ for every one of these categories.
 
 import json
 import logging
+from datetime import date as _date
 from unittest import mock
 
 import pytest
@@ -22,7 +23,7 @@ import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_common as su
 import tradingagents.dataflows.yfinance_news as ynews
 from tests.conftest import registry_pairs
-from tradingagents.dataflows import interface
+from tradingagents.dataflows import date_window, interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import (
     UnsupportedIndicatorError,
@@ -34,6 +35,17 @@ from tradingagents.dataflows.errors import (
 from tradingagents.dataflows.throttle import THROTTLE_LATCH_TTL_S
 from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS
 
+# The wall-clock day, for the getter that withholds a live-only profile on any
+# earlier date (#1300).
+_TODAY = _date.today().strftime("%Y-%m-%d")
+
+
+@pytest.fixture(autouse=True)
+def _freeze_the_withhold_clock(monkeypatch):
+    """withhold_live_profile reads the wall clock at call time; pin it to the
+    day these tests were computed with, so a run crossing midnight cannot turn
+    a served profile into a withheld one."""
+    monkeypatch.setattr(date_window, "get_current_date", lambda: _TODAY)
 
 def _throttled(*a, **k):
     raise VendorRateLimitError("Yahoo Finance rate limited the request")
@@ -553,7 +565,7 @@ def _http_error(status):
 
 
 _SWALLOWING_LEAVES = [
-    pytest.param(lambda: yfin.get_fundamentals("AAPL", "2026-06-01"), id="fundamentals"),
+    pytest.param(lambda: yfin.get_fundamentals("AAPL", _TODAY), id="fundamentals"),
     pytest.param(lambda: yfin.get_insider_transactions("AAPL"), id="insiders"),
     pytest.param(
         lambda: yfin.get_YFin_data_online("AAPL", "2026-06-01", "2026-06-05"), id="prices"
@@ -703,7 +715,7 @@ def test_an_outage_page_on_the_second_fundamentals_fetch_is_not_no_data(monkeypa
     payload = {"quoteSummary": {"result": [{"symbol": "AAPL", "longName": "Apple Inc."}]}}
     monkeypatch.setattr(yfdata.YfData, "get_raw_json", mock.Mock(return_value=payload))
     with pytest.raises(VendorUnavailableError):
-        yfin.get_fundamentals("AAPL", "2026-06-01")
+        yfin.get_fundamentals("AAPL", _TODAY)
 
 
 @pytest.mark.unit
@@ -839,7 +851,9 @@ def test_a_partial_service_history_failure_takes_the_no_data_lane(monkeypatch, t
 _YFINANCE_LEAF_CALLS = {
     "get_stock_data": ((yfin, "yf_fetch_unhidden"), ("AAPL", "2026-06-01", "2026-06-05")),
     "get_indicators": ((su, "yf_fetch_unhidden"), ("AAPL", "rsi", "2026-06-01", 5)),
-    "get_fundamentals": ((yfin, "yf_fetch_unhidden"), ("AAPL", "2026-06-01")),
+    # Today, not a fixed past date: a past curr_date is withheld before the seam
+    # (date_window.withhold_live_profile, #1300), so only a live-dated call reaches it.
+    "get_fundamentals": ((yfin, "yf_fetch_unhidden"), ("AAPL", _TODAY)),
     "get_balance_sheet": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_cashflow": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),
     "get_income_statement": ((yfin, "yf_fetch_statement"), ("AAPL", "quarterly", "2026-06-01")),

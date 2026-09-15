@@ -54,7 +54,7 @@ def _message(**overrides):
 
 
 @pytest.mark.unit
-class StockTwitsResilienceTests:
+class TestStockTwitsResilience:
     @pytest.mark.parametrize(
         "exc",
         [
@@ -273,3 +273,47 @@ class TestMalformedMessageShapes:
         with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
             out = stocktwits.fetch_stocktwits_messages("NVDA")
         assert "Total: 1" in out  # rendered without crashing
+
+
+@pytest.mark.unit
+class TestStockTwitsCryptoSymbols:
+    """StockTwits lists crypto under ``<BASE>.X`` (Yahoo's ``BTC-USD`` 404s), so
+    a crypto pair is requested by its base plus ``.X`` (upstream #1113)."""
+
+    @pytest.mark.parametrize(
+        ("ticker", "expected"),
+        [
+            ("BTC-USD", "BTC.X"),
+            ("eth-usd", "ETH.X"),
+            ("SOL-USD", "SOL.X"),
+            ("BTCUSD", "BTC.X"),      # undashed broker form
+            ("BTC-USDT", "BTC.X"),    # stablecoin quote
+            ("AMD", "AMD"),
+            ("BRK-B", "BRK-B"),       # dashed class share: untouched
+            ("GOLD", "GOLD"),         # real equity (aliases elsewhere): untouched here
+            ("XYZ-USD", "XYZ-USD"),   # unknown base: not treated as crypto
+        ],
+    )
+    def test_symbol_mapping(self, ticker, expected):
+        assert stocktwits._stocktwits_symbol(ticker) == expected
+
+    def test_crypto_pair_requests_dot_x_endpoint(self):
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen["url"] = req.full_url
+            raise TimeoutError("stop after capturing the URL")
+
+        with patch.object(stocktwits, "urlopen", side_effect=fake_urlopen):
+            stocktwits.fetch_stocktwits_messages("BTC-USD")
+        assert "/symbol/BTC.X.json" in seen["url"]
+
+    def test_crypto_pair_echo_is_judged_against_the_mapped_symbol(self):
+        # The venue echoes the symbol it was asked for (BTC.X), not the caller's
+        # pair; judging the echo against the pair discarded every successful
+        # crypto answer as a mismatch.
+        payload = {"symbol": {"symbol": "BTC.X"}, "messages": [_message()]}
+        with patch.object(stocktwits, "urlopen", return_value=_json_resp(payload)):
+            out = stocktwits.fetch_stocktwits_messages("BTC-USD")
+        assert "to the moon" in out
+        assert "symbol mismatch" not in out

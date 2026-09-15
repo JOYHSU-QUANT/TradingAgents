@@ -441,7 +441,11 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # that engine's _get_provider_kwargs would forward nothing: the request
     # goes out uncapped and 400s, which is #177 verbatim. Refusing by name
     # beats both a bare KeyError (exit 2 "unexpected error") and, worse,
-    # logging a cap that was never sent.
+    # logging a cap that was never sent. Since #266 the import above is the
+    # first line against a stale engine (one old enough to lack the cap key
+    # also lacks ``_coerce_max_retries``, and fails there, by name); this
+    # stays as the second, for an engine that has the validator but not the
+    # key — defence in depth, not the expected path.
     if "max_tokens" not in engine_config:
         raise EngineConfigError(
             "the imported tradingagents engine has no 'max_tokens' config key, "

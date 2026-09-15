@@ -166,7 +166,7 @@ def test_build_engine_config_is_the_inner_line_against_a_zero_cap():
 def test_build_engine_config_rejects_a_bad_env_int_knob_at_startup(monkeypatch, key, bad, env):
     """A junk env int knob must fail the daemon at startup, not once per cycle.
 
-    ``load_config`` validates the YAML keys, but the env overrides reach the
+    ``load_config`` validates the cap's YAML key, but the env overrides reach the
     bridge unchecked (coerced against a ``None`` default, so any string rides
     through). Left to ``build_graph`` the ValueError lands per cycle OUTSIDE
     the retry classification: the scheduler writes an unclassified

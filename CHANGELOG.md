@@ -1621,7 +1621,7 @@ Breaking changes within the 0.x line are called out explicitly.
   started, and every decision cycle then raised inside `build_graph` outside
   the retry classification — an unclassified `api_failed`, the position held
   on SL/TP alone, until someone read the log. `_build_engine_config` now
-  validates the value with the graph's own `_coerce_max_retries` (one policy
+  validates the value with the engine's own `_coerce_max_retries` (one policy
   for the family, #264 — not a fourth copy), refuses with an
   `EngineConfigError` naming the config key and the env var, and writes the
   int it yields into `engine_config` so the graph forwards a number, not the

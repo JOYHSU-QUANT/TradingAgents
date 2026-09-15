@@ -39,8 +39,8 @@ from tradingagents.dataflows.utils import (
 from tradingagents.default_config import (
     DEFAULT_CONFIG,
     DEFAULT_MAX_TOKENS,
-    _coerce_max_retries,  # also re-exported: upstream tests import it from here
-    _coerce_max_tokens,
+    _coerce_max_retries,  # housed there since #266; on an upstream sync, port edits THERE
+    _coerce_max_tokens,  # both re-exported: upstream tests import them from this module
 )
 from tradingagents.llm_clients import create_llm_client, is_gateway_provider
 from tradingagents.reporting import write_report_tree

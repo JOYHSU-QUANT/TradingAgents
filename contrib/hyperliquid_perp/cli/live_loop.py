@@ -6,13 +6,36 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
 
 from . import _provider
+from ._common import (
+    announce_engine_config_protection_only,
+    holds_live_work,
+    note_stranded_attempt,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ProtectionOnlyExit:
+    """How a protection-only live loop ended (issue #268).
+
+    Returned by :func:`_run_live_loop` instead of ``None`` when the decision
+    provider could not be built over a live position and the loop ran
+    tick-only. ``cause`` is the ``EngineConfigError`` text; ``settled`` says
+    the loop ended ITSELF because the position closed and nothing was left
+    to protect (the paper loop's settle-exit, exit 1 there), as opposed to
+    Ctrl-C / SIGTERM. The caller prints the matching exit line and picks the
+    exit code — the loop never chooses one.
+    """
+
+    cause: str
+    settled: bool
 
 
 # The live loop's tick period. Kept well inside the kill-switch tick budget
@@ -200,7 +223,7 @@ def _run_live_loop(
     payload_dir: Path,
     fetch_clearinghouse,
     identity,
-) -> None:
+) -> ProtectionOnlyExit | None:
     """The PR 5 live trading loop (§9/§11.4): tick the engine + pump the 4h cycle.
 
     ``identity`` is the caller's shared :class:`VenueIdentityMonitor` — the
@@ -223,8 +246,24 @@ def _run_live_loop(
     A ``RunLockError`` from the lease heartbeat propagates OUT of this function
     by design: the caller exits without the §18.2 sweep (the successor process
     owns the run's orders — see the caller's ``except RunLockError``).
+
+    Returns ``None`` after an ordinary Ctrl-C / SIGTERM, or a
+    :class:`ProtectionOnlyExit` when the loop ran in protection-only mode
+    (issue #268): the decision provider's construction raised an
+    ``EngineConfigError`` — a failed engine import, or a rejected env knob
+    such as ``TRADINGAGENTS_MAX_TOKENS``, ``TRADINGAGENTS_LLM_MAX_RETRIES``
+    or ``TRADINGAGENTS_TEMPERATURE`` — over a LIVE position. Exiting then
+    would hand the caller's §18.2 sweep a passing verdict and a live
+    position, and the sweep would cancel the resting SL/TP: the position
+    naked, and under ``Restart=`` a crash-loop into the same refusal. So the
+    loop starts anyway, tick-only (kill-switch refresh, reconciliation, SL/TP
+    protection; NO decision pump, so no new cycle), and ends itself once the
+    position is closed. Flat, the same ``EngineConfigError`` propagates OUT
+    (nothing to guard): the caller's handler makes it a named exit 1, the
+    paper lane's rule.
     """
 
+    from ..engine_bridge import EngineConfigError
     from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
     from ..live.decision import AdoptionWedgedError, LiveDecisionDriver, LiveDecisionWorker
     from ..live.engine import LiveExecutionEngine
@@ -236,6 +275,7 @@ def _run_live_loop(
     from ..paper.clock import WallClock
     from ..paper.engine import AssetSpec
     from ..paper.market_feed import PortSnapshotProvider
+    from ..paper.position_facts import read_books
     from ..paper.stops import StopConfig
     from ..persistence import repository as repo
 
@@ -320,44 +360,72 @@ def _run_live_loop(
     # that segment now, before the first tick, so the loss counter cannot merge
     # it into the next one.
     engine.settle_offline_flat()
-    from ..paper.position_facts import read_books
 
-    decision_provider = _provider._EngineDecisionProvider(
-        config,
-        risk_cfg=risk_cfg,
-        decision_cfg=decision_cfg,
-        payload_dir=payload_dir,
-        # build_input runs on THIS thread inside driver.pump(); its five market
-        # reads are the longest back-to-back REST chain in the system. Refreshing
-        # between them keeps the unrefreshed run at the submit chain's 3 instead
-        # of 5, which is what lets the operator advisory stay at a ~10s timeout
-        # rather than demanding 7.5s from a cycle that cannot retry.
-        on_blocking_read=partial(
-            refresh_across_blocking_work, kill_switch, what="decision market data"
-        ),
-        # The live store keeps the same books the paper daemon reads (the
-        # reconciler mirrors the exchange onto them), so the prompt's
-        # ``Position:`` section comes from the same read on both lanes.
-        position_source=partial(read_books, db, run_id, coin),
-    )
-    worker = LiveDecisionWorker(provider=decision_provider)
-    driver = LiveDecisionDriver(
-        db=db,
-        run_id=run_id,
-        coin=coin,
-        asset=asset,
-        risk_config=risk_cfg,
-        decision_config=decision_cfg,
-        engine=engine,
-        worker=worker,
-        provider=decision_provider,
-        clock=clock,
-    )
+    # The provider's construction is the process's first tradingagents import
+    # and runs the bridge's startup gates, so this is where an
+    # operator-fixable environment fault surfaces — as an ``EngineConfigError``
+    # (the base: a bad env knob and a failed import are the same class of
+    # mistake, and a new sibling cause needs no new handler). Over a live
+    # position it must NOT propagate: see the docstring (issue #268). This
+    # mirrors ``cli/paper.py``'s healthy-restart rule through the same
+    # ``holds_live_work`` decision (the live engine's own answer: position,
+    # active leg or pending flip; unreadable counts as live).
+    protection_only: ProtectionOnlyExit | None = None
+    try:
+        decision_provider = _provider._EngineDecisionProvider(
+            config,
+            risk_cfg=risk_cfg,
+            decision_cfg=decision_cfg,
+            payload_dir=payload_dir,
+            # build_input runs on THIS thread inside driver.pump(); its five market
+            # reads are the longest back-to-back REST chain in the system. Refreshing
+            # between them keeps the unrefreshed run at the submit chain's 3 instead
+            # of 5, which is what lets the operator advisory stay at a ~10s timeout
+            # rather than demanding 7.5s from a cycle that cannot retry.
+            on_blocking_read=partial(
+                refresh_across_blocking_work, kill_switch, what="decision market data"
+            ),
+            # The live store keeps the same books the paper daemon reads (the
+            # reconciler mirrors the exchange onto them), so the prompt's
+            # ``Position:`` section comes from the same read on both lanes.
+            position_source=partial(read_books, db, run_id, coin),
+        )
+    except EngineConfigError as exc:
+        if not holds_live_work(engine):
+            # Flat: nothing to guard, so the named refusal stands — the
+            # caller's ``except EngineConfigError`` prints it and exits 1.
+            raise
+        protection_only = ProtectionOnlyExit(cause=str(exc), settled=False)
+        announce_engine_config_protection_only(
+            exc,
+            where=f"for live run {run_id}",
+            alive="SL/TP protection, the kill-switch refresh and reconciliation",
+        )
+        worker = driver = None
+        # Only a healthy restart's driver may adopt a stranded attempt (§3.1);
+        # protection-only never builds the driver, so it stays open until then.
+        note_stranded_attempt(
+            db, run_id, never="builds the decision driver", restart_will="adopts it"
+        )
+    else:
+        worker = LiveDecisionWorker(provider=decision_provider)
+        driver = LiveDecisionDriver(
+            db=db,
+            run_id=run_id,
+            coin=coin,
+            asset=asset,
+            risk_config=risk_cfg,
+            decision_config=decision_cfg,
+            engine=engine,
+            worker=worker,
+            provider=decision_provider,
+            clock=clock,
+        )
     # §3.1: adopt a prior process's stranded in-progress decision (resume from
     # its stored response, or fail it closed) — without this the deterministic
     # attempt id collides every tick and the driver never decides again.
     try:
-        adopted = driver.resume_startup()
+        adopted = None if driver is None else driver.resume_startup()
     except AdoptionWedgedError as exc:
         # The SAME containment (the loop must watch the position either way),
         # at the severity the fault deserves: this one cannot heal by being
@@ -392,7 +460,9 @@ def _run_live_loop(
             logger.info("decision driver startup adoption: %s", adopted)
     pid = os.getpid()
     print(
-        f"live loop started for {run_id!r} ({live_cfg.mode.value}) — Ctrl-C to stop",
+        f"live loop started for {run_id!r} ({live_cfg.mode.value})"
+        + (" in protection-only mode" if driver is None else "")
+        + " — Ctrl-C to stop",
         file=sys.stderr,
     )
     try:
@@ -411,21 +481,44 @@ def _run_live_loop(
                 # The tick logs its own per-tick activity summary from a finally,
                 # so no raise below can eat the record (see _log_tick_activity).
                 engine.tick()
-                phase = "decision pump"
-                # The seam between the two blocking halves of one iteration.
-                # engine.tick() refreshes at its top and across its own blocking
-                # work, but driver.pump() then runs _build_context ON THIS THREAD:
-                # constructing the SDK client fetches perp meta, then snapshot,
-                # candles, the exchange clock and funding — five back-to-back
-                # REST calls on the same
-                # network_timeout_s, with no refresh of their own. Without this
-                # line the two chains are consecutive, so the run of unrefreshed
-                # calls is their SUM, not the max the budget constant assumes
-                # (2026-08-01 lifecycle review).
-                refresh_across_blocking_work(kill_switch, what="decision pump")
-                cycle = driver.pump()
-                if cycle is not None:
-                    logger.info("live decision cycle: %s", cycle)
+                if driver is None:
+                    # Protection-only (issue #268): no pump, ever. The mode
+                    # exists for a live position; once it is closed no later
+                    # iteration can do anything, and a zombie would hold the
+                    # lease and refresh the switch for days. End the loop
+                    # loud instead — the caller's §18.2 sweep then runs over a
+                    # flat book, and the exit code tells the supervisor
+                    # (the paper loop's settle-exit rule). Its own phase: the
+                    # read is a store read after tick() has returned, so a
+                    # raise here must not be filed against the tick (#238).
+                    phase = "protection-only settle check"
+                    # ``driver`` is None exactly when ``protection_only`` was
+                    # set (the except/else above assign them together); the
+                    # assert states that for the type checker.
+                    assert protection_only is not None
+                    if not engine.has_active_work():
+                        logger.error(
+                            "protection-only live run %s has nothing left to "
+                            "protect — exiting",
+                            run_id,
+                        )
+                        return replace(protection_only, settled=True)
+                else:
+                    phase = "decision pump"
+                    # The seam between the two blocking halves of one iteration.
+                    # engine.tick() refreshes at its top and across its own
+                    # blocking work, but driver.pump() then runs _build_context
+                    # ON THIS THREAD: constructing the SDK client fetches perp
+                    # meta, then snapshot, candles, the exchange clock and
+                    # funding — five back-to-back REST calls on the same
+                    # network_timeout_s, with no refresh of their own. Without
+                    # this line the two chains are consecutive, so the run of
+                    # unrefreshed calls is their SUM, not the max the budget
+                    # constant assumes (2026-08-01 lifecycle review).
+                    refresh_across_blocking_work(kill_switch, what="decision pump")
+                    cycle = driver.pump()
+                    if cycle is not None:
+                        logger.info("live decision cycle: %s", cycle)
             except AdoptionWedgedError as exc:
                 # pump retries adoption when the BOOT call was contained, so a
                 # wedge can surface here too: the boot failure was the locked
@@ -467,12 +560,15 @@ def _run_live_loop(
             time.sleep(max(0.0, _LIVE_TICK_SECONDS - (time.monotonic() - tick_started)))
     except KeyboardInterrupt:
         print("\nlive loop stopping — running the §18.2 shutdown sweep...", file=sys.stderr)
-        # Let the off-thread AI decision settle so no worker thread writes to the
-        # store after teardown begins (§11.4 single writer).
-        worker.join(timeout=5.0)
-        # A decision that finished during the shutdown window is a paid-for
-        # answer only the next pump would have persisted — store its raw
-        # response so resume_startup resumes it after restart (§3.1) instead
-        # of failing the cycle closed and idling up to 4h. Fully contained:
-        # shutdown proceeds on any failure.
-        driver.salvage_shutdown()
+        if driver is not None:
+            assert worker is not None  # built together with the driver
+            # Let the off-thread AI decision settle so no worker thread writes
+            # to the store after teardown begins (§11.4 single writer).
+            worker.join(timeout=5.0)
+            # A decision that finished during the shutdown window is a paid-for
+            # answer only the next pump would have persisted — store its raw
+            # response so resume_startup resumes it after restart (§3.1)
+            # instead of failing the cycle closed and idling up to 4h. Fully
+            # contained: shutdown proceeds on any failure.
+            driver.salvage_shutdown()
+    return protection_only

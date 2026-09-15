@@ -8,13 +8,17 @@ installs, and the OPENROUTER_API_KEY gate.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from ..config import dotenv_diagnosis
+from ..persistence import repository as repo
 from ..persistence.db import Database, SchemaVersionError
+
+logger = logging.getLogger(__name__)
 
 
 def _raise_keyboard_interrupt(signum, frame) -> None:
@@ -187,6 +191,104 @@ def _require_live_run_mode(run_row, run_id: str, db_label: str, *, extra: str = 
         )
         return False
     return True
+
+
+def announce_engine_config_protection_only(exc, *, where: str, alive: str) -> None:
+    """The one wording for "the engine could not be built over live work".
+
+    Both lanes (``paper``'s healthy restart, ``live --loop`` after the §19.1
+    verdict; issue #268) reach this from ``except EngineConfigError`` around
+    provider construction, and both must say the same thing: the cause, that
+    the position is guarded, that NEW cycles are halted, and the remedy.
+    ``where`` names the run for the log ("on restart of r1", "for live run
+    r1"); ``alive`` is the lane's list of what keeps running.
+    """
+    logger.error(
+        "the engine could not be built %s with a live position — entering "
+        "protection-only mode: %s",
+        where,
+        exc,
+    )
+    print(
+        f"ERROR: {exc}\nThis run holds a live position — running in "
+        f"protection-only mode: {alive} stay live, NEW decision cycles stay "
+        "halted. Fix the environment and restart to resume trading.",
+        file=sys.stderr,
+    )
+
+
+def holds_live_work(engine) -> bool:
+    """Whether a startup refusal has anything to guard — failing toward "yes".
+
+    The decision both lanes make on an operator-fixable startup fault (a
+    missing key on paper, an ``EngineConfigError`` on either): live work means
+    protection-only, flat means a named exit. ``has_active_work`` is a store
+    read, and a raise from it (an operator's export/validate holding the
+    SQLite lock) must not turn into an exit over a position nobody watches —
+    unknown ≠ flat, the shutdown sweep's own rule (#268 review).
+    """
+    try:
+        return engine.has_active_work()
+    except Exception:  # noqa: BLE001 — unknown ≠ flat; the process must watch the position
+        logger.exception("could not read whether the run holds live work — treating it as live")
+        return True
+
+
+def announce_protection_only_settled(cause: str, *, then: str) -> None:
+    """The one wording for protection-only's settle-exit over an unbuildable engine.
+
+    The position closed with new cycles halted: no later iteration can do
+    anything, so the loop ends loud (exit 1 in both lanes) naming the cause
+    the operator has to fix; ``then`` is the lane's tail ("exporting the
+    final state and exiting", "exiting").
+    """
+    print(
+        "protection-only mode has nothing left to protect (the position is "
+        "closed and new cycles stayed halted because the engine could not be "
+        f"built: {cause}) — {then}. Fix the environment and restart to resume "
+        "this run.",
+        file=sys.stderr,
+    )
+
+
+def note_stranded_attempt(db: Database, run_id: str, *, never: str, restart_will: str) -> None:
+    """Protection-only's note about a prior process's in-progress decision.
+
+    Purely informational, for both lanes: only a healthy restart may finish
+    the attempt (§3.1 resumes the SAME attempt, without burning its retry
+    budget) — terminalizing it here would destroy that resumable state.
+    ``never`` is what this mode never does ("polls the scheduler", "builds
+    the decision driver"); ``restart_will`` is what the next healthy restart
+    does with it ("resumes it", "adopts it"). Both phrases land in both the
+    log line and the stderr note.
+
+    Best-effort, like every other write-free courtesy on a startup whose one
+    job is keeping SL/TP alive: the lookup is fail-loud on a store holding
+    two in-progress rows (the wedge the healthy lane escalates by name), and
+    a raise here must not leave the loop before it watches the position —
+    logged with its traceback, the note is simply not printed.
+    """
+    try:
+        stranded = repo.find_in_progress_attempt(db.conn, run_id)
+    except Exception:  # noqa: BLE001 — a courtesy note must not end a protection-only start
+        logger.exception("could not look up a stranded in-progress decision attempt")
+        return
+    if stranded is None:
+        return
+    attempt_id = stranded["decision_attempt_id"]
+    logger.warning(
+        "decision attempt %s remains in_progress; protection-only never %s, so it "
+        "stays open until the next healthy restart %s",
+        attempt_id,
+        never,
+        restart_will,
+    )
+    print(
+        f"note: decision attempt {attempt_id!r} from the previous process remains "
+        f"in_progress — protection-only mode never {never}; the next healthy "
+        f"restart {restart_will}.",
+        file=sys.stderr,
+    )
 
 
 def _require_api_key() -> bool:

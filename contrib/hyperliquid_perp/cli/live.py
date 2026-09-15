@@ -20,6 +20,7 @@ from ._common import (
     _raise_keyboard_interrupt,
     _require_agent_key,
     _require_api_key,
+    announce_protection_only_settled,
 )
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report, _norm_network, _run_config_subset
 from .live_loop import _run_live_loop, _still_owns_run
@@ -412,11 +413,19 @@ def _live_startup_recovery(
     (which keeps the kill switch refreshed) before the same sweep runs on the
     way out. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle;
     4 = recovery executed but the verdict is unclean (the run is in safe
-    mode); 1 = hard failure (config/arming/creation errors).
+    mode), or a --loop run was stopped while in protection-only mode (issue
+    #268: the engine could not be built over a live position, so the loop
+    ran tick-only — see :func:`_run_live_loop`); 1 = hard failure
+    (config/arming/creation errors, the engine not buildable over a FLAT
+    book, or a protection-only loop that ended itself once its position
+    closed — that settle-exit is 1 even with safe mode latched: the cause the
+    operator must fix comes first, and the ``safe_mode:`` line above it
+    still reports the latch).
     """
     import signal
     from decimal import Decimal
 
+    from ..engine_bridge import EngineConfigError
     from ..exchanges.hyperliquid.mapper import map_account_snapshot
     from ..exchanges.hyperliquid.sdk_client import call_sdk
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
@@ -823,6 +832,19 @@ def _live_startup_recovery(
             # must not let a luckier later read report "all quiet" over
             # deliberately-kept orders.
             exit_safe_mode_unknown = False
+            # What a --loop run reports on the way out: None for an ordinary
+            # stop, a ProtectionOnlyExit when the loop ran without a decision
+            # provider (issue #268) — read after the sweep to pick the exit line.
+            loop_exit = None
+            # True while the loop is in flight, so a raise out of it leaves
+            # it True. The boot verdict says the loop may start; it says
+            # nothing about how the loop ended, and a raise out of it (any of
+            # its construction steps, a store read, an import) reaches the
+            # generic handler below with that passing verdict on record — the
+            # sweep in the ``finally`` must not read "verdict passed" as
+            # "ended cleanly" and strip SL/TP over a live position (issue
+            # #268 review).
+            loop_raised = False
             try:
                 result = run_startup_recovery(
                     db=db,
@@ -840,7 +862,8 @@ def _live_startup_recovery(
                 # trading loop; it returns on Ctrl-C / SIGTERM, and the §18.2
                 # shutdown sweep in the ``finally`` below then disarms the switch.
                 if args.loop and result.passed:
-                    _run_live_loop(
+                    loop_raised = True
+                    loop_exit = _run_live_loop(
                         cfgs=loop_cfgs,
                         db=db,
                         run_id=run_id,
@@ -858,6 +881,7 @@ def _live_startup_recovery(
                         fetch_clearinghouse=fetch_clearinghouse,
                         identity=identity,
                     )
+                    loop_raised = False
             except RunLockError as exc:
                 # §18.2 lease takeover (raised out of the loop's heartbeat): a
                 # successor process owns the run now — its store, its resting
@@ -871,6 +895,17 @@ def _live_startup_recovery(
                 # RunLockError exit.
                 superseded = True
                 logger.error("run lease lost: %s", exc)
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            except EngineConfigError as exc:
+                # The loop's decision provider could not be built and the book
+                # is FLAT (over a live position the loop contains this itself
+                # — issue #268): an operator-fixable environment fault — a
+                # failed engine import, a rejected env knob — named as such,
+                # the paper lane's exit 1, not the generic "startup recovery
+                # failed" below. The ``finally`` sweep runs over the flat
+                # book; nothing there needs guarding.
+                logger.error("the engine could not be built: %s", exc)
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
             except Exception as exc:  # noqa: BLE001 — arming is the one hard-error step
@@ -948,15 +983,17 @@ def _live_startup_recovery(
                         logger.exception("shutdown safe-mode read failed")
                         exit_safe_mode = True
                         exit_safe_mode_unknown = True
-                    keep_protective = (not verdict_passed or exit_safe_mode) and (
+                    keep_protective = (not verdict_passed or exit_safe_mode or loop_raised) and (
                         fresh_positions is None or bool(fresh_positions)
                     )
-                    # Three distinct causes, three truthful notes: a FAILED
+                    # Four distinct causes, four truthful notes: a FAILED
                     # read is not "safe mode is active" — claiming so would
                     # contradict the fresh `safe_mode:` line printed later
                     # when the second read succeeds and finds none.
                     if not verdict_passed:
                         unclean_note = "the startup verdict did not pass"
+                    elif loop_raised:
+                        unclean_note = "the live loop raised instead of returning"
                     elif exit_safe_mode_unknown:
                         unclean_note = (
                             "the exit-time safe-mode state could NOT be read (unknown ≠ clean)"
@@ -1118,6 +1155,31 @@ def _live_startup_recovery(
                     # "§18.2 shutdown unclean" line above carries the detail).
                     return 4
                 if args.loop:
+                    if loop_exit is not None:
+                        # Protection-only (issue #268), BEFORE the safe-mode
+                        # lane below: the cause the operator must fix has to
+                        # reach the output, and the ``safe_mode:`` line
+                        # printed above already reports a latch. Two endings,
+                        # the paper lane's two codes: the position closed and
+                        # the loop ended itself — exit 1, like paper's
+                        # settle-exit, so a supervisor restarts into the same
+                        # named refusal (now over a flat book: exit 1 again,
+                        # no zombie) until the environment is fixed; or the
+                        # operator stopped it — "executed, not clean", the
+                        # same 4 as a stop in safe mode, never 0 ("all quiet")
+                        # for a run that was not trading.
+                        if loop_exit.settled:
+                            announce_protection_only_settled(loop_exit.cause, then="exiting")
+                            return 1
+                        print(
+                            "live loop exited from protection-only mode — §18.2 "
+                            "shutdown sweep done; NEW decision cycles never ran "
+                            f"because the engine could not be built: {loop_exit.cause}. "
+                            "Fix the environment and re-run with --loop to resume "
+                            "this run.",
+                            file=sys.stderr,
+                        )
+                        return 4
                     if state is not None or (exit_safe_mode_unknown and keep_protective):
                         # Sibling of the keep decision (2026-07-22): the boot
                         # verdict is stale after a loop, and a run that latched

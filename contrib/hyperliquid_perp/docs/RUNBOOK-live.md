@@ -377,10 +377,31 @@ python -m contrib.hyperliquid_perp live \
 - 迴圈每 ~10s tick（在 30s kill-switch 預算內）：排空 WS queue → 刷 kill switch →
   reconciliation → SL/TP protection → 到期切片；4h AI decision 在背景 thread。
 - Ctrl-C／SIGTERM 安全停止並跑 §18.2 shutdown sweep。
+- **Protection-only 模式**（issue #268；與 paper 的同名模式同一條規則）：`--loop` 在
+  recovery 通過後建構 decision provider，這一步會跑 engine 的啟動閘門——`.env` 裡壞的
+  `TRADINGAGENTS_MAX_TOKENS`／`TRADINGAGENTS_LLM_MAX_RETRIES`／`TRADINGAGENTS_TEMPERATURE`、
+  或 tradingagents import 失敗（常見是 `.env` 存成 UTF-16），都在這裡以 `EngineConfigError`
+  被拒。**持倉時不退出**（退出會讓 §18.2 sweep 撤掉 SL/TP、倉位裸奔，監管再拉起來又撞同
+  一個拒絕）：改以 protection-only 起迴圈——tick 照跑（kill-switch 刷新、reconciliation、
+  SL/TP 修復），**不 pump、不開新 decision cycle**，啟動行會印 `in protection-only mode`，
+  stderr 明講成因與修法。**不進 safe mode**（環境錯，不是執行失敗）。倉位被 SL/TP 了結後
+  迴圈自己結束、印 `nothing left to protect`、**exit 1**（同 paper 的 settle-exit；監管重啟
+  會撞到空倉版的具名拒絕，同樣 exit 1，不會養出殭屍）；Ctrl-C／SIGTERM 停掉的 protection-only
+  run 印 `exited from protection-only mode`、**exit 4**（執行了但不乾淨，與 safe mode 停止同碼，
+  絕不回 0）。**空倉**時同一個拒絕直接具名 exit 1（`error: config key ...`），不進迴圈。
+  前一個 process 留下的 in_progress decision attempt 在 protection-only 下刻意不動，啟動時
+  提示一行，下一次健康重啟才接續。修法＝照 stderr 的錯誤修好 `.env`／環境後重跑 `--loop`。
+  同一批修正把 `_ENV_OVERRIDES` 表的**每一列**都納入這條車道（`TRADINGAGENTS_MAX_DEBATE_ROUNDS=abc`
+  這種在 import 時就被拒的值，以前是無型別的 `ValueError` 直接穿出去）。
+- **迴圈拋例外（不是回傳）時 SL/TP 留著**：§18.2 sweep 以前只看啟動判定，`--loop` 進迴圈後
+  任何一個 raise（建構期的 REST 讀取、store 讀取、import）都會被當成「乾淨結束」而撤掉 SL/TP。
+  現在 sweep 也問「迴圈有沒有正常回傳」——沒有就把 SL/TP 留在書上（reduce-only），WARNING 寫
+  `the live loop raised instead of returning`、exit 1；操作者處理完成因後重跑 `--loop`。
 - **長駐建議**同 paper（[RUNBOOK §3](./RUNBOOK.md)）：掛在會自動重啟的監管下，
   working directory 設 repo 根目錄。監管（systemd 等）的重啟策略可依 exit code
-  分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、**1**＝
-  config／憑證／環境錯誤——兩者都不該無腦無限重啟。**exit 1 至少有以下四種是暫時性的**：
+  分流：**4**＝smoke gate 未開（重啟不會自己好，先去跑 `live-smoke`）、或被停掉時處在
+  safe mode／protection-only；**1**＝
+  config／憑證／環境錯誤（含上面 protection-only 倉位了結後的自我結束）——兩者都不該無腦無限重啟。**exit 1 至少有以下四種是暫時性的**：
   (a) 同錢包姊妹 run 還持著新鮮 lease 時的具名拒絕（訊息含 `ACCOUNT-wide`），等對方
   收工或 lease 過期後重跑就會好——但那代表有兩個 run 同時被啟動，該查的是啟動來源；
   (b) store 打不開來讀的具名拒絕（訊息含 `could not be opened for reading`），成因

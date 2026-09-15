@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 
@@ -43,21 +44,23 @@ _BOOL_FALSE = ("false", "0", "no", "off")
 DEFAULT_MAX_TOKENS = 8192
 
 
-# The validators for the integer LLM knobs (``max_tokens``,
-# ``llm_max_retries``) live HERE, beside the ``_ENV_OVERRIDES`` rows they
-# validate, not in ``graph/trading_graph.py`` where the graph applies them:
-# they depend on nothing but ``sys.maxsize``, and the perp bridge gates the
-# env values at daemon startup (#266) — reached through the graph module,
+# The validators for the cross-provider LLM knobs an env string can reach
+# unchecked (``temperature``, ``llm_max_retries``, ``max_tokens``) live HERE,
+# beside the ``_ENV_OVERRIDES`` rows they validate, not in
+# ``graph/trading_graph.py`` where the graph applies them: they depend on
+# nothing but ``sys.maxsize`` and ``math``, and the perp bridge gates the env
+# values at daemon startup (#266, #269) — reached through the graph module,
 # that one import would drag the whole engine tree (langgraph, every agent
 # and LLM client) into provider construction. ``trading_graph`` imports
 # them from here, so the names upstream's tests import from it still
 # resolve. NOT applied in ``_coerce`` below: the env overlay coerces
 # against the default's type, and these knobs default to ``None``, so an
-# env string rides through to whichever consumer validates it.
+# env string rides through to whichever consumer validates it — the graph
+# per build, the bridge once at startup, both through ``validate_llm_knobs``.
 def _coerce_config_int(value, *, key, env, minimum, bound):
     """Validate an integer config knob, or raise ``ValueError`` naming ``key`` and ``env``.
 
-    One policy for the family (``max_tokens``, ``llm_max_retries``; #264):
+    One policy for the two integer knobs (``max_tokens``, ``llm_max_retries``; #264):
     an int or a numeric string is accepted; a bool, a non-integral numeric
     (``4096.7``, ``Decimal("2.5")``), a value below ``minimum`` or beyond
     ``sys.maxsize`` is refused. Numerics are range-checked BEFORE ``int()``
@@ -109,6 +112,72 @@ def _coerce_max_tokens(value):
         minimum=1,
         bound="a positive integer (> 0)",
     )
+
+
+def _coerce_temperature(value):
+    """``temperature``: the sampling temperature, as a finite non-negative float.
+
+    The int knobs' policy, minus integrality (#269): an int, a float, a
+    ``Decimal`` or a numeric string is accepted and returned as ``float``
+    (``"0.0"`` and ``0`` are legal — off is a real setting here, unlike the
+    cap); a bool, a non-numeric string, NaN and ±inf are refused, and so is a
+    negative value, which no provider accepts. There is NO upper bound: the
+    ceiling is per provider (1 on Anthropic, 2 on OpenAI and Gemini), so a
+    value above it is the provider's own 400 — raised inside the decision
+    call, so a CLASSIFIED ``api_failed`` naming the provider's complaint,
+    not the unclassified per-cycle shape this gate exists for. ``math.isfinite``
+    is the whole range check: an
+    absurd ``Decimal`` exponent converts to ±inf (or raises) instead of
+    hanging the way ``int()`` does, so nothing here needs the int knobs'
+    pre-conversion bound.
+    """
+    base = "config key 'temperature' (TRADINGAGENTS_TEMPERATURE) must be a finite, non-negative number"
+    if isinstance(value, bool):
+        raise ValueError(f"{base}, not a boolean: {value!r}")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, ArithmeticError):
+        raise ValueError(f"{base}, got {value!r}") from None
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{base}, got {value!r}")
+    return parsed
+
+
+# One row per knob: the config key, and the validator that turns whatever
+# reached the config (an env string, a programmatic value) into the value the
+# graph forwards. A new cross-provider knob is one row here — the graph and
+# the bridge then both validate it without a line of their own.
+_LLM_KNOB_VALIDATORS = (
+    ("temperature", _coerce_temperature),
+    ("llm_max_retries", _coerce_max_retries),
+    ("max_tokens", _coerce_max_tokens),
+)
+
+
+def validate_llm_knobs(config) -> dict:
+    """Validate the cross-provider LLM knobs ``config`` sets; return them coerced.
+
+    The ONE place the family's "set" rule and its validators meet, shared by
+    the graph (``_get_provider_kwargs``, per build) and the perp bridge
+    (``_build_engine_config``, once at daemon startup; #266, #269): a knob is
+    set when its value is neither ``None`` nor ``""`` (the env overlay never
+    writes ``""``, but a blank YAML/programmatic value means unset the same
+    way), and a set value is validated by its own ``_coerce_*`` — which
+    raises ``ValueError`` naming the config key and the env var. The result
+    holds only the set knobs, under their CONFIG keys (``llm_max_retries``,
+    not the client's ``max_retries``; ``max_tokens`` even for Gemini, whose
+    client spells it ``max_output_tokens``): renaming for the wire is the
+    graph's job, this is validation. Read tolerantly (``.get``): an absent
+    key is unset, so a stale engine missing one forwards nothing for it
+    rather than failing here.
+    """
+    knobs = {}
+    for key, coerce in _LLM_KNOB_VALIDATORS:
+        value = config.get(key)
+        if value is None or value == "":
+            continue
+        knobs[key] = coerce(value)
+    return knobs
 
 
 def _coerce(value: str, reference):

@@ -947,3 +947,20 @@ def test_the_example_config_quotes_the_market_data_defaults_the_loader_enforces(
     example = config_text()
     assert f"candle_lookback: {MarketDataConfig().candle_lookback} " in example
     assert f"Must be 0 or >= {MIN_VOLUME_PROFILE_WINDOW}, and <= candle_lookback" in example
+
+
+def test_int_from_yaml_is_bounded_by_the_platform_integer_range():
+    # Python ints are unbounded and YAML happily loads 2**63; every consumer
+    # of an integer key would otherwise meet the overflow where it uses the
+    # value (the engine's completion cap: per cycle, #269 review). The bound
+    # is the one the engine's own integer-knob validator applies, and the
+    # message shape matches so the bridge's named wrap reads the same.
+    import sys
+
+    from contrib.hyperliquid_perp.common.config_coercion import int_from_yaml
+
+    assert int_from_yaml(sys.maxsize) == sys.maxsize
+    assert int_from_yaml(str(-sys.maxsize)) == -sys.maxsize
+    for huge in (sys.maxsize + 1, str(2**63), -(sys.maxsize + 1)):
+        with pytest.raises(ValueError, match="within the platform integer range"):
+            int_from_yaml(huge)

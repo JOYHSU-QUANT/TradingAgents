@@ -15,6 +15,7 @@ Everything here is pure (no I/O, no clock); amounts are :class:`~decimal.Decimal
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -89,14 +90,26 @@ def int_from_yaml(value: object) -> int:
     if isinstance(value, float):
         if not value.is_integer():
             raise ValueError(f"expected an integer, got {value!r}")
-        return int(value)
-    try:
-        return int(value)  # int/numeric string passes through
-    except (TypeError, ValueError):
-        # A non-numeric string raises ValueError; a list/dict (YAML indentation
-        # slip) raises TypeError. Normalise both to ValueError so config_overrides
-        # surfaces a named config error instead of leaking an unnamed TypeError.
-        raise ValueError(f"expected an integer, got {value!r}") from None
+        parsed = int(value)
+    else:
+        try:
+            parsed = int(value)  # int/numeric string passes through
+        except (TypeError, ValueError):
+            # A non-numeric string raises ValueError; a list/dict (YAML
+            # indentation slip) raises TypeError. Normalise both to ValueError
+            # so config_overrides surfaces a named config error instead of
+            # leaking an unnamed TypeError.
+            raise ValueError(f"expected an integer, got {value!r}") from None
+    # The platform bound the engine's own integer-knob validator applies
+    # (``default_config._coerce_config_int``): a YAML integer past it used to
+    # load fine and be refused per cycle where the engine read it (#269
+    # review). Python ints are unbounded, so this is the one place the fit
+    # is checked for every YAML integer key.
+    if not -sys.maxsize <= parsed <= sys.maxsize:
+        raise ValueError(
+            f"expected an integer within the platform integer range, got {value!r}"
+        )
+    return parsed
 
 
 def str_from_yaml(value: object) -> str:

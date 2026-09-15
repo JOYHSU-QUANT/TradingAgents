@@ -467,8 +467,9 @@ class LiveExecutionEngine:
 
         Paper-parity surface (``PaperExecutionEngine.has_active_work`` drives the
         paper loop's cadence). The v1 live loop ticks unconditionally every ~10s
-        and does NOT consult this — kept for a future protection-only cadence
-        (PR 6) and for symmetry, not because any live caller exists today.
+        and does not consult this for its cadence; it IS the loop's
+        "anything to guard?" answer when the decision provider cannot be built
+        (issue #268): live work means protection-only, flat means a named exit.
         """
         return not self._read_position().is_flat or self._leg is not None or self._flip is not None
 

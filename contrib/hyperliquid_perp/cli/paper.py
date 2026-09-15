@@ -24,6 +24,10 @@ from ._common import (
     _open_owned_store,
     _raise_keyboard_interrupt,
     _require_api_key,
+    announce_engine_config_protection_only,
+    announce_protection_only_settled,
+    holds_live_work,
+    note_stranded_attempt,
 )
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report, _run_config_subset
 
@@ -198,6 +202,7 @@ def _cmd_paper(argv: list[str]) -> int:
             from ..persistence.schema import SCHEMA_VERSION
 
             trading_halted = False
+            halt_cause: str | None = None  # the EngineConfigError text, for the settle-exit line
             # Built pre-flight on a fresh run (before the run row exists);
             # a restart builds it after reconciliation settles that it trades.
             provider = None
@@ -378,7 +383,7 @@ def _cmd_paper(argv: list[str]) -> int:
                 # restart, with *less* trustworthy books, already gets that
                 # protection). Flat, there is nothing to protect and the
                 # plain abort stands.
-                if engine.has_active_work():
+                if holds_live_work(engine):
                     trading_halted = True
                     halt_reason = "missing-key"
                     logger.error(
@@ -410,22 +415,14 @@ def _cmd_paper(argv: list[str]) -> int:
                 try:
                     provider = _build_provider()
                 except EngineConfigError as exc:
-                    if engine.has_active_work():
+                    if holds_live_work(engine):
                         trading_halted = True
                         halt_reason = "engine-config-error"
-                        logger.error(
-                            "the engine could not be built on restart of %s with "
-                            "a live position — entering protection-only mode: %s",
-                            run_id,
+                        halt_cause = str(exc)
+                        announce_engine_config_protection_only(
                             exc,
-                        )
-                        print(
-                            f"ERROR: {exc}\nThis run holds a live position — "
-                            "running in protection-only mode: SL/TP protection "
-                            "and the market monitor stay live, NEW decision "
-                            "cycles stay halted. Fix the environment and "
-                            "restart to resume trading.",
-                            file=sys.stderr,
+                            where=f"on restart of {run_id}",
+                            alive="SL/TP protection and the market monitor",
                         )
                     else:
                         print(f"error: {exc}", file=sys.stderr)
@@ -438,26 +435,12 @@ def _cmd_paper(argv: list[str]) -> int:
                 # modes to a startup whose one job is keeping SL/TP alive, the
                 # same principle that lets this mode start keyless.
                 scheduler = None
-                stranded = repo.find_in_progress_attempt(db.conn, run_id)
-                if stranded is not None:
-                    # Purely informational: only a healthy restart's first
-                    # poll may finish this attempt (§3.1 resumes the SAME
-                    # attempt, without burning its retry budget) — terminalizing
-                    # it here would destroy that resumable state and write a
-                    # next_decision_at onto books this mode exists to distrust.
-                    attempt_id = stranded["decision_attempt_id"]
-                    logger.warning(
-                        "decision attempt %s remains in_progress; protection-only "
-                        "never polls the scheduler, so it stays open until the "
-                        "next healthy restart resumes it",
-                        attempt_id,
-                    )
-                    print(
-                        f"note: decision attempt {attempt_id!r} from the previous "
-                        "process remains in_progress — protection-only mode never "
-                        "resumes it; the next healthy restart will.",
-                        file=sys.stderr,
-                    )
+                # Only a healthy restart's first poll may finish a stranded
+                # attempt; writing a next_decision_at onto books this mode
+                # exists to distrust is exactly what the note declines to do.
+                note_stranded_attempt(
+                    db, run_id, never="polls the scheduler", restart_will="resumes it"
+                )
             else:
                 scheduler = PaperScheduler(
                     db=db,
@@ -482,6 +465,7 @@ def _cmd_paper(argv: list[str]) -> int:
                     funding_source,
                     trading_halted=trading_halted,
                     halt_reason=halt_reason,
+                    halt_cause=halt_cause,
                 )
             except KeyboardInterrupt:
                 print("\nshutting down — final export...", file=sys.stderr)
@@ -526,6 +510,7 @@ def _paper_loop(
     *,
     trading_halted: bool,
     halt_reason: str | None = None,
+    halt_cause: str | None = None,
 ) -> int:
     """The production loop: tick (when the monitor is on) → poll → sleep.
 
@@ -697,14 +682,9 @@ def _paper_loop(
                     file=sys.stderr,
                 )
             elif halt_reason == "engine-config-error":
-                print(
-                    "protection-only mode has nothing left to protect (the "
-                    "position is closed and new cycles stayed halted because "
-                    "the engine could not be built — a failed tradingagents "
-                    "import, or a rejected config value) — exporting the "
-                    "final state and exiting. Fix the environment (see the "
-                    "startup error) to resume this run.",
-                    file=sys.stderr,
+                announce_protection_only_settled(
+                    halt_cause or "see the startup error",
+                    then="exporting the final state and exiting",
                 )
             else:
                 print(

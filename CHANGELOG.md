@@ -1613,6 +1613,111 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`live --loop` no longer cancels its own SL/TP when the engine cannot be
+  built over a live position (#268)**. `_run_live_loop` constructs the
+  decision provider after the §19.1 verdict passes, and that construction
+  runs the bridge's startup gates — so a bad env knob (`TRADINGAGENTS_MAX_TOKENS`
+  since PR #179, `TRADINGAGENTS_LLM_MAX_RETRIES` since #267, now
+  `TRADINGAGENTS_TEMPERATURE`) or a failed engine import raised an
+  `EngineConfigError` there with nothing to catch it. The refusal crossed the
+  loop into `_cmd_live`'s generic handler with a PASSING verdict already
+  recorded, so the §18.2 shutdown sweep ran with `keep_protective=False` and
+  cancelled every bot-owned order, the resting SL/TP included; under
+  `Restart=` the next start met the same refusal — a crash-loop with the
+  position naked throughout. Before the gates existed the same bad value
+  failed each decision inside `build_graph`, contained by the driver, with
+  SL/TP standing: on the live lane the startup gates had made things worse.
+  Now the loop follows the `paper` command's rule at the same site. Over live
+  work (the engine's own `has_active_work`: a position, an active leg or a
+  pending flip) it does NOT exit: it logs and prints the cause, and runs in
+  protection-only mode — tick-only (the kill-switch refresh, reconciliation
+  and SL/TP repair all live in the tick), no decision pump, no decision
+  stack built, no safe mode entered (nothing failed; the environment is
+  wrong), the startup line saying `in protection-only mode`, and a stranded
+  in-progress attempt left for the next healthy restart to adopt. Once the
+  position closes the loop ends itself (`nothing left to protect`) and the
+  command exits 1, the paper loop's settle-exit code, so a supervisor's
+  restart meets the flat-book refusal rather than a zombie holding the lease;
+  a Ctrl-C / SIGTERM stop in protection-only exits 4 (executed, not clean —
+  the same code as a stop in safe mode; never 0 for a run whose cycles
+  never ran), the cause in the exit line. Over a FLAT book the refusal
+  propagates out and `_cmd_live` names it (`error: config key ...`), exit 1,
+  instead of `startup recovery failed`. SETUP and RUNBOOK-live §4 describe
+  the lane; the `paper`-only wording in the #266 entry below is thereby
+  lifted. The two lanes share one policy and one wording, hoisted from
+  `cli/paper.py` into `cli/_common.py` and parameterised by the lane's
+  phrases: the "anything to guard?" decision (`holds_live_work`, which
+  treats an unreadable book — a locked store — as live work, unknown ≠ flat;
+  paper's keyless restart now makes the same call), the protection-only
+  banner, the settle-exit line (paper's now names the cause too), and the
+  stranded-attempt note, whose lookup is best-effort (a store holding two
+  in-progress rows makes it raise by design; over a live position that
+  raise must not end the start). A raise from the live loop's settle check
+  is contained under its own phase marker, not filed against the tick
+  (#238).
+
+  Two wider closures from the same review. First, the §18.2 sweep keyed
+  "clean" off the BOOT verdict alone, so ANY raise out of the loop after a
+  pass — a REST read in loop construction, a store read, an import — took
+  the same route: generic exit 1, SL/TP cancelled. The sweep now also asks
+  whether the loop RETURNED; a raise keeps the resting SL/TP standing (the
+  existing unclean-exit rule) and the warning names the cause (`the live
+  loop raised instead of returning`). Second, `default_config` applies the
+  whole TRADINGAGENTS_* env overlay at import and refuses an uncoercible
+  value (`TRADINGAGENTS_MAX_DEBATE_ROUNDS=abc`, `..._CHECKPOINT_ENABLED=treu`)
+  with a bare `ValueError`, which the bridge's import guard let through
+  untyped — past both lanes' `except EngineConfigError`. The guard now wraps
+  it as an `EngineConfigError` naming the variable, so every row of the
+  overlay table gets the protection-only / named-exit treatment, not just
+  the three knobs gated by value below.
+
+  Not taken: refusing the bad knob at `_cmd_live`'s front gate (before the
+  lease, arming and recovery), which is how a missing `OPENROUTER_API_KEY`
+  is handled on this lane. A front-gate refusal never re-covers the
+  position: a deliberate stop's sweep has already cancelled the SL/TP, and
+  the refusal would leave them off until the environment is fixed —
+  protection-only runs the §19.1 recovery and the tick's SL/TP repair
+  first. The missing-key front gate keeps its (older) policy; it is the
+  remaining case on the live lane where an operator-fixable startup fault
+  is refused without re-covering the position.
+
+- **`TRADINGAGENTS_TEMPERATURE` is gated at perp-bridge startup, and the
+  three cross-provider LLM knobs are validated by one call (#269)**. The
+  sampling temperature was the last env knob on the unchecked path the cap
+  (#177) and the retry budget (#266) had been taken off: `default_config`
+  overlays the env string onto a `None` default untouched, and the first
+  thing to look at it was `float()` inside `_get_provider_kwargs`, in
+  `build_graph`, once per cycle — so `TRADINGAGENTS_TEMPERATURE=abc` on the
+  host started the daemon and then failed every decision cycle as an
+  unclassified `api_failed`, the position on SL/TP alone, until someone read
+  the log. `default_config` now carries `_coerce_temperature` (a finite,
+  non-negative number, returned as `float`: `0`, `"0.0"`, `"0.2"` and a
+  `Decimal` are accepted; `abc`, blank-but-set, `nan`, `±inf`, a negative
+  and a bool are refused by name — there is no upper bound, since the
+  ceiling is per provider and a value above it is that provider's own named
+  400 — a CLASSIFIED `api_failed`, not the shape this gate exists for) and
+  `validate_llm_knobs(config)`, the family's one entry point: it
+  applies each knob's validator to whatever is set and returns the coerced
+  values under their config keys. The graph's `_get_provider_kwargs` forwards
+  what it returns (renaming for the wire — `max_retries`, Gemini's
+  `max_output_tokens` — stays the graph's job), and `_build_engine_config`
+  gates the whole family through the same call at daemon startup — BEFORE
+  the cap is resolved, so an env refusal names the env var and the resolver
+  only validates the YAML cap under its own key (`engine.max_completion_tokens`),
+  handing the env value through as the int it already is; `int_from_yaml`
+  gained the platform-range bound the graph's integer validator applies,
+  for every YAML integer key (a YAML cap past `sys.maxsize` used to load
+  fine and fail per cycle) — writing
+  the coerced values back so the graph forwards a number, not the env
+  string, with an `engine sampling temperature:` log line beside the cap and
+  retry-budget lines. A junk temperature is now an `EngineConfigError` at
+  startup — protection-only over a live position, a named exit 1 flat, on
+  both the `paper` and (with the entry above) the `live` lane — and a
+  fourth cross-provider knob is one row in `_LLM_KNOB_VALIDATORS`, not a new
+  bridge gate and a new graph branch. The bridge's import now names
+  `validate_llm_knobs`, so a stale `tradingagents` predating this change is
+  refused at import by that name.
+
 - **The perp bridge gates `TRADINGAGENTS_LLM_MAX_RETRIES` at startup, as it
   already gated `TRADINGAGENTS_MAX_TOKENS` (#266)**. The retry budget rides
   `DEFAULT_CONFIG` the same unchecked way as the cap (coerced against a
@@ -1631,10 +1736,9 @@ Breaking changes within the 0.x line are called out explicitly.
   Same lane as the cap in the `paper` command: a refusal over a live position
   degrades to protection-only, an empty book or a fresh `--create` is a named
   exit 1, and the startup log has one `engine LLM retry budget:` line beside
-  the completion-cap line. (The live lane has no `EngineConfigError` handler
-  around provider construction — a gap since the cap gate, PR #179, that this
-  second knob also reaches — and `TRADINGAGENTS_TEMPERATURE` has the same
-  unguarded shape; both filed separately.)
+  the completion-cap line. (The live lane's missing `EngineConfigError`
+  handler and the unguarded `TRADINGAGENTS_TEMPERATURE` — both noted at the
+  time — are the two entries above this one.)
 
   To keep that a one-line import for the bridge, the three integer-knob
   validators (`_coerce_config_int`, `_coerce_max_retries`,

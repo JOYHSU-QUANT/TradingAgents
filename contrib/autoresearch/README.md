@@ -76,7 +76,7 @@ python -m contrib.autoresearch fetch --coin BTC --interval 4h --since 2023-01-01
 # 日線那條序列；funding 不分 interval，第二趟就別再抓一次
 python -m contrib.autoresearch fetch --coin BTC --interval 1d --since 2023-01-01 --skip-funding
 
-# 例行補資料：funding 從已存的最新一筆之後接著走（一個 request），candles 照舊重走
+# 例行補資料：funding 從已存的最新一筆之後接著走（一兩個 request），candles 照舊重走
 python -m contrib.autoresearch fetch --coin BTC --interval 4h --since 2023-01-01 --resume
 
 # 只掃 gap，不連網；日線 backdrop 也一併掃（每個 experiment 都讀它）
@@ -136,7 +136,7 @@ gap 掃描拿這個形狀當檢查（`constants.CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS
 不等於 `open_time + interval − 1` 的 bar 是第四種發現 **misshapen**，experiment 的暖機
 檢查也照樣拒絕。測試夾具 `bars()`／`candles()` 從此就是這個形狀——原本是
 `close = open + step`，碰邊界的測試各自手工減 1 ms，而整點 `.000` 的 settlement 正好
-落在 venue 形狀的收盤與下一根開盤之間（見下面「已知取捨」）。
+正好落在下一根的 open 上（見下面「已知取捨」）。
 
 ### funding 偶爾晚好幾分鐘才落（2026-09-14 實測）
 
@@ -436,7 +436,8 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
 - **整點 `.000` 的 settlement 落在兩根 venue bar 的縫**：`_Settlements.due` 用
   `(open, close]` 收費，feature 用 `(前一根 close, close]` 加總，兩者只在 stamp 恰好等於
   open（＝前一根 close ＋ 1 ms）時不同。實測 531 筆全部晚 2–99 ms，evaluator 的 docstring
-  有記，測試夾具也不造這種 stamp。
+  有記；`test_evaluator` 的 `_funding` 夾具不造這種 stamp，`conftest.funding_points` 仍是整點
+  （feature 測試拿它釘窗口邊界，gaps 測試釘的是整點格線）。
 
 ## 測試
 

@@ -188,7 +188,11 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="backfill start, as 2023-01-01 (midnight UTC) or a full ISO-8601 instant",
     )
-    fetch_cmd.add_argument(
+    # One group: ``--resume`` is about the funding walk, so beside
+    # ``--skip-funding`` it would be a flag that does nothing - refused as a
+    # usage error rather than accepted and silently ignored.
+    funding_walk = fetch_cmd.add_mutually_exclusive_group()
+    funding_walk.add_argument(
         "--skip-funding",
         action="store_true",
         help=(
@@ -196,16 +200,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "fetch at another interval would re-walk it for nothing; this skips that pass."
         ),
     )
-    fetch_cmd.add_argument(
+    funding_walk.add_argument(
         "--resume",
         action="store_true",
         help=(
             "start the funding walk just past the newest settlement already stored, not "
             "at --since. A walk from --since re-covers every window and so fills holes; a "
-            "resume fills nothing behind it, but costs one request instead of one per "
-            "twenty days since --since (about forty for the 4h span, past where the venue "
-            "starts throttling). Candles are always re-walked: five pages to the venue's "
-            "depth wall, and the re-walk is what fills their holes."
+            "resume fills nothing behind it, but costs a request or two instead of one per "
+            "twenty days since --since (about forty from the 4h depth wall, past where the "
+            "venue starts throttling). Candles are always re-walked: five pages to the "
+            "venue's depth wall, and the re-walk is what fills their holes."
         ),
     )
 
@@ -406,7 +410,19 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
         ]
         if not args.skip_funding:
             start = _funding_start(store, coin=coin, since=since, resume=args.resume)
-            results.append(backfill_funding(market, store, coin=coin, since=start, end=end))
+            if start >= end:
+                # Only a resume can land here (a --since past the clock was refused
+                # by the candle walk above): the newest stored settlement is at
+                # the venue clock, and the walk's own refusal would blame a
+                # --since the operator never typed.
+                print(
+                    "funding: the store already holds every settlement up to the venue "
+                    "clock; nothing to walk"
+                )
+            else:
+                results.append(
+                    backfill_funding(market, store, coin=coin, since=start, end=end)
+                )
         for result in results:
             print(render_fetch(result))
         _print_scans(store, coin=coin, interval=args.interval, funding=not args.skip_funding)

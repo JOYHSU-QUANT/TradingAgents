@@ -32,7 +32,8 @@ Breaking changes within the 0.x line are called out explicitly.
   settlement instead of at `--since`. Not the default: the full re-walk is
   the one that fills holes, but at twenty days a page it is forty-odd
   requests for the 4h span - past where the venue starts throttling - and a
-  resume is one. Candles are always re-walked (five pages to the depth wall).
+  resume is a request or two. Candles are always re-walked (five pages to the
+  depth wall). Beside `--skip-funding` the flag is a usage error, not a no-op.
 
   THE DAILY BACKDROP IS SCANNED BESIDE WHATEVER WAS ASKED FOR. Every
   experiment reads `close_1d` / `sma_1d_*`, so a store holding a clean 4h
@@ -56,8 +57,9 @@ Breaking changes within the 0.x line are called out explicitly.
   stamped exactly on a venue bar's open falls in the millisecond between
   `_Settlements.due`'s `(open, close]` and the features' `(previous close,
   close]`; the venue has never stamped one (531 of 531 measured were 2-99 ms
-  late), the evaluator's docstring records the difference, and the fixtures
-  stamp none.
+  late), the evaluator's docstring records the difference, and the evaluator
+  fixtures stamp none (`funding_points` still stamps on the hour; the feature
+  tests pin the window edge with it).
 
 - **autoresearch: a ledger that scores many hypotheses without letting the search
   cheat, and the baselines that show the scorer is not fooled** (plan PR A4, the

@@ -184,6 +184,11 @@ _STOP_WORDING: Final[dict[StopReason, str]] = {
     StopReason.PAGE_LIMIT: "hit the request limit",
     StopReason.INTERRUPTED: "the walk did not finish",
 }
+# Checked at import rather than at the first walk that ends a new way: a
+# member without a sentence would fail on the walk's return path, after the
+# requests were spent.
+if set(_STOP_WORDING) != set(StopReason):
+    raise RuntimeError("every StopReason member needs a sentence in _STOP_WORDING")
 
 
 def describe_stop(stopped: StopReason) -> str:

@@ -169,8 +169,9 @@ def test_a_settlement_posted_just_after_a_close_belongs_to_the_next_bar():
     closes = [110, 120, 130]
     result = _run(_spec(), _bundle(closes, rate=0.001), costs=_FREE)
     trade = result.trades[0]
-    # Filled at bar 1's open: the settlement due at bar 0's close posts 57 ms
-    # after it, a millisecond and 57 into bar 1, and is paid; so is the one
+    # Filled at bar 1's open: the settlement due at bar 0's close posts 58 ms
+    # after it (a millisecond past the close is bar 1's open, then the jitter)
+    # and is paid; so is the one
     # due at bar 1's close. The one due at bar 2's close, where the position
     # was flattened, posts after that close and is not. Four settlements a
     # bar — and none reported missing, since the span's last one exists, it
@@ -751,6 +752,14 @@ def test_an_offset_counts_towards_the_warm_up():
         _run(spec, _bundle(closes))
 
 
+def test_a_bar_whose_close_disagrees_with_the_interval_is_refused_by_the_window_check_too():
+    """``evaluate_segment`` is reachable without ``require_clean_history``; it shares the scan."""
+    bars = candles([110, 120, 130, 140])
+    bars[2] = dataclasses.replace(bars[2], close_time=bars[2].open_time + MS_PER_HOUR - 1)
+    with pytest.raises(EvaluationError, match=r"1 bar\(s\) whose close disagrees .*lasting 3599999 ms"):
+        _run(_spec(), SeriesBundle(bars, funding=_funding(4)))
+
+
 def test_a_window_the_funding_series_does_not_cover_is_refused():
     closes = [110, 120, 130, 140, 150]
     with pytest.raises(EvaluationError, match="has no settlements"):
@@ -994,7 +1003,7 @@ def test_load_bundle_reads_nothing_past_the_bound(store):
     everything = load_bundle(store, coin="BTC", interval="4h")
     assert len(everything.bars) == 30
     assert len(everything.funding) == 120
-    # A second post in every hour, 57 ms after the first: counted, that store
+    # A second post in every hour, ``_JITTER_MS`` after the first: counted, that store
     # read as covered and charged each hour's carry twice. The scan refuses it.
     late_points = [FundingPoint(time=p.time + _JITTER_MS, rate=p.rate) for p in _funding(30)]
     store.upsert_funding("BTC", late_points)

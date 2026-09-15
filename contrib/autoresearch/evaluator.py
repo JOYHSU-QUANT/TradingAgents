@@ -89,7 +89,7 @@ from .constants import (
 from .costs import CostModel, require_amount
 from .dsl import Condition, Op, Side, SizingMode, StrategySpec
 from .features import FeatureFrame, FeatureValue, SeriesBundle, window_is_covered
-from .gaps import scan_stamps
+from .gaps import scan_bars, scan_stamps
 from .metrics import RegimeBucket, SegmentMetrics, Tally, describe_measurement
 from .split import Segment, Split, studied_interval
 from .store import ResearchStore
@@ -855,8 +855,18 @@ def _require_measurable(
             f"cut the split to the history the store has."
         )
     # The gap scanner's verdict, not a second definition of a hole: ``gaps``
-    # and this refusal have to agree about the same store.
-    report = scan_stamps(str(segment), step, CANDLE_STAMP_TOLERANCE_MS, stamps)
+    # and this refusal have to agree about the same store - including the
+    # one finding a stamp scan cannot make, a bar whose close disagrees with
+    # the interval, which ``scan_bars`` adds over the same stamps.
+    report = scan_bars(str(segment), step, CANDLE_STAMP_TOLERANCE_MS, bars[first:stop])
+    if report.misshapen:
+        bar = report.misshapen[0]
+        raise EvaluationError(
+            f"{segment} holds {len(report.misshapen)} bar(s) whose close disagrees with the "
+            f"{step} ms interval, the first opening at {from_epoch_ms(bar.open_ms).isoformat()} "
+            f"and lasting {bar.close_ms - bar.open_ms} ms - another cadence written into this "
+            f"series. Run `gaps`, then `fetch` the window at its own interval."
+        )
     if report.duplicate_ms or report.misaligned_ms:
         # Named before any hole: a stamp the scanner could not place on the
         # grid leaves its slot empty, so the same series also reads as having

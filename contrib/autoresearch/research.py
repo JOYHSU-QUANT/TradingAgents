@@ -169,8 +169,9 @@ def _unclean(report: GapReport) -> str:
     return (
         f"the {report.label} this measurement reads are not a grid: {len(report.gaps)} hole(s), "
         f"{len(report.duplicate_ms)} duplicate slot(s), {len(report.misaligned_ms)} off-grid "
-        f"stamp(s), {len(report.misshapen)} misshapen bar(s), the earliest at "
-        f"{from_epoch_ms(min(stamps)).isoformat()}. A feature reading "
+        f"stamp(s)"
+        + (f", {len(report.misshapen)} misshapen bar(s)" if report.misshapen else "")
+        + f", the earliest at {from_epoch_ms(min(stamps)).isoformat()}. A feature reading "
         f"across a hole covers more calendar than its name says — run `gaps`, then `fetch` "
         f"the span."
     )

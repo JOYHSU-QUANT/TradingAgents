@@ -12,9 +12,9 @@ from contrib.autoresearch import upstream
 from contrib.autoresearch.cli import _parse_since, main
 from contrib.autoresearch.constants import DAILY_INTERVAL, STUDIED_INTERVALS
 from contrib.autoresearch.store import DB_FILENAME, ResearchStore
-from contrib.autoresearch.upstream import CandleInterval, ExchangeError, epoch_ms
+from contrib.autoresearch.upstream import CandleInterval, ExchangeError, epoch_ms, from_epoch_ms
 
-from .conftest import MS_PER_HOUR, bars, funding_points, market_at
+from .conftest import MS_PER_HOUR, ScriptedMarket, bars, funding_points, market_at
 
 
 @pytest.fixture
@@ -144,7 +144,7 @@ def _fetched_twice(monkeypatch, path, *, second_argv):
 
     Returns the funding requests each made. The first is the full walk from
     2023-01-01: at twenty days a page, sixteen-odd requests to cover a start
-    ten months before the anchor - the shape that earns a 429 on the venue.
+    ten months before the anchor - the long walk a resume exists to avoid.
     """
     series = bars(30)
     stored = funding_points(48)
@@ -209,6 +209,37 @@ def test_resume_walks_from_since_when_nothing_newer_is_stored(tmp_path, monkeypa
     assert main(["fetch", "--since", "2023-11-20", "--db", str(path), "--resume"]) == 0
     assert market.funding_calls[0][1] == epoch_ms(later, what="test")
     assert "walking from --since" in capsys.readouterr().out
+
+
+def test_resume_beside_skip_funding_is_a_usage_error_not_a_silent_no_op(tmp_path):
+    with pytest.raises(SystemExit) as caught:
+        main(["fetch", "--since", "2023-01-01", "--db", str(tmp_path / DB_FILENAME),
+              "--resume", "--skip-funding"])
+    assert caught.value.code == 2
+
+
+def test_a_resume_with_nothing_past_the_venue_clock_says_so_instead_of_blaming_since(
+    tmp_path, monkeypatch, capsys
+):
+    """The walk's own refusal names ``--since``; under a resume that is a date nobody typed."""
+    series = bars(30)
+    stored = funding_points(48)
+    path = tmp_path / DB_FILENAME
+    with ResearchStore(path) as store:
+        store.upsert_funding("BTC", stored)
+    market = _serve(
+        monkeypatch,
+        ScriptedMarket(
+            clock=from_epoch_ms(stored[-1].time + 1),
+            candles={("BTC", "4h"): series},
+            funding={"BTC": stored},
+        ),
+    )
+    assert main(["fetch", "--since", "2023-01-01", "--db", str(path), "--resume"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing to walk" in out
+    assert market.funding_calls == []
+    assert "BTC funding: 48 rows" in out
 
 
 def test_the_scan_names_the_missing_daily_backdrop_beside_the_4h_series(seeded, capsys):

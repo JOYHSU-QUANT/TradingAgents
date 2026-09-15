@@ -9,8 +9,8 @@ most. So the store is scanned before anything is measured on it, and what it
 finds is RECORDED here (plan §3.4); refusing to evaluate across a hole is the
 evaluator's job, later.
 
-Every stamp is assigned to the slot nearest it, and the three findings are
-what can go wrong with that assignment:
+Every stamp is assigned to the slot nearest it, and three of the findings are
+what can go wrong with that assignment; the fourth is about a bar, not a stamp:
 
 - a **gap** — two occupied slots with empty ones between them. The series is
   on the grid but incomplete; re-fetching that window is the remedy.
@@ -104,7 +104,7 @@ class GapReport:
     """What one series looks like on its own grid.
 
     ``complete`` is deliberately a property rather than a stored flag: the
-    verdict is nothing but "none of the three findings", and a stored copy of
+    verdict is nothing but "none of the findings", and a stored copy of
     it could disagree with the findings beside it.
     """
 
@@ -117,9 +117,11 @@ class GapReport:
     gaps: tuple[Gap, ...]
     duplicate_ms: tuple[int, ...]
     misaligned_ms: tuple[int, ...]
-    # Bars only. A stamp scan cannot see it, so ``scan_stamps`` leaves it
-    # empty and ``scan_bars`` fills it; a funding report never carries one.
-    misshapen: tuple[Misshapen, ...] = ()
+    # Bars only. A stamp scan cannot see it, so ``scan_stamps`` passes it
+    # empty and ``scan_bars`` fills it. Required rather than defaulted: a
+    # hand-built bar report has to say it checked the shape, where a default
+    # of "none" would read as a verdict its builder never reached.
+    misshapen: tuple[Misshapen, ...]
 
     def __post_init__(self) -> None:
         # The one coupling this object has, checked where it is built rather
@@ -176,6 +178,7 @@ def scan_stamps(label: str, step_ms: int, tolerance_ms: int, stamps: Sequence[in
             gaps=(),
             duplicate_ms=(),
             misaligned_ms=(),
+            misshapen=(),
         )
     first = stamps[0]
     occupied: list[tuple[int, int]] = []  # (stamp, slot index), in stamp order
@@ -211,6 +214,7 @@ def scan_stamps(label: str, step_ms: int, tolerance_ms: int, stamps: Sequence[in
         gaps=tuple(gaps),
         duplicate_ms=tuple(duplicates),
         misaligned_ms=tuple(misaligned),
+        misshapen=(),
     )
 
 
@@ -223,8 +227,9 @@ def scan_bars(label: str, step_ms: int, tolerance_ms: int, bars: Iterable[Candle
     measured). A bar that says otherwise is **misshapen**: it came from
     another cadence - a daily bar written into the 4h series sits exactly on
     a 4h slot, so the stamp scan calls it aligned - or the venue changed what
-    a bar is. Neither is repaired by re-fetching the window, and until this
-    check such a bar was stored faithfully and never mentioned.
+    a bar is. Re-fetching the window at its own cadence overwrites it (the
+    store keys a bar by its open); until this check such a bar was stored
+    faithfully and never mentioned.
 
     The evaluator's history check comes through here too, so the series it
     refuses to measure on and the series ``gaps`` reports are the same one.

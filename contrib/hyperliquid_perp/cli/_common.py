@@ -226,9 +226,10 @@ def holds_live_work(engine) -> bool:
     read (on paper, behind the engine's own halted-state guard), and a raise
     from it — an operator's export/validate holding the SQLite lock, or
     that guard — must not turn into an exit over a position nobody watches:
-    unknown ≠ flat, the shutdown sweep's own rule (#268 review). The live
-    loop's protection-only settle check makes the same call each tick, for
-    the same reason (a locked store is not a tick fault).
+    unknown ≠ flat, the shutdown sweep's own rule (#268 review). Startup
+    only: the live loop's per-tick settle check reads raw under the loop's
+    containment instead, so a lock that persists stays visible (safe mode)
+    rather than becoming an ERROR every ~10s that no tool reports.
     """
     try:
         return engine.has_active_work()

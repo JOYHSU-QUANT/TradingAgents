@@ -490,16 +490,23 @@ def _run_live_loop(
                     # lease and refresh the switch for days. End the loop
                     # loud instead — the caller's §18.2 sweep then runs over a
                     # flat book, and the exit code tells the supervisor
-                    # (the paper loop's settle-exit rule). The same
-                    # ``holds_live_work`` read as at startup: a store read
-                    # that cannot be made (a locked store) is live work, and
-                    # is NOT a tick fault — it must not latch safe mode every
-                    # ~10s (the mode enters none; the environment is wrong).
+                    # (the paper loop's settle-exit rule). A raw store read
+                    # under the loop's containment, on purpose: a raise here
+                    # (a locked store) is contained like any loop-body fault
+                    # — logged, recoverable safe mode latched (auto-releases
+                    # on the next clean reconcile; nothing to block, this
+                    # mode pumps nothing) — so a lock that PERSISTS is
+                    # visible to `safe-mode --status` and `validate`, not
+                    # only as a ~10s ERROR storm in the log (#270 review).
+                    # The startup read is the one that must never latch
+                    # (holds_live_work, above): its answer decides the lane.
+                    # Its own phase, so the record does not say "tick" (#238).
+                    phase = "protection-only settle check"
                     # ``driver`` is None exactly when ``protection_only`` was
                     # set (the except/else above assign them together); the
                     # assert states that for the type checker.
                     assert protection_only is not None
-                    if not holds_live_work(engine):
+                    if not engine.has_active_work():
                         logger.error(
                             "protection-only live run %s has nothing left to "
                             "protect — exiting",

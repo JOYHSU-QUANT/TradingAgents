@@ -6017,6 +6017,8 @@ def test_cmd_live_protection_only_stop_keeps_sl_tp_standing(
     assert "leaves the bot's resting SL/TP STANDING" in err
     assert "the loop ran in protection-only mode" in err
     assert "exited from protection-only mode" in err
+    # The cause line leads; the sweep's WARNING follows it.
+    assert err.index("exited from protection-only mode") < err.index("SL/TP STANDING")
 
 
 def test_cmd_live_unclean_sweep_outranks_the_code_but_not_the_cause(
@@ -6037,6 +6039,10 @@ def test_cmd_live_unclean_sweep_outranks_the_code_but_not_the_cause(
     assert "§18.2 shutdown unclean" in err
     assert "nothing left to protect" in err
     assert "TRADINGAGENTS_MAX_TOKENS" in err
+    # ORDER, not just membership: the cause line comes first, ahead of the
+    # unclean-sweep line the ``finally`` prints (round 2: the earlier
+    # placement after the try/finally printed it last).
+    assert err.index("nothing left to protect") < err.index("§18.2 shutdown unclean")
 
 
 def test_cmd_live_settled_protection_only_outranks_a_safe_mode_latch(
@@ -7355,14 +7361,16 @@ def test_the_live_loop_protection_only_survives_a_broken_stranded_attempt_lookup
     assert "note: decision attempt" not in err
 
 
-def test_a_raising_settle_check_is_live_work_and_not_a_tick_fault(tmp_path, monkeypatch):
-    # The settle check is a store read AFTER engine.tick() has returned; a
-    # raise from it (a locked store) is "unknown ≠ flat" — the loop keeps
-    # ticking with NO safe-mode latch (#270 review: protection-only enters
-    # none, and a lock held by an operator's export must not latch it every
-    # ~10s), and it is not recorded against the tick either (#238).
+def test_a_raising_settle_check_is_contained_under_its_own_phase(tmp_path, monkeypatch):
+    # The settle check is a store read AFTER engine.tick() has returned. A
+    # raise from it (a locked store) is contained like any loop-body fault —
+    # the loop keeps ticking, recoverable safe mode latched so a lock that
+    # PERSISTS is visible to `safe-mode --status`/`validate` rather than only
+    # as a ~10s ERROR storm (#270 review, round 2) — and it is recorded under
+    # its own phase, not as "live tick raised" (#238). The STARTUP read is
+    # the one that never latches (test_the_live_loop_treats_an_unreadable_book_as_live_work).
     from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
-    from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
+    from contrib.hyperliquid_perp.live.safe_mode import REASON_LIVE_TICK_ERROR, SafeModeManager
 
     _forbid_the_decision_driver(monkeypatch)
     _scripted_active_work(monkeypatch, [True, sqlite3.OperationalError("database is locked")])
@@ -7376,10 +7384,14 @@ def test_a_raising_settle_check_is_live_work_and_not_a_tick_fault(tmp_path, monk
         tick_results=(quiet,),
     )
     assert built.ticks == 2
-    assert _contained_details(built.db_path) == []
+    assert _contained_details(built.db_path) == [
+        "live protection-only settle check raised (see log)"
+    ]
     db = Database(built.db_path)
     try:
-        assert SafeModeManager(db=db, run_id="r1", gate=None).current() is None
+        state = SafeModeManager(db=db, run_id="r1", gate=None).current()
+        assert state is not None and not state.is_manual
+        assert state.reason == REASON_LIVE_TICK_ERROR
     finally:
         db.close()
 

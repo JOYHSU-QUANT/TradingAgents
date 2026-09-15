@@ -280,12 +280,12 @@ def test_build_engine_config_keeps_yaml_precedence_over_a_junk_env_cap(monkeypat
         bridge_mod._build_engine_config({})
 
 
-def test_build_engine_config_leaves_a_foreign_import_value_error_alone(monkeypatch):
-    # Only the overlay's own refusal (its ``Invalid value for TRADINGAGENTS_``
-    # prefix) is claimed as "an environment override was refused"; any other
-    # ValueError an engine import raises keeps its shape and reaches the
-    # generic lane, rather than being blamed on an env var and quietly
-    # degrading a live run to protection-only (#270 review).
+def test_build_engine_config_names_a_foreign_import_value_error_without_blaming_the_env(monkeypatch):
+    # Every import-time ValueError takes the operator-fixable lane (over a
+    # live position the alternative is a crash-loop with nobody watching
+    # SL/TP on paper), but only the overlay's own refusal (its ``Invalid
+    # value for TRADINGAGENTS_`` prefix) is CALLED an environment override —
+    # any other is reported as what it is (#270 review, rounds 1 and 2).
     import sys
     from types import ModuleType
 
@@ -294,8 +294,10 @@ def test_build_engine_config_leaves_a_foreign_import_value_error_alone(monkeypat
             raise ValueError("something else entirely")
 
     monkeypatch.setitem(sys.modules, "tradingagents.default_config", _Refusing("tradingagents.default_config"))
-    with pytest.raises(ValueError, match="something else entirely"):
+    with pytest.raises(bridge_mod.EngineConfigError, match="something else entirely") as info:
         bridge_mod._build_engine_config({})
+    assert "environment override" not in str(info.value).split("—")[0]
+    assert not isinstance(info.value, bridge_mod.EngineImportError)
 
 
 def test_build_engine_config_names_an_env_overlay_refusal_at_import(monkeypatch):

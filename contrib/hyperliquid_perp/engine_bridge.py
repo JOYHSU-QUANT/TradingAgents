@@ -432,16 +432,21 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         # knobs gated below, reaching the CLI lanes untyped: over a live
         # position the paper lane would crash instead of entering
         # protection-only, and the live lane's sweep would strip SL/TP
-        # (issue #268 review). Named here, once, for the whole overlay table
-        # — by the overlay's own message prefix, so any OTHER ValueError an
-        # engine import may raise (an upstream change) keeps its own shape
-        # and reaches the generic lane, rather than being blamed on an env
-        # var and quietly degrading a live run to protection-only.
-        if not str(exc).startswith(_ENV_OVERLAY_REFUSAL_PREFIX):
-            raise
+        # (issue #268 review). Named here, once, for the whole overlay table.
+        # Every import-time ValueError takes this lane — over a live
+        # position the alternative is the crash-loop the lane exists to
+        # prevent, on paper with nobody watching SL/TP at all — but only
+        # the overlay's own (its message prefix) is CALLED an environment
+        # override; any other (an upstream change) is reported as what it
+        # is, so the operator is not sent to an env var they never set.
+        if str(exc).startswith(_ENV_OVERLAY_REFUSAL_PREFIX):
+            raise EngineConfigError(
+                f"the tradingagents engine refused an environment override at "
+                f"import: {exc} — fix the TRADINGAGENTS_* value named and restart"
+            ) from exc
         raise EngineConfigError(
-            f"the tradingagents engine refused an environment override at "
-            f"import: {exc} — fix the TRADINGAGENTS_* value named and restart"
+            f"importing tradingagents raised at import: {exc} — not an "
+            "environment override this adapter knows; see the traceback in the log"
         ) from exc
 
     # The block projected onto ``ENGINE_KEYS`` (the set ``load_config`` warns

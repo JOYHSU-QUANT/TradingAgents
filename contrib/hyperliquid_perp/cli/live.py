@@ -918,6 +918,23 @@ def _live_startup_recovery(
                 print(f"error: startup recovery failed — {exc}", file=sys.stderr)
                 return 1
             finally:
+                if loop_exit is not None:
+                    # Protection-only (issue #268): the cause the operator
+                    # must fix reaches stderr FIRST — here, ahead of the
+                    # sweep's own WARNINGs and the unclean-sweep line this
+                    # ``finally`` may print, and ahead of the exit-code
+                    # dispatch after it, none of which may hide it.
+                    if loop_exit.settled:
+                        announce_protection_only_settled(loop_exit.cause, then="exiting")
+                    else:
+                        print(
+                            "live loop exited from protection-only mode — §18.2 "
+                            "shutdown sweep done; NEW decision cycles never ran "
+                            f"because the engine could not be built: {loop_exit.cause}. "
+                            "Fix the environment and re-run with --loop to resume "
+                            "this run.",
+                            file=sys.stderr,
+                        )
                 # Re-ASKED, not merely remembered: ``superseded`` is only True
                 # when a heartbeat raised, and the Ctrl-C / SIGTERM lane reaches
                 # here without one (see _still_owns_run).
@@ -1158,22 +1175,6 @@ def _live_startup_recovery(
                 for failure in result.sweep_failures:
                     print(f"error: stale-order sweep — {failure}", file=sys.stderr)
             if result.passed:
-                if loop_exit is not None:
-                    # Protection-only (issue #268): the cause the operator
-                    # must fix reaches the output FIRST — before the unclean-
-                    # sweep and safe-mode dispatches below, either of which
-                    # may pick the exit code but must not hide it.
-                    if loop_exit.settled:
-                        announce_protection_only_settled(loop_exit.cause, then="exiting")
-                    else:
-                        print(
-                            "live loop exited from protection-only mode — §18.2 "
-                            "shutdown sweep done; NEW decision cycles never ran "
-                            f"because the engine could not be built: {loop_exit.cause}. "
-                            "Fix the environment and re-run with --loop to resume "
-                            "this run.",
-                            file=sys.stderr,
-                        )
                 if shutdown_problem is not None:
                     # Decided 2026-07-17: exit 0 means "all quiet" to a
                     # supervisor — a passing verdict with an unclean shutdown
@@ -1184,8 +1185,9 @@ def _live_startup_recovery(
                 if args.loop:
                     if loop_exit is not None:
                         # Protection-only's exit code, BEFORE the safe-mode
-                        # lane below (its line was printed above, and the
-                        # ``safe_mode:`` line already reports a latch). Two
+                        # lane below (its line was printed at the top of the
+                        # ``finally``, and the ``safe_mode:`` line already
+                        # reports a latch). Two
                         # endings, the paper lane's two codes: the position
                         # closed and the loop ended itself — exit 1, like
                         # paper's settle-exit, so a supervisor restarts into

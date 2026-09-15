@@ -384,7 +384,10 @@ python -m contrib.hyperliquid_perp live \
   被拒。**持倉時不退出**（退出會讓 §18.2 sweep 撤掉 SL/TP、倉位裸奔，監管再拉起來又撞同
   一個拒絕）：改以 protection-only 起迴圈——tick 照跑（kill-switch 刷新、reconciliation、
   SL/TP 修復），**不 pump、不開新 decision cycle**，啟動行會印 `in protection-only mode`，
-  stderr 明講成因與修法。**不進 safe mode**（環境錯，不是執行失敗）。倉位被 SL/TP 了結後
+  stderr 明講成因與修法。**啟動那次「有沒有倉位要顧」的讀取不會 latch safe mode**（環境錯，
+  不是執行失敗；讀不到＝當作有倉位）；之後每 tick 的 settle check 若 store 一直被鎖住而讀不到，
+  則和任何 tick 錯誤一樣 latch **recoverable** safe mode（`safe-mode --status`／`validate` 看得到，
+  下一次乾淨 reconcile 自動解除；這個模式本來就不下新單，latch 不改變任何交易行為）。倉位被 SL/TP 了結後
   迴圈自己結束、印 `nothing left to protect`、**exit 1**（同 paper 的 settle-exit；監管重啟
   會撞到空倉版的具名拒絕，同樣 exit 1，不會養出殭屍）；Ctrl-C／SIGTERM 停掉的 protection-only
   run 印 `exited from protection-only mode`、**exit 4**（執行了但不乾淨，與 safe mode 停止同碼，

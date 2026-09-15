@@ -1632,8 +1632,11 @@ Breaking changes within the 0.x line are called out explicitly.
   pending flip) it does NOT exit: it logs and prints the cause, and runs in
   protection-only mode — tick-only (the kill-switch refresh, reconciliation
   and SL/TP repair all live in the tick), no decision pump, no decision
-  stack built, no safe mode entered (nothing failed; the environment is
-  wrong), the startup line saying `in protection-only mode`, and a stranded
+  stack built, no safe mode entered by the refusal itself (nothing failed;
+  the environment is wrong — a settle-check read that keeps failing on a
+  locked store still latches recoverable safe mode like any tick fault, so
+  the condition stays visible to `safe-mode --status` and `validate`), the
+  startup line saying `in protection-only mode`, and a stranded
   in-progress attempt left for the next healthy restart to adopt. Once the
   position closes the loop ends itself (`nothing left to protect`) and the
   command exits 1, the paper loop's settle-exit code, so a supervisor's
@@ -1659,7 +1662,9 @@ Breaking changes within the 0.x line are called out explicitly.
   in-progress rows makes it raise by design; over a live position that
   raise must not end the start). A raise from the live loop's settle check
   is contained under its own phase marker, not filed against the tick
-  (#238).
+  (#238). The protection-only cause line is printed at the top of the
+  shutdown `finally`, ahead of the sweep's WARNINGs and any unclean-sweep
+  line.
 
   Two wider closures from the same review. First, the §18.2 sweep keyed
   "clean" off the BOOT verdict alone, so ANY raise out of the loop after a
@@ -1672,11 +1677,12 @@ Breaking changes within the 0.x line are called out explicitly.
   value (`TRADINGAGENTS_MAX_DEBATE_ROUNDS=abc`, `..._CHECKPOINT_ENABLED=treu`)
   with a bare `ValueError`, which the bridge's import guard let through
   untyped — past both lanes' `except EngineConfigError`. The guard now wraps
-  it as an `EngineConfigError` naming the variable (matched by the overlay's
-  own `Invalid value for TRADINGAGENTS_` prefix; any other import-time
-  `ValueError` keeps its shape), so every row of the overlay table gets the
-  protection-only / named-exit treatment, not just the three knobs gated by
-  value below.
+  every import-time `ValueError` as an `EngineConfigError` (over a live
+  position the alternative is the crash-loop the lane prevents), calling
+  it an environment override only when it carries the overlay's own
+  `Invalid value for TRADINGAGENTS_` prefix and reporting any other as what
+  it is — so every row of the overlay table gets the protection-only /
+  named-exit treatment, not just the three knobs gated by value below.
 
   Not taken: refusing the bad knob at `_cmd_live`'s front gate (before the
   lease, arming and recovery), which is how a missing `OPENROUTER_API_KEY`

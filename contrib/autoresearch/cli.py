@@ -435,7 +435,7 @@ def _funding_start(
     when the newest stored settlement is at or past the venue clock. Said
     here as one line, because the walk's own refusal would blame a
     ``--since`` the operator never typed, and the funding scan printed after
-    it then describes the previous walk.
+    it then describes what was already stored.
     """
     if not resume:
         return since
@@ -443,7 +443,7 @@ def _funding_start(
     if start >= end:
         print(
             "funding: the store already holds every settlement up to the venue clock; "
-            "nothing to walk (the funding scan and reach below are the previous walk's)"
+            "nothing to walk (the funding scan and reach below are not this run's)"
         )
         return None
     if start == since:

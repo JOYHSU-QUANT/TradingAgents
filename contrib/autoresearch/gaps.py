@@ -231,9 +231,10 @@ def scan_bars(label: str, step_ms: int, tolerance_ms: int, bars: Iterable[Candle
     series' cadence overwrites it (the store keys a bar by its open); until
     this check such a bar was stored faithfully and never mentioned.
 
-    The evaluator's checks come through here too, so the decision series they
-    refuse to measure on and the series ``gaps`` reports are the same one. (A
-    misshapen DAILY bar is refused earlier, by the bundle's own cadence check,
+    The experiment's history check and the evaluator's window check come
+    through here too, so the decision series they refuse to measure on and
+    the series ``gaps`` reports are the same one. (A short misshapen DAILY bar
+    with a predecessor is refused earlier, by the bundle's own cadence check,
     in that check's words.)
     """
     # One pass, so a store cursor can be handed in as it is rather than

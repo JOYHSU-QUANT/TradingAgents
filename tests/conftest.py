@@ -259,7 +259,9 @@ def llm_result_of(chat_result):
     return LLMResult(generations=[chat_result.generations], llm_output=chat_result.llm_output)
 
 
-def run_child_under_deadline(source: str, *, seconds: float = 45) -> subprocess.CompletedProcess:
+def run_child_under_deadline(
+    source: str, *, seconds: float = 45, reason: str = "int() hung"
+) -> subprocess.CompletedProcess:
     """Run ``source`` in a child interpreter from the repo root, or fail on the deadline.
 
     For the ``int(Decimal("1E999999999"))`` shape: that conversion never
@@ -283,8 +285,18 @@ def run_child_under_deadline(source: str, *, seconds: float = 45) -> subprocess.
             cwd=Path(__file__).resolve().parents[1],
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"the child interpreter did not return within {seconds}s: int() hung")
+    except subprocess.TimeoutExpired as exc:
+        # The child's output so far says how far it got (a flushed marker
+        # before each probe names the one that hung). Windows hands it over
+        # already decoded (``run`` calls ``communicate`` there), POSIX as
+        # bytes or not at all.
+        partial = exc.stdout or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        pytest.fail(
+            f"the child interpreter did not return within {seconds}s: {reason}\n"
+            f"child stdout so far:\n{partial}"
+        )
 
 
 def provider_kwargs_for(config: dict) -> dict:

@@ -51,7 +51,8 @@ class BedrockClient(BaseLLMClient):
 
     # Auth is the AWS credential chain (``api_key`` is set from the env
     # below), so only the cross-provider set is forwarded. ``max_retries``
-    # reaches botocore's ``Config`` (tests/test_bedrock_provider.py, #263).
+    # reaches botocore's ``Config`` (tests/test_bedrock_provider.py, #263);
+    # the class also takes ``timeout``, deliberately not forwarded here.
     _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS
 
     def get_llm(self) -> Any:

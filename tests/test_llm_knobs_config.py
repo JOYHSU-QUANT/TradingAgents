@@ -314,25 +314,29 @@ class TestProviderKwargs:
             _provider_kwargs(max_tokens=bad)
 
     def test_an_absurd_decimal_exponent_is_refused_without_hanging(self):
-        # int(Decimal("1E999999999")) never returns (PR #207's shape), so the
-        # range check has to run before the conversion. Both knobs share the
-        # validator, so one child interpreter (one graph import) covers both;
-        # a process deadline, because a thread cannot time this hang out
-        # (see run_child_under_deadline).
+        # int(Decimal("1E999999999")) never returns (PR #207's shape), and a
+        # huge NEGATIVE exponent hangs it just the same, so the range check
+        # has to run before the conversion on both sides. Both knobs share
+        # the validator, so one child interpreter (one graph import) covers
+        # both; a process deadline, because a thread cannot time this hang
+        # out (see run_child_under_deadline). The flushed marker names the
+        # probe that hung in the deadline failure.
         done = run_child_under_deadline(
             "from decimal import Decimal\n"
             "from tradingagents.graph.trading_graph import _coerce_max_retries, _coerce_max_tokens\n"
             "for coerce in (_coerce_max_tokens, _coerce_max_retries):\n"
-            "    try:\n"
-            "        coerce(Decimal('1E999999999'))\n"
-            "    except ValueError as exc:\n"
-            "        print(exc)\n"
-            "    else:\n"
-            "        raise SystemExit(coerce.__name__ + ' accepted it')\n"
+            "    for exponent in ('1E999999999', '-1E999999999'):\n"
+            "        print('probing', coerce.__name__, exponent, flush=True)\n"
+            "        try:\n"
+            "            coerce(Decimal(exponent))\n"
+            "        except ValueError as exc:\n"
+            "            print(exc)\n"
+            "        else:\n"
+            "            raise SystemExit(coerce.__name__ + ' accepted ' + exponent)\n"
         )
         assert done.returncode == 0, done.stderr
-        assert "'max_tokens' (TRADINGAGENTS_MAX_TOKENS)" in done.stdout
-        assert "'llm_max_retries' (TRADINGAGENTS_LLM_MAX_RETRIES)" in done.stdout
+        for key in ("'max_tokens' (TRADINGAGENTS_MAX_TOKENS)", "'llm_max_retries' (TRADINGAGENTS_LLM_MAX_RETRIES)"):
+            assert done.stdout.count(f"config key {key} must be") == 2, done.stdout
 
 
 @pytest.mark.unit

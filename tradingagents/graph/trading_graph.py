@@ -60,7 +60,8 @@ def _coerce_config_int(value, *, key, env, minimum, bound):
     ``sys.maxsize`` is refused. Numerics are range-checked BEFORE ``int()``
     because ``int(Decimal("1E999999999"))`` hangs rather than raising (#177);
     a string is bounded after parsing, since ``int()`` caps its digits.
-    ``bound`` is the worded rule for the message ("a positive integer (> 0)").
+    ``bound`` is the worded rule for the message and must describe
+    ``minimum`` ("a positive integer (> 0)" for 1); nothing checks the pair.
     """
     base = f"config key '{key}' ({env}) must be {bound}"
     if isinstance(value, bool):
@@ -78,7 +79,7 @@ def _coerce_config_int(value, *, key, env, minimum, bound):
     # InvalidOperation, and OverflowError: a bad value must never leak raw.
     except (TypeError, ValueError, ArithmeticError):
         raise ValueError(f"{base}, got {value!r}") from None
-    if parsed is None or parsed > sys.maxsize:
+    if parsed is None or not (-sys.maxsize <= parsed <= sys.maxsize):
         raise ValueError(f"{base} within the platform integer range, got {value!r}")
     if parsed < minimum:
         raise ValueError(f"{base}, got {value!r}")

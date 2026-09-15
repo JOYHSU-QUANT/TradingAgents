@@ -47,7 +47,16 @@ def test_coerce_rejects_non_integers(bad):
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "bad",
-    [2.7, Decimal("2.5"), Decimal("NaN"), float("inf"), float("nan"), 2**70, str(sys.maxsize + 1)],
+    [
+        2.7,
+        Decimal("2.5"),
+        Decimal("NaN"),
+        float("inf"),
+        float("nan"),
+        2**70,
+        str(sys.maxsize + 1),
+        str(-sys.maxsize - 1),
+    ],
 )
 def test_coerce_refuses_a_fractional_or_unbounded_numeric_instead_of_truncating(bad):
     # ``int(2.7)`` is 2: a programmatic ``llm_max_retries=2.7`` used to pass

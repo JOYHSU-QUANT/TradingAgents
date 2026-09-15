@@ -10,38 +10,6 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **One validation policy for the integer LLM knobs; `max_retries` verified to
-  reach Bedrock (#263, #264)**. `_coerce_max_retries` `int()`-truncated a
-  programmatic `llm_max_retries=2.7` to 2 while `_coerce_max_tokens`, twenty
-  lines away, refused `4096.7`; the retry validator also lacked the cap's
-  `sys.maxsize` range check, so `Decimal("1E999999999")` hung it. Both now
-  call one `_coerce_config_int(value, key=, env=, minimum=, bound=)`
-  (`max_tokens` minimum 1, `llm_max_retries` minimum 0), keeping the bool /
-  fractional / range guards; the upstream-facing names stay as one-line
-  wrappers so upstream's tests keep importing them. The refusal message names
-  the config key and the env var for both knobs now. Two holes the shared
-  validator also closes: `Decimal("NaN")` leaked a raw
-  `decimal.InvalidOperation` from the range comparison (the except now
-  covers `ArithmeticError`), and an env STRING beyond `sys.maxsize` skipped
-  the range check a programmatic numeric got (strings are bounded after
-  parsing; the refusal says "within the platform integer range").
-
-  The two "absurd Decimal exponent" tests ran the probe in a thread with a
-  join deadline and claimed a regression would fail rather than hang; it
-  hangs, because `int()` on that Decimal never releases the GIL (measured
-  with the range check removed). One child interpreter now covers both knobs
-  under a process deadline (`tests/conftest.run_child_under_deadline`).
-
-  #263 suspected langchain-aws's `ChatBedrockConverse` silently dropped the
-  forwarded `max_retries` (no field, `extra="ignore"`). Verified against the
-  pin floor (1.5.0) and current (1.7.6): the field exists, folds into the
-  botocore `Config` both boto clients are built with, and the model config is
-  `extra="forbid"`, so an unknown kwarg would raise rather than vanish. No
-  code change; a test now pins the knob through the real class and the real
-  boto client (`total_max_attempts` 9 for `max_retries=8`), and `bedrock`
-  joins the forwarding parametrization. The `BedrockClient` comment claiming
-  the class takes no `timeout` was false and is corrected.
-
 - **Synced upstream TauricResearch/TradingAgents v0.3.0 -> v0.4.2** (47 commits,
   `85946c2`..`be952b8`; the first sync since the fork). `main` was
   fast-forwarded to upstream; this merge carries upstream's `tradingagents/`
@@ -1644,6 +1612,42 @@ Breaking changes within the 0.x line are called out explicitly.
   is unchanged as the one yfinance indicator entry point.
 
 ### Fixed
+
+- **One validation policy for the integer LLM knobs; `max_retries` verified to
+  reach Bedrock (#263, #264)**. `_coerce_max_retries` `int()`-truncated a
+  programmatic `llm_max_retries=2.7` to 2 while `_coerce_max_tokens`, twenty
+  lines away, refused `4096.7`; the retry validator also lacked the cap's
+  `sys.maxsize` range check, so `Decimal("1E999999999")` hung it. Both now
+  call one `_coerce_config_int(value, key=, env=, minimum=, bound=)`
+  (`max_tokens` minimum 1, `llm_max_retries` minimum 0), keeping the bool /
+  fractional / range guards; the upstream-facing names stay as one-line
+  wrappers so upstream's tests keep importing them. The refusal message names
+  the config key and the env var for both knobs now. Two holes the shared
+  validator also closes: `Decimal("NaN")` leaked a raw
+  `decimal.InvalidOperation` from the range comparison (the except now
+  covers `ArithmeticError`), and an env STRING beyond `sys.maxsize` skipped
+  the range check a programmatic numeric got (strings are bounded after
+  parsing). Either sign and either type now gets the same refusal, "within
+  the platform integer range", and that bound is NEW for the retry knob:
+  `llm_max_retries=2**70` used to be forwarded as-is.
+
+  The two "absurd Decimal exponent" tests ran the probe in a thread with a
+  join deadline and claimed a regression would fail rather than hang; it
+  hangs, because `int()` on that Decimal never releases the GIL (measured
+  with the range check removed). One child interpreter now covers both knobs
+  under a process deadline (`tests/conftest.run_child_under_deadline`).
+
+  #263 suspected langchain-aws's `ChatBedrockConverse` silently dropped the
+  forwarded `max_retries` (no field, `extra="ignore"`). Checked by hand at
+  the pin floor (1.5.0 wheel) and at 1.7.6: the field exists, folds into the
+  botocore `Config` both boto clients are built with, and the model config is
+  `extra="forbid"`, so an unknown kwarg would raise rather than vanish. Not
+  reproduced, no code change; the issue closes on that finding. A test now
+  pins the knob through the real class and the real boto client
+  (`total_max_attempts` 9 for `max_retries=8`) at whatever langchain-aws
+  the dev extra resolves to (skipped where the extra is absent), and
+  `bedrock` joins the forwarding parametrization. The `BedrockClient` comment claiming
+  the class takes no `timeout` was false and is corrected.
 
 - **The instrument identity reached every analyst's SYSTEM prompt unflattened**
   (issue #233, closing it). The three batches before this one closed what

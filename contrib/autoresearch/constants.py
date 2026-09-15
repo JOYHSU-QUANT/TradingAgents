@@ -9,12 +9,15 @@ while the other silently kept describing a different history.
 from __future__ import annotations
 
 __all__ = [
+    "CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS",
     "CANDLE_STAMP_TOLERANCE_MS",
+    "DAILY_INTERVAL",
     "DEFAULT_MAX_TRIALS",
     "FUNDING_INTERVAL_MS",
     "FUNDING_STAMP_TOLERANCE_MS",
     "MS_PER_DAY",
     "STUDIED_INTERVALS",
+    "bar_span_ms",
 ]
 
 MS_PER_DAY = 24 * 60 * 60_000
@@ -36,6 +39,12 @@ DEFAULT_MAX_TRIALS = 10
 # measured on), so a window cannot be built on an interval the CLI would
 # refuse to fetch.
 STUDIED_INTERVALS = ("4h", "1d")
+
+# The daily backdrop. Every experiment reads it whatever its decision
+# interval: ``close_1d`` and ``sma_1d_*`` are daily features, so a store with
+# a clean 4h series and no daily one is not fit to measure on, and the scan
+# names its absence beside whichever interval was asked for.
+DAILY_INTERVAL = "1d"
 
 # Hyperliquid settles perp funding every HOUR (the perp package's engine pays
 # it hourly, and ``fundingHistory`` publishes one point per hour), so this is
@@ -78,3 +87,20 @@ FUNDING_STAMP_TOLERANCE_MS = 20 * 60_000
 # A venue that started jittering bar stamps would be changing what a bar IS,
 # so the scan should say so loudly rather than absorb it.
 CANDLE_STAMP_TOLERANCE_MS = 0
+
+# Where the venue says a bar ENDS, relative to where the next one opens: the
+# millisecond measured above. The gap scan holds every stored bar to this
+# shape - ``close_time == open_time + interval - 1`` - because a bar whose
+# close disagrees with its interval is the one finding ``open_time`` alone
+# cannot see: a daily bar written into the 4h series sits exactly on a 4h
+# slot, and is wrong only in how long it says it lasted.
+CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS = 1
+
+
+def bar_span_ms(step_ms: int) -> int:
+    """How long a venue bar on a ``step_ms`` grid says it lasted: its ``close_time - open_time``.
+
+    The one spelling of the shape the scan checks and the test fixtures build,
+    so the two cannot drift apart into every clean series reading as misshapen.
+    """
+    return step_ms - CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS

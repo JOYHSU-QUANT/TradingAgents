@@ -26,10 +26,13 @@ B1 是計畫的 Phase B 完成點。**
   ledger 的 `experiments`、`trials`，加上搜尋的 `proposals`）。
 - `series_state`：每條序列一列，記上一跑 fetch **實際抽到哪、為什麼停在那**。gap 掃描回答不了這件事：它以第一個 stamp 當格線原點，所以前端被截掉的序列掃起來「完全沒洞」——跟交易所真的沒更舊資料長得一模一樣。
 - `fetch` 指令：由新往舊分頁抓 candles、由舊往新分頁抓 funding history，全部 upsert。
-- gap 檢查：把每個時間戳指派到最近的格位，分開回報**三種**發現——
+  `--resume` 讓 funding 那趟從已存的最新一筆之後開始走，而不是從 `--since` 重走。
+- gap 檢查：把每個時間戳指派到最近的格位，分開回報**四種**發現——
   **洞**（中間有空格，重抓可補）、**重複格位**（兩筆落在同一格；一小時內兩筆 funding
   會把那小時的 carry 算兩次，而且 row 數看起來更健康）、**不在格線上**（重抓修不好，
-  意思是交易所改了節奏，或兩種節奏被寫進同一條序列）。只回報，不修補。
+  意思是交易所改了節奏，或兩種節奏被寫進同一條序列）、**形狀不對**（只有 bar 有：
+  `close_time` 不在 `open_time + interval − 1 ms`；一根日 K 被寫進 4h 序列時 open
+  正好落在 4h 格位上，前三種發現看不出來）。只回報，不修補。
 - **封閉的 feature 詞彙表**（`vocabulary.py`）：16 個 kind、每個 kind 自己宣告它接受哪些
   period，所以整套語言列得完。`vocab` 指令印的那張表是**從 parser 查的同一張表生出來的**，
   不是手抄的——B1 要餵給 LLM 的詞彙表也走這一個函式。
@@ -77,7 +80,10 @@ python -m contrib.autoresearch fetch --coin BTC --interval 4h --since 2023-01-01
 # 日線那條序列；funding 不分 interval，第二趟就別再抓一次
 python -m contrib.autoresearch fetch --coin BTC --interval 1d --since 2023-01-01 --skip-funding
 
-# 只掃 gap，不連網
+# 例行補資料：funding 從已存的最新一筆之後接著走（一兩個 request），candles 照舊重走
+python -m contrib.autoresearch fetch --coin BTC --interval 4h --since 2023-01-01 --resume
+
+# 只掃 gap，不連網；日線 backdrop 也一併掃（每個 experiment 都讀它）
 python -m contrib.autoresearch gaps --coin BTC --interval 4h
 
 # 一個假說能用哪些 feature（不開 store、不連網）
@@ -137,7 +143,11 @@ data」，不會靜默地裝作抓完了。
 4h 全部 4999 列 `close_time − open_time = 14399999`，1d 全部 2215 列 `= 86399999`。任何把
 close 跟 open 或跟 interval 混著算的算式都得說清楚用的是哪一個：評估器算「這段該有幾筆
 settlement」用 round 不用 floor，日線 backdrop 用日 K **自己的** close 過濾而不是從 open 推。
-測試用的 `candles()` 工廠是 `close = open + step`，所以碰邊界的測試要自己造 venue 形狀的 bar。
+gap 掃描拿這個形狀當檢查（`constants.CANDLE_CLOSE_BEFORE_NEXT_OPEN_MS`）：`close_time`
+不等於 `open_time + interval − 1` 的 bar 是第四種發現 **misshapen**，experiment 的暖機
+檢查也照樣拒絕。測試夾具 `bars()`／`candles()` 從此就是這個形狀——原本是
+`close = open + step`，碰邊界的測試各自手工減 1 ms，而整點 `.000` 的 settlement 正好
+落在下一根的 open 上（見下面「已知取捨」）。
 
 ### funding 偶爾晚好幾分鐘才落（2026-09-14 實測）
 
@@ -165,6 +175,10 @@ start`／`reached the requested end`（正常跑完）、`hit the request limit`
 `the venue stopped moving the window`。從沒記錄過的 store 則是 `no fetch has recorded one in this store`。
 
 所以 `gaps` 不只是「看有沒有洞」，它也是回答「上次回補是不是被打斷」的那個指令。
+
+兩個指令也都在被要求的 interval 旁邊**一併掃日線 backdrop**：每個 experiment 都讀
+`close_1d`／`sma_1d_*`，所以一個只有乾淨 4h、沒有 1d 的 store 對 A2 之後是半殘的，
+而單掃 4h 只會說「no gaps」。1d 沒有 rows 時會多印一行說該用哪個指令補。
 
 ### 假說是資料，不是程式
 
@@ -490,6 +504,13 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
 - **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批
   rows，`load_bundle` 直接拿 bars 當 backdrop，不讀第二次）；parser 看不到 interval 所以擋不了
   （承 A2 §10.8）。
+- **`fetch` 沒拆成 `fetch-candles`／`fetch-funding`**（#256 的可選配套）：`--skip-funding`
+  留著，`--resume` 也只管 funding——candles 到深度牆只要 5 頁，而且重走才補得了洞。
+- **整點 `.000` 的 settlement 落在兩根 venue bar 的縫**：`_Settlements.due` 用
+  `(open, close]` 收費，feature 用 `(前一根 close, close]` 加總，兩者只在 stamp 恰好等於
+  open（＝前一根 close ＋ 1 ms）時不同。實測 531 筆全部晚 2–99 ms，evaluator 的 docstring
+  有記；`test_evaluator` 的 `_funding` 夾具不造這種 stamp，`conftest.funding_points` 仍是整點
+  （feature 測試拿它釘窗口邊界，gaps 測試釘的是整點格線）。
 
 ## 測試
 
@@ -499,3 +520,7 @@ python -m pytest contrib/autoresearch/tests -q
 
 自己一條基準數，不併進 `hyperliquid_perp` 的那條。測試不打網路：交易所那端一律走
 [`ports.py`](./ports.py) 的 `HistoryMarketData`，由測試餵劇本化的假資料。
+
+CI 也跑這一套（`.github/workflows/ci.yml` 的 `autoresearch` job）：pin 測試會 import 上游的
+venue reader，所以除了 dev extras 還要裝 `requirements.txt`（Hyperliquid SDK）。
+`hyperliquid_perp` 自己的測試仍然只在部署時於伺服器上跑，這裡沒有改。

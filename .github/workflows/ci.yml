@@ -59,3 +59,24 @@ jobs:
         # The repo is fully clean under the strict select, so we lint everything
         # (results/ and worklog/ are excluded via pyproject extend-exclude).
         run: ruff check .
+
+  autoresearch:
+    name: autoresearch tests (py3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (dev extras, then the perp module's requirements)
+        # contrib/autoresearch borrows read-only from contrib/hyperliquid_perp,
+        # and its pin tests import the venue reader, which needs the Hyperliquid
+        # SDK that requirements.txt declares and pyproject does not.
+        # requirements.txt also lists ".", which would rebuild and replace the
+        # editable install just made; that line is filtered out.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          grep -v '^\.$' requirements.txt | pip install -r /dev/stdin
+      - name: Run the research radar's suite
+        run: pytest -q contrib/autoresearch/tests

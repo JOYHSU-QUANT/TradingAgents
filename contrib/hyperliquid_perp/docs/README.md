@@ -118,6 +118,7 @@ TradingAgents/
 ├── tradingagents/                       # UNCHANGED upstream engine
 ├── examples/
 └── contrib/
+    ├── autoresearch/                    # 研究雷達：自己的 store／評估器／ledger，只唯讀借用 hyperliquid_perp（見其 README）
     └── hyperliquid_perp/
         ├── exchanges/
         ├── domains/

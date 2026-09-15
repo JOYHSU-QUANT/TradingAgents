@@ -6,11 +6,18 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.autoresearch.constants import FUNDING_INTERVAL_MS, FUNDING_STAMP_TOLERANCE_MS
+from contrib.autoresearch.constants import (
+    FUNDING_INTERVAL_MS,
+    FUNDING_STAMP_TOLERANCE_MS,
+    MS_PER_DAY,
+    bar_span_ms,
+)
 from contrib.autoresearch.gaps import (
     Gap,
     GapReport,
+    Misshapen,
     render_report,
+    scan_bars,
     scan_candles,
     scan_funding,
 )
@@ -19,6 +26,7 @@ from contrib.autoresearch.upstream import Candle, FundingPoint, interval_to_ms
 from .conftest import ANCHOR_MS, MS_PER_HOUR, bars, funding_points
 
 STEP_4H = interval_to_ms("4h")
+SPAN_4H = bar_span_ms(STEP_4H)  # how long a venue 4h bar says it lasted
 
 
 def test_an_empty_series_says_so_rather_than_reporting_a_clean_grid(store):
@@ -69,11 +77,11 @@ def test_the_grid_is_anchored_on_the_first_row_not_on_the_epoch(store):
     assert scan_candles(store, coin="BTC", interval="4h").complete
 
 
-def _stray(at_ms):
-    """A well-formed bar parked at ``at_ms``, for the off-grid cases."""
+def _stray(at_ms, *, lasts_ms=SPAN_4H):
+    """A well-formed bar parked at ``at_ms``; by default the venue's 4h shape."""
     return Candle(
         open_time=at_ms,
-        close_time=at_ms + STEP_4H,
+        close_time=at_ms + lasts_ms,
         open=Decimal("1"),
         high=Decimal("1"),
         low=Decimal("1"),
@@ -300,19 +308,20 @@ def test_the_summary_line_counts_what_it_left_out(store):
 
 
 @pytest.mark.parametrize(
-    ("rows", "first_ms", "last_ms", "gaps"),
+    ("rows", "first_ms", "last_ms", "gaps", "misshapen"),
     [
-        (5, None, None, ()),          # claims rows, carries no span
-        (0, ANCHOR_MS, ANCHOR_MS, ()),  # claims a span, says it has no rows
-        (0, None, None, (Gap(after_ms=1, before_ms=3, missing=1),)),  # findings, no rows
+        (5, None, None, (), ()),          # claims rows, carries no span
+        (0, ANCHOR_MS, ANCHOR_MS, (), ()),  # claims a span, says it has no rows
+        (0, None, None, (Gap(after_ms=1, before_ms=3, missing=1),), ()),  # findings, no rows
+        (0, None, None, (), (Misshapen(open_ms=1, close_ms=3),)),  # the fourth finding too
     ],
 )
 def test_a_report_that_contradicts_itself_is_refused_where_it_is_built(
-    rows, first_ms, last_ms, gaps
+    rows, first_ms, last_ms, gaps, misshapen
 ):
     """A report is read as authoritative, so it may not disagree with itself.
 
-    Only ``scan_stamps`` builds these today and it always builds them consistently,
+    The scans build these consistently, and a test builds four by hand below,
     which is exactly why the coupling needs saying out loud: the type is
     exported, and the first hand-built one would otherwise fail somewhere
     downstream - rendering a span it does not have - rather than here.
@@ -328,4 +337,68 @@ def test_a_report_that_contradicts_itself_is_refused_where_it_is_built(
             gaps=gaps,
             duplicate_ms=(),
             misaligned_ms=(),
+            misshapen=misshapen,
         )
+
+
+@pytest.mark.parametrize(
+    ("after_ms", "before_ms", "missing"),
+    [(100, 50, 1), (50, 100, 0), (50, 50, 1)],
+    ids=["runs backwards", "misses nothing", "has no width"],
+)
+def test_a_gap_that_is_not_a_hole_is_refused_where_it_is_built(after_ms, before_ms, missing):
+    """The same coupling ``GapReport`` checks, one type down: a hole runs forward and misses rows."""
+    with pytest.raises(ValueError, match="not a hole"):
+        Gap(after_ms=after_ms, before_ms=before_ms, missing=missing)
+
+
+# -- the finding only a bar can have ------------------------------------------
+
+
+def test_a_daily_bar_written_into_the_4h_series_is_named_though_its_stamp_is_on_the_grid(store):
+    """The finding the stamp scan cannot make.
+
+    Its open sits exactly on a 4h slot, so it is neither a hole nor off-grid
+    nor a duplicate; it is wrong only in how long it says it lasted, which
+    only its ``close_time`` records. Until this the store kept such a bar
+    faithfully and never mentioned it.
+    """
+    series = bars(8)
+    store.upsert_candles("BTC", "4h", series)
+    daily = _stray(series[3].open_time, lasts_ms=bar_span_ms(MS_PER_DAY))
+    store.upsert_candles("BTC", "4h", [daily])  # revises bar 3 in place
+    report = scan_candles(store, coin="BTC", interval="4h")
+    assert (report.gaps, report.duplicate_ms, report.misaligned_ms) == ((), (), ())
+    assert report.misshapen == (Misshapen(open_ms=daily.open_time, close_ms=daily.close_time),)
+    assert not report.complete
+    lines = render_report(report)
+    assert "1 misshapen bar(s)" in lines[0]
+    (named,) = [line for line in lines if line.strip().startswith("misshapen:")]
+    assert f"closes {bar_span_ms(MS_PER_DAY)} ms after it opens, not {bar_span_ms(STEP_4H)}" in named
+
+
+def test_a_bar_closing_at_the_next_open_is_misshapen_by_the_venue_s_millisecond():
+    """``close = open + step`` was this suite's own fixture shape once; it is not the venue's."""
+    at_next_open = _stray(ANCHOR_MS, lasts_ms=STEP_4H)
+    assert scan_bars("x", STEP_4H, 0, [at_next_open]).misshapen == (
+        Misshapen(open_ms=ANCHOR_MS, close_ms=ANCHOR_MS + STEP_4H),
+    )
+    assert scan_bars("x", STEP_4H, 0, [_stray(ANCHOR_MS)]).complete
+
+
+def test_a_wall_of_misshapen_bars_is_summarised_too(store):
+    store.upsert_candles(
+        "BTC", "4h", [_stray(ANCHOR_MS + i * STEP_4H, lasts_ms=STEP_4H) for i in range(14)]
+    )
+    lines = render_report(scan_candles(store, coin="BTC", interval="4h"))
+    assert sum(1 for line in lines if line.strip().startswith("misshapen:")) == 10
+    assert any(line.strip() == "... and 4 more misshapen bar(s)" for line in lines)
+
+
+def test_a_funding_report_never_names_a_shape(store):
+    """A settlement has no duration: the finding is absent from the line, not counted as zero."""
+    store.upsert_funding("BTC", [p for i, p in enumerate(funding_points(10)) if i != 4])
+    report = scan_funding(store, coin="BTC")
+    assert not report.complete
+    assert report.misshapen == ()
+    assert "misshapen" not in "\n".join(render_report(report))

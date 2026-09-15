@@ -77,19 +77,15 @@ def _prices(count: int, *, seed: int, start: float, drift: float) -> tuple[list,
     return closes, [closes[0], *closes[:-1]]
 
 
-def _venue(bars):
-    return [dataclasses.replace(bar, close_time=bar.close_time - 1) for bar in bars]
-
-
 def _fill(store: ResearchStore) -> None:
     closes, opens = _prices(_BARS, seed=1, start=30000.0, drift=0.002)
-    store.upsert_candles("BTC", "4h", _venue(candles(closes, opens=opens, start_ms=_START)))
+    store.upsert_candles("BTC", "4h", candles(closes, opens=opens, start_ms=_START))
     days = 240 + _BARS // 6 + 1
     closes, opens = _prices(days, seed=2, start=20000.0, drift=0.001)
     store.upsert_candles(
         "BTC",
         "1d",
-        _venue(candles(closes, opens=opens, start_ms=_START - 240 * _DAY, step_ms=_DAY)),
+        candles(closes, opens=opens, start_ms=_START - 240 * _DAY, step_ms=_DAY),
     )
     first = _START - 40 * _DAY
     store.upsert_funding(
@@ -297,6 +293,24 @@ def test_a_daily_hole_is_refused_inside_the_reach_of_sma_1d_200_and_ignored_befo
     del older[5]
     clean = SeriesBundle(bundle.bars, daily=older, funding=bundle.funding)
     assert require_clean_history(clean, "4h") == 0
+
+
+def test_a_bar_whose_close_disagrees_with_its_interval_is_refused_by_name(fresh):
+    """The finding a stamp scan cannot make: an hourly bar written into the 4h series.
+
+    Its open sits exactly on a 4h slot, so it is neither a hole nor off-grid;
+    it is wrong only in how long it says it lasted, and a windowed mean read
+    across it covers less calendar than its name. The history check and
+    ``gaps`` share the scan, so the refusal here names the same finding.
+    """
+    bundle = load_bundle(fresh.store, coin="BTC", interval="4h")
+    bars = list(bundle.bars)
+    bars[10] = dataclasses.replace(bars[10], close_time=bars[10].open_time + MS_PER_HOUR - 1)
+    with pytest.raises(
+        EvaluationError,
+        match=r"4h bars this measurement reads are not a grid: 0 hole\(s\).*1 misshapen bar",
+    ):
+        require_clean_history(SeriesBundle(bars, daily=bundle.daily, funding=bundle.funding), "4h")
 
 
 def test_a_funding_hole_is_counted_and_an_off_grid_settlement_is_refused(fresh):

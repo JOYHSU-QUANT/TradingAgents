@@ -10,10 +10,11 @@ import pytest
 
 from contrib.autoresearch import upstream
 from contrib.autoresearch.cli import _parse_since, main
+from contrib.autoresearch.constants import DAILY_INTERVAL, STUDIED_INTERVALS
 from contrib.autoresearch.store import DB_FILENAME, ResearchStore
-from contrib.autoresearch.upstream import ExchangeError
+from contrib.autoresearch.upstream import CandleInterval, ExchangeError, epoch_ms, from_epoch_ms
 
-from .conftest import bars, funding_points, market_at
+from .conftest import MS_PER_HOUR, ScriptedMarket, bars, funding_points, market_at
 
 
 @pytest.fixture
@@ -136,6 +137,143 @@ def test_skip_funding_leaves_the_funding_endpoint_alone(tmp_path, monkeypatch):
         main(["fetch", "--since", "2023-01-01", "--db", str(path), "--skip-funding"]) == 0
     )
     assert market.funding_calls == []
+
+
+def _fetched_twice(monkeypatch, path, *, second_argv):
+    """A first fetch that lands 48 settlements, then ``second_argv`` against 72.
+
+    Returns the funding requests each made. The first is the full walk from
+    2023-01-01: at twenty days a page, sixteen-odd requests to cover a start
+    ten months before the anchor - the long walk a resume exists to avoid.
+    """
+    series = bars(30)
+    stored = funding_points(48)
+    newer = funding_points(24, start_ms=stored[-1].time + MS_PER_HOUR)
+    first = _serve(
+        monkeypatch,
+        market_at(series[-1].close_time, candles={("BTC", "4h"): series}, funding={"BTC": stored}),
+    )
+    assert main(["fetch", "--since", "2023-01-01", "--db", str(path)]) == 0
+    second = _serve(
+        monkeypatch,
+        market_at(
+            series[-1].close_time,
+            candles={("BTC", "4h"): series},
+            funding={"BTC": [*stored, *newer]},
+        ),
+    )
+    assert main(second_argv + ["--db", str(path)]) == 0
+    return first.funding_calls, second.funding_calls, stored
+
+
+def test_resume_starts_the_funding_walk_just_past_the_newest_stored_settlement(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / DB_FILENAME
+    full, resumed, stored = _fetched_twice(
+        monkeypatch, path, second_argv=["fetch", "--since", "2023-01-01", "--resume"]
+    )
+    assert len(full) > 10
+    # Two requests: the page that lands the day of new settlements, and the
+    # empty one past them that shows the walk there is nothing further.
+    assert len(resumed) == 2
+    assert resumed[0][1] == stored[-1].time + 1  # the window's start IS the resume point
+    with ResearchStore(path) as store:
+        assert store.count_funding("BTC") == 72
+        assert store.series_state(coin="BTC", series="funding")["since_ms"] == stored[-1].time + 1
+    assert "funding: resuming from" in capsys.readouterr().out
+
+
+def test_without_resume_the_funding_walk_starts_at_since_again(tmp_path, monkeypatch):
+    """The default is the full re-walk, because that is the one that fills holes."""
+    full, again, _ = _fetched_twice(
+        monkeypatch, tmp_path / DB_FILENAME, second_argv=["fetch", "--since", "2023-01-01"]
+    )
+    assert len(again) >= len(full) > 10
+    assert again[0] == full[0]  # the first window starts at --since, as before
+
+
+def test_resume_walks_from_since_when_nothing_newer_is_stored(tmp_path, monkeypatch, capsys):
+    """A store that ends before ``--since`` resumes from nothing: ``--since`` is later."""
+    series = bars(60)  # ten days past the anchor, so a --since after the store is still inside
+    stored = funding_points(48)
+    market = _serve(
+        monkeypatch,
+        market_at(series[-1].close_time, candles={("BTC", "4h"): series}, funding={"BTC": stored}),
+    )
+    path = tmp_path / DB_FILENAME
+    assert main(["fetch", "--since", "2023-01-01", "--db", str(path)]) == 0
+    market.funding_calls.clear()
+    later = datetime(2023, 11, 20, tzinfo=timezone.utc)
+    assert epoch_ms(later, what="test") > stored[-1].time
+    assert main(["fetch", "--since", "2023-11-20", "--db", str(path), "--resume"]) == 0
+    assert market.funding_calls[0][1] == epoch_ms(later, what="test")
+    assert "walking from --since" in capsys.readouterr().out
+
+
+def test_resume_beside_skip_funding_is_a_usage_error_not_a_silent_no_op(tmp_path):
+    with pytest.raises(SystemExit) as caught:
+        main(["fetch", "--since", "2023-01-01", "--db", str(tmp_path / DB_FILENAME),
+              "--resume", "--skip-funding"])
+    assert caught.value.code == 2
+
+
+def test_a_resume_with_nothing_past_the_venue_clock_says_so_instead_of_blaming_since(
+    tmp_path, monkeypatch, capsys
+):
+    """The walk's own refusal names ``--since``; under a resume that is a date nobody typed."""
+    series = bars(30)
+    stored = funding_points(48)
+    path = tmp_path / DB_FILENAME
+    with ResearchStore(path) as store:
+        store.upsert_funding("BTC", stored)
+    market = _serve(
+        monkeypatch,
+        ScriptedMarket(
+            clock=from_epoch_ms(stored[-1].time + 1),
+            candles={("BTC", "4h"): series},
+            funding={"BTC": stored},
+        ),
+    )
+    assert main(["fetch", "--since", "2023-01-01", "--db", str(path), "--resume"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing to walk (the funding scan and reach below are not this run's)" in out
+    assert "resuming from" not in out  # one line, not a promise and a retraction
+    assert market.funding_calls == []
+    assert "BTC funding: 48 rows" in out
+
+
+def test_the_scan_names_the_missing_daily_backdrop_beside_the_4h_series(seeded, capsys):
+    """A clean 4h series over no daily one scanned as fit to measure on; it is not."""
+    assert main(["gaps", "--coin", "BTC", "--interval", "4h", "--db", str(seeded)]) == 0
+    out = capsys.readouterr().out
+    assert "BTC 1d candles: no rows stored" in out
+    assert "every experiment reads the daily backdrop" in out
+    assert "`fetch --coin BTC --interval 1d --skip-funding` lands it" in out
+
+
+def test_a_daily_backdrop_that_is_there_is_scanned_not_prompted_for(seeded, capsys):
+    with ResearchStore(seeded) as store:
+        store.upsert_candles("BTC", "1d", bars(5, interval="1d"))
+    assert main(["gaps", "--db", str(seeded)]) == 0
+    out = capsys.readouterr().out
+    assert "BTC 1d candles: 5 rows" in out
+    assert "daily backdrop" not in out
+
+
+def test_the_backdrop_interval_is_the_venue_s_daily_one_and_one_the_cli_studies():
+    """One fact with three spellings - the constant, the venue's enum, --interval's choices - pinned together."""
+    assert CandleInterval.D1.value == DAILY_INTERVAL
+    assert DAILY_INTERVAL in STUDIED_INTERVALS
+
+
+def test_scanning_the_daily_series_asks_after_no_sibling(seeded, capsys):
+    """Only the daily series is read by every experiment; the 4h one is a backdrop of nothing."""
+    assert main(["gaps", "--interval", "1d", "--db", str(seeded)]) == 0
+    out = capsys.readouterr().out
+    assert "BTC 4h candles" not in out
+    assert out.count("no rows stored") == 1  # the 1d line itself, and no hint under it
+    assert "daily backdrop" not in out
 
 
 def test_a_venue_failure_is_named_and_exits_one_without_leaving_a_store(

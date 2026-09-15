@@ -81,6 +81,7 @@ from typing import Final
 
 from .constants import (
     CANDLE_STAMP_TOLERANCE_MS,
+    DAILY_INTERVAL,
     FUNDING_INTERVAL_MS,
     FUNDING_STAMP_TOLERANCE_MS,
     MS_PER_DAY,
@@ -88,13 +89,12 @@ from .constants import (
 from .costs import CostModel, require_amount
 from .dsl import Condition, Op, Side, SizingMode, StrategySpec
 from .features import FeatureFrame, FeatureValue, SeriesBundle, window_is_covered
-from .gaps import scan_stamps
+from .gaps import scan_bars, scan_stamps
 from .metrics import RegimeBucket, SegmentMetrics, Tally, describe_measurement
 from .split import Segment, Split, studied_interval
 from .store import ResearchStore
 from .upstream import (
     Candle,
-    CandleInterval,
     MarketRegime,
     VocabEnum,
     from_epoch_ms,
@@ -855,16 +855,29 @@ def _require_measurable(
             f"cut the split to the history the store has."
         )
     # The gap scanner's verdict, not a second definition of a hole: ``gaps``
-    # and this refusal have to agree about the same store.
-    report = scan_stamps(str(segment), step, CANDLE_STAMP_TOLERANCE_MS, stamps)
+    # and this refusal have to agree about the same store - including the
+    # one finding a stamp scan cannot make, a bar whose close disagrees with
+    # the interval, which ``scan_bars`` adds over the same stamps.
+    report = scan_bars(str(segment), step, CANDLE_STAMP_TOLERANCE_MS, bars[first:stop])
     if report.duplicate_ms or report.misaligned_ms:
         # Named before any hole: a stamp the scanner could not place on the
         # grid leaves its slot empty, so the same series also reads as having
         # a hole there, and the hole is the consequence rather than the fact.
+        # And before a misshapen bar: an off-grid bar is misshapen too when it
+        # came from another cadence, but no re-fetch repairs it, while the
+        # shape refusal below promises one.
         raise EvaluationError(
             f"{segment} is not on the {step} ms grid ({len(report.duplicate_ms)} duplicate "
             f"slot(s), {len(report.misaligned_ms)} off-grid stamp(s)); a re-fetch does not "
             f"repair this — run `gaps` to see which stamps."
+        )
+    if report.misshapen:
+        bar = report.misshapen[0]
+        raise EvaluationError(
+            f"{segment} holds {len(report.misshapen)} bar(s) whose close disagrees with the "
+            f"{step} ms interval, the first opening at {from_epoch_ms(bar.open_ms).isoformat()} "
+            f"and lasting {bar.close_ms - bar.open_ms} ms - not the venue's bar shape. Run "
+            f"`gaps`; a re-fetch at this interval overwrites a bar another cadence wrote here."
         )
     if report.gaps:
         gap = report.gaps[0]
@@ -989,7 +1002,7 @@ def load_bundle(
     holdout lock is the reason.
     """
     key = studied_interval(interval)
-    daily_key = CandleInterval.D1.value
+    daily_key = DAILY_INTERVAL
     bars = list(store.iter_candles(coin, key, until_ms=until_ms))
     if not bars:
         raise EvaluationError(f"the store holds no {key} bars for {coin} in that span")

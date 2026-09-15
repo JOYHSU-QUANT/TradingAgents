@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from functools import partial
-from typing import TypeVar
+from typing import Final, TypeVar
 
 from .constants import MS_PER_DAY
 from .ports import HistoryMarketData
@@ -56,6 +56,8 @@ __all__ = [
     "StopReason",
     "backfill_candles",
     "backfill_funding",
+    "describe_stop",
+    "funding_resume_start",
     "render_fetch",
 ]
 
@@ -140,8 +142,13 @@ def _served(call: Callable[[], _T], *, sleep: Callable[[float], None], what: str
     return call()
 
 
-class StopReason(str, Enum):
+class StopReason(Enum):
     """Why a walk ended. Reported, because the endings mean very different things.
+
+    The values are tokens, not the sentences an operator reads; those come
+    from :func:`describe_stop`, beside :func:`render_fetch`. The store records the
+    member NAME (``series_state.stopped``), and no text is ever parsed back
+    into a member, so the value is compared and nothing else.
 
     ``REACHED_SINCE`` / ``REACHED_END`` is the walk finishing its job.
     ``INTERRUPTED`` is the one nothing inside the walk ever sets: it is what
@@ -156,12 +163,37 @@ class StopReason(str, Enum):
     lying about that.
     """
 
-    REACHED_SINCE = "reached the requested start"
-    REACHED_END = "reached the requested end"
-    VENUE_EXHAUSTED = "the venue served no older data"
-    NO_PROGRESS = "the venue stopped moving the window"
-    PAGE_LIMIT = "hit the request limit"
-    INTERRUPTED = "the walk did not finish"
+    REACHED_SINCE = "reached_since"
+    REACHED_END = "reached_end"
+    VENUE_EXHAUSTED = "venue_exhausted"
+    NO_PROGRESS = "no_progress"
+    PAGE_LIMIT = "page_limit"
+    INTERRUPTED = "interrupted"
+
+
+# What each ending is called to an operator. These were once the members'
+# values, which made a rewording a change of vocabulary and let a test pin the
+# phrasing by substring, so a wording touch-up and a behaviour change looked
+# the same to the suite. Wording lives here, next to the other renderer, and
+# the enum compares by token.
+_STOP_WORDING: Final[dict[StopReason, str]] = {
+    StopReason.REACHED_SINCE: "reached the requested start",
+    StopReason.REACHED_END: "reached the requested end",
+    StopReason.VENUE_EXHAUSTED: "the venue served no older data",
+    StopReason.NO_PROGRESS: "the venue stopped moving the window",
+    StopReason.PAGE_LIMIT: "hit the request limit",
+    StopReason.INTERRUPTED: "the walk did not finish",
+}
+# Checked at import rather than at the first walk that ends a new way: a
+# member without a sentence would fail on the walk's return path, after the
+# requests were spent.
+if set(_STOP_WORDING) != set(StopReason):
+    raise RuntimeError("every StopReason member needs a sentence in _STOP_WORDING")
+
+
+def describe_stop(stopped: StopReason) -> str:
+    """The sentence an operator reads for ``stopped``; every member has one."""
+    return _STOP_WORDING[stopped]
 
 
 @dataclass(frozen=True)
@@ -180,6 +212,20 @@ class SeriesFetch:
     rows_before: int
     rows_after: int
     stopped: StopReason
+
+    def __post_init__(self) -> None:
+        # A walk only upserts, so across one the store cannot shrink; a value
+        # that says it did is hand-built, and the first one should fail here
+        # rather than render as a plausible line. Deliberately NOT also "no
+        # more rows new than written": a second fetch in another terminal (of
+        # funding, which no interval scopes, or of the same interval) lands rows
+        # this walk then counts as new, and a successful fetch must not exit on
+        # another writer's work.
+        if self.rows_after < self.rows_before:
+            raise ValueError(
+                f"{self.label}: rows fell from {self.rows_before} to {self.rows_after} "
+                f"across a walk that only upserts"
+            )
 
     @property
     def rows_added(self) -> int:
@@ -340,7 +386,7 @@ def backfill_candles(
         key,
         pages,
         written,
-        stopped.value,
+        describe_stop(stopped),
     )
     after = store.count_candles(coin, key)
     return SeriesFetch(
@@ -442,7 +488,7 @@ def backfill_funding(
         coin,
         pages,
         written,
-        stopped.value,
+        describe_stop(stopped),
     )
     after = store.count_funding(coin)
     return SeriesFetch(
@@ -455,10 +501,24 @@ def backfill_funding(
     )
 
 
+def funding_resume_start(store: ResearchStore, *, coin: str, since: datetime) -> datetime:
+    """Where a resumed funding walk starts: just past the newest stored settlement, or ``since``.
+
+    The rule the walk applies between its own pages (``newest + 1``), lifted
+    out beside it so a resume across runs cannot drift from a resume within
+    one. ``since`` wins when the store ends before it: an operator asking for
+    a later start gets that start.
+    """
+    _, latest = store.funding_span(coin)
+    if latest is None or latest + 1 <= epoch_ms(since, what=f"{coin} funding resume start"):
+        return since
+    return from_epoch_ms(latest + 1)
+
+
 def render_fetch(result: SeriesFetch) -> str:
     """One line saying what the walk landed, including whether any of it was new."""
     return (
         f"{result.label}: {result.pages} request(s), {result.rows_written} row(s) written, "
         f"{result.rows_added} new ({result.rows_before} -> {result.rows_after}); "
-        f"stopped because {result.stopped.value}"
+        f"stopped because {describe_stop(result.stopped)}"
     )

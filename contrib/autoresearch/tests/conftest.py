@@ -24,6 +24,7 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.autoresearch.constants import bar_span_ms
 from contrib.autoresearch.store import ResearchStore
 from contrib.autoresearch.upstream import (
     Candle,
@@ -54,6 +55,12 @@ def bars(
     the remaining bars: every other bar keeps the stamp it would have had, so
     the gap scan is being asked about a hole rather than about a
     differently-shaped series.
+
+    Bars close the way the venue's do - a millisecond before the next open -
+    because the scan now holds every bar to that shape, and a fixture that
+    closed AT the next open would be a misshapen bar in every test that
+    expects a clean series. It was ``open + step`` once, and the tests that
+    touched the boundary each rebuilt the venue's shape by hand.
     """
     step = interval_to_ms(interval)
     made = []
@@ -65,7 +72,7 @@ def bars(
         made.append(
             Candle(
                 open_time=open_time,
-                close_time=open_time + step,
+                close_time=open_time + bar_span_ms(step),
                 open=price,
                 high=price + 1,
                 low=price - 1,
@@ -124,7 +131,7 @@ def candles(
         made.append(
             Candle(
                 open_time=start_ms + index * step,
-                close_time=start_ms + (index + 1) * step,
+                close_time=start_ms + index * step + bar_span_ms(step),
                 open=opened,
                 # The default band brackets BOTH prices, so an open ten away
                 # from its close is still a legal bar.

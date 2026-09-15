@@ -848,6 +848,10 @@ def _live_startup_recovery(
             # "ended cleanly" and strip SL/TP over a live position (issue
             # #268 review).
             loop_raised = False
+            # The one raise out of the loop that is NAMED and handled (a flat
+            # book's EngineConfigError): the sweep's note must point at the
+            # error already printed, not call it an unaccounted-for raise.
+            loop_refused = False
             try:
                 result = run_startup_recovery(
                     db=db,
@@ -908,6 +912,7 @@ def _live_startup_recovery(
                 # the paper lane's exit 1, not the generic "startup recovery
                 # failed" below. The ``finally`` sweep runs over the flat
                 # book; nothing there needs guarding.
+                loop_refused = True
                 logger.error("the engine could not be built: %s", exc)
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
@@ -1012,12 +1017,14 @@ def _live_startup_recovery(
                     keep_protective = (
                         not verdict_passed or exit_safe_mode or loop_raised or loop_exit is not None
                     ) and (fresh_positions is None or bool(fresh_positions))
-                    # Five distinct causes, five truthful notes: a FAILED
+                    # Six distinct causes, six truthful notes: a FAILED
                     # read is not "safe mode is active" — claiming so would
                     # contradict the fresh `safe_mode:` line printed later
                     # when the second read succeeds and finds none.
                     if not verdict_passed:
                         unclean_note = "the startup verdict did not pass"
+                    elif loop_refused:
+                        unclean_note = "the engine could not be built (see the error above)"
                     elif loop_raised:
                         unclean_note = "the live loop raised instead of returning"
                     elif loop_exit is not None:

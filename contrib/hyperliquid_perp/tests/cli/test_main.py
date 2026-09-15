@@ -266,6 +266,22 @@ def test_build_engine_config_refuses_a_yaml_cap_beyond_the_platform_range():
     assert "TRADINGAGENTS_MAX_TOKENS" not in str(info.value)
 
 
+@pytest.mark.parametrize(
+    "key,bad,env",
+    [("llm_max_retries", "abc", "TRADINGAGENTS_LLM_MAX_RETRIES"), ("temperature", "abc", "TRADINGAGENTS_TEMPERATURE")],
+)
+def test_build_engine_config_names_the_sibling_knob_not_the_resolved_cap(monkeypatch, key, bad, env):
+    # The family validator runs AFTER the cap resolver: the resolved YAML cap
+    # rides through it unchanged, and a refusal in a sibling knob names that
+    # knob — never the cap (exit-check review).
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, key, bad)
+    with pytest.raises(bridge_mod.EngineConfigError, match=env) as info:
+        bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 4096}})
+    assert "max_tokens" not in str(info.value)
+
+
 def test_build_engine_config_keeps_yaml_precedence_over_a_junk_env_cap(monkeypatch):
     # YAML shadows env, junk included (#270 review): a stale
     # TRADINGAGENTS_MAX_TOKENS=8k on a host whose YAML sets the cap must not

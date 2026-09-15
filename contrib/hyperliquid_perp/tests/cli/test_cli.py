@@ -5930,6 +5930,28 @@ def test_cmd_live_names_the_engine_refusal_over_a_flat_book_as_exit_1(
     assert "startup recovery failed" not in err
 
 
+def test_cmd_live_flat_refusal_names_itself_when_the_shutdown_reread_fails(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The flat-book refusal raises out of the loop, so ``loop_raised`` stays
+    # True; when the shutdown position re-read ALSO fails (unknown ≠ flat →
+    # keep), the sweep's note must point at the error already printed, not
+    # file it as an unaccounted-for raise (exit-check review).
+    from contrib.hyperliquid_perp.engine_bridge import EngineConfigError
+
+    def _refuse(**kwargs):
+        raise EngineConfigError("config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...")
+
+    live_seams.clearinghouse = None  # map_account_snapshot(None) raises → fresh_positions None
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_refuse)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error: config key 'temperature' (TRADINGAGENTS_TEMPERATURE)" in err
+    assert "could NOT be re-read at shutdown" in err
+    assert "the engine could not be built (see the error above)" in err
+    assert "raised instead of returning" not in err
+
+
 def test_cmd_live_exits_1_when_protection_only_has_nothing_left_to_protect(
     tmp_path, capsys, live_seams, monkeypatch
 ):
@@ -5945,6 +5967,10 @@ def test_cmd_live_exits_1_when_protection_only_has_nothing_left_to_protect(
     assert "nothing left to protect" in err
     assert "TRADINGAGENTS_MAX_TOKENS" in err
     assert "live loop exited — §18.2 shutdown sweep done" not in err  # not the all-quiet line
+    # Flat: the protection-only "unclean" term keeps nothing (the AND with
+    # the position re-read), so no STANDING line and no unclean sweep.
+    assert "STANDING" not in err
+    assert "§18.2 shutdown unclean" not in err
 
 
 def test_cmd_live_exits_4_when_stopped_in_protection_only(tmp_path, capsys, live_seams, monkeypatch):

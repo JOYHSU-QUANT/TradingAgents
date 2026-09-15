@@ -1672,7 +1672,9 @@ Breaking changes within the 0.x line are called out explicitly.
   the same route: generic exit 1, SL/TP cancelled. The sweep now also asks
   whether the loop RETURNED; a raise keeps the resting SL/TP standing (the
   existing unclean-exit rule) and the warning names the cause (`the live
-  loop raised instead of returning`). Second, `default_config` applies the
+  loop raised instead of returning`; the flat-book refusal, already printed
+  by name, is noted as `the engine could not be built (see the error
+  above)` instead). Second, `default_config` applies the
   whole TRADINGAGENTS_* env overlay at import and refuses an uncoercible
   value (`TRADINGAGENTS_MAX_DEBATE_ROUNDS=abc`, `..._CHECKPOINT_ENABLED=treu`)
   with a bare `ValueError`, which the bridge's import guard let through

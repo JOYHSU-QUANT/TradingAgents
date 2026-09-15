@@ -7,6 +7,7 @@ fundamentals look-ahead filter (curr_date normalization + undated-row handling).
 
 import json
 import logging
+from datetime import date
 
 import pytest
 import requests
@@ -15,18 +16,32 @@ import tradingagents.dataflows.alpha_vantage_common as av
 import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
+import tradingagents.dataflows.alpha_vantage_stock as avs
 
 # The forged message and the one-capped-line assertions are the yfinance
 # siblings' — one definition of the hostile shape, so tightening it reaches
 # both vendors serving the routed indicator tool.
 from tests._date_refusal_table import patch_av_request
 from tests.test_yfinance_rate_limit import _FORGED_MESSAGE, _assert_one_capped_line
+from tradingagents.dataflows import date_window
 from tradingagents.dataflows.alpha_vantage_fundamentals import _filter_reports_by_date
 from tradingagents.dataflows.errors import (
     NoMarketDataError,
     VendorUnavailableError,
     WiringGapError,
 )
+
+# The wall-clock day: OVERVIEW is withheld on any earlier date (#1300), so the
+# tests that exercise what a served overview looks like must ask for today.
+_TODAY = date.today().strftime("%Y-%m-%d")
+
+
+@pytest.fixture(autouse=True)
+def _freeze_the_withhold_clock(monkeypatch):
+    """withhold_live_profile reads the wall clock at call time; pin it to the
+    day these tests were computed with, so a run crossing midnight cannot turn
+    a served profile into a withheld one."""
+    monkeypatch.setattr(date_window, "get_current_date", lambda: _TODAY)
 
 
 class _FakeResponse:
@@ -1114,15 +1129,20 @@ def _note_of(out: str) -> str:
 
 
 @pytest.mark.unit
-def test_overview_backtest_date_discloses_live_values(monkeypatch):
+def test_overview_backtest_date_is_withheld(monkeypatch):
     # AV OVERVIEW is a current-state snapshot with no historical form, exactly
-    # like yfinance `info`: rendered for a past analysis date it must say the
-    # numbers are live as of the fetch, or the agent reads today's market cap
-    # as that date's.
+    # like yfinance `info`. For a past analysis date it is withheld outright
+    # (upstream #1300, the shared date_window rule): even name, sector and
+    # industry are today's, so a disclosure beside live figures still put
+    # post-decision information into the analysis. The request is not made.
+    calls = []
     patch_av_request(monkeypatch, _OVERVIEW)
+    monkeypatch.setattr(avf, "_make_api_request", lambda *a, **k: calls.append(1) or _OVERVIEW)
     out = avf.get_fundamentals("AAPL", "2020-01-01")
-    assert "live values" in _note_of(out)
-    assert json.loads(out)["MarketCapitalization"] == "3000000000"  # data still rendered
+    assert "withheld" in out
+    assert "Point-in-time as of: 2020-01-01" in out
+    assert "3000000000" not in out
+    assert calls == []
 
 
 @pytest.mark.unit
@@ -1146,11 +1166,11 @@ def test_overview_non_json_body_is_untouched(monkeypatch):
     # returning the body rather than raising inside a disclosure helper.
     body = "Thank you for using Alpha Vantage!"
     patch_av_request(monkeypatch, body)
-    assert avf.get_fundamentals("AAPL", "2020-01-01") == body
+    assert avf.get_fundamentals("AAPL", _TODAY) == body
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("curr_date", ["2020-01-01", None])
+@pytest.mark.parametrize("curr_date", [_TODAY, None])
 def test_overview_empty_payload_raises_no_market_data(monkeypatch, curr_date):
     # AV answers an unknown symbol with "{}". Serving that as a successful
     # (optionally note-dressed) fundamentals report is what let a routed call
@@ -1183,16 +1203,19 @@ def test_overview_error_envelope_is_not_dressed_with_a_note(monkeypatch, key):
     # message asserts a fetch that never returned anything.
     body = json.dumps({key: "Invalid API call."})
     patch_av_request(monkeypatch, body)
-    assert avf.get_fundamentals("AAPL", "2020-01-01") == body
+    assert avf.get_fundamentals("AAPL", _TODAY) == body
 
 
 @pytest.mark.unit
-def test_overview_notice_beside_real_fields_is_still_disclosed(monkeypatch):
-    # The envelope guard keys on "nothing BUT notice keys": a payload that also
-    # carries fundamentals must keep its disclosure.
+def test_overview_notice_beside_real_fields_is_still_withheld_on_a_past_date(monkeypatch):
+    # A payload that carries fundamentals beside a vendor notice is no
+    # exception to the withhold: on a past date nothing the vendor sent is
+    # rendered, notice included.
     body = json.dumps({"Note": "delayed", "Symbol": "AAPL", "MarketCapitalization": "1"})
     patch_av_request(monkeypatch, body)
-    assert "live values" in _note_of(avf.get_fundamentals("AAPL", "2020-01-01"))
+    out = avf.get_fundamentals("AAPL", "2020-01-01")
+    assert "withheld" in out
+    assert "delayed" not in out
 
 
 @pytest.mark.unit
@@ -1378,7 +1401,7 @@ def test_a_vendor_note_key_does_not_make_an_envelope_look_like_data(monkeypatch)
     # content dresses a rate-limit notice in our own live-snapshot disclosure.
     body = json.dumps({"Information": "rate limit reached", "_freshness_note": "vendor text"})
     patch_av_request(monkeypatch, body)
-    out = avf.get_fundamentals("AAPL", "2020-01-01")
+    out = avf.get_fundamentals("AAPL", _TODAY)
     assert "live values" not in out
     assert "vendor text" not in out
     assert json.loads(out) == {"Information": "rate limit reached"}
@@ -1752,3 +1775,38 @@ def test_news_vendor_note_key_is_dropped_on_the_served_path(monkeypatch, getter,
     parsed = json.loads(out)
     assert avf._FRESHNESS_NOTE_KEY not in parsed
     assert parsed["feed"] == [{"title": "Fed cuts"}]  # the articles still arrive
+
+
+# ---------------------------------------------------------------------------
+# Date trim (upstream #1218): the trim is the only thing keeping post-end_date
+# bars out of a historical run, so a body it cannot parse is never served
+# untrimmed. Here that refusal is the taxonomy's NoMarketDataError rather than
+# a raw ValueError, so the router treats it like any other unusable answer.
+# ---------------------------------------------------------------------------
+
+_TRIM_CSV = (
+    "timestamp,open,high,low,close,volume\n"
+    "2024-05-13,1,1,1,1,10\n"   # after end_date -> must never be served
+    "2024-05-10,1,1,1,1,10\n"
+    "2024-05-09,1,1,1,1,10\n"
+)
+
+
+@pytest.mark.unit
+def test_stock_data_is_trimmed_to_the_requested_window(monkeypatch):
+    monkeypatch.setattr(avs, "_make_api_request", lambda *a, **k: _TRIM_CSV)
+    out = avs.get_stock("IBM", "2024-05-09", "2024-05-10")
+    assert "2024-05-10" in out and "2024-05-09" in out
+    assert "2024-05-13" not in out, "bar after end_date leaked into the window"
+
+
+@pytest.mark.unit
+def test_unparseable_body_is_never_served_untrimmed(monkeypatch):
+    """The trim used to swallow the failure and return the whole body, putting
+    bars after end_date into a backtest. It must refuse instead."""
+    monkeypatch.setattr(
+        avs, "_make_api_request", lambda *a, **k: "timestamp,close\nnot-a-date,1\n"
+    )
+
+    with pytest.raises(NoMarketDataError):
+        avs.get_stock("IBM", "2024-05-09", "2024-05-10")

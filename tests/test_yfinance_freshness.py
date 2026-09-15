@@ -107,11 +107,13 @@ class TestStatementLagNote:
 class TestFundamentalsLiveSnapshotNote:
     _INFO = {"longName": "Apple Inc.", "marketCap": 1_000_000}
 
-    def test_backtest_date_discloses_live_values(self, monkeypatch):
+    def test_backtest_date_is_withheld(self, monkeypatch):
+        # Superseded the live-snapshot disclosure (#30) with upstream's withhold
+        # (#1300): on a past date nothing from ``info`` is rendered at all.
         patch_ticker(monkeypatch, info=self._INFO)
         out = yfin.get_fundamentals("AAPL", "2020-01-01")
-        assert "live values" in out
-        assert "Apple Inc." in out  # data still rendered
+        assert "withheld" in out
+        assert "Apple Inc." not in out
 
     def test_current_date_has_no_note(self, monkeypatch):
         patch_ticker(monkeypatch, info=self._INFO)

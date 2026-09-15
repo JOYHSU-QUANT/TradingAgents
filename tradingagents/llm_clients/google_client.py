@@ -23,7 +23,9 @@ class GoogleClient(BaseLLMClient):
     # ``max_tokens`` is ChatGoogleGenerativeAI's declared alias for its
     # ``max_output_tokens`` field, so the unified spelling works here too.
     # ``api_key`` is deliberately absent: it maps to ``google_api_key`` in get_llm.
-    _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS + ("timeout", "http_client", "http_async_client")
+    _passthrough_kwargs = _COMMON_PASSTHROUGH_KWARGS + (
+        "max_output_tokens", "timeout", "http_client", "http_async_client"
+    )
 
     def __init__(self, model: str, base_url: str | None = None, **kwargs):
         super().__init__(model, base_url, **kwargs)

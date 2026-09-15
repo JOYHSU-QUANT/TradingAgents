@@ -198,6 +198,47 @@ class FredFormattingTests(unittest.TestCase):
         self.assertEqual(obs_params["observation_end"], "2025-09-30")
         self.assertEqual(obs_params["observation_start"], "2025-07-02")  # 90d back
 
+    def test_requests_pin_the_data_vintage(self):
+        # #1275: both the metadata and observations requests must pin the vintage
+        # to curr_date (clamped to FRED's today), or FRED serves the latest
+        # revision and revision-prone series leak future information. A past
+        # curr_date sits below FRED's today, so it pins through unchanged.
+        captured = {}
+
+        def _capture(path, params):
+            captured[path] = params
+            return _META if path == "series" else _OBS
+
+        with mock.patch.object(fred, "_fred_today", return_value="2026-01-01"), \
+                mock.patch.object(fred, "_request", side_effect=_capture):
+            fred.get_macro_data("cpi", "2025-09-30", 90)
+
+        for path in ("series", "series/observations"):
+            self.assertEqual(captured[path]["realtime_start"], "2025-09-30", path)
+            self.assertEqual(captured[path]["realtime_end"], "2025-09-30", path)
+
+    def test_future_curr_date_clamps_vintage_to_fred_today(self):
+        # #1275 regression: on a live run curr_date is the caller's LOCAL date,
+        # which can be a day ahead of FRED's US-Central clock. Pinning the vintage
+        # to that future date 400s, and the routing layer then drops macro data
+        # silently. The pin must clamp to FRED's today; the observation window
+        # (future bars can't exist yet) stays at curr_date.
+        captured = {}
+
+        def _capture(path, params):
+            captured[path] = params
+            return _META if path == "series" else _OBS
+
+        with mock.patch.object(fred, "_fred_today", return_value="2026-08-31"), \
+                mock.patch.object(fred, "_request", side_effect=_capture):
+            fred.get_macro_data("cpi", "2026-09-01", 90)  # local a day ahead of Chicago
+
+        for path in ("series", "series/observations"):
+            self.assertEqual(captured[path]["realtime_start"], "2026-08-31", path)
+            self.assertEqual(captured[path]["realtime_end"], "2026-08-31", path)
+        # the observation window still tracks curr_date, not the clamped vintage
+        self.assertEqual(captured["series/observations"]["observation_end"], "2026-09-01")
+
 
 def _meta_with_id(freq_short="M", series_id="UNRATE"):
     return {
@@ -452,3 +493,22 @@ class FredRoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_non_zero_padded_curr_date_still_pins_the_vintage():
+    # date_refusal accepts "2026-6-5"; a lexical min() against FRED's today
+    # sorted it after "2026-09-15" and pinned a June backtest to today's revisions.
+    captured = {}
+
+    def _capture(path, params):
+        captured[path] = params
+        return _META if path == "series" else _OBS
+
+    with mock.patch.object(fred, "_fred_today", return_value="2026-09-15"), \
+            mock.patch.object(fred, "_request", side_effect=_capture):
+        fred.get_macro_data("cpi", "2026-6-5", 90)
+
+    for path in ("series", "series/observations"):
+        assert captured[path]["realtime_start"] == "2026-06-05", path
+        assert captured[path]["realtime_end"] == "2026-06-05", path
+    assert captured["series/observations"]["observation_end"] == "2026-06-05"

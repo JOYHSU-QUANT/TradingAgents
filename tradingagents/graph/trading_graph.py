@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import warnings
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,11 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.dataflows.utils import (
+    get_current_date,
+    normalize_iso_date,
+    safe_ticker_component,
+)
 from tradingagents.default_config import DEFAULT_CONFIG, DEFAULT_MAX_TOKENS
 from tradingagents.llm_clients import create_llm_client, is_gateway_provider
 from tradingagents.reporting import write_report_tree
@@ -44,6 +49,59 @@ from .setup import GraphSetup
 from .signal_processing import SignalProcessor
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_max_retries(value):
+    """Validate an ``llm_max_retries`` value to a non-negative int.
+
+    Accepts an int or a numeric string (env vars arrive as strings). Rejects
+    booleans and negatives loudly so a misconfiguration fails at startup rather
+    than silently disabling retries.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"llm_max_retries must be an integer, not a boolean: {value!r}")
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"llm_max_retries must be an integer, got {value!r}") from exc
+    if n < 0:
+        raise ValueError(f"llm_max_retries must be >= 0, got {n}")
+    return n
+
+
+def _coerce_max_tokens(value):
+    """Validate a ``max_tokens`` cap to a positive int, or raise ``ValueError``.
+
+    Env-sourced values are strings and bypass every YAML-side check, and
+    forwarding 0 or a negative cap is a deterministic provider 400 on every
+    call — the #177 stall shape — so the value is validated here, not just
+    coerced. ``bool`` is an ``int`` subclass (``True`` would pass as a 1-token
+    cap that truncates every completion with nothing raised anywhere); a
+    programmatic ``4096.7`` (or ``Decimal`` / ``Fraction``) must not
+    ``int()``-truncate to a cap the caller never asked for; and numerics are
+    range-checked BEFORE ``int()`` because ``int(Decimal("1E999999999"))`` is a
+    hang, not an exception. A numeric string goes straight to ``int()``.
+    """
+    base = "config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) must be a positive integer"
+    if isinstance(value, bool):
+        raise ValueError(f"{base}, not a boolean: {value!r}")
+    try:
+        if not isinstance(value, str):
+            # Bound both sides: a huge negative exponent hangs int() just as a
+            # huge positive one does; positivity is judged after parsing so the
+            # message can name it.
+            if not (-sys.maxsize <= value <= sys.maxsize):
+                raise ValueError
+            if int(value) != value:
+                raise ValueError
+        parsed = int(value)
+    # OverflowError kept for belt-and-braces: the range check above already
+    # refuses inf, but a bad cap must never leak raw.
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{base}, got {value!r}") from None
+    if parsed <= 0:
+        raise ValueError(f"{base} (> 0), got {value!r}")
+    return parsed
 
 
 class TradingAgentsGraph:
@@ -131,10 +189,14 @@ class TradingAgentsGraph:
         self.ticker = None
         self.log_states_dict = {}  # date to full state dict
 
+        # Graph-shape-affecting run choices, kept for the checkpoint signature.
+        self.selected_analysts = tuple(selected_analysts)
+
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
+        self._resuming = False
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
@@ -167,42 +229,19 @@ class TradingAgentsGraph:
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
 
-        # Completion cap is cross-provider too (every client forwards the
-        # ``max_tokens`` spelling; Google aliases it to ``max_output_tokens``).
-        # Validated here, not just coerced: env-sourced values bypass every
-        # YAML-side check, and forwarding 0 or a negative cap is a
-        # deterministic provider 400 on every call — the #177 stall shape.
+        # SDK retry budget is cross-provider. Forward it only when explicitly set
+        # so each provider keeps its own default (usually 2) otherwise (#1091).
+        max_retries = self.config.get("llm_max_retries")
+        if max_retries is not None and max_retries != "":
+            kwargs["max_retries"] = _coerce_max_retries(max_retries)
+
+        # Completion cap is cross-provider too; Gemini names it
+        # ``max_output_tokens``, so it goes under the right key per provider
+        # (#1204). Validated, not just coerced — see _coerce_max_tokens.
         max_tokens = self.config.get("max_tokens")
         if max_tokens is not None and max_tokens != "":
-            try:
-                # bool is an int subclass: True would pass as a 1-token cap,
-                # truncating every completion with nothing raised anywhere.
-                if isinstance(max_tokens, bool):
-                    raise ValueError
-                if not isinstance(max_tokens, str):
-                    # Range-check numerics BEFORE int(): int(Decimal("1E999999999"))
-                    # is a hang, not an exception, and a cap that does not fit
-                    # a machine int (inf, NaN, absurd exponents) is junk anyway.
-                    # A comparison is O(digits); the conversion is not.
-                    if not (0 < max_tokens <= sys.maxsize):
-                        raise ValueError
-                    # A programmatic 4096.7 (or Decimal / Fraction) must not
-                    # int()-truncate to a cap the caller never asked for;
-                    # compared by value, not type, so every numeric shape is
-                    # covered. A numeric string goes straight to int() below.
-                    if int(max_tokens) != max_tokens:
-                        raise ValueError
-                parsed = int(max_tokens)
-                if parsed <= 0:
-                    raise ValueError
-            # OverflowError kept for belt-and-braces: the range check above
-            # already refuses inf, but a bad cap must never leak raw.
-            except (TypeError, ValueError, OverflowError):
-                raise ValueError(
-                    f"config key 'max_tokens' (TRADINGAGENTS_MAX_TOKENS) must "
-                    f"be a positive integer, got {max_tokens!r}"
-                ) from None
-            kwargs["max_tokens"] = parsed
+            key = "max_output_tokens" if provider == "google" else "max_tokens"
+            kwargs[key] = _coerce_max_tokens(max_tokens)
         elif is_gateway_provider(provider, base_url=self.config.get("backend_url")):
             # Uncapped through a gateway is the #177 shape: some upstreams
             # substitute the model's full context for a missing cap and
@@ -305,13 +344,16 @@ class TradingAgentsGraph:
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5,
         benchmark: str = "SPY",
-    ) -> tuple[float | None, float | None, int | None]:
+    ) -> tuple[float | None, float | None, int | None, str | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
         ``benchmark`` is the index used as the alpha baseline (resolved by the
         caller via ``_resolve_benchmark``). Returns ``(raw_return, alpha_return,
-        actual_holding_days)`` or ``(None, None, None)`` if price data is
-        unavailable (too recent, delisted, or network error).
+        holding_days, resolution_date)`` — where ``resolution_date`` is the date
+        of the last price bar used, i.e. when the outcome became known (#1251) —
+        or ``(None, None, None, None)`` when the outcome cannot be settled yet:
+        the full holding window has not traded (#1169), or the symbol is delisted
+        or unreachable.
         """
         from tradingagents.dataflows.symbol_utils import normalize_symbol
 
@@ -326,26 +368,31 @@ class TradingAgentsGraph:
             stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
             bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
 
-            if len(stock) < 2 or len(bench) < 2:
-                return None, None, None
+            # Require the full holding window in both series. A rerun before it
+            # has traded leaves the entry pending to retry next run, rather than
+            # settling on a premature partial return (#1169).
+            if len(stock) <= holding_days or len(bench) <= holding_days:
+                return None, None, None, None
 
-            actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
             raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
+                (stock["Close"].iloc[holding_days] - stock["Close"].iloc[0])
                 / stock["Close"].iloc[0]
             )
             bench_ret = float(
-                (bench["Close"].iloc[actual_days] - bench["Close"].iloc[0])
+                (bench["Close"].iloc[holding_days] - bench["Close"].iloc[0])
                 / bench["Close"].iloc[0]
             )
             alpha = raw - bench_ret
-            return raw, alpha, actual_days
+            # The date of the last price bar used is when this outcome became
+            # known — the point-in-time cutoff for injecting the lesson (#1251).
+            resolution_date = stock.index[holding_days].strftime("%Y-%m-%d")
+            return raw, alpha, holding_days, resolution_date
         except Exception as e:
             logger.warning(
                 "Could not resolve outcome for %s on %s vs %s (will retry next run): %s",
                 ticker, trade_date, benchmark, e,
             )
-            return None, None, None
+            return None, None, None, None
 
     def _resolve_pending_entries(self, ticker: str) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
@@ -364,7 +411,7 @@ class TradingAgentsGraph:
         benchmark = self._resolve_benchmark(ticker)
         updates = []
         for entry in pending:
-            raw, alpha, days = self._fetch_returns(
+            raw, alpha, days, resolution_date = self._fetch_returns(
                 ticker, entry["date"], benchmark=benchmark,
             )
             if raw is None:
@@ -382,6 +429,7 @@ class TradingAgentsGraph:
                 "alpha_return": alpha,
                 "holding_days": days,
                 "reflection": reflection,
+                "resolution_date": resolution_date,
             })
 
         if updates:
@@ -399,6 +447,39 @@ class TradingAgentsGraph:
         identity = resolve_instrument_identity(ticker)
         return build_instrument_context(ticker, asset_type, identity)
 
+    def _memory_as_of(self, trade_date) -> str | None:
+        """Point-in-time cutoff for past-context lessons (#1251).
+
+        A historical/backtest run (trade date before today) filters lessons to
+        those already resolved by the trade date. A current-date run returns
+        None, disabling the filter so live behavior and pre-migration entries
+        (which have no stored resolution date) are unaffected.
+
+        Judged as a DATE: ``propagate`` performs no date validation, and a
+        non-zero-padded "2026-6-5" compared as a string sorts after today, which
+        switched the filter off for exactly the backtest it guards. The
+        normalized form is what ``get_past_context`` then compares resolution
+        dates against. A value that is not a date at all gets no filter.
+        """
+        as_of = normalize_iso_date(str(trade_date))
+        if as_of is None:
+            return None
+        return as_of if as_of < get_current_date() else None
+
+    def _run_signature(self, asset_type: str) -> str:
+        """Graph-shape inputs that must invalidate a checkpoint if changed.
+
+        Keyed into the checkpoint thread ID so a resume under a different analyst
+        selection, debate/risk depth, or asset mode starts fresh instead of
+        silently continuing the previous graph (#1089).
+        """
+        return "|".join([
+            "analysts=" + ",".join(self.selected_analysts),
+            f"debate={self.config['max_debate_rounds']}",
+            f"risk={self.config['max_risk_discuss_rounds']}",
+            f"asset={asset_type}",
+        ])
+
     def propagate(self, company_name, trade_date, asset_type: str = "stock"):
         """Run the trading agents graph for a company on a specific date.
 
@@ -408,37 +489,86 @@ class TradingAgentsGraph:
         ``checkpoint_enabled`` is set in config, the graph is recompiled with
         a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
+
+        Returns ``(final_state, signal)`` where ``signal`` is one of the 5-tier
+        ratings (Buy / Overweight / Hold / Underweight / Sell) or ``"REVIEW"``
+        when the decision had no parseable rating (#1170); guard with
+        ``tradingagents.agents.utils.rating.is_review`` before mapping it to the
+        PortfolioRating enum.
         """
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
 
-        # Recompile with a checkpointer if the user opted in.
-        if self.config.get("checkpoint_enabled"):
-            self._checkpointer_ctx = get_checkpointer(
-                self.config["data_cache_dir"], company_name
+        with self.checkpoint_scope(company_name, trade_date, asset_type) as thread_id_value:
+            return self._run_graph(
+                company_name, trade_date, asset_type=asset_type,
+                checkpoint_thread_id=thread_id_value,
             )
-            saver = self._checkpointer_ctx.__enter__()
-            self.graph = self.workflow.compile(checkpointer=saver)
 
-            step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
-            if step is not None:
-                logger.info(
-                    "Resuming from step %d for %s on %s", step, company_name, trade_date
-                )
-            else:
-                logger.info("Starting fresh for %s on %s", company_name, trade_date)
+    def begin_checkpoint(self, company_name, trade_date, asset_type: str = "stock") -> str | None:
+        """Recompile the graph with a per-ticker checkpointer and return the
+        ``thread_id`` to inject into the stream/invoke ``config`` (or ``None``
+        when checkpointing is disabled).
 
+        Pair every call with :meth:`end_checkpoint` in a ``finally``. Both
+        ``propagate`` (via :meth:`checkpoint_scope`) and the CLI stream path use
+        this so ``--checkpoint`` actually resumes (#1249); previously the setup
+        lived only inside ``propagate`` and the CLI streamed the checkpointer-less
+        graph, making the flag a no-op.
+        """
+        self._resuming = False
+        if not self.config.get("checkpoint_enabled"):
+            return None
+        signature = self._run_signature(asset_type)
+        self._checkpointer_ctx = get_checkpointer(self.config["data_cache_dir"], company_name)
+        saver = self._checkpointer_ctx.__enter__()
+        self.graph = self.workflow.compile(checkpointer=saver)
+
+        step = checkpoint_step(
+            self.config["data_cache_dir"], company_name, str(trade_date), signature
+        )
+        self._resuming = step is not None
+        if step is not None:
+            logger.info("Resuming from step %d for %s on %s", step, company_name, trade_date)
+        else:
+            logger.info("Starting fresh for %s on %s", company_name, trade_date)
+        return thread_id(company_name, str(trade_date), signature)
+
+    def checkpoint_input(self, init_state):
+        """The value to stream/invoke: ``None`` to resume an existing checkpoint,
+        else the initial state for a fresh run.
+
+        LangGraph resumes an interrupted thread when invoked with ``None``;
+        re-passing the initial state instead appends it through the message
+        reducer, duplicating messages in the resumed state (#1249).
+        """
+        return None if self._resuming else init_state
+
+    def end_checkpoint(self):
+        """Restore the plain uncheckpointed graph after a checkpointed run."""
+        if self._checkpointer_ctx is not None:
+            self._checkpointer_ctx.__exit__(None, None, None)
+            self._checkpointer_ctx = None
+            self.graph = self.workflow.compile()
+        self._resuming = False
+
+    @contextmanager
+    def checkpoint_scope(self, company_name, trade_date, asset_type: str = "stock"):
+        """Context-manager form of begin/end_checkpoint for the propagate path."""
         try:
-            return self._run_graph(company_name, trade_date, asset_type=asset_type)
+            yield self.begin_checkpoint(company_name, trade_date, asset_type)
         finally:
-            if self._checkpointer_ctx is not None:
-                self._checkpointer_ctx.__exit__(None, None, None)
-                self._checkpointer_ctx = None
-                self.graph = self.workflow.compile()
+            self.end_checkpoint()
+
+    def clear_checkpoint_on_success(self, company_name, trade_date, asset_type: str = "stock"):
+        """Drop a completed run's checkpoint so a later run starts fresh (#1249)."""
+        if self.config.get("checkpoint_enabled"):
+            clear_checkpoint(
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                self._run_signature(asset_type),
+            )
 
     def save_reports(self, final_state, ticker, save_path=None) -> Path:
         """Write the markdown report tree for a completed run, like the CLI does.
@@ -455,11 +585,16 @@ class TradingAgentsGraph:
             )
         return write_report_tree(final_state, ticker, save_path)
 
-    def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
+    def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
+                   checkpoint_thread_id: str | None = None):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
-        # deterministically resolved instrument identity for all agents.
-        past_context = self.memory_log.get_past_context(company_name)
+        # deterministically resolved instrument identity for all agents. On a
+        # historical run, gate lessons to those whose outcome was known by the
+        # trade date so a backtest can't learn from the future (#1251).
+        past_context = self.memory_log.get_past_context(
+            company_name, as_of=self._memory_as_of(trade_date)
+        )
         instrument_context = self.resolve_instrument_context(company_name, asset_type)
         init_agent_state = self.propagator.create_initial_state(
             company_name,
@@ -470,15 +605,17 @@ class TradingAgentsGraph:
         )
         args = self.propagator.get_graph_args()
 
-        # Inject thread_id so same ticker+date resumes, different date starts fresh.
-        if self.config.get("checkpoint_enabled"):
-            tid = thread_id(company_name, str(trade_date))
-            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+        # Inject the checkpoint thread_id (from checkpoint_scope) so the same
+        # ticker+date+graph-shape resumes; a different one starts fresh (#1089).
+        if checkpoint_thread_id is not None:
+            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = checkpoint_thread_id
 
+        # None resumes an existing checkpoint; init_agent_state starts fresh (#1249).
+        graph_input = self.checkpoint_input(init_agent_state)
         if self.debug:
             trace = []
             last_printed = None
-            for chunk in self.graph.stream(init_agent_state, **args):
+            for chunk in self.graph.stream(graph_input, **args):
                 if chunk["messages"]:
                     msg = chunk["messages"][-1]
                     # Nodes after the trader don't append to messages, so the
@@ -495,7 +632,7 @@ class TradingAgentsGraph:
             for chunk in trace:
                 final_state.update(chunk)
         else:
-            final_state = self.graph.invoke(init_agent_state, **args)
+            final_state = self.graph.invoke(graph_input, **args)
 
         # Store current state for reflection.
         self.curr_state = final_state
@@ -511,10 +648,7 @@ class TradingAgentsGraph:
         )
 
         # Clear checkpoint on successful completion to avoid stale state.
-        if self.config.get("checkpoint_enabled"):
-            clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
+        self.clear_checkpoint_on_success(company_name, trade_date, asset_type)
 
         return final_state, self.process_signal(final_state["final_trade_decision"])
 

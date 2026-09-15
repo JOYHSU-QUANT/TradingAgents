@@ -84,7 +84,7 @@ KNOB_IDS = [knob.key for knob in KNOBS]
 # because langchain-aws is optional.
 PROVIDERS = [
     ("openai", "gpt-5.4-mini"),
-    ("anthropic", "claude-sonnet-4-6"),
+    ("anthropic", "claude-sonnet-5"),
     ("google", "gemini-3.5-flash"),
     ("deepseek", "deepseek-v4-flash"),
     ("azure", "gpt-5.4-mini"),

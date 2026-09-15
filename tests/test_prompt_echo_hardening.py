@@ -22,7 +22,7 @@ back looking like the clean one.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from unittest import mock
 
 import pandas as pd
@@ -35,10 +35,23 @@ import tradingagents.dataflows.yfinance_news as yfnews
 from tests._date_refusal_table import GOOD, PERIOD, FakeTicker, patch_ticker, statement
 from tests.test_vendor_routing import _chain, _no_data, _stock
 from tests.test_yfinance_rate_limit import _FORGED_MESSAGE
+from tradingagents.dataflows import date_window
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import NoMarketDataError, UnsupportedIndicatorError
 from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS
 from tradingagents.dataflows.yfinance_news import MAX_NEWS_SUMMARY_CHARS
+
+# The yfinance fundamentals getter withholds its live-only profile on any past
+# date (#1300); these tests are about what a SERVED report looks like.
+LIVE = date.today().strftime("%Y-%m-%d")
+
+
+@pytest.fixture(autouse=True)
+def _freeze_the_withhold_clock(monkeypatch):
+    """withhold_live_profile reads the wall clock at call time; pin it to the
+    day these tests were computed with, so a run crossing midnight cannot turn
+    a served profile into a withheld one."""
+    monkeypatch.setattr(date_window, "get_current_date", lambda: LIVE)
 
 # The repo's forging payload — a line break to open a block of its own, a table
 # row, a heading, and bulk nothing caps would pass through whole — built from
@@ -352,7 +365,7 @@ class TestYfinanceReportHeadings:
     @staticmethod
     def _fundamentals(monkeypatch, symbol, info=None):
         patch_ticker(monkeypatch, info=info or {"longName": "Apple"})
-        return yfin.get_fundamentals(symbol, GOOD)
+        return yfin.get_fundamentals(symbol, LIVE)
 
     @staticmethod
     def _insider(monkeypatch, symbol, *, empty=False):
@@ -452,7 +465,7 @@ class TestYfinanceInfoFields:
     def test_a_forged_info_field_cannot_start_a_line_of_its_own(self, monkeypatch, field, label):
         def render(value):
             patch_ticker(monkeypatch, info={field: value})
-            return _line_carrying(yfin.get_fundamentals("AAPL", GOOD))
+            return _line_carrying(yfin.get_fundamentals("AAPL", LIVE))
 
         forged = render(FORGED)
         assert forged.startswith(f"{label}: ")
@@ -462,7 +475,7 @@ class TestYfinanceInfoFields:
         # The flattening covers the whole field list rather than the three
         # prose ones, so this pins that it costs the numbers nothing.
         patch_ticker(monkeypatch, info={"marketCap": 3120000000000, "beta": 1.24})
-        out = yfin.get_fundamentals("AAPL", GOOD)
+        out = yfin.get_fundamentals("AAPL", LIVE)
         assert "Market Cap: 3120000000000" in out
         assert "Beta: 1.24" in out
 
@@ -623,6 +636,6 @@ class TestFundamentalsFieldsThatRenderToNothing:
 
     def test_a_field_that_flattens_away_is_omitted_not_printed_empty(self, monkeypatch):
         patch_ticker(monkeypatch, info={"longName": "Apple", "sector": "***"})
-        out = yfin.get_fundamentals("AAPL", GOOD)
+        out = yfin.get_fundamentals("AAPL", LIVE)
         assert "Sector:" not in out
         assert "Name: Apple" in out  # the report is otherwise unchanged

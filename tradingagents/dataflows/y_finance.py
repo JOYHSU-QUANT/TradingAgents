@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 from dateutil.relativedelta import relativedelta
 
+from .date_window import withhold_live_profile
 from .errors import UnsupportedIndicatorError
 from .symbol_utils import NoMarketDataError, normalize_symbol
 
@@ -19,7 +20,6 @@ from .utils import (
     date_range_refusal,
     date_refusal,
     echo_argument,
-    live_snapshot_note,
     no_insider_transactions,
     sanitize_untrusted,
     statement_lag_bound,
@@ -213,6 +213,8 @@ def _statement_lag_note(data: pd.DataFrame, curr_date: str | None, freq: str, wh
         curr_date = datetime.now().strftime("%Y-%m-%d")
     return _dates_lag_note(data.columns, curr_date, statement_lag_bound(freq), what)
 
+logger = logging.getLogger(__name__)
+
 
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -399,8 +401,18 @@ def get_fundamentals(
         "so this triggers a disclosure when it trails today",
     ] = None,
 ):
-    """Get company fundamentals overview from yfinance."""
+    """Get company fundamentals overview from yfinance.
+
+    ``Ticker.info`` is a present-day snapshot with no historical vintage, so a
+    past ``curr_date`` withholds it through the shared point-in-time guard
+    (``date_window.withhold_live_profile``, #1300).
+    """
     canonical = normalize_symbol(ticker)
+    # Guard before the request: the response would only be discarded, and the
+    # answer does not depend on it (#1300).
+    withheld = withhold_live_profile(curr_date, canonical)
+    if withheld:
+        return withheld
     ticker_obj = yf.Ticker(canonical)
     # Un-hidden: the quote scraper swallows a non-429 HTTP failure into a
     # None its own parser then trips over, which the router would render
@@ -486,13 +498,6 @@ def get_fundamentals(
         return refusal
 
     header = f"# Company Fundamentals for {echo_argument(canonical)}\n"
-    # yfinance ``info`` is a live current-state snapshot with no
-    # historical form; when the analysis date sits behind the wall clock
-    # (a backtest), say so or today's ratios read as that date's (#30).
-    if curr_date is not None:
-        snapshot_note = live_snapshot_note(curr_date, "these fundamentals are")
-        if snapshot_note:
-            header += f"# {snapshot_note}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
     return header + "\n".join(lines)

@@ -8,6 +8,80 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+
+- **Synced upstream TauricResearch/TradingAgents v0.3.0 -> v0.4.2** (47 commits,
+  `85946c2`..`be952b8`; the first sync since the fork). `main` was
+  fast-forwarded to upstream; this merge carries upstream's `tradingagents/`
+  and `tests/` changes into the adapter branch. `contrib/` is untouched.
+
+  TAKEN AS UPSTREAM SHIPPED IT (auto-merged, no fork counterpart): the Trader,
+  Research Manager, Portfolio Manager and debate-opener prompt changes
+  (absolute price levels, no forced direction under ambiguity, no rebuttal of
+  an argument nobody made, the Trader grounded in the technical report) - a
+  prompt-fingerprint change for the paper run, so deploying this is a segment
+  point; memory gated to point-in-time, and no settlement before the holding
+  window trades; `REVIEW` for an unparseable rating (no effect here: contrib
+  never reads a rating); checkpoints keyed on graph shape and `--checkpoint`
+  resuming on the CLI; `llm_max_retries` (`TRADINGAGENTS_LLM_MAX_RETRIES`);
+  Bedrock bearer-token auth; the Kimi, GPT-5.6, GLM-5.3 and Claude 5 catalog
+  entries, with effort support reaching single-number Claude versions; the FRED
+  vintage pinned to the as-of date (ALFRED); Reddit honouring `Retry-After: 0`,
+  a 60s jittered fallback, a 5 MB feed cap, and a failed fetch reported as
+  unavailable instead of as silence; StockTwits and Reddit trimmed to the
+  analysis window, with crypto pairs mapped to StockTwits' `BTC.X`; version
+  0.4.0.
+
+  PORTED BY HAND onto the fork's shape: the same-day OHLCV cache TTL
+  (`OHLCV_CACHE_TTL_SECONDS`, upstream #1150) and per-bar tz-safe date
+  normalization (#1201) into `yfinance_common` - upstream still edits
+  `stockstats_utils`, renamed here in #227, and its two new test files are
+  ported with it; the output-token cap now forwards as `max_output_tokens` for
+  Google and validates in `_coerce_max_tokens` (the fork's bool, Decimal and
+  range guards kept, upstream's wording honoured); the shared risk-router path
+  map (#1088) naming the node by `PORTFOLIO_MANAGER_NODE`; the news prompt's
+  `get_news(ticker, ...)` hint (#1116 - the fork advertised `query` too);
+  `date_window.in_window` in place of the fork's `_in_news_window`, which was
+  end-INCLUSIVE and host-local where the shared one is UTC and end-exclusive.
+
+  BEHAVIOUR CHANGE ADOPTED: a live-only company profile (yfinance `info`,
+  Alpha Vantage OVERVIEW) is WITHHELD on a past `curr_date` (#1300), before
+  the request is made, superseding the fork's live-snapshot disclosure on
+  those two getters. A live run is unchanged; the tests that exercised the
+  disclosure now ask for today or assert the withhold. The StockTwits getter
+  keeps its `curr_date` freshness disclosure beside the new window.
+
+  NOT TAKEN: upstream's forward/back-fill of price gaps (`_fill_price_gaps` -
+  the fork drops an incomplete bar and never fabricates one, #38); the raw
+  `ValueError` on an unparseable Alpha Vantage date trim (the fork already
+  refuses with `NoMarketDataError`); the old `cli/main.py` risk-status block
+  (upstream re-indented it into a try/finally; the fork's node constant is
+  restored inside it); upstream's module-level `_PASSTHROUGH_KWARGS` copies
+  (the fork's per-client allowlists stay, and upstream's test reads them);
+  `test_temperature_config.py`, deleted here in #211.
+
+  FOUND BY THE MERGE REVIEW AND FIXED HERE. Three of upstream's new point-in-time
+  guards compared dates as STRINGS, and the pipeline accepts a non-zero-padded
+  "2026-6-5" as a usable date: it sorts after "2026-09-15", so
+  `withhold_live_profile` served a June backtest today's profile, FRED's
+  `min(curr_date, today)` pinned the vintage to today, and `_memory_as_of`
+  switched the #1251 lesson filter off. All three now judge the normalized
+  date (`normalize_iso_date`), and the withheld heading takes `echo_argument`
+  like every other rendered argument. Two interactions the merge itself
+  created: the StockTwits identity echo compared the caller's `BTC-USD` with
+  the venue's `BTC.X` echo and discarded every successful crypto answer as a
+  mismatch (judged against the requested symbol now), and the Alpha Vantage
+  live-snapshot note became unreachable behind the withhold (removed, with its
+  docstring promise). Also: a negative `Retry-After` no longer reaches
+  `time.sleep` (which raises), a Reddit search that finds nothing inside an
+  analysis window names the window instead of claiming "no posts in the past 7
+  days", and the CLI's `begin_checkpoint` moved inside the try/finally that
+  closes the store it opens. The tests that assume a served profile freeze the
+  withhold clock instead of reading it at import.
+
+  Upstream's own release notes since the fork base are appended verbatim at
+  the bottom of this file under "Upstream releases".
+
 ### Added
 
 - **autoresearch: the store follow-ups from PR #255 (#256)** - the scan holds
@@ -4659,3 +4733,101 @@ PRs from late 2025 also landed here.
 [0.2.0]: https://github.com/TauricResearch/TradingAgents/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/TauricResearch/TradingAgents/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/TauricResearch/TradingAgents/releases/tag/v0.1.0
+
+---
+
+## Upstream releases (TauricResearch/TradingAgents)
+
+Synced 2026-09-15 (`85946c2` v0.3.0 → `be952b8` v0.4.2). The notes below are upstream's own, kept verbatim; this fork's entries above say what was taken and what was not.
+
+## [0.4.0] — 2026-08-31
+
+Look-ahead and point-in-time fixes across the data and memory layers, clearer
+decision signals, working CLI checkpoint resume, and the GPT-5.6 / GLM-5.3 models.
+
+### Fixed
+
+- **FRED macro look-ahead.** Historical macro requests were served from today's
+  data vintage, leaking later revisions into a backtest; both the observations
+  and metadata requests now pin the vintage to the as-of date. (#1275)
+- **Social sentiment look-ahead.** StockTwits and Reddit were fetched with no
+  date, so a historical run showed today's chatter as if it were from the as-of
+  date; the social path is now trimmed to the analysis window, via one shared
+  UTC half-open window rule (`dataflows/date_window`) used by news too. (#1220)
+- **Memory point-in-time guard.** `get_past_context` returned every resolved
+  lesson regardless of the run date; each resolved entry now records the date
+  its outcome became known, and a historical run only sees lessons resolved by
+  the trade date. (#1251)
+- **Premature reflection.** A decision was settled on a partial return if a rerun
+  happened before its holding window fully traded; resolution now waits for the
+  full window. (#1169)
+- **Latest OHLCV bar dropped.** The newest bar with a NaN close was silently
+  dropped before the date cutoff, making the previous trading day look like the
+  latest; dates are normalized per element (DST- and non-US-market safe) and a
+  missing latest close raises rather than falling back. (#1201)
+- **Debate opening fabrication.** The first speaker in each debate round rebutted
+  an empty opponent response, fabricating the other side; all five debators now
+  open with their own case when no opponent has spoken. (#1176)
+- **Silent Hold.** An unparseable Portfolio Manager rating (including a fullwidth
+  colon) was coerced to a tradeable Hold; it now surfaces a `REVIEW` sentinel,
+  with `parse_rating` keeping its silent default for compatibility callers. (#1170)
+- **`--checkpoint` was a no-op on the CLI.** Checkpoint setup lived only in
+  `propagate()`; the CLI streamed the checkpointer-less graph. The lifecycle is
+  now shared, and a resume feeds `None` so LangGraph continues the interrupted
+  run instead of duplicating messages. (#1249)
+- **DeepSeek via OpenRouter.** `deepseek/<id>` fell through to default
+  capabilities and had object-form `tool_choice` forced on it; the official
+  namespace is stripped so it reuses the native DeepSeek quirks. (#1199)
+- **Trader price grounding.** The Trader saw only the digested plan; it now also
+  receives the technical market report so entry/stop levels anchor to real price
+  structure. (#1167)
+
+### Added
+
+- **Configurable output-token cap.** `max_tokens` / `TRADINGAGENTS_MAX_TOKENS`,
+  forwarded to every provider (Gemini as `max_output_tokens`), so a model that
+  emits unbounded reasoning can be bounded instead of hanging. (#1204)
+- **Latest models.** Added the GPT-5.6 family (`gpt-5.6` / `gpt-5.6-terra` /
+  `gpt-5.6-luna`) and GLM-5.3 (`glm-5.3`, `glm-5.3-flash`). The default models
+  are now `gpt-5.6` (deep) and `gpt-5.6-luna` (quick).
+
+### Contributors
+
+Thanks to everyone who reported these or sent a fix:
+
+[@PyriteResearch](https://github.com/PyriteResearch), [@yiran1268](https://github.com/yiran1268), [@fabiolenine](https://github.com/fabiolenine), [@lx7720](https://github.com/lx7720), [@taro0915](https://github.com/taro0915), [@Jaswanth-Sriram-Veturi](https://github.com/Jaswanth-Sriram-Veturi), [@ariesy](https://github.com/ariesy), [@liangzj1999](https://github.com/liangzj1999), [@zkwang616](https://github.com/zkwang616), [@aniketshukla1](https://github.com/aniketshukla1), [@loulanyue](https://github.com/loulanyue), [@hudsonwa](https://github.com/hudsonwa), [@daleselaji-dev](https://github.com/daleselaji-dev), [@wolfoswald777-crypto](https://github.com/wolfoswald777-crypto).
+
+## [0.3.1] — 2026-07-05
+
+Correctness and stability patch: data look-ahead, graph-router crash-safety,
+checkpoint identity, crypto sentiment sources, and configurable resilience.
+
+### Fixed
+
+- **Alpha Vantage look-ahead filter now runs.** The fundamentals payload is a
+  JSON string, so the dict-only guard skipped filtering and future-dated reports
+  leaked into historical runs; parse before filtering. (#1115, @zachthebird)
+- **News analyst prompt matches the tool.** The prompt advertised
+  `get_news(query, ...)` but the tool takes a ticker; aligned to stop
+  hallucinated free-text query calls. (#1116, @shcheuk)
+- **Shared debate/risk routers can't crash mid-run.** Both routers return more
+  targets than any one edge mapped; every edge now shares the complete path map,
+  so a fall-through under prompt/i18n/refactor drift stays routable.
+  (#1088, @Fr3ya, @sa7an7, @Sushanth012)
+- **Checkpoint resume respects graph shape.** The thread id folds in selected
+  analysts, debate/risk depth, and asset mode, so a resume under different
+  choices no longer continues the wrong graph. (#1089, @bossjoker1, @Ghraven)
+- **Crypto sentiment sources resolve.** StockTwits lists crypto as `<BASE>.X`
+  (Yahoo's `BTC-USD` 404s) and Reddit needs the base symbol to match; the social
+  path now maps crypto correctly for both. (#1113, @suremadoreai)
+
+### Added
+
+- **Configurable LLM retry budget.** `llm_max_retries` /
+  `TRADINGAGENTS_LLM_MAX_RETRIES` is forwarded to every provider, so a transient
+  429 burst no longer aborts a run. (#1091, @yanggaome)
+- **Bedrock API-key auth.** `AWS_BEARER_TOKEN_BEDROCK` authenticates Amazon
+  Bedrock without AWS access keys and takes precedence over an ambient
+  `AWS_PROFILE`. (#1103, @praxstack)
+- **Latest Claude models.** Added Claude Sonnet 5 (`claude-sonnet-5`) and
+  Fable 5 (`claude-fable-5`); effort control now covers the Claude 5 line.

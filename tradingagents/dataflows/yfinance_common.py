@@ -41,6 +41,12 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+# How long a same-day cache that does not yet reach the requested day may be
+# reused before it is refetched (#1150). Short enough that an intraday run picks
+# up today's close soon after it publishes, long enough that a day with no bar
+# at all (weekend, holiday) cannot trigger a download on every call.
+OHLCV_CACHE_TTL_SECONDS = 900
+
 
 # Yahoo's standing with this client (#86): yfinance's own latch, not an entry
 # in the router's. It sits at the network boundary — for the indicator path
@@ -344,6 +350,32 @@ def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def _local_midnight(value) -> pd.Timestamp:
+    """A single timestamp as its naive, midnight-normalized local date (or NaT)."""
+    if pd.isna(value):
+        return pd.NaT
+    try:
+        ts = pd.Timestamp(value)
+    except (ValueError, TypeError):
+        return pd.NaT
+    if ts.tzinfo is not None:
+        ts = ts.tz_localize(None)  # drop tz, keep the local wall-clock date
+    return ts.normalize()
+
+
+def _normalize_dates(dates) -> pd.Series:
+    """Parse to naive, midnight-normalized dates so tz-aware or intraday
+    timestamps compare correctly against the naive ``curr_date`` cutoff (#1201).
+
+    Normalized per element: 5 years of yfinance bars span daylight-saving
+    changes (and cache CSVs round-trip the offsets as strings), so the series can
+    carry mixed UTC offsets that ``pd.to_datetime`` cannot unify without
+    ``utc=True`` — which would shift non-US (positive-offset) markets to the
+    previous day. Keeping each bar's own local date avoids both.
+    """
+    return pd.to_datetime(pd.Series(dates).map(_local_midnight))
+
+
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows.
 
@@ -356,7 +388,7 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     number.
     """
     data = _ensure_date_column(data)
-    data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
+    data["Date"] = _normalize_dates(data["Date"])
     data = data.dropna(subset=["Date"])
 
     price_cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in data.columns]
@@ -444,6 +476,23 @@ def _assert_ohlcv_not_stale(
         )
 
 
+def _needs_same_day_refresh(data_file, curr_date_dt, today_date) -> bool:
+    """Whether a cached frame must be refetched to reflect the requested day.
+
+    The cache file is keyed per day, so without this a run started before the
+    day's bar was final keeps serving that snapshot to every later run (#1150).
+    Two distinct staleness cases exist for a current-day request: the bar may be
+    missing entirely, or present but still in progress — Yahoo publishes a
+    partial daily candle during market hours, whose ``Close`` is not the closing
+    price. Row inspection cannot tell a partial bar from a final one, so the TTL
+    governs every current-day cache. Historical requests always reuse the cache,
+    since those rows are immutable.
+    """
+    if curr_date_dt.date() < today_date.date():
+        return False
+    return time.time() - os.path.getmtime(data_file) > OHLCV_CACHE_TTL_SECONDS
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
@@ -458,7 +507,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     safe_symbol = safe_ticker_component(canonical)
 
     config = get_config()
-    curr_date_dt = pd.to_datetime(curr_date)
+    curr_date_dt = pd.to_datetime(curr_date).normalize()
 
     # Cache uses a fixed window (5y to today) so one file per symbol.
     today_date = pd.Timestamp.today()
@@ -487,7 +536,13 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     data = None
     if os.path.exists(data_file):
         cached = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-        if not cached.empty and "Close" in cached.columns:
+        # Serve the cache only when it is usable and not a stale snapshot of the
+        # day being requested (#1150); otherwise fall through and refetch.
+        if (
+            not cached.empty
+            and "Close" in cached.columns
+            and not _needs_same_day_refresh(data_file, curr_date_dt, today_date)
+        ):
             data = cached
 
     if data is None:

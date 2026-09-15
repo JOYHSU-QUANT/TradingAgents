@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import json
 from collections.abc import Callable
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -41,8 +42,9 @@ import tradingagents.dataflows.sosovalue_macro as sosovalue_macro
 import tradingagents.dataflows.sosovalue_treasuries as sosovalue_treasuries
 import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_news as yfnews
+from tradingagents.dataflows import date_window
 from tradingagents.dataflows.errors import VendorError
-from tradingagents.dataflows.utils import DateKind
+from tradingagents.dataflows.utils import DateKind, normalize_iso_date
 
 # A date every getter accepts, so the parameters a test is NOT refusing on
 # are usable ones.
@@ -134,6 +136,12 @@ class Row:
     # then require to be non-empty, so the ordering the row claims is
     # measured rather than labelled.
     serve: Callable[[pytest.MonkeyPatch], list] | None = None
+    # The getter withholds its live-only profile on any PAST usable date, before
+    # the vendor is asked (date_window.withhold_live_profile, #1300). Such a row
+    # can only prove "not refused, and the vendor was asked" on a date that is
+    # today - so ``not_refused`` moves a usable date to today, keeping the
+    # spelling (zero-padded or not) the test chose.
+    live_only: bool = False
 
     def __post_init__(self):
         # A date-less tool is a ``None`` entry, never an empty row: an empty
@@ -207,6 +215,7 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
         "disclosure",
         omitted_ok=True,
         serve=_serve_av(json.dumps({"Symbol": "AAPL"})),
+        live_only=True,
     ),
     ("get_fundamentals", "yfinance"): Row(
         yfin.get_fundamentals,
@@ -216,6 +225,7 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
         "disclosure",
         omitted_ok=True,
         serve=lambda mp: patch_ticker(mp, info={"longName": "Apple Inc.", "marketCap": 1_000_000}),
+        live_only=True,
     ),
     ("get_balance_sheet", "alpha_vantage"): _statement_row(avf.get_balance_sheet, _AV_SERVE),
     ("get_balance_sheet", "yfinance"): _statement_row(
@@ -356,6 +366,18 @@ def call(row, **dates):
     return row.impl(*args_for(row, **dates))
 
 
+def _as_live_date(value, today):
+    """``today``, in the spelling ``value`` used: zero-padded stays zero-padded,
+    a non-zero-padded usable date becomes today's non-zero-padded form, so the
+    normalization the row is being tested on is still exercised."""
+    normalized = normalize_iso_date(value) if isinstance(value, str) else None
+    if normalized is None:
+        return value
+    if normalized == value:
+        return today.isoformat()
+    return f"{today.year}-{today.month}-{today.day}"
+
+
 def not_refused(monkeypatch, reached, row, **dates):
     """A call with these dates gets past the gate — the lane's own answer is
     the getter's business (and pinned by its suite); here it only has to not
@@ -363,6 +385,13 @@ def not_refused(monkeypatch, reached, row, **dates):
     row through its served seam, for a before-fetch row through a raising
     one, which also proves the seam list covers this getter's path to its
     vendor."""
+    if row.live_only:
+        # One reading of the clock for both sides: the dates handed to the
+        # getter and the today the withhold guard compares them with, so a
+        # run crossing midnight cannot withhold a date computed as today.
+        today = date.today()
+        monkeypatch.setattr(date_window, "get_current_date", today.isoformat)
+        dates = {name: _as_live_date(value, today) for name, value in dates.items()}
     if row.judged_after_fetch:
         served = row.serve(monkeypatch)
         out = call(row, **dates)

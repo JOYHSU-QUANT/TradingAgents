@@ -144,6 +144,8 @@ def _rows_not_served(unusable: int, undatable: int) -> str:
         )
     return " and ".join(parts)
 
+logger = logging.getLogger(__name__)
+
 
 def get_indicator(
     symbol: str,

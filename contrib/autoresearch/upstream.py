@@ -1,10 +1,15 @@
-"""The ONE place this package names ``contrib.hyperliquid_perp``.
+"""The ONE place this package names a package outside itself.
+
+Two of them: ``contrib.hyperliquid_perp``, whose domain types and analytics
+make a research figure comparable with what the paper trader saw, and
+``tradingagents``, whose LLM client factory the hypothesis loop asks for a
+hypothesis through (plan §3.2 lists it as a Phase B borrow).
 
 Two reasons the borrow is funnelled through a single module rather than
 spelled at each use site:
 
 1. **It is auditable.** The plan's hard constraint is that AutoResearch reads
-   the perp package and never changes it. A reviewer (and
+   those packages and never changes them. A reviewer (and
    ``tests/test_upstream.py``, which reads this package's sources) can check
    that constraint by looking at one import list instead of grepping a
    growing package.
@@ -23,6 +28,10 @@ built inside a call instead:
 - the exchange READER, because reaching it pulls in the Hyperliquid SDK,
   which a store-only or gap-check invocation has no use for
   (:func:`build_market_data`);
+- the CHAT MODEL, for the same reason and by the same measurement: importing
+  ``tradingagents.llm_clients`` costs 251 ms on this box and loads
+  ``langchain_core``, and only ``research`` asks a model anything
+  (:func:`build_chat_model`);
 - the three ANALYTICS the live path builds its context from, because
   ``domains.perp.indicators`` imports pandas and stockstats — measured at
   511 ms on this box against 57 ms for the whole store layer, so a ``gaps``
@@ -65,6 +74,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and it must stay that 
 
 __all__ = [
     "BORROWED",
+    "UPSTREAM_PACKAGES",
     "REGIME_INDICATORS",
     "Candle",
     "CandleInterval",
@@ -75,6 +85,7 @@ __all__ = [
     "MarketDataConfig",
     "MarketRegime",
     "VocabEnum",
+    "build_chat_model",
     "build_market_data",
     "context_analytics",
     "epoch_ms",
@@ -85,10 +96,15 @@ __all__ = [
     "supported_indicators",
 ]
 
+# The packages this one is allowed to name at all. Everything under them is
+# declared below; anything outside them is not borrowed but vendored, and
+# ``tests/test_upstream.py`` reads the sources to hold both halves.
+UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.hyperliquid_perp", "tradingagents")
+
 # What this package borrows, as ``(dotted module, attribute)`` pairs — the
 # audit list plan §3.2 asks for, and the sequence the pin tests walk. The
-# lazily-imported reader below is in it too: "not imported at module scope" is
-# a load-time choice, not an exemption from the audit.
+# lazily-imported reader and chat model below are in it too: "not imported at
+# module scope" is a load-time choice, not an exemption from the audit.
 BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.common.enum_guard", "VocabEnum"),
     ("contrib.hyperliquid_perp.common.instants", "epoch_ms"),
@@ -110,6 +126,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.exchanges.hyperliquid.errors", "ExchangeThrottledError"),
     ("contrib.hyperliquid_perp.exchanges.hyperliquid.market_data", "HyperliquidMarketData"),
     ("contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client", "HyperliquidClient"),
+    ("tradingagents.llm_clients", "create_llm_client"),
 )
 
 
@@ -135,6 +152,28 @@ def build_market_data():
     from contrib.hyperliquid_perp.exchanges.hyperliquid.sdk_client import HyperliquidClient
 
     return HyperliquidMarketData(HyperliquidClient(network="mainnet"))
+
+
+def build_chat_model(provider: str, model: str, base_url: str | None = None, **kwargs):
+    """The repo's own chat client for ``provider``/``model``, ready to ``invoke``.
+
+    The factory is imported INSIDE the call, and the measurement in the module
+    docstring is why: every other command here computes nothing with a model,
+    and a module-scope import would put ``langchain_core`` behind ``vocab``.
+
+    Handed back as the library's object rather than wrapped, because the wrap
+    belongs on the other side of this seam: the adapter that turns an answer
+    into a hypothesis, and a transport failure into
+    ``ports.HypothesistError``, is in :mod:`~contrib.autoresearch.hypothesis`.
+    Wrapping here would put this package's own policy inside its audit list.
+
+    The provider's own refusal of an unknown name is left to propagate as the
+    ``ValueError`` it already is — the CLI's exit-1 lane catches that family,
+    and the factory's sentence names the provider better than a paraphrase.
+    """
+    from tradingagents.llm_clients import create_llm_client
+
+    return create_llm_client(provider=provider, model=model, base_url=base_url, **kwargs).get_llm()
 
 
 @dataclass(frozen=True)

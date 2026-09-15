@@ -17,12 +17,13 @@ memory `hyperliquid-autoresearch-mvp-direction`。
 ## 現況
 
 **PR A1＝資料落地層、PR A2＝假說寫得出來的那套語言、PR A3＝替假說打分的評估器、
-PR A4（本次）＝把打分變成實驗紀錄：ledger、trial penalty、五個指令、baseline 校準。
-A4 是計畫的 Phase A 完成點。**
+PR A4＝把打分變成實驗紀錄：ledger、trial penalty、五個指令、baseline 校準（Phase A 完成點）、
+PR B1（本次）＝讓模型自己提假說的那個迴圈：`research` 指令、答案預算、失敗回饋。
+B1 是計畫的 Phase B 完成點。**
 已經有的東西：
 
-- 自己的 store `autoresearch.sqlite`（schema v2：歷史的 `candles`、`funding`、`series_state`，
-  加上 ledger 的 `experiments`、`trials`）。
+- 自己的 store `autoresearch.sqlite`（schema v3：歷史的 `candles`、`funding`、`series_state`，
+  ledger 的 `experiments`、`trials`，加上搜尋的 `proposals`）。
 - `series_state`：每條序列一列，記上一跑 fetch **實際抽到哪、為什麼停在那**。gap 掃描回答不了這件事：它以第一個 stamp 當格線原點，所以前端被截掉的序列掃起來「完全沒洞」——跟交易所真的沒更舊資料長得一模一樣。
 - `fetch` 指令：由新往舊分頁抓 candles、由舊往新分頁抓 funding history，全部 upsert。
 - gap 檢查：把每個時間戳指派到最近的格位，分開回報**三種**發現——
@@ -53,8 +54,11 @@ A4 是計畫的 Phase A 完成點。**
   `ln(n)` 上升；holdout 只有 promote 過的 trial 看得到，而且一次。見下面「ledger」段。
 - **baseline 校準**（`baselines.py`、`tests/test_calibration.py`）：buy-and-hold、always-flat、
   高換手雜訊三個寫成本套件語言的文件，加上只能在測試裡抽的 seeded random entries（計畫 §6.6）。
+- **假說迴圈**（`hypothesis.py`、`ports.Hypothesist`）：`research` 指令一次跟模型要一條規則，
+  用同一個 parser 讀、同一個評估器打分，每個答案都記進 `proposals`——被拒絕的也記。
+  見下面「假說迴圈」段。
 
-**還沒有的東西**（依計畫 §5 的順序）：LLM 假說迴圈（B1）、context bridge（C1，排 run 6）。
+**還沒有的東西**（依計畫 §5 的順序）：context bridge（C1，排 run 6）。
 
 ## 用法
 
@@ -101,6 +105,13 @@ python -m contrib.autoresearch report --experiment btc-4h --trial 3
 
 # 三個 baseline 在這個 experiment 的窗口上拿幾分（不記成 trial）
 python -m contrib.autoresearch calibrate --experiment btc-4h
+
+# 讓模型自己提假說。預設一跑 10 個答案——被拒絕的、重複的都各算一個
+python -m contrib.autoresearch research --experiment btc-4h \
+    --provider anthropic --model claude-sonnet-5
+
+# 先看模型會拿到什麼：印出整份 prompt，不問任何模型、什麼都不記
+python -m contrib.autoresearch research --experiment btc-4h --dry-run
 ```
 
 ### 交易所只給得起這麼多歷史（2026-09-11 實測）
@@ -348,6 +359,47 @@ segment 才會；`by_shares` 會貼格線）。這幾種都是「換窗口或補
 - **`report` 只讀 ledger**，不重算、不載入 pandas（`test_upstream.py` 的 subprocess 測試守著）；
   它印的量測文字和 `evaluate` 當下印的是同一個函式（`metrics.describe_measurement`）產生的。
 
+### 假說迴圈：模型提、評估器打分、失敗回饋（B1）
+
+`research` 是這個套件唯一會跟模型講話的指令。一輪的形狀是：把詞彙表與文法交給模型 → 模型回
+一段文字 → 用**跟手寫 spec 同一個 parser** 讀 → 讀得出來就走 `research.measure` 打分、記成
+trial → 不管結果是什麼，都記成一列 `proposals`。
+
+- **預算算「答案」，不算「trial」**（計畫 §3.11、§10.7）。`--max-trials` 預設 10；被 parser
+  拒絕的答案算一個，提出一條**已經量過的規則**也算一個。只算成功規則的預算不會停——模型一直
+  回同一段壞 JSON 就永遠跑不完——而且多重比較本來要收費的就是「看了幾次」。
+- **例外是 seam 失敗**。`HypothesistError`（連不上、401、回傳的不是文字）不是一個答案：不花
+  預算、直接中止這一跑。否則一把壞掉的 key 可以安靜把預算燒完，還回報一場沒發生過的搜尋。
+- **`proposals` 表（schema v3）**：`trials` 裝的是**規則**，這張裝的是**嘗試**。被拒絕的答案
+  從來不是規則，記成 trial 會替沒人量過的東西把 promote 門檻墊高。它存原文，因為對一個被拒絕
+  的答案來說，store 裡沒有別的地方留著模型到底寫了什麼。
+- **prompt 裡沒有任何日期**，窗口一律用「幾根 bar」講。這是 holdout 鎖自己關不掉的那個洞：
+  模型對 BTC 有自己的記憶，prompt 只要說出 validation 的日期，就等於邀請它拿場外知識去 fit
+  那一段——而 penalty 收的是「試了幾條規則」的費，根本 price 不到這件事。三段窗口又是連著的，
+  講 validation 的結束就等於講 holdout 的開始。
+- **模型看到的是搜尋視圖**。摘要一律從 `SearchTrial` 來（那個型別沒有 holdout 欄位），迴圈
+  只呼叫 `research.measure`、**不呼叫 `research.promote`**；`tests/test_hypothesis.py` 是用
+  import graph 斷言這件事，不是用字串搜尋——這個模組的 docstring 自己就一直在講 promote。
+- **fence 只剝「整段包起來」的那一種**。` ```json … ``` ` 是 chat 格式包上去的殼，剝掉；
+  prose 夾著 JSON、兩段 fence、沒收尾的 fence，一律原樣交給 parser 拒絕——再往下就是在猜
+  作者指的是哪一段文字了。
+- **失敗回饋**：下一輪的 prompt 會帶上這個 experiment 最近幾條被拒絕的句子，以及已經量過的
+  規則。所以「`ema_9` 不存在」只會被學一次，不是每跑一次學一次。**指標只印前 12 條
+  （validation sharpe 由好到壞），但「試過哪些規則」是列完的**——重複提案要花掉一個 round，
+  只印前 12 條等於拿 prompt 自己的遺漏去罰模型。
+- **每個答案都記下是哪個模型講的**（`proposals.model`）。`research` 不替你猜 provider／model，
+  正是同一個理由：一個 store 被兩個模型搜過之後，append-only 的 ledger 沒有第二次機會說清楚
+  哪條是誰提的。
+- **trial 和它的來源寫在同一個 transaction 裡**。本來是兩段：中間失敗會留下一個算進
+  `rules_tried`（正確，它真的被量過）、卻沒有任何一列說它從哪來的 trial，而 `report` 的答案數
+  就對不上 trial 數。重複與被拒絕的答案沒有 trial 可搭，各自單獨寫。
+- **seam 失敗會回傳「跑到哪」的部分報告**：第 7 輪斷線不會把前 6 輪的摘要一起丟掉，指令照樣
+  exit 1。rounds 本來就是落地的，所以重跑就等於接續。
+- **Ctrl-C 也留得住部分報告，但 exit code 還是 130**。攔 `KeyboardInterrupt` 是為了把已經
+  記下的 round 印出來，不是為了把「使用者自己停掉」改判成「這次跑失敗」——同一個 Ctrl-C 落在
+  模型呼叫裡跟落在別的地方，退出碼必須一樣，否則拿 130 判斷「人為取消」的腳本會為了一次
+  Ctrl-C 叫人起床。理由寫在 `INTERRUPTED` 常數旁邊。
+
 ## store 路徑與拒絕
 
 預設在 repo root 的 `data/autoresearch.sqlite`，用 `--db` 改路徑。四種會被**具名拒絕**的情況：
@@ -410,8 +462,29 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
   holdout 是另開一個 store 的事，這裡不提供輪替。
 - **`experiment` 會讀到 holdout 的 rows**（量 span 與暖機要用），不算任何窗口的分數；鎖擋的是
   trial 的量測。
-- **`SearchTrial` 不藏 promote 狀態**：gate 的 blocker 會說「已經 promote 過」；要不要連這個
-  也對搜尋隱藏，留給 B1。
+- **`SearchTrial` 不藏 promote 狀態，但 B1 的 prompt 藏**（B1 拍板）：gate 的 blocker 仍然會
+  說「已經 promote 過」，型別本身沒改；模型拿到的那份摘要則完全不提 promote——「這條過了」
+  不是提下一條假說需要的事實，而要讓型別說出這件事就得替它加一個欄位，那個型別存在的理由
+  就是沒有東西可洩。
+- **prompt 不給日期是有代價的**：模型不知道自己在哪一段歷史上，所以「這幾年比較像什麼行情」
+  這類先驗完全用不上。故意付的，理由見上面「假說迴圈」段。
+- **`--max-trials` 是每次呼叫自己的計數，不跨 run 累計**：`proposals` 記得住每一次嘗試，但
+  預算不是從那裡扣的。要限制總量是排程的事，不是這個旗標的事。
+- **`ChatHypothesist` 捕捉整個 `Exception` 家族**：後面是半打 provider SDK 疊在 httpx 上，
+  沒有共同基底類別可以點名，而每一種在這裡的意思都一樣——沒有答案回來。`BaseException`
+  沒捕，所以 Ctrl-C 照樣停得下來。
+- **模型重提同一條規則，要花掉一個 round 才知道它重複**：`spec_hash` 撞到就不重算（正確，
+  評估器是確定性的），回給它的是上一次的數字。prompt 現在會把試過的規則列完，所以這是模型
+  自己的重複，不是 prompt 沒講。
+- **schema v3 是單向門**：v2 的 store 升上來資料完整（實測 candles／funding／experiments／
+  trials 全保留、`integrity_check` ok），但**只要用新 build 開過一次，舊 checkout 就完全打不開
+  它**——連唯讀的 `report` 都會被 `schema_version` 的守衛擋下。跟 PR #239 不同的是，備份不是
+  為了保資料，是為了保住「退回舊 build」這個選項。要在兩個 build 之間來回，先複製一份 store。
+- **「被中斷」是拿字串常數 `INTERRUPTED` 認出來的**：CLI 靠它決定回 130 還是 1。理論上一個
+  自訂的 `Hypothesist` 丟出訊息剛好等於 `interrupted` 的 `HypothesistError` 會被誤判成取消；
+  本套件唯一的實作 `ChatHypothesist` 一定會加上 label 前綴，所以實際踩不到。改成「訊息＋旗標」
+  兩個欄位反而會長出「兩個欄位可能互相矛盾」的問題——那正是 `Round.__post_init__` 在防的東西
+  ——所以維持一個欄位。
 - **CLI 認 `EvaluationError`／`FeatureError` 是查 `sys.modules`**：直接 import 會讓每個指令付
   pandas 的錢；它們被 raise 出來，就代表定義它們的模組已經載入。
 - **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批

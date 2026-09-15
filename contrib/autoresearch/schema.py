@@ -22,13 +22,18 @@ trials themselves. It arrived with :mod:`~contrib.autoresearch.ledger`, the
 code that writes and reads it, rather than beside the history tables in v1 —
 two tables with no producer read to a later maintainer as a feature that
 broke, not as one that had not been built.
+
+v3 is the SEARCH (plan PR B1): what a model was asked and what came back,
+including the answers that never became trials. It arrived with
+:mod:`~contrib.autoresearch.hypothesis` for the same reason v2 arrived with
+the ledger.
 """
 
 from __future__ import annotations
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION", "SCHEMA_VERSION_DDL"]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Created by ``store.apply_migrations`` before any migration runs, so it is
 # kept out of the versioned list below (it is the bookkeeping, not a step).
@@ -166,8 +171,52 @@ CREATE TABLE trials (
 )
 """
 
+# One row per answer a hypothesis loop got back from a model, whatever became
+# of it. The trials table holds RULES; this holds ATTEMPTS, and the two are not
+# the same population — a refused answer was never a rule, so filing it as a
+# trial would raise the promote threshold for every real rule measured after
+# it (the reason baselines are not trials either).
+#
+# It exists because the budget and the failure feedback both need what the
+# ledger structurally cannot hold. ``--max-trials`` is spent by every answer,
+# and a run that starts with no memory of the last one re-spends it on the
+# same refusals: told nothing, a model re-proposes ``ema_9`` in the next run
+# exactly as readily as it did in this one. ``response`` is kept because for a
+# refused answer nothing else in the store holds what was actually written -
+# the parser's sentence names the mistake, and the text is the evidence for it.
+#
+# ``trial_id`` is set for an answer that parsed, whether it was measured or was
+# a rule the experiment already held; ``refusal`` is set for one that did not
+# and is the sentence the next round is shown. The three CHECKs say that in
+# the table, so a writer cannot file a refusal that names no reason or a
+# measured answer that points at no trial.
+#
+# ``model`` is who was asked. ``research`` refuses to guess a provider or a
+# model for exactly the reason this column exists - which model proposed a
+# rule is part of what the trial means - and without it a store searched with
+# two models is unattributable for good, an append-only ledger having no later
+# chance to say. NOT NULL because every row has an author: there is no way to
+# reach this table except by asking someone.
+_PROPOSALS = """
+CREATE TABLE proposals (
+    proposal_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT    NOT NULL REFERENCES experiments (experiment_id),
+    outcome       TEXT    NOT NULL CHECK (outcome IN ('measured', 'duplicate', 'refused')),
+    response      TEXT    NOT NULL,
+    model         TEXT    NOT NULL,
+    spec_hash     TEXT,
+    trial_id      INTEGER REFERENCES trials (trial_id),
+    refusal       TEXT,
+    created_at    TEXT    NOT NULL,
+    CHECK ((outcome = 'refused') = (refusal IS NOT NULL)),
+    CHECK ((outcome = 'refused') = (spec_hash IS NULL)),
+    CHECK ((outcome = 'refused') = (trial_id IS NULL))
+)
+"""
+
 # version -> ordered DDL statements applied in one transaction for that version.
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (_CANDLES, _FUNDING, _SERIES_STATE),
     2: (_EXPERIMENTS, _TRIALS),
+    3: (_PROPOSALS,),
 }

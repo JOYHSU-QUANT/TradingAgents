@@ -1,4 +1,9 @@
-"""The borrow from ``hyperliquid_perp`` is one-way, read-only, and funnelled.
+"""The borrow from outside this package is one-way, read-only, and funnelled.
+
+Two packages are borrowed from - ``hyperliquid_perp`` for the domain types
+and the analytics, ``tradingagents`` for the LLM client factory the
+hypothesis loop asks a model through - and both are held to the same rule by
+the same scan, so a third one cannot be added by writing an import.
 
 Every check here reads the IMPORT GRAPH, parsed, rather than searching the
 sources for a string. The difference is the whole value of the file: these
@@ -21,7 +26,20 @@ import pytest
 from contrib.autoresearch import upstream
 
 _PACKAGE = Path(upstream.__file__).resolve().parent
-_UPSTREAM_PACKAGE = "contrib.hyperliquid_perp"
+
+
+def _is_upstream(name: str) -> bool:
+    """Whether an imported module name belongs to a declared upstream package.
+
+    The package itself or something under it, matched on the DOT rather than on
+    the bare prefix: ``startswith("tradingagents")`` would also swallow a
+    hypothetical ``tradingagents_extras``, which is a different distribution and
+    would sail through an audit that believed it had been declared.
+    """
+    return any(
+        name == package or name.startswith(f"{package}.")
+        for package in upstream.UPSTREAM_PACKAGES
+    )
 _SOURCES = sorted(
     path
     for path in _PACKAGE.rglob("*.py")
@@ -75,6 +93,7 @@ def test_the_scan_has_sources_to_walk():
     """
     assert {p.name for p in _SOURCES} >= {
         "upstream.py",
+        "hypothesis.py",
         "store.py",
         "fetch.py",
         "gaps.py",
@@ -112,10 +131,10 @@ def test_re_exports_are_the_upstream_objects_themselves():
         )
 
 
-def test_only_upstream_py_imports_the_perp_package():
+def test_only_upstream_py_imports_an_upstream_package():
     offenders = {
         path.relative_to(_PACKAGE).as_posix(): sorted(
-            name for name in _imported_modules(path) if name.startswith(_UPSTREAM_PACKAGE)
+            name for name in _imported_modules(path) if _is_upstream(name)
         )
         for path in _SOURCES
         if path.name != "upstream.py"
@@ -132,12 +151,20 @@ def test_upstream_imports_nothing_it_has_not_declared():
     tree, which is why the lazily-imported reader has to be declared too.
     """
     declared = {module for module, _attr in upstream.BORROWED}
-    actual = {
-        name
-        for name in _imported_modules(_PACKAGE / "upstream.py")
-        if name.startswith(_UPSTREAM_PACKAGE)
-    }
+    actual = {name for name in _imported_modules(_PACKAGE / "upstream.py") if _is_upstream(name)}
     assert actual == declared
+
+
+def test_every_declared_borrow_is_inside_a_declared_package():
+    """``UPSTREAM_PACKAGES`` bounds ``BORROWED``, not the other way round.
+
+    Without this the two lists could drift apart in the direction that matters:
+    a name added to ``BORROWED`` under some third package would be "declared",
+    and the scan above - which only asks whether an import sits under a DECLARED
+    package - would then wave it through.
+    """
+    outside = sorted({module for module, _attr in upstream.BORROWED if not _is_upstream(module)})
+    assert outside == []
 
 
 def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack(tmp_path):
@@ -164,7 +191,8 @@ def test_the_commands_that_touch_no_indicator_do_not_load_the_indicator_stack(tm
         "import sys; import contrib.autoresearch.cli as cli; "
         "from contrib.autoresearch.cli import main; main(['vocab']); "
         "main(['report', '--db', sys.argv[1]]); "
-        "heavy = sorted(m for m in ('pandas', 'stockstats', 'hyperliquid') if m in sys.modules); "
+        "heavy = sorted(m for m in ('pandas', 'stockstats', 'hyperliquid', "
+        "'langchain_core') if m in sys.modules); "
         "print(heavy)"
     )
     root = Path(upstream.__file__).resolve().parents[2]

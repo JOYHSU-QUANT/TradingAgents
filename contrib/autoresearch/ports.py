@@ -1,8 +1,11 @@
-"""The outward seam this package fetches history through.
+"""The two outward seams this package reaches through: history in, hypotheses in.
 
-One protocol, because there is one direction of traffic: AutoResearch reads
-public market history and writes it to its own store. Nothing here faces the
-other way — this package signs nothing and places no orders.
+Neither faces the other way — this package signs nothing and places no orders.
+:class:`HistoryMarketData` reads public market history into the store;
+:class:`Hypothesist` asks a model for one hypothesis. What comes back through
+the second is TEXT, and it is treated as text: it is parsed by the same closed
+parser an operator's hand-written spec goes through, so a model cannot widen
+the language by writing confidently.
 
 :class:`HistoryMarketData` is a structural SUPERSET of the perp package's
 ``ExchangeMarketData``: the two windowed reads with the same signatures, plus
@@ -26,6 +29,41 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from .upstream import Candle, FundingPoint
+
+__all__ = ["HistoryMarketData", "Hypothesist", "HypothesistError"]
+
+
+class HypothesistError(RuntimeError):
+    """The model seam failed: no answer came back, so there is no proposal.
+
+    The counterpart of ``ExchangeError`` on the other port, and it exists for
+    the same reason — a transport failure must not be able to impersonate a
+    result. A refused SPEC is a result: the model answered, the answer was not
+    a rule, and the round spends its budget and files the refusal. An outage,
+    a bad key or a truncated stream is not an answer at all, so it spends
+    nothing and stops the run; charging budget for it would let a broken key
+    quietly exhaust a run's trials and report a search that never happened.
+    """
+
+
+@runtime_checkable
+class Hypothesist(Protocol):
+    """Something that answers a prompt with one strategy spec as JSON text.
+
+    Two messages rather than one string, because that is the shape the chat
+    models behind it take: the language and the vocabulary are the same every
+    round and belong in ``system``, while what changed — the rules already
+    tried and why they failed — is ``user``.
+
+    The return is the model's raw text, NOT a parsed spec. Parsing belongs to
+    :mod:`~contrib.autoresearch.dsl` on this side of the seam, so an
+    implementation cannot decide what counts as a valid hypothesis, and a fake
+    in a test cannot be more permissive than the real parser.
+    """
+
+    def propose(self, system: str, user: str) -> str:
+        """One answer, as text. Raises :class:`HypothesistError` if the seam failed."""
+        ...
 
 
 @runtime_checkable

@@ -1,4 +1,5 @@
 import os
+import sys
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
@@ -40,6 +41,74 @@ _BOOL_FALSE = ("false", "0", "no", "off")
 # never goes out uncapped through a gateway (#177, #183). The perp bridge
 # declares the same number as its own default; a contrib test pins them equal.
 DEFAULT_MAX_TOKENS = 8192
+
+
+# The validators for the integer LLM knobs (``max_tokens``,
+# ``llm_max_retries``) live HERE, beside the ``_ENV_OVERRIDES`` rows they
+# validate, not in ``graph/trading_graph.py`` where the graph applies them:
+# they depend on nothing but ``sys.maxsize``, and the perp bridge gates the
+# env values at daemon startup (#266) — reached through the graph module,
+# that one import would drag the whole engine tree (langgraph, every agent
+# and LLM client) into provider construction. ``trading_graph`` imports
+# them from here, so the names upstream's tests import from it still
+# resolve. NOT applied in ``_coerce`` below: the env overlay coerces
+# against the default's type, and these knobs default to ``None``, so an
+# env string rides through to whichever consumer validates it.
+def _coerce_config_int(value, *, key, env, minimum, bound):
+    """Validate an integer config knob, or raise ``ValueError`` naming ``key`` and ``env``.
+
+    One policy for the family (``max_tokens``, ``llm_max_retries``; #264):
+    an int or a numeric string is accepted; a bool, a non-integral numeric
+    (``4096.7``, ``Decimal("2.5")``), a value below ``minimum`` or beyond
+    ``sys.maxsize`` is refused. Numerics are range-checked BEFORE ``int()``
+    because ``int(Decimal("1E999999999"))`` hangs rather than raising (#177);
+    a string is bounded after parsing, since ``int()`` caps its digits.
+    ``bound`` is the worded rule for the message and must describe
+    ``minimum`` ("a positive integer (> 0)" for 1); nothing checks the pair.
+    """
+    base = f"config key '{key}' ({env}) must be {bound}"
+    if isinstance(value, bool):
+        raise ValueError(f"{base}, not a boolean: {value!r}")
+    try:
+        if isinstance(value, str):
+            parsed = int(value)
+        elif not (-sys.maxsize <= value <= sys.maxsize):
+            parsed = None  # int() of a huge exponent, either sign, never returns
+        else:
+            parsed = int(value)
+            if parsed != value:
+                raise ValueError
+    # ArithmeticError covers Decimal("NaN"), whose ordering comparison signals
+    # InvalidOperation, and OverflowError: a bad value must never leak raw.
+    except (TypeError, ValueError, ArithmeticError):
+        raise ValueError(f"{base}, got {value!r}") from None
+    if parsed is None or not (-sys.maxsize <= parsed <= sys.maxsize):
+        raise ValueError(f"{base} within the platform integer range, got {value!r}")
+    if parsed < minimum:
+        raise ValueError(f"{base}, got {value!r}")
+    return parsed
+
+
+def _coerce_max_retries(value):
+    """``llm_max_retries``: the SDK retry budget; 0 disables retries (#1091)."""
+    return _coerce_config_int(
+        value,
+        key="llm_max_retries",
+        env="TRADINGAGENTS_LLM_MAX_RETRIES",
+        minimum=0,
+        bound="a non-negative integer (>= 0)",
+    )
+
+
+def _coerce_max_tokens(value):
+    """``max_tokens``: the completion cap; 0 is a provider 400 on every call (#177)."""
+    return _coerce_config_int(
+        value,
+        key="max_tokens",
+        env="TRADINGAGENTS_MAX_TOKENS",
+        minimum=1,
+        bound="a positive integer (> 0)",
+    )
 
 
 def _coerce(value: str, reference):

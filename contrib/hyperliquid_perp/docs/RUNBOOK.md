@@ -304,7 +304,9 @@ deploy 的 restart 不是修復（§3 的警告同樣適用）——先照 §5 �
   不需要先跑 `validate`。
 - **健康 resume 但引擎建不起來**（`EngineConfigError`；成因有二：引擎 import
   失敗，常見是 `.env` 被存成 UTF-16 等壞編碼；或某個 config 值被拒絕，例如
-  `TRADINGAGENTS_MAX_TOKENS=8k` 這種壞的 completion 上限）：帳本健康、倉位仍
+  `TRADINGAGENTS_MAX_TOKENS=8k` 這種壞的 completion 上限、或
+  `TRADINGAGENTS_LLM_MAX_RETRIES=abc` 這種壞的 SDK 重試預算——兩個 env 整數 knob
+  都在啟動時預驗，不會留到每個 cycle 才炸）：帳本健康、倉位仍
   活著，只是引擎起不來——照 stderr 印出的錯誤修好環境（重存 `.env` 為 UTF-8、
   或改掉那個被指名的 config key）後重啟即可恢復交易，不需要先跑 `validate`。
   同樣的失敗發生在**空倉** restart 或 fresh `--create` 時則直接具名 exit 1

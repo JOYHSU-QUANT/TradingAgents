@@ -153,25 +153,70 @@ def test_build_engine_config_is_the_inner_line_against_a_zero_cap():
         bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 0}})
 
 
-@pytest.mark.parametrize("bad", ["8k", "0", "-1", "4096.5", "true"])
-def test_build_engine_config_rejects_a_bad_env_cap_at_startup(monkeypatch, bad):
-    """A junk env cap must fail the daemon at startup, not once per cycle.
+@pytest.mark.parametrize(
+    "key,bad,env",
+    [
+        *[("max_tokens", bad, "TRADINGAGENTS_MAX_TOKENS") for bad in ("8k", "0", "-1", "4096.5", "true")],
+        *[
+            ("llm_max_retries", bad, "TRADINGAGENTS_LLM_MAX_RETRIES")
+            for bad in ("abc", "2.7", "-1", "true", "8k")
+        ],
+    ],
+)
+def test_build_engine_config_rejects_a_bad_env_int_knob_at_startup(monkeypatch, key, bad, env):
+    """A junk env int knob must fail the daemon at startup, not once per cycle.
 
-    ``load_config`` validates the YAML key, but the env override reaches the
-    bridge unchecked. Left to ``build_graph`` the ValueError lands per cycle
-    OUTSIDE the retry classification: the scheduler writes an unclassified
+    ``load_config`` validates the YAML keys, but the env overrides reach the
+    bridge unchecked (coerced against a ``None`` default, so any string rides
+    through). Left to ``build_graph`` the ValueError lands per cycle OUTSIDE
+    the retry classification: the scheduler writes an unclassified
     api_failed, keeps running, and holds the position on SL/TP alone — the
-    #177 stall shape, reached from a one-character typo.
+    #177 stall shape, reached from a one-character typo. The cap (#177) and
+    the retry budget (#266) share the gate; the refusal names the env var,
+    the fixable cause.
     """
     from tradingagents.default_config import DEFAULT_CONFIG
 
-    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", bad)
+    monkeypatch.setitem(DEFAULT_CONFIG, key, bad)
     # EngineConfigError, not a bare ValueError: over a live position the CLI
     # lane must degrade to protection-only, and only the named type gets it
     # there (a bare ValueError would kill the process — see the CLI test).
-    with pytest.raises(bridge_mod.EngineConfigError, match="TRADINGAGENTS_MAX_TOKENS"):
+    with pytest.raises(bridge_mod.EngineConfigError, match=env):
         bridge_mod._build_engine_config({})
 
+
+@pytest.mark.parametrize("raw,expected", [("0", 0), ("6", 6), (3, 3)])
+def test_build_engine_config_normalises_the_env_retry_budget(monkeypatch, caplog, raw, expected):
+    # A good value reaches engine_config as the int the graph forwards, not
+    # the env string — and "0" is a good value: it disables SDK retries
+    # (#1091), so it must neither be refused nor fall through as falsy.
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "llm_max_retries", raw)
+    with caplog.at_level(logging.INFO, logger=bridge_mod.__name__):
+        engine_config, _ = bridge_mod._build_engine_config({})
+    assert engine_config["llm_max_retries"] == expected
+    assert f"engine LLM retry budget: {expected} (TRADINGAGENTS_LLM_MAX_RETRIES)" in caplog.text
+
+
+def test_build_engine_config_leaves_an_unset_retry_budget_alone(monkeypatch, caplog):
+    # Unlike the cap there is no perp default and no "must be present" rule:
+    # unset (None, the engine default) and blank both forward nothing so each
+    # provider keeps its own SDK retry default, and an absent key (read
+    # tolerantly; any engine carrying the validator carries the key) is
+    # not refused by name — nothing goes out wrong when the budget is
+    # simply not applied.
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    for absent in (None, ""):
+        monkeypatch.setitem(DEFAULT_CONFIG, "llm_max_retries", absent)
+        with caplog.at_level(logging.INFO, logger=bridge_mod.__name__):
+            engine_config, _ = bridge_mod._build_engine_config({})
+        assert engine_config["llm_max_retries"] == absent
+        assert "retry budget" not in caplog.text
+    monkeypatch.delitem(DEFAULT_CONFIG, "llm_max_retries")
+    engine_config, _ = bridge_mod._build_engine_config({})
+    assert "llm_max_retries" not in engine_config
 
 def test_build_engine_config_refuses_an_engine_that_cannot_carry_the_cap(monkeypatch):
     """A missing engine ``max_tokens`` key must refuse by name, not default.

@@ -340,6 +340,42 @@ class TestProviderKwargs:
 
 
 @pytest.mark.unit
+class TestKnobValidatorHome:
+    """The integer-knob validators live in ``default_config`` (#266).
+
+    The perp bridge gates the env values at daemon startup; reached through
+    ``graph.trading_graph`` that import would pull the whole engine tree
+    into provider construction. The graph re-exports them so upstream's
+    tests keep importing the names from it.
+    """
+
+    def test_the_graph_re_exports_the_default_config_validators(self):
+        import tradingagents.default_config as dc
+        from tradingagents.graph import trading_graph
+
+        # By home module, not identity: sibling test files reload
+        # default_config to test the env overlay, which mints new function
+        # objects while the graph keeps the ones it imported.
+        for name in ("_coerce_max_retries", "_coerce_max_tokens"):
+            assert getattr(trading_graph, name).__module__ == dc.__name__
+
+    def test_default_config_carries_the_validators_without_the_graph(self):
+        # A child interpreter, because in-process the graph is long loaded:
+        # importing the validators from default_config must not load any
+        # tradingagents.graph module.
+        done = run_child_under_deadline(
+            "import sys\n"
+            "from tradingagents.default_config import _coerce_max_retries, _coerce_max_tokens\n"
+            "assert _coerce_max_retries('0') == 0 and _coerce_max_tokens('1') == 1\n"
+            "loaded = sorted(m for m in sys.modules if m.startswith('tradingagents.graph'))\n"
+            "print('graph modules loaded:', loaded)\n"
+            "raise SystemExit(1 if loaded else 0)\n",
+            reason="default_config import did not return",
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+
+
+@pytest.mark.unit
 class TestGatewayUncappedWarning:
     """A gateway provider about to run uncapped warns (#183); a single-host
     provider, or a gateway with a cap, stays quiet.

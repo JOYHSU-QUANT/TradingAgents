@@ -1613,6 +1613,40 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The perp bridge gates `TRADINGAGENTS_LLM_MAX_RETRIES` at startup, as it
+  already gated `TRADINGAGENTS_MAX_TOKENS` (#266)**. The retry budget rides
+  `DEFAULT_CONFIG` the same unchecked way as the cap (coerced against a
+  `None` default, so any string rides through), and a junk value (`abc`,
+  `2.7`, a YAML-style typo) had the cap's pre-#177 failure shape: the daemon
+  started, and every decision cycle then raised inside `build_graph` outside
+  the retry classification — an unclassified `api_failed`, the position held
+  on SL/TP alone, until someone read the log. `_build_engine_config` now
+  validates the value with the graph's own `_coerce_max_retries` (one policy
+  for the family, #264 — not a fourth copy), refuses with an
+  `EngineConfigError` naming the config key and the env var, and writes the
+  int it yields into `engine_config` so the graph forwards a number, not the
+  env string; `"0"` (retries off, #1091) is accepted and reaches the graph as
+  `0`, and unset stays unset (each provider's own SDK default — there is no
+  perp default for the budget).
+  Same lane as the cap in the `paper` command: a refusal over a live position
+  degrades to protection-only, an empty book or a fresh `--create` is a named
+  exit 1, and the startup log has one `engine LLM retry budget:` line beside
+  the completion-cap line. (The live lane has no `EngineConfigError` handler
+  around provider construction — a gap since the cap gate, PR #179, that this
+  second knob also reaches — and `TRADINGAGENTS_TEMPERATURE` has the same
+  unguarded shape; both filed separately.)
+
+  To keep that a one-line import for the bridge, the three integer-knob
+  validators (`_coerce_config_int`, `_coerce_max_retries`,
+  `_coerce_max_tokens`) moved verbatim from `tradingagents/graph/trading_graph.py`
+  to `tradingagents/default_config.py`, beside the `_ENV_OVERRIDES` rows they
+  validate: they depend on nothing but `sys.maxsize`, and importing them
+  through the graph module would have pulled the whole engine tree
+  (langgraph, every agent and LLM client; 2.3 s cold against 0.15 s) into
+  provider construction. `trading_graph` imports them from there, so the
+  names upstream's tests import from it still resolve; a test pins that
+  `default_config` loads them without any `tradingagents.graph` module.
+
 - **One validation policy for the integer LLM knobs; `max_retries` verified to
   reach Bedrock (#263, #264)**. `_coerce_max_retries` `int()`-truncated a
   programmatic `llm_max_retries=2.7` to 2 while `_coerce_max_tokens`, twenty

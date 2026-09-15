@@ -77,6 +77,7 @@ from .vocabulary import describe_vocabulary
 
 __all__ = [
     "DEFAULT_MAX_TRIALS",
+    "INTERRUPTED",
     "MAX_RESPONSE_CHARS",
     "ChatHypothesist",
     "Round",
@@ -86,6 +87,13 @@ __all__ = [
     "search",
     "strip_fence",
 ]
+
+# What ``SearchReport.stopped`` says when the operator interrupted the run.
+# A constant rather than a literal in two files: the CLI has to recognise this
+# exact reason to keep the interrupt on its own exit code (130), and a reason
+# produced in one module and compared by spelling in another is one edit away
+# from silently reclassifying a cancellation as a failure.
+INTERRUPTED: Final = "interrupted"
 
 # How long an answer may be before it is refused unread. A spec is a few
 # hundred characters; this is room for a very verbose one and a fence. The
@@ -351,7 +359,12 @@ def search(
             stopped = str(exc)
             break
         except KeyboardInterrupt:
-            stopped = "interrupted"
+            # Caught so the rounds that already filed are still reported, NOT to
+            # swallow the cancellation: the caller keeps the interrupt's own
+            # exit code (the CLI re-raises it once the report is printed, so its
+            # top-level handler answers 130 exactly as it does for an interrupt
+            # landing anywhere else in the command).
+            stopped = INTERRUPTED
             break
         completed = _resolve(ledger, experiment, number, said, model)
         rounds.append(completed)
@@ -460,8 +473,10 @@ class ChatHypothesist:
             # unrelated types. Every one of them means the same thing here —
             # no answer came back — and letting one escape would end the run
             # with a third-party traceback that reads as a defect in this
-            # package. ``BaseException`` is NOT caught, so an interrupt still
-            # stops the run.
+            # package. ``BaseException`` is NOT caught here, so an interrupt
+            # passes through this adapter untouched; ``search`` catches it one
+            # level up to keep the filed rounds reportable, and the CLI turns it
+            # back into exit 130.
             raise HypothesistError(f"{self.label} did not answer: {exc}") from exc
         content = getattr(reply, "content", None)
         if not isinstance(content, str):

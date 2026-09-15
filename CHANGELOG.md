@@ -65,6 +65,9 @@ Breaking changes within the 0.x line are called out explicitly.
   trials. A duplicate or a refusal writes no trial, so its row is filed alone.
   A seam failure now returns the report instead of throwing it away: a run that
   dies at round seven still prints what the first six bought, and still exits 1.
+  An interrupt keeps its partial report too and still exits 130, the code the
+  command gives a Ctrl-C landing anywhere else in it: catching the interrupt to
+  save the report must not also reclassify a cancellation as a failure.
   The prompt lists every rule already tried, with figures for the best twelve
   only - the budget charges a round for a duplicate, and showing a truncated
   list would charge the model for the prompt's omission rather than its own

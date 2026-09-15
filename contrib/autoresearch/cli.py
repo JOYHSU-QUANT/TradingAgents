@@ -701,7 +701,13 @@ def _print_answers(ledger: Ledger, experiment_id: str) -> None:
 def _cmd_research(args: argparse.Namespace) -> int:
     # Imported inside the command: the loop reaches the evaluator, so importing
     # it at module scope would put pandas behind ``vocab`` and ``report``.
-    from .hypothesis import ChatHypothesist, build_system_prompt, build_user_prompt, search
+    from .hypothesis import (
+        INTERRUPTED,
+        ChatHypothesist,
+        build_system_prompt,
+        build_user_prompt,
+        search,
+    )
 
     store, ledger = _open_ledger(args)
     with store:
@@ -737,6 +743,15 @@ def _cmd_research(args: argparse.Namespace) -> int:
         for line in report.describe():
             print(line)
         print(_looks(ledger, experiment.coin))
+        if report.stopped == INTERRUPTED:
+            # Re-raised rather than answered here: ``main``'s handler is the one
+            # place that decides what an interrupt exits with, for every command.
+            # The partial report above is the reason ``search`` caught it at all,
+            # and catching it must not also reclassify a cancellation as a
+            # failure - a script reading 130 as "the operator stopped this"
+            # would otherwise page someone for a Ctrl-C that landed during the
+            # model call rather than a millisecond earlier.
+            raise KeyboardInterrupt
         if report.stopped is not None:
             # The rounds that filed are reported above and their rows are in the
             # store; the command still fails, because the run did not do what it

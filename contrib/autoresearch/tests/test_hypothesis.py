@@ -648,6 +648,31 @@ def test_a_seam_failure_leaves_the_command_on_the_named_exit_one_lane(opened, mo
     assert "0 of 10 round(s) spent" in captured.out
 
 
+def test_an_interrupted_run_keeps_the_interrupt_exit_code(opened, monkeypatch, capsys):
+    """Ctrl-C means the same thing wherever it lands in the command.
+
+    ``search`` catches the interrupt so the filed rounds can still be reported,
+    and that must not turn a cancellation into a failure: ``main``'s own handler
+    answers 130 when the interrupt lands anywhere else in the same command, so
+    this path answers 130 too.
+    """
+    path = opened.path
+    opened.close()
+
+    class Impatient:
+        def propose(self, system, user):
+            raise KeyboardInterrupt
+
+    _serve(monkeypatch, Impatient())
+    code = main(
+        ["research", "--experiment", "btc-4h", "--provider", "p", "--model", "m", "--db", str(path)]
+    )
+    assert code == 130
+    captured = capsys.readouterr()
+    assert "interrupted" in captured.err
+    assert "0 of 10 round(s) spent" in captured.out
+
+
 def test_report_says_what_a_model_answered_including_what_never_became_a_trial(
     opened, monkeypatch, capsys
 ):

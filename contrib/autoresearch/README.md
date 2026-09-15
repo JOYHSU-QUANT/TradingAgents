@@ -394,7 +394,11 @@ trial → 不管結果是什麼，都記成一列 `proposals`。
   `rules_tried`（正確，它真的被量過）、卻沒有任何一列說它從哪來的 trial，而 `report` 的答案數
   就對不上 trial 數。重複與被拒絕的答案沒有 trial 可搭，各自單獨寫。
 - **seam 失敗會回傳「跑到哪」的部分報告**：第 7 輪斷線不會把前 6 輪的摘要一起丟掉，指令照樣
-  exit 1。Ctrl-C 同樣處理。rounds 本來就是落地的，所以重跑就等於接續。
+  exit 1。rounds 本來就是落地的，所以重跑就等於接續。
+- **Ctrl-C 也留得住部分報告，但 exit code 還是 130**。攔 `KeyboardInterrupt` 是為了把已經
+  記下的 round 印出來，不是為了把「使用者自己停掉」改判成「這次跑失敗」——同一個 Ctrl-C 落在
+  模型呼叫裡跟落在別的地方，退出碼必須一樣，否則拿 130 判斷「人為取消」的腳本會為了一次
+  Ctrl-C 叫人起床。理由寫在 `INTERRUPTED` 常數旁邊。
 
 ## store 路徑與拒絕
 
@@ -476,6 +480,11 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
   trials 全保留、`integrity_check` ok），但**只要用新 build 開過一次，舊 checkout 就完全打不開
   它**——連唯讀的 `report` 都會被 `schema_version` 的守衛擋下。跟 PR #239 不同的是，備份不是
   為了保資料，是為了保住「退回舊 build」這個選項。要在兩個 build 之間來回，先複製一份 store。
+- **「被中斷」是拿字串常數 `INTERRUPTED` 認出來的**：CLI 靠它決定回 130 還是 1。理論上一個
+  自訂的 `Hypothesist` 丟出訊息剛好等於 `interrupted` 的 `HypothesistError` 會被誤判成取消；
+  本套件唯一的實作 `ChatHypothesist` 一定會加上 label 前綴，所以實際踩不到。改成「訊息＋旗標」
+  兩個欄位反而會長出「兩個欄位可能互相矛盾」的問題——那正是 `Round.__post_init__` 在防的東西
+  ——所以維持一個欄位。
 - **CLI 認 `EvaluationError`／`FeatureError` 是查 `sys.modules`**：直接 import 會讓每個指令付
   pandas 的錢；它們被 raise 出來，就代表定義它們的模組已經載入。
 - **`--interval 1d` 的 experiment 上 `close_1d` 退化成 `close`**（bars 與 daily 是同一批

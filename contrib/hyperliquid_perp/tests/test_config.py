@@ -532,11 +532,12 @@ def test_the_perp_default_cap_equals_the_cli_default_cap():
     The bridge keeps its own ``_DEFAULT_MAX_COMPLETION_TOKENS`` rather than
     reading ``tradingagents.default_config.DEFAULT_MAX_TOKENS`` through the
     deferred engine import: the perp default must be declared where the perp
-    docs (SETUP.md, the example YAML) pin it, and a stale engine lacking the
-    new name would otherwise be misreported as "DEFAULT_CONFIG not importable"
-    instead of the cap refusal ``_build_engine_config`` already names. So the
-    two are pinned equal here — the one place both are importable — rather
-    than by a perp run and a CLI run quietly capping at different numbers.
+    docs (SETUP.md, the example YAML) pin it. (That import does now carry a
+    second name, ``_coerce_max_retries`` — #266 — so a stale engine fails
+    there as a named EngineImportError that says "stale"; the point stands
+    that the NUMBER is declared on the perp side, not fetched.) So the two
+    are pinned equal here — the one place both are importable — rather than
+    by a perp run and a CLI run quietly capping at different numbers.
     """
     from contrib.hyperliquid_perp.engine_bridge import _DEFAULT_MAX_COMPLETION_TOKENS
     from tradingagents.default_config import DEFAULT_MAX_TOKENS

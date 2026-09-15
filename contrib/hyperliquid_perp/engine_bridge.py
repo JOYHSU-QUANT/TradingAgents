@@ -384,7 +384,10 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     to ``False`` here (the engine default is on) — see RUNBOOK §7.
     """
     try:
-        from tradingagents.default_config import DEFAULT_CONFIG
+        # ``_coerce_max_retries`` is the graph's own validator for the retry
+        # budget (one policy for the integer LLM knobs, #264), housed in
+        # default_config so this import stays as light as it was (#266).
+        from tradingagents.default_config import DEFAULT_CONFIG, _coerce_max_retries
     except ImportError as exc:
         # Deferred so --context-only stays import-light, but if the engine package is
         # missing/moved this surfaces a clear cause instead of a generic top-level
@@ -393,9 +396,9 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         # 'langchain'``) would otherwise be invisible — the chained cause never
         # reaches a traceback-printing handler on this named-exit path.
         raise EngineImportError(
-            f"tradingagents.default_config.DEFAULT_CONFIG is not importable "
-            f"({exc}) — is the tradingagents package (and its dependencies) "
-            "installed?"
+            f"tradingagents.default_config is not importable ({exc}) — is the "
+            "tradingagents package (and its dependencies) installed, and is a "
+            "stale tradingagents shadowing this checkout?"
         ) from exc
     except DOTENV_READ_ERRORS as exc:
         # This is the process's first tradingagents import, and the package
@@ -438,7 +441,11 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
     # that engine's _get_provider_kwargs would forward nothing: the request
     # goes out uncapped and 400s, which is #177 verbatim. Refusing by name
     # beats both a bare KeyError (exit 2 "unexpected error") and, worse,
-    # logging a cap that was never sent.
+    # logging a cap that was never sent. Since #266 the import above is the
+    # first line against a stale engine (one old enough to lack the cap key
+    # also lacks ``_coerce_max_retries``, and fails there, by name); this
+    # stays as the second, for an engine that has the validator but not the
+    # key — defence in depth, not the expected path.
     if "max_tokens" not in engine_config:
         raise EngineConfigError(
             "the imported tradingagents engine has no 'max_tokens' config key, "
@@ -458,6 +465,32 @@ def _build_engine_config(config: dict) -> tuple[dict, list[str]]:
         engine_config["max_tokens"],
         cap_source,
     )
+    # The retry budget (``TRADINGAGENTS_LLM_MAX_RETRIES``, upstream #1091) is
+    # the cap's sibling env int knob, rides DEFAULT_CONFIG the same unchecked
+    # way, and a junk value has the cap's exact per-cycle failure shape — see
+    # ``_resolve_completion_cap`` — so it gets the same startup gate (#266).
+    # Two differences from the cap, both deliberate: there is no perp
+    # default (unset is not a bug here — off IS a valid budget, ``0``),
+    # and nothing is refused by name: any engine that just imported the
+    # validator carries the key, and read tolerantly, an absent key would
+    # mean "forward nothing", each provider's own SDK default.
+    # ``is not None``/blank mirrors the graph's own forwarding guard, and
+    # the graph's own validator does the check, so the value accepted here
+    # is by construction the value ``build_graph`` accepts, and the int it
+    # yields is what the graph forwards.
+    raw_retries = engine_config.get("llm_max_retries")
+    if raw_retries is not None and raw_retries != "":
+        try:
+            engine_config["llm_max_retries"] = _coerce_max_retries(raw_retries)
+        except ValueError as exc:
+            # The validator's message already names the config key AND the
+            # env var; the cap's ``config key '...'`` prefix would name it
+            # twice.
+            raise EngineConfigError(str(exc)) from None
+        logger.info(
+            "engine LLM retry budget: %d (TRADINGAGENTS_LLM_MAX_RETRIES)",
+            engine_config["llm_max_retries"],
+        )
     # Perp runs default structured output OFF (the engine default is on): the
     # Phase 2 target JSON contract is injected as prompt text and can only
     # survive in the gated agents' free-text answers — a *successful*

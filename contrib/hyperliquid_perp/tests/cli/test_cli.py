@@ -2087,13 +2087,21 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
     assert "protection-only" in err
 
 
-def test_paper_restart_bad_completion_cap_with_live_work_enters_protection_only(
-    tmp_path, capsys, monkeypatch, paper_seams
+@pytest.mark.parametrize(
+    "key,bad,env",
+    [
+        ("max_tokens", "8k", "TRADINGAGENTS_MAX_TOKENS"),
+        ("llm_max_retries", "abc", "TRADINGAGENTS_LLM_MAX_RETRIES"),
+    ],
+)
+def test_paper_restart_bad_engine_env_knob_with_live_work_enters_protection_only(
+    tmp_path, capsys, monkeypatch, paper_seams, key, bad, env
 ):
-    """A rejected completion cap must degrade like a failed import, not exit.
+    """A rejected engine env knob must degrade like a failed import, not exit.
 
-    The cap is validated at startup so a typo cannot stall every cycle
-    unclassified (issue #177). But raising over a live position must NOT kill
+    The cap (issue #177) and the retry budget (issue #266) are validated at
+    startup so a typo cannot stall every cycle unclassified. But raising
+    over a live position must NOT kill
     the process: that would leave the position with nobody watching SL/TP —
     strictly worse than the stall it replaces, and under systemd Restart= a
     crash-loop with no protection at all. This pins the lane, not just the
@@ -2130,7 +2138,7 @@ def test_paper_restart_bad_completion_cap_with_live_work_enters_protection_only(
         ),
     )
     # The operator's typo, exactly as it would arrive from the host .env.
-    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", "8k")
+    monkeypatch.setitem(DEFAULT_CONFIG, key, bad)
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -2147,8 +2155,51 @@ def test_paper_restart_bad_completion_cap_with_live_work_enters_protection_only(
     assert seen["trading_halted"] is True
     assert seen["halt_reason"] == "engine-config-error"
     err = capsys.readouterr().err
-    assert "TRADINGAGENTS_MAX_TOKENS" in err  # the fixable cause is named
+    assert env in err  # the fixable cause is named
     assert "protection-only" in err
+
+
+@pytest.mark.parametrize(
+    "key,bad,env",
+    [
+        ("max_tokens", "8k", "TRADINGAGENTS_MAX_TOKENS"),
+        ("llm_max_retries", "abc", "TRADINGAGENTS_LLM_MAX_RETRIES"),
+    ],
+)
+def test_paper_bad_engine_env_knob_with_no_live_work_is_a_named_exit_1(
+    tmp_path, capsys, monkeypatch, paper_seams, key, bad, env
+):
+    """Flat, the same refusal is a named exit 1 in both lanes: nothing to guard.
+
+    The fresh ``--create`` lane fails pre-flight, BEFORE the run row is
+    written (the key check's ordering rule, so the retry after fixing the
+    .env is not bounced as "already exists"); the healthy-restart lane with
+    an empty book exits by name instead of entering protection-only. The
+    test above pins the live-position half of ``except EngineConfigError``;
+    this pins the other half, for both env int knobs.
+    """
+    import contrib.hyperliquid_perp.cli as cli_mod
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setitem(DEFAULT_CONFIG, key, bad)
+    monkeypatch.setattr(
+        cli_mod.paper, "_paper_loop", lambda *a, **kw: pytest.fail("the loop must not start")
+    )
+    # Fresh --create: refused before genesis.
+    fresh = tmp_path / "fresh.db"
+    assert cli_main(_paper_argv(fresh, run_id="fresh", config=paper_seams, create=True)) == 1
+    err = capsys.readouterr().err
+    assert env in err and "protection-only" not in err
+    db = Database(fresh)
+    assert repo.get_run(db.conn, "fresh") is None
+    db.close()
+    # Healthy restart, empty book: named exit 1, not protection-only.
+    path, db = _seed_db(tmp_path)
+    db.close()
+    assert cli_main(_paper_argv(path, run_id="r", config=paper_seams)) == 1
+    err = capsys.readouterr().err
+    assert env in err and "protection-only" not in err
 
 
 def test_mark_export_verification_writes_and_clears(tmp_path):

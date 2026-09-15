@@ -266,6 +266,38 @@ def test_build_engine_config_refuses_a_yaml_cap_beyond_the_platform_range():
     assert "TRADINGAGENTS_MAX_TOKENS" not in str(info.value)
 
 
+def test_build_engine_config_keeps_yaml_precedence_over_a_junk_env_cap(monkeypatch):
+    # YAML shadows env, junk included (#270 review): a stale
+    # TRADINGAGENTS_MAX_TOKENS=8k on a host whose YAML sets the cap must not
+    # refuse a daemon whose cap it would never have set. The env value is
+    # validated under its own name only when it would apply (no YAML cap).
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "max_tokens", "8k")
+    engine_config, _ = bridge_mod._build_engine_config({"engine": {"max_completion_tokens": 4096}})
+    assert engine_config["max_tokens"] == 4096
+    with pytest.raises(bridge_mod.EngineConfigError, match="TRADINGAGENTS_MAX_TOKENS"):
+        bridge_mod._build_engine_config({})
+
+
+def test_build_engine_config_leaves_a_foreign_import_value_error_alone(monkeypatch):
+    # Only the overlay's own refusal (its ``Invalid value for TRADINGAGENTS_``
+    # prefix) is claimed as "an environment override was refused"; any other
+    # ValueError an engine import raises keeps its shape and reaches the
+    # generic lane, rather than being blamed on an env var and quietly
+    # degrading a live run to protection-only (#270 review).
+    import sys
+    from types import ModuleType
+
+    class _Refusing(ModuleType):
+        def __getattr__(self, name):
+            raise ValueError("something else entirely")
+
+    monkeypatch.setitem(sys.modules, "tradingagents.default_config", _Refusing("tradingagents.default_config"))
+    with pytest.raises(ValueError, match="something else entirely"):
+        bridge_mod._build_engine_config({})
+
+
 def test_build_engine_config_names_an_env_overlay_refusal_at_import(monkeypatch):
     """The whole ``_ENV_OVERRIDES`` table, not just the three gated knobs.
 

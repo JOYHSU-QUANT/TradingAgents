@@ -420,7 +420,10 @@ def _live_startup_recovery(
     book, or a protection-only loop that ended itself once its position
     closed — that settle-exit is 1 even with safe mode latched: the cause the
     operator must fix comes first, and the ``safe_mode:`` line above it
-    still reports the latch).
+    still reports the latch). Either protection-only ending prints its own
+    line naming the cause BEFORE the exit-code dispatch, so an unclean
+    §18.2 sweep (``shutdown_problem``, always 4: the wallet-wide trigger may
+    still be armed) can outrank the code but never hide the cause.
     """
     import signal
     from decimal import Decimal
@@ -983,10 +986,16 @@ def _live_startup_recovery(
                         logger.exception("shutdown safe-mode read failed")
                         exit_safe_mode = True
                         exit_safe_mode_unknown = True
-                    keep_protective = (not verdict_passed or exit_safe_mode or loop_raised) and (
-                        fresh_positions is None or bool(fresh_positions)
-                    )
-                    # Four distinct causes, four truthful notes: a FAILED
+                    # A protection-only loop (issue #268) counts as unclean
+                    # too: the environment is wrong, the next start meets
+                    # the same refusal, and only a protection-only start (or
+                    # a fixed one) re-covers the position — stripping the
+                    # SL/TP on the operator's way to fixing .env would be
+                    # the front-gate hole the mode exists to close.
+                    keep_protective = (
+                        not verdict_passed or exit_safe_mode or loop_raised or loop_exit is not None
+                    ) and (fresh_positions is None or bool(fresh_positions))
+                    # Five distinct causes, five truthful notes: a FAILED
                     # read is not "safe mode is active" — claiming so would
                     # contradict the fresh `safe_mode:` line printed later
                     # when the second read succeeds and finds none.
@@ -994,6 +1003,8 @@ def _live_startup_recovery(
                         unclean_note = "the startup verdict did not pass"
                     elif loop_raised:
                         unclean_note = "the live loop raised instead of returning"
+                    elif loop_exit is not None:
+                        unclean_note = "the loop ran in protection-only mode"
                     elif exit_safe_mode_unknown:
                         unclean_note = (
                             "the exit-time safe-mode state could NOT be read (unknown ≠ clean)"
@@ -1147,6 +1158,22 @@ def _live_startup_recovery(
                 for failure in result.sweep_failures:
                     print(f"error: stale-order sweep — {failure}", file=sys.stderr)
             if result.passed:
+                if loop_exit is not None:
+                    # Protection-only (issue #268): the cause the operator
+                    # must fix reaches the output FIRST — before the unclean-
+                    # sweep and safe-mode dispatches below, either of which
+                    # may pick the exit code but must not hide it.
+                    if loop_exit.settled:
+                        announce_protection_only_settled(loop_exit.cause, then="exiting")
+                    else:
+                        print(
+                            "live loop exited from protection-only mode — §18.2 "
+                            "shutdown sweep done; NEW decision cycles never ran "
+                            f"because the engine could not be built: {loop_exit.cause}. "
+                            "Fix the environment and re-run with --loop to resume "
+                            "this run.",
+                            file=sys.stderr,
+                        )
                 if shutdown_problem is not None:
                     # Decided 2026-07-17: exit 0 means "all quiet" to a
                     # supervisor — a passing verdict with an unclean shutdown
@@ -1156,30 +1183,18 @@ def _live_startup_recovery(
                     return 4
                 if args.loop:
                     if loop_exit is not None:
-                        # Protection-only (issue #268), BEFORE the safe-mode
-                        # lane below: the cause the operator must fix has to
-                        # reach the output, and the ``safe_mode:`` line
-                        # printed above already reports a latch. Two endings,
-                        # the paper lane's two codes: the position closed and
-                        # the loop ended itself — exit 1, like paper's
-                        # settle-exit, so a supervisor restarts into the same
-                        # named refusal (now over a flat book: exit 1 again,
-                        # no zombie) until the environment is fixed; or the
-                        # operator stopped it — "executed, not clean", the
-                        # same 4 as a stop in safe mode, never 0 ("all quiet")
-                        # for a run that was not trading.
-                        if loop_exit.settled:
-                            announce_protection_only_settled(loop_exit.cause, then="exiting")
-                            return 1
-                        print(
-                            "live loop exited from protection-only mode — §18.2 "
-                            "shutdown sweep done; NEW decision cycles never ran "
-                            f"because the engine could not be built: {loop_exit.cause}. "
-                            "Fix the environment and re-run with --loop to resume "
-                            "this run.",
-                            file=sys.stderr,
-                        )
-                        return 4
+                        # Protection-only's exit code, BEFORE the safe-mode
+                        # lane below (its line was printed above, and the
+                        # ``safe_mode:`` line already reports a latch). Two
+                        # endings, the paper lane's two codes: the position
+                        # closed and the loop ended itself — exit 1, like
+                        # paper's settle-exit, so a supervisor restarts into
+                        # the same named refusal (now over a flat book: exit
+                        # 1 again, no zombie) until the environment is fixed;
+                        # or the operator stopped it — "executed, not clean",
+                        # the same 4 as a stop in safe mode, never 0 ("all
+                        # quiet") for a run that was not trading.
+                        return 1 if loop_exit.settled else 4
                     if state is not None or (exit_safe_mode_unknown and keep_protective):
                         # Sibling of the keep decision (2026-07-22): the boot
                         # verdict is stale after a loop, and a run that latched

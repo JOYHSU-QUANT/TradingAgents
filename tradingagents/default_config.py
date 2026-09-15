@@ -1,6 +1,7 @@
 import math
 import os
 import sys
+from typing import TypedDict
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
@@ -154,7 +155,15 @@ _LLM_KNOB_VALIDATORS = (
 )
 
 
-def validate_llm_knobs(config) -> dict:
+class LlmKnobs(TypedDict, total=False):
+    """What ``validate_llm_knobs`` returns: each knob present only when set."""
+
+    temperature: float
+    llm_max_retries: int
+    max_tokens: int
+
+
+def validate_llm_knobs(config) -> LlmKnobs:
     """Validate the cross-provider LLM knobs ``config`` sets; return them coerced.
 
     The ONE place the family's "set" rule and its validators meet, shared by
@@ -171,12 +180,12 @@ def validate_llm_knobs(config) -> dict:
     key is unset, so a stale engine missing one forwards nothing for it
     rather than failing here.
     """
-    knobs = {}
+    knobs: LlmKnobs = {}
     for key, coerce in _LLM_KNOB_VALIDATORS:
         value = config.get(key)
         if value is None or value == "":
             continue
-        knobs[key] = coerce(value)
+        knobs[key] = coerce(value)  # type: ignore[literal-required]  # key is a table row
     return knobs
 
 

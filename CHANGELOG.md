@@ -1640,7 +1640,12 @@ Breaking changes within the 0.x line are called out explicitly.
   restart meets the flat-book refusal rather than a zombie holding the lease;
   a Ctrl-C / SIGTERM stop in protection-only exits 4 (executed, not clean —
   the same code as a stop in safe mode; never 0 for a run whose cycles
-  never ran), the cause in the exit line. Over a FLAT book the refusal
+  never ran), the cause in the exit line, and the §18.2 sweep treats the
+  run as unclean: the resting SL/TP are left standing (reduce-only) for the
+  fixed restart to adopt, since stripping them on the operator's way to
+  fixing `.env` would be the very hole the mode closes. Either ending
+  prints its cause before the exit-code dispatch, so an unclean sweep can
+  outrank the code (4) but not hide the cause. Over a FLAT book the refusal
   propagates out and `_cmd_live` names it (`error: config key ...`), exit 1,
   instead of `startup recovery failed`. SETUP and RUNBOOK-live §4 describe
   the lane; the `paper`-only wording in the #266 entry below is thereby
@@ -1667,9 +1672,11 @@ Breaking changes within the 0.x line are called out explicitly.
   value (`TRADINGAGENTS_MAX_DEBATE_ROUNDS=abc`, `..._CHECKPOINT_ENABLED=treu`)
   with a bare `ValueError`, which the bridge's import guard let through
   untyped — past both lanes' `except EngineConfigError`. The guard now wraps
-  it as an `EngineConfigError` naming the variable, so every row of the
-  overlay table gets the protection-only / named-exit treatment, not just
-  the three knobs gated by value below.
+  it as an `EngineConfigError` naming the variable (matched by the overlay's
+  own `Invalid value for TRADINGAGENTS_` prefix; any other import-time
+  `ValueError` keeps its shape), so every row of the overlay table gets the
+  protection-only / named-exit treatment, not just the three knobs gated by
+  value below.
 
   Not taken: refusing the bad knob at `_cmd_live`'s front gate (before the
   lease, arming and recovery), which is how a missing `OPENROUTER_API_KEY`
@@ -1701,13 +1708,13 @@ Breaking changes within the 0.x line are called out explicitly.
   values under their config keys. The graph's `_get_provider_kwargs` forwards
   what it returns (renaming for the wire — `max_retries`, Gemini's
   `max_output_tokens` — stays the graph's job), and `_build_engine_config`
-  gates the whole family through the same call at daemon startup — BEFORE
-  the cap is resolved, so an env refusal names the env var and the resolver
-  only validates the YAML cap under its own key (`engine.max_completion_tokens`),
-  handing the env value through as the int it already is; `int_from_yaml`
-  gained the platform-range bound the graph's integer validator applies,
-  for every YAML integer key (a YAML cap past `sys.maxsize` used to load
-  fine and fail per cycle) — writing
+  gates the whole family through the same call at daemon startup — after
+  the cap is resolved, so the resolver's precedence still holds (a YAML cap
+  shadows the env one, junk included; the env cap is refused under its own
+  name only when it would apply) and the resolved int passes the family
+  validator unchanged; `int_from_yaml` gained the platform-range bound the
+  graph's integer validator applies, for every YAML integer key (a YAML cap
+  past `sys.maxsize` used to load fine and fail per cycle) — writing
   the coerced values back so the graph forwards a number, not the env
   string, with an `engine sampling temperature:` log line beside the cap and
   retry-budget lines. A junk temperature is now an `EngineConfigError` at

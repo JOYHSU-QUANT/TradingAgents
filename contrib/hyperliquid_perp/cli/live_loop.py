@@ -260,7 +260,9 @@ def _run_live_loop(
     protection; NO decision pump, so no new cycle), and ends itself once the
     position is closed. Flat, the same ``EngineConfigError`` propagates OUT
     (nothing to guard): the caller's handler makes it a named exit 1, the
-    paper lane's rule.
+    paper lane's rule. The caller's §18.2 sweep treats a protection-only
+    run as unclean, so a stop leaves the resting SL/TP standing for the
+    fixed restart to adopt.
     """
 
     from ..engine_bridge import EngineConfigError
@@ -488,15 +490,16 @@ def _run_live_loop(
                     # lease and refresh the switch for days. End the loop
                     # loud instead — the caller's §18.2 sweep then runs over a
                     # flat book, and the exit code tells the supervisor
-                    # (the paper loop's settle-exit rule). Its own phase: the
-                    # read is a store read after tick() has returned, so a
-                    # raise here must not be filed against the tick (#238).
-                    phase = "protection-only settle check"
+                    # (the paper loop's settle-exit rule). The same
+                    # ``holds_live_work`` read as at startup: a store read
+                    # that cannot be made (a locked store) is live work, and
+                    # is NOT a tick fault — it must not latch safe mode every
+                    # ~10s (the mode enters none; the environment is wrong).
                     # ``driver`` is None exactly when ``protection_only`` was
                     # set (the except/else above assign them together); the
                     # assert states that for the type checker.
                     assert protection_only is not None
-                    if not engine.has_active_work():
+                    if not holds_live_work(engine):
                         logger.error(
                             "protection-only live run %s has nothing left to "
                             "protect — exiting",

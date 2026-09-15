@@ -363,14 +363,17 @@ def _cmd_paper(argv: list[str]) -> int:
                 paper_config=paper_cfg,
                 funding_source=funding_source,
             )
-            if is_restart and engine.has_active_work():
+            if is_restart and holds_live_work(engine):
                 # §1.2 step 6: the restart was a blind window — the first tick must
                 # treat a crossed SL as a gap stop, not a normal trigger-price fill.
                 # Armed only when the blind window had something to watch (a position
                 # or live protection): on a flat restart the forced immediate cycle
                 # can open a NEW position via poll() before any tick ever runs, and
                 # an unconsumed flag would mislabel that fresh position's first real
-                # SL trigger as a restart gap fill.
+                # SL trigger as a restart gap fill. ``holds_live_work``: an
+                # unreadable book counts as live here too (the flag only
+                # labels a first SL trigger; arming it over a flat book is
+                # harmless, and the read raising must not end the restart).
                 engine.flag_restart_gap()
             halt_reason = "replay" if trading_halted else None
             if not trading_halted and not os.environ.get("OPENROUTER_API_KEY"):

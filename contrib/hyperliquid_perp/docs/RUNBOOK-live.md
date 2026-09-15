@@ -388,7 +388,10 @@ python -m contrib.hyperliquid_perp live \
   迴圈自己結束、印 `nothing left to protect`、**exit 1**（同 paper 的 settle-exit；監管重啟
   會撞到空倉版的具名拒絕，同樣 exit 1，不會養出殭屍）；Ctrl-C／SIGTERM 停掉的 protection-only
   run 印 `exited from protection-only mode`、**exit 4**（執行了但不乾淨，與 safe mode 停止同碼，
-  絕不回 0）。**空倉**時同一個拒絕直接具名 exit 1（`error: config key ...`），不進迴圈。
+  絕不回 0），而且 §18.2 sweep 把它當不乾淨的結束：**SL/TP 留在書上**（reduce-only），
+  等修好環境後的下一次 `--loop` 接手——這條 lane 存在的理由就是不讓倉位在修 `.env` 的
+  路上裸奔。sweep 本身不乾淨（`shutdown_problem`，觸發器可能還武裝著）時 exit 4 優先，但
+  protection-only 的成因行一律先印。**空倉**時同一個拒絕直接具名 exit 1（`error: config key ...`），不進迴圈。
   前一個 process 留下的 in_progress decision attempt 在 protection-only 下刻意不動，啟動時
   提示一行，下一次健康重啟才接續。修法＝照 stderr 的錯誤修好 `.env`／環境後重跑 `--loop`。
   同一批修正把 `_ENV_OVERRIDES` 表的**每一列**都納入這條車道（`TRADINGAGENTS_MAX_DEBATE_ROUNDS=abc`

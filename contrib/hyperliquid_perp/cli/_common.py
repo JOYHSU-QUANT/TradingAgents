@@ -223,9 +223,12 @@ def holds_live_work(engine) -> bool:
     The decision both lanes make on an operator-fixable startup fault (a
     missing key on paper, an ``EngineConfigError`` on either): live work means
     protection-only, flat means a named exit. ``has_active_work`` is a store
-    read, and a raise from it (an operator's export/validate holding the
-    SQLite lock) must not turn into an exit over a position nobody watches —
-    unknown ≠ flat, the shutdown sweep's own rule (#268 review).
+    read (on paper, behind the engine's own halted-state guard), and a raise
+    from it — an operator's export/validate holding the SQLite lock, or
+    that guard — must not turn into an exit over a position nobody watches:
+    unknown ≠ flat, the shutdown sweep's own rule (#268 review). The live
+    loop's protection-only settle check makes the same call each tick, for
+    the same reason (a locked store is not a tick fault).
     """
     try:
         return engine.has_active_work()

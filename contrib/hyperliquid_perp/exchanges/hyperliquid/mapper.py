@@ -720,10 +720,12 @@ def map_top_of_book(raw: Any, *, expected_coin: str | None = None) -> TopOfBook:
     """The best bid / ask off an ``l2Book`` snapshot, stamped with its clock.
 
     ``levels`` is ``[bids, asks]``, each side best-first, each level ``{"px",
-    "sz", "n"}``; only the two head levels are read. An EMPTY side is refused,
-    not defaulted: a maker slice joins the touch, and "no bid" means there is
-    no touch to join — the caller must not be handed a price it would then
-    post against nothing. A crossed or locked book is refused by
+    "sz", "n"}``; only the two head levels are read. An EMPTY side — or a
+    head level with no size — is refused, not defaulted: a maker slice joins
+    the touch, and "no bid" means there is no touch to join — the caller must
+    not be handed a price it would then post against nothing. Sizes are read
+    only for that guard; the DTO carries prices alone (no reader for depth
+    yet). A crossed or locked book is refused by
     :class:`TopOfBook` itself, re-raised here as the malformed response it is.
     The clock goes through :func:`map_exchange_time`, so the two readers of
     this one payload (the freshness guard's clock, the maker slice's quote)
@@ -740,14 +742,26 @@ def map_top_of_book(raw: Any, *, expected_coin: str | None = None) -> TopOfBook:
         raise MalformedResponseError(f"l2Book 'levels' is not a [bids, asks] pair: {levels!r}")
     touch: list[Decimal] = []
     for side_name, side in zip(("bids", "asks"), levels, strict=True):
-        if not isinstance(side, list) or not side:
-            raise MalformedResponseError(f"l2Book {side_name} side is empty: {side!r}")
+        if not isinstance(side, list):
+            raise MalformedResponseError(f"l2Book {side_name} side is not a list: {side!r}")
+        if not side:
+            raise MalformedResponseError(f"l2Book {side_name} side is empty")
         head = side[0]
         if not isinstance(head, dict):
             raise MalformedResponseError(
                 f"l2Book best {side_name[:-1]} level is not an object: {head!r}"
             )
-        touch.append(_dec(head.get("px"), field=f"{side_name}[0].px"))
+        price = _dec(head.get("px"), field=f"{side_name}[0].px")
+        # A head level with no size is the empty side wearing a price: there
+        # is nothing at that price to join. Whether the venue ever emits one is
+        # unverified; the guard costs one field read and closes the one way a
+        # plausible-looking quote could come off an empty book.
+        size = _dec(head.get("sz"), field=f"{side_name}[0].sz")
+        if size <= 0:
+            raise MalformedResponseError(
+                f"l2Book best {side_name[:-1]} level has no size ({size}) — no touch to join"
+            )
+        touch.append(price)
     try:
         return TopOfBook(coin=coin, best_bid=touch[0], best_ask=touch[1], time=when)
     except ValueError as exc:

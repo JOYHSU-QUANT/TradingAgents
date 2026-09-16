@@ -184,7 +184,7 @@ _ORDER_ROLES = LIVE_ORDER_ROLES
 # maker slice from an IOC that partially filled without opening the ack
 # payload. The four paper_* / trigger types are the Phase 2 simulation
 # vocabulary.
-_ORDER_TYPES = frozenset(
+ORDER_TYPES = frozenset(
     {
         "paper_market",
         "paper_twap_slice",

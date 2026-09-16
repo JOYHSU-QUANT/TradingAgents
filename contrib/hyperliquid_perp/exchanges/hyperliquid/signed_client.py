@@ -466,8 +466,10 @@ class HyperliquidSignedClient:
         ``"Ioc"`` is the §9.2 slice shape (see :meth:`place_ioc_limit`);
         ``"Alo"`` is the post-only maker slice, which the venue rejects — a
         per-order ``error`` ack — instead of filling when it would cross the
-        book, so an Alo ack is either ``resting`` or ``error``, never
-        ``filled``.
+        book, so the venue answers an Alo with ``resting`` or ``error``. That
+        is a venue property, not one this layer enforces: the ack parser books
+        whatever word came back, so a ``filled`` Alo (a venue-semantics change)
+        would be recorded as the fill it claims to be, not refused.
 
         The §4.1 gate bound at construction runs first — a rejection raises
         ``LiveOrderGateRejected`` before any network traffic. It is the

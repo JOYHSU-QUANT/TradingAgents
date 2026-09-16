@@ -343,7 +343,11 @@ def test_get_top_of_book_reads_the_l2book_for_the_coin():
 def test_get_top_of_book_rejects_a_misrouted_response():
     client = _FakeClient(None)
     client.info = _BookInfo(
-        {"coin": "ETH", "time": 1787369175468, "levels": [[{"px": "1"}], [{"px": "2"}]]}
+        {
+            "coin": "ETH",
+            "time": 1787369175468,
+            "levels": [[{"px": "1", "sz": "1"}], [{"px": "2", "sz": "1"}]],
+        }
     )
     with pytest.raises(MalformedResponseError, match="carries coin 'ETH'"):
         HyperliquidMarketData(client).get_top_of_book("BTC")

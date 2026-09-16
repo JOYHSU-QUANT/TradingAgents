@@ -924,6 +924,10 @@ _BOOK = {
 }
 
 
+def _lvl(px, sz="1"):
+    return {"px": px, "sz": sz, "n": 1}
+
+
 def test_map_top_of_book_reads_the_head_of_each_side_and_the_clock():
     top = mapper.map_top_of_book(_BOOK, expected_coin="BTC")
     assert top.coin == "BTC"
@@ -940,28 +944,31 @@ def test_map_top_of_book_rejects_a_misrouted_coin_like_the_clock_read():
     "levels, why",
     [
         ([], r"not a \[bids, asks\] pair"),
-        ([[{"px": "99"}]], r"not a \[bids, asks\] pair"),
+        ([[_lvl("99")]], r"not a \[bids, asks\] pair"),
         ("bids,asks", r"not a \[bids, asks\] pair"),
-        ([[], [{"px": "100.5"}]], "bids side is empty"),
-        ([[{"px": "99.5"}], []], "asks side is empty"),
-        ([[{"px": "99.5"}], "100.5"], "asks side is empty"),
-        ([[{"px": "99.5"}], ["100.5"]], "best ask level is not an object"),
-        ([[{"sz": "1"}], [{"px": "100.5"}]], r"missing required field 'bids\[0\].px'"),
-        ([[{"px": "abc"}], [{"px": "100.5"}]], "not numeric"),
-        ([[{"px": "NaN"}], [{"px": "100.5"}]], "not a finite number"),
+        ([[], [_lvl("100.5")]], "bids side is empty"),
+        ([[_lvl("99.5")], []], "asks side is empty"),
+        ([[_lvl("99.5")], "100.5"], "asks side is not a list"),
+        ([[_lvl("99.5")], ["100.5"]], "best ask level is not an object"),
+        ([[{"sz": "1"}], [_lvl("100.5")]], r"missing required field 'bids\[0\].px'"),
+        ([[{"px": "99.5"}], [_lvl("100.5")]], r"missing required field 'bids\[0\].sz'"),
+        ([[_lvl("99.5", "0")], [_lvl("100.5")]], "best bid level has no size"),
+        ([[_lvl("99.5")], [_lvl("100.5", "-1")]], "best ask level has no size"),
+        ([[_lvl("abc")], [_lvl("100.5")]], "not numeric"),
+        ([[_lvl("NaN")], [_lvl("100.5")]], "not a finite number"),
     ],
 )
 def test_map_top_of_book_refuses_a_side_it_cannot_join(levels, why):
-    # An empty side is refused, never defaulted: "no bid" means there is no
-    # touch for a maker slice to join, and a default price would be posted
-    # against nothing.
+    # An empty side — or a head level with no size, the empty side wearing a
+    # price — is refused, never defaulted: "no bid" means there is no touch for
+    # a maker slice to join, and a default price would be posted against nothing.
     with pytest.raises(MalformedResponseError, match=why):
         mapper.map_top_of_book({**_BOOK, "levels": levels}, expected_coin="BTC")
 
 
 @pytest.mark.parametrize("bid, ask", [("100.5", "100.5"), ("101", "100.5"), ("0", "100.5")])
 def test_map_top_of_book_refuses_a_crossed_locked_or_zero_book(bid, ask):
-    levels = [[{"px": bid}], [{"px": ask}]]
+    levels = [[_lvl(bid)], [_lvl(ask)]]
     with pytest.raises(MalformedResponseError, match="top of book is unusable"):
         mapper.map_top_of_book({**_BOOK, "levels": levels}, expected_coin="BTC")
 

@@ -50,7 +50,11 @@ from ..exchanges.hyperliquid.errors import (
     OrderIdempotencyContradiction,
 )
 from ..exchanges.hyperliquid.mapper import hex_identity_matches
-from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient, OrderAck
+from ..exchanges.hyperliquid.signed_client import (
+    LIMIT_TIFS,
+    HyperliquidSignedClient,
+    OrderAck,
+)
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.cloid import assert_cloid_provenance, cloid_hex as derive_cloid_hex
@@ -89,6 +93,18 @@ OrderStatusQuery = Callable[[str], Any]
 # maker slice (2026-09-16 maker path).
 _ORDER_TYPE_FOR_TIF = {"Ioc": "ioc_limit", "Alo": "alo_limit"}
 _SUBMITTABLE_TIFS = frozenset(_ORDER_TYPE_FOR_TIF)
+# Literal copies of two other modules' vocabularies, pinned at import (the
+# protection.py / startup.py guard family). A tif respelled in the transport
+# but not here would pass this layer's check, write the registry row, the
+# orders row and a 'submitted' attempt, and only THEN be refused by
+# place_limit — riding the post-wire failure lane, burning a cloid per slice
+# while telling the caller "outcome unknown" for an order that never left the
+# process. A type respelled in the repository but not here would fail inside
+# the intent transaction on the first live submit instead of at startup.
+if not _SUBMITTABLE_TIFS <= LIMIT_TIFS:
+    raise AssertionError("_SUBMITTABLE_TIFS drifted from signed_client.LIMIT_TIFS")
+if not set(_ORDER_TYPE_FOR_TIF.values()) <= repo.ORDER_TYPES:
+    raise AssertionError("_ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES")
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +400,19 @@ class LiveOrderSubmitter:
                     f"{existing['cloid_hex']!r}, not {cloid_hex!r} — an order_id "
                     "keeps one cloid pair for life (§8.3)"
                 )
+            if existing["type"] != order_type:
+                # Same coherence rule for the wire shape: a rule-5 resend of the
+                # same order_id under a different tif would send the NEW shape
+                # while the row (whose type is written once, at insert) kept the
+                # old one — and nothing else persists the tif actually sent, so
+                # the audit trail could never tell. An Alo refused by the venue
+                # that must go out as an IOC is a NEW logical order (§8.3 rule 9):
+                # new order_id, new cloid, its own type.
+                raise ValueError(
+                    f"order {order_id!r} already exists with type "
+                    f"{existing['type']!r}, not {order_type!r} — an order_id "
+                    "keeps one type for life, like its cloid pair"
+                )
             return False
         repo.insert_order(
             conn,
@@ -476,9 +505,15 @@ class LiveOrderSubmitter:
         """Place one limit order with time-in-force ``tif`` under the §8.3 contract.
 
         ``tif`` is a key of :data:`_ORDER_TYPE_FOR_TIF` (``"Ioc"`` / ``"Alo"``)
-        and decides the ``orders.type`` word the row is recorded under; an
-        unsupported word is a ``ValueError`` with the gate's footprint — no
-        evidence written, no wire call. ``order_id`` and ``cloid_logical`` are
+        and decides the ``orders.type`` word the row is recorded under. An
+        unsupported word is a ``ValueError`` — a contract violation in the same
+        lane as a bad cloid provenance: nothing is written and nothing is sent,
+        but it is NOT a gate refusal or a ``LiveOrderPreSubmitError``, so a
+        caller modelled on the engine's ``_submit_slice`` lands it in its
+        catch-all (``SENT_FAILED``, cursor advances) rather than holding the
+        slice. That is the right reading — the caller's own code is wrong, not
+        the store or the wire — and a maker caller must pass a supported word
+        by construction. ``order_id`` and ``cloid_logical`` are
         minted by the caller (the PR 5 engine derives both deterministically
         from run/plan/slice), so a retry of the same logical order arrives
         here with the same identifiers — which is exactly what makes the

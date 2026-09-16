@@ -1126,3 +1126,21 @@ def test_pre_check_recovery_inserts_the_row_with_the_submitted_order_type(env, m
     assert outcome.outcome == "recovered_existing" and outcome.attempt_id is None
     assert client.place_calls == []
     assert repo.get_order(db.conn, "o1")["type"] == "alo_limit"
+
+
+def test_an_order_id_keeps_one_type_for_life(env):
+    # A rule-5 resend of the same order_id under a different tif would put the
+    # new wire shape out while the row kept the old type, with nothing else
+    # persisting the tif actually sent. Refused like a changed cloid pair: an
+    # Alo that must go out as an IOC is a NEW logical order, not a resend.
+    db, client, _, submitter = env
+    client.place_results = [_REJECT_ACK]
+    client.status_results = [_UNKNOWN_STATUS]
+    assert _submit(submitter).outcome == "rejected"  # Ioc, resendable under rule 5
+    client.status_results = [_UNKNOWN_STATUS]
+    client.place_results = [_RESTING_ACK]
+    with pytest.raises(ValueError, match="keeps one type for life"):
+        _submit(submitter, tif="Alo")
+    assert len(client.place_calls) == 1  # the resend never reached the wire
+    row = repo.get_order(db.conn, "o1")
+    assert row["type"] == "ioc_limit" and row["status"] == "rejected"

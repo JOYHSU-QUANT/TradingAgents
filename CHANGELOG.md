@@ -89,10 +89,13 @@ Breaking changes within the 0.x line are called out explicitly.
   time-in-force (`LIMIT_TIFS`: `Alo` / `Ioc` / `Gtc`), with `place_ioc_limit`
   kept as the taker spelling; `LiveOrderSubmitter.submit_limit` records the
   order under `ioc_limit` or the new `alo_limit` type (`Gtc` is refused
-  pre-wire: nothing in v1 rests without a deadline of its own);
+  pre-wire: nothing in v1 rests without a deadline of its own; an order_id
+  keeps one type for life, like its cloid pair; both vocabularies are pinned
+  at import against the transport's and the repository's);
   `HyperliquidMarketData.get_top_of_book` maps the `l2Book` touch to a new
-  `TopOfBook` DTO (an empty side, a crossed or locked book, or a missing
-  clock is refused). Additive only: no live or paper behaviour changes -
+  `TopOfBook` DTO (an empty or zero-size side, a crossed or locked book, or
+  a missing clock is refused). Additive only: no live or paper behaviour
+  changes -
   every slice is still an IOC until the engine PR lands.
 
 - **autoresearch: the store follow-ups from PR #255 (#256)** - the scan holds

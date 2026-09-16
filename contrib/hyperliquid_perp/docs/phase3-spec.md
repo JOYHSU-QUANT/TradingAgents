@@ -1440,6 +1440,11 @@ raw_exchange_payload_path
 時間未知，消費者必須把 NULL 讀成「未知」而非「未送出」。IOC ack 部分成交
 （totalSz < 請求 size）時 `status` 寫 `partially_filled`，不得寫 `filled`；
 成交數量真相仍由 PR 3 fill ingestion 擁有。
+**（2026-09-16 maker path，PR A）**post-only（`tif: Alo`）單的 resting ack 寫
+`status=open`／`exchange_status=open`（§8.3 的保守讀法，與 IOC 的 resting ack 同），
+`orders.type` 寫 `alo_limit`（IOC 片仍是 `ioc_limit`）；同一 `order_id` 終身只有一個
+`type`，以不同 tif 重送同一 order_id 是 contract violation（`ValueError`，與換 cloid pair
+同一條 lane）——Alo 被拒後要改送 IOC 的是**新的邏輯單**（§8.3 rule 9）。
 
 **（v11 新增，2026-07-15）live fill 的 plan/slice 歸因契約**：paper fill 的
 `plan_id`／`slice_index` 由 engine 從記憶體內的 plan context 同步填入；live fill 走

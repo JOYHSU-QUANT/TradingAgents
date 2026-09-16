@@ -84,6 +84,23 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **perp: the paper mirror of the maker slice (maker path, PR C)** -
+  `paper_trading.execution.fill_model.style: maker` posts each simulated
+  slice at a modelled touch (mid -/+ `assumed_half_spread_bps`, rounded
+  to the passive tick) and fills it at that price with `maker_fee_rate`
+  only when the mid trades THROUGH the post by a full tick; after
+  `maker_rest_seconds` it re-posts at the new touch up to
+  `maker_max_requotes` times, then crosses at the existing taker model.
+  One slice rests at a time; a leg that ends drops its post as residual; a
+  no-data tick leaves the post in place (the slices behind it queue, they
+  are not missed); the deadline tick neither tends nor posts. Config
+  refuses a rest budget (first post + requotes) longer than the 1h plan
+  lifetime — a sanity bound, not a completion promise.
+  SL / TP / gap-stop / liquidation fills and the prompt's marginal-cost
+  figures stay on the taker model. Default `style: taker` is unchanged;
+  switching a paper run to `maker` is an EXECUTION segment point (deploy on
+  a segment boundary). Execution spec §5.2.1 / §5.4.
+
 - **perp: the maker-slice execution style (maker path, PR B)** -
   `live.execution.default_style: sliced_maker` posts each TWAP slice at the
   touch with `tif: Alo` (join best bid / ask off the public `l2Book`), polls

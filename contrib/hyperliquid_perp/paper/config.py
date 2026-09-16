@@ -20,7 +20,8 @@ from ..common.config_coercion import (
     str_from_yaml,
 )
 from ..common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC
-from .twap import SLICE_INTERVAL_SECONDS
+from ..common.enum_guard import check_enum
+from .twap import PLAN_LIFETIME_SECONDS, SLICE_INTERVAL_SECONDS
 
 __all__ = [
     "FillModelConfig",
@@ -160,19 +161,81 @@ class MarketMonitorConfig:
         )
 
 
+# ``fill_model.style``: how a simulated slice reaches its fill (execution §5.2 /
+# §5.2.1). ``taker`` is the Phase 2 model (mid ± slippage, taker fee, at once);
+# ``maker`` posts at the touch and fills only when the mid trades THROUGH the
+# posted price — the paper mirror of the live ``sliced_maker`` style.
+PAPER_FILL_STYLES = frozenset({"taker", "maker"})
+
+
 @dataclass(frozen=True)
 class FillModelConfig:
-    """``paper_trading.execution.fill_model`` — simulated-fill slippage (§5.4)."""
+    """``paper_trading.execution.fill_model`` — the simulated-fill model (§5.4).
+
+    ``slippage_bps`` prices every taker fill (and the maker style's crossing
+    fallback). The ``maker`` style (§5.2.1, 2026-09-16 maker path) adds: the
+    maker fee, the half-spread assumed around the mid (the snapshot carries
+    no book), how long a posted slice rests before it is re-posted at the new
+    touch, and how many re-posts a slice gets before its remainder crosses as
+    a taker. Conservative on purpose: a post fills only when the mid moves
+    through it by a full tick, never on a touch.
+    """
 
     slippage_bps: Decimal = Decimal("5")
+    style: str = "taker"
+    maker_fee_rate: Decimal = Decimal("0.00015")
+    assumed_half_spread_bps: Decimal = Decimal("0.5")
+    maker_rest_seconds: int = 30
+    maker_max_requotes: int = 2
 
     def __post_init__(self) -> None:
         if self.slippage_bps < 0:
             raise ValueError(f"slippage_bps must be >= 0, got {self.slippage_bps}")
+        check_enum(self.style, PAPER_FILL_STYLES, name="fill_model.style")
+        if self.maker_fee_rate < 0:
+            raise ValueError(f"maker_fee_rate must be >= 0, got {self.maker_fee_rate}")
+        if self.assumed_half_spread_bps < 0:
+            raise ValueError(
+                f"assumed_half_spread_bps must be >= 0, got {self.assumed_half_spread_bps}"
+            )
+        if self.maker_rest_seconds <= 0:
+            raise ValueError(f"maker_rest_seconds must be > 0, got {self.maker_rest_seconds}")
+        if self.maker_max_requotes < 0:
+            raise ValueError(f"maker_max_requotes must be >= 0, got {self.maker_max_requotes}")
+        if self.style == "maker":
+            # §5.2.1: every post rests its own clock, so a slice's longest stay
+            # on the (simulated) book is (1 + requotes) * rest — it must fit the
+            # plan lifetime (a sanity bound on one slice, not a completion
+            # promise). The single-rest check is subsumed by the budget check and
+            # kept only for its more specific message.
+            if self.maker_rest_seconds > PLAN_LIFETIME_SECONDS:
+                raise ValueError(
+                    f"maker_rest_seconds must be <= {PLAN_LIFETIME_SECONDS} (the plan "
+                    f"lifetime), got {self.maker_rest_seconds}"
+                )
+            budget = (1 + self.maker_max_requotes) * self.maker_rest_seconds
+            if budget > PLAN_LIFETIME_SECONDS:
+                raise ValueError(
+                    "(1 + maker_max_requotes) * maker_rest_seconds must be <= "
+                    f"{PLAN_LIFETIME_SECONDS} (the plan lifetime) so one slice's rest "
+                    f"budget (first post + requotes) fits inside it, got {budget}"
+                )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> FillModelConfig:
-        return cls(**config_overrides(cfg, {"slippage_bps": decimal_from_yaml}))
+        return cls(
+            **config_overrides(
+                cfg,
+                {
+                    "slippage_bps": decimal_from_yaml,
+                    "style": str_from_yaml,
+                    "maker_fee_rate": decimal_from_yaml,
+                    "assumed_half_spread_bps": decimal_from_yaml,
+                    "maker_rest_seconds": int_from_yaml,
+                    "maker_max_requotes": int_from_yaml,
+                },
+            )
+        )
 
 
 @dataclass(frozen=True)

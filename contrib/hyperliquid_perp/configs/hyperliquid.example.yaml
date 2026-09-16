@@ -77,7 +77,12 @@ paper_trading:
       interval_seconds: 30       # 30s poll cadence for the position-aware monitor (PR 3, §5.5)
       request_timeout_seconds: 5 # per-request market-data timeout (§1.1)
     fill_model:
-      slippage_bps: 5            # simulated slippage applied to mid on every fill (§5.2)
+      slippage_bps: 5            # slippage on every taker fill and on a maker slice's crossing fallback (§5.2 / §5.2.1)
+      # style: maker             # §5.2.1 paper mirror of live sliced_maker (a segment point)
+      # maker_fee_rate: 0.00015  # fee on a simulated post-only fill
+      # assumed_half_spread_bps: 0.5   # the touch is mid -/+ this (no book in the snapshot)
+      # maker_rest_seconds: 30   # re-post at the new touch after this rest
+      # maker_max_requotes: 2    # re-posts before the slice crosses; (1+this)×rest ≤ 3600
 
 # Phase 3 live execution gates (phase3-spec §4) — uncomment to use the `live`
 # subcommand. The agent private key is NEVER put here: it is read from

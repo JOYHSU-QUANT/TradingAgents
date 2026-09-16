@@ -411,6 +411,7 @@ def test_an_orphan_bot_owned_order_gets_its_local_row_backfilled(env):
             "origSz": "0.002",
             "limitPx": "50000",
             "reduceOnly": False,
+            "tif": "Ioc",
         }
     ]
     report = reconciler.run("startup")
@@ -418,6 +419,7 @@ def test_an_orphan_bot_owned_order_gets_its_local_row_backfilled(env):
     row = repo.get_order_by_cloid_hex(db.conn, _HEX)
     assert row is not None
     assert row["status"] == "open"
+    assert row["type"] == "ioc_limit"
     assert row["exchange_order_id"] == "42"
     assert row["qty"] == "0.002"
     assert row["filled_qty"] == "0.001"
@@ -435,6 +437,7 @@ def _orphan_order(**overrides) -> dict:
         "origSz": "0.002",
         "limitPx": "50000",
         "reduceOnly": False,
+        "tif": "Ioc",
     }
     base.update(overrides)
     return base
@@ -2944,3 +2947,50 @@ def test_a_compound_failure_names_every_cause_in_the_safe_mode_detail(env):
     assert "equity_mismatch" in event["detail"]
     assert "unmapped fill sighting" in event["detail"]
     assert "123 (entry)" in event["detail"]
+
+
+# -- §9.2.1: an orphan slice's type comes from the venue's tif, never a default --
+
+
+def test_an_orphan_maker_slice_backfills_as_alo_limit_from_the_listing(env):
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [_orphan_order(tif="Alo")]
+    report = reconciler.run("startup")
+    assert report.orders_reconciled
+    assert repo.get_order_by_cloid_hex(db.conn, _HEX)["type"] == "alo_limit"
+
+
+def test_an_orphan_listing_without_a_tif_is_probed_for_it(env):
+    # The documented frontendOpenOrders example carries no tif; orderStatus
+    # always does (and echoes the cloid), so the back-fill asks it.
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [_orphan_order(tif=None)]
+    seams.order_status[_HEX] = {
+        "status": "order",
+        "order": {"order": {"oid": 42, "tif": "Alo", "sz": "0.001"}, "status": "open"},
+    }
+    report = reconciler.run("startup")
+    assert report.orders_reconciled
+    assert repo.get_order_by_cloid_hex(db.conn, _HEX)["type"] == "alo_limit"
+
+
+@pytest.mark.parametrize("tif", ["Gtc", "FrontendMarket", None])
+def test_an_orphan_with_a_tif_this_system_never_places_stays_a_mismatch(env, tif):
+    # Refused, not defaulted: a wrong type is a permanent audit-row mislabel,
+    # while an open mismatch is a loud, curable state (the listing's tif is
+    # absent here and orderStatus answers the same unusable word / nothing).
+    db, seams, reconciler = env
+    _register_cloid(db, hex_id=_HEX, logical="log-entry", role="entry")
+    seams.open_orders = [_orphan_order(tif=None)]
+    if tif is not None:
+        seams.order_status[_HEX] = {
+            "status": "order",
+            "order": {"order": {"oid": 42, "tif": tif}, "status": "open"},
+        }
+    report = reconciler.run("startup")
+    assert not report.orders_reconciled
+    assert repo.get_order_by_cloid_hex(db.conn, _HEX) is None
+    (case,) = _cases(db, "orphan_exchange_order")
+    assert case["action_taken"] != "local_row_backfilled"

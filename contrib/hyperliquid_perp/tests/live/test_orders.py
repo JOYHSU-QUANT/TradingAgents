@@ -1161,7 +1161,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
         ),
         (
             "repo.ORDER_TYPES = frozenset(repo.ORDER_TYPES - {'alo_limit'})",
-            "_ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES",
+            "ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES",
         ),
     ],
 )
@@ -1190,3 +1190,40 @@ def test_the_import_time_vocab_pins_fire(drift, sentence):
     )
     assert result.returncode != 0
     assert "AssertionError" in result.stderr and sentence in result.stderr
+
+
+# ---- maker path (§9.2.1): the optional tif / size reads off orderStatus -------
+
+
+def test_parse_order_status_reads_tif_and_sizes_when_the_venue_states_them():
+    payload = {
+        "status": "order",
+        "order": {
+            "order": {"oid": 7, "cloid": _HEX, "tif": "Alo", "sz": "0.004", "origSz": "0.01"},
+            "status": "open",
+        },
+    }
+    reading = parse_order_status(payload, expected_cloid_hex=_HEX)
+    assert reading is not None
+    assert (reading.tif, reading.remaining_size, reading.original_size) == (
+        "Alo",
+        Decimal("0.004"),
+        Decimal("0.01"),
+    )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        {"oid": 7},  # an older payload: none of the three
+        {"oid": 7, "tif": None, "sz": None, "origSz": ""},  # present but empty
+        {"oid": 7, "tif": 3, "sz": "abc", "origSz": "NaN"},  # present but unusable
+    ],
+)
+def test_parse_order_status_reads_absent_or_unusable_extras_as_none(inner):
+    # None means "the venue did not say" — a consumer must never turn it into a
+    # size on the wire; the status word (the one required read) is untouched.
+    payload = {"status": "order", "order": {"order": {**inner, "cloid": _HEX}, "status": "open"}}
+    reading = parse_order_status(payload, expected_cloid_hex=_HEX)
+    assert reading is not None and reading.status == "open"
+    assert (reading.tif, reading.remaining_size, reading.original_size) == (None, None, None)

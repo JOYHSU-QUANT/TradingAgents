@@ -112,7 +112,9 @@ class ProbeSite(Enum):
     PROTECTION_RECOVERY_PROBE = "protection {role} recovery probe"
     RECONCILE_ORPHAN_TIEBREAKER = "reconcile orphan-order tiebreaker"
     RECONCILE_ABSENT_SETTLE = "reconcile absent-order settle"
+    RECONCILE_ORPHAN_TYPE = "reconcile orphan-order type"
     KILL_SWITCH_DISARM_CROSS_CHECK = "kill-switch disarm cross-check"
+    ENGINE_MAKER_SLICE_POLL = "engine maker-slice poll"
 
     def label(self, *, role: str | None = None) -> str:
         """The rendered site text; ``role`` iff the member names one."""

@@ -84,9 +84,10 @@ if _CANCEL_ROLES | _INSPECT_ROLES | _PROTECTION_ROLES != LIVE_ORDER_ROLES:
         f"LIVE_ORDER_ROLES: {sorted(LIVE_ORDER_ROLES)}"
     )
 # The same discipline for the role → order_type vocabulary: the reconciler's
-# orphan back-fill derives order_type via ``repo.ROLE_TO_ORDER_TYPE.get(role,
-# "ioc_limit")``, so a new protection role added to the buckets above but not
-# to that mapping would silently label a backfilled trigger order "ioc_limit".
+# orphan back-fill derives a TRIGGER order's type from ``repo.ROLE_TO_ORDER_TYPE``
+# (a slice's from the venue's ``tif`` word), so a new protection role added to
+# the buckets above but not to that mapping would fall through to the tif read
+# and be refused — a resting SL left with no local row.
 if set(repo.ROLE_TO_ORDER_TYPE) != _PROTECTION_ROLES:
     raise AssertionError(
         "repo.ROLE_TO_ORDER_TYPE keys no longer mirror the §19.3 protection "

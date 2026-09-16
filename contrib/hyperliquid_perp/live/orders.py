@@ -49,7 +49,7 @@ from ..exchanges.hyperliquid.errors import (
     MalformedResponseError,
     OrderIdempotencyContradiction,
 )
-from ..exchanges.hyperliquid.mapper import hex_identity_matches
+from ..exchanges.hyperliquid.mapper import hex_identity_matches, optional_decimal
 from ..exchanges.hyperliquid.signed_client import (
     LIMIT_TIFS,
     HyperliquidSignedClient,
@@ -67,6 +67,7 @@ from .payloads import payload_column, write_raw_payload
 __all__ = [
     "LiveOrderPreSubmitError",
     "LiveOrderSubmitter",
+    "ORDER_TYPE_FOR_TIF",
     "OrderStatusQuery",
     "OrderStatusReading",
     "SubmitOutcome",
@@ -91,8 +92,8 @@ OrderStatusQuery = Callable[[str], Any]
 # any evidence is written rather than recorded under a type the vocabulary
 # does not carry. ``Ioc`` is the taker slice (§9.2), ``Alo`` the post-only
 # maker slice (2026-09-16 maker path).
-_ORDER_TYPE_FOR_TIF = {"Ioc": "ioc_limit", "Alo": "alo_limit"}
-_SUBMITTABLE_TIFS = frozenset(_ORDER_TYPE_FOR_TIF)
+ORDER_TYPE_FOR_TIF = {"Ioc": "ioc_limit", "Alo": "alo_limit"}
+_SUBMITTABLE_TIFS = frozenset(ORDER_TYPE_FOR_TIF)
 # Literal copies of two other modules' vocabularies, pinned at import (the
 # protection.py / startup.py guard family). A tif respelled in the transport
 # but not here would pass this layer's check, write the registry row, the
@@ -103,8 +104,8 @@ _SUBMITTABLE_TIFS = frozenset(_ORDER_TYPE_FOR_TIF)
 # the intent transaction on the first live submit instead of at startup.
 if not _SUBMITTABLE_TIFS <= LIMIT_TIFS:
     raise AssertionError("_SUBMITTABLE_TIFS drifted from signed_client.LIMIT_TIFS")
-if not set(_ORDER_TYPE_FOR_TIF.values()) <= repo.ORDER_TYPES:
-    raise AssertionError("_ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES")
+if not set(ORDER_TYPE_FOR_TIF.values()) <= repo.ORDER_TYPES:
+    raise AssertionError("ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +122,17 @@ class OrderStatusReading:
 
     exchange_order_id: str
     status: str
+    # The maker path's three optional reads (2026-09-16): the venue's own
+    # ``tif`` word (``Alo`` / ``Ioc`` / ``Gtc`` / ``FrontendMarket``; ``None``
+    # for a trigger order or an older payload) and the order's remaining /
+    # original size. Optional because ``parse_order_status`` predates them and
+    # every earlier caller judges liveness off ``status`` alone; a consumer
+    # that NEEDS one (the engine's resting-slice tender, the reconciler's
+    # orphan back-fill) reads ``None`` as "the venue did not say" — never as
+    # zero, and never as a size to put on the wire.
+    tif: str | None = None
+    remaining_size: Decimal | None = None
+    original_size: Decimal | None = None
 
 
 class LiveOrderPreSubmitError(RuntimeError):
@@ -504,7 +516,7 @@ class LiveOrderSubmitter:
     ) -> SubmitOutcome:
         """Place one limit order with time-in-force ``tif`` under the §8.3 contract.
 
-        ``tif`` is a key of :data:`_ORDER_TYPE_FOR_TIF` (``"Ioc"`` / ``"Alo"``)
+        ``tif`` is a key of :data:`ORDER_TYPE_FOR_TIF` (``"Ioc"`` / ``"Alo"``)
         and decides the ``orders.type`` word the row is recorded under. An
         unsupported word is a ``ValueError`` — a contract violation in the same
         lane as a bad cloid provenance: nothing is written and nothing is sent,
@@ -541,7 +553,7 @@ class LiveOrderSubmitter:
             # Same footprint as a gate refusal: a contract slip is refused
             # before any evidence exists, and ``check_enum`` names the vocabulary.
             check_enum(tif, _SUBMITTABLE_TIFS, name="tif")
-            order_type = _ORDER_TYPE_FOR_TIF[tif]
+            order_type = ORDER_TYPE_FOR_TIF[tif]
             # The cloid and the provenance fields beside it describe the same
             # order twice; both reach the audit trail, and only this check makes
             # them agree. Before the intent transaction, so a contradictory pair
@@ -1152,7 +1164,16 @@ def parse_order_status(payload: Any, *, expected_cloid_hex: str) -> OrderStatusR
                     f"orderStatus for cloid {expected_cloid_hex} answered with cloid "
                     f"{echoed!r} — refusing to read another order's status as this one's",
                 )
-            return OrderStatusReading(exchange_order_id=str(inner["oid"]), status=status)
+            tif = inner.get("tif")
+            return OrderStatusReading(
+                exchange_order_id=str(inner["oid"]),
+                status=status,
+                tif=tif if isinstance(tif, str) else None,
+                remaining_size=optional_decimal(inner.get("sz"), field="orderStatus sz"),
+                original_size=optional_decimal(
+                    inner.get("origSz"), field="orderStatus origSz"
+                ),
+            )
     raise _refused(payload, f"orderStatus payload not recognised: {payload!r}")
 
 

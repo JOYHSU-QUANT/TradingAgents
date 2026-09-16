@@ -39,6 +39,7 @@ unwinds (decided 2026-07-22; §9.4's ``close`` role has no emitter in v1).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
@@ -52,6 +53,7 @@ from ..domains.perp.risk_gate import (
     RiskGateResult,
     evaluate,
 )
+from ..domains.perp.schema import TopOfBook
 from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, TargetSide
 from ..paper.clock import Clock, WallClock
 from ..paper.engine import AssetSpec
@@ -69,14 +71,24 @@ from ..persistence import repository as repo
 from ..persistence.cloid import cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState
-from .config import AGGRESSIVE_FILL_BAND_PCT, EXCHANGE_MIN_ORDER_NOTIONAL_USDC, LiveConfig
+from .config import (
+    AGGRESSIVE_FILL_BAND_PCT,
+    EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
+    ExecutionStyle,
+    LiveConfig,
+)
 from .kill_switch import refresh_across_blocking_work
 from .loss_guards import LossGuards
 from .order_gate import LiveOrderGateRejected, RealOrderGate
-from .orders import LiveOrderPreSubmitError, LiveOrderSubmitter
+from .orders import (
+    LiveOrderPreSubmitError,
+    LiveOrderSubmitter,
+    SubmitOutcomeKind,
+    local_status_for_exchange_status,
+)
 from .protection import ProtectionManager, ProtectionOutcome
 from .safe_mode import REASON_EMERGENCY_CLOSE, REASON_NO_MARKET_DATA
-from .venue_identity import EscalationHolder, escalate_identity_fault
+from .venue_identity import EscalationHolder, ProbeSite, escalate_identity_fault
 
 __all__ = ["LiveExecutionEngine", "LiveTickResult", "PlanRegistration", "TickStatus"]
 
@@ -117,6 +129,16 @@ _NO_LEGAL_SLICE = "no_legal_slice"
 # within the flip envelope, so _maybe_advance_flip abandons instead of retrying.
 _STRUCTURAL_DECLINE_REASONS = frozenset({NO_ORDER_ZERO_DELTA, _NO_LEGAL_SLICE})
 
+# §9.2.1: the maker slice's time-in-force. Post-only — the venue refuses,
+# rather than fills, an Alo that would cross, which is what lets the engine
+# treat every maker ack as "resting or refused" and never as a taker fill.
+_MAKER_TIF = "Alo"
+
+
+# Sentinel for a resting-slice poll that could not be read (distinct from the
+# parser's ``None`` = unknownOid, which IS an answer).
+_POLL_FAILED = object()
+
 
 class _SliceOutcome(Enum):
     """How one slice submission attempt ended.
@@ -129,6 +151,26 @@ class _SliceOutcome(Enum):
     SENT_OK = "sent_ok"  # reached the wire and landed (non-rejected ack)
     SENT_FAILED = "sent_failed"  # reached (or may have reached) the wire; did not land
     HELD = "held"  # provably never transmitted — the cursor retries this slice
+
+
+@dataclass
+class _RestingSlice:
+    """The one maker slice on the book (§9.2.1), as the engine placed it.
+
+    Mutable like ``_Leg`` (it belongs to one); replaced wholesale on a
+    requote, since a requote is a new logical order with its own cloid.
+    ``size`` is what THIS order asked for — the slice's remainder after an
+    earlier requote, not necessarily the slice's planned size.
+    """
+
+    index: int
+    order_id: str
+    cloid_logical: str
+    cloid_hex: str
+    exchange_order_id: str | None
+    size: Decimal
+    price: Decimal
+    placed_at: datetime
 
 
 @dataclass
@@ -146,6 +188,11 @@ class _Leg:
     active_from: datetime
     deadline: datetime
     submitted: int = 0  # slices submitted so far
+    # Maker path (§9.2.1): the one slice resting on the book, and how many
+    # logical orders the slice being worked has consumed so far — each Alo
+    # refusal or rest timeout mints a fresh cloid; reset when the slice is done.
+    resting: _RestingSlice | None = None
+    attempt: int = 0
 
     @property
     def planned(self) -> int:
@@ -277,6 +324,8 @@ class LiveExecutionEngine:
         fetch_open_orders,
         clock: Clock | None = None,
         timeout_seconds: Decimal = _MARKET_DATA_TIMEOUT_S,
+        fetch_top_of_book: Callable[[str], TopOfBook] | None = None,
+        cancel_order: Callable[..., None] | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
@@ -310,6 +359,23 @@ class LiveExecutionEngine:
             MAX_SLICES,
             max(1, (execution.plan_duration_minutes * 60) // execution.slice_interval_seconds),
         )
+        # Maker path (§9.2.1): the style decides how a due slice reaches the
+        # book. Its two seams — the public top-of-book read and the evidence
+        # cancel — are refused at construction when the style needs them and
+        # the wiring left them out: a maker run must not learn at its first
+        # slice that it cannot quote.
+        self._style = execution.default_style
+        self._maker_rest = timedelta(seconds=execution.maker_rest_seconds)
+        self._maker_max_requotes = execution.maker_max_requotes
+        if self._style is ExecutionStyle.SLICED_MAKER and (
+            fetch_top_of_book is None or cancel_order is None
+        ):
+            raise ValueError(
+                "live.execution.default_style is sliced_maker but the engine was built "
+                "without fetch_top_of_book / cancel_order — wire both (cli.live_loop does)"
+            )
+        self._fetch_top_of_book = fetch_top_of_book
+        self._cancel_order = cancel_order
         self._no_data_streak = 0
         self._prefix = live_config.order_owner_prefix
         self._leg: _Leg | None = None
@@ -806,6 +872,9 @@ class LiveExecutionEngine:
         leg = self._leg
         if leg is None:
             return
+        if self._style is ExecutionStyle.SLICED_MAKER:
+            self._submit_due_maker_slices(leg, mid, now, events, progress)
+            return
         if leg.submitted < self._due_count(leg, now) and now < leg.deadline:
             # The deadline is a HARD envelope (decided 2026-07-22): a slice's
             # size and direction come from a decision older than the whole plan
@@ -855,8 +924,314 @@ class LiveExecutionEngine:
         elapsed = (now - leg.active_from).total_seconds()
         return min(leg.planned, 1 + int(elapsed // self._slice_interval))
 
+    # -- maker path (§9.2.1) --------------------------------------------------
+
+    def _submit_due_maker_slices(
+        self, leg: _Leg, mid: Decimal, now: datetime, events: list[str], progress: _TickProgress
+    ) -> None:
+        """The maker-style counterpart of the IOC ladder above (§9.2.1).
+
+        One slice on the book at a time: a resting slice is TENDED first
+        (polled; on a rest timeout pulled, then requoted or crossed), and only
+        a leg with nothing resting places the next due slice. The cursor
+        advances when a slice's first Alo lands, so ``submitted`` still counts
+        slices the way the taker ladder does; the leg is ``completed`` only
+        once the last slice has left the book.
+        """
+        if now >= leg.deadline:
+            # The hard envelope (§9.2 rule 4): nothing is tended, requoted or
+            # crossed at or past the deadline — _maybe_expire_plan, next in
+            # the tick, pulls the resting slice as it terminates the leg.
+            return
+        if leg.resting is not None:
+            self._tend_resting_slice(leg, mid, now, events, progress)
+            if leg.resting is not None or self._leg is not leg:
+                return
+        if leg.submitted < self._due_count(leg, now):
+            reason = self._gate.check_order(self._coin)
+            if reason is not None:
+                events.append(f"slices_paused:{leg.plan_id}:{reason}")
+            else:
+                idx = leg.submitted
+                self._place_maker_slice(leg, idx, leg.slice_sizes[idx], mid, now, events, progress)
+        if leg.submitted >= leg.planned and leg.resting is None and self._leg is leg:
+            self._terminate_leg(leg, now, "completed", events)
+
+    def _leg_marker(self, leg: _Leg, attempt: int) -> str:
+        """The cloid ``leg`` segment for the ``attempt``-th order of a slice.
+
+        The first order keeps the plain leg marker; every requote appends
+        ``-r<n>`` so it is a NEW logical order with its own cloid (§8.3 rule
+        9). The leg segment is the id's one caller-chosen display field, so no
+        id-format change is needed (``persistence.cloid``).
+        """
+        base = leg.flip_leg or "na"
+        return base if attempt == 0 else f"{base}-r{attempt}"
+
+    def _read_top_of_book(self) -> TopOfBook | None:
+        """The touch to join, or ``None`` when the book could not be read.
+
+        A failed read HOLDS the slice (nothing sent; the cursor stays) — never
+        prices off the last snapshot's mid, which is exactly the quote the
+        venue would refuse or, worse, rest on the wrong side of.
+        """
+        assert self._fetch_top_of_book is not None  # refused at construction otherwise
+        try:
+            return self._fetch_top_of_book(self._coin)
+        except Exception as exc:  # noqa: BLE001 — a read failure holds the slice, never prices it
+            logger.warning("top-of-book read failed for %s: %s", self._coin, exc)
+            return None
+        finally:
+            # A REST round-trip on the tick thread, like the snapshot (§18.2).
+            refresh_across_blocking_work(self._kill_switch, what="top of book")
+
+    def _advance_after_slice(self, leg: _Leg, idx: int) -> None:
+        """Slice ``idx`` is off the engine's hands: nothing rests, attempts reset.
+
+        The cursor moves only for the slice it points at — a requote of an
+        earlier slice's remainder was counted when its first Alo landed.
+        """
+        leg.resting = None
+        leg.attempt = 0
+        if idx == leg.submitted:
+            leg.submitted += 1
+
+    def _place_maker_slice(
+        self,
+        leg: _Leg,
+        idx: int,
+        size: Decimal,
+        mid: Decimal,
+        now: datetime,
+        events: list[str],
+        progress: _TickProgress,
+    ) -> None:
+        """Post ``size`` of slice ``idx`` at the touch — or cross it (§9.2.1).
+
+        Past ``maker_max_requotes`` the remainder goes out as the same
+        bounded IOC the taker ladder sends, under a requote leg marker, so
+        the plan still completes inside its deadline. Every Alo refusal that
+        names the book (the venue's post-only-would-match error) is a stale
+        quote, not a §9.2 rule-2 rejection: the slice is requoted next tick
+        under a fresh cloid. Any other refusal advances as rule 2 says.
+        """
+        if leg.attempt > self._maker_max_requotes:
+            crossed = self._submit_slice(
+                leg, idx, size, mid, now, leg_marker=self._leg_marker(leg, leg.attempt)
+            )
+            if crossed is _SliceOutcome.HELD:
+                events.append(f"slice_held:{leg.plan_id}:{idx}")
+                return
+            if crossed is _SliceOutcome.SENT_OK:
+                progress.slices += 1
+            events.append(f"maker_fallback_ioc:{leg.plan_id}:{idx}:{crossed.value}")
+            self._advance_after_slice(leg, idx)
+            return
+        book = self._read_top_of_book()
+        if book is None:
+            events.append(f"slice_held:{leg.plan_id}:{idx}:book_unavailable")
+            return
+        is_buy = leg.side is Side.BUY
+        # Join the touch on the passive side: rounding a bid DOWN and an ask
+        # UP can only make the quote more passive, never cross.
+        price = round_to_tick(
+            book.best_bid if is_buy else book.best_ask, self._asset.tick_size, up=not is_buy
+        )
+        order_id = self._next_order_id(leg.order_role)
+        logical = cloid_logical(
+            prefix=self._prefix,
+            run_id=self._run_id,
+            symbol=self._coin,
+            output_id=leg.output_id or "na",
+            plan_id=leg.plan_id,
+            leg=self._leg_marker(leg, leg.attempt),
+            slice_index=idx,
+            order_role=leg.order_role,
+        )
+        try:
+            outcome = self._submitter.submit_limit(
+                order_id=order_id,
+                coin=self._coin,
+                side=leg.side.value,
+                size=size,
+                limit_price=price,
+                cloid_logical=logical,
+                order_role=leg.order_role,
+                tif=_MAKER_TIF,
+                reduce_only=leg.reduce_only,
+                output_id=leg.output_id,
+                flip_plan_id=leg.flip_plan_id,
+                flip_leg=leg.flip_leg,
+            )
+        except (LiveOrderGateRejected, LiveOrderPreSubmitError) as exc:
+            # Nothing sent, nothing recorded (the same two lanes _submit_slice holds on).
+            logger.warning("maker slice %s[%d] held pre-wire (%s)", leg.plan_id, idx, exc)
+            events.append(f"slice_held:{leg.plan_id}:{idx}")
+            return
+        except Exception:  # noqa: BLE001 — past pre-wire the submitter recorded the attempt
+            logger.exception("maker slice %s[%d] submit raised", leg.plan_id, idx)
+            self._advance_after_slice(leg, idx)
+            events.append(f"slice_failed:{leg.plan_id}:{idx}")
+            return
+        if outcome.outcome is SubmitOutcomeKind.REJECTED:
+            if outcome.ack is not None and outcome.ack.is_post_only_cross:
+                leg.attempt += 1
+                events.append(f"maker_requote:{leg.plan_id}:{idx}:{leg.attempt}")
+                return
+            logger.warning("maker slice %s[%d] rejected: %s", leg.plan_id, idx, outcome.error)
+            self._advance_after_slice(leg, idx)
+            events.append(f"slice_rejected:{leg.plan_id}:{idx}")
+            return
+        assert outcome.exchange_raw_status is not None  # every non-rejected verdict carries it
+        if local_status_for_exchange_status(outcome.exchange_raw_status) != "open":
+            # A filled / canceled word off an ack or a §8.3 recovery: nothing
+            # rests, the slice is done (a FILLED Alo is a venue-semantics change
+            # the transport books as the fill it claims; the position and the
+            # SL sync follow the fills stream as always).
+            self._advance_after_slice(leg, idx)
+            events.append(f"maker_settled_on_ack:{leg.plan_id}:{idx}:{outcome.exchange_raw_status}")
+            return
+        first = idx == leg.submitted
+        leg.resting = _RestingSlice(
+            index=idx,
+            order_id=order_id,
+            cloid_logical=logical,
+            cloid_hex=outcome.cloid_hex,
+            exchange_order_id=outcome.exchange_order_id,
+            size=size,
+            price=price,
+            placed_at=now,
+        )
+        if first:
+            leg.submitted += 1
+            progress.slices += 1
+        events.append(f"maker_slice:{leg.plan_id}:{idx}:{price}")
+
+    def _tend_resting_slice(
+        self, leg: _Leg, mid: Decimal, now: datetime, events: list[str], progress: _TickProgress
+    ) -> None:
+        """Poll the resting slice; on a rest timeout pull it and requote or cross.
+
+        The poll rides the shared identity monitor (§13.5) like every other
+        orderStatus read. A poll that cannot be read is retried next tick —
+        the plan deadline bounds a slice that keeps failing to answer. A
+        remainder the venue does not state is NEVER guessed onto the wire:
+        the slice is treated as done and the shortfall is the plan's residual
+        (unknown in v1, §9.2 rule 2).
+        """
+        r = leg.resting
+        assert r is not None
+        reading = self._poll_resting(r, events, what="maker slice poll")
+        if reading is _POLL_FAILED:
+            return
+        if reading is None:
+            logger.warning(
+                "maker slice %s[%d]: orderStatus does not know cloid %s the venue acked — "
+                "nothing rests under it; the reconciler owns the contradiction (§8.3 rule 10)",
+                leg.plan_id,
+                r.index,
+                r.cloid_hex,
+            )
+            self._advance_after_slice(leg, r.index)
+            events.append(f"maker_gone:{leg.plan_id}:{r.index}:unknownOid")
+            return
+        local = local_status_for_exchange_status(reading.status)
+        if local != "open":
+            self._advance_after_slice(leg, r.index)
+            events.append(f"maker_gone:{leg.plan_id}:{r.index}:{reading.status}")
+            return
+        if now - r.placed_at < self._maker_rest:
+            return
+        assert self._cancel_order is not None  # refused at construction otherwise
+        try:
+            self._cancel_order(
+                cloid_hex=r.cloid_hex, cloid_logical=r.cloid_logical, cancel_reason="maker_timeout"
+            )
+        except Exception as exc:  # noqa: BLE001 — re-polled next tick (it may have filled meanwhile)
+            logger.warning(
+                "maker slice %s[%d] cancel failed (%s); re-polled next tick", leg.plan_id, r.index, exc
+            )
+            events.append(f"maker_cancel_failed:{leg.plan_id}:{r.index}")
+            return
+        finally:
+            refresh_across_blocking_work(self._kill_switch, what="maker slice cancel")
+        remaining = self._remaining_after_cancel(r, events)
+        events.append(f"maker_timeout:{leg.plan_id}:{r.index}:{remaining}")
+        if remaining is None or remaining <= 0:
+            self._advance_after_slice(leg, r.index)
+            return
+        leg.resting = None
+        leg.attempt += 1
+        self._place_maker_slice(leg, r.index, remaining, mid, now, events, progress)
+
+    def _poll_resting(self, r: _RestingSlice, events: list[str], *, what: str):
+        """One orderStatus read for the resting slice; ``_POLL_FAILED`` on a failed read."""
+        try:
+            return self._protection.identity.probe(
+                r.cloid_hex, site=ProbeSite.ENGINE_MAKER_SLICE_POLL
+            )
+        except Exception as exc:  # noqa: BLE001 — retried next tick; the deadline bounds it
+            logger.warning("%s for slice %d failed: %s", what, r.index, exc)
+            events.append(f"maker_poll_failed:{r.index}")
+            return _POLL_FAILED
+        finally:
+            refresh_across_blocking_work(self._kill_switch, what=what)
+
+    def _remaining_after_cancel(self, r: _RestingSlice, events: list[str]) -> Decimal | None:
+        """What the pulled order left unfilled, per the venue — or ``None`` if it did not say."""
+        reading = self._poll_resting(r, events, what="maker slice remainder read")
+        if reading is _POLL_FAILED or reading is None:
+            return None
+        if local_status_for_exchange_status(reading.status) == "filled":
+            return Decimal(0)
+        remaining = reading.remaining_size
+        if remaining is None or remaining > r.size:
+            logger.warning(
+                "maker slice %d: venue remainder %r is unusable against the placed size %s — "
+                "treating the remainder as unknown (never guessed onto the wire)",
+                r.index,
+                remaining,
+                r.size,
+            )
+            return None
+        return remaining
+
+    def _cancel_resting_slice(self, leg: _Leg, reason: str, events: list[str]) -> None:
+        """Pull the resting maker slice because its leg is ending (§9.2.1 rule 4).
+
+        A failed cancel does not block the leg's termination: the §19.3
+        startup sweep, the §18.2 shutdown sweep and the dead man's switch all
+        retire a bot-owned resting order this call could not, and the
+        reconciler keeps the local row honest meanwhile.
+        """
+        r = leg.resting
+        if r is None:
+            return
+        leg.resting = None
+        assert self._cancel_order is not None  # a resting slice exists only under the maker style
+        try:
+            self._cancel_order(
+                cloid_hex=r.cloid_hex, cloid_logical=r.cloid_logical, cancel_reason=reason
+            )
+        except Exception as exc:  # noqa: BLE001 — the sweeps retire what this cancel could not
+            logger.warning(
+                "maker slice %s[%d] cancel on %s failed: %s", leg.plan_id, r.index, reason, exc
+            )
+            events.append(f"maker_cancel_failed:{leg.plan_id}:{r.index}:{reason}")
+            return
+        finally:
+            refresh_across_blocking_work(self._kill_switch, what="maker slice cancel")
+        events.append(f"maker_canceled:{leg.plan_id}:{r.index}:{reason}")
+
     def _submit_slice(
-        self, leg: _Leg, idx: int, size: Decimal, mid: Decimal, now: datetime
+        self,
+        leg: _Leg,
+        idx: int,
+        size: Decimal,
+        mid: Decimal,
+        now: datetime,
+        *,
+        leg_marker: str | None = None,
     ) -> _SliceOutcome:
         """Submit one slice; returns its :class:`_SliceOutcome`.
 
@@ -879,7 +1254,7 @@ class LiveExecutionEngine:
             symbol=self._coin,
             output_id=leg.output_id or "na",
             plan_id=leg.plan_id,
-            leg=leg.flip_leg or "na",
+            leg=leg_marker or leg.flip_leg or "na",
             slice_index=idx,
             order_role=leg.order_role,
         )
@@ -1208,6 +1583,8 @@ class LiveExecutionEngine:
     ) -> None:
         if self._leg is not leg:
             return
+        # §9.2.1 rule 4: a leg never ends with a maker slice still on the book.
+        self._cancel_resting_slice(leg, f"plan_{status}", events)
         with self._db.transaction() as conn:
             repo.update_execution_plan(
                 conn,

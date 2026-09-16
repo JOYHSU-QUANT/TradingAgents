@@ -88,6 +88,24 @@ def is_duplicate_cloid_error(message: str | None) -> bool:
     return any(marker in lowered for marker in _DUPLICATE_CLOID_MARKERS)
 
 
+# The venue's documented refusal of a post-only order that would take
+# liquidity (API error responses: "Post only order would have immediately
+# matched, bbo was {bbo}."). Same posture as the duplicate markers: a
+# fast-path hint on ack text, not a versioned contract. A false negative
+# costs the slice its maker attempt (the engine advances as on any other
+# rejection); a false positive costs one extra requote round. Neither can
+# put a second order on the book — the requote is a NEW cloid either way.
+_POST_ONLY_CROSS_MARKERS = ("post only order would have immediately matched",)
+
+
+def is_post_only_cross_error(message: str | None) -> bool:
+    """True when an order ACK's error text says an Alo would have crossed the book."""
+    if not message:
+        return False
+    lowered = message.lower()
+    return any(marker in lowered for marker in _POST_ONLY_CROSS_MARKERS)
+
+
 # The ``limit`` order body's time-in-force words, verbatim as the SDK's ``Tif``
 # type spells them. ``Ioc`` is the §9 slice / §9.4 close shape (marketable,
 # cancels the unfilled remainder); ``Alo`` (add-liquidity-only, post-only) is
@@ -153,6 +171,11 @@ class OrderAck:
     @property
     def is_duplicate(self) -> bool:
         return self.status == "error" and is_duplicate_cloid_error(self.error)
+
+    @property
+    def is_post_only_cross(self) -> bool:
+        """An ``error`` ack refusing a post-only order that would have matched."""
+        return self.status == "error" and is_post_only_cross_error(self.error)
 
 
 @dataclass(frozen=True)

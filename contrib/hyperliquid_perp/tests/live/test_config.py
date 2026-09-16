@@ -769,3 +769,36 @@ def test_the_example_config_quotes_the_live_limits_the_loader_enforces():
     assert f"(exchange {EXCHANGE_MIN_ORDER_NOTIONAL_USDC} USDC min) wins over interval" in example
     assert f"schedule_cancel_seconds: {DEFAULT_SCHEDULE_CANCEL_SECONDS} " in example
     assert f"# must be > {MIN_SCHEDULE_CANCEL_SECONDS} (Hyperliquid's own floor)" in example
+
+
+# -- §9.2.1 maker style ---------------------------------------------------------
+
+
+def test_execution_config_admits_the_maker_style_with_its_two_knobs():
+    from contrib.hyperliquid_perp.live.config import LiveExecutionConfig
+
+    cfg = LiveExecutionConfig.from_dict(
+        {"default_style": "sliced_maker", "maker_rest_seconds": 45, "maker_max_requotes": 0}
+    )
+    assert cfg.default_style is ExecutionStyle.SLICED_MAKER
+    assert (cfg.maker_rest_seconds, cfg.maker_max_requotes) == (45, 0)
+    # The knobs default even under the taker style (read only under maker).
+    default = LiveExecutionConfig.from_dict({})
+    assert default.default_style is ExecutionStyle.SLICED_TWAP
+    assert (default.maker_rest_seconds, default.maker_max_requotes) == (30, 2)
+
+
+@pytest.mark.parametrize(
+    "overrides, needle",
+    [
+        ({"maker_rest_seconds": 0}, "maker_rest_seconds must be > 0"),
+        ({"maker_rest_seconds": 3601}, "exceeds the whole plan duration"),
+        ({"maker_max_requotes": -1}, "maker_max_requotes must be >= 0"),
+        ({"default_style": "post_only"}, "'sliced_twap' or 'sliced_maker'"),
+    ],
+)
+def test_execution_config_refuses_unusable_maker_knobs(overrides, needle):
+    from contrib.hyperliquid_perp.live.config import LiveExecutionConfig
+
+    with pytest.raises(ValueError, match=needle):
+        LiveExecutionConfig.from_dict(overrides)

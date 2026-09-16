@@ -588,6 +588,46 @@ sell limit = mid_price × 0.995
    / 30 秒；full-grid 切片預算 = duration/interval，上限 120）——config 驗證既有，
    引擎實際消費，不得驗證了卻靜默忽略（§18.1 原則）。
 
+### 9.2.1 Maker 切片（`default_style: sliced_maker`，2026-09-16 maker path）
+
+`sliced_maker` 保留 §9.1 的切片數學、§8.2 的 cloid 與 §9.2 rule 4 的 deadline 硬信封，
+只改「每片怎麼成交」。預設仍是 `sliced_twap`；maker 是 config 明示才開的路徑。
+
+```yaml
+execution:
+  default_style: sliced_maker
+  maker_rest_seconds: 30      # 一張 Alo 掛多久沒成交就撤掉（≤ plan 長度）
+  maker_max_requotes: 2       # 同一片最多重報幾次；超過就以 §9.2 的 IOC 吃殘量
+```
+
+1. **掛單**：切片到期時讀 public `l2Book` 的 touch（`HyperliquidMarketData.get_top_of_book`），
+   買掛 best bid、賣掛 best ask，`tif: Alo`（post-only）、reduce_only 同 taker 片；價格過
+   `round_to_tick`（買向下、賣向上，只會更被動、不會 cross）。**一次只有一片在簿上**：上一片
+   沒結案前不送下一片。簿讀不到→該片 hold（事件 `slice_held:…:book_unavailable`），絕不拿
+   snapshot 的 mid 代替報價。
+2. **Alo 被拒**（ack error 為 API 文件字串「Post only order would have immediately matched,
+   bbo was …」）：不是 rule 2 的「拒絕不重送」，是報價過時——同一片下一 tick 以**新 cloid**
+   重報（cloid 的 leg 段加 `-r<n>`，§8.3 rule 9 的新邏輯單），計入 `maker_max_requotes`；
+   其他拒絕字照 rule 2 前進。
+3. **掛著期間**：每 tick 以 `orderStatus`（走 §13.5 identity monitor，site
+   `engine maker-slice poll`）確認：`filled`／canceled 家族→該片結案；仍 `open` 且掛滿
+   `maker_rest_seconds`→`cancelByCloid`（`cancel_reason=maker_timeout`，走 §16.5 evidence
+   協議），再讀一次 orderStatus 的 `sz` 取殘量：殘量 0→結案；重報次數未滿→以殘量再掛一張
+   Alo；滿了→以殘量送一張 §9.2 的 IOC（同一個 requote leg 標記）。殘量讀不到（unknownOid、
+   缺 `sz`、大於掛出量）→**不猜尺寸上鏈**，該片視同結案、殘量歸入 plan 的未知 residual
+   （rule 2 live v1 寫 NULL 不變）。
+4. **cursor 與終止**：`submitted` 在該片第一張 Alo 落簿時前進（片數計數不變）；leg 只有在
+   `submitted ≥ planned` **且簿上無單**時才 `completed`。plan 到期／倉位歸零／emergency
+   close／新決策取代而終止 leg 時，**先撤掉簿上那張**（`cancel_reason=plan_<status>`）；撤不掉
+   不擋終止——§19.3 啟動掃描、§18.2 收工掃描與 dead man's switch 都會收拾 bot-owned 的
+   resting 單，reconciliation 同時把本地 row 對齊。
+5. **不變**：stop_loss／take_profit／emergency_close 仍是 §9.4 的 aggressive IOC；§10.5 的
+   count-at-admission 仍成立（rule 3 修訂）；fill 歸屬與 residual 真值同 rule 2（live v1
+   NULL）。
+6. **啟動**：process 重啟時 in-memory 的 resting 片與 plan 一起作廢（`restart_abandoned`），
+   簿上那張由 §19.3 sweep 以 entry／rebalance 角色 cancel。
+7. **`Gtc` 不使用**：submitter 拒絕 `Gtc`（PR #271）——沒有任何掛單可以沒有 deadline。
+
 ### 9.3 Active Plan Overlap
 
 若存在 active slice plan 且尚未 terminal：
@@ -755,7 +795,8 @@ pump 只補寫入，例外上拋 tick guard（recoverable safe mode）；shutdow
    `no_order_reason = max_open_orders`，並觸發一次 reconciliation
    （正常單一 symbol 運行不應接近此上限，接近即是異常訊號）。
 3. **v1 計數點縮限（PR 5，2026-07-21，使用者拍板）**：計數僅在 plan admission
-   （`start_plan`）執行一次。slice IOC 從不 resting、不占 open-order 名額；SL/TP
+   （`start_plan`）執行一次。slice IOC 從不 resting；maker 片（§9.2.1）**最多同時一張**
+   resting 且 leg 終止前必撤（單一 symbol 上限≈SL＋TP＋1 片＝3 < 5）；SL/TP
    是 protective——若掛單前也過 count 檢查，計數讀取失敗的 fail-closed（視為
    at-cap）會擋住停損掛單本身，與 §4.1 protective 豁免哲學矛盾。單一 symbol 下
    實際 resting 上限 ≈ SL＋TP 兩張，plan-admission 檢查已覆蓋風險。

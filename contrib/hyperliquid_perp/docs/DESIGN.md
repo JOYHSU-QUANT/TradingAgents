@@ -195,6 +195,8 @@ structured target 與 Phase 1 legacy `PerpTradeDecision`）。決策如何從引
 > **Phase 3 註記**：live 執行採**自管切片 TWAP**（自送 IOC 限價切片單，帶 0.5%
 > 價格保護與 cloid），不用原生 twapOrder——SDK 未支援、API 無價格保護參數
 > （子單滑價固定 3%）且無 cloid。詳見 [phase3-spec §9.5](./phase3-spec.md)。
+> **2026-09-16 maker path**：`default_style: sliced_maker` 時每片改為 post-only（`Alo`）
+> 掛 touch、逾時 requote、再逾時以 IOC 吃殘量——見 [phase3-spec §9.2.1](./phase3-spec.md)。
 
 ---
 

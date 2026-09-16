@@ -12,6 +12,7 @@ import pytest
 
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import RiskConfig
+from contrib.hyperliquid_perp.domains.perp.schema import TopOfBook
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
     DecisionConfig,
     DecisionMode,
@@ -27,6 +28,7 @@ from contrib.hyperliquid_perp.live.config import (
 from contrib.hyperliquid_perp.live.engine import LiveExecutionEngine
 from contrib.hyperliquid_perp.live.loss_guards import LossGuards
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
+from contrib.hyperliquid_perp.live.orders import OrderStatusReading, SubmitOutcomeKind
 from contrib.hyperliquid_perp.live.protection import ProtectionOutcome
 from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
 from contrib.hyperliquid_perp.paper import accounting
@@ -34,6 +36,7 @@ from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.engine import AssetSpec
 from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
 from contrib.hyperliquid_perp.persistence import repository as repo
+from contrib.hyperliquid_perp.persistence.cloid import cloid_hex as derive_cloid_hex
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState
 
@@ -120,11 +123,24 @@ class _FakeReconciler:
 
 
 class _FakeIdentity:
-    """What the engine's escalation reads off the shared monitor (§13.5)."""
+    """What the engine's escalation reads off the shared monitor (§13.5).
+
+    ``readings`` scripts the maker path's orderStatus polls in order: an
+    ``OrderStatusReading``, ``None`` (unknownOid) or an exception to raise.
+    """
 
     def __init__(self) -> None:
         self.latched = False
         self.latched_site = "protection stop_loss no-op guard"
+        self.readings: list = []
+        self.probes: list = []
+
+    def probe(self, cloid_hex, *, site, role=None):
+        self.probes.append((cloid_hex, site))
+        result = self.readings.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class _FakeProtection:
@@ -187,6 +203,8 @@ def _build(
     open_orders=None,
     ws=None,
     seed=(),
+    fetch_top_of_book=None,
+    cancel_order=None,
 ):
     db = Database(tmp_path / "live.db")
     accounting.initialize_run(
@@ -230,6 +248,8 @@ def _build(
         ws_stream=ws or _FakeWs(),
         fetch_open_orders=lambda: open_orders if open_orders is not None else [],
         clock=clock,
+        fetch_top_of_book=fetch_top_of_book,
+        cancel_order=cancel_order,
     )
     return db, clock, engine, gate, fake_sub
 
@@ -1959,3 +1979,354 @@ def test_third_consecutive_loss_blocks_next_start_plan_same_run(tmp_path):
     assert plan["status"] == "rejected"
     assert plan["status_reason"] == reg.reason
     assert plan["output_id"] == "o1"
+
+
+# -- §9.2.1 maker slices ---------------------------------------------------------
+
+_BID, _ASK = D("49990"), D("50010")
+
+
+def _maker_config(**execution) -> LiveConfig:
+    cfg = {
+        "default_style": "sliced_maker",
+        "plan_duration_minutes": 60,
+        "slice_interval_seconds": 30,
+        "maker_rest_seconds": 30,
+        "maker_max_requotes": 2,
+    }
+    cfg.update(execution)
+    return _live_config(execution=cfg)
+
+
+def _resting_outcome(kw, oid="111"):
+    return SimpleNamespace(
+        outcome=SubmitOutcomeKind.ACKNOWLEDGED,
+        exchange_raw_status="resting",
+        cloid_hex=derive_cloid_hex(kw["cloid_logical"]),
+        exchange_order_id=oid,
+        ack=SimpleNamespace(is_post_only_cross=False),
+        error=None,
+    )
+
+
+def _refused_outcome(kw, *, post_only=True):
+    return SimpleNamespace(
+        outcome=SubmitOutcomeKind.REJECTED,
+        exchange_raw_status="error",
+        cloid_hex=derive_cloid_hex(kw["cloid_logical"]),
+        exchange_order_id=None,
+        ack=SimpleNamespace(is_post_only_cross=post_only),
+        error="Post only order would have immediately matched, bbo was 50000"
+        if post_only
+        else "Insufficient margin to place order.",
+    )
+
+
+class _MakerSubmitter(_FakeSubmitter):
+    """Records ``submit_limit`` (maker) and ``submit_ioc_limit`` (fallback) calls.
+
+    ``script`` is consumed one entry per ``submit_limit`` call: a callable of the
+    kwargs returning the outcome, or an exception to raise; an exhausted script
+    answers a resting ack.
+    """
+
+    def __init__(self, script=None) -> None:
+        super().__init__()
+        self.limit_calls: list[dict] = []
+        self.script = list(script or [])
+
+    def submit_limit(self, **kw):
+        self.limit_calls.append(kw)
+        step = self.script.pop(0) if self.script else _resting_outcome
+        if isinstance(step, Exception):
+            raise step
+        return step(kw)
+
+
+def _reading(status, remaining=None):
+    return OrderStatusReading(exchange_order_id="111", status=status, remaining_size=remaining)
+
+
+class _MakerHarness:
+    """A maker-style engine with its two seams recorded."""
+
+    def __init__(self, tmp_path, *, execution=None, script=None, book=None):
+        self.cancels: list[dict] = []
+        self.book_reads = 0
+        self.book_error: Exception | None = None
+        self.protection = _FakeProtection()
+        self.submitter = _MakerSubmitter(script)
+        top = book or TopOfBook(coin="BTC", best_bid=_BID, best_ask=_ASK, time=_T0)
+
+        def fetch_top_of_book(coin):
+            self.book_reads += 1
+            if self.book_error is not None:
+                raise self.book_error
+            return top
+
+        def cancel_order(*, cloid_hex, cloid_logical, cancel_reason):
+            self.cancels.append(
+                {"cloid_hex": cloid_hex, "cloid_logical": cloid_logical, "reason": cancel_reason}
+            )
+
+        self.db, self.clock, self.engine, self.gate, _ = _build(
+            tmp_path,
+            live=_maker_config(**(execution or {})),
+            submitter=self.submitter,
+            protection=self.protection,
+            fetch_top_of_book=fetch_top_of_book,
+            cancel_order=cancel_order,
+        )
+
+    @property
+    def identity(self) -> _FakeIdentity:
+        return self.protection.identity
+
+    def start(self, margin=5):
+        _script(self.engine, [_snap()])
+        reg = self.engine.start_plan(_decision("long", margin), output_id="o1")
+        assert reg.plan_id is not None and reg.reason is None, reg
+        return reg
+
+    def tick(self, *, advance=10):
+        self.clock.advance(advance)
+        _script(self.engine, [_snap()])
+        return self.engine.tick()
+
+
+def test_maker_style_refuses_construction_without_its_seams(tmp_path):
+    with pytest.raises(ValueError, match="fetch_top_of_book / cancel_order"):
+        _build(tmp_path, live=_maker_config())
+
+
+def test_maker_slice_joins_the_touch_post_only_and_rests_one_at_a_time(tmp_path):
+    h = _MakerHarness(tmp_path)
+    reg = h.start()  # 0.004 BTC -> 4 slices of 0.001
+    # Tick 1: the first slice is due at t=0 and is posted at the bid, Alo.
+    r1 = h.tick()
+    (call,) = h.submitter.limit_calls
+    assert call["tif"] == "Alo" and call["side"] == "buy"
+    assert call["limit_price"] == _BID  # joins the bid, never the mid
+    assert call["size"] == D("0.001") and call["reduce_only"] is False
+    assert r1.slices_submitted == 1 and any(e.startswith("maker_slice:") for e in r1.events)
+    assert h.submitter.calls == []  # nothing crossed
+    # Tick 2 (+10s): slice 2 is not due yet AND slice 1 still rests -> poll only.
+    h.identity.readings = [_reading("open")]
+    r2 = h.tick()
+    assert len(h.submitter.limit_calls) == 1 and r2.slices_submitted == 0
+    # Tick 3 (+20s in): still resting, still under the rest timeout -> poll only.
+    h.identity.readings = [_reading("open")]
+    h.tick()
+    assert len(h.submitter.limit_calls) == 1
+    # Tick 4 (+35s): slice 1 filled -> the book is clear and slice 2 (due since
+    # +30s) goes out in the same tick; still one slice on the book at a time.
+    h.identity.readings = [_reading("filled")]
+    r4 = h.tick(advance=5)
+    assert any(e.startswith("maker_gone:") for e in r4.events)
+    assert len(h.submitter.limit_calls) == 2
+    assert h.submitter.limit_calls[1]["cloid_logical"].endswith("_na_001_entry")
+    assert h.cancels == []
+    plan = repo.get_execution_plan(h.db.conn, reg.plan_id)
+    assert plan["status"] == "active"
+
+
+def test_maker_rest_timeout_pulls_and_requotes_the_venue_stated_remainder(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    first = h.submitter.limit_calls[0]
+    # +30s: still open at the touch -> cancel, read the remainder, requote it.
+    h.identity.readings = [_reading("open"), _reading("canceled", remaining=D("0.0004"))]
+    r = h.tick(advance=30)
+    (cancel,) = h.cancels
+    assert cancel["reason"] == "maker_timeout"
+    assert cancel["cloid_hex"] == derive_cloid_hex(first["cloid_logical"])
+    requote = h.submitter.limit_calls[1]
+    assert requote["size"] == D("0.0004") and requote["tif"] == "Alo"
+    # A requote is a NEW logical order: fresh cloid via the leg marker.
+    assert "_na-r1_000_" in requote["cloid_logical"]
+    assert requote["cloid_logical"] != first["cloid_logical"]
+    assert h.submitter.calls == []  # no IOC yet
+    assert any(e.startswith("maker_timeout:") for e in r.events)
+    # The cursor counted the slice once (its first Alo), not per requote.
+    assert h.engine._leg.submitted == 1 and h.engine._leg.attempt == 1
+
+
+def test_requote_budget_exhausted_crosses_the_remainder_with_the_ioc(tmp_path):
+    h = _MakerHarness(tmp_path, execution={"maker_max_requotes": 0})
+    h.start()
+    h.tick()
+    h.identity.readings = [_reading("open"), _reading("canceled", remaining=D("0.0007"))]
+    r = h.tick(advance=30)
+    (ioc,) = h.submitter.calls
+    assert ioc["size"] == D("0.0007")
+    assert "_na-r1_000_" in ioc["cloid_logical"]
+    assert ioc["limit_price"] > _MARK  # the bounded, marketable IOC band
+    assert any(e.startswith("maker_fallback_ioc:") for e in r.events)
+    # No second Alo for slice 0; slice 1 (due at +30s) went out once the book
+    # was clear — still one slice on the book at a time.
+    assert [c["cloid_logical"][-13:] for c in h.submitter.limit_calls] == [
+        "_na_000_entry",
+        "_na_001_entry",
+    ]
+    assert h.engine._leg.resting is not None and h.engine._leg.attempt == 0
+
+
+def test_a_post_only_refusal_requotes_next_tick_then_crosses(tmp_path):
+    h = _MakerHarness(
+        tmp_path,
+        execution={"maker_max_requotes": 1},
+        script=[_refused_outcome, _refused_outcome],
+    )
+    h.start()
+    r1 = h.tick()  # refused: stale quote, cursor held, attempt 1
+    assert h.engine._leg.submitted == 0 and h.engine._leg.attempt == 1
+    assert any(e.startswith("maker_requote:") for e in r1.events)
+    h.tick()  # refused again: attempt 2 > budget 1
+    assert h.engine._leg.submitted == 0 and h.engine._leg.attempt == 2
+    r3 = h.tick()  # crosses with the IOC under the requote marker
+    (ioc,) = h.submitter.calls
+    assert "_na-r2_000_" in ioc["cloid_logical"]
+    assert h.engine._leg.submitted == 1
+    assert any(e.startswith("maker_fallback_ioc:") for e in r3.events)
+    assert len(h.submitter.limit_calls) == 2
+
+
+def test_any_other_refusal_advances_the_cursor_as_rule_2_says(tmp_path):
+    h = _MakerHarness(tmp_path, script=[lambda kw: _refused_outcome(kw, post_only=False)])
+    h.start()
+    r = h.tick()
+    assert h.engine._leg.submitted == 1 and h.engine._leg.resting is None
+    assert any(e.startswith("slice_rejected:") for e in r.events)
+    assert h.submitter.calls == []
+
+
+def test_a_book_that_cannot_be_read_holds_the_slice(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.book_error = RuntimeError("l2Book timed out")
+    r = h.tick()
+    assert h.submitter.limit_calls == [] and h.submitter.calls == []
+    assert h.engine._leg.submitted == 0
+    assert any(e.endswith(":book_unavailable") for e in r.events)
+    h.book_error = None
+    h.tick()
+    assert len(h.submitter.limit_calls) == 1  # retried, not consumed
+
+
+def test_an_unknown_remainder_is_never_guessed_onto_the_wire(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    # After the cancel the venue answers with no size: remainder unknown.
+    h.identity.readings = [_reading("open"), _reading("canceled", remaining=None)]
+    h.tick(advance=30)
+    assert len(h.cancels) == 1
+    assert h.submitter.calls == []  # no IOC for a size the venue never stated
+    # Slice 0 is done (no requote); slice 1 went out on its due tick.
+    assert [c["cloid_logical"][-13:] for c in h.submitter.limit_calls] == [
+        "_na_000_entry",
+        "_na_001_entry",
+    ]
+    assert h.engine._leg.submitted == 2
+
+
+def test_a_failed_poll_is_retried_and_the_slice_keeps_resting(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.identity.readings = [RuntimeError("orderStatus 503")]
+    r = h.tick()
+    assert any(e.startswith("maker_poll_failed:") for e in r.events)
+    assert h.engine._leg.resting is not None and h.cancels == []
+
+
+def test_the_leg_completes_only_after_the_last_slice_leaves_the_book(tmp_path):
+    h = _MakerHarness(tmp_path)
+    reg = h.start(margin=2)  # 80 USDC -> 0.0016 BTC -> floors to one 0.001 clip
+    h.tick()
+    assert h.engine._leg is not None  # submitted == planned, but it still rests
+    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "active"
+    h.identity.readings = [_reading("filled")]
+    r = h.tick()
+    assert h.engine._leg is None
+    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "completed"
+    assert any(e.startswith("plan_terminal:") for e in r.events)
+    assert h.cancels == []
+
+
+def test_plan_expiry_pulls_the_resting_slice_first(tmp_path):
+    h = _MakerHarness(tmp_path)
+    reg = h.start()
+    h.tick()
+    resting = h.engine._leg.resting
+    h.identity.readings = [_reading("open")] * 3
+    r = h.tick(advance=61 * 60)
+    (cancel,) = h.cancels
+    assert cancel["reason"] == "plan_expired"
+    assert cancel["cloid_hex"] == resting.cloid_hex
+    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "expired"
+    assert any(e.startswith("maker_canceled:") for e in r.events)
+
+
+def test_a_failed_terminal_cancel_does_not_block_the_leg_from_ending(tmp_path):
+    h = _MakerHarness(tmp_path)
+    reg = h.start()
+    h.tick()
+
+    def boom(**kw):
+        raise RuntimeError("cancel timed out")
+
+    h.engine._cancel_order = boom
+    h.identity.readings = [_reading("open")] * 3
+    r = h.tick(advance=61 * 60)
+    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "expired"
+    assert any(e.startswith("maker_cancel_failed:") for e in r.events)
+
+
+def test_emergency_close_pulls_the_resting_slice_before_crossing(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    order: list[str] = []
+    real_cancel = h.engine._cancel_order
+
+    def cancel_then_note(**kw):
+        order.append("cancel")
+        real_cancel(**kw)
+
+    h.engine._cancel_order = cancel_then_note
+    ioc = h.submitter.submit_ioc_limit
+
+    def ioc_then_note(**kw):
+        order.append("ioc")
+        return ioc(**kw)
+
+    h.submitter.submit_ioc_limit = ioc_then_note
+    # A seeded position so the close has something to cut.
+    with h.db.transaction() as conn:
+        repo.upsert_current_position(
+            conn,
+            "r",
+            PositionState(coin="BTC", size=D("0.001"), entry_price=_MARK),
+            updated_at=_T0,
+        )
+    h.engine._was_flat = False
+    h.protection.outcome = ProtectionOutcome.NEEDS_EMERGENCY_CLOSE
+    h.tick()
+    assert order == ["cancel", "ioc"]
+    assert h.cancels[0]["reason"] == "plan_canceled"
+
+
+def test_the_taker_style_does_not_touch_the_book_or_the_cancel_seam(tmp_path):
+    reads: list[str] = []
+    db, clock, engine, gate, sub = _build(
+        tmp_path,
+        fetch_top_of_book=lambda coin: reads.append(coin),
+        cancel_order=lambda **kw: reads.append("cancel"),
+    )
+    _script(engine, [_snap()])
+    engine.start_plan(_decision("long", 5), output_id="o1")
+    _script(engine, [_snap()])
+    engine.tick()
+    assert len(sub.calls) == 1 and reads == []

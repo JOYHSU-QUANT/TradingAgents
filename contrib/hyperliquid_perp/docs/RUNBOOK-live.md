@@ -721,7 +721,9 @@ disarm 交叉檢查，走的是同一個 `VenueIdentityMonitor`——所以故�
 | probe | `protection {role} recovery probe` |
 | probe | `reconcile orphan-order tiebreaker` |
 | probe | `reconcile absent-order settle` |
+| probe | `reconcile orphan-order type` |
 | probe | `kill-switch disarm cross-check` |
+| probe | `engine maker-slice poll` |
 | holder | `§17 protection sync` |
 | holder | `§12 reconciliation, {trigger}` |
 | holder | `§18.2 shutdown disarm cross-check` |

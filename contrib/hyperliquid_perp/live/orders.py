@@ -43,14 +43,18 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from ..common.enum_guard import VocabEnum
+from ..common.enum_guard import VocabEnum, check_enum
 from ..exchanges.hyperliquid.errors import (
     ExchangeError,
     MalformedResponseError,
     OrderIdempotencyContradiction,
 )
 from ..exchanges.hyperliquid.mapper import hex_identity_matches
-from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient, OrderAck
+from ..exchanges.hyperliquid.signed_client import (
+    LIMIT_TIFS,
+    HyperliquidSignedClient,
+    OrderAck,
+)
 from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.cloid import assert_cloid_provenance, cloid_hex as derive_cloid_hex
@@ -80,6 +84,28 @@ logger = logging.getLogger(__name__)
 # purpose: :func:`parse_order_status` is its one reader and owns the shape.
 OrderStatusQuery = Callable[[str], Any]
 
+# The time-in-force words THIS layer submits, each with the ``orders.type``
+# word it is recorded under (§16.1). A strict subset of the transport's
+# ``LIMIT_TIFS``: ``Gtc`` is legal on the wire but has no caller here — nothing
+# in v1 rests an order without a deadline of its own — so it is refused before
+# any evidence is written rather than recorded under a type the vocabulary
+# does not carry. ``Ioc`` is the taker slice (§9.2), ``Alo`` the post-only
+# maker slice (2026-09-16 maker path).
+_ORDER_TYPE_FOR_TIF = {"Ioc": "ioc_limit", "Alo": "alo_limit"}
+_SUBMITTABLE_TIFS = frozenset(_ORDER_TYPE_FOR_TIF)
+# Literal copies of two other modules' vocabularies, pinned at import (the
+# protection.py / startup.py guard family). A tif respelled in the transport
+# but not here would pass this layer's check, write the registry row, the
+# orders row and a 'submitted' attempt, and only THEN be refused by
+# place_limit — riding the post-wire failure lane, burning a cloid per slice
+# while telling the caller "outcome unknown" for an order that never left the
+# process. A type respelled in the repository but not here would fail inside
+# the intent transaction on the first live submit instead of at startup.
+if not _SUBMITTABLE_TIFS <= LIMIT_TIFS:
+    raise AssertionError("_SUBMITTABLE_TIFS drifted from signed_client.LIMIT_TIFS")
+if not set(_ORDER_TYPE_FOR_TIF.values()) <= repo.ORDER_TYPES:
+    raise AssertionError("_ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES")
+
 
 @dataclass(frozen=True, slots=True)
 class OrderStatusReading:
@@ -98,7 +124,7 @@ class OrderStatusReading:
 
 
 class LiveOrderPreSubmitError(RuntimeError):
-    """``submit_ioc_limit`` failed LOCALLY before the wire — nothing was sent.
+    """``submit_limit`` failed LOCALLY before the wire — nothing was sent.
 
     Raised for a pre-wire-phase failure (the §8.3 pre-check reads or the
     intent transaction) with no pinned meaning of its own — a ``sqlite3.Error``
@@ -129,7 +155,7 @@ class SubmitOutcomeKind(VocabEnum, noun="submit outcome"):
 
 @dataclass(frozen=True)
 class SubmitOutcome:
-    """What one :meth:`LiveOrderSubmitter.submit_ioc_limit` call achieved.
+    """What one :meth:`LiveOrderSubmitter.submit_limit` call achieved.
 
     ``outcome``:
 
@@ -331,6 +357,7 @@ class LiveOrderSubmitter:
         cloid_logical: str,
         cloid_hex: str,
         order_role: str,
+        order_type: str,
         reduce_only: bool,
         output_id: str | None,
         flip_plan_id: str | None,
@@ -373,6 +400,19 @@ class LiveOrderSubmitter:
                     f"{existing['cloid_hex']!r}, not {cloid_hex!r} — an order_id "
                     "keeps one cloid pair for life (§8.3)"
                 )
+            if existing["type"] != order_type:
+                # Same coherence rule for the wire shape: a rule-5 resend of the
+                # same order_id under a different tif would send the NEW shape
+                # while the row (whose type is written once, at insert) kept the
+                # old one — and nothing else persists the tif actually sent, so
+                # the audit trail could never tell. An Alo refused by the venue
+                # that must go out as an IOC is a NEW logical order (§8.3 rule 9):
+                # new order_id, new cloid, its own type.
+                raise ValueError(
+                    f"order {order_id!r} already exists with type "
+                    f"{existing['type']!r}, not {order_type!r} — an order_id "
+                    "keeps one type for life, like its cloid pair"
+                )
             return False
         repo.insert_order(
             conn,
@@ -382,7 +422,7 @@ class LiveOrderSubmitter:
             symbol=coin,
             order_role=order_role,
             side=side,
-            order_type="ioc_limit",
+            order_type=order_type,
             qty=size,
             status=status,
             status_reason=status_reason,
@@ -423,12 +463,61 @@ class LiveOrderSubmitter:
         flip_leg: str | None = None,
         parent_order_id: str | None = None,
     ) -> SubmitOutcome:
-        """Place one IOC limit order under the §8.3 idempotent-retry contract.
+        """:meth:`submit_limit` with ``tif="Ioc"`` — the §9.2 taker slice.
 
-        ``order_id`` and ``cloid_logical`` are minted by the caller (the PR 5
-        engine derives both deterministically from run/plan/slice), so a retry
-        of the same logical order arrives here with the same identifiers —
-        which is exactly what makes the protocol idempotent.
+        Kept as its own name so every caller that means "marketable, cancel
+        the remainder" says so at the call site; the maker slice calls
+        :meth:`submit_limit` with ``"Alo"`` directly.
+        """
+        return self.submit_limit(
+            order_id=order_id,
+            coin=coin,
+            side=side,
+            size=size,
+            limit_price=limit_price,
+            cloid_logical=cloid_logical,
+            order_role=order_role,
+            tif="Ioc",
+            reduce_only=reduce_only,
+            output_id=output_id,
+            flip_plan_id=flip_plan_id,
+            flip_leg=flip_leg,
+            parent_order_id=parent_order_id,
+        )
+
+    def submit_limit(
+        self,
+        *,
+        order_id: str,
+        coin: str,
+        side: str,
+        size: Decimal,
+        limit_price: Decimal,
+        cloid_logical: str,
+        order_role: str,
+        tif: str,
+        reduce_only: bool = False,
+        output_id: str | None = None,
+        flip_plan_id: str | None = None,
+        flip_leg: str | None = None,
+        parent_order_id: str | None = None,
+    ) -> SubmitOutcome:
+        """Place one limit order with time-in-force ``tif`` under the §8.3 contract.
+
+        ``tif`` is a key of :data:`_ORDER_TYPE_FOR_TIF` (``"Ioc"`` / ``"Alo"``)
+        and decides the ``orders.type`` word the row is recorded under. An
+        unsupported word is a ``ValueError`` — a contract violation in the same
+        lane as a bad cloid provenance: nothing is written and nothing is sent,
+        but it is NOT a gate refusal or a ``LiveOrderPreSubmitError``, so a
+        caller modelled on the engine's ``_submit_slice`` lands it in its
+        catch-all (``SENT_FAILED``, cursor advances) rather than holding the
+        slice. That is the right reading — the caller's own code is wrong, not
+        the store or the wire — and a maker caller must pass a supported word
+        by construction. ``order_id`` and ``cloid_logical`` are
+        minted by the caller (the PR 5 engine derives both deterministically
+        from run/plan/slice), so a retry of the same logical order arrives
+        here with the same identifiers — which is exactly what makes the
+        protocol idempotent.
         """
         # §4.1 first, before any evidence is written: a gate-blocked order
         # must leave no phantom 'submitted' rows behind (the caller records
@@ -449,6 +538,10 @@ class LiveOrderSubmitter:
         # unknown" (everything past the network call) — the two demand
         # opposite cursor handling (§9.2 rule 2 applies only to sent orders).
         try:
+            # Same footprint as a gate refusal: a contract slip is refused
+            # before any evidence exists, and ``check_enum`` names the vocabulary.
+            check_enum(tif, _SUBMITTABLE_TIFS, name="tif")
+            order_type = _ORDER_TYPE_FOR_TIF[tif]
             # The cloid and the provenance fields beside it describe the same
             # order twice; both reach the audit trail, and only this check makes
             # them agree. Before the intent transaction, so a contradictory pair
@@ -473,6 +566,7 @@ class LiveOrderSubmitter:
                     cloid_logical=cloid_logical,
                     cloid_hex=hex_id,
                     order_role=order_role,
+                    order_type=order_type,
                     reduce_only=reduce_only,
                     output_id=output_id,
                     flip_plan_id=flip_plan_id,
@@ -514,6 +608,7 @@ class LiveOrderSubmitter:
                     cloid_logical=cloid_logical,
                     cloid_hex=hex_id,
                     order_role=order_role,
+                    order_type=order_type,
                     reduce_only=reduce_only,
                     output_id=output_id,
                     flip_plan_id=flip_plan_id,
@@ -602,12 +697,13 @@ class LiveOrderSubmitter:
         # was never sent. Validating here would need the exchange's perp meta,
         # which is the plan builder's (§9.1) job, not the transport's.
         try:
-            ack = self._client.place_ioc_limit(
+            ack = self._client.place_limit(
                 coin=coin,
                 is_buy=is_buy,
                 size=size,
                 limit_price=limit_price,
                 cloid_hex=hex_id,
+                tif=tif,
                 reduce_only=reduce_only,
                 protective=protective,
             )
@@ -770,6 +866,7 @@ class LiveOrderSubmitter:
         cloid_logical: str,
         cloid_hex: str,
         order_role: str,
+        order_type: str,
         reduce_only: bool,
         output_id: str | None,
         flip_plan_id: str | None,
@@ -808,7 +905,7 @@ class LiveOrderSubmitter:
             # contradicts local evidence (retention expiry, an Info
             # inconsistency) and a resend would be accepted as a brand-new
             # order. Same fail-loud posture as the duplicate/unknownOid
-            # contradiction in submit_ioc_limit.
+            # contradiction in submit_limit.
             #
             # "Took it" means BOTH kinds of durable proof: an acknowledged or
             # duplicate place attempt, AND an orders row already carrying an
@@ -852,6 +949,7 @@ class LiveOrderSubmitter:
                 cloid_logical=cloid_logical,
                 cloid_hex=cloid_hex,
                 order_role=order_role,
+                order_type=order_type,
                 reduce_only=reduce_only,
                 output_id=output_id,
                 flip_plan_id=flip_plan_id,

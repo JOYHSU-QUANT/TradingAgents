@@ -908,3 +908,80 @@ def test_map_exchange_time_rejects_a_non_dict_and_a_misrouted_coin():
     # ``None`` skips the identity check (identity-agnostic fixtures), like the
     # candle and funding mappers.
     assert mapper.map_exchange_time({"coin": "ETH", "time": 1000}) is not None
+
+
+# ---------------------------------------------------------------------------
+# l2Book -> the top of book (maker path, 2026-09-16)
+# ---------------------------------------------------------------------------
+
+_BOOK = {
+    "coin": "BTC",
+    "time": 1787369175468,
+    "levels": [
+        [{"px": "99.5", "sz": "1.2", "n": 3}, {"px": "99.0", "sz": "4", "n": 1}],
+        [{"px": "100.5", "sz": "0.7", "n": 2}, {"px": "101.0", "sz": "2", "n": 5}],
+    ],
+}
+
+
+def _lvl(px, sz="1"):
+    return {"px": px, "sz": sz, "n": 1}
+
+
+def test_map_top_of_book_reads_the_head_of_each_side_and_the_clock():
+    top = mapper.map_top_of_book(_BOOK, expected_coin="BTC")
+    assert top.coin == "BTC"
+    assert (top.best_bid, top.best_ask) == (Decimal("99.5"), Decimal("100.5"))
+    assert top.time == mapper.map_exchange_time(_BOOK)
+
+
+def test_map_top_of_book_rejects_a_misrouted_coin_like_the_clock_read():
+    with pytest.raises(MalformedResponseError, match="carries coin 'BTC'"):
+        mapper.map_top_of_book(_BOOK, expected_coin="ETH")
+
+
+@pytest.mark.parametrize(
+    "levels, why",
+    [
+        ([], r"not a \[bids, asks\] pair"),
+        ([[_lvl("99")]], r"not a \[bids, asks\] pair"),
+        ("bids,asks", r"not a \[bids, asks\] pair"),
+        ([[], [_lvl("100.5")]], "bids side is empty"),
+        ([[_lvl("99.5")], []], "asks side is empty"),
+        ([[_lvl("99.5")], "100.5"], "asks side is not a list"),
+        ([[_lvl("99.5")], ["100.5"]], "best ask level is not an object"),
+        ([[{"sz": "1"}], [_lvl("100.5")]], r"missing required field 'bids\[0\].px'"),
+        ([[{"px": "99.5"}], [_lvl("100.5")]], r"missing required field 'bids\[0\].sz'"),
+        ([[_lvl("99.5", "0")], [_lvl("100.5")]], "best bid level has no size"),
+        ([[_lvl("99.5")], [_lvl("100.5", "-1")]], "best ask level has no size"),
+        ([[_lvl("abc")], [_lvl("100.5")]], "not numeric"),
+        ([[_lvl("NaN")], [_lvl("100.5")]], "not a finite number"),
+    ],
+)
+def test_map_top_of_book_refuses_a_side_it_cannot_join(levels, why):
+    # An empty side — or a head level with no size, the empty side wearing a
+    # price — is refused, never defaulted: "no bid" means there is no touch for
+    # a maker slice to join, and a default price would be posted against nothing.
+    with pytest.raises(MalformedResponseError, match=why):
+        mapper.map_top_of_book({**_BOOK, "levels": levels}, expected_coin="BTC")
+
+
+@pytest.mark.parametrize("bid, ask", [("100.5", "100.5"), ("101", "100.5"), ("0", "100.5")])
+def test_map_top_of_book_refuses_a_crossed_locked_or_zero_book(bid, ask):
+    levels = [[_lvl(bid)], [_lvl(ask)]]
+    with pytest.raises(MalformedResponseError, match="top of book is unusable"):
+        mapper.map_top_of_book({**_BOOK, "levels": levels}, expected_coin="BTC")
+
+
+def test_map_top_of_book_without_an_expected_coin_needs_a_string_coin():
+    # Identity-agnostic callers still get a coin on the DTO — from the payload —
+    # and a payload with none is malformed, not a TopOfBook named "None".
+    assert mapper.map_top_of_book(_BOOK).coin == "BTC"
+    with pytest.raises(MalformedResponseError, match="'coin' is not a string"):
+        mapper.map_top_of_book({**_BOOK, "coin": None})
+
+
+def test_map_top_of_book_needs_the_clock_like_the_clock_read():
+    # The same fail-closed stamp rule as map_exchange_time: no clock, no quote.
+    with pytest.raises(MalformedResponseError, match="'time' is unusable"):
+        mapper.map_top_of_book({**_BOOK, "time": None}, expected_coin="BTC")

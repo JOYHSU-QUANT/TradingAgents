@@ -19,6 +19,11 @@ The full §4.1 list is a
 DECISION question, asked once per cycle through ``check_new_target`` by the
 engine, not per order. Queries are read-only and ungated.
 
+The maker path (2026-09-16) generalises the order shape: :meth:`place_limit`
+and :meth:`modify_limit` take an explicit time-in-force from :data:`LIMIT_TIFS`
+(``Alo`` post-only / ``Ioc`` / ``Gtc``), and :meth:`place_ioc_limit` stays as
+the taker spelling every existing caller uses.
+
 This layer is transport only: no persistence, no retry policy. The §8.3
 idempotent-retry protocol (registry write before send, query-before-resend on
 duplicate) lives in :mod:`contrib.hyperliquid_perp.live.orders`, the intended
@@ -81,6 +86,17 @@ def is_duplicate_cloid_error(message: str | None) -> bool:
         return False
     lowered = message.lower()
     return any(marker in lowered for marker in _DUPLICATE_CLOID_MARKERS)
+
+
+# The ``limit`` order body's time-in-force words, verbatim as the SDK's ``Tif``
+# type spells them. ``Ioc`` is the §9 slice / §9.4 close shape (marketable,
+# cancels the unfilled remainder); ``Alo`` (add-liquidity-only, post-only) is
+# the maker slice — the venue REJECTS rather than fills an Alo that would
+# cross the book, so its unfilled remainder is the whole order; ``Gtc`` rests
+# until canceled. Checked at the wire so a typo (``"IOC"``, ``"alo"``) is a
+# named refusal here instead of a signed request the venue answers with an
+# opaque error — and never a resting order we meant to be immediate.
+LIMIT_TIFS = frozenset({"Alo", "Ioc", "Gtc"})
 
 
 @dataclass(frozen=True)
@@ -431,7 +447,7 @@ class HyperliquidSignedClient:
         response = call_sdk(self._exchange.update_leverage, leverage, coin, is_cross)
         _response_payload(response, action="updateLeverage")
 
-    def place_ioc_limit(
+    def place_limit(
         self,
         *,
         coin: str,
@@ -439,10 +455,21 @@ class HyperliquidSignedClient:
         size: Decimal,
         limit_price: Decimal,
         cloid_hex: str,
+        tif: str,
         reduce_only: bool = False,
         protective: bool = False,
     ) -> OrderAck:
-        """Submit one IOC limit order carrying its cloid (§7 ``order``, §9).
+        """Submit one limit order with time-in-force ``tif`` and its cloid (§7 ``order``).
+
+        ``tif`` is one of :data:`LIMIT_TIFS`, checked before the gate so a
+        vocabulary slip is refused by name rather than signed and sent.
+        ``"Ioc"`` is the §9.2 slice shape (see :meth:`place_ioc_limit`);
+        ``"Alo"`` is the post-only maker slice, which the venue rejects — a
+        per-order ``error`` ack — instead of filling when it would cross the
+        book, so the venue answers an Alo with ``resting`` or ``error``. That
+        is a venue property, not one this layer enforces: the ack parser books
+        whatever word came back, so a ``filled`` Alo (a venue-semantics change)
+        would be recorded as the fill it claims to be, not refused.
 
         The §4.1 gate bound at construction runs first — a rejection raises
         ``LiveOrderGateRejected`` before any network traffic. It is the
@@ -465,6 +492,7 @@ class HyperliquidSignedClient:
         caller (:class:`~...live.orders.LiveOrderSubmitter`) sets it from the
         order role so this backstop and its own pre-check agree.
         """
+        check_enum(tif, LIMIT_TIFS, name="tif")
         if protective:
             self._gate.require_protective_order(coin)
         else:
@@ -475,11 +503,40 @@ class HyperliquidSignedClient:
             is_buy,
             float(size),
             float(limit_price),
-            {"limit": {"tif": "Ioc"}},
+            {"limit": {"tif": tif}},
             reduce_only,
             Cloid.from_str(cloid_hex),
         )
         return _parse_order_ack(response, expected_cloid_hex=cloid_hex)
+
+    def place_ioc_limit(
+        self,
+        *,
+        coin: str,
+        is_buy: bool,
+        size: Decimal,
+        limit_price: Decimal,
+        cloid_hex: str,
+        reduce_only: bool = False,
+        protective: bool = False,
+    ) -> OrderAck:
+        """:meth:`place_limit` with ``tif="Ioc"`` — the §9.2 slice and §9.4 close shape.
+
+        Kept as its own name because every caller that means "marketable,
+        cancel the remainder" (the slice engine, the emergency close, the
+        smoke suite) should say so at the call site rather than spell a wire
+        word; the maker path goes through :meth:`place_limit` directly.
+        """
+        return self.place_limit(
+            coin=coin,
+            is_buy=is_buy,
+            size=size,
+            limit_price=limit_price,
+            cloid_hex=cloid_hex,
+            tif="Ioc",
+            reduce_only=reduce_only,
+            protective=protective,
+        )
 
     def place_trigger_order(
         self,
@@ -564,6 +621,51 @@ class HyperliquidSignedClient:
             float(size),
             float(limit_price),
             {"trigger": {"triggerPx": float(trigger_price), "isMarket": is_market, "tpsl": tpsl}},
+            reduce_only,
+            Cloid.from_str(cloid_hex),
+        )
+        return _parse_order_ack(response, expected_cloid_hex=cloid_hex)
+
+    def modify_limit(
+        self,
+        *,
+        target: str,
+        coin: str,
+        is_buy: bool,
+        size: Decimal,
+        limit_price: Decimal,
+        cloid_hex: str,
+        tif: str,
+        reduce_only: bool = False,
+        protective: bool = False,
+    ) -> OrderAck:
+        """Re-price a resting limit order in place (§7 ``modify``) — the maker requote.
+
+        ``target`` is the exchange order id of the resting order being
+        replaced; the replacement carries a FRESH ``cloid_hex`` (a new price is
+        a new logical order, §8.3 rule 9), the same one-cloid-one-order
+        discipline :meth:`modify_trigger_order` follows for SL/TP. ``tif`` is
+        checked against :data:`LIMIT_TIFS` like :meth:`place_limit`, and the
+        gate is the ORDER gate (``require_order``) — a requote of an entry /
+        rebalance slice is a risk-adding order, not a protective one, unless
+        the caller says otherwise with ``protective``. The ack is the
+        replacement order's: ``resting`` on success, ``error`` when the venue
+        refused it (the original may then be gone or still resting — the
+        caller resolves that through orderStatus, never by assumption).
+        """
+        check_enum(tif, LIMIT_TIFS, name="tif")
+        if protective:
+            self._gate.require_protective_order(coin)
+        else:
+            self._gate.require_order(coin)
+        response = call_sdk(
+            self._exchange.modify_order,
+            int(target),
+            coin,
+            is_buy,
+            float(size),
+            float(limit_price),
+            {"limit": {"tif": tif}},
             reduce_only,
             Cloid.from_str(cloid_hex),
         )

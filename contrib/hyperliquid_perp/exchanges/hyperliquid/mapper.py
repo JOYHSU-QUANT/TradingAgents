@@ -12,7 +12,8 @@ The shapes handled:
 - ``candleSnapshot`` -> ``[{t,T,o,h,l,c,v}, ...]``.
 - ``fundingHistory`` -> ``[{fundingRate, premium, time}, ...]``.
 - ``clearinghouseState`` (a.k.a. ``user_state``) -> margin summary + positions.
-- ``l2Book`` -> the exchange's clock only (``time``; the levels are unused).
+- ``l2Book`` -> the exchange's clock (``time``) and, for the maker slice, the
+  best bid / ask (the head of each ``levels`` side).
 
 **Snapshots, not every wire field in the system.** This docstring used to claim
 to be "the only module allowed to know Hyperliquid's raw field names". That was
@@ -71,6 +72,7 @@ from ...domains.perp.schema import (
     FundingPoint,
     MarketSnapshot,
     PerpPosition,
+    TopOfBook,
     epoch_ms_out_of_range,
 )
 from .errors import MalformedResponseError, UnknownCoinError
@@ -668,7 +670,7 @@ def map_funding_history(
 
 
 # --------------------------------------------------------------------------
-# l2Book -> the exchange's clock
+# l2Book -> the exchange's clock / the top of book
 # --------------------------------------------------------------------------
 
 
@@ -712,6 +714,58 @@ def map_exchange_time(raw: Any, *, expected_coin: str | None = None) -> datetime
         raise MalformedResponseError(
             f"l2Book 'time' is unusable as epoch ms ({stamp!r}): {exc}"
         ) from exc
+
+
+def map_top_of_book(raw: Any, *, expected_coin: str | None = None) -> TopOfBook:
+    """The best bid / ask off an ``l2Book`` snapshot, stamped with its clock.
+
+    ``levels`` is ``[bids, asks]``, each side best-first, each level ``{"px",
+    "sz", "n"}``; only the two head levels are read. An EMPTY side — or a
+    head level with no size — is refused, not defaulted: a maker slice joins
+    the touch, and "no bid" means there is no touch to join — the caller must
+    not be handed a price it would then post against nothing. Sizes are read
+    only for that guard; the DTO carries prices alone (no reader for depth
+    yet). A crossed or locked book is refused by
+    :class:`TopOfBook` itself, re-raised here as the malformed response it is.
+    The clock goes through :func:`map_exchange_time`, so the two readers of
+    this one payload (the freshness guard's clock, the maker slice's quote)
+    can never disagree on what it said.
+    """
+    when = map_exchange_time(raw, expected_coin=expected_coin)
+    coin = raw.get("coin")
+    if not isinstance(coin, str):
+        # ``map_exchange_time`` checks the echo only when asked; a caller that
+        # skipped the identity check still gets a named coin on the DTO.
+        raise MalformedResponseError(f"l2Book 'coin' is not a string: {coin!r}")
+    levels = raw.get("levels")
+    if not isinstance(levels, list) or len(levels) != 2:
+        raise MalformedResponseError(f"l2Book 'levels' is not a [bids, asks] pair: {levels!r}")
+    touch: list[Decimal] = []
+    for side_name, side in zip(("bids", "asks"), levels, strict=True):
+        if not isinstance(side, list):
+            raise MalformedResponseError(f"l2Book {side_name} side is not a list: {side!r}")
+        if not side:
+            raise MalformedResponseError(f"l2Book {side_name} side is empty")
+        head = side[0]
+        if not isinstance(head, dict):
+            raise MalformedResponseError(
+                f"l2Book best {side_name[:-1]} level is not an object: {head!r}"
+            )
+        price = _dec(head.get("px"), field=f"{side_name}[0].px")
+        # A head level with no size is the empty side wearing a price: there
+        # is nothing at that price to join. Whether the venue ever emits one is
+        # unverified; the guard costs one field read and closes the one way a
+        # plausible-looking quote could come off an empty book.
+        size = _dec(head.get("sz"), field=f"{side_name}[0].sz")
+        if size <= 0:
+            raise MalformedResponseError(
+                f"l2Book best {side_name[:-1]} level has no size ({size}) — no touch to join"
+            )
+        touch.append(price)
+    try:
+        return TopOfBook(coin=coin, best_bid=touch[0], best_ask=touch[1], time=when)
+    except ValueError as exc:
+        raise MalformedResponseError(f"l2Book top of book is unusable: {exc}") from exc
 
 
 # --------------------------------------------------------------------------

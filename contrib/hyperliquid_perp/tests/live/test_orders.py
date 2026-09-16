@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -57,8 +59,8 @@ class _FakeClient:
         self.place_calls: list[dict] = []
         self.status_calls: list[str] = []
 
-    def place_ioc_limit(
-        self, *, coin, is_buy, size, limit_price, cloid_hex, reduce_only, protective=False
+    def place_limit(
+        self, *, coin, is_buy, size, limit_price, cloid_hex, tif, reduce_only, protective=False
     ):
         self.place_calls.append(
             {
@@ -67,6 +69,7 @@ class _FakeClient:
                 "size": size,
                 "limit_price": limit_price,
                 "cloid_hex": cloid_hex,
+                "tif": tif,
                 "reduce_only": reduce_only,
                 "protective": protective,
             }
@@ -148,7 +151,10 @@ def _submit(submitter, **overrides):
         "output_id": "out1",
     }
     fields.update(overrides)
-    return submitter.submit_ioc_limit(**fields)
+    tif = fields.pop("tif", None)
+    if tif is None:
+        return submitter.submit_ioc_limit(**fields)
+    return submitter.submit_limit(tif=tif, **fields)
 
 
 def test_accepted_order_writes_evidence_then_backfills_ack(env):
@@ -712,7 +718,7 @@ def test_evidence_is_durable_before_the_wire_and_failure_is_patched(env):
         assert [a["status"] for a in attempts] == ["submitted"]
         raise _Boom()
 
-    client.place_ioc_limit = _check_then_boom
+    client.place_limit = _check_then_boom
     with pytest.raises(_Boom):
         _submit(submitter)
     # A Python-level failure is patched to 'failed' (outcome unknown — the
@@ -795,7 +801,7 @@ def test_resend_after_rejection_restamps_the_order_row_to_submitted(env):
         seen["row"] = repo.get_order(db.conn, "o1")
         return _RESTING_ACK
 
-    client.place_ioc_limit = _capture  # type: ignore[method-assign]
+    client.place_limit = _capture  # type: ignore[method-assign]
     outcome = _submit(submitter)
 
     mid_send = seen["row"]
@@ -1060,3 +1066,127 @@ def test_recovery_refuses_a_wrong_cloid_order_status_answer(env):
     order = repo.get_order(db.conn, "o1")
     assert order["exchange_order_id"] is None
     assert order["status"] == "submitted"
+
+
+# ---- maker path (2026-09-16): submit_limit with an explicit tif ---------------
+
+
+def test_submit_ioc_limit_is_submit_limit_spelled_ioc(env):
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    _submit(submitter)
+    assert client.place_calls[0]["tif"] == "Ioc"
+    assert repo.get_order(db.conn, "o1")["type"] == "ioc_limit"
+
+
+def test_submit_limit_alo_records_the_maker_order_type_and_sends_alo(env):
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    outcome = _submit(submitter, tif="Alo")
+    assert outcome.outcome == "acknowledged"
+    assert client.place_calls[0]["tif"] == "Alo"
+    order = repo.get_order(db.conn, "o1")
+    assert order["type"] == "alo_limit"
+    assert order["status"] == "open"  # a post-only order can only rest (or be refused)
+
+
+def test_submit_limit_refuses_an_unsupported_tif_before_any_evidence(env):
+    # ``Gtc`` is in the transport's vocabulary but not in this layer's: nothing
+    # in v1 rests an order without a deadline of its own. Refused pre-wire with
+    # the same footprint as a gate rejection — no registry row, no orders row,
+    # no attempt, no wire call.
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    with pytest.raises(ValueError, match="tif must be one of"):
+        _submit(submitter, tif="Gtc")
+    assert client.place_calls == []
+    assert repo.get_cloid_by_hex(db.conn, _HEX) is None
+    assert repo.get_order(db.conn, "o1") is None
+    assert repo.iter_live_order_attempts(db.conn, "r") == []
+
+
+def test_duplicate_recovery_keeps_the_submitted_order_type(env):
+    # §8.3 rule 4 back-fill on a duplicate ack: the recovery passes the same
+    # type the send carried, so the row it finds (inserted pre-wire) is left
+    # as is — a recovery hard-coding ``ioc_limit`` would be refused by the
+    # one-type-for-life guard. The recovery INSERT path is the next test.
+    db, client, _, submitter = env
+    client.place_results = [_DUPLICATE_ACK]
+    client.status_results = [_KNOWN_STATUS]
+    outcome = _submit(submitter, tif="Alo")
+    assert outcome.outcome == "recovered_existing"
+    assert repo.get_order(db.conn, "o1")["type"] == "alo_limit"
+
+
+def test_pre_check_recovery_inserts_the_row_with_the_submitted_order_type(env, monkeypatch):
+    # The pre-send path (a prior attempt exists, no local row): the recovery
+    # INSERT carries the same type the send would have — the one shape for both
+    # write paths that _ensure_local_order exists to guarantee.
+    db, client, _, submitter = env
+    monkeypatch.setattr(repo, "has_place_attempt", lambda conn, *, cloid_hex: True)
+    client.status_results = [_KNOWN_STATUS]
+    outcome = _submit(submitter, tif="Alo")
+    assert outcome.outcome == "recovered_existing" and outcome.attempt_id is None
+    assert client.place_calls == []
+    assert repo.get_order(db.conn, "o1")["type"] == "alo_limit"
+
+
+def test_an_order_id_keeps_one_type_for_life(env):
+    # A rule-5 resend of the same order_id under a different tif would put the
+    # new wire shape out while the row kept the old type, with nothing else
+    # persisting the tif actually sent. Refused like a changed cloid pair: an
+    # Alo that must go out as an IOC is a NEW logical order, not a resend.
+    db, client, _, submitter = env
+    client.place_results = [_REJECT_ACK]
+    client.status_results = [_UNKNOWN_STATUS]
+    assert _submit(submitter).outcome == "rejected"  # Ioc, resendable under rule 5
+    client.status_results = [_UNKNOWN_STATUS]
+    client.place_results = [_RESTING_ACK]
+    with pytest.raises(ValueError, match="keeps one type for life"):
+        _submit(submitter, tif="Alo")
+    assert len(client.place_calls) == 1  # the resend never reached the wire
+    row = repo.get_order(db.conn, "o1")
+    assert row["type"] == "ioc_limit" and row["status"] == "rejected"
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+@pytest.mark.parametrize(
+    "drift, sentence",
+    [
+        (
+            "sc.LIMIT_TIFS = frozenset({'Ioc'})",
+            "_SUBMITTABLE_TIFS drifted from signed_client.LIMIT_TIFS",
+        ),
+        (
+            "repo.ORDER_TYPES = frozenset(repo.ORDER_TYPES - {'alo_limit'})",
+            "_ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES",
+        ),
+    ],
+)
+def test_the_import_time_vocab_pins_fire(drift, sentence):
+    # The two pins only exist to fail at import; prove they can. A subprocess,
+    # not ``importlib.reload``: reloading live.orders mints a second set of its
+    # classes while every already-imported consumer keeps the first, and the
+    # identity trap that opens (an ``except`` that no longer matches) is the one
+    # PR #267 walked into. A fresh interpreter has no such second copy.
+    code = "; ".join(
+        [
+            "import contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client as sc",
+            "import contrib.hyperliquid_perp.persistence.repository as repo",
+            drift,
+            "import contrib.hyperliquid_perp.live.orders",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert result.returncode != 0
+    assert "AssertionError" in result.stderr and sentence in result.stderr

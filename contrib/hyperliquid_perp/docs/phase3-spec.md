@@ -236,7 +236,7 @@ reconciliation pass 又要求場上已有有效 SL——死鎖，倉位裸奔到
   每個 decision cycle 建立 plan **之前**問一次。
 - `check_order(symbol)` / `require_order` — 上表扣除 DECISION-scoped 三條。每一張
   **加風險**的單（entry / rebalance 切片）都必須通過（`LiveOrderSubmitter.
-  submit_ioc_limit` 送出前查一次，signed client 綁定的 gate 在 wire 再查一次當
+  submit_limit`（`submit_ioc_limit` 是它的 IOC 包裝）送出前查一次，signed client 綁定的 gate 在 wire 再查一次當
   backstop）。
 - `check_protective_order(symbol)` / `require_protective_order` — 再扣除
   SAFE-MODE-scoped 兩條。保護／去風險單（SL / TP trigger、§17.2 急平 IOC）走這個
@@ -358,10 +358,10 @@ Phase 3 會使用 Hyperliquid signed exchange endpoint，**全部透過官方
 
 | Action | SDK 方法 | 用途 |
 |---|---|---|
-| order | `Exchange.order` / `bulk_orders` | 下單：entry / rebalance 切片、close、SL、TP |
+| order | `Exchange.order` / `bulk_orders` | 下單：entry / rebalance 切片（`tif: Ioc` taker 片；`tif: Alo` post-only maker 片，2026-09-16 maker path，transport 為 `place_limit`）、close、SL、TP |
 | cancel | `Exchange.cancel` | 依 exchange order id 取消 |
 | cancelByCloid | `Exchange.cancel_by_cloid` | 依 client order id 取消 |
-| modify | `Exchange.modify_order` / `bulk_modify_orders_new` | SL / TP modify-before-cancel（§17.4） |
+| modify | `Exchange.modify_order` / `bulk_modify_orders_new` | SL / TP modify-before-cancel（§17.4）；maker 片 requote（`modify_limit`，新 cloid） |
 | scheduleCancel | `Exchange.schedule_cancel` | dead man's switch |
 | updateLeverage | `Exchange.update_leverage` | 開倉前確認 leverage 設定 |
 | orderStatus | `Info.query_order_by_oid` / `query_order_by_cloid` | 查詢 order 狀態與 reconciliation |
@@ -1440,6 +1440,11 @@ raw_exchange_payload_path
 時間未知，消費者必須把 NULL 讀成「未知」而非「未送出」。IOC ack 部分成交
 （totalSz < 請求 size）時 `status` 寫 `partially_filled`，不得寫 `filled`；
 成交數量真相仍由 PR 3 fill ingestion 擁有。
+**（2026-09-16 maker path，PR A）**post-only（`tif: Alo`）單的 resting ack 寫
+`status=open`／`exchange_status=open`（§8.3 的保守讀法，與 IOC 的 resting ack 同），
+`orders.type` 寫 `alo_limit`（IOC 片仍是 `ioc_limit`）；同一 `order_id` 終身只有一個
+`type`，以不同 tif 重送同一 order_id 是 contract violation（`ValueError`，與換 cloid pair
+同一條 lane）——Alo 被拒後要改送 IOC 的是**新的邏輯單**（§8.3 rule 9）。
 
 **（v11 新增，2026-07-15）live fill 的 plan/slice 歸因契約**：paper fill 的
 `plan_id`／`slice_index` 由 engine 從記憶體內的 plan context 同步填入；live fill 走

@@ -21,6 +21,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
 )
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
+    LIMIT_TIFS,
     CancelAck,
     HyperliquidSignedClient,
     OrderAck,
@@ -950,3 +951,114 @@ def test_an_accepted_order_ack_leaves_the_evidence_attribute_alone():
     ack = _parse_order_ack(response, expected_cloid_hex=_CLOID)
     assert ack.status == "resting"
     assert MalformedResponseError.payload is None  # the class default, untouched
+
+
+# ---- maker path (2026-09-16): place_limit / modify_limit with an explicit tif ----
+
+
+def _limit(client, tif, **overrides):
+    fields = {
+        "coin": "BTC",
+        "is_buy": True,
+        "size": Decimal("0.01"),
+        "limit_price": Decimal("100"),
+        "cloid_hex": _CLOID,
+        "tif": tif,
+    }
+    fields.update(overrides)
+    return client.place_limit(**fields)
+
+
+def _requote(client, tif, **overrides):
+    fields = {
+        "target": "222",
+        "coin": "BTC",
+        "is_buy": True,
+        "size": Decimal("0.01"),
+        "limit_price": Decimal("99.5"),
+        "cloid_hex": _CLOID,
+        "tif": tif,
+    }
+    fields.update(overrides)
+    return client.modify_limit(**fields)
+
+
+def test_place_limit_alo_sends_the_post_only_body_with_the_cloid(fake_exchange):
+    client = _client()
+    ack = _limit(client, "Alo", is_buy=False, limit_price=Decimal("101"))
+    assert ack.status == "resting" and ack.exchange_order_id == "111"
+    (name, is_buy, sz, px, order_type, reduce_only, cloid) = client._exchange.order_calls[0]
+    assert (name, is_buy, sz, px, reduce_only) == ("BTC", False, 0.01, 101.0, False)
+    assert order_type == {"limit": {"tif": "Alo"}}
+    assert cloid.to_raw() == _CLOID
+
+
+def test_place_ioc_limit_is_place_limit_spelled_ioc(fake_exchange):
+    # The IOC name survives as the taker spelling; both reach the same wire call.
+    client = _client()
+    _place(client)
+    _limit(client, "Ioc")
+    first, second = client._exchange.order_calls
+    assert first[:6] == second[:6]
+    assert first[4] == {"limit": {"tif": "Ioc"}}
+
+
+@pytest.mark.parametrize("bad", ["IOC", "alo", "GTC", "", None, "PostOnly"])
+def test_place_and_modify_limit_refuse_a_tif_outside_the_vocabulary(fake_exchange, bad):
+    # Checked BEFORE the gate and the wire: a typo is a named refusal here, not a
+    # signed request the venue answers with an opaque error (or, worse, rests).
+    # A CLOSED gate, so the ordering is what the assertion pins: swapping the
+    # two checks would answer LiveOrderGateRejected here instead.
+    client = _client(gate=_closed_gate())
+    with pytest.raises(ValueError, match="tif must be one of"):
+        _limit(client, bad)
+    with pytest.raises(ValueError, match="tif must be one of"):
+        _requote(client, bad)
+    assert client._exchange.order_calls == [] and client._exchange.modify_calls == []
+
+
+def test_limit_tifs_are_the_sdk_tif_literal():
+    # LIMIT_TIFS claims to be the SDK's ``Tif`` words verbatim; pin it, so an
+    # SDK bump that renames or adds a tif fails by name here rather than as a
+    # venue-side opaque error on the first live order.
+    from typing import get_args
+
+    from hyperliquid.utils.signing import Tif
+
+    assert {word for literal in get_args(Tif) for word in get_args(literal)} == LIMIT_TIFS
+
+
+def test_modify_limit_wire_shape_and_order_gate(fake_exchange):
+    client = _client()
+    ack = _requote(client, "Alo")
+    assert ack.status == "resting"
+    (oid, name, is_buy, sz, px, order_type, reduce_only, cloid) = client._exchange.modify_calls[0]
+    assert (oid, name, is_buy, sz, px, reduce_only) == (222, "BTC", True, 0.01, 99.5, False)
+    assert order_type == {"limit": {"tif": "Alo"}}
+    assert cloid.to_raw() == _CLOID  # the replacement carries its own fresh cloid
+    # A requote is a risk-adding order: the ORDER gate, not the protective one —
+    # unless the caller says protective, exactly as place_limit reads the flag.
+    gate = _open_gate()
+    gate.state_reconciled = False
+    closed = _client(gate=gate)
+    with pytest.raises(LiveOrderGateRejected):
+        _requote(closed, "Alo")
+    assert closed._exchange.modify_calls == []
+    assert _requote(closed, "Alo", protective=True).accepted
+
+
+def test_place_limit_alo_error_ack_is_a_per_order_verdict_not_an_exception(fake_exchange):
+    # The venue answers a would-cross Alo with an ``error`` status, which the
+    # submitter's §8.3 path must be able to inspect (rule 9: a new logical
+    # order may follow) — so it must arrive as an ack, never as an exception,
+    # and it is not a duplicate.
+    client = _client()
+    client._exchange.order_result = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"error": "Post only order would have immediately matched"}]},
+        },
+    }
+    ack = _limit(client, "Alo")
+    assert ack.status == "error" and not ack.accepted and not ack.is_duplicate

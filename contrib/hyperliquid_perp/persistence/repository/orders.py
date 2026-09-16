@@ -16,8 +16,8 @@ from ._vocab import (
     _MODES,
     _ORDER_ROLES,
     _ORDER_STATUSES,
-    _ORDER_TYPES,
     LIVE_ORDER_STATUSES,
+    ORDER_TYPES,
     RESTING_ORDER_STATUSES,
 )
 
@@ -87,7 +87,7 @@ def insert_order(
     """
     check_enum(mode, _MODES, name="mode")
     check_enum(order_role, _ORDER_ROLES, name="order_role")
-    check_enum(order_type, _ORDER_TYPES, name="type")
+    check_enum(order_type, ORDER_TYPES, name="type")
     check_enum(status, _ORDER_STATUSES, name="status")
     if exchange_status is not None:
         check_enum(exchange_status, _EXCHANGE_STATUS_FAMILIES, name="exchange_status")

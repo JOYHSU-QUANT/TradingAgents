@@ -1,8 +1,11 @@
 """Simulated fill pricing (execution §5.2 / §6.4) — pure, all-Decimal.
 
-Every Phase-2 fill (``paper_market``, TWAP slice, SL, TP, gap-stop) is an active
-taker fill priced off the **mid** at execution time, plus a fixed slippage in the
-adverse direction:
+Under ``fill_model.style: taker`` every Phase-2 fill (``paper_market``, TWAP slice,
+SL, TP, gap-stop) is an active taker fill priced off the **mid** at execution
+time, plus a fixed slippage in the adverse direction; the ``maker`` style
+(execution §5.2.1) posts a slice at :func:`maker_post_price` and fills it at that
+price when :func:`maker_would_fill` says the mid traded through it, while SL / TP /
+gap-stop fills stay taker:
 
     buy  → mid * (1 + slippage_bps / 10_000)
     sell → mid * (1 - slippage_bps / 10_000)

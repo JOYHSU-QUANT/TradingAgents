@@ -363,6 +363,14 @@ fill_price = mid_price * (1 + slippage_bps / 10_000)
 fill_price = mid_price * (1 - slippage_bps / 10_000)
 ```
 
+SL / TP 的觸發與成交價格使用不同基準：
+
+```text
+trigger 判斷     = mark_price
+模擬成交參考價 = mid_price
+最終模擬成交價 = mid_price ± slippage
+```
+
 #### 5.2.1 maker 成交模型（`fill_model.style: maker`，2026-09-16 maker path）
 
 live 的 `sliced_maker`（phase3-spec §9.2.1）在 paper 的鏡像，讓兩邊的 baseline 可比。
@@ -383,23 +391,16 @@ post_price(sell) = round_up_to_tick  (mid_price * (1 + assumed_half_spread_bps /
 3. 掛滿 `maker_rest_seconds` 未成交 → 以當時 mid 重掛（`slice_requoted`，計次；每次重掛重新計時，
    重掛那一 tick 不另發 `slice_posted`），最多
    `maker_max_requotes` 次；超過 → 以 5.2 的 taker 模型成交（`slice_crossed` ＋ `slice_fill`，
+   `paper_market` 下為 `paper_market_fill`；
    `taker_fee_rate`）；deadline 仍是硬信封（規則 4）。
 4. plan 到期那一 tick 不 tend、不重掛、也不新掛。no-data tick 掛著的片維持原狀：不 tend，也不把它之後
-   的片記成 missed（1.1 的跳片規則只在沒有掛單時適用；掛著的片本來就擋住後面的片）。
+   的片記成 missed（1.1 的跳片規則只在沒有掛單時適用；掛著的片本來就擋住後面的片）。掛單的計時
+   在斷線期間照走，所以額度在斷線中用完的片會在恢復那一 tick（gap-stop 檢查之後）直接 cross。
    到期／取代／SL／TP／清算讓 leg 終止時，掛著的那片視同未成交，
    歸入 `residual_qty`。
 5. SL／TP／gap-stop／清算平倉**不變**，仍是 5.2 的 taker 模型；每筆 fill 照舊保存實際使用的
    `fee_rate`。prompt 的往返成本（marginal cost）仍以 `taker_fee_rate`／`slippage_bps` 計算——
    給模型看的是保守的 taker 成本，這是刻意的（不動 prompt、不另開分段點）。
-
-SL / TP 的觸發與成交價格使用不同基準：
-
-```text
-trigger 判斷     = mark_price
-模擬成交參考價 = mid_price
-最終模擬成交價 = mid_price ± slippage
-```
-
 ---
 
 ### 5.3 同一 market snapshot 的事件優先順序
@@ -448,7 +449,7 @@ paper_trading:
       maker_max_requotes: 2
 ```
 
-`fill_model` 是所有 simulated fills 共用的成交參數（`paper_market`、TWAP slices、SL / TP 與 gap-stop fills），成交參考價一律為執行當時取得的 `mid_price`（見 5.2；`maker` 風格掛單成交的價格是掛單當 tick 的 `post_price`，見 5.2.1）。`maker` 風格下另驗 `maker_rest_seconds ≤ 3600` 且 `(1 + maker_max_requotes) × maker_rest_seconds ≤ 3600`（plan 的一小時壽命，1.2），這只是單一掛單壽命的 sanity bound，不保證整個 plan 在 deadline 前完成。`min_notional_usdc` 即 1.2 節的 `min_notional`，對應交易所單筆 order 至少 `10 USDC` 的規則。
+`fill_model` 是所有 simulated fills 共用的成交參數（`paper_market`、TWAP slices、SL / TP 與 gap-stop fills），成交參考價一律為執行當時取得的 `mid_price`（見 5.2；`maker` 風格掛單成交的價格是掛單當 tick 的 `post_price`，見 5.2.1）。`maker` 風格下另驗 `maker_rest_seconds ≤ 3600` 且 `(1 + maker_max_requotes) × maker_rest_seconds ≤ 3600`（plan 的一小時壽命，1.2），這只是單一切片（含全部重掛）最長掛單時間的 sanity bound，不保證整個 plan 在 deadline 前完成。`min_notional_usdc` 即 1.2 節的 `min_notional`，對應交易所單筆 order 至少 `10 USDC` 的規則。
 
 `initial_balance_usdc` 與 `initial_positions` 只在建立新的 paper `run_id` 時套用。一般程式重啟必須從已記錄的 accounting events / snapshots 恢復上次的本地 account 與 position state，不得重設為 1,000 USDC。
 

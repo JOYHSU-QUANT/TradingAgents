@@ -278,7 +278,7 @@ class PlanStartResult:
 # --------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class _PaperResting:
     """A maker-style slice resting at the modelled touch (execution §5.2.1).
 
@@ -1080,7 +1080,9 @@ class PaperExecutionEngine:
         # re-run (execution §1.1). Advance the leg's cursor over it without filling.
         # §5.2.1 rule 4: a resting maker slice is left exactly as it is through
         # an outage (nothing to tend without a mid), and the slices behind it are
-        # queued, not missed — it blocks them whether or not data arrives.
+        # queued, not missed — it blocks them whether or not data arrives. Its
+        # rest clock keeps running, so a post whose budget ran out during the
+        # outage crosses on the resume tick (after the gap-stop check).
         if self._leg is not None and not self._leg.terminal and self._leg.resting is None:
             due = self._due_count(self._leg, now)
             if due > self._leg.consumed:
@@ -1321,8 +1323,8 @@ class PaperExecutionEngine:
         Fills at the POSTED price with the maker fee only when the mid trades
         through it by a tick; after ``maker_rest_seconds`` it is re-posted at
         the new touch up to ``maker_max_requotes`` times, then crosses at the
-        taker model's price and fee — so a plan still completes inside its
-        deadline, as the live path does.
+        taker model's price and fee — so a slice never rests past its budget
+        (the deadline stays the hard envelope, rule 4).
         """
         r = leg.resting
         assert r is not None

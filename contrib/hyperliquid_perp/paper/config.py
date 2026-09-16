@@ -205,7 +205,9 @@ class FillModelConfig:
         if self.style == "maker":
             # §5.2.1: every post rests its own clock, so a slice's longest stay
             # on the (simulated) book is (1 + requotes) * rest — it must fit the
-            # plan lifetime (a sanity bound on one post, not a completion promise).
+            # plan lifetime (a sanity bound on one slice, not a completion
+            # promise). The single-rest check is subsumed by the budget check and
+            # kept only for its more specific message.
             if self.maker_rest_seconds > PLAN_LIFETIME_SECONDS:
                 raise ValueError(
                     f"maker_rest_seconds must be <= {PLAN_LIFETIME_SECONDS} (the plan "
@@ -215,8 +217,8 @@ class FillModelConfig:
             if budget > PLAN_LIFETIME_SECONDS:
                 raise ValueError(
                     "(1 + maker_max_requotes) * maker_rest_seconds must be <= "
-                    f"{PLAN_LIFETIME_SECONDS} (the plan lifetime) so one post's rest "
-                    f"budget fits inside it, got {budget}"
+                    f"{PLAN_LIFETIME_SECONDS} (the plan lifetime) so one slice's rest "
+                    f"budget (first post + requotes) fits inside it, got {budget}"
                 )
 
     @classmethod

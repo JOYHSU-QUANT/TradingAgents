@@ -94,7 +94,8 @@ Breaking changes within the 0.x line are called out explicitly.
   One slice rests at a time; a leg that ends drops its post as residual; a
   no-data tick leaves the post in place (the slices behind it queue, they
   are not missed); the deadline tick neither tends nor posts. Config
-  refuses a rest budget that cannot cross before the 1h plan lifetime.
+  refuses a rest budget (first post + requotes) longer than the 1h plan
+  lifetime — a sanity bound, not a completion promise.
   SL / TP / gap-stop / liquidation fills and the prompt's marginal-cost
   figures stay on the taker model. Default `style: taker` is unchanged;
   switching a paper run to `maker` is an EXECUTION segment point (deploy on

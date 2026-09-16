@@ -75,7 +75,7 @@ from ..persistence.models import PositionState, Side
 from . import accounting
 from .clock import Clock
 from .config import PaperTradingConfig
-from .fill_model import fill_price
+from .fill_model import fill_price, maker_post_price, maker_would_fill
 from .liquidation import (
     LIQUIDATION_MODEL_VERSION,
     estimated_liquidation_price,
@@ -188,6 +188,9 @@ class TickEvent(str, Enum):
     SLICE_FILL = "slice_fill"
     PAPER_MARKET_FILL = "paper_market_fill"
     SLICE_MISSED = "slice_missed"
+    SLICE_POSTED = "slice_posted"  # §5.2.1: a maker slice rests at the modelled touch
+    SLICE_REQUOTED = "slice_requoted"  # §5.2.1: re-posted at the new touch after resting
+    SLICE_CROSSED = "slice_crossed"  # §5.2.1: requotes exhausted — filled as a taker
     PENDING_MARKET_DATA = "pending_market_data"
     PAUSED = "paused_market_data"
     RESUMED = "resumed"
@@ -275,6 +278,27 @@ class PlanStartResult:
 
 
 @dataclass
+class _PaperResting:
+    """A maker-style slice resting at the modelled touch (execution §5.2.1).
+
+    ``attempt`` counts re-posts so far (the first post is 0); ``placed_at`` is
+    the clock at the LAST post, so each re-post gets a fresh rest.
+    """
+
+    index: int
+    size: Decimal
+    price: Decimal
+    placed_at: datetime
+    attempt: int = 0
+
+    def __post_init__(self) -> None:
+        if self.size <= 0 or self.price <= 0:
+            raise ValueError("_PaperResting size and price must be > 0")
+        if self.attempt < 0:
+            raise ValueError("_PaperResting.attempt must be >= 0")
+
+
+@dataclass
 class _Leg:
     """One executing leg: a rebalance plan, or a flip's close / open leg."""
 
@@ -294,6 +318,9 @@ class _Leg:
     executed: int = 0
     filled_qty: Decimal = Decimal(0)
     terminal: bool = False
+    # §5.2.1 maker style: the one slice resting at the touch (consumed, not
+    # yet executed); dropped with the leg when it goes terminal.
+    resting: _PaperResting | None = None
 
     def __post_init__(self) -> None:
         self.validate()  # construction obeys the same invariants as every mutation
@@ -423,6 +450,26 @@ class PaperExecutionEngine:
     @property
     def _slippage_bps(self) -> Decimal:
         return self._paper.execution.fill_model.slippage_bps
+
+    @property
+    def _maker_style(self) -> bool:
+        return self._paper.execution.fill_model.style == "maker"
+
+    @property
+    def _maker_fee_rate(self) -> Decimal:
+        return self._paper.execution.fill_model.maker_fee_rate
+
+    @property
+    def _half_spread_bps(self) -> Decimal:
+        return self._paper.execution.fill_model.assumed_half_spread_bps
+
+    @property
+    def _maker_rest(self) -> timedelta:
+        return timedelta(seconds=self._paper.execution.fill_model.maker_rest_seconds)
+
+    @property
+    def _maker_max_requotes(self) -> int:
+        return self._paper.execution.fill_model.maker_max_requotes
 
     @property
     def _min_notional(self) -> Decimal:
@@ -1210,17 +1257,94 @@ class PaperExecutionEngine:
         leg = self._leg
         if leg is None or leg.terminal or self._paused:
             return
+        if leg.resting is not None:
+            # §5.2.1: one slice rests at a time; tend it before anything new,
+            # and — like the live maker path — do nothing at or past the
+            # deadline (the expiry that follows drops the post as residual).
+            if now >= leg.deadline:
+                return
+            self._tend_paper_resting(now, snap, leg, events)
+            if leg.resting is not None or leg.terminal or self._leg is not leg:
+                return
         due = self._due_count(leg, now)
         if leg.consumed >= due:
             return  # nothing new due this tick
         idx = leg.consumed
         leg.consumed += 1  # one slice per tick (execution §5.5)
         size = leg.slice_sizes[idx]
+        if self._maker_style:
+            self._post_paper_maker(now, snap, leg, idx, size, attempt=0, events=events)
+            return
         price = fill_price(snap.mid_price, leg.side, self._slippage_bps)
+        self._fill_slice(
+            now, snap, leg, idx, size, price=price, fee_rate=self._fee_rate, events=events
+        )
+
+    def _post_paper_maker(
+        self, now, snap, leg: _Leg, idx: int, size, *, attempt: int, events
+    ) -> None:
+        """Rest slice ``idx`` at the modelled touch (execution §5.2.1)."""
+        price = maker_post_price(
+            snap.mid_price, leg.side, self._half_spread_bps, self._asset.tick_size
+        )
+        leg.resting = _PaperResting(
+            index=idx, size=size, price=price, placed_at=now, attempt=attempt
+        )
+        leg.validate()
+        events.append(TickEvent.SLICE_POSTED)
+
+    def _tend_paper_resting(self, now, snap, leg: _Leg, events) -> None:
+        """Fill, re-post or cross the resting maker slice (execution §5.2.1).
+
+        Fills at the POSTED price with the maker fee only when the mid trades
+        through it by a tick; after ``maker_rest_seconds`` it is re-posted at
+        the new touch up to ``maker_max_requotes`` times, then crosses at the
+        taker model's price and fee — so a plan still completes inside its
+        deadline, as the live path does.
+        """
+        r = leg.resting
+        assert r is not None
+        if maker_would_fill(snap.mid_price, leg.side, r.price, self._asset.tick_size):
+            leg.resting = None
+            self._fill_slice(
+                now,
+                snap,
+                leg,
+                r.index,
+                r.size,
+                price=r.price,
+                fee_rate=self._maker_fee_rate,
+                events=events,
+            )
+            return
+        if now - r.placed_at < self._maker_rest:
+            return
+        if r.attempt < self._maker_max_requotes:
+            self._post_paper_maker(
+                now, snap, leg, r.index, r.size, attempt=r.attempt + 1, events=events
+            )
+            events.append(TickEvent.SLICE_REQUOTED)
+            return
+        leg.resting = None
+        events.append(TickEvent.SLICE_CROSSED)
+        price = fill_price(snap.mid_price, leg.side, self._slippage_bps)
+        self._fill_slice(
+            now, snap, leg, r.index, r.size, price=price, fee_rate=self._fee_rate, events=events
+        )
+
+    def _fill_slice(self, now, snap, leg: _Leg, idx: int, size, *, price, fee_rate, events) -> None:
+        """Book one slice's fill and everything that follows it (SL, terminal)."""
         slice_id = derive_slice_id(self._run_id, leg.plan_id, leg.flip_leg, idx)
         fid = derive_fill_id(self._run_id, leg.order_id, idx)
         self._post_slice_fill(
-            now, leg, size=size, price=price, slice_id=slice_id, fill_id=fid, slice_index=idx
+            now,
+            leg,
+            size=size,
+            price=price,
+            fee_rate=fee_rate,
+            slice_id=slice_id,
+            fill_id=fid,
+            slice_index=idx,
         )
         leg.executed += 1
         with localcontext(DECIMAL_CONTEXT):
@@ -1244,7 +1368,7 @@ class PaperExecutionEngine:
             self._terminate_leg(now, events)
 
     def _post_slice_fill(
-        self, now, leg: _Leg, *, size, price, slice_id, fill_id, slice_index
+        self, now, leg: _Leg, *, size, price, fee_rate, slice_id, fill_id, slice_index
     ) -> None:
         with self._db.transaction() as conn:
             accounting.apply_fill(
@@ -1257,7 +1381,7 @@ class PaperExecutionEngine:
                 side=leg.side,
                 qty=size,
                 price=price,
-                fee_rate=self._fee_rate,
+                fee_rate=fee_rate,
                 slice_id=slice_id,
                 plan_id=leg.plan_id,
                 flip_leg=leg.flip_leg,

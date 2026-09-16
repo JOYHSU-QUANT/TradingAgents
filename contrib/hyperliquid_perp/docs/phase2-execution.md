@@ -363,6 +363,30 @@ fill_price = mid_price * (1 + slippage_bps / 10_000)
 fill_price = mid_price * (1 - slippage_bps / 10_000)
 ```
 
+#### 5.2.1 maker 成交模型（`fill_model.style: maker`，2026-09-16 maker path）
+
+live 的 `sliced_maker`（phase3-spec §9.2.1）在 paper 的鏡像，讓兩邊的 baseline 可比。
+預設仍是 `taker`；開 `maker` 是**執行面分段點**，要照換段 SOP 部署。snapshot 沒有簿，所以
+touch 以 mid ∓ `assumed_half_spread_bps` 模擬，並向被動側 round 到 tick（買向下、賣向上）：
+
+```
+post_price(buy)  = round_down_to_tick(mid_price * (1 - assumed_half_spread_bps / 10_000))
+post_price(sell) = round_up_to_tick  (mid_price * (1 + assumed_half_spread_bps / 10_000))
+```
+
+1. 切片到期時**掛**在 `post_price`（事件 `slice_posted`），一次只有一片在掛；下一片到期也等它結案。
+2. 之後每個 tick 只有在 mid **穿過**掛單價至少一個 tick 才成交（買：`mid <= post - tick`；
+   賣：`mid >= post + tick`），成交價＝掛單價、費率＝`maker_fee_rate`（預設 0.00015）。mid 只碰到
+   掛單價不算成交——排隊位置模擬不了，寧可保守。
+3. 掛滿 `maker_rest_seconds` 未成交 → 以當時 mid 重掛（`slice_requoted`，計次），最多
+   `maker_max_requotes` 次；超過 → 以 5.2 的 taker 模型成交（`slice_crossed` ＋ `slice_fill`，
+   `taker_fee_rate`），plan 仍在 deadline 內完成。
+4. plan 到期那一 tick 不 tend；到期／取代／SL／TP／清算讓 leg 終止時，掛著的那片視同未成交，
+   歸入 `residual_qty`。
+5. SL／TP／gap-stop／清算平倉**不變**，仍是 5.2 的 taker 模型；每筆 fill 照舊保存實際使用的
+   `fee_rate`。prompt 的往返成本（marginal cost）仍以 `taker_fee_rate`／`slippage_bps` 計算——
+   給模型看的是保守的 taker 成本，這是刻意的（不動 prompt、不另開分段點）。
+
 SL / TP 的觸發與成交價格使用不同基準：
 
 ```text
@@ -412,6 +436,11 @@ paper_trading:
 
     fill_model:
       slippage_bps: 5
+      style: taker                 # 或 maker（5.2.1）
+      maker_fee_rate: 0.00015
+      assumed_half_spread_bps: 0.5
+      maker_rest_seconds: 30
+      maker_max_requotes: 2
 ```
 
 `fill_model` 是所有 simulated fills 共用的成交參數（`paper_market`、TWAP slices、SL / TP 與 gap-stop fills），成交參考價一律為執行當時取得的 `mid_price`（見 5.2）。`min_notional_usdc` 即 1.2 節的 `min_notional`，對應交易所單筆 order 至少 `10 USDC` 的規則。

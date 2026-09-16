@@ -69,6 +69,7 @@ def _engine(
     funding=None,
     stop_config=None,
     seed=(),
+    fill_model=None,
 ):
     db = Database(tmp_path / "e.db")
     accounting.initialize_run(
@@ -81,9 +82,12 @@ def _engine(
     )
     clock = ManualClock(_T0)
     asset = AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=_schedule())
-    paper = PaperTradingConfig.from_dict(
-        {"execution": {"min_notional_usdc": min_notional}} if min_notional else None
-    )
+    execution: dict = {}
+    if min_notional:
+        execution["min_notional_usdc"] = min_notional
+    if fill_model:
+        execution["fill_model"] = fill_model
+    paper = PaperTradingConfig.from_dict({"execution": execution} if execution else None)
     engine = PaperExecutionEngine(
         db=db,
         run_id="r",
@@ -1206,3 +1210,136 @@ def test_cycle_snapshot_failure_never_strands_the_sl_tp_monitor(
     with caplog.at_level(_logging.WARNING):
         assert engine.write_cycle_snapshot(Decimal("100")) is False  # swallowed, not raised
     assert "snapshot write failed" in caplog.text
+
+
+# --------------------------------------------------------------------------
+# §5.2.1 maker fill model
+# --------------------------------------------------------------------------
+
+
+def _maker(tmp_path, **fill_model):
+    cfg = {
+        "style": "maker",
+        "assumed_half_spread_bps": "1",
+        "maker_rest_seconds": 30,
+        "maker_max_requotes": 1,
+    }
+    cfg.update(fill_model)
+    return _engine(tmp_path, fill_model=cfg)
+
+
+def _fill_rates(db, order_id):
+    rows = db.conn.execute(
+        "SELECT fee_rate FROM fills WHERE order_id = ? ORDER BY rowid", (order_id,)
+    ).fetchall()
+    return [D(row["fee_rate"]) for row in rows]
+
+
+def test_maker_slice_posts_at_the_modelled_touch_and_fills_only_through_it(tmp_path):
+    from contrib.hyperliquid_perp.paper.stops import round_to_tick
+
+    db, clock, engine, asset = _maker(tmp_path)
+    tick = asset.tick_size
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 2))  # 2 slices of 0.001
+    clock.advance(30)
+    r1 = engine.tick()
+    assert r1.has(TickEvent.SLICE_POSTED) and not r1.has(TickEvent.SLICE_FILL)
+    post = engine._leg.resting.price
+    assert post == round_to_tick(_MARK * (D(1) - D("0.0001")), tick, up=False)
+    assert post < _MARK and _size(db) == D(0)
+    # The mid touches the post: still no fill (queue position is unknowable).
+    clock.advance(10)
+    _provider(engine, [_snap(_MARK, post)])
+    r2 = engine.tick()
+    assert not r2.has(TickEvent.SLICE_FILL) and engine._leg.resting is not None
+    # The mid trades through by a tick: filled at the POSTED price, maker fee.
+    clock.advance(10)
+    _provider(engine, [_snap(_MARK, post - tick)])
+    r3 = engine.tick()
+    assert r3.has(TickEvent.SLICE_FILL) and engine._leg.resting is None
+    assert _size(db) == D("0.001")
+    assert repo.get_current_position(db.conn, "r", "BTC").entry_price == post
+    assert _fill_rates(db, engine._leg.order_id) == [D("0.00015")]
+    db.close()
+
+
+def test_maker_rest_timeout_reposts_then_crosses_as_a_taker(tmp_path):
+    db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=1)
+    _provider(engine, [_snap()] * 4)
+    engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    engine.tick()  # posted
+    clock.advance(30)
+    r2 = engine.tick()  # rested 30s: re-posted at the (unchanged) touch, attempt 1
+    assert r2.has(TickEvent.SLICE_REQUOTED) and engine._leg.resting.attempt == 1
+    assert _size(db) == D(0)
+    clock.advance(30)
+    r3 = engine.tick()  # budget exhausted: crosses at mid + slippage with the taker fee
+    assert r3.has(TickEvent.SLICE_CROSSED) and r3.has(TickEvent.SLICE_FILL)
+    assert _size(db) == D("0.001")
+    assert repo.get_current_position(db.conn, "r", "BTC").entry_price > _MARK
+    assert _fill_rates(db, engine._leg.order_id) == [D("0.00045")]
+    db.close()
+
+
+def test_a_resting_maker_slice_blocks_the_next_due_slice_until_it_fills(tmp_path):
+    db, clock, engine, asset = _maker(tmp_path, maker_max_requotes=9, maker_rest_seconds=600)
+    _provider(engine, [_snap()] * 3)
+    engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    engine.tick()  # slice 0 posted
+    clock.advance(30)
+    r2 = engine.tick()  # slice 1 due, but slice 0 still rests
+    assert engine._leg.consumed == 1 and not r2.has(TickEvent.SLICE_POSTED)
+    clock.advance(30)
+    _provider(engine, [_snap(_MARK, engine._leg.resting.price - asset.tick_size)])
+    r3 = engine.tick()  # slice 0 fills; slice 1 (long due) posts in the same tick
+    assert r3.has(TickEvent.SLICE_FILL) and r3.has(TickEvent.SLICE_POSTED)
+    assert engine._leg.consumed == 2 and engine._leg.executed == 1
+    db.close()
+
+
+def test_plan_expiry_drops_the_resting_maker_slice_as_residual(tmp_path):
+    db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=9)
+    _provider(engine, [_snap()] * 3)
+    start = engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    engine.tick()
+    clock.advance(3600)
+    r = engine.tick()  # the deadline tick neither re-posts nor fills
+    assert r.has(TickEvent.PLAN_TERMINAL) and not r.has(TickEvent.SLICE_REQUOTED)
+    assert _plan_status(db, start.plan_id) == ("expired", "deadline")
+    assert _size(db) == D(0)
+    row = db.conn.execute(
+        "SELECT residual_qty FROM execution_plans WHERE plan_id = ?", (start.plan_id,)
+    ).fetchone()
+    assert D(row["residual_qty"]) == D("0.002")
+    db.close()
+
+
+def test_a_single_slice_plan_under_maker_posts_then_fills_as_paper_market(tmp_path):
+    db, clock, engine, asset = _maker(tmp_path)
+    _provider(engine, [_snap(), _snap()])
+    start = engine.start_plan(_decision("long", 1))  # one 0.001 clip
+    assert start.disposition.value == "paper_market"
+    clock.advance(30)
+    r1 = engine.tick()
+    assert r1.has(TickEvent.SLICE_POSTED) and not r1.has(TickEvent.PAPER_MARKET_FILL)
+    clock.advance(10)
+    _provider(engine, [_snap(_MARK, engine._leg.resting.price - asset.tick_size)])
+    r2 = engine.tick()
+    assert r2.has(TickEvent.PAPER_MARKET_FILL) and r2.has(TickEvent.PLAN_TERMINAL)
+    assert _plan_status(db, start.plan_id) == ("completed", None)
+    db.close()
+
+
+def test_the_taker_style_never_posts(tmp_path):
+    db, clock, engine, _ = _engine(tmp_path)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    r = engine.tick()
+    assert r.has(TickEvent.SLICE_FILL) and not r.has(TickEvent.SLICE_POSTED)
+    assert engine._leg.resting is None
+    db.close()

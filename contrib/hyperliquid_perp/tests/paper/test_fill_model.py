@@ -41,3 +41,36 @@ def test_rejects_non_positive_mid():
 def test_rejects_negative_slippage():
     with pytest.raises(ValueError):
         fill_price(D(100), Side.BUY, D(-1))
+
+
+# -- §5.2.1 maker post / fill rules -----------------------------------------------
+
+
+def test_maker_post_price_sits_on_the_passive_side_of_the_modelled_touch():
+    from contrib.hyperliquid_perp.paper.fill_model import maker_post_price
+
+    mid, tick = D("50000"), D("0.1")
+    buy = maker_post_price(mid, "buy", D("1"), tick)
+    sell = maker_post_price(mid, "sell", D("1"), tick)
+    assert buy == D("49995") and sell == D("50005")  # 1 bps each side
+    assert maker_post_price(mid, "buy", D(0), tick) == mid  # zero half-spread: at the mid
+    with pytest.raises(ValueError):
+        maker_post_price(D(0), "buy", D(1), tick)
+    with pytest.raises(ValueError):
+        maker_post_price(mid, "buy", D(-1), tick)
+
+
+def test_maker_would_fill_needs_the_mid_to_trade_through_by_a_tick():
+    from contrib.hyperliquid_perp.paper.fill_model import maker_would_fill
+
+    tick = D("0.1")
+    post = D("49995")
+    assert not maker_would_fill(post, "buy", post, tick)  # a touch is not a fill
+    assert not maker_would_fill(post - D("0.05"), "buy", post, tick)
+    assert maker_would_fill(post - tick, "buy", post, tick)
+    assert maker_would_fill(post - D(50), "buy", post, tick)
+    ask = D("50005")
+    assert not maker_would_fill(ask, "sell", ask, tick)
+    assert maker_would_fill(ask + tick, "sell", ask, tick)
+    with pytest.raises(ValueError):
+        maker_would_fill(post, "buy", post, D(0))

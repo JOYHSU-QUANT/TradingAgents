@@ -128,3 +128,36 @@ def test_example_yaml_paper_block_parses():
     cfg = PaperTradingConfig.from_dict(raw.get("paper_trading"))
     assert cfg.execution.taker_fee_rate == Decimal("0.00045")
     assert cfg.account.initial_balance_usdc == Decimal("1000")
+
+
+# -- §5.2.1 maker fill model ----------------------------------------------------
+
+
+def test_fill_model_maker_style_parses_and_defaults():
+    from contrib.hyperliquid_perp.paper.config import FillModelConfig
+
+    cfg = FillModelConfig.from_dict(
+        {"style": "maker", "maker_fee_rate": "0.0001", "assumed_half_spread_bps": 2}
+    )
+    assert cfg.style == "maker"
+    assert (cfg.maker_fee_rate, cfg.assumed_half_spread_bps) == (Decimal("0.0001"), Decimal(2))
+    assert (cfg.maker_rest_seconds, cfg.maker_max_requotes) == (30, 2)
+    default = FillModelConfig.from_dict(None)
+    assert default.style == "taker" and default.maker_fee_rate == Decimal("0.00015")
+
+
+@pytest.mark.parametrize(
+    "overrides, needle",
+    [
+        ({"style": "post_only"}, "fill_model.style must be one of"),
+        ({"maker_fee_rate": -1}, "maker_fee_rate must be >= 0"),
+        ({"assumed_half_spread_bps": -1}, "assumed_half_spread_bps must be >= 0"),
+        ({"maker_rest_seconds": 0}, "maker_rest_seconds must be > 0"),
+        ({"maker_max_requotes": -1}, "maker_max_requotes must be >= 0"),
+    ],
+)
+def test_fill_model_refuses_unusable_maker_knobs(overrides, needle):
+    from contrib.hyperliquid_perp.paper.config import FillModelConfig
+
+    with pytest.raises(ValueError, match=needle):
+        FillModelConfig.from_dict(overrides)

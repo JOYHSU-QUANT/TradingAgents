@@ -383,7 +383,7 @@ post_price(sell) = round_up_to_tick  (mid_price * (1 + assumed_half_spread_bps /
 3. 掛滿 `maker_rest_seconds` 未成交 → 以當時 mid 重掛（`slice_requoted`，計次；每次重掛重新計時，
    重掛那一 tick 不另發 `slice_posted`），最多
    `maker_max_requotes` 次；超過 → 以 5.2 的 taker 模型成交（`slice_crossed` ＋ `slice_fill`，
-   `taker_fee_rate`），plan 仍在 deadline 內完成。
+   `taker_fee_rate`）；deadline 仍是硬信封（規則 4）。
 4. plan 到期那一 tick 不 tend、不重掛、也不新掛。no-data tick 掛著的片維持原狀：不 tend，也不把它之後
    的片記成 missed（1.1 的跳片規則只在沒有掛單時適用；掛著的片本來就擋住後面的片）。
    到期／取代／SL／TP／清算讓 leg 終止時，掛著的那片視同未成交，
@@ -448,7 +448,7 @@ paper_trading:
       maker_max_requotes: 2
 ```
 
-`fill_model` 是所有 simulated fills 共用的成交參數（`paper_market`、TWAP slices、SL / TP 與 gap-stop fills），成交參考價一律為執行當時取得的 `mid_price`（見 5.2；`maker` 風格掛單成交的價格是掛單當 tick 的 `post_price`，見 5.2.1）。`maker` 風格下另驗 `maker_rest_seconds ≤ 3600` 且 `(1 + maker_max_requotes) × maker_rest_seconds ≤ 3600`（plan 的一小時壽命，1.2），保證每片都能在 deadline 前 cross。`min_notional_usdc` 即 1.2 節的 `min_notional`，對應交易所單筆 order 至少 `10 USDC` 的規則。
+`fill_model` 是所有 simulated fills 共用的成交參數（`paper_market`、TWAP slices、SL / TP 與 gap-stop fills），成交參考價一律為執行當時取得的 `mid_price`（見 5.2；`maker` 風格掛單成交的價格是掛單當 tick 的 `post_price`，見 5.2.1）。`maker` 風格下另驗 `maker_rest_seconds ≤ 3600` 且 `(1 + maker_max_requotes) × maker_rest_seconds ≤ 3600`（plan 的一小時壽命，1.2），這只是單一掛單壽命的 sanity bound，不保證整個 plan 在 deadline 前完成。`min_notional_usdc` 即 1.2 節的 `min_notional`，對應交易所單筆 order 至少 `10 USDC` 的規則。
 
 `initial_balance_usdc` 與 `initial_positions` 只在建立新的 paper `run_id` 時套用。一般程式重啟必須從已記錄的 accounting events / snapshots 恢復上次的本地 account 與 position state，不得重設為 1,000 USDC。
 

@@ -354,9 +354,11 @@ class _Leg:
             total = sum(self.slice_sizes, Decimal(0))
         if not 0 <= self.filled_qty <= total:
             raise ValueError(f"_Leg.filled_qty {self.filled_qty} not in [0, total {total}]")
+        # A resting slice is always the newest consumed one and is unexecuted;
+        # missed slices (§1.1) may legitimately sit between executed and it.
         r = self.resting
         if r is not None and (
-            self.terminal or r.index != self.consumed - 1 or self.executed != self.consumed - 1
+            self.terminal or r.index != self.consumed - 1 or self.executed >= self.consumed
         ):
             raise ValueError(
                 f"_Leg.resting slice {r.index} inconsistent with executed {self.executed}, "

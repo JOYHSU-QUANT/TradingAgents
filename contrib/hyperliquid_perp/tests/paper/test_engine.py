@@ -1480,3 +1480,18 @@ def test_emergency_close_after_a_maker_fill_posts_nothing_on_the_canceled_plan(t
     assert leg.resting is None and _size(db) == D(0)
     assert _plan_status(db, plan_id) == ("canceled", "no_safe_sl")
     db.close()
+
+
+def test_a_slice_missed_before_the_first_post_does_not_halt_the_maker_leg(tmp_path):
+    db, clock, engine, _ = _maker(tmp_path)
+    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT, _snap()])
+    engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    r1 = engine.tick()  # slice 0 is missed (execution 1.1) with nothing resting
+    assert r1.has(TickEvent.SLICE_MISSED) and engine._leg.consumed == 1
+    clock.advance(30)
+    r2 = engine.tick()  # slice 1 posts behind the gap; the leg counters stay legal
+    assert r2.has(TickEvent.SLICE_POSTED) and not engine._halted
+    assert engine._leg.resting.index == 1
+    assert (engine._leg.consumed, engine._leg.executed) == (2, 0)
+    db.close()

@@ -21,6 +21,7 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
+from contrib.hyperliquid_perp.live import engine as engine_module
 from contrib.hyperliquid_perp.live.config import (
     AGGRESSIVE_FILL_BAND_PCT,
     ExecutionMode,
@@ -2316,11 +2317,43 @@ def test_a_cancel_that_raised_and_did_not_land_is_retried(tmp_path):
     h.cancel_error = RuntimeError("cancel timed out")
     h.identity.readings = [_reading("open")]
     h.tick(advance=30)
+    assert h.work.resting.pull is engine_module._Pull.REQUESTED
     h.cancel_error = None
     h.identity.readings = [_reading("open"), _reading("canceled", remaining=D("0.001"))]
-    h.tick()  # still open -> cancelled again, now acked
+    h.tick()  # still open -> cancelled again, now acked, remainder read
     assert len(h.cancels) == 2
     assert h.submitter.limit_calls[1]["size"] == D("0.001")
+    assert h.work.resting.pull is engine_module._Pull.NONE  # a fresh order
+
+
+def test_an_acked_pull_the_venue_still_shows_open_is_re_read_not_requoted(tmp_path):
+    # Eventual consistency: the cancel acked, orderStatus still says open —
+    # requoting off that read could put two orders on the book for one slice.
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.identity.readings = [_reading("open"), _reading("open", remaining=D("0.001"))]
+    r = h.tick(advance=30)
+    assert len(h.cancels) == 1 and len(h.submitter.limit_calls) == 1
+    assert any(e.startswith("maker_pull_pending:") for e in r.events)
+    assert h.work.resting.pull is engine_module._Pull.ACKED
+    h.identity.readings = [_reading("canceled", remaining=D("0.001"))]
+    h.tick()
+    assert len(h.cancels) == 1 and h.submitter.limit_calls[1]["size"] == D("0.001")
+
+
+def test_a_terminal_cancel_of_an_already_pulled_order_is_not_sent_again(tmp_path):
+    h = _MakerHarness(tmp_path)
+    reg = h.start()
+    h.tick()
+    h.identity.readings = [_reading("open"), RuntimeError("orderStatus 503")]
+    h.tick(advance=30)  # pulled, remainder unread -> ACKED
+    assert h.work.resting.pull is engine_module._Pull.ACKED
+    h.identity.readings = [_reading("open")] * 3
+    r = h.tick(advance=61 * 60)
+    assert len(h.cancels) == 1  # not cancelled a second time at expiry
+    assert any(e.startswith("maker_already_pulled:") for e in r.events)
+    assert h.plan_status(reg.plan_id) == "expired"
 
 
 def test_a_failed_poll_is_retried_and_the_slice_keeps_resting(tmp_path):
@@ -2390,16 +2423,46 @@ def test_a_failed_terminal_cancel_ends_the_leg_and_is_retried_each_tick(tmp_path
     h.identity.readings = [_reading("open")] * 3
     r = h.tick(advance=61 * 60)
     assert h.plan_status(reg.plan_id) == "expired"
+    assert len(h.cancels) == 1
     assert "maker_cancel_failed:r:plan:1:0:plan_expired:1" in r.events
     r2 = h.tick()  # retried next tick, still failing
     assert len(h.cancels) == 2
     assert "maker_cancel_failed:r:plan:1:0:plan_expired:2" in r2.events
+    # A tick with no market data still retries: the cancel needs no snapshot.
+    h.clock.advance(10)
+    _script(h.engine, [SnapshotOutcome.TIMEOUT])
+    r_nodata = h.engine.tick()
+    assert r_nodata.status.value == "no_market_data" and len(h.cancels) == 3
     h.cancel_error = None
     r3 = h.tick()  # lands
-    assert len(h.cancels) == 3
+    assert len(h.cancels) == 4
     assert "maker_canceled:r:plan:1:0:plan_expired" in r3.events
     h.tick()
-    assert len(h.cancels) == 3  # nothing left to retry
+    assert len(h.cancels) == 4  # nothing left to retry
+
+
+def test_a_cancel_past_the_retry_cap_slows_down_but_is_never_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine_module, "_MAX_CANCEL_RETRIES", 2)
+    monkeypatch.setattr(engine_module, "_CANCEL_RETRY_SLOW_EVERY", 3)
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.cancel_error = RuntimeError("cancel timed out")
+    h.identity.readings = [_reading("open")] * 3
+    h.tick(advance=61 * 60)  # attempt 1 at expiry
+    h.tick()  # attempt 2 (the cap)
+    assert len(h.cancels) == 2
+    h.tick()  # attempt 3: past the cap, skipped
+    h.tick()  # attempt 4: skipped
+    assert len(h.cancels) == 2
+    h.tick()  # attempt 5: (5-2) % 3 == 0 -> the slow-lane wire attempt
+    assert len(h.cancels) == 3
+    h.cancel_error = None
+    for _ in range(3):
+        h.tick()
+    assert len(h.cancels) == 4  # lands on the next slow-lane attempt, then stops
+    h.tick()
+    assert len(h.cancels) == 4
 
 
 def test_a_refused_terminal_cancel_means_the_order_is_already_gone(tmp_path):

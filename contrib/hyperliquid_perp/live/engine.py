@@ -150,9 +150,13 @@ if _MAKER_TIF not in ORDER_TYPE_FOR_TIF:
     raise AssertionError("_MAKER_TIF drifted from orders.ORDER_TYPE_FOR_TIF")
 
 # A terminal cancel that keeps failing is retried once per tick this many
-# times (~5 minutes at the ~10s cadence) before the engine gives up on it and
-# leaves the order to the §19.3 / §18.2 sweeps and the dead man's switch.
+# times, then once every _CANCEL_RETRY_SLOW_EVERY ticks (~5 minutes at the
+# ~10s cadence) at ERROR — never dropped: a bot-owned Alo resting on a dead
+# target is exactly the order the reconciler cannot see as wrong (venue open,
+# local open), so the engine keeps it on its own books until the cancel lands,
+# the venue says it is gone, or a §19.3 / §18.2 sweep retires it.
 _MAX_CANCEL_RETRIES = 30
+_CANCEL_RETRY_SLOW_EVERY = 30
 
 
 class _Poll(Enum):
@@ -690,6 +694,11 @@ class LiveExecutionEngine:
             # §18.2: refresh the kill switch every loop; the AI decision is off-thread
             # so this cadence is never blocked by a multi-minute cycle.
             self._kill_switch.tick()
+            # §9.2.1 rule 4: a maker slice a terminated leg could not pull is
+            # retried here — before the snapshot, which it does not need: an
+            # outage that blanks the market data must not also park the cancel
+            # of an entry order the position no longer wants (round-2 review).
+            self._retry_pending_cancels(events)
 
             # §12.2: reconcile after any fill ingest, and on the 5-minute heartbeat.
             reconciled = False
@@ -760,9 +769,6 @@ class LiveExecutionEngine:
                 account_equity=self._equity(position, snap.mark_price), now=now
             )
 
-            # §9.2.1 rule 4: a maker slice a terminated leg could not pull is
-            # retried here, before anything new reaches the book.
-            self._retry_pending_cancels(events)
             # §9: submit any due slice(s) of the active plan.
             self._submit_due_slices(snap.mid_price, now, events, progress)
             self._maybe_expire_plan(now, events)
@@ -1266,6 +1272,10 @@ class LiveExecutionEngine:
         reading = self._poll_resting(leg, work, r, events, what="maker slice poll")
         if reading is _Poll.FAILED:
             return
+        if reading is not None:
+            # The venue knows the order — it landed (this also settles the
+            # count for a lost-ack order booked as resting).
+            self._count_first_landing(work, progress)
         if reading is None:
             logger.warning(
                 "maker slice %s[%d]: orderStatus does not know cloid %s the venue acked — "
@@ -1379,6 +1389,13 @@ class LiveExecutionEngine:
             return _Poll.FAILED
         if reading is None:
             return None
+        if local_status_for_exchange_status(reading.status) == "open":
+            # The cancel was acked but the venue still shows the order open
+            # (eventual consistency): its remainder is not settled yet, and
+            # requoting off it could put two orders on the book for one slice.
+            # Re-read next tick, like a failed read.
+            events.append(f"maker_pull_pending:{leg.plan_id}:{work.index}")
+            return _Poll.FAILED
         return self._remainder_from_reading(reading, r, work)
 
     @staticmethod
@@ -1412,6 +1429,10 @@ class LiveExecutionEngine:
             return
         r = work.resting
         leg.working = None
+        if r.pull is _Pull.ACKED:
+            # Already pulled (only its remainder was unread): nothing rests.
+            events.append(f"maker_already_pulled:{leg.plan_id}:{work.index}:{reason}")
+            return
         self._try_cancel(
             _PendingCancel(
                 cloid_hex=r.cloid_hex,
@@ -1455,26 +1476,26 @@ class LiveExecutionEngine:
         self, pending: _PendingCancel, exc: BaseException, events: list[str], tag: str
     ) -> None:
         events.append(f"maker_cancel_failed:{tag}:{pending.attempt}")
-        if pending.attempt >= _MAX_CANCEL_RETRIES:
-            logger.error(
-                "maker slice cancel %s gave up after %d attempts (%s); the §19.3 / §18.2 "
-                "sweeps and the dead man's switch retire it",
-                tag,
-                pending.attempt,
-                exc,
-            )
-            return
-        logger.warning(
-            "maker slice cancel %s failed (attempt %d): %s — retried next tick",
+        slow = pending.attempt >= _MAX_CANCEL_RETRIES
+        (logger.error if slow else logger.warning)(
+            "maker slice cancel %s failed (attempt %d): %s — retried %s",
             tag,
             pending.attempt,
             exc,
+            f"every {_CANCEL_RETRY_SLOW_EVERY} ticks until it lands or a sweep retires it"
+            if slow
+            else "next tick",
         )
         self._pending_cancels.append(replace(pending, attempt=pending.attempt + 1))
 
     def _retry_pending_cancels(self, events: list[str]) -> None:
         pending, self._pending_cancels = self._pending_cancels, []
         for item in pending:
+            past_cap = item.attempt - _MAX_CANCEL_RETRIES
+            if past_cap > 0 and past_cap % _CANCEL_RETRY_SLOW_EVERY != 0:
+                # Slow lane: keep the item, skip the wire this tick.
+                self._pending_cancels.append(replace(item, attempt=item.attempt + 1))
+                continue
             self._try_cancel(item, events)
 
     def _submit_slice(

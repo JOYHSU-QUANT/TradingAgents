@@ -625,8 +625,9 @@ execution:
    一片（index／attempt／殘量／簿上那張綁在一起），殘量沒掛完之前不碰下一片；leg 只有在
    `submitted ≥ planned` **且沒有在工作的片**時才 `completed`。到期那一 tick 不 tend、不重報，
    直接進終止。plan 到期／倉位歸零／emergency close／新決策取代而終止 leg 時，**先撤掉簿上那張**
-   （`cancel_reason=plan_<status>`）；撤不掉不擋終止，但引擎每 tick 重試（上限約 5 分鐘）；
-   之後 §19.3 啟動掃描、§18.2 收工掃描與 dead man's switch 收拾 bot-owned 的 resting 單，
+   （`cancel_reason=plan_<status>`）；撤不掉不擋終止，但引擎**每 tick 重試 30 次、之後每 ~5 分鐘
+   一次並以 ERROR 提醒，永不丟棄**（這種單 reconciliation 看不出有錯：venue open、本地 open）；
+   在此之外 §19.3 啟動掃描、§18.2 收工掃描與 dead man's switch 也會收拾 bot-owned 的 resting 單，
    reconciliation 同時把本地 row 對齊。**§9.2 rule 4「每 tick 最多一張」在 maker 下的 carve-out**：
    同一 tick 內「結案一片（IOC 兜底或成交）＋接手下一片（Alo）」可以各上一次線；長時間 resting
    後多片同時到期時仍是一 tick 接一片（被動掛單不會像 taker burst 那樣推價）。

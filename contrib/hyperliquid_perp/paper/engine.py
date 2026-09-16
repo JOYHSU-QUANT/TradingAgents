@@ -86,6 +86,7 @@ from .market_feed import SnapshotOutcome, SnapshotProvider, SnapshotResult
 from .stops import StopAction, StopConfig, stop_loss_decision, take_profit_price
 from .twap import (
     MAX_SLICES,
+    PLAN_LIFETIME_SECONDS,
     SLICE_INTERVAL_SECONDS,
     PlanDisposition,
     build_slice_plan,
@@ -134,7 +135,7 @@ def _fail_stop(method):
 
 
 # The one-hour terminal deadline every plan must reach (execution §1.2).
-_PLAN_LIFETIME = timedelta(hours=1)
+_PLAN_LIFETIME = timedelta(seconds=PLAN_LIFETIME_SECONDS)
 _MODE = "paper"
 
 
@@ -353,6 +354,14 @@ class _Leg:
             total = sum(self.slice_sizes, Decimal(0))
         if not 0 <= self.filled_qty <= total:
             raise ValueError(f"_Leg.filled_qty {self.filled_qty} not in [0, total {total}]")
+        r = self.resting
+        if r is not None and (
+            self.terminal or r.index != self.consumed - 1 or self.executed != self.consumed - 1
+        ):
+            raise ValueError(
+                f"_Leg.resting slice {r.index} inconsistent with executed {self.executed}, "
+                f"consumed {self.consumed}, terminal {self.terminal}"
+            )
 
 
 @dataclass
@@ -1067,7 +1076,10 @@ class PaperExecutionEngine:
         self._consecutive_md_failures += 1
         # Any slice whose scheduled time passed during the outage is missed, never
         # re-run (execution §1.1). Advance the leg's cursor over it without filling.
-        if self._leg is not None and not self._leg.terminal:
+        # §5.2.1 rule 4: a resting maker slice is left exactly as it is through
+        # an outage (nothing to tend without a mid), and the slices behind it are
+        # queued, not missed — it blocks them whether or not data arrives.
+        if self._leg is not None and not self._leg.terminal and self._leg.resting is None:
             due = self._due_count(self._leg, now)
             if due > self._leg.consumed:
                 self._leg.consumed = due
@@ -1257,12 +1269,13 @@ class PaperExecutionEngine:
         leg = self._leg
         if leg is None or leg.terminal or self._paused:
             return
+        if self._maker_style and now >= leg.deadline:
+            # §5.2.1 rule 4: like the live maker path, the deadline tick neither
+            # tends, re-posts nor posts — the expiry that follows drops any post
+            # as residual.
+            return
         if leg.resting is not None:
-            # §5.2.1: one slice rests at a time; tend it before anything new,
-            # and — like the live maker path — do nothing at or past the
-            # deadline (the expiry that follows drops the post as residual).
-            if now >= leg.deadline:
-                return
+            # §5.2.1: one slice rests at a time; tend it before anything new.
             self._tend_paper_resting(now, snap, leg, events)
             if leg.resting is not None or leg.terminal or self._leg is not leg:
                 return
@@ -1270,7 +1283,10 @@ class PaperExecutionEngine:
         if leg.consumed >= due:
             return  # nothing new due this tick
         idx = leg.consumed
-        leg.consumed += 1  # one slice per tick (execution §5.5)
+        # One slice per tick (execution §5.5); under the maker style a slice that
+        # just left the book hands over to the next due one in this same tick
+        # (§5.2.1 rule 1).
+        leg.consumed += 1
         size = leg.slice_sizes[idx]
         if self._maker_style:
             self._post_paper_maker(now, snap, leg, idx, size, attempt=0, events=events)
@@ -1283,7 +1299,11 @@ class PaperExecutionEngine:
     def _post_paper_maker(
         self, now, snap, leg: _Leg, idx: int, size, *, attempt: int, events
     ) -> None:
-        """Rest slice ``idx`` at the modelled touch (execution §5.2.1)."""
+        """Rest slice ``idx`` at the modelled touch (execution §5.2.1).
+
+        ``attempt`` 0 is the first post (``slice_posted``); a re-post after a
+        rest reports ``slice_requoted`` instead, never both.
+        """
         price = maker_post_price(
             snap.mid_price, leg.side, self._half_spread_bps, self._asset.tick_size
         )
@@ -1291,7 +1311,7 @@ class PaperExecutionEngine:
             index=idx, size=size, price=price, placed_at=now, attempt=attempt
         )
         leg.validate()
-        events.append(TickEvent.SLICE_POSTED)
+        events.append(TickEvent.SLICE_REQUOTED if attempt else TickEvent.SLICE_POSTED)
 
     def _tend_paper_resting(self, now, snap, leg: _Leg, events) -> None:
         """Fill, re-post or cross the resting maker slice (execution §5.2.1).
@@ -1323,7 +1343,6 @@ class PaperExecutionEngine:
             self._post_paper_maker(
                 now, snap, leg, r.index, r.size, attempt=r.attempt + 1, events=events
             )
-            events.append(TickEvent.SLICE_REQUOTED)
             return
         leg.resting = None
         events.append(TickEvent.SLICE_CROSSED)
@@ -1593,6 +1612,7 @@ class PaperExecutionEngine:
         caller's transaction; only the status/reason vocabulary differs per path.
         """
         leg.terminal = True
+        leg.resting = None  # §5.2.1 rule 4: a terminal leg's post is residual
         remaining = leg.remaining_qty
         repo.update_execution_plan(
             conn,

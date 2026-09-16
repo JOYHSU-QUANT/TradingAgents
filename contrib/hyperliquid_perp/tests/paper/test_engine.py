@@ -1284,7 +1284,7 @@ def test_maker_rest_timeout_reposts_then_crosses_as_a_taker(tmp_path):
 
 
 def test_a_resting_maker_slice_blocks_the_next_due_slice_until_it_fills(tmp_path):
-    db, clock, engine, asset = _maker(tmp_path, maker_max_requotes=9, maker_rest_seconds=600)
+    db, clock, engine, asset = _maker(tmp_path, maker_max_requotes=2, maker_rest_seconds=600)
     _provider(engine, [_snap()] * 3)
     engine.start_plan(_decision("long", 2))
     clock.advance(30)
@@ -1342,4 +1342,141 @@ def test_the_taker_style_never_posts(tmp_path):
     r = engine.tick()
     assert r.has(TickEvent.SLICE_FILL) and not r.has(TickEvent.SLICE_POSTED)
     assert engine._leg.resting is None
+    assert _fill_rates(db, engine._leg.order_id) == [D("0.00045")]
+    db.close()
+
+
+def test_short_leg_posts_above_mid_and_fills_only_when_mid_trades_up_through(tmp_path):
+    db, clock, engine, asset = _maker(tmp_path, maker_rest_seconds=600)
+    tick = asset.tick_size
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("short", 2))
+    clock.advance(30)
+    engine.tick()
+    post = engine._leg.resting.price
+    assert post > _MARK
+    clock.advance(10)
+    _provider(engine, [_snap(_MARK, post - tick)])  # below the ask: nothing
+    assert not engine.tick().has(TickEvent.SLICE_FILL)
+    clock.advance(10)
+    _provider(engine, [_snap(_MARK, post + tick)])
+    r = engine.tick()
+    assert r.has(TickEvent.SLICE_FILL) and _size(db) == D("-0.001")
+    assert repo.get_current_position(db.conn, "r", "BTC").entry_price == post
+    db.close()
+
+
+def test_requote_gets_a_fresh_rest(tmp_path):
+    db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=1)
+    _provider(engine, [_snap()] * 4)
+    engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    engine.tick()  # posted at t=30
+    clock.advance(30)
+    assert engine.tick().has(TickEvent.SLICE_REQUOTED)  # rested 30 s: re-posted at t=60
+    clock.advance(10)
+    r3 = engine.tick()  # t=70: the re-post has rested only 10 s
+    assert not r3.has(TickEvent.SLICE_CROSSED) and not r3.has(TickEvent.SLICE_REQUOTED)
+    assert engine._leg.resting.attempt == 1 and _size(db) == D(0)
+    db.close()
+
+
+def test_requote_moves_to_the_new_touch(tmp_path):
+    from contrib.hyperliquid_perp.paper.fill_model import maker_post_price
+
+    db, clock, engine, asset = _maker(tmp_path)
+    _provider(engine, [_snap(), _snap(), _snap(50100, 50100)])
+    engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    r1 = engine.tick()
+    old = engine._leg.resting.price
+    assert r1.has(TickEvent.SLICE_POSTED) and not r1.has(TickEvent.SLICE_REQUOTED)
+    clock.advance(30)
+    r2 = engine.tick()  # the mid rose: no fill, and the re-post follows the new touch
+    assert r2.has(TickEvent.SLICE_REQUOTED) and not r2.has(TickEvent.SLICE_POSTED)
+    assert engine._leg.resting.price == maker_post_price(D(50100), "buy", D(1), asset.tick_size)
+    assert engine._leg.resting.price > old
+    db.close()
+
+
+def test_zero_requotes_crosses_on_the_first_timeout(tmp_path):
+    db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=0)
+    _provider(engine, [_snap()] * 3)
+    engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    engine.tick()
+    clock.advance(30)
+    r = engine.tick()
+    assert r.has(TickEvent.SLICE_CROSSED) and not r.has(TickEvent.SLICE_REQUOTED)
+    assert _fill_rates(db, engine._leg.order_id) == [D("0.00045")]
+    db.close()
+
+
+def test_an_outage_leaves_the_resting_maker_slice_in_place(tmp_path):
+    db, clock, engine, asset = _maker(tmp_path, maker_rest_seconds=600, maker_max_requotes=1)
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 2))
+    plan_id = engine._leg.plan_id
+    clock.advance(30)
+    engine.tick()
+    post = engine._leg.resting.price
+    clock.advance(30)
+    _provider(engine, [SnapshotOutcome.TIMEOUT])
+    r2 = engine.tick()  # one failed snapshot while slice 0 rests and slice 1 is due
+    assert r2.has(TickEvent.PENDING_MARKET_DATA)
+    assert not r2.has(TickEvent.SLICE_MISSED) and not r2.has(TickEvent.PLAN_TERMINAL)
+    assert engine._leg.resting is not None and engine._leg.consumed == 1
+    clock.advance(30)
+    _provider(engine, [_snap(_MARK, post - asset.tick_size)])
+    r3 = engine.tick()  # data is back: the post fills, slice 1 posts
+    assert r3.has(TickEvent.SLICE_FILL) and r3.has(TickEvent.SLICE_POSTED)
+    assert _size(db) == D("0.001") and _plan_status(db, plan_id)[0] == "active"
+    db.close()
+
+
+def test_the_deadline_tick_neither_fills_nor_reposts_a_maker_slice(tmp_path):
+    db, clock, engine, asset = _maker(tmp_path, maker_max_requotes=9)
+    _provider(engine, [_snap(), _snap()])
+    start = engine.start_plan(_decision("long", 2))
+    clock.advance(30)
+    engine.tick()
+    post = engine._leg.resting.price
+    clock.advance(3570)  # now == deadline, and the mid is through the post
+    _provider(engine, [_snap(_MARK, post - asset.tick_size)])
+    r = engine.tick()
+    assert r.has(TickEvent.PLAN_TERMINAL)
+    assert not r.has(TickEvent.SLICE_FILL) and not r.has(TickEvent.SLICE_REQUOTED)
+    assert _size(db) == D(0)
+    assert _plan_status(db, start.plan_id) == ("expired", "deadline")
+    db.close()
+
+
+def test_emergency_close_after_a_maker_fill_posts_nothing_on_the_canceled_plan(tmp_path):
+    db, clock, engine, asset = _engine(
+        tmp_path,
+        seed=_BIG_SEED,
+        stop_config=StopConfig(liq_buffer=D("0.2")),
+        fill_model={
+            "style": "maker",
+            "assumed_half_spread_bps": "1",
+            "maker_rest_seconds": 30,
+            "maker_max_requotes": 9,
+        },
+    )
+    _provider(engine, [_snap(), _snap()])
+    engine.start_plan(_decision("long", 10))
+    leg = engine._leg
+    assert leg.planned >= 2
+    plan_id = leg.plan_id
+    clock.advance(30)
+    assert engine.tick().has(TickEvent.SLICE_POSTED)
+    post = leg.resting.price
+    through = post + asset.tick_size if leg.side is Side.SELL else post - asset.tick_size
+    clock.advance(30)  # slice 1 is due; the fill's SL recompute finds no safe SL
+    _provider(engine, [_snap(_MARK, through)])
+    r = engine.tick()
+    assert r.has(TickEvent.SLICE_FILL) and r.has(TickEvent.LIQUIDATION_CLOSE)
+    assert r.has(TickEvent.PLAN_TERMINAL) and not r.has(TickEvent.SLICE_POSTED)
+    assert leg.resting is None and _size(db) == D(0)
+    assert _plan_status(db, plan_id) == ("canceled", "no_safe_sl")
     db.close()

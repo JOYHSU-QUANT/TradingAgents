@@ -21,7 +21,7 @@ from ..common.config_coercion import (
 )
 from ..common.constants import EXCHANGE_MIN_ORDER_NOTIONAL_USDC
 from ..common.enum_guard import check_enum
-from .twap import SLICE_INTERVAL_SECONDS
+from .twap import PLAN_LIFETIME_SECONDS, SLICE_INTERVAL_SECONDS
 
 __all__ = [
     "FillModelConfig",
@@ -202,6 +202,22 @@ class FillModelConfig:
             raise ValueError(f"maker_rest_seconds must be > 0, got {self.maker_rest_seconds}")
         if self.maker_max_requotes < 0:
             raise ValueError(f"maker_max_requotes must be >= 0, got {self.maker_max_requotes}")
+        if self.style == "maker":
+            # §5.2.1: every post rests its own clock, so a slice's longest stay
+            # on the (simulated) book is (1 + requotes) * rest — it must fit the
+            # plan lifetime or the slice can never cross before the deadline.
+            if self.maker_rest_seconds > PLAN_LIFETIME_SECONDS:
+                raise ValueError(
+                    f"maker_rest_seconds must be <= {PLAN_LIFETIME_SECONDS} (the plan "
+                    f"lifetime), got {self.maker_rest_seconds}"
+                )
+            budget = (1 + self.maker_max_requotes) * self.maker_rest_seconds
+            if budget > PLAN_LIFETIME_SECONDS:
+                raise ValueError(
+                    "(1 + maker_max_requotes) * maker_rest_seconds must be <= "
+                    f"{PLAN_LIFETIME_SECONDS} (the plan lifetime) so every slice can "
+                    f"cross before the deadline, got {budget}"
+                )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> FillModelConfig:

@@ -91,7 +91,10 @@ Breaking changes within the 0.x line are called out explicitly.
   only when the mid trades THROUGH the post by a full tick; after
   `maker_rest_seconds` it re-posts at the new touch up to
   `maker_max_requotes` times, then crosses at the existing taker model.
-  One slice rests at a time; a leg that ends drops its post as residual.
+  One slice rests at a time; a leg that ends drops its post as residual; a
+  no-data tick leaves the post in place (the slices behind it queue, they
+  are not missed); the deadline tick neither tends nor posts. Config
+  refuses a rest budget that cannot cross before the 1h plan lifetime.
   SL / TP / gap-stop / liquidation fills and the prompt's marginal-cost
   figures stay on the taker model. Default `style: taker` is unchanged;
   switching a paper run to `maker` is an EXECUTION segment point (deploy on

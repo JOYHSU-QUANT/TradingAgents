@@ -144,6 +144,9 @@ def test_fill_model_maker_style_parses_and_defaults():
     assert (cfg.maker_rest_seconds, cfg.maker_max_requotes) == (30, 2)
     default = FillModelConfig.from_dict(None)
     assert default.style == "taker" and default.maker_fee_rate == Decimal("0.00015")
+    # The rest-budget envelope is a maker-style rule; taker ignores the knobs.
+    assert FillModelConfig.from_dict({"maker_rest_seconds": 7200}).style == "taker"
+    assert FillModelConfig.from_dict({"style": "maker", "maker_rest_seconds": 1200}).style
 
 
 @pytest.mark.parametrize(
@@ -154,6 +157,11 @@ def test_fill_model_maker_style_parses_and_defaults():
         ({"assumed_half_spread_bps": -1}, "assumed_half_spread_bps must be >= 0"),
         ({"maker_rest_seconds": 0}, "maker_rest_seconds must be > 0"),
         ({"maker_max_requotes": -1}, "maker_max_requotes must be >= 0"),
+        ({"style": "maker", "maker_rest_seconds": 3601}, "maker_rest_seconds must be <= 3600"),
+        (
+            {"style": "maker", "maker_rest_seconds": 1800, "maker_max_requotes": 2},
+            r"\(1 \+ maker_max_requotes\) \* maker_rest_seconds must be <= 3600",
+        ),
     ],
 )
 def test_fill_model_refuses_unusable_maker_knobs(overrides, needle):

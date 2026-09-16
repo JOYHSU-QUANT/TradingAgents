@@ -74,3 +74,11 @@ def test_maker_would_fill_needs_the_mid_to_trade_through_by_a_tick():
     assert maker_would_fill(ask + tick, "sell", ask, tick)
     with pytest.raises(ValueError):
         maker_would_fill(post, "buy", post, D(0))
+
+
+def test_maker_post_price_rounds_toward_the_passive_side():
+    from contrib.hyperliquid_perp.paper.fill_model import maker_post_price
+
+    mid, tick = D("50000"), D("1")
+    assert maker_post_price(mid, "buy", D("0.3"), tick) == D("49998")  # raw 49998.5 rounds down
+    assert maker_post_price(mid, "sell", D("0.3"), tick) == D("50002")  # raw 50001.5 rounds up

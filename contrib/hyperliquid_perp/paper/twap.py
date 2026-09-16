@@ -39,6 +39,7 @@ from ..persistence.models import Side
 
 __all__ = [
     "MAX_SLICES",
+    "PLAN_LIFETIME_SECONDS",
     "SLICE_INTERVAL_SECONDS",
     "PlanDisposition",
     "RebalanceDelta",
@@ -55,6 +56,9 @@ __all__ = [
 # Execution §1.2: at most 120 slices, one every 30 s → a one-hour ceiling.
 MAX_SLICES = 120
 SLICE_INTERVAL_SECONDS = 30
+# The terminal deadline every plan must reach (execution §1.2); the paper
+# engine's plan lifetime and the maker rest budget's envelope (§5.2.1).
+PLAN_LIFETIME_SECONDS = MAX_SLICES * SLICE_INTERVAL_SECONDS
 
 
 class PlanDisposition(str, Enum):

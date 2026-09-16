@@ -205,7 +205,8 @@ class _PendingCancel:
     reason: str
     plan_id: str
     index: int
-    attempt: int
+    attempt: int  # ticks this cancel has been queued for (drives the slow lane)
+    sent: int = 0  # wire attempts so far (what the log and the event report)
 
 
 class _SliceOutcome(Enum):
@@ -1448,6 +1449,7 @@ class LiveExecutionEngine:
     def _try_cancel(self, pending: _PendingCancel, events: list[str]) -> None:
         assert self._cancel_order is not None  # a resting slice exists only under the maker style
         tag = f"{pending.plan_id}:{pending.index}:{pending.reason}"
+        pending = replace(pending, sent=pending.sent + 1)
         try:
             self._cancel_order(
                 cloid_hex=pending.cloid_hex,
@@ -1475,11 +1477,12 @@ class LiveExecutionEngine:
     def _defer_cancel(
         self, pending: _PendingCancel, exc: BaseException, events: list[str], tag: str
     ) -> None:
-        events.append(f"maker_cancel_failed:{tag}:{pending.attempt}")
+        events.append(f"maker_cancel_failed:{tag}:{pending.sent}")
         slow = pending.attempt >= _MAX_CANCEL_RETRIES
         (logger.error if slow else logger.warning)(
-            "maker slice cancel %s failed (attempt %d): %s — retried %s",
+            "maker slice cancel %s failed (send %d, queued %d ticks): %s — retried %s",
             tag,
+            pending.sent,
             pending.attempt,
             exc,
             f"every {_CANCEL_RETRY_SLOW_EVERY} ticks until it lands or a sweep retires it"

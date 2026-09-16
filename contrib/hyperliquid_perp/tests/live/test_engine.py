@@ -2380,6 +2380,19 @@ def test_a_submit_that_raised_is_treated_as_possibly_resting(tmp_path):
     assert any(e.endswith(":unknownOid") for e in r2.events) and h.work is None
 
 
+def test_a_lost_ack_order_the_venue_knows_is_counted_once_when_first_seen(tmp_path):
+    h = _MakerHarness(tmp_path, script=[RuntimeError("socket closed after send")])
+    h.start()
+    r1 = h.tick()
+    assert r1.slices_submitted == 0  # nothing landed for sure yet
+    h.identity.readings = [_reading("open")]
+    r2 = h.tick()
+    assert r2.slices_submitted == 1  # the venue knows it: counted now, once
+    h.identity.readings = [_reading("open")]
+    r3 = h.tick()
+    assert r3.slices_submitted == 0
+
+
 def test_a_contract_violation_from_the_submitter_is_not_swallowed(tmp_path):
     h = _MakerHarness(tmp_path, script=[ValueError("tif must be one of ['Alo', 'Ioc']")])
     h.start()

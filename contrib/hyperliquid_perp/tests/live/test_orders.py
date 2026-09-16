@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -1144,3 +1146,46 @@ def test_an_order_id_keeps_one_type_for_life(env):
     assert len(client.place_calls) == 1  # the resend never reached the wire
     row = repo.get_order(db.conn, "o1")
     assert row["type"] == "ioc_limit" and row["status"] == "rejected"
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+@pytest.mark.parametrize(
+    "drift, sentence",
+    [
+        (
+            "sc.LIMIT_TIFS = frozenset({'Ioc'})",
+            "_SUBMITTABLE_TIFS drifted from signed_client.LIMIT_TIFS",
+        ),
+        (
+            "repo.ORDER_TYPES = frozenset(repo.ORDER_TYPES - {'alo_limit'})",
+            "_ORDER_TYPE_FOR_TIF values drifted from repository.ORDER_TYPES",
+        ),
+    ],
+)
+def test_the_import_time_vocab_pins_fire(drift, sentence):
+    # The two pins only exist to fail at import; prove they can. A subprocess,
+    # not ``importlib.reload``: reloading live.orders mints a second set of its
+    # classes while every already-imported consumer keeps the first, and the
+    # identity trap that opens (an ``except`` that no longer matches) is the one
+    # PR #267 walked into. A fresh interpreter has no such second copy.
+    code = "; ".join(
+        [
+            "import contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client as sc",
+            "import contrib.hyperliquid_perp.persistence.repository as repo",
+            drift,
+            "import contrib.hyperliquid_perp.live.orders",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert result.returncode != 0
+    assert "AssertionError" in result.stderr and sentence in result.stderr

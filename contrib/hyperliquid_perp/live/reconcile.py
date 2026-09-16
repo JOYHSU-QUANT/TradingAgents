@@ -1455,9 +1455,15 @@ class LiveReconciler:
             return role_type
         tif = order.get("tif")
         if not isinstance(tif, str):
-            reading = self._identity.probe(
-                registry["cloid_hex"], site=ProbeSite.RECONCILE_ORPHAN_TYPE
-            )
+            try:
+                reading = self._identity.probe(
+                    registry["cloid_hex"], site=ProbeSite.RECONCILE_ORPHAN_TYPE
+                )
+            except Exception as exc:  # noqa: BLE001 — named like the sibling probes, then re-raised
+                raise ValueError(
+                    f"cannot derive orders.type for orphan cloid {registry['cloid_hex']}: "
+                    f"the listing carries no tif and {describe_order_status_failure(exc)}"
+                ) from exc
             tif = None if reading is None else reading.tif
         order_type = ORDER_TYPE_FOR_TIF.get(tif) if isinstance(tif, str) else None
         if order_type is None:

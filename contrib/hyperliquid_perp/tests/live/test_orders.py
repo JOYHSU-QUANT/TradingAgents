@@ -1199,25 +1199,22 @@ def test_parse_order_status_reads_tif_and_sizes_when_the_venue_states_them():
     payload = {
         "status": "order",
         "order": {
-            "order": {"oid": 7, "cloid": _HEX, "tif": "Alo", "sz": "0.004", "origSz": "0.01"},
+            "order": {"oid": 7, "cloid": _HEX, "tif": "Alo", "sz": "0.004"},
             "status": "open",
         },
     }
     reading = parse_order_status(payload, expected_cloid_hex=_HEX)
     assert reading is not None
-    assert (reading.tif, reading.remaining_size, reading.original_size) == (
-        "Alo",
-        Decimal("0.004"),
-        Decimal("0.01"),
-    )
+    assert (reading.tif, reading.remaining_size) == ("Alo", Decimal("0.004"))
 
 
 @pytest.mark.parametrize(
     "inner",
     [
-        {"oid": 7},  # an older payload: none of the three
-        {"oid": 7, "tif": None, "sz": None, "origSz": ""},  # present but empty
-        {"oid": 7, "tif": 3, "sz": "abc", "origSz": "NaN"},  # present but unusable
+        {"oid": 7},  # an older payload: neither field
+        {"oid": 7, "tif": None, "sz": None},  # present but empty
+        {"oid": 7, "tif": 3, "sz": "abc"},  # present but unusable
+        {"oid": 7, "tif": 3, "sz": "NaN"},  # present but non-finite
     ],
 )
 def test_parse_order_status_reads_absent_or_unusable_extras_as_none(inner):
@@ -1226,4 +1223,4 @@ def test_parse_order_status_reads_absent_or_unusable_extras_as_none(inner):
     payload = {"status": "order", "order": {"order": {**inner, "cloid": _HEX}, "status": "open"}}
     reading = parse_order_status(payload, expected_cloid_hex=_HEX)
     assert reading is not None and reading.status == "open"
-    assert (reading.tif, reading.remaining_size, reading.original_size) == (None, None, None)
+    assert (reading.tif, reading.remaining_size) == (None, None)

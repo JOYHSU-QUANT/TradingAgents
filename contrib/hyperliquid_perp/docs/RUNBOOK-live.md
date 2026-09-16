@@ -722,6 +722,12 @@ disarm 交叉檢查，走的是同一個 `VenueIdentityMonitor`——所以故�
 | probe | `reconcile orphan-order tiebreaker` |
 | probe | `reconcile absent-order settle` |
 | probe | `reconcile orphan-order type` |
+
+> **maker 路徑（§9.2.1）下的孤兒單**：切片是 post-only 單時，孤兒單回填會用 venue 的 `tif`
+> 決定 `orders.type`（listing 沒有就 probe orderStatus）。`tif` 是 `Gtc`／`FrontendMarket`
+> 之類本系統不會送的字，或 probe 讀不到 → **不回填**，case 保持 open、`orders_reconciled=false`
+> → recoverable safe mode。處置＝到 venue 把那張單撤掉（它不是這個 run 會送的形狀），下一趟
+> reconciliation 自動清掉。
 | probe | `kill-switch disarm cross-check` |
 | probe | `engine maker-slice poll` |
 | holder | `§17 protection sync` |

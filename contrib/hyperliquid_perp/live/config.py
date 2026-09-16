@@ -349,6 +349,15 @@ class LiveExecutionConfig:
                 f"({self.plan_duration_minutes} minutes) — there would never be a "
                 "second slice; almost certainly a units mix-up"
             )
+        if self.maker_max_requotes < 0:
+            raise ValueError(
+                f"live.execution.maker_max_requotes must be >= 0, got {self.maker_max_requotes}"
+            )
+        if self.default_style is not ExecutionStyle.SLICED_MAKER:
+            # The envelope checks below only make sense for the style that
+            # reads the knobs; a taker run with a one-minute test plan must not
+            # be refused over a rest budget it never uses.
+            return
         if self.maker_rest_seconds <= 0:
             raise ValueError(
                 f"live.execution.maker_rest_seconds must be > 0, got {self.maker_rest_seconds}"
@@ -360,9 +369,15 @@ class LiveExecutionConfig:
                 "post-only slice can never rest past its plan; almost certainly a "
                 "units mix-up"
             )
-        if self.maker_max_requotes < 0:
+        # Each requote is a new order with a fresh rest clock (§9.2.1), so a
+        # slice may rest (1 + max_requotes) × rest before it crosses; that
+        # product, not the single rest, is what the plan envelope must hold.
+        budget = (1 + self.maker_max_requotes) * self.maker_rest_seconds
+        if budget > self.plan_duration_minutes * 60:
             raise ValueError(
-                f"live.execution.maker_max_requotes must be >= 0, got {self.maker_max_requotes}"
+                f"live.execution.maker_rest_seconds × (1 + maker_max_requotes) = {budget}s "
+                f"exceeds the whole plan duration ({self.plan_duration_minutes} minutes) — "
+                "one slice could out-rest its plan"
             )
 
     @classmethod

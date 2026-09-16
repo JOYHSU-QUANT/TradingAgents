@@ -6,6 +6,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -2047,19 +2048,23 @@ def _reading(status, remaining=None):
     return OrderStatusReading(exchange_order_id="111", status=status, remaining_size=remaining)
 
 
+def _tails(calls):
+    """The ``<leg>_<slice>_<role>`` tail of each call's cloid_logical."""
+    return [c["cloid_logical"].split("_", 5)[-1] for c in calls]
+
+
 class _MakerHarness:
     """A maker-style engine with its two seams recorded."""
 
     def __init__(self, tmp_path, *, execution=None, script=None, book=None):
         self.cancels: list[dict] = []
-        self.book_reads = 0
+        self.cancel_error: Exception | None = None
         self.book_error: Exception | None = None
         self.protection = _FakeProtection()
         self.submitter = _MakerSubmitter(script)
         top = book or TopOfBook(coin="BTC", best_bid=_BID, best_ask=_ASK, time=_T0)
 
         def fetch_top_of_book(coin):
-            self.book_reads += 1
             if self.book_error is not None:
                 raise self.book_error
             return top
@@ -2068,6 +2073,8 @@ class _MakerHarness:
             self.cancels.append(
                 {"cloid_hex": cloid_hex, "cloid_logical": cloid_logical, "reason": cancel_reason}
             )
+            if self.cancel_error is not None:
+                raise self.cancel_error
 
         self.db, self.clock, self.engine, self.gate, _ = _build(
             tmp_path,
@@ -2082,6 +2089,10 @@ class _MakerHarness:
     def identity(self) -> _FakeIdentity:
         return self.protection.identity
 
+    @property
+    def work(self):
+        return self.engine._leg.working
+
     def start(self, margin=5):
         _script(self.engine, [_snap()])
         reg = self.engine.start_plan(_decision("long", margin), output_id="o1")
@@ -2093,6 +2104,9 @@ class _MakerHarness:
         _script(self.engine, [_snap()])
         return self.engine.tick()
 
+    def plan_status(self, plan_id):
+        return repo.get_execution_plan(self.db.conn, plan_id)["status"]
+
 
 def test_maker_style_refuses_construction_without_its_seams(tmp_path):
     with pytest.raises(ValueError, match="fetch_top_of_book / cancel_order"):
@@ -2102,32 +2116,25 @@ def test_maker_style_refuses_construction_without_its_seams(tmp_path):
 def test_maker_slice_joins_the_touch_post_only_and_rests_one_at_a_time(tmp_path):
     h = _MakerHarness(tmp_path)
     reg = h.start()  # 0.004 BTC -> 4 slices of 0.001
-    # Tick 1: the first slice is due at t=0 and is posted at the bid, Alo.
-    r1 = h.tick()
+    r1 = h.tick()  # +10s: slice 0 due at t=0, posted at the bid, Alo
     (call,) = h.submitter.limit_calls
     assert call["tif"] == "Alo" and call["side"] == "buy"
     assert call["limit_price"] == _BID  # joins the bid, never the mid
     assert call["size"] == D("0.001") and call["reduce_only"] is False
     assert r1.slices_submitted == 1 and any(e.startswith("maker_slice:") for e in r1.events)
     assert h.submitter.calls == []  # nothing crossed
-    # Tick 2 (+10s): slice 2 is not due yet AND slice 1 still rests -> poll only.
+    assert h.engine._leg.submitted == 1 and h.work.resting is not None
     h.identity.readings = [_reading("open")]
-    r2 = h.tick()
+    r2 = h.tick()  # +20s: still resting, under the rest timeout -> poll only
     assert len(h.submitter.limit_calls) == 1 and r2.slices_submitted == 0
-    # Tick 3 (+20s in): still resting, still under the rest timeout -> poll only.
     h.identity.readings = [_reading("open")]
-    h.tick()
+    h.tick()  # +30s: slice 1 due, but slice 0 still rests -> still one on the book
     assert len(h.submitter.limit_calls) == 1
-    # Tick 4 (+35s): slice 1 filled -> the book is clear and slice 2 (due since
-    # +30s) goes out in the same tick; still one slice on the book at a time.
     h.identity.readings = [_reading("filled")]
-    r4 = h.tick(advance=5)
+    r4 = h.tick(advance=5)  # +35s: slice 0 filled -> slice 1 goes out in the same tick
     assert any(e.startswith("maker_gone:") for e in r4.events)
-    assert len(h.submitter.limit_calls) == 2
-    assert h.submitter.limit_calls[1]["cloid_logical"].endswith("_na_001_entry")
-    assert h.cancels == []
-    plan = repo.get_execution_plan(h.db.conn, reg.plan_id)
-    assert plan["status"] == "active"
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry", "na_001_entry"]
+    assert h.cancels == [] and h.plan_status(reg.plan_id) == "active"
 
 
 def test_maker_rest_timeout_pulls_and_requotes_the_venue_stated_remainder(tmp_path):
@@ -2143,13 +2150,13 @@ def test_maker_rest_timeout_pulls_and_requotes_the_venue_stated_remainder(tmp_pa
     assert cancel["cloid_hex"] == derive_cloid_hex(first["cloid_logical"])
     requote = h.submitter.limit_calls[1]
     assert requote["size"] == D("0.0004") and requote["tif"] == "Alo"
-    # A requote is a NEW logical order: fresh cloid via the leg marker.
-    assert "_na-r1_000_" in requote["cloid_logical"]
-    assert requote["cloid_logical"] != first["cloid_logical"]
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry", "na-r1_000_entry"]  # fresh cloid
     assert h.submitter.calls == []  # no IOC yet
     assert any(e.startswith("maker_timeout:") for e in r.events)
-    # The cursor counted the slice once (its first Alo), not per requote.
-    assert h.engine._leg.submitted == 1 and h.engine._leg.attempt == 1
+    # The slice is still the one being worked: index 0, attempt 1, resting again.
+    assert (h.work.index, h.work.attempt) == (0, 1) and h.work.resting is not None
+    assert h.engine._leg.submitted == 1
+    assert r.slices_submitted == 0  # counted once, on its first landed order
 
 
 def test_requote_budget_exhausted_crosses_the_remainder_with_the_ioc(tmp_path):
@@ -2160,16 +2167,14 @@ def test_requote_budget_exhausted_crosses_the_remainder_with_the_ioc(tmp_path):
     r = h.tick(advance=30)
     (ioc,) = h.submitter.calls
     assert ioc["size"] == D("0.0007")
-    assert "_na-r1_000_" in ioc["cloid_logical"]
+    assert ioc["cloid_logical"].endswith("_na-r1_000_entry")
     assert ioc["limit_price"] > _MARK  # the bounded, marketable IOC band
     assert any(e.startswith("maker_fallback_ioc:") for e in r.events)
     # No second Alo for slice 0; slice 1 (due at +30s) went out once the book
-    # was clear — still one slice on the book at a time.
-    assert [c["cloid_logical"][-13:] for c in h.submitter.limit_calls] == [
-        "_na_000_entry",
-        "_na_001_entry",
-    ]
-    assert h.engine._leg.resting is not None and h.engine._leg.attempt == 0
+    # was clear, with a PLAIN marker and a fresh attempt budget.
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry", "na_001_entry"]
+    assert (h.work.index, h.work.attempt) == (1, 0) and h.work.resting is not None
+    assert r.slices_submitted == 1  # slice 1's first landing; slice 0 was counted last tick
 
 
 def test_a_post_only_refusal_requotes_next_tick_then_crosses(tmp_path):
@@ -2179,24 +2184,58 @@ def test_a_post_only_refusal_requotes_next_tick_then_crosses(tmp_path):
         script=[_refused_outcome, _refused_outcome],
     )
     h.start()
-    r1 = h.tick()  # refused: stale quote, cursor held, attempt 1
-    assert h.engine._leg.submitted == 0 and h.engine._leg.attempt == 1
+    r1 = h.tick()  # refused: stale quote, the slice stays the work, attempt 1
+    assert (h.engine._leg.submitted, h.work.index, h.work.attempt) == (1, 0, 1)
+    assert h.work.resting is None
     assert any(e.startswith("maker_requote:") for e in r1.events)
     h.tick()  # refused again: attempt 2 > budget 1
-    assert h.engine._leg.submitted == 0 and h.engine._leg.attempt == 2
-    r3 = h.tick()  # crosses with the IOC under the requote marker
+    assert (h.work.index, h.work.attempt) == (0, 2)
+    r3 = h.tick()  # crosses with the IOC under the requote marker; slice 1 follows
     (ioc,) = h.submitter.calls
-    assert "_na-r2_000_" in ioc["cloid_logical"]
-    assert h.engine._leg.submitted == 1
+    assert ioc["cloid_logical"].endswith("_na-r2_000_entry")
     assert any(e.startswith("maker_fallback_ioc:") for e in r3.events)
-    assert len(h.submitter.limit_calls) == 2
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry", "na-r1_000_entry", "na_001_entry"]
+    assert (h.work.index, h.work.attempt) == (1, 0)
+
+
+def test_a_held_requote_is_retried_next_tick_not_dropped(tmp_path):
+    # Round-1 review: the remainder used to live only in a call argument, so a
+    # requote held on a book read failure fell through to the NEXT slice.
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.identity.readings = [_reading("open"), _reading("canceled", remaining=D("0.0004"))]
+    h.book_error = RuntimeError("l2Book timed out")
+    r = h.tick(advance=30)  # pulled; the requote is held — nothing else goes out
+    assert len(h.cancels) == 1 and len(h.submitter.limit_calls) == 1
+    assert any(e.endswith(":book_unavailable") for e in r.events)
+    assert (h.work.index, h.work.attempt, h.work.remainder) == (0, 1, D("0.0004"))
+    h.book_error = None
+    h.tick()  # the remainder goes out first, under its requote marker
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry", "na-r1_000_entry"]
+    assert h.submitter.limit_calls[1]["size"] == D("0.0004")
+
+
+def test_a_refused_requote_on_the_last_slice_does_not_complete_the_leg(tmp_path):
+    h = _MakerHarness(tmp_path, execution={"maker_max_requotes": 2})
+    reg = h.start(margin=2)  # one slice
+    h.tick()
+    h.submitter.script = [_refused_outcome]
+    h.identity.readings = [_reading("open"), _reading("canceled", remaining=D("0.0004"))]
+    h.tick(advance=30)  # pulled, requote refused
+    assert h.plan_status(reg.plan_id) == "active" and h.work is not None
+    h.tick()  # requote rests
+    assert h.work.resting is not None
+    h.identity.readings = [_reading("filled")]
+    h.tick()
+    assert h.plan_status(reg.plan_id) == "completed" and h.engine._leg is None
 
 
 def test_any_other_refusal_advances_the_cursor_as_rule_2_says(tmp_path):
     h = _MakerHarness(tmp_path, script=[lambda kw: _refused_outcome(kw, post_only=False)])
     h.start()
     r = h.tick()
-    assert h.engine._leg.submitted == 1 and h.engine._leg.resting is None
+    assert h.engine._leg.submitted == 1 and h.work is None
     assert any(e.startswith("slice_rejected:") for e in r.events)
     assert h.submitter.calls == []
 
@@ -2207,28 +2246,81 @@ def test_a_book_that_cannot_be_read_holds_the_slice(tmp_path):
     h.book_error = RuntimeError("l2Book timed out")
     r = h.tick()
     assert h.submitter.limit_calls == [] and h.submitter.calls == []
-    assert h.engine._leg.submitted == 0
     assert any(e.endswith(":book_unavailable") for e in r.events)
+    assert h.engine._leg.submitted == 1 and h.work.resting is None  # taken up, not sent
     h.book_error = None
     h.tick()
-    assert len(h.submitter.limit_calls) == 1  # retried, not consumed
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry"]  # retried, plain marker
 
 
-def test_an_unknown_remainder_is_never_guessed_onto_the_wire(tmp_path):
+def test_a_remainder_the_venue_does_not_state_is_never_guessed_onto_the_wire(tmp_path):
     h = _MakerHarness(tmp_path)
     h.start()
     h.tick()
-    # After the cancel the venue answers with no size: remainder unknown.
     h.identity.readings = [_reading("open"), _reading("canceled", remaining=None)]
-    h.tick(advance=30)
-    assert len(h.cancels) == 1
-    assert h.submitter.calls == []  # no IOC for a size the venue never stated
+    r = h.tick(advance=30)
+    assert len(h.cancels) == 1 and h.submitter.calls == []
+    assert "maker_timeout:r:plan:1:0:unknown" in r.events
     # Slice 0 is done (no requote); slice 1 went out on its due tick.
-    assert [c["cloid_logical"][-13:] for c in h.submitter.limit_calls] == [
-        "_na_000_entry",
-        "_na_001_entry",
-    ]
-    assert h.engine._leg.submitted == 2
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry", "na_001_entry"]
+
+
+def test_an_oversize_remainder_is_treated_as_unknown(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.identity.readings = [_reading("open"), _reading("canceled", remaining=D("0.005"))]
+    r = h.tick(advance=30)
+    assert "maker_timeout:r:plan:1:0:unknown" in r.events
+    assert h.submitter.calls == []
+    assert _tails(h.submitter.limit_calls) == ["na_000_entry", "na_001_entry"]
+
+
+def test_a_failed_remainder_read_is_re_read_next_tick(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.identity.readings = [_reading("open"), RuntimeError("orderStatus 503")]
+    r = h.tick(advance=30)  # cancel landed, remainder unread
+    assert len(h.cancels) == 1
+    assert any(e.startswith("maker_poll_failed:r:plan:1:0") for e in r.events)
+    assert len(h.submitter.limit_calls) == 1 and h.work.resting is not None
+    h.identity.readings = [_reading("canceled", remaining=D("0.0004"))]
+    h.tick()  # re-read, then requoted
+    assert len(h.cancels) == 1  # no second cancel
+    assert h.submitter.limit_calls[1]["size"] == D("0.0004")
+    assert _tails(h.submitter.limit_calls)[1] == "na-r1_000_entry"
+
+
+def test_a_cancel_that_raised_but_landed_still_requotes_the_remainder(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.cancel_error = RuntimeError("cancel timed out")
+    h.identity.readings = [_reading("open")]
+    r = h.tick(advance=30)
+    assert any(e.startswith("maker_cancel_failed:") for e in r.events)
+    assert h.work.resting is not None
+    h.cancel_error = None
+    # The next poll shows the cancel DID land: that answer is the remainder read.
+    h.identity.readings = [_reading("canceled", remaining=D("0.0004"))]
+    h.tick()
+    assert len(h.cancels) == 1  # not cancelled twice
+    assert h.submitter.limit_calls[1]["size"] == D("0.0004")
+
+
+def test_a_cancel_that_raised_and_did_not_land_is_retried(tmp_path):
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.cancel_error = RuntimeError("cancel timed out")
+    h.identity.readings = [_reading("open")]
+    h.tick(advance=30)
+    h.cancel_error = None
+    h.identity.readings = [_reading("open"), _reading("canceled", remaining=D("0.001"))]
+    h.tick()  # still open -> cancelled again, now acked
+    assert len(h.cancels) == 2
+    assert h.submitter.limit_calls[1]["size"] == D("0.001")
 
 
 def test_a_failed_poll_is_retried_and_the_slice_keeps_resting(tmp_path):
@@ -2237,8 +2329,29 @@ def test_a_failed_poll_is_retried_and_the_slice_keeps_resting(tmp_path):
     h.tick()
     h.identity.readings = [RuntimeError("orderStatus 503")]
     r = h.tick()
-    assert any(e.startswith("maker_poll_failed:") for e in r.events)
-    assert h.engine._leg.resting is not None and h.cancels == []
+    assert any(e.startswith("maker_poll_failed:r:plan:1:0") for e in r.events)
+    assert h.work.resting is not None and h.cancels == []
+
+
+def test_a_submit_that_raised_is_treated_as_possibly_resting(tmp_path):
+    # Unlike the IOC ladder, an Alo whose ack was lost may be ON THE BOOK: it is
+    # booked as resting under its known cloid and the poll settles it.
+    h = _MakerHarness(tmp_path, script=[RuntimeError("socket closed after send")])
+    h.start()
+    r = h.tick()
+    assert any(e.startswith("maker_unknown_outcome:") for e in r.events)
+    assert h.work.resting is not None
+    assert h.work.resting.cloid_hex == derive_cloid_hex(h.submitter.limit_calls[0]["cloid_logical"])
+    h.identity.readings = [None]  # unknownOid: it never landed
+    r2 = h.tick()
+    assert any(e.endswith(":unknownOid") for e in r2.events) and h.work is None
+
+
+def test_a_contract_violation_from_the_submitter_is_not_swallowed(tmp_path):
+    h = _MakerHarness(tmp_path, script=[ValueError("tif must be one of ['Alo', 'Ioc']")])
+    h.start()
+    with pytest.raises(ValueError, match="tif must be one of"):
+        h.tick()
 
 
 def test_the_leg_completes_only_after_the_last_slice_leaves_the_book(tmp_path):
@@ -2246,42 +2359,61 @@ def test_the_leg_completes_only_after_the_last_slice_leaves_the_book(tmp_path):
     reg = h.start(margin=2)  # 80 USDC -> 0.0016 BTC -> floors to one 0.001 clip
     h.tick()
     assert h.engine._leg is not None  # submitted == planned, but it still rests
-    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "active"
+    assert h.plan_status(reg.plan_id) == "active"
     h.identity.readings = [_reading("filled")]
     r = h.tick()
-    assert h.engine._leg is None
-    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "completed"
+    assert h.engine._leg is None and h.plan_status(reg.plan_id) == "completed"
     assert any(e.startswith("plan_terminal:") for e in r.events)
     assert h.cancels == []
 
 
-def test_plan_expiry_pulls_the_resting_slice_first(tmp_path):
+def test_plan_expiry_pulls_the_resting_slice_first_without_tending(tmp_path):
     h = _MakerHarness(tmp_path)
     reg = h.start()
     h.tick()
-    resting = h.engine._leg.resting
+    resting = h.work.resting
     h.identity.readings = [_reading("open")] * 3
     r = h.tick(advance=61 * 60)
     (cancel,) = h.cancels
     assert cancel["reason"] == "plan_expired"
     assert cancel["cloid_hex"] == resting.cloid_hex
-    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "expired"
+    assert h.plan_status(reg.plan_id) == "expired"
     assert any(e.startswith("maker_canceled:") for e in r.events)
+    assert len(h.identity.readings) == 3  # the deadline tick polled nothing
 
 
-def test_a_failed_terminal_cancel_does_not_block_the_leg_from_ending(tmp_path):
+def test_a_failed_terminal_cancel_ends_the_leg_and_is_retried_each_tick(tmp_path):
     h = _MakerHarness(tmp_path)
     reg = h.start()
     h.tick()
-
-    def boom(**kw):
-        raise RuntimeError("cancel timed out")
-
-    h.engine._cancel_order = boom
+    h.cancel_error = RuntimeError("cancel timed out")
     h.identity.readings = [_reading("open")] * 3
     r = h.tick(advance=61 * 60)
-    assert repo.get_execution_plan(h.db.conn, reg.plan_id)["status"] == "expired"
-    assert any(e.startswith("maker_cancel_failed:") for e in r.events)
+    assert h.plan_status(reg.plan_id) == "expired"
+    assert "maker_cancel_failed:r:plan:1:0:plan_expired:1" in r.events
+    r2 = h.tick()  # retried next tick, still failing
+    assert len(h.cancels) == 2
+    assert "maker_cancel_failed:r:plan:1:0:plan_expired:2" in r2.events
+    h.cancel_error = None
+    r3 = h.tick()  # lands
+    assert len(h.cancels) == 3
+    assert "maker_canceled:r:plan:1:0:plan_expired" in r3.events
+    h.tick()
+    assert len(h.cancels) == 3  # nothing left to retry
+
+
+def test_a_refused_terminal_cancel_means_the_order_is_already_gone(tmp_path):
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeError
+
+    h = _MakerHarness(tmp_path)
+    h.start()
+    h.tick()
+    h.cancel_error = ExchangeError("cancel rejected: already canceled, or filled.")
+    h.identity.readings = [_reading("open")] * 3
+    r = h.tick(advance=61 * 60)
+    assert any(e.startswith("maker_cancel_rejected:") for e in r.events)
+    h.tick()
+    assert len(h.cancels) == 1  # not retried
 
 
 def test_emergency_close_pulls_the_resting_slice_before_crossing(tmp_path):
@@ -2303,7 +2435,6 @@ def test_emergency_close_pulls_the_resting_slice_before_crossing(tmp_path):
         return ioc(**kw)
 
     h.submitter.submit_ioc_limit = ioc_then_note
-    # A seeded position so the close has something to cut.
     with h.db.transaction() as conn:
         repo.upsert_current_position(
             conn,
@@ -2330,3 +2461,28 @@ def test_the_taker_style_does_not_touch_the_book_or_the_cancel_seam(tmp_path):
     _script(engine, [_snap()])
     engine.tick()
     assert len(sub.calls) == 1 and reads == []
+
+
+def test_the_maker_tif_pin_fires_at_import():
+    # Same subprocess shape as the submitter's vocab pins (test_orders).
+    import subprocess
+    import sys
+
+    code = "; ".join(
+        [
+            "import contrib.hyperliquid_perp.live.orders as o",
+            "o.ORDER_TYPE_FOR_TIF = {'Ioc': 'ioc_limit'}",
+            "import contrib.hyperliquid_perp.live.engine",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[4],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert result.returncode != 0
+    assert "_MAKER_TIF drifted from orders.ORDER_TYPE_FOR_TIF" in result.stderr

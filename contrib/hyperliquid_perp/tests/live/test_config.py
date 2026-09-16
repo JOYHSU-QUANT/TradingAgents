@@ -791,9 +791,11 @@ def test_execution_config_admits_the_maker_style_with_its_two_knobs():
 @pytest.mark.parametrize(
     "overrides, needle",
     [
-        ({"maker_rest_seconds": 0}, "maker_rest_seconds must be > 0"),
-        ({"maker_rest_seconds": 3601}, "exceeds the whole plan duration"),
+        ({"default_style": "sliced_maker", "maker_rest_seconds": 0}, "must be > 0"),
+        ({"default_style": "sliced_maker", "maker_rest_seconds": 3601}, "exceeds the whole plan"),
         ({"maker_max_requotes": -1}, "maker_max_requotes must be >= 0"),
+        # Each requote gets a fresh rest clock: the PRODUCT must fit the plan.
+        ({"default_style": "sliced_maker", "maker_rest_seconds": 1500, "maker_max_requotes": 2}, "1 \\+ maker_max_requotes"),
         ({"default_style": "post_only"}, "'sliced_twap' or 'sliced_maker'"),
     ],
 )

@@ -340,8 +340,8 @@ def _run_live_loop(
     ws_stream = LiveWsStream()
 
     def cancel_bot_order(*, cloid_hex: str, cloid_logical: str, cancel_reason: str) -> None:
-        # The maker slice's cancel seam (§9.2.1): the one evidence protocol
-        # every bot-owned cancel in the system runs, bound to this run.
+        # The maker slice's cancel seam (§9.2.1): the evidence protocol the
+        # §18.2 / §19.3 sweeps run for a bot-owned cancel, bound to this run.
         cancel_bot_order_with_evidence(
             db=db,
             client=signed,

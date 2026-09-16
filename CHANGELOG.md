@@ -91,11 +91,13 @@ Breaking changes within the 0.x line are called out explicitly.
   and requotes the venue-stated remainder under a fresh cloid up to
   `maker_max_requotes` times, then crosses what is left with the existing
   bounded IOC - so a plan still completes inside its deadline. One slice
-  rests at a time; a leg that ends (completed, expired, flat, emergency
-  close, superseded) pulls its resting slice first. The venue's documented
+  is worked at a time (index, attempt, remainder and resting order bound
+  together, so a held requote can never fall through to the next slice);
+  a leg that ends (expired, flat, emergency close, superseded) pulls its
+  resting slice first and retries a failed pull every tick. The venue's documented
   post-only refusal ("Post only order would have immediately matched") is
   a stale quote, not a rule-2 rejection. `orderStatus` readings now carry
-  the venue's `tif` and `sz` / `origSz`; the reconciler's orphan back-fill
+  the venue's `tif` and `sz`; the reconciler's orphan back-fill
   derives a slice's `orders.type` from that `tif` instead of defaulting to
   `ioc_limit` (an unknown word leaves the orphan an open mismatch). The
   default style is unchanged (`sliced_twap`): nothing moves until the YAML

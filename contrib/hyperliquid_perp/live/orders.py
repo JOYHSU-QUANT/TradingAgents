@@ -124,15 +124,14 @@ class OrderStatusReading:
     status: str
     # The maker path's three optional reads (2026-09-16): the venue's own
     # ``tif`` word (``Alo`` / ``Ioc`` / ``Gtc`` / ``FrontendMarket``; ``None``
-    # for a trigger order or an older payload) and the order's remaining /
-    # original size. Optional because ``parse_order_status`` predates them and
+    # for a trigger order or an older payload) and the order's remaining
+    # size. Optional because ``parse_order_status`` predates them and
     # every earlier caller judges liveness off ``status`` alone; a consumer
     # that NEEDS one (the engine's resting-slice tender, the reconciler's
     # orphan back-fill) reads ``None`` as "the venue did not say" — never as
     # zero, and never as a size to put on the wire.
     tif: str | None = None
     remaining_size: Decimal | None = None
-    original_size: Decimal | None = None
 
 
 class LiveOrderPreSubmitError(RuntimeError):
@@ -1169,9 +1168,8 @@ def parse_order_status(payload: Any, *, expected_cloid_hex: str) -> OrderStatusR
                 exchange_order_id=str(inner["oid"]),
                 status=status,
                 tif=tif if isinstance(tif, str) else None,
-                remaining_size=optional_decimal(inner.get("sz"), field="orderStatus sz"),
-                original_size=optional_decimal(
-                    inner.get("origSz"), field="orderStatus origSz"
+                remaining_size=optional_decimal(
+                    inner.get("sz"), field=f"orderStatus sz ({expected_cloid_hex})"
                 ),
             )
     raise _refused(payload, f"orderStatus payload not recognised: {payload!r}")

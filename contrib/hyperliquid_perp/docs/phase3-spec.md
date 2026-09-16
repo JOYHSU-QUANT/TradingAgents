@@ -236,7 +236,7 @@ reconciliation pass 又要求場上已有有效 SL——死鎖，倉位裸奔到
   每個 decision cycle 建立 plan **之前**問一次。
 - `check_order(symbol)` / `require_order` — 上表扣除 DECISION-scoped 三條。每一張
   **加風險**的單（entry / rebalance 切片）都必須通過（`LiveOrderSubmitter.
-  submit_ioc_limit` 送出前查一次，signed client 綁定的 gate 在 wire 再查一次當
+  submit_limit`（`submit_ioc_limit` 是它的 IOC 包裝）送出前查一次，signed client 綁定的 gate 在 wire 再查一次當
   backstop）。
 - `check_protective_order(symbol)` / `require_protective_order` — 再扣除
   SAFE-MODE-scoped 兩條。保護／去風險單（SL / TP trigger、§17.2 急平 IOC）走這個

@@ -224,7 +224,7 @@ _FAILURE_BACKOFF_FRACTION = 0.5
 
 # The longest run of BACK-TO-BACK REST calls a tick can make with no
 # :func:`refresh_across_blocking_work` between them — the order-submission chain
-# in ``orders.submit_ioc_limit``: the §8.3 pre-check recovery probe (which falls
+# in ``orders.submit_limit``: the §8.3 pre-check recovery probe (which falls
 # THROUGH when it cannot resolve the cloid, rather than returning), the place
 # itself, and the duplicate-ack recovery probe. Each rides the full
 # ``network_timeout_s``.

@@ -905,7 +905,7 @@ class LiveOrderSubmitter:
             # contradicts local evidence (retention expiry, an Info
             # inconsistency) and a resend would be accepted as a brand-new
             # order. Same fail-loud posture as the duplicate/unknownOid
-            # contradiction in submit_ioc_limit.
+            # contradiction in submit_limit.
             #
             # "Took it" means BOTH kinds of durable proof: an acknowledged or
             # duplicate place attempt, AND an orders row already carrying an

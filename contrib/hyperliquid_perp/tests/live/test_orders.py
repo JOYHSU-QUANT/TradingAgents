@@ -1106,9 +1106,10 @@ def test_submit_limit_refuses_an_unsupported_tif_before_any_evidence(env):
 
 
 def test_duplicate_recovery_keeps_the_submitted_order_type(env):
-    # §8.3 rule 4 back-fill on a duplicate ack: the row is settled from
-    # orderStatus but keeps the type the send carried — an Alo slice recovered
-    # as ``ioc_limit`` would misfile every audit query that tells the two apart.
+    # §8.3 rule 4 back-fill on a duplicate ack: the recovery passes the same
+    # type the send carried, so the row it finds (inserted pre-wire) is left
+    # as is — a recovery hard-coding ``ioc_limit`` would be refused by the
+    # one-type-for-life guard. The recovery INSERT path is the next test.
     db, client, _, submitter = env
     client.place_results = [_DUPLICATE_ACK]
     client.status_results = [_KNOWN_STATUS]

@@ -358,10 +358,10 @@ Phase 3 會使用 Hyperliquid signed exchange endpoint，**全部透過官方
 
 | Action | SDK 方法 | 用途 |
 |---|---|---|
-| order | `Exchange.order` / `bulk_orders` | 下單：entry / rebalance 切片、close、SL、TP |
+| order | `Exchange.order` / `bulk_orders` | 下單：entry / rebalance 切片（`tif: Ioc` taker 片；`tif: Alo` post-only maker 片，2026-09-16 maker path，transport 為 `place_limit`）、close、SL、TP |
 | cancel | `Exchange.cancel` | 依 exchange order id 取消 |
 | cancelByCloid | `Exchange.cancel_by_cloid` | 依 client order id 取消 |
-| modify | `Exchange.modify_order` / `bulk_modify_orders_new` | SL / TP modify-before-cancel（§17.4） |
+| modify | `Exchange.modify_order` / `bulk_modify_orders_new` | SL / TP modify-before-cancel（§17.4）；maker 片 requote（`modify_limit`，新 cloid） |
 | scheduleCancel | `Exchange.schedule_cancel` | dead man's switch |
 | updateLeverage | `Exchange.update_leverage` | 開倉前確認 leverage 設定 |
 | orderStatus | `Info.query_order_by_oid` / `query_order_by_cloid` | 查詢 order 狀態與 reconciliation |

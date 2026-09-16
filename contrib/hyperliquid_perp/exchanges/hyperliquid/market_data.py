@@ -18,7 +18,13 @@ from datetime import datetime
 
 from ...common.instants import epoch_ms
 from ...domains.perp.margin import MarginSchedule
-from ...domains.perp.schema import Candle, FundingPoint, MarketSnapshot, interval_to_ms
+from ...domains.perp.schema import (
+    Candle,
+    FundingPoint,
+    MarketSnapshot,
+    TopOfBook,
+    interval_to_ms,
+)
 from . import mapper
 from .sdk_client import HyperliquidClient, call_sdk
 
@@ -158,3 +164,16 @@ class HyperliquidMarketData:
         """
         raw = call_sdk(self._info.l2_snapshot, coin)
         return mapper.map_exchange_time(raw, expected_coin=coin)
+
+    def get_top_of_book(self, coin: str) -> TopOfBook:
+        """The best bid / ask for ``coin`` off the public ``l2Book`` snapshot.
+
+        The maker slice's quote (2026-09-16 maker path): a post-only buy joins
+        the bid, a post-only sell the ask. Same payload and identity echo as
+        :meth:`get_exchange_time`, and like it not on the ``ExchangeMarketData``
+        port — the paper engine's snapshot provider has no use for a live book.
+        The clock on the returned :class:`TopOfBook` is this same read's
+        stamp, so the caller can age the quote without a second request.
+        """
+        raw = call_sdk(self._info.l2_snapshot, coin)
+        return mapper.map_top_of_book(raw, expected_coin=coin)

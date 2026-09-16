@@ -177,11 +177,22 @@ _NOT_EXCHANGE_KNOWN_ATTEMPT_STATUSES: tuple[str, ...] = ("submitted", "rejected"
 # frozenset (defined next to the cloid derivation that also stamps roles) so
 # the id layer and the write boundary can never accept different vocabularies.
 _ORDER_ROLES = LIVE_ORDER_ROLES
-# ``ioc_limit`` is the live wire type: every §9 slice (and §9.4 close /
-# emergency close) is an IOC limit order; the four paper_* / trigger types are
-# the Phase 2 simulation vocabulary.
+# The live wire types spell the limit order's time-in-force: ``ioc_limit`` is
+# the taker slice (§9.2) and the §9.4 close / emergency close; ``alo_limit`` is
+# the post-only maker slice (2026-09-16 maker path) — the same ``order`` action
+# with ``tif: Alo``, kept as its own word so an audit query can tell a resting
+# maker slice from an IOC that partially filled without opening the ack
+# payload. The four paper_* / trigger types are the Phase 2 simulation
+# vocabulary.
 _ORDER_TYPES = frozenset(
-    {"paper_market", "paper_twap_slice", "stop_market", "take_market", "ioc_limit"}
+    {
+        "paper_market",
+        "paper_twap_slice",
+        "stop_market",
+        "take_market",
+        "ioc_limit",
+        "alo_limit",
+    }
 )
 # The trigger-role → order-type spelling, next to the vocabulary it draws from:
 # writers that derive a type from a registry/protection role (the live orphan

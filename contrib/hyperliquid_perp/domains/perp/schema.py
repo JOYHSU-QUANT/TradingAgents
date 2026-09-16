@@ -328,6 +328,43 @@ class MarketSnapshot:
 
 
 @dataclass(frozen=True)
+class TopOfBook:
+    """The best bid and ask for one coin, as of the exchange's own clock.
+
+    The maker slice's price reference: a post-only buy joins ``best_bid``, a
+    post-only sell joins ``best_ask`` — never the mid, since a mid-priced
+    post-only order on a one-tick spread is exactly the order the venue
+    refuses. Both prices must be positive and the book uncrossed
+    (``best_bid < best_ask``): a crossed or locked book is a malformed
+    snapshot, not a quote to join, and is refused at construction like every
+    other price boundary in this module. ``time`` is the exchange's clock off
+    the same payload (tz-aware UTC, the form ``common.instants.from_epoch_ms``
+    returns), so a consumer ages the quote against the clock the freshness
+    guard already trusts.
+    """
+
+    coin: str
+    best_bid: Decimal
+    best_ask: Decimal
+    time: datetime
+
+    def __post_init__(self) -> None:
+        if not self.coin or not self.coin.strip():
+            raise ValueError("TopOfBook.coin must be a non-empty string")
+        for name in ("best_bid", "best_ask"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ValueError(f"TopOfBook.{name} must be > 0, got {value}")
+        if self.best_bid >= self.best_ask:
+            raise ValueError(
+                f"TopOfBook for {self.coin} is crossed or locked: best_bid {self.best_bid} "
+                f">= best_ask {self.best_ask}"
+            )
+        if self.time.tzinfo is None:
+            raise ValueError("TopOfBook.time must be tz-aware (the exchange's UTC clock)")
+
+
+@dataclass(frozen=True)
 class FundingPoint:
     """One historical funding observation. ``time`` is UTC epoch milliseconds."""
 

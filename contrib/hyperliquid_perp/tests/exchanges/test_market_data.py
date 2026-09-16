@@ -321,3 +321,29 @@ def test_windowed_reads_take_no_default_clock():
             end = inspect.signature(getattr(cls, name)).parameters["end"]
             assert end.kind is inspect.Parameter.KEYWORD_ONLY, (cls, name)
             assert end.default is inspect.Parameter.empty, (cls, name)
+
+
+def test_get_top_of_book_reads_the_l2book_for_the_coin():
+    client = _FakeClient(None)
+    client.info = _BookInfo(
+        {
+            "coin": "BTC",
+            "time": 1787369175468,
+            "levels": [[{"px": "99.5", "sz": "1"}], [{"px": "100.5", "sz": "1"}]],
+        }
+    )
+    market = HyperliquidMarketData(client)
+    top = market.get_top_of_book("BTC")
+    assert client.info.asked == ["BTC"]
+    assert (top.best_bid, top.best_ask) == (Decimal("99.5"), Decimal("100.5"))
+    # One payload, one clock: the quote's stamp is the exchange time read.
+    assert top.time == market.get_exchange_time("BTC")
+
+
+def test_get_top_of_book_rejects_a_misrouted_response():
+    client = _FakeClient(None)
+    client.info = _BookInfo(
+        {"coin": "ETH", "time": 1787369175468, "levels": [[{"px": "1"}], [{"px": "2"}]]}
+    )
+    with pytest.raises(MalformedResponseError, match="carries coin 'ETH'"):
+        HyperliquidMarketData(client).get_top_of_book("BTC")

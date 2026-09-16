@@ -57,8 +57,8 @@ class _FakeClient:
         self.place_calls: list[dict] = []
         self.status_calls: list[str] = []
 
-    def place_ioc_limit(
-        self, *, coin, is_buy, size, limit_price, cloid_hex, reduce_only, protective=False
+    def place_limit(
+        self, *, coin, is_buy, size, limit_price, cloid_hex, tif, reduce_only, protective=False
     ):
         self.place_calls.append(
             {
@@ -67,6 +67,7 @@ class _FakeClient:
                 "size": size,
                 "limit_price": limit_price,
                 "cloid_hex": cloid_hex,
+                "tif": tif,
                 "reduce_only": reduce_only,
                 "protective": protective,
             }
@@ -148,7 +149,10 @@ def _submit(submitter, **overrides):
         "output_id": "out1",
     }
     fields.update(overrides)
-    return submitter.submit_ioc_limit(**fields)
+    tif = fields.pop("tif", None)
+    if tif is None:
+        return submitter.submit_ioc_limit(**fields)
+    return submitter.submit_limit(tif=tif, **fields)
 
 
 def test_accepted_order_writes_evidence_then_backfills_ack(env):
@@ -712,7 +716,7 @@ def test_evidence_is_durable_before_the_wire_and_failure_is_patched(env):
         assert [a["status"] for a in attempts] == ["submitted"]
         raise _Boom()
 
-    client.place_ioc_limit = _check_then_boom
+    client.place_limit = _check_then_boom
     with pytest.raises(_Boom):
         _submit(submitter)
     # A Python-level failure is patched to 'failed' (outcome unknown — the
@@ -795,7 +799,7 @@ def test_resend_after_rejection_restamps_the_order_row_to_submitted(env):
         seen["row"] = repo.get_order(db.conn, "o1")
         return _RESTING_ACK
 
-    client.place_ioc_limit = _capture  # type: ignore[method-assign]
+    client.place_limit = _capture  # type: ignore[method-assign]
     outcome = _submit(submitter)
 
     mid_send = seen["row"]
@@ -1060,3 +1064,65 @@ def test_recovery_refuses_a_wrong_cloid_order_status_answer(env):
     order = repo.get_order(db.conn, "o1")
     assert order["exchange_order_id"] is None
     assert order["status"] == "submitted"
+
+
+# ---- maker path (2026-09-16): submit_limit with an explicit tif ---------------
+
+
+def test_submit_ioc_limit_is_submit_limit_spelled_ioc(env):
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    _submit(submitter)
+    assert client.place_calls[0]["tif"] == "Ioc"
+    assert repo.get_order(db.conn, "o1")["type"] == "ioc_limit"
+
+
+def test_submit_limit_alo_records_the_maker_order_type_and_sends_alo(env):
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    outcome = _submit(submitter, tif="Alo")
+    assert outcome.outcome == "acknowledged"
+    assert client.place_calls[0]["tif"] == "Alo"
+    order = repo.get_order(db.conn, "o1")
+    assert order["type"] == "alo_limit"
+    assert order["status"] == "open"  # a post-only order can only rest (or be refused)
+
+
+def test_submit_limit_refuses_an_unsupported_tif_before_any_evidence(env):
+    # ``Gtc`` is in the transport's vocabulary but not in this layer's: nothing
+    # in v1 rests an order without a deadline of its own. Refused pre-wire with
+    # the same footprint as a gate rejection — no registry row, no orders row,
+    # no attempt, no wire call.
+    db, client, _, submitter = env
+    client.place_results = [_RESTING_ACK]
+    with pytest.raises(ValueError, match="tif must be one of"):
+        _submit(submitter, tif="Gtc")
+    assert client.place_calls == []
+    assert repo.get_cloid_by_hex(db.conn, _HEX) is None
+    assert repo.get_order(db.conn, "o1") is None
+    assert repo.iter_live_order_attempts(db.conn, "r") == []
+
+
+def test_duplicate_recovery_keeps_the_submitted_order_type(env):
+    # §8.3 rule 4 back-fill on a duplicate ack: the row is settled from
+    # orderStatus but keeps the type the send carried — an Alo slice recovered
+    # as ``ioc_limit`` would misfile every audit query that tells the two apart.
+    db, client, _, submitter = env
+    client.place_results = [_DUPLICATE_ACK]
+    client.status_results = [_KNOWN_STATUS]
+    outcome = _submit(submitter, tif="Alo")
+    assert outcome.outcome == "recovered_existing"
+    assert repo.get_order(db.conn, "o1")["type"] == "alo_limit"
+
+
+def test_pre_check_recovery_inserts_the_row_with_the_submitted_order_type(env, monkeypatch):
+    # The pre-send path (a prior attempt exists, no local row): the recovery
+    # INSERT carries the same type the send would have — the one shape for both
+    # write paths that _ensure_local_order exists to guarantee.
+    db, client, _, submitter = env
+    monkeypatch.setattr(repo, "has_place_attempt", lambda conn, *, cloid_hex: True)
+    client.status_results = [_KNOWN_STATUS]
+    outcome = _submit(submitter, tif="Alo")
+    assert outcome.outcome == "recovered_existing" and outcome.attempt_id is None
+    assert client.place_calls == []
+    assert repo.get_order(db.conn, "o1")["type"] == "alo_limit"

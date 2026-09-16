@@ -2000,12 +2000,12 @@ def _maker_config(**execution) -> LiveConfig:
     return _live_config(execution=cfg)
 
 
-def _resting_outcome(kw, oid="111"):
+def _resting_outcome(kw):
     return SimpleNamespace(
         outcome=SubmitOutcomeKind.ACKNOWLEDGED,
         exchange_raw_status="resting",
         cloid_hex=derive_cloid_hex(kw["cloid_logical"]),
-        exchange_order_id=oid,
+        exchange_order_id="111",
         ack=SimpleNamespace(is_post_only_cross=False),
         error=None,
     )
@@ -2057,13 +2057,13 @@ def _tails(calls):
 class _MakerHarness:
     """A maker-style engine with its two seams recorded."""
 
-    def __init__(self, tmp_path, *, execution=None, script=None, book=None):
+    def __init__(self, tmp_path, *, execution=None, script=None):
         self.cancels: list[dict] = []
         self.cancel_error: Exception | None = None
         self.book_error: Exception | None = None
         self.protection = _FakeProtection()
         self.submitter = _MakerSubmitter(script)
-        top = book or TopOfBook(coin="BTC", best_bid=_BID, best_ask=_ASK, time=_T0)
+        top = TopOfBook(coin="BTC", best_bid=_BID, best_ask=_ASK, time=_T0)
 
         def fetch_top_of_book(coin):
             if self.book_error is not None:
@@ -2077,7 +2077,7 @@ class _MakerHarness:
             if self.cancel_error is not None:
                 raise self.cancel_error
 
-        self.db, self.clock, self.engine, self.gate, _ = _build(
+        self.db, self.clock, self.engine, _gate, _ = _build(
             tmp_path,
             live=_maker_config(**(execution or {})),
             submitter=self.submitter,

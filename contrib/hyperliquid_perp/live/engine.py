@@ -149,8 +149,9 @@ _MAKER_TIF = "Alo"
 if _MAKER_TIF not in ORDER_TYPE_FOR_TIF:
     raise AssertionError("_MAKER_TIF drifted from orders.ORDER_TYPE_FOR_TIF")
 
-# A terminal cancel that keeps failing is retried once per tick this many
-# times, then once every _CANCEL_RETRY_SLOW_EVERY ticks (~5 minutes at the
+# A terminal cancel that keeps failing is sent once per tick up to this many
+# times (the termination-tick send included), then once every
+# _CANCEL_RETRY_SLOW_EVERY ticks (~5 minutes at the
 # ~10s cadence) at ERROR — never dropped: a bot-owned Alo resting on a dead
 # target is exactly the order the reconciler cannot see as wrong (venue open,
 # local open), so the engine keeps it on its own books until the cancel lands,
@@ -198,14 +199,16 @@ class _CancelOrder(Protocol):
 
 @dataclass(frozen=True)
 class _PendingCancel:
-    """A terminal cancel that failed on the wire and is retried each tick."""
+    """A terminal cancel that failed on the wire: sent once per tick up to
+    ``_MAX_CANCEL_RETRIES`` times, then once every ``_CANCEL_RETRY_SLOW_EVERY``
+    ticks, never dropped."""
 
     cloid_hex: str
     cloid_logical: str
     reason: str
     plan_id: str
     index: int
-    attempt: int  # ticks this cancel has been queued for (drives the slow lane)
+    attempt: int  # 1-based send / queue ordinal (drives the slow lane)
     sent: int = 0  # wire attempts so far (what the log and the event report)
 
 
@@ -228,22 +231,19 @@ class _RestingSlice:
 
     ``size`` is what THIS order asked for — a slice's remainder after an
     earlier pull, not necessarily the slice's planned size. Guarded like
-    :class:`~...domains.perp.schema.TopOfBook`: a non-positive size or price,
-    or a naive stamp, is a bug in the placer, not a state to tend.
+    :class:`~...domains.perp.schema.TopOfBook`: a non-positive size or a
+    naive stamp is a bug in the placer, not a state to tend.
     """
 
     cloid_logical: str
     cloid_hex: str
     size: Decimal
-    price: Decimal
     placed_at: datetime
     pull: _Pull = _Pull.NONE
 
     def __post_init__(self) -> None:
         if self.size <= 0:
             raise ValueError(f"_RestingSlice.size must be > 0, got {self.size}")
-        if self.price <= 0:
-            raise ValueError(f"_RestingSlice.price must be > 0, got {self.price}")
         if self.placed_at.tzinfo is None:
             raise ValueError("_RestingSlice.placed_at must be tz-aware")
 
@@ -255,8 +255,8 @@ class _SliceWork:
 
     ``remainder`` is what still has to be placed (the planned size at first,
     the venue-stated unfilled part after a pull); ``attempt`` counts the
-    logical orders the slice has consumed (each refusal or pull mints a fresh
-    cloid); ``resting`` is the order on the book, if any; ``counted`` says the
+    requotes so far — the first order is attempt 0, and each refusal or pull
+    mints a fresh cloid; ``resting`` is the order on the book, if any; ``counted`` says the
     tick summary already counted this slice's first landed order.
     """
 
@@ -473,7 +473,8 @@ class LiveExecutionEngine:
             )
         self._fetch_top_of_book = fetch_top_of_book
         self._cancel_order = cancel_order
-        # Terminal cancels that failed on the wire, retried each tick (bounded).
+        # Terminal cancels that failed on the wire: retried fast, then on the
+        # slow lane, never dropped (see _MAX_CANCEL_RETRIES).
         self._pending_cancels: list[_PendingCancel] = []
         self._no_data_streak = 0
         self._prefix = live_config.order_owner_prefix
@@ -1205,7 +1206,6 @@ class LiveExecutionEngine:
                 cloid_logical=logical,
                 cloid_hex=derive_cloid_hex(logical),
                 size=size,
-                price=price,
                 placed_at=now,
             )
             events.append(f"maker_unknown_outcome:{leg.plan_id}:{idx}")
@@ -1235,7 +1235,6 @@ class LiveExecutionEngine:
             cloid_logical=logical,
             cloid_hex=outcome.cloid_hex,
             size=size,
-            price=price,
             placed_at=now,
         )
         self._count_first_landing(work, progress)
@@ -1297,7 +1296,7 @@ class LiveExecutionEngine:
             if r.pull is _Pull.REQUESTED:
                 # Our cancel did land after all (its ack was lost): this very
                 # answer is the remainder read.
-                remaining = self._remainder_from_reading(reading, r, work)
+                remaining = self._remainder_from_reading(reading, r, work, leg.plan_id)
                 self._settle_pulled(leg, work, remaining, mid, now, events, progress)
                 return
             # Gone by someone else's hand (the venue flattening a reduce-only,
@@ -1324,7 +1323,7 @@ class LiveExecutionEngine:
                 exc,
                 exc_info=not isinstance(exc, ExchangeError),
             )
-            events.append(f"maker_cancel_failed:{leg.plan_id}:{work.index}:maker_timeout")
+            events.append(f"maker_cancel_failed:{leg.plan_id}:{work.index}:maker_timeout:1")
             return
         finally:
             refresh_across_blocking_work(self._kill_switch, what="maker slice cancel")
@@ -1397,19 +1396,20 @@ class LiveExecutionEngine:
             # Re-read next tick, like a failed read.
             events.append(f"maker_pull_pending:{leg.plan_id}:{work.index}")
             return _Poll.FAILED
-        return self._remainder_from_reading(reading, r, work)
+        return self._remainder_from_reading(reading, r, work, leg.plan_id)
 
     @staticmethod
     def _remainder_from_reading(
-        reading: OrderStatusReading, r: _RestingSlice, work: _SliceWork
+        reading: OrderStatusReading, r: _RestingSlice, work: _SliceWork, plan_id: str
     ) -> Decimal | None:
         if local_status_for_exchange_status(reading.status) == "filled":
             return Decimal(0)
         remaining = reading.remaining_size
         if remaining is None or remaining > r.size:
             logger.warning(
-                "maker slice %d: venue remainder %r is unusable against the placed size %s — "
-                "treating the remainder as unknown (never guessed onto the wire)",
+                "maker slice %s[%d]: venue remainder %r is unusable against the placed size "
+                "%s — treating the remainder as unknown (never guessed onto the wire)",
+                plan_id,
                 work.index,
                 remaining,
                 r.size,
@@ -1421,9 +1421,10 @@ class LiveExecutionEngine:
         """Pull the resting maker order because its leg is ending (§9.2.1 rule 4).
 
         A failed cancel does not block the leg's termination, but it is not
-        forgotten either: it is retried once per tick (bounded), and past that
-        the §19.3 startup sweep, the §18.2 shutdown sweep and the dead man's
-        switch retire a bot-owned resting order this engine could not.
+        forgotten either: it is retried once per tick, then once every
+        ``_CANCEL_RETRY_SLOW_EVERY`` ticks at ERROR, never dropped; the §19.3
+        startup sweep, the §18.2 shutdown sweep and the dead man's switch also
+        retire a bot-owned resting order this engine could not.
         """
         work = leg.working
         if work is None or work.resting is None:
@@ -1480,7 +1481,7 @@ class LiveExecutionEngine:
         events.append(f"maker_cancel_failed:{tag}:{pending.sent}")
         slow = pending.attempt >= _MAX_CANCEL_RETRIES
         (logger.error if slow else logger.warning)(
-            "maker slice cancel %s failed (send %d, queued %d ticks): %s — retried %s",
+            "maker slice cancel %s failed (send %d, queue ordinal %d): %s — retried %s",
             tag,
             pending.sent,
             pending.attempt,

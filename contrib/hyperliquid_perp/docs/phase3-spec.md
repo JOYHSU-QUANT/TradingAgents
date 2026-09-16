@@ -541,7 +541,8 @@ execution:
 
 ### 9.2 Slice Slippage Bound
 
-每張切片單都是 **IOC 限價單**，送出前根據當下 mid_price 計算保護價格：
+`sliced_twap`（預設）下每張切片單都是 **IOC 限價單**（`sliced_maker` 的 post-only 片見 §9.2.1；
+其 IOC 兜底仍照本節定價），送出前根據當下 mid_price 計算保護價格：
 
 ```
 buy  limit = mid_price × (1 + max_slippage_pct)
@@ -625,7 +626,7 @@ execution:
    一片（index／attempt／殘量／簿上那張綁在一起），殘量沒掛完之前不碰下一片；leg 只有在
    `submitted ≥ planned` **且沒有在工作的片**時才 `completed`。到期那一 tick 不 tend、不重報，
    直接進終止。plan 到期／倉位歸零／emergency close／新決策取代而終止 leg 時，**先撤掉簿上那張**
-   （`cancel_reason=plan_<status>`）；撤不掉不擋終止，但引擎**每 tick 重試 30 次、之後每 ~5 分鐘
+   （`cancel_reason=plan_<status>`）；撤不掉不擋終止，但引擎**每 tick 送一次、最多 30 次（含終止那一 tick）、之後每 ~5 分鐘
    一次並以 ERROR 提醒，永不丟棄**（這種單 reconciliation 看不出有錯：venue open、本地 open）；
    在此之外 §19.3 啟動掃描、§18.2 收工掃描與 dead man's switch 也會收拾 bot-owned 的 resting 單，
    reconciliation 同時把本地 row 對齊。**§9.2 rule 4「每 tick 最多一張」在 maker 下的 carve-out**：

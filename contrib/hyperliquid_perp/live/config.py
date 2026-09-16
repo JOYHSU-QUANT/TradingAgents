@@ -128,10 +128,16 @@ class ExecutionMode(str, Enum):
 
 
 class ExecutionStyle(str, Enum):
-    """``live.execution.default_style`` — §9's only v1 style (native TWAP is
-    out of scope, §25 #3); a future style lands as an explicit member here."""
+    """``live.execution.default_style`` — how a §9 slice reaches the book.
+
+    ``sliced_twap`` is the v1 taker shape (every slice an IOC ±slippage);
+    ``sliced_maker`` (2026-09-16 maker path) posts each slice at the touch
+    with ``tif: Alo``, requotes on a rest timeout and crosses the remainder
+    with the same IOC — spec §9.2.1. Native TWAP stays out of scope (§25 #3).
+    """
 
     SLICED_TWAP = "sliced_twap"
+    SLICED_MAKER = "sliced_maker"
 
 
 class TpFailureMode(str, Enum):
@@ -291,12 +297,22 @@ class LiveSafetyConfig:
 
 @dataclass(frozen=True)
 class LiveExecutionConfig:
-    """``live.execution`` — sliced-TWAP parameters (§4, behaviour in §9/PR 5)."""
+    """``live.execution`` — slice pacing and shape (§4; behaviour in §9 / §9.2.1).
+
+    The two ``maker_*`` knobs are read only under ``sliced_maker``: how long
+    one post-only slice may rest at the touch before it is pulled, and how
+    many fresh quotes a slice may consume (each Alo refusal or timeout is
+    one) before its remainder crosses with the IOC. Bounded by the plan
+    envelope like the slice interval — a rest longer than the whole plan
+    is the same units mix-up.
+    """
 
     default_style: ExecutionStyle = ExecutionStyle.SLICED_TWAP
     max_slippage_pct: Decimal = Decimal("0.005")
     plan_duration_minutes: int = 60
     slice_interval_seconds: int = 30
+    maker_rest_seconds: int = 30
+    maker_max_requotes: int = 2
 
     def __post_init__(self) -> None:
         _coerce_enum(
@@ -304,7 +320,7 @@ class LiveExecutionConfig:
             "default_style",
             ExecutionStyle,
             key="live.execution.default_style",
-            expected="'sliced_twap'",
+            expected="'sliced_twap' or 'sliced_maker'",
         )
         # A fraction despite the _pct name (0.005 = ±0.5%, §4/§9.2) — the spec
         # key is kept verbatim so config and spec never need translating.
@@ -333,6 +349,36 @@ class LiveExecutionConfig:
                 f"({self.plan_duration_minutes} minutes) — there would never be a "
                 "second slice; almost certainly a units mix-up"
             )
+        if self.maker_max_requotes < 0:
+            raise ValueError(
+                f"live.execution.maker_max_requotes must be >= 0, got {self.maker_max_requotes}"
+            )
+        if self.default_style is not ExecutionStyle.SLICED_MAKER:
+            # The envelope checks below only make sense for the style that
+            # reads the knobs; a taker run with a one-minute test plan must not
+            # be refused over a rest budget it never uses.
+            return
+        if self.maker_rest_seconds <= 0:
+            raise ValueError(
+                f"live.execution.maker_rest_seconds must be > 0, got {self.maker_rest_seconds}"
+            )
+        if self.maker_rest_seconds > self.plan_duration_minutes * 60:
+            raise ValueError(
+                f"live.execution.maker_rest_seconds ({self.maker_rest_seconds}) exceeds "
+                f"the whole plan duration ({self.plan_duration_minutes} minutes) — a "
+                "post-only slice can never rest past its plan; almost certainly a "
+                "units mix-up"
+            )
+        # Each requote is a new order with a fresh rest clock (§9.2.1), so a
+        # slice may rest (1 + max_requotes) × rest before it crosses; that
+        # product, not the single rest, is what the plan envelope must hold.
+        budget = (1 + self.maker_max_requotes) * self.maker_rest_seconds
+        if budget > self.plan_duration_minutes * 60:
+            raise ValueError(
+                f"live.execution.maker_rest_seconds × (1 + maker_max_requotes) = {budget}s "
+                f"exceeds the whole plan duration ({self.plan_duration_minutes} minutes) — "
+                "one slice could out-rest its plan"
+            )
 
     @classmethod
     def from_dict(cls, cfg: dict | None) -> LiveExecutionConfig:
@@ -344,6 +390,8 @@ class LiveExecutionConfig:
                     "max_slippage_pct": decimal_from_yaml,
                     "plan_duration_minutes": int_from_yaml,
                     "slice_interval_seconds": int_from_yaml,
+                    "maker_rest_seconds": int_from_yaml,
+                    "maker_max_requotes": int_from_yaml,
                 },
             )
         )

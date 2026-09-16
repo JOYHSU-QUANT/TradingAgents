@@ -58,7 +58,7 @@ from .fill_backfill import (
     FillBackfiller,
 )
 from .fills import ENVELOPE_FACT_KEY_PREFIX
-from .orders import OrderStatusQuery, local_status_for_exchange_status
+from .orders import ORDER_TYPE_FOR_TIF, OrderStatusQuery, local_status_for_exchange_status
 from .payloads import write_raw_payload
 from .safe_mode import (
     REASON_INVALID_LOCAL_FILL,
@@ -1440,6 +1440,39 @@ class LiveReconciler:
             ),
         )
 
+    def _orphan_order_type(self, order: dict, registry: Any) -> str:
+        """The ``orders.type`` word for an orphan: role for triggers, venue tif otherwise.
+
+        The listing entry carries the tif when the venue includes it; the
+        documented ``orderStatus`` shape always does, so an entry without one
+        is probed (through the shared identity monitor, §13.5). Raises when
+        the word is missing or is not one this system places — the caller's
+        back-fill then fails as it does for any unusable field, leaving the
+        orphan an open mismatch rather than a mislabeled row.
+        """
+        role_type = repo.ROLE_TO_ORDER_TYPE.get(registry["order_role"])
+        if role_type is not None:
+            return role_type
+        tif = order.get("tif")
+        if not isinstance(tif, str):
+            try:
+                reading = self._identity.probe(
+                    registry["cloid_hex"], site=ProbeSite.RECONCILE_ORPHAN_TYPE
+                )
+            except Exception as exc:  # noqa: BLE001 — named like the sibling probes, then re-raised
+                raise ValueError(
+                    f"cannot derive orders.type for orphan cloid {registry['cloid_hex']}: "
+                    f"the listing carries no tif and {describe_order_status_failure(exc)}"
+                ) from exc
+            tif = None if reading is None else reading.tif
+        order_type = ORDER_TYPE_FOR_TIF.get(tif) if isinstance(tif, str) else None
+        if order_type is None:
+            raise ValueError(
+                f"cannot derive orders.type for orphan cloid {registry['cloid_hex']}: "
+                f"tif {tif!r} is not a wire type this system places"
+            )
+        return order_type
+
     def _backfill_orphan_order(self, order: dict, registry: Any, now: datetime) -> bool:
         """Insert the missing local row for a bot-owned exchange order."""
         try:
@@ -1494,11 +1527,14 @@ class LiveReconciler:
                     order.get("limitPx"),
                 )
             # The registry role is the bot's own durable record of what it
-            # placed — through PR 4 the only wire type is ioc_limit, but the
-            # registry already carries stop_loss/take_profit roles, and once
-            # PR 5 places trigger orders an orphaned SL backfilled as
-            # "ioc_limit" would be a permanent audit-row mislabel.
-            order_type = repo.ROLE_TO_ORDER_TYPE.get(registry["order_role"], "ioc_limit")
+            # placed: a trigger role names its type outright. A slice role does
+            # NOT — the registry carries no tif, and since the maker path
+            # (2026-09-16) a resting slice is an ``Alo`` at least as easily as
+            # an ``Ioc`` (more easily: an IOC never rests long enough to be
+            # orphaned). The venue's own ``tif`` word decides; a word this
+            # system never places is refused, not defaulted — a wrong type
+            # here is a permanent audit-row mislabel.
+            order_type = self._orphan_order_type(order, registry)
             with self._db.transaction() as conn:
                 repo.insert_order(
                     conn,

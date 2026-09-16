@@ -267,6 +267,7 @@ def _run_live_loop(
 
     from ..engine_bridge import EngineConfigError
     from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
+    from ..live.cancel import cancel_bot_order_with_evidence
     from ..live.decision import AdoptionWedgedError, LiveDecisionDriver, LiveDecisionWorker
     from ..live.engine import LiveExecutionEngine
     from ..live.kill_switch import refresh_across_blocking_work
@@ -337,6 +338,22 @@ def _run_live_loop(
     if ledger is not None:
         loss_guards.ensure_settlement_anchor(ledger.wallet_balance, now=clock.now())
     ws_stream = LiveWsStream()
+
+    def cancel_bot_order(*, cloid_hex: str, cloid_logical: str, cancel_reason: str) -> None:
+        # The maker slice's cancel seam (§9.2.1): the evidence protocol the
+        # §18.2 / §19.3 sweeps run for a bot-owned cancel, bound to this run.
+        cancel_bot_order_with_evidence(
+            db=db,
+            client=signed,
+            run_id=run_id,
+            payload_dir=payload_dir,
+            clock=clock,
+            coin=coin,
+            cloid_hex=cloid_hex,
+            cloid_logical=cloid_logical,
+            cancel_reason=cancel_reason,
+        )
+
     engine = LiveExecutionEngine(
         db=db,
         run_id=run_id,
@@ -356,6 +373,8 @@ def _run_live_loop(
         ws_stream=ws_stream,
         fetch_open_orders=signed.open_orders,
         clock=clock,
+        fetch_top_of_book=market.get_top_of_book,
+        cancel_order=cancel_bot_order,
     )
     # §10.4: a flat reached while the process was down (an SL filled offline,
     # backfilled by startup recovery) never crosses _detect_settlement — score

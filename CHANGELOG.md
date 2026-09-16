@@ -84,6 +84,27 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **perp: the maker-slice execution style (maker path, PR B)** -
+  `live.execution.default_style: sliced_maker` posts each TWAP slice at the
+  touch with `tif: Alo` (join best bid / ask off the public `l2Book`), polls
+  it through the shared identity monitor, pulls it after `maker_rest_seconds`
+  and requotes the venue-stated remainder under a fresh cloid up to
+  `maker_max_requotes` times, then crosses what is left with the existing
+  bounded IOC - so a plan still completes inside its deadline. One slice
+  is worked at a time (index, attempt, remainder and resting order bound
+  together, so a held requote can never fall through to the next slice);
+  a leg that ends (expired, flat, emergency close, superseded) pulls its
+  resting slice first and retries a failed pull (once per tick, then every
+  ~5 minutes at ERROR, never dropped). The venue's documented
+  post-only refusal ("Post only order would have immediately matched") is
+  a stale quote, not a rule-2 rejection. `orderStatus` readings now carry
+  the venue's `tif` and `sz`; the reconciler's orphan back-fill
+  derives a slice's `orders.type` from that `tif` instead of defaulting to
+  `ioc_limit` (an unknown word leaves the orphan an open mismatch). The
+  default style is unchanged (`sliced_twap`): nothing moves until the YAML
+  says so. Spec §9.2.1 / §10.5 rule 3. Smoke tests for the Alo wire shape
+  follow in a separate PR.
+
 - **perp: the maker-slice transport and persistence seams (maker path, PR A)** -
   `HyperliquidSignedClient.place_limit` / `modify_limit` take an explicit
   time-in-force (`LIMIT_TIFS`: `Alo` / `Ioc` / `Gtc`), with `place_ioc_limit`

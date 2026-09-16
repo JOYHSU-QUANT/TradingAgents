@@ -27,6 +27,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
     OrderAck,
     _parse_order_ack,
     is_duplicate_cloid_error,
+    is_post_only_cross_error,
 )
 from contrib.hyperliquid_perp.live.authorization import derive_agent_address
 from contrib.hyperliquid_perp.live.config import ExecutionMode
@@ -1062,3 +1063,17 @@ def test_place_limit_alo_error_ack_is_a_per_order_verdict_not_an_exception(fake_
     }
     ack = _limit(client, "Alo")
     assert ack.status == "error" and not ack.accepted and not ack.is_duplicate
+
+
+def test_the_post_only_refusal_is_recognised_off_the_documented_text():
+    # API error-responses page: "Post only order would have immediately
+    # matched, bbo was {bbo}." — matched case-insensitively on the leading
+    # clause, like the duplicate markers; anything else is an ordinary refusal.
+    assert is_post_only_cross_error("Post only order would have immediately matched, bbo was 100.5")
+    assert is_post_only_cross_error("POST ONLY ORDER WOULD HAVE IMMEDIATELY MATCHED")
+    assert not is_post_only_cross_error("Insufficient margin to place order.")
+    assert not is_post_only_cross_error(None)
+    assert not is_post_only_cross_error("")
+    refused = OrderAck(status="error", error="Post only order would have immediately matched, bbo was 1")
+    assert refused.is_post_only_cross and not refused.is_duplicate
+    assert not OrderAck(status="resting", exchange_order_id="1").is_post_only_cross

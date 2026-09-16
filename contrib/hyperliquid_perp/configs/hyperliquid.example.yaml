@@ -108,7 +108,9 @@ paper_trading:
 #     max_daily_loss_pct: 2            # behaviour §10.3
 #     max_consecutive_loss_count: 3    # behaviour §10.4
 #   execution:
-#     default_style: sliced_twap       # entry/rebalance only (§9.4); the only v1 style
+#     default_style: sliced_twap       # entry/rebalance only (§9.4); or sliced_maker (§9.2.1)
+#     maker_rest_seconds: 30           # sliced_maker: pull a post-only slice after this rest
+#     maker_max_requotes: 2            # sliced_maker: requotes before the remainder crosses (IOC)
 #     max_slippage_pct: 0.005          # a FRACTION: 0.005 = ±0.5% IOC limit band (§9.2)
 #     plan_duration_minutes: 60        # an ENVELOPE, not a slice-count commitment: the min clip
 #     slice_interval_seconds: 30       # size (exchange 10 USDC min) wins over interval (§9.1)

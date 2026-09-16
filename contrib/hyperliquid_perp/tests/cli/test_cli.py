@@ -33,7 +33,7 @@ from contrib.hyperliquid_perp.cli import (
 )
 from contrib.hyperliquid_perp.common import store_layout
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
-from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
+from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext, TopOfBook
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
@@ -6950,6 +6950,18 @@ def _drive_live_loop_construction(
     class _FakeMarket:
         def __init__(self, _client):
             pass
+
+        def get_top_of_book(self, coin):
+            # The maker slice's quote seam (§9.2.1), wired even under the
+            # default taker style; never read by these loop tests.
+            from datetime import datetime, timezone
+
+            return TopOfBook(
+                coin=coin,
+                best_bid=D(49990),
+                best_ask=D(50010),
+                time=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+            )
 
         def get_asset_meta(self, coin):
             return 3, MarginSchedule(coin=coin, tiers=(MarginTier(D(0), D(50)),))

@@ -227,7 +227,7 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 不方便一次備齊時，用 `--only` 分項跑（見下）。
 
 > **pre-flight recovery（先讀這段再排順序）**：真跑且選到會下 probe 單的測試
-> （3、5–13、18）時，suite 會在第一項測試前**先跑一次** §19.1 recovery——signed
+> （3、5–13、18–20）時，suite 會在第一項測試前**先跑一次** §19.1 recovery——signed
 > client 自己的 order gate 要求 recovery 通過＋kill switch armed 才放行任何單。
 > 副作用：全套 20 項一次跑時，這個 pre-flight 會先把你為 test 17 備好的 stale 單
 > 掃掉（test 17 之後照樣記 passed，但證明的只是「乾淨狀態下 recovery 乾淨」）。
@@ -347,7 +347,7 @@ python -m contrib.hyperliquid_perp live-smoke \
   訊號）：
   - `a probe position may still be OPEN` — 意外成交的探針倉沒能完全平掉（test 3 的
     far IOC、測 6/7 的切片）。處置同 staging 殘倉：手動平掉、換新 run-id。
-  - `trigger probe(s) may still REST on the exchange` — 探針掛單撤不掉。**這族最重**：
+  - `probe(s) may still REST on the exchange` — 探針掛單撤不掉。**這族最重**：
     trigger 探針刻意不寫本地 orders row，而 §19.3 掃單對 `stop_loss`／`take_profit`
     是「驗證但不撤」，所以下一次 `live` 啟動會把它記成 `orphan_exchange_order`，依 §2
     的累積制，**該 run-id 的 `validate` 從此永遠 exit 5**。進 cycles 前務必到交易所
@@ -601,7 +601,7 @@ daemon 判準這兩處；`kill_switch_fired_count`／`disarm_failed_count` **不
 （每輪至少 21 筆＝20 個 test 各一次 pre-test refresh ＋ test 14 自己那次；pre-flight
 recovery 寫的是 `kill_switch_armed`，本來就不計入樣本下限。說「至少」是因為真 testnet
 上 pre-flight 與 test 15-17 建的那個真 `KillSwitchManager` 還會隨時間再寫幾筆——見下
-一段——所以 114 是下限，這只讓「daemon 沒跑過也早就湊滿 100 筆」的論證更保守）。
+一段——所以 126 是下限，這只讓「daemon 沒跑過也早就湊滿 100 筆」的論證更保守）。
 （suite 自己打的那幾筆走的是 signed client 而不是 `KillSwitchManager`，所以沒有別人會
 補那些列。）沒有這些列的話，整個 smoke 期間、以及跑完 smoke
 到啟動 `live --loop` 之間那段由操作者決定長度的空窗，都會被算成 outage——一個完全乾淨的

@@ -582,7 +582,7 @@ class SmokeTestRunner:
                 # Not ours to cancel — the successor owns this wallet — but the
                 # probes are still on its book, so name them.
                 self.probe_residual = (
-                    f"{len(self._resting_probes)} trigger probe(s) were left resting "
+                    f"{len(self._resting_probes)} probe(s) were left resting "
                     f"(cloids: {', '.join(sorted(self._resting_probes))}): this run's "
                     "lease was taken over mid-suite, so cancelling them now would act "
                     "on a wallet this process no longer owns. Cancel them manually"
@@ -1093,6 +1093,7 @@ class SmokeTestRunner:
         qty: Decimal,
         price: Decimal,
         reduce_only: bool,
+        order_type: str = "ioc_limit",
     ) -> Exception:
         """Ask orderStatus what became of an IOC whose ack was lost.
 
@@ -1130,6 +1131,7 @@ class SmokeTestRunner:
         local_status = local_status_for_exchange_status(status_word)
         try:
             self._insert_probe_row(
+                order_type=order_type,
                 status=local_status,
                 # The venue says filled/canceled/etc, not HOW MUCH: orderStatus
                 # carries no size here. Booking 0 keeps the row honest about what
@@ -1187,6 +1189,7 @@ class SmokeTestRunner:
         qty: Decimal,
         price: Decimal,
         reduce_only: bool,
+        order_type: str = "ioc_limit",
     ) -> None:
         with self.ctx.db.transaction() as conn:
             repo.insert_order(
@@ -1199,7 +1202,7 @@ class SmokeTestRunner:
                 symbol=self.ctx.coin,
                 order_role=role,
                 side=side,
-                order_type="ioc_limit",
+                order_type=order_type,
                 qty=qty,
                 filled_qty=filled,
                 remaining_qty=qty - filled,
@@ -2096,7 +2099,12 @@ class SmokeTestRunner:
             if not isinstance(row, dict):
                 continue
             if str(row.get("cloid") or "").lower() == cloid_hex_value.lower():
-                return str(row.get("tif") or "")
+                if "tif" not in row:
+                    return ""  # listed, key absent: the documented fallback case
+                # Present-but-empty/null is NOT that case. Returning the empty
+                # string here would silently take the weaker-evidence branch;
+                # name it instead so the type check below goes red.
+                return str(row["tif"]) if row["tif"] else "<empty>"
         return None
 
     def _test_maker_slice_post_cancel(self) -> SmokeStepResult:
@@ -2112,17 +2120,33 @@ class SmokeTestRunner:
         # The same far-from-mark rule test 3 uses: a buy at half the mark is not
         # marketable, so the post-only condition is never even exercised here.
         price = self._round_price(mark * Decimal("0.5"), up=False)
-        _logical, cloid = self._register_cloid(role="entry", tag=f"alo-{self._tag()}")
+        size = self._probe_size()
+        logical, cloid = self._register_cloid(role="entry", tag=f"alo-{self._tag()}")
         self._track_probe(cloid)
         ack = self._wire.place_limit(
             coin=self.ctx.coin,
             is_buy=True,
-            size=self._probe_size(),
+            size=size,
             limit_price=price,
             cloid_hex=cloid,
             tif=_ALO_TIF,
         )
         self._require_probe_accepted(ack, "post-only (Alo) slice", cloid)
+        if ack.status == "filled":
+            # ``accepted`` covers filled too, and place_limit's contract admits
+            # that a filled Alo is recorded as the fill it claims to be. A
+            # post-only buy at HALF the mark cannot legitimately fill, so this is
+            # a venue-semantics change — book it before flattening (an unbooked
+            # fill pins this run-id's validate at exit 5, §12.3) and say what
+            # actually happened, instead of letting the listing read below
+            # misdiagnose it as "accepted but unlisted".
+            self._book_alo_fill(
+                ack, cloid_logical=logical, cloid_hex_value=cloid, qty=size, price=price
+            )
+            raise _SmokeAbort(
+                f"the venue FILLED a post-only slice priced at half the mark "
+                f"(oid {ack.exchange_order_id}); " + self._flatten_alo_fill(ack)
+            )
         listed = self._listed_tif(cloid)
         if listed is None:
             raise _SmokeAbort(
@@ -2163,16 +2187,36 @@ class SmokeTestRunner:
         # Marketable by construction: a buy 50% above the mark crosses any book
         # the venue could show, so post-only has to refuse it.
         price = self._round_price(mark * Decimal("1.5"), up=True)
-        _logical, cloid = self._register_cloid(role="entry", tag=f"alox-{self._tag()}")
+        size = self._probe_size()
+        logical, cloid = self._register_cloid(role="entry", tag=f"alox-{self._tag()}")
         self._track_probe(cloid)
-        ack = self._wire.place_limit(
-            coin=self.ctx.coin,
-            is_buy=True,
-            size=self._probe_size(),
-            limit_price=price,
-            cloid_hex=cloid,
-            tif=_ALO_TIF,
-        )
+        try:
+            ack = self._wire.place_limit(
+                coin=self.ctx.coin,
+                is_buy=True,
+                size=size,
+                limit_price=price,
+                cloid_hex=cloid,
+                tif=_ALO_TIF,
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised below; this only ASKS
+            # This probe is MARKETABLE, so a lost ack is the §8.3 rule 11 case,
+            # not a harmless retry: the venue may have filled it, and a fill with
+            # no local order row books fill_unmapped and pins this run-id's
+            # validate at exit 5 forever. Ask orderStatus once and record the
+            # answer — the same lane _place_and_record_ioc gives every other
+            # marketable probe.
+            raise self._recover_lost_ioc(
+                exc,
+                cloid_logical=logical,
+                cloid_hex_value=cloid,
+                role="entry",
+                side="buy",
+                qty=size,
+                price=price,
+                reduce_only=False,
+                order_type=_ALO_ORDER_TYPE,
+            ) from exc
         if ack.status == "error":
             # Refused per order: positive evidence nothing exists under this
             # cloid, so the handle must not be swept (the same reading
@@ -2187,21 +2231,59 @@ class SmokeTestRunner:
             return SmokeStepResult(
                 "passed", detail=f"crossing post-only slice refused by name: {ack.error!r}"
             )
-        # Not refused. Whatever the venue did with a marketable buy, this suite
-        # promises not to strand it: flatten a fill, pull a rest, then fail —
-        # the engine's whole re-post lane rests on this refusal existing.
+        # Not refused. The finding IS that post-only stopped being honoured —
+        # the premise the whole §9.2.1 re-post lane rests on — so that is what
+        # the durable row must say. Cleanup is therefore best-effort and folded
+        # into this one message: a cleanup helper that raises on its own would
+        # replace the finding with a cancel error (and name a trigger order that
+        # does not exist here).
         filled = ack.filled_size or Decimal(0)
         if filled > 0:
-            self._resting_probes.discard(cloid)
-            note = self._best_effort_close(filled)
-            cleanup = note or f"reduce-only closed {filled}"
+            self._book_alo_fill(
+                ack, cloid_logical=logical, cloid_hex_value=cloid, qty=size, price=price
+            )
+            cleanup = self._flatten_alo_fill(ack)
         else:
-            self._cancel_tested_probe(cloid, "cleanup of an unrefused post-only cross")
-            cleanup = "cancelled the unexpectedly resting order"
+            # A marketable order the venue rested can fill at any moment, so a
+            # refused cancel keeps the cloid tracked for the exit sweep.
+            cleanup = self._best_effort_cancel(cloid) or "cancelled the unexpectedly resting order"
         raise _SmokeAbort(
             f"the venue did NOT refuse a crossing post-only slice (status={ack.status}, "
             f"oid={ack.exchange_order_id}); {cleanup}"
         )
+
+    def _book_alo_fill(self, ack, *, cloid_logical, cloid_hex_value, qty, price) -> None:
+        """Book a post-only probe the venue FILLED, typed ``alo_limit``.
+
+        The fill is the exposure: with no ``orders`` row the backfill maps it to
+        nothing, books ``fill_unmapped`` plus a position mismatch, and pins this
+        run-id's ``validate`` at exit 5 (§12.3) — flat wallet or not. An UNFILLED
+        resting probe is deliberately NOT booked: that is the orphan lane's job,
+        the same as every trigger probe.
+        """
+        self._insert_probe_row(
+            status="filled",
+            filled=ack.filled_size or Decimal(0),
+            ack=ack,
+            cloid_logical=cloid_logical,
+            cloid_hex_value=cloid_hex_value,
+            role="entry",
+            side="buy",
+            qty=qty,
+            price=price,
+            reduce_only=False,
+            order_type=_ALO_ORDER_TYPE,
+        )
+        # A filled order is off the book; keeping the handle would have the exit
+        # sweep chase it and report a residual that does not exist.
+        self._resting_probes.discard(cloid_hex_value)
+
+    def _flatten_alo_fill(self, ack) -> str:
+        """Reduce-only close a filled post-only probe; return what happened."""
+        filled = ack.filled_size or Decimal(0)
+        if filled <= 0:
+            return "the venue reported a fill with no size — check the position by hand"
+        return self._best_effort_close(filled) or f"reduce-only closed {filled}"
 
 
 # --------------------------------------------------------------------------

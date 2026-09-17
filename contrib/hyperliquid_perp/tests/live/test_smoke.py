@@ -2356,3 +2356,90 @@ def test_both_maker_probes_are_order_placing_and_typed_alo():
     assert "maker_slice_post_cancel" in smoke._ORDER_PLACING_TESTS
     assert "maker_slice_post_only_refusal" in smoke._ORDER_PLACING_TESTS
     assert smoke._ALO_ORDER_TYPE == "alo_limit"
+
+
+def _probe_order_types(live_db):
+    return [
+        r["type"]
+        for r in live_db.conn.execute("SELECT type FROM orders WHERE order_id LIKE 'smoke|%'")
+    ]
+
+
+def test_maker_post_probe_books_and_flattens_a_filled_alo(live_db):
+    """A post-only buy at HALF the mark cannot legitimately fill.
+
+    If the venue fills it anyway, the fill must be BOOKED (an unbooked fill
+    pins the run-id's validate at exit 5) and flattened, and the message must
+    say the venue filled it rather than blaming the listing.
+    """
+    signed = _FakeSigned(limit_ack=_Ack("filled", filled_size=_D("0.001")))
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=["maker_slice_post_cancel"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+        types = _probe_order_types(live_db)
+    row = latest["maker_slice_post_cancel"]
+    said = (row["detail"] or "") + (row["error_message"] or "")
+    assert row["status"] == "failed"
+    assert "FILLED a post-only slice" in said
+    assert "does not list" not in said  # the old misdiagnosis
+    assert "alo_limit" in types  # the entry leg is booked under its real type
+    assert "place_ioc_limit" in signed.calls  # and flattened reduce-only
+
+
+def test_maker_post_probe_treats_an_empty_tif_as_evidence_not_absence(live_db):
+    """``tif: null`` is not the documented "no tif key" case and must go red."""
+    signed = _FakeSigned(open_orders_tif="")
+    row, said = _maker_row(live_db, signed, "maker_slice_post_cancel")
+    assert row["status"] == "failed"
+    assert "<empty>" in said
+
+
+def test_post_only_refusal_probe_asks_orderstatus_when_the_ack_is_lost(live_db):
+    """A MARKETABLE probe whose ack is lost may have filled — ask, never assume."""
+    signed = _FakeSigned(raise_on={"place_limit"})
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=["maker_slice_post_only_refusal"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+        types = _probe_order_types(live_db)
+    row = latest["maker_slice_post_only_refusal"]
+    said = (row["detail"] or "") + (row["error_message"] or "")
+    # Unknown outcome is a harness/exposure case, not an exchange refusal.
+    assert row["status"] == "error"
+    assert signed.queried_cloid is not None  # it ASKED instead of assuming
+    assert "DID reach the exchange" in said
+    assert types == ["alo_limit"]  # and booked what it found, under the right type
+
+
+def test_post_only_refusal_probe_books_a_fill_before_flattening(live_db):
+    """A crossing Alo the venue FILLS is booked under alo_limit, then closed."""
+    signed = _FakeSigned(limit_ack=_Ack("filled", filled_size=_D("0.001")))
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=["maker_slice_post_only_refusal"])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+        types = _probe_order_types(live_db)
+    row = latest["maker_slice_post_only_refusal"]
+    said = (row["detail"] or "") + (row["error_message"] or "")
+    assert row["status"] == "failed"
+    assert "did NOT refuse" in said
+    assert "alo_limit" in types
+    assert "place_ioc_limit" in signed.calls
+
+
+def test_post_only_refusal_probe_keeps_the_finding_when_the_cleanup_cancel_fails(live_db):
+    """The finding is that post-only stopped being honoured — cleanup must not bury it.
+
+    A cleanup helper that raised on a refused cancel would replace the durable
+    message with a cancel error, losing the premise the whole re-post lane
+    rests on.
+    """
+    signed = _FakeSigned(
+        limit_ack=_Ack("resting", filled_size=None, average_price=None),
+        cancel=_Cancel(False, error="cannot cancel"),
+    )
+    row, said = _maker_row(live_db, signed, "maker_slice_post_only_refusal")
+    assert row["status"] == "failed"
+    assert "did NOT refuse" in said  # the finding survives
+    assert "cannot cancel" in said  # and the cleanup note rides along

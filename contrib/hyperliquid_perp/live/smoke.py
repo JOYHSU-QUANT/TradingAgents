@@ -56,7 +56,7 @@ from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
 from .config import AGGRESSIVE_FILL_BAND_PCT
 from .kill_switch import deadline_detail, record_kill_switch_event
-from .orders import local_status_for_exchange_status, parse_order_status
+from .orders import ORDER_TYPE_FOR_TIF, local_status_for_exchange_status, parse_order_status
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
@@ -127,6 +127,12 @@ SMOKE_TESTS: tuple[SmokeTest, ...] = (
     SmokeTest(16, "startup_with_existing_position", "startup with existing position"),
     SmokeTest(17, "startup_with_stale_open_order", "startup with stale bot-owned order"),
     SmokeTest(18, "emergency_close", "emergency close (aggressive reduce-only IOC, §17.2)"),
+    SmokeTest(19, "maker_slice_post_cancel", "post-only (Alo) slice rests, is listed, cancels"),
+    SmokeTest(
+        20,
+        "maker_slice_post_only_refusal",
+        "post-only (Alo) slice that would cross is refused by name",
+    ),
 )
 
 # The stable identities, in one place: the gate iterates them, the validator
@@ -216,8 +222,16 @@ _ORDER_PLACING_TESTS: frozenset[str] = frozenset(
         "take_profit_modify",
         "take_profit_cancel",
         "emergency_close",
+        "maker_slice_post_cancel",
+        "maker_slice_post_only_refusal",
     }
 )
+
+# §9.2.1's post-only wire vocabulary, bound to the mapping the engine and
+# reconcile already read so tests 19/20 cannot drift from it: losing `Alo`
+# from ORDER_TYPE_FOR_TIF breaks this import, not a mid-suite assertion.
+_ALO_TIF = "Alo"
+_ALO_ORDER_TYPE = ORDER_TYPE_FOR_TIF[_ALO_TIF]
 
 # The tests whose probe is a resting reduce-only trigger. Hyperliquid's
 # reduce-only semantics make a flat-account trigger a bet on venue leniency
@@ -2063,6 +2077,130 @@ class SmokeTestRunner:
         self._require_full_close(close_ack, opened, "emergency close")
         return SmokeStepResult(
             "passed", detail=f"emergency-closed {opened} in full (aggressive reduce-only IOC)"
+        )
+
+    # -- §9.2.1 maker slices (PR B2) ---------------------------------------
+
+    def _listed_tif(self, cloid_hex_value: str) -> str | None:
+        """The ``tif`` ``frontendOpenOrders`` reports for our cloid.
+
+        ``None`` means the listing does not carry the order at all; ``""``
+        means it is listed WITHOUT a ``tif`` key — two different answers the
+        caller must keep apart: the API docs' example payload omits ``tif``,
+        which is exactly why reconcile's orphan backfill falls back to an
+        ``orderStatus`` probe (§12.3) instead of assuming the field is there.
+        Read with reconcile's own wire vocabulary (``cloid``), so a schema
+        drift has to be answered in both places.
+        """
+        for row in self._wire.open_orders() or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("cloid") or "").lower() == cloid_hex_value.lower():
+                return str(row.get("tif") or "")
+        return None
+
+    def _test_maker_slice_post_cancel(self) -> SmokeStepResult:
+        """A post-only slice that cannot cross must REST, be listed, and pull.
+
+        The §9.2.1 happy path on the real wire. Beyond "the Alo action
+        round-trips", what this proves is the listing's ``tif``: reconcile
+        derives an orphaned slice's ``orders.type`` from that field via
+        :data:`ORDER_TYPE_FOR_TIF`, and this is the one place that assumption
+        meets the venue instead of the API docs.
+        """
+        mark = self.ctx.mark_price()
+        # The same far-from-mark rule test 3 uses: a buy at half the mark is not
+        # marketable, so the post-only condition is never even exercised here.
+        price = self._round_price(mark * Decimal("0.5"), up=False)
+        _logical, cloid = self._register_cloid(role="entry", tag=f"alo-{self._tag()}")
+        self._track_probe(cloid)
+        ack = self._wire.place_limit(
+            coin=self.ctx.coin,
+            is_buy=True,
+            size=self._probe_size(),
+            limit_price=price,
+            cloid_hex=cloid,
+            tif=_ALO_TIF,
+        )
+        self._require_probe_accepted(ack, "post-only (Alo) slice", cloid)
+        listed = self._listed_tif(cloid)
+        if listed is None:
+            raise _SmokeAbort(
+                f"the venue accepted a post-only slice (oid {ack.exchange_order_id}) that "
+                f"frontendOpenOrders does not list under its cloid — §19.3 bot-ownership "
+                f"and §12.3 orphan reconciliation both decide off that listing"
+            )
+        if listed and ORDER_TYPE_FOR_TIF.get(listed) != _ALO_ORDER_TYPE:
+            raise _SmokeAbort(
+                f"frontendOpenOrders reports tif {listed!r} for a post-only slice; "
+                f"reconcile would type an orphan of it "
+                f"{ORDER_TYPE_FOR_TIF.get(listed)!r}, not {_ALO_ORDER_TYPE!r} (§12.3)"
+            )
+        self._cancel_tested_probe(cloid, "cancel-by-cloid")
+        tif_note = (
+            f"listed with tif {listed}"
+            if listed
+            else "listed WITHOUT a tif — reconcile's orderStatus fallback is the live path"
+        )
+        return SmokeStepResult(
+            "passed",
+            detail=(
+                f"post-only slice rested (oid {ack.exchange_order_id}), {tif_note}, "
+                f"then cancelled by cloid"
+            ),
+        )
+
+    def _test_maker_slice_post_only_refusal(self) -> SmokeStepResult:
+        """A post-only slice that WOULD cross must be refused, by a text we know.
+
+        §9.2.1 reads this refusal as "the quote is stale, re-post", not §9.2
+        rule 2's "refused, move on" — and tells them apart by the venue's
+        message (:func:`is_post_only_cross_error`, pinned from the API docs in
+        PR B). If the venue ever rewords it, every stale quote silently becomes
+        a dropped slice, so the string is checked here against the exchange.
+        """
+        mark = self.ctx.mark_price()
+        # Marketable by construction: a buy 50% above the mark crosses any book
+        # the venue could show, so post-only has to refuse it.
+        price = self._round_price(mark * Decimal("1.5"), up=True)
+        _logical, cloid = self._register_cloid(role="entry", tag=f"alox-{self._tag()}")
+        self._track_probe(cloid)
+        ack = self._wire.place_limit(
+            coin=self.ctx.coin,
+            is_buy=True,
+            size=self._probe_size(),
+            limit_price=price,
+            cloid_hex=cloid,
+            tif=_ALO_TIF,
+        )
+        if ack.status == "error":
+            # Refused per order: positive evidence nothing exists under this
+            # cloid, so the handle must not be swept (the same reading
+            # _require_probe_accepted applies on its refusal lane).
+            self._resting_probes.discard(cloid)
+            if not ack.is_post_only_cross:
+                raise _SmokeAbort(
+                    f"a crossing post-only slice was refused with text the engine does NOT "
+                    f"recognize as a post-only cross: {ack.error!r} — "
+                    f"is_post_only_cross_error must be retuned before sliced_maker is enabled"
+                )
+            return SmokeStepResult(
+                "passed", detail=f"crossing post-only slice refused by name: {ack.error!r}"
+            )
+        # Not refused. Whatever the venue did with a marketable buy, this suite
+        # promises not to strand it: flatten a fill, pull a rest, then fail —
+        # the engine's whole re-post lane rests on this refusal existing.
+        filled = ack.filled_size or Decimal(0)
+        if filled > 0:
+            self._resting_probes.discard(cloid)
+            note = self._best_effort_close(filled)
+            cleanup = note or f"reduce-only closed {filled}"
+        else:
+            self._cancel_tested_probe(cloid, "cleanup of an unrefused post-only cross")
+            cleanup = "cancelled the unexpectedly resting order"
+        raise _SmokeAbort(
+            f"the venue did NOT refuse a crossing post-only slice (status={ack.status}, "
+            f"oid={ack.exchange_order_id}); {cleanup}"
         )
 
 

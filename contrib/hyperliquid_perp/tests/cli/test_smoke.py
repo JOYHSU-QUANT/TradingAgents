@@ -131,6 +131,8 @@ def smoke_seams(monkeypatch):
         # disarm (the second call in a full run) fails.
         clear_fail_after=None,
         oids=itertools.count(1),
+        # cloid -> oid for the post-only slices left on the fake book (19.2.1).
+        resting={},
     )
 
     class _FakeClient:
@@ -207,6 +209,41 @@ def smoke_seams(monkeypatch):
                 average_price=limit_price,
             )
 
+        def place_limit(
+            self,
+            *,
+            coin,
+            is_buy,
+            size,
+            limit_price,
+            cloid_hex,
+            tif,
+            reduce_only=False,
+            protective=False,
+        ):
+            # The venue's post-only rule, modelled: a marketable Alo is refused
+            # per order (smoke 20), anything else rests and shows up in the
+            # listing until it is cancelled (smoke 19).
+            if tif == "Alo" and limit_price > state.mark:
+                return OrderAck(
+                    status="error",
+                    exchange_order_id=None,
+                    filled_size=None,
+                    average_price=None,
+                    error=(
+                        "Post only order would have immediately matched, "
+                        "bbo was [49999.0, 50001.0]."
+                    ),
+                )
+            oid = str(next(state.oids))
+            state.resting[cloid_hex] = oid
+            return OrderAck(
+                status="resting",
+                exchange_order_id=oid,
+                filled_size=None,
+                average_price=None,
+            )
+
         def place_trigger_order(
             self,
             *,
@@ -237,6 +274,7 @@ def smoke_seams(monkeypatch):
             return OrderAck(status="resting", exchange_order_id=str(next(state.oids)))
 
         def cancel_by_cloid(self, *, coin, cloid_hex):
+            state.resting.pop(cloid_hex, None)
             return CancelAck(success=True)
 
         def cancel_by_oid(self, *, coin, exchange_order_id):
@@ -254,7 +292,7 @@ def smoke_seams(monkeypatch):
             return []
 
         def open_orders(self):
-            return []
+            return [{"cloid": c, "oid": o, "tif": "Alo"} for c, o in state.resting.items()]
 
         def exchange_time(self):
             return None  # the kill switch skips the skew check with a warning

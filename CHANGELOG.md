@@ -84,6 +84,24 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **perp: live smoke tests 19 / 20 for the post-only slice (maker path, PR B2)** -
+  test 19 places an Alo buy far below the touch, requires the venue to REST it,
+  reads `frontendOpenOrders` and refuses any `tif` that would make reconcile's
+  orphan backfill type the slice as anything but `alo_limit` (a listing with no
+  `tif` at all is the documented `orderStatus` fallback and passes), then
+  cancels it by cloid; test 20 places an Alo buy 50% above the mark and requires
+  the venue to REFUSE it with a message `is_post_only_cross_error` recognizes --
+  the string PR B pinned from the API docs, now checked against the real
+  exchange, because the engine reads that refusal as "re-post" rather than
+  rule 2's "move on". Both are order-placing tests, so the pre-flight recovery
+  applies. RUNBOOK-live gains the three wallet-level prerequisites measured on
+  testnet: the account must be in Standard mode (the adapter reads the perp
+  clearinghouse, which reports zero under a Unified Account), `scheduleCancel`
+  is refused until the account has traded US$1M cumulatively (so a run cannot
+  even be created), and a run must not be created within 6h of manual trading on
+  the wallet (the fill backfill's trailing floor books those fills as unmapped
+  and leaves startup recovery unclean).
+
 - **perp: the paper mirror of the maker slice (maker path, PR C)** -
   `paper_trading.execution.fill_model.style: maker` posts each simulated
   slice at a modelled touch (mid -/+ `assumed_half_spread_bps`, rounded

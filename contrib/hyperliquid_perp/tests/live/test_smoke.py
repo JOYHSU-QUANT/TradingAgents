@@ -10,6 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
+    is_post_only_cross_error,
+)
 from contrib.hyperliquid_perp.live import smoke
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
@@ -64,11 +67,26 @@ class _Ack:
     def is_duplicate(self) -> bool:
         return False
 
+    @property
+    def is_post_only_cross(self) -> bool:
+        # The REAL matcher, so a test pinning the venue's wording pins what
+        # the engine actually reads (§9.2.1).
+        return self.status == "error" and is_post_only_cross_error(self.error)
+
 
 @dataclass
 class _Cancel:
     success: bool = True
     error: str | None = None
+
+
+# The mark every _ctx hands the runner; the fake venue below prices its
+# post-only decision against the same number.
+_POST_ONLY_CROSS_TEXT = (
+    "Post only order would have immediately matched, bbo was [76000.0, 76001.0]."
+)
+
+_FAKE_MARK = _D(60000)
 
 
 class _FakeSigned:
@@ -86,6 +104,9 @@ class _FakeSigned:
         cancel=None,
         raise_on=None,
         query_payload=None,
+        limit_ack=None,
+        open_orders_tif="Alo",
+        open_orders_rows=None,
     ):
         # The REAL Info vocabulary (live/orders.py parse_order_status): a hit
         # is {"status": "order", ...}; the miss shape is {"status": "unknownOid"}.
@@ -98,6 +119,15 @@ class _FakeSigned:
         # lets a test make slice 0 fill and slice 1 fail.
         self._place_acks = list(place_acks or [])
         self._trigger_ack = trigger_ack or _Ack("resting", filled_size=None, average_price=None)
+        # §9.2.1 post-only slices. The ack is separate from the IOC one so a
+        # suite placing both cannot have one test's outcome answer the other.
+        self._limit_ack = limit_ack
+        # The listing is built at read time around the cloid actually placed
+        # (a test cannot know it in advance); ``open_orders_tif=None`` models
+        # the docs' example payload, which carries no ``tif`` at all, and
+        # ``open_orders_rows`` overrides the whole listing (e.g. empty).
+        self._open_orders_tif = open_orders_tif
+        self._open_orders_rows = open_orders_rows
         self._modify_ack = modify_ack  # None → same ack as a fresh trigger place
         self._cancel = cancel or _Cancel(True)
         self._raise_on = raise_on or set()
@@ -129,6 +159,32 @@ class _FakeSigned:
         if self._place_acks:
             return self._place_acks.pop(0)
         return self._place_ack
+
+    def place_limit(self, **k):
+        self._log("place_limit")
+        self.last_place_cloid = k.get("cloid_hex")
+        self.place_calls.append(k)
+        if self._limit_ack is not None:
+            return self._limit_ack
+        # Default: behave like the venue. Post-only refuses a marketable price
+        # and rests anything else, so the same fake answers tests 19 and 20.
+        if k.get("tif") == "Alo" and k["limit_price"] > _FAKE_MARK:
+            return _Ack(
+                "error",
+                exchange_order_id=None,
+                filled_size=None,
+                error=_POST_ONLY_CROSS_TEXT,
+            )
+        return _Ack("resting", filled_size=None, average_price=None)
+
+    def open_orders(self):
+        self._log("open_orders")
+        if self._open_orders_rows is not None:
+            return self._open_orders_rows
+        row = {"cloid": self.last_place_cloid, "oid": 1}
+        if self._open_orders_tif is not None:
+            row["tif"] = self._open_orders_tif
+        return [row]
 
     def place_trigger_order(self, **k):
         self._log("place_trigger_order")
@@ -175,7 +231,7 @@ def _ctx(db, signed, *, dry_run=False, run_recovery=None, run_id="live-BTC") -> 
         network="testnet",
         payload_dir=Path("."),
         owner_prefix="hta",
-        mark_price=lambda: _D(60000),
+        mark_price=lambda: _FAKE_MARK,
         qty_step=_D("0.00001"),
         tick_size=_D(1),
         now=lambda: _T0,
@@ -209,7 +265,7 @@ def test_full_suite_passes_and_gate_opens(live_db):
             _ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery())
         )
         executed = runner.run()
-        assert [t.number for t in executed] == list(range(1, 19))
+        assert [t.number for t in executed] == list(range(1, len(smoke.SMOKE_TESTS) + 1))
         passed, missing, failed, errored = smoke.smoke_gate_report(live_db.conn, "live-BTC")
     assert passed
     assert missing == () and failed == ()
@@ -2185,3 +2241,118 @@ def test_a_clean_submit_detail_carries_no_error_clause(live_db):
     assert row["status"] == "passed"
     assert "error=" not in row["detail"]
     assert row["detail"].endswith(")")  # the envelope still closes properly
+
+
+# --------------------------------------------------------------------------
+# §9.2.1 maker slices — smoke tests 19 / 20 (PR B2)
+# --------------------------------------------------------------------------
+
+
+def _maker_row(live_db, signed, key):
+    """Run one maker smoke test; return its persisted row and its message text."""
+    with live_db:
+        runner = smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery()))
+        runner.run(only=[key])
+        latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
+    row = latest[key]
+    return row, (row["detail"] or "") + (row["error_message"] or "")
+
+
+def test_maker_post_probe_rests_is_listed_as_alo_then_cancels(live_db):
+    """Test 19's happy path: the venue rests the Alo, lists it, and lets it go."""
+    signed = _FakeSigned()  # resting ack; the listing reports tif "Alo"
+    row, said = _maker_row(live_db, signed, "maker_slice_post_cancel")
+    assert row["status"] == "passed"
+    assert "tif Alo" in said
+    assert signed.place_calls[0]["tif"] == "Alo"
+    # Far BELOW the mark: the post-only condition is never exercised by test 19.
+    assert signed.place_calls[0]["limit_price"] < _D(60000)
+    assert signed.cancelled_cloids == [signed.last_place_cloid]
+
+
+def test_maker_post_probe_accepts_a_listing_that_carries_no_tif(live_db):
+    """A listing with no ``tif`` is the documented case, not a red gate.
+
+    The API docs' frontendOpenOrders example omits ``tif``, which is precisely
+    why reconcile falls back to an orderStatus probe; turning the venue's
+    silence into a failure would block the gate over a supported path.
+    """
+    signed = _FakeSigned(open_orders_tif=None)
+    row, said = _maker_row(live_db, signed, "maker_slice_post_cancel")
+    assert row["status"] == "passed"
+    assert "WITHOUT a tif" in said
+    assert signed.cancelled_cloids == [signed.last_place_cloid]
+
+
+def test_maker_post_probe_refuses_a_listing_that_would_mis_type_the_orphan(live_db):
+    """A ``tif`` mapping to another order type must fail test 19 by name.
+
+    Reconcile derives an orphaned slice's ``orders.type`` from this field, so a
+    venue reporting ``Ioc`` for a post-only order would have it booked as
+    ``ioc_limit`` and the mismatch would never surface again.
+    """
+    signed = _FakeSigned(open_orders_tif="Ioc")
+    row, said = _maker_row(live_db, signed, "maker_slice_post_cancel")
+    assert row["status"] == "failed"
+    assert "'Ioc'" in said and "ioc_limit" in said and "alo_limit" in said
+
+
+def test_maker_post_probe_refuses_an_accepted_order_the_listing_omits(live_db):
+    """Accepted but unlisted breaks §19.3 bot-ownership, so test 19 goes red."""
+    signed = _FakeSigned(open_orders_rows=[])
+    row, said = _maker_row(live_db, signed, "maker_slice_post_cancel")
+    assert row["status"] == "failed"
+    assert "does not list" in said
+
+
+def test_post_only_refusal_probe_passes_on_the_venues_own_text(live_db):
+    """Test 20 passes only when the engine RECOGNIZES the refusal text."""
+    signed = _FakeSigned(
+        limit_ack=_Ack(
+            "error", exchange_order_id=None, filled_size=None, error=_POST_ONLY_CROSS_TEXT
+        )
+    )
+    row, said = _maker_row(live_db, signed, "maker_slice_post_only_refusal")
+    assert row["status"] == "passed"
+    assert "Post only order would have immediately matched" in said
+    # Marketable by construction: the probe price sits ABOVE the mark.
+    assert signed.place_calls[0]["limit_price"] > _D(60000)
+    assert signed.place_calls[0]["tif"] == "Alo"
+    assert signed.cancelled_cloids == []  # a refused order does not exist to cancel
+
+
+def test_post_only_refusal_probe_fails_on_text_the_engine_cannot_recognize(live_db):
+    """A reworded refusal must go red HERE rather than silently in production.
+
+    ``is_post_only_cross_error`` is what tells "the quote was stale, re-post"
+    apart from §9.2 rule 2's "refused, move on"; once it stops matching, every
+    stale quote becomes a dropped slice.
+    """
+    signed = _FakeSigned(
+        limit_ack=_Ack(
+            "error",
+            exchange_order_id=None,
+            filled_size=None,
+            error="ALO order would cross the book",
+        )
+    )
+    row, said = _maker_row(live_db, signed, "maker_slice_post_only_refusal")
+    assert row["status"] == "failed"
+    assert "is_post_only_cross_error" in said
+    assert "ALO order would cross the book" in said
+
+
+def test_post_only_refusal_probe_cancels_an_order_the_venue_did_not_refuse(live_db):
+    """A crossing Alo the venue RESTS fails test 20 but is not left behind."""
+    signed = _FakeSigned(limit_ack=_Ack("resting", filled_size=None, average_price=None))
+    row, said = _maker_row(live_db, signed, "maker_slice_post_only_refusal")
+    assert row["status"] == "failed"
+    assert "did NOT refuse" in said
+    assert signed.cancelled_cloids == [signed.last_place_cloid]
+
+
+def test_both_maker_probes_are_order_placing_and_typed_alo():
+    """Both place real orders (pre-flight recovery applies) and mean ``alo_limit``."""
+    assert "maker_slice_post_cancel" in smoke._ORDER_PLACING_TESTS
+    assert "maker_slice_post_only_refusal" in smoke._ORDER_PLACING_TESTS
+    assert smoke._ALO_ORDER_TYPE == "alo_limit"

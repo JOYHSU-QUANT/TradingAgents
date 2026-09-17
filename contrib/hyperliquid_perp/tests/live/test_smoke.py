@@ -2385,6 +2385,10 @@ def test_maker_post_probe_books_and_flattens_a_filled_alo(live_db):
     assert "does not list" not in said  # the old misdiagnosis
     assert "alo_limit" in types  # the entry leg is booked under its real type
     assert "place_ioc_limit" in signed.calls  # and flattened reduce-only
+    # A FILLED order is off the book: chasing it would report a residual that
+    # does not exist and leave the operator hunting a phantom.
+    assert signed.cancelled_cloids == []
+    assert runner.probe_residual is None
 
 
 def test_maker_post_probe_treats_an_empty_tif_as_evidence_not_absence(live_db):
@@ -2443,3 +2447,16 @@ def test_post_only_refusal_probe_keeps_the_finding_when_the_cleanup_cancel_fails
     assert row["status"] == "failed"
     assert "did NOT refuse" in said  # the finding survives
     assert "cannot cancel" in said  # and the cleanup note rides along
+
+
+def test_maker_post_probe_says_so_when_a_fill_carries_no_size(live_db):
+    """A fill the venue reports with no size cannot be closed — say that.
+
+    Claiming "reduce-only closed 0" would tell the operator the wallet is flat
+    when nobody knows what it holds.
+    """
+    signed = _FakeSigned(limit_ack=_Ack("filled", filled_size=None))
+    row, said = _maker_row(live_db, signed, "maker_slice_post_cancel")
+    assert row["status"] == "failed"
+    assert "fill with no size" in said
+    assert "place_ioc_limit" not in signed.calls  # nothing to close, so nothing sent

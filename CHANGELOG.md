@@ -100,7 +100,12 @@ Breaking changes within the 0.x line are called out explicitly.
   is refused until the account has traded US$1M cumulatively (so a run cannot
   even be created), and a run must not be created within 6h of manual trading on
   the wallet (the fill backfill's trailing floor books those fills as unmapped
-  and leaves startup recovery unclean).
+  and leaves startup recovery unclean). Both probes carry the marketable-order
+  lanes the rest of the suite has: a lost ack asks `orderStatus` once and books
+  what it says (typed `alo_limit`), and a post-only order the venue FILLS is
+  booked before it is flattened -- an unbooked fill would pin the run-id's
+  `validate` at exit 5. A listing whose `tif` is present but empty is refused
+  rather than treated as the absent-key fallback.
 
 - **perp: the paper mirror of the maker slice (maker path, PR C)** -
   `paper_trading.execution.fill_model.style: maker` posts each simulated

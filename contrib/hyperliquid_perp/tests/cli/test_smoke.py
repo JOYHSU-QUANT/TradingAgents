@@ -550,7 +550,9 @@ def test_a_full_suite_writes_the_refresh_count_the_runbook_reasons_from(tmp_path
     KillSwitchManager those recoveries build emits nothing of its own; on real
     testnet it does, which is why the constant is documented as a floor.
     """
-    from contrib.hyperliquid_perp.live.smoke import REFRESHES_PER_FULL_SUITE
+    from contrib.hyperliquid_perp.live.smoke import (
+        REFRESHES_PER_FULL_SUITE,
+    )
 
     dbp = _drive_a_full_smoke_suite(tmp_path)
     with Database(dbp) as db:
@@ -563,7 +565,10 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     # log by hand. Nothing tied the doc to the constant, so renaming the constant
     # left the suite green and the runbook quietly wrong (round-16 probe).
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
-    from contrib.hyperliquid_perp.live.smoke import REFRESHES_PER_FULL_SUITE
+    from contrib.hyperliquid_perp.live.smoke import (
+        _PROBE_RESIDUAL_HEADLINE,
+        REFRESHES_PER_FULL_SUITE,
+    )
     from contrib.hyperliquid_perp.live.validation import (
         _NO_DAEMON_ROWS_RENDER,
         _REFRESH_BAR,
@@ -578,6 +583,9 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     # value for a run with no daemon rows. It could drift in either place with
     # the suite green (2026-08-01 round-18 mutation probe).
     assert _NO_DAEMON_ROWS_RENDER in runbook
+    # Same tie for the probe-residual headline: the doc tells operators to grep
+    # for it, and it drifted from the code once already (PR B2 review round 2).
+    assert _PROBE_RESIDUAL_HEADLINE in runbook
     # And every figure in the six-suite sentence §20.3 uses to explain WHY suite
     # rows are barred from the sample floor. Nothing produced that number: it sat
     # hand-counted in four places, so growing SMOKE_TESTS left all four wrong at
@@ -659,7 +667,7 @@ def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, caps
     assert "smoke_gate_passed: yes" in out
     with Database(dbp) as db:
         latest = repo.latest_smoke_test_results(db.conn, "r1")
-        assert set(latest) == set(SMOKE_TEST_KEYS)  # all 18 ran for real
+        assert set(latest) == set(SMOKE_TEST_KEYS)  # every registered test ran for real
         assert all(row["status"] == "passed" for row in latest.values())
         assert all(row["dry_run"] == 0 for row in latest.values())
     # The pre-flight + tests 15-17 each armed the switch; test 14 cleared once

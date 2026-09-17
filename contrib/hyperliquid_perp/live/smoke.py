@@ -233,6 +233,11 @@ _ORDER_PLACING_TESTS: frozenset[str] = frozenset(
 _ALO_TIF = "Alo"
 _ALO_ORDER_TYPE = ORDER_TYPE_FOR_TIF[_ALO_TIF]
 
+# The headline of the probe-residual report. RUNBOOK 20.3 quotes it so an
+# operator can grep for it, and tests/cli pins the two together -- the same
+# tie _SUITE_AUTHORED_TOKEN has, for the same reason.
+_PROBE_RESIDUAL_HEADLINE = "probe(s) may still REST on the exchange"
+
 # The tests whose probe is a resting reduce-only trigger. Hyperliquid's
 # reduce-only semantics make a flat-account trigger a bet on venue leniency
 # (nothing to reduce), so the runner stages one small real long under the whole
@@ -1959,9 +1964,11 @@ class SmokeTestRunner:
             self.probe_residual = None
             return
         self.probe_residual = (
-            f"{len(self._resting_probes)} trigger probe(s) may still REST on the "
-            f"exchange (cloids: {', '.join(sorted(self._resting_probes))}). They carry "
-            "no local orders row, and §19.3's startup sweep validates rather than "
+            f"{len(self._resting_probes)} {_PROBE_RESIDUAL_HEADLINE} "
+            f"(cloids: {', '.join(sorted(self._resting_probes))}). They carry "
+            "no local orders row (trigger probes by design, and an UNFILLED "
+            "post-only slice probe likewise), and §19.3's startup sweep validates "
+            "rather than "
             "cancels protective roles — so the next `live` start files each as an "
             "orphan_exchange_order, which pins this run-id's `validate` at exit 5 "
             "permanently. Cancel them on the exchange before starting cycles"

@@ -114,16 +114,20 @@ python -m contrib.hyperliquid_perp live --config contrib/hyperliquid_perp/config
 1. **帳戶必須是 Standard（manual）模式，不能是 Unified Account／Portfolio Margin。**
    切成 Unified 之後「所有餘額與 hold 都只出現在 spot clearinghouse state，個別 perp
    帳戶狀態沒有意義」（HL account-abstraction-modes 文件），而本 adapter 的 startup
-   gate、kill switch、reconciliation、genesis 快照全部讀 perp `clearinghouseState`
+   gate、reconciliation、genesis 快照都讀 perp `clearinghouseState`
+   （kill switch 不讀它，但 gate 先 exit 1，根本走不到 arm）
    ——帳戶淨值會讀成 0，gate 以
    `account snapshot unusable ... account_value must be > 0` exit 1。
    到 Portfolio 頁的 **Account Type** 切回 standard，再把 USDC transfer 進 perp。
 2. **帳戶累計成交量要達 US$1,000,000，`scheduleCancel` 才會被接受。**
    API 文件沒寫這條，交易所自己擋：
    `Cannot set scheduled cancel time until enough volume traded. Required: $1000000. Traded: $X`。
-   §19.1 startup recovery 一定會 `arm()` dead man's switch（`allow_real_orders: true`
-   配 `kill_switch.enabled: false` 本來就會被 config 拒絕），所以量不夠就**連 run 都建不起來**
-   （`--create` 在 arm 失敗、exit 1）。只能先在該錢包刷到門檻；mainnet 刷到 100 萬的
+   §19.1 startup recovery 一定會 `arm()` dead man's switch，而每一個帶 `--run-id` 的
+   `live` 都會建 `KillSwitchManager`（停用就拒絕建立），沒有逃生門，所以量不夠就
+   **跑不起來**。要注意的是：`--create` 會**先把 run row 寫進 DB**（印
+   `created live run ...`），然後才在 arm 失敗、exit 1——那個 run-id 從此存在卻沒跑過任何
+   recovery，重試時**不能再帶 `--create`**（會被 `run ... already exists` 擋），要嘗去掉
+   `--create` resume，要嘗換一個新 run-id。只能先在該錢包刷到門檻；mainnet 刷到 100 萬的
    手續費以 taker 0.045% 計約 US$450（maker 0.015% 約 US$150），**這筆成本要算進上線計畫**。
 3. **建 run 前 6 小時內不要用這個錢包手動下單。**
    §11.2 的 fill backfill 視窗起點取「genesis」與「now − 6h 回看」**較早**的那個
@@ -348,7 +352,8 @@ python -m contrib.hyperliquid_perp live-smoke \
   - `a probe position may still be OPEN` — 意外成交的探針倉沒能完全平掉（test 3 的
     far IOC、測 6/7 的切片）。處置同 staging 殘倉：手動平掉、換新 run-id。
   - `probe(s) may still REST on the exchange` — 探針掛單撤不掉。**這族最重**：
-    trigger 探針刻意不寫本地 orders row，而 §19.3 掃單對 `stop_loss`／`take_profit`
+    探針刻意不寫本地 orders row（trigger 探針如此，未成交的 post-only 切片探針也如此），
+  而 §19.3 掃單對 `stop_loss`／`take_profit`
     是「驗證但不撤」，所以下一次 `live` 啟動會把它記成 `orphan_exchange_order`，依 §2
     的累積制，**該 run-id 的 `validate` 從此永遠 exit 5**。進 cycles 前務必到交易所
     確認並手動撤掉。

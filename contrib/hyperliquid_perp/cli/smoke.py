@@ -68,7 +68,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
         nargs="+",
         default=None,
         metavar="TEST_KEY",
-        help="Run only these smoke-test keys (default: all 18, in canonical order).",
+        help="Run only these smoke-test keys (default: every test, in canonical order).",
     )
     parser.add_argument(
         "--dry-run",
@@ -83,11 +83,17 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from ..live.smoke import (
+        SMOKE_TEST_KEYS,
         SmokePreflightError,
         SmokeTestRunner,
         smoke_gate_report,
         validate_only_keys,
     )
+
+    # The suite's size, for the residual warnings that quote it. Derived,
+    # not copied: these sentences said 18 through the two tests PR B2 added
+    # (the RUNBOOK's copy of the same sentence was pinned; this one was not).
+    _suite_size = len(SMOKE_TEST_KEYS)
 
     # Mutual exclusion BEFORE key validation: under --gate-status the --only
     # keys are never going to be used, so answering a typo in them names the
@@ -129,7 +135,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
             # The §20.2 gate is testnet-only state: a mainnet_tiny run's
             # live_smoke_tests is empty BY DESIGN (§21.3 — smoke is proven on
             # the separate testnet run), so reporting its raw buckets would
-            # print "not_yet_run: <all 18>" + exit 4 and read as "go smoke-test
+            # print "not_yet_run: <every test>" + exit 4 and read as "go smoke-test
             # mainnet" — the exact misreading `validate` renders as "n/a
             # (§21.3)". Refuse, mirroring the real-run testnet-only guard
             # (decision 2026-07-28).
@@ -303,7 +309,8 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                         "staging long it opened itself. Note the new run-id starts "
                         "with an EMPTY §20.2 gate: re-run the full live-smoke suite "
                         "under it (including the operator-staged preconditions for "
-                        "tests 16/17) or `live --loop` exits 4 with all 18 not_yet_run.",
+                        f"tests 16/17) or `live --loop` exits 4 with all {_suite_size} "
+                        "not_yet_run.",
                         file=sys.stderr,
                     )
                 if runner.position_residuals:
@@ -321,7 +328,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
                             "fill_unmapped and pins this run's validate at exit 5. "
                             "The new run-id starts with an EMPTY §20.2 gate — re-run "
                             "the full live-smoke suite under it, or `live --loop` "
-                            "exits 4 with all 18 tests not_yet_run.",
+                            f"exits 4 with all {_suite_size} tests not_yet_run.",
                             file=sys.stderr,
                         )
                 if runner.probe_residual is not None:

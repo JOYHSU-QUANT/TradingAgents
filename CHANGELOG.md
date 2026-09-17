@@ -106,6 +106,20 @@ Breaking changes within the 0.x line are called out explicitly.
   booked before it is flattened -- an unbooked fill would pin the run-id's
   `validate` at exit 5. A listing whose `tif` is present but empty is refused
   rather than treated as the absent-key fallback.
+  The `live-smoke` subcommand's own copies of the suite size are derived from
+  the registry rather than hand-copied: its `--only` help and the two "re-run
+  under a NEW run-id" residual warnings each said 18 while the suite grew to
+  20, under-quoting the work a fresh run-id starts out owing. The RUNBOOK's
+  copy of that same sentence was already pinned against the registry; the
+  code's copies were not, and now are.
+  Probe orders are now sized against the price they will actually carry
+  rather than against the mark. The exchange's minimum order value reads the
+  order's own price, so the probes that deliberately rest FAR from the touch
+  were sized at roughly half what they needed: testnet refused smoke 19 with
+  `Order must have minimum value of $10. asset=3`, and smoke 3 carries the
+  same half-the-mark shape and would have answered the same way. `_probe_size`
+  now takes that price as a REQUIRED argument so a probe added later cannot
+  inherit the bug by omission.
 
 - **perp: the paper mirror of the maker slice (maker path, PR C)** -
   `paper_trading.execution.fill_model.style: maker` posts each simulated

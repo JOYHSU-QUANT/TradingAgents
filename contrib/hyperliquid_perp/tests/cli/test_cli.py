@@ -7670,6 +7670,46 @@ def test_live_smoke_flat_staged_long_prints_no_residual_warning(tmp_path, capsys
     assert "staging position may still be OPEN" not in err
 
 
+def test_the_residual_warnings_quote_the_real_suite_size(tmp_path, capsys, monkeypatch):
+    """Both "re-run under a NEW run-id" warnings must name the CURRENT suite size.
+
+    The number is the cost the operator is being quoted: how many tests the
+    fresh run-id starts out owing. Both sentences carried a hand-copied 18
+    through the two tests PR B2 added, so the warning under-quoted the work by
+    two while the RUNBOOK's copy of the same sentence -- which IS pinned, in
+    test_smoke.py -- stayed right. Pin the code copies the same way: not a
+    count of how many warnings say it, but "no copy says a different number".
+    """
+    import re
+
+    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
+
+    dbp = _make_live_run(tmp_path)
+    monkeypatch.setattr(
+        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+    )
+
+    def _leaves_both_residuals(self, *, only=None):
+        # The two warnings are reached by different residuals, so one run has
+        # to strand both for this to see both sentences.
+        self.staged_long_residual = "cleanup: reduce-only close of 0.001 refused"
+        self.position_residuals = ["0.0005 left after cleanup"]
+        return []
+
+    monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", _leaves_both_residuals)
+    rc = cli_main(
+        ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
+    )
+    err = capsys.readouterr().err
+    assert rc == 4
+    quoted = re.findall(r"all (\d+) (?:tests )?not_yet_run", err)
+    # Both sentences fired, and neither of them is stale.
+    assert len(quoted) == 2, err
+    assert set(quoted) == {str(len(SMOKE_TEST_KEYS))}, quoted
+
+
 def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     """The version stamp and the text it versions must move together.
 

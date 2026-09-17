@@ -90,7 +90,14 @@ def is_duplicate_cloid_error(message: str | None) -> bool:
 
 # The venue's documented refusal of a post-only order that would take
 # liquidity (API error responses: "Post only order would have immediately
-# matched, bbo was {bbo}."). Same posture as the duplicate markers: a
+# matched, bbo was {bbo}."). Measured against testnet 2026-09-17 (smoke 20,
+# run live-BTC-maker-smoke-0917), which answered "Post only order would have
+# immediately matched, bbo was 76830@76831. asset=3" -- so {bbo} renders as
+# bid@ask and the venue appends an asset= suffix the docs do not show. That is
+# why the match stays a SUBSTRING of the leading sentence: an equality check
+# against the documented form would have missed the real text, and the marker
+# has to survive the venue decorating either end of it. Same posture as the
+# duplicate markers: a
 # fast-path hint on ack text, not a versioned contract. A false negative
 # costs the slice its maker attempt (the engine advances as on any other
 # rejection); a false positive costs one extra requote round. Neither can

@@ -2086,15 +2086,21 @@ def test_backstop_close_clears_the_staged_long_residual(live_db):
 
 
 def test_probe_size_reaches_the_wire(live_db):
-    """_probe_size()'s ceil-to-step notional must be the SIZE the wire call carries.
+    """_probe_size()'s ceil-to-step size must be the SIZE the wire call carries.
 
-    Hand-computed independently of calling _probe_size() itself — ceil(11 USDC
-    / 60000 mark / 0.00001 step) is 19 steps, i.e. 0.00019 (the same value the
-    "old re-derived size" control in test_trigger_probes_are_sized_to_the_staged_position
-    already pins for this exact mark/step pair) — so a regression in the
-    rounding mode or a dropped max(step, ...) floor would under-size the wire
-    call and this test would catch it even though the same bug would also
-    corrupt a `_probe_size()`-derived expectation.
+    Hand-computed independently of calling _probe_size() itself: test 3 rests at
+    half the 60000 mark, so the order carries 30000, and ceil(11 USDC / 30000 /
+    0.00001 step) is 37 steps, i.e. 0.00037 — so a regression in the rounding
+    mode or a dropped max(step, ...) floor would under-size the wire call and
+    this test would catch it even though the same bug would also corrupt a
+    `_probe_size()`-derived expectation.
+
+    This pinned 0.00019 — 11 USDC at the MARK — until testnet answered smoke 19
+    with "Order must have minimum value of $10. asset=3" (2026-09-17). The floor
+    the venue enforces reads the order's OWN price, so a probe resting at half
+    the mark carried half the value its size implied, and test 3 had the same
+    shape. The value assertion below is the property; the size is only the
+    arithmetic that has to produce it.
     """
     signed = _FakeSigned()
     with live_db:
@@ -2103,7 +2109,11 @@ def test_probe_size_reaches_the_wire(live_db):
         )
     entries = [c for c in signed.place_calls if not c.get("reduce_only")]
     assert len(entries) == 1
-    assert entries[0]["size"] == _D("0.00019")
+    assert entries[0]["size"] == _D("0.00037")
+    # The property that size exists to satisfy. What the exchange checks is the
+    # order's own value, so it is the price on the CALL that has to be multiplied
+    # in — multiplying by the mark is exactly the reading that under-sized it.
+    assert entries[0]["size"] * entries[0]["limit_price"] >= _D("10")
 
 
 def test_staged_long_that_floors_to_zero_aborts_the_trigger_probe(live_db):

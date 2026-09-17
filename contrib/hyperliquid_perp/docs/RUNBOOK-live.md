@@ -173,8 +173,10 @@ safe mode，見 §6）；exit 1＝硬失敗（config／arming／建立）。
 ## 3. Smoke tests（§20.2）——進 cycles 的硬 gate
 
 testnet_live **必須先全過 20 項 smoke test 才允許 `--loop` 進 cycles**（同一個
-run-id）。smoke 對 testnet 真連線、真下小單（每筆約 11 USDC 名目、far-from-market、
-reduce-only 或小額真倉，跑完自清）。
+run-id）。smoke 對 testnet 真連線、真下小單（每筆**以自己的下單價**計約 11 USDC、
+far-from-market、reduce-only 或小額真倉，跑完自清）。交易所的最小單額看的是下單價
+而不是 mark，所以掛得離盤口越遠、同樣的 size 價值越低——2026-09-17 實測 smoke 19
+就是這樣被退的（`Order must have minimum value of $10.`），修法是按實際下單價定量。
 
 ### 3.1 先離線驗一次 wiring（不下單）
 

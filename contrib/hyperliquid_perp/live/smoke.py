@@ -1243,13 +1243,40 @@ class SmokeTestRunner:
         """
         return round_to_tick(raw, self.ctx.tick_size, up=up)
 
-    def _probe_size(self) -> Decimal:
-        """The smallest qty whose notional clears the exchange minimum."""
+    def _require_positive_mark(self) -> Decimal:
+        """The mark, refused as a controlled verdict when the seam misbehaves.
+
+        Every probe price is derived from the mark, so a stale seam returning
+        zero or negative has to be stopped BEFORE it reaches tick rounding or a
+        size division -- otherwise the suite reports a crash where it owes the
+        operator a failed test with a reason.
+        """
         mark = self.ctx.mark_price()
         if mark <= 0:
             raise _SmokeAbort(f"mark price is non-positive ({mark}); cannot size a probe order")
+        return mark
+
+    def _probe_size(self, price: Decimal) -> Decimal:
+        """The smallest qty whose ORDER VALUE at ``price`` clears the venue minimum.
+
+        The exchange's floor is on the order's own value -- size x the price the
+        order carries -- not on notional at the mark, and the two diverge by
+        exactly as far as the probe rests from the touch. Sizing at the mark
+        therefore under-sized every far-from-mark probe: the buy at half the
+        mark asked for ~$5.50 against a $10 floor and came back ``Order must
+        have minimum value of $10. asset=3`` (measured on testnet 2026-09-17,
+        smoke 19; smoke 3 carries the same half-the-mark shape and would have
+        answered the same way).
+
+        ``price`` is REQUIRED rather than defaulted to the mark so a probe added
+        later cannot inherit that bug by omission: the caller has already
+        rounded the price it is about to send, and that rounded number is the
+        only one the exchange's check reads.
+        """
+        if price <= 0:
+            raise _SmokeAbort(f"probe price is non-positive ({price}); cannot size a probe order")
         step = self.ctx.qty_step
-        raw = _PROBE_NOTIONAL_USDC / mark
+        raw = _PROBE_NOTIONAL_USDC / price
         steps = (raw / step).to_integral_value(rounding=ROUND_CEILING)
         return max(step, steps * step)
 
@@ -1338,9 +1365,9 @@ class SmokeTestRunner:
     def _test_slice_order_submit(self) -> SmokeStepResult:
         # A far-below-mark IOC buy: the wire action round-trips but never fills
         # (so nothing is left to clean up) — a pure "can we submit a slice" test.
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         price = self._round_price(mark * Decimal("0.5"), up=False)
+        size = self._probe_size(price)
         _logical, cloid, ack = self._place_and_record_ioc(
             role="entry", tag=f"submit-{self._tag()}", is_buy=True, qty=size, price=price
         )
@@ -1444,9 +1471,9 @@ class SmokeTestRunner:
         # the fill path. Best-effort close afterwards keeps the account flat (the
         # reduce-only close is itself test 7, but 6 must not strand a position if
         # 7 is deselected).
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         marketable = self._round_price(mark * Decimal("1.01"), up=True)
+        size = self._probe_size(marketable)
         filled = Decimal(0)
         try:
             for i in range(2):
@@ -1513,9 +1540,9 @@ class SmokeTestRunner:
         apart. Returns the filled size (> 0), or raises.
         """
         self._require_not_net_short(what)
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         price = self._round_price(mark * Decimal("1.01"), up=True)
+        size = self._probe_size(price)
         _logical, _cloid, ack = self._place_and_record_ioc(
             role="entry", tag=tag, is_buy=True, qty=size, price=price
         )
@@ -2123,11 +2150,11 @@ class SmokeTestRunner:
         :data:`ORDER_TYPE_FOR_TIF`, and this is the one place that assumption
         meets the venue instead of the API docs.
         """
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         # The same far-from-mark rule test 3 uses: a buy at half the mark is not
         # marketable, so the post-only condition is never even exercised here.
         price = self._round_price(mark * Decimal("0.5"), up=False)
-        size = self._probe_size()
+        size = self._probe_size(price)
         logical, cloid = self._register_cloid(role="entry", tag=f"alo-{self._tag()}")
         self._track_probe(cloid)
         ack = self._wire.place_limit(
@@ -2187,14 +2214,17 @@ class SmokeTestRunner:
         §9.2.1 reads this refusal as "the quote is stale, re-post", not §9.2
         rule 2's "refused, move on" — and tells them apart by the venue's
         message (:func:`is_post_only_cross_error`, pinned from the API docs in
-        PR B). If the venue ever rewords it, every stale quote silently becomes
+        PR B and measured against testnet on 2026-09-17 — the venue's real text
+        wraps that sentence in a bid@ask and an ``asset=`` suffix, so only a
+        substring match survives it; the marker's own note carries the verbatim
+        answer). If the venue ever rewords it, every stale quote silently becomes
         a dropped slice, so the string is checked here against the exchange.
         """
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         # Marketable by construction: a buy 50% above the mark crosses any book
         # the venue could show, so post-only has to refuse it.
         price = self._round_price(mark * Decimal("1.5"), up=True)
-        size = self._probe_size()
+        size = self._probe_size(price)
         logical, cloid = self._register_cloid(role="entry", tag=f"alox-{self._tag()}")
         self._track_probe(cloid)
         try:

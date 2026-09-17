@@ -106,6 +106,38 @@ python -m contrib.hyperliquid_perp live --config contrib/hyperliquid_perp/config
 
 ---
 
+### 1.4 錢包本身的三個前提（2026-09-17 testnet 實測）
+
+這三項都不是設定，是**錢包／帳戶的狀態**；任一項沒備妥，`live` 會在啟動就具名擋下來。
+三者 mainnet 同樣成立。
+
+1. **帳戶必須是 Standard（manual）模式，不能是 Unified Account／Portfolio Margin。**
+   切成 Unified 之後「所有餘額與 hold 都只出現在 spot clearinghouse state，個別 perp
+   帳戶狀態沒有意義」（HL account-abstraction-modes 文件），而本 adapter 的 startup
+   gate、reconciliation、genesis 快照都讀 perp `clearinghouseState`
+   （kill switch 不讀它，但 gate 先 exit 1，根本走不到 arm）
+   ——帳戶淨值會讀成 0，gate 以
+   `account snapshot unusable ... account_value must be > 0` exit 1。
+   到 Portfolio 頁的 **Account Type** 切回 standard，再把 USDC transfer 進 perp。
+2. **帳戶累計成交量要達 US$1,000,000，`scheduleCancel` 才會被接受。**
+   API 文件沒寫這條，交易所自己擋：
+   `Cannot set scheduled cancel time until enough volume traded. Required: $1000000. Traded: $X`。
+   §19.1 startup recovery 一定會 `arm()` dead man's switch，而每一個帶 `--run-id` 的
+   `live` 都會建 `KillSwitchManager`（停用就拒絕建立），沒有逃生門，所以量不夠就
+   **跑不起來**。要注意的是：`--create` 會**先把 run row 寫進 DB**（印
+   `created live run ...`），然後才在 arm 失敗、exit 1——那個 run-id 從此存在卻沒跑過任何
+   recovery，重試時**不能再帶 `--create`**（會被 `run ... already exists` 擋），要嘗去掉
+   `--create` resume，要嘗換一個新 run-id。只能先在該錢包刷到門檻；mainnet 刷到 100 萬的
+   手續費以 taker 0.045% 計約 US$450（maker 0.015% 約 US$150），**這筆成本要算進上線計畫**。
+3. **建 run 前 6 小時內不要用這個錢包手動下單。**
+   §11.2 的 fill backfill 視窗起點取「genesis」與「now − 6h 回看」**較早**的那個
+   （`DEFAULT_LOOKBACK_SECONDS`；回看是 floor 不是上限），所以即使 genesis 是剛剛，
+   它仍會讀進最近 6 小時的交易所成交。那些手動成交本地沒有對應 order row，會變成
+   `fill_unmapped` sighting → recovery 判 unclean → run 進 safe mode、exit 4。
+   為了門檻刷量、或用 UI 試過單之後，**等 6 小時**再以新 run-id `--create`。
+
+---
+
 ## 2. 建 live run 並跑 §19.1 startup recovery
 
 > **建 run 前先想好 test 16 的前置**：若要做 smoke test 16（startup with existing
@@ -134,15 +166,17 @@ safe mode，見 §6）；exit 1＝硬失敗（config／arming／建立）。
 > `fill_unmapped`／`exchange_position_mismatch` case——`fill_unmapped` 無法用
 > `--stamp-case` 了結（只能靠補記 fill，而手動單永遠沒有本地 order row），且驗收的
 > integrity 計數是**累積制**：case 一旦記錄，該 run 的 `validate` 從此永遠 exit 5，
-> 只能換新 run-id 重跑驗收（**換 run-id 一併把 §20.2 smoke gate 歸零**：18 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。要動錢包，先把 run 收掉。
+> 只能換新 run-id 重跑驗收（**換 run-id 一併把 §20.2 smoke gate 歸零**：20 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。要動錢包，先把 run 收掉。
 
 ---
 
 ## 3. Smoke tests（§20.2）——進 cycles 的硬 gate
 
-testnet_live **必須先全過 18 項 smoke test 才允許 `--loop` 進 cycles**（同一個
-run-id）。smoke 對 testnet 真連線、真下小單（每筆約 11 USDC 名目、far-from-market、
-reduce-only 或小額真倉，跑完自清）。
+testnet_live **必須先全過 20 項 smoke test 才允許 `--loop` 進 cycles**（同一個
+run-id）。smoke 對 testnet 真連線、真下小單（每筆**以自己的下單價**計約 11 USDC、
+far-from-market、reduce-only 或小額真倉，跑完自清）。交易所的最小單額看的是下單價
+而不是 mark，所以掛得離盤口越遠、同樣的 size 價值越低——2026-09-17 實測 smoke 19
+就是這樣被退的（`Order must have minimum value of $10.`），修法是按實際下單價定量。
 
 ### 3.1 先離線驗一次 wiring（不下單）
 
@@ -199,9 +233,9 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 不方便一次備齊時，用 `--only` 分項跑（見下）。
 
 > **pre-flight recovery（先讀這段再排順序）**：真跑且選到會下 probe 單的測試
-> （3、5–13、18）時，suite 會在第一項測試前**先跑一次** §19.1 recovery——signed
+> （3、5–13、18–20）時，suite 會在第一項測試前**先跑一次** §19.1 recovery——signed
 > client 自己的 order gate 要求 recovery 通過＋kill switch armed 才放行任何單。
-> 副作用：全套 18 項一次跑時，這個 pre-flight 會先把你為 test 17 備好的 stale 單
+> 副作用：全套 20 項一次跑時，這個 pre-flight 會先把你為 test 17 備好的 stale 單
 > 掃掉（test 17 之後照樣記 passed，但證明的只是「乾淨狀態下 recovery 乾淨」）。
 > **要讓 test 16/17 真的驗到前置**，用 `--only` 單獨跑 restart 系列（不含下單測試
 > 的選擇不觸發 pre-flight）：
@@ -228,7 +262,7 @@ switch ＋ reconcile ＋ 掃 stale bot-owned 單）：
 ### 3.3 跑 smoke（真連線）
 
 ```bash
-# 全部 18 項：
+# 全部 20 項：
 python -m contrib.hyperliquid_perp live-smoke \
   --config contrib/hyperliquid_perp/configs/hyperliquid.local.yaml \
   --run-id live-BTC --db live_trading.db
@@ -309,7 +343,7 @@ python -m contrib.hyperliquid_perp live-smoke \
   然後換一個新的 run-id 重跑驗收**——依 §2 的累積制，手動成交會記
   `fill_unmapped`，該 run 的 `validate` 從此永遠 exit 5。
   **換 run-id 也會把 §20.2 的 smoke gate 一併歸零**：`live_smoke_tests` 是 per-run-id 的，
-  新 run-id 底下 18 項全是 `not_yet_run`，`live --loop` 會直接 exit 4。所以換完 run-id
+  新 run-id 底下 20 項全是 `not_yet_run`，`live --loop` 會直接 exit 4。所以換完 run-id
   要**整套 live-smoke 重跑一次**（含 test 16／17 需要操作者事先備妥的前置狀態），
   不是只把殘倉平掉就好。
   （**唯一例外**：若殘倉的成因是 lease 被接管，收尾**刻意不平**，因為那口倉已經
@@ -319,8 +353,9 @@ python -m contrib.hyperliquid_perp live-smoke \
   訊號）：
   - `a probe position may still be OPEN` — 意外成交的探針倉沒能完全平掉（test 3 的
     far IOC、測 6/7 的切片）。處置同 staging 殘倉：手動平掉、換新 run-id。
-  - `trigger probe(s) may still REST on the exchange` — 探針掛單撤不掉。**這族最重**：
-    trigger 探針刻意不寫本地 orders row，而 §19.3 掃單對 `stop_loss`／`take_profit`
+  - `probe(s) may still REST on the exchange` — 探針掛單撤不掉。**這族最重**：
+    探針刻意不寫本地 orders row（trigger 探針如此，未成交的 post-only 切片探針也如此），
+  而 §19.3 掃單對 `stop_loss`／`take_profit`
     是「驗證但不撤」，所以下一次 `live` 啟動會把它記成 `orphan_exchange_order`，依 §2
     的累積制，**該 run-id 的 `validate` 從此永遠 exit 5**。進 cycles 前務必到交易所
     確認並手動撤掉。
@@ -343,7 +378,7 @@ python -m contrib.hyperliquid_perp live-smoke \
 
 | `live-smoke` exit | 意義 | 下一步 |
 |---|---|---|
-| `0` | **全 18 項** gate 開（每項最新真跑結果都 passed） | 可進 testnet_live cycles |
+| `0` | **全 20 項** gate 開（每項最新真跑結果都 passed） | 可進 testnet_live cycles |
 | `4` | 跑了（或讀了）但 gate 未滿足；含 pre-flight recovery 沒過、或跑到一半出 `error` 判定，suite 提前中止 | 看 not_yet_run／failed／errored（或 pre-flight 錯誤訊息），補跑或修 |
 | `1` | config／env／網路／run-lock 具名錯誤 | 依訊息修 |
 
@@ -530,7 +565,7 @@ repository 在寫入時保證（終態寫入一律落成 NULL；回覆只能經 
 > **`kill_switch_fired_count` > 0 則是真的不可補救**：deadline 過期代表交易所已把
 > 整個錢包的單（含 SL/TP）撤光，那段時間的倉位確實裸奔過，沒有任何後續狀態能讓它
 > 變成沒發生。查清原因（跨過 deadline 的 API 中斷，或主機時鐘往前跳），然後**換新
-> run-id** 重新累積驗收 cycles（**換 run-id 一併把 §20.2 smoke gate 歸零**：18 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。
+> run-id** 重新累積驗收 cycles（**換 run-id 一併把 §20.2 smoke gate 歸零**：20 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。
 
 §20.3 驗收門檻（testnet_live）：`cycle_count ≥ 30`、`live_order_count ≥ 30`、
 `exchange_fill_dedupe_error_count / orphan_exchange_order_count /
@@ -569,11 +604,11 @@ refresh），**也包含 suite 為 pre-flight recovery 與 test 15-17 建的那�
 但**不計入 §20.3 的 100 筆樣本下限**（排除只作用在**樣本下限**與 `clean_shutdown` 的
 daemon 判準這兩處；`kill_switch_fired_count`／`disarm_failed_count` **不分寫入者**，
 所以 smoke 階段真的燒掉一次 dead man's switch 一樣會讓這個 run-id 報廢——見 §5 該列）——樣本下限問的是「這個 run 有沒有把 switch 操練到
-足以判定可用率」，而連跑六輪 smoke 就能湊到 114 筆、100%、daemon 卻一秒都沒跑過
-（每輪至少 19 筆＝18 個 test 各一次 pre-test refresh ＋ test 14 自己那次；pre-flight
+足以判定可用率」，而連跑六輪 smoke 就能湊到 126 筆、100%、daemon 卻一秒都沒跑過
+（每輪至少 21 筆＝20 個 test 各一次 pre-test refresh ＋ test 14 自己那次；pre-flight
 recovery 寫的是 `kill_switch_armed`，本來就不計入樣本下限。說「至少」是因為真 testnet
 上 pre-flight 與 test 15-17 建的那個真 `KillSwitchManager` 還會隨時間再寫幾筆——見下
-一段——所以 114 是下限，這只讓「daemon 沒跑過也早就湊滿 100 筆」的論證更保守）。
+一段——所以 126 是下限，這只讓「daemon 沒跑過也早就湊滿 100 筆」的論證更保守）。
 （suite 自己打的那幾筆走的是 signed client 而不是 `KillSwitchManager`，所以沒有別人會
 補那些列。）沒有這些列的話，整個 smoke 期間、以及跑完 smoke
 到啟動 `live --loop` 之間那段由操作者決定長度的空窗，都會被算成 outage——一個完全乾淨的
@@ -661,7 +696,7 @@ close 落在同一個時鐘刻度）照樣 exit 5，不會讀成「從來沒有�
 > 計數算的是「這個 run 歷史上記錄過的 case 數」，`--stamp-case` 只了結 §21.4 的
 > unresolved gate，**不會**把計數歸零——一旦記錄過，該 run 的 `validate` 永遠
 > exit 5。這是刻意的政策（帳本潔癖：驗收 run 必須全程乾淨）；中途出過 case 就換
-> 新 run-id 重新累積 30 cycles（**換 run-id 一併把 §20.2 smoke gate 歸零**：18 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。
+> 新 run-id 重新累積 30 cycles（**換 run-id 一併把 §20.2 smoke gate 歸零**：20 項全回 `not_yet_run`，要整套 live-smoke 重跑，含 test 16／17 的操作者前置）。
 
 ---
 

@@ -131,6 +131,8 @@ def smoke_seams(monkeypatch):
         # disarm (the second call in a full run) fails.
         clear_fail_after=None,
         oids=itertools.count(1),
+        # cloid -> oid for the post-only slices left on the fake book (19.2.1).
+        resting={},
     )
 
     class _FakeClient:
@@ -207,6 +209,41 @@ def smoke_seams(monkeypatch):
                 average_price=limit_price,
             )
 
+        def place_limit(
+            self,
+            *,
+            coin,
+            is_buy,
+            size,
+            limit_price,
+            cloid_hex,
+            tif,
+            reduce_only=False,
+            protective=False,
+        ):
+            # The venue's post-only rule, modelled: a marketable Alo is refused
+            # per order (smoke 20), anything else rests and shows up in the
+            # listing until it is cancelled (smoke 19).
+            if tif == "Alo" and limit_price > state.mark:
+                return OrderAck(
+                    status="error",
+                    exchange_order_id=None,
+                    filled_size=None,
+                    average_price=None,
+                    error=(
+                        "Post only order would have immediately matched, "
+                        "bbo was [49999.0, 50001.0]."
+                    ),
+                )
+            oid = str(next(state.oids))
+            state.resting[cloid_hex] = oid
+            return OrderAck(
+                status="resting",
+                exchange_order_id=oid,
+                filled_size=None,
+                average_price=None,
+            )
+
         def place_trigger_order(
             self,
             *,
@@ -237,6 +274,7 @@ def smoke_seams(monkeypatch):
             return OrderAck(status="resting", exchange_order_id=str(next(state.oids)))
 
         def cancel_by_cloid(self, *, coin, cloid_hex):
+            state.resting.pop(cloid_hex, None)
             return CancelAck(success=True)
 
         def cancel_by_oid(self, *, coin, exchange_order_id):
@@ -254,7 +292,7 @@ def smoke_seams(monkeypatch):
             return []
 
         def open_orders(self):
-            return []
+            return [{"cloid": c, "oid": o, "tif": "Alo"} for c, o in state.resting.items()]
 
         def exchange_time(self):
             return None  # the kill switch skips the skew check with a warning
@@ -512,7 +550,9 @@ def test_a_full_suite_writes_the_refresh_count_the_runbook_reasons_from(tmp_path
     KillSwitchManager those recoveries build emits nothing of its own; on real
     testnet it does, which is why the constant is documented as a floor.
     """
-    from contrib.hyperliquid_perp.live.smoke import REFRESHES_PER_FULL_SUITE
+    from contrib.hyperliquid_perp.live.smoke import (
+        REFRESHES_PER_FULL_SUITE,
+    )
 
     dbp = _drive_a_full_smoke_suite(tmp_path)
     with Database(dbp) as db:
@@ -525,7 +565,10 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     # log by hand. Nothing tied the doc to the constant, so renaming the constant
     # left the suite green and the runbook quietly wrong (round-16 probe).
     from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
-    from contrib.hyperliquid_perp.live.smoke import REFRESHES_PER_FULL_SUITE
+    from contrib.hyperliquid_perp.live.smoke import (
+        _PROBE_RESIDUAL_HEADLINE,
+        REFRESHES_PER_FULL_SUITE,
+    )
     from contrib.hyperliquid_perp.live.validation import (
         _NO_DAEMON_ROWS_RENDER,
         _REFRESH_BAR,
@@ -540,6 +583,9 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     # value for a run with no daemon rows. It could drift in either place with
     # the suite green (2026-08-01 round-18 mutation probe).
     assert _NO_DAEMON_ROWS_RENDER in runbook
+    # Same tie for the probe-residual headline: the doc tells operators to grep
+    # for it, and it drifted from the code once already (PR B2 review round 2).
+    assert _PROBE_RESIDUAL_HEADLINE in runbook
     # And every figure in the six-suite sentence §20.3 uses to explain WHY suite
     # rows are barred from the sample floor. Nothing produced that number: it sat
     # hand-counted in four places, so growing SMOKE_TESTS left all four wrong at
@@ -621,7 +667,7 @@ def test_live_smoke_full_real_suite_passes_gate_and_releases_lock(tmp_path, caps
     assert "smoke_gate_passed: yes" in out
     with Database(dbp) as db:
         latest = repo.latest_smoke_test_results(db.conn, "r1")
-        assert set(latest) == set(SMOKE_TEST_KEYS)  # all 18 ran for real
+        assert set(latest) == set(SMOKE_TEST_KEYS)  # every registered test ran for real
         assert all(row["status"] == "passed" for row in latest.values())
         assert all(row["dry_run"] == 0 for row in latest.values())
     # The pre-flight + tests 15-17 each armed the switch; test 14 cleared once

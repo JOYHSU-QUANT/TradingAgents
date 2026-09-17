@@ -84,6 +84,43 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **perp: live smoke tests 19 / 20 for the post-only slice (maker path, PR B2)** -
+  test 19 places an Alo buy far below the touch, requires the venue to REST it,
+  reads `frontendOpenOrders` and refuses any `tif` that would make reconcile's
+  orphan backfill type the slice as anything but `alo_limit` (a listing with no
+  `tif` at all is the documented `orderStatus` fallback and passes), then
+  cancels it by cloid; test 20 places an Alo buy 50% above the mark and requires
+  the venue to REFUSE it with a message `is_post_only_cross_error` recognizes --
+  the string PR B pinned from the API docs, now checked against the real
+  exchange, because the engine reads that refusal as "re-post" rather than
+  rule 2's "move on". Both are order-placing tests, so the pre-flight recovery
+  applies. RUNBOOK-live gains the three wallet-level prerequisites measured on
+  testnet: the account must be in Standard mode (the adapter reads the perp
+  clearinghouse, which reports zero under a Unified Account), `scheduleCancel`
+  is refused until the account has traded US$1M cumulatively (so a run cannot
+  even be created), and a run must not be created within 6h of manual trading on
+  the wallet (the fill backfill's trailing floor books those fills as unmapped
+  and leaves startup recovery unclean). Both probes carry the marketable-order
+  lanes the rest of the suite has: a lost ack asks `orderStatus` once and books
+  what it says (typed `alo_limit`), and a post-only order the venue FILLS is
+  booked before it is flattened -- an unbooked fill would pin the run-id's
+  `validate` at exit 5. A listing whose `tif` is present but empty is refused
+  rather than treated as the absent-key fallback.
+  The `live-smoke` subcommand's own copies of the suite size are derived from
+  the registry rather than hand-copied: its `--only` help and the two "re-run
+  under a NEW run-id" residual warnings each said 18 while the suite grew to
+  20, under-quoting the work a fresh run-id starts out owing. The RUNBOOK's
+  copy of that same sentence was already pinned against the registry; the
+  code's copies were not, and now are.
+  Probe orders are now sized against the price they will actually carry
+  rather than against the mark. The exchange's minimum order value reads the
+  order's own price, so the probes that deliberately rest FAR from the touch
+  were sized at roughly half what they needed: testnet refused smoke 19 with
+  `Order must have minimum value of $10. asset=3`, and smoke 3 carries the
+  same half-the-mark shape and would have answered the same way. `_probe_size`
+  now takes that price as a REQUIRED argument so a probe added later cannot
+  inherit the bug by omission.
+
 - **perp: the paper mirror of the maker slice (maker path, PR C)** -
   `paper_trading.execution.fill_model.style: maker` posts each simulated
   slice at a modelled touch (mid -/+ `assumed_half_spread_bps`, rounded

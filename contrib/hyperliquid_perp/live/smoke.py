@@ -56,7 +56,7 @@ from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
 from .config import AGGRESSIVE_FILL_BAND_PCT
 from .kill_switch import deadline_detail, record_kill_switch_event
-from .orders import local_status_for_exchange_status, parse_order_status
+from .orders import ORDER_TYPE_FOR_TIF, local_status_for_exchange_status, parse_order_status
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
@@ -127,6 +127,12 @@ SMOKE_TESTS: tuple[SmokeTest, ...] = (
     SmokeTest(16, "startup_with_existing_position", "startup with existing position"),
     SmokeTest(17, "startup_with_stale_open_order", "startup with stale bot-owned order"),
     SmokeTest(18, "emergency_close", "emergency close (aggressive reduce-only IOC, §17.2)"),
+    SmokeTest(19, "maker_slice_post_cancel", "post-only (Alo) slice rests, is listed, cancels"),
+    SmokeTest(
+        20,
+        "maker_slice_post_only_refusal",
+        "post-only (Alo) slice that would cross is refused by name",
+    ),
 )
 
 # The stable identities, in one place: the gate iterates them, the validator
@@ -216,8 +222,21 @@ _ORDER_PLACING_TESTS: frozenset[str] = frozenset(
         "take_profit_modify",
         "take_profit_cancel",
         "emergency_close",
+        "maker_slice_post_cancel",
+        "maker_slice_post_only_refusal",
     }
 )
+
+# §9.2.1's post-only wire vocabulary, bound to the mapping the engine and
+# reconcile already read so tests 19/20 cannot drift from it: losing `Alo`
+# from ORDER_TYPE_FOR_TIF breaks this import, not a mid-suite assertion.
+_ALO_TIF = "Alo"
+_ALO_ORDER_TYPE = ORDER_TYPE_FOR_TIF[_ALO_TIF]
+
+# The headline of the probe-residual report. RUNBOOK 20.3 quotes it so an
+# operator can grep for it, and tests/cli pins the two together -- the same
+# tie _SUITE_AUTHORED_TOKEN has, for the same reason.
+_PROBE_RESIDUAL_HEADLINE = "probe(s) may still REST on the exchange"
 
 # The tests whose probe is a resting reduce-only trigger. Hyperliquid's
 # reduce-only semantics make a flat-account trigger a bet on venue leniency
@@ -568,7 +587,7 @@ class SmokeTestRunner:
                 # Not ours to cancel — the successor owns this wallet — but the
                 # probes are still on its book, so name them.
                 self.probe_residual = (
-                    f"{len(self._resting_probes)} trigger probe(s) were left resting "
+                    f"{len(self._resting_probes)} probe(s) were left resting "
                     f"(cloids: {', '.join(sorted(self._resting_probes))}): this run's "
                     "lease was taken over mid-suite, so cancelling them now would act "
                     "on a wallet this process no longer owns. Cancel them manually"
@@ -1079,6 +1098,7 @@ class SmokeTestRunner:
         qty: Decimal,
         price: Decimal,
         reduce_only: bool,
+        order_type: str = "ioc_limit",
     ) -> Exception:
         """Ask orderStatus what became of an IOC whose ack was lost.
 
@@ -1116,6 +1136,7 @@ class SmokeTestRunner:
         local_status = local_status_for_exchange_status(status_word)
         try:
             self._insert_probe_row(
+                order_type=order_type,
                 status=local_status,
                 # The venue says filled/canceled/etc, not HOW MUCH: orderStatus
                 # carries no size here. Booking 0 keeps the row honest about what
@@ -1173,6 +1194,7 @@ class SmokeTestRunner:
         qty: Decimal,
         price: Decimal,
         reduce_only: bool,
+        order_type: str = "ioc_limit",
     ) -> None:
         with self.ctx.db.transaction() as conn:
             repo.insert_order(
@@ -1185,7 +1207,7 @@ class SmokeTestRunner:
                 symbol=self.ctx.coin,
                 order_role=role,
                 side=side,
-                order_type="ioc_limit",
+                order_type=order_type,
                 qty=qty,
                 filled_qty=filled,
                 remaining_qty=qty - filled,
@@ -1221,13 +1243,40 @@ class SmokeTestRunner:
         """
         return round_to_tick(raw, self.ctx.tick_size, up=up)
 
-    def _probe_size(self) -> Decimal:
-        """The smallest qty whose notional clears the exchange minimum."""
+    def _require_positive_mark(self) -> Decimal:
+        """The mark, refused as a controlled verdict when the seam misbehaves.
+
+        Every probe price is derived from the mark, so a stale seam returning
+        zero or negative has to be stopped BEFORE it reaches tick rounding or a
+        size division -- otherwise the suite reports a crash where it owes the
+        operator a failed test with a reason.
+        """
         mark = self.ctx.mark_price()
         if mark <= 0:
             raise _SmokeAbort(f"mark price is non-positive ({mark}); cannot size a probe order")
+        return mark
+
+    def _probe_size(self, price: Decimal) -> Decimal:
+        """The smallest qty whose ORDER VALUE at ``price`` clears the venue minimum.
+
+        The exchange's floor is on the order's own value -- size x the price the
+        order carries -- not on notional at the mark, and the two diverge by
+        exactly as far as the probe rests from the touch. Sizing at the mark
+        therefore under-sized every far-from-mark probe: the buy at half the
+        mark asked for ~$5.50 against a $10 floor and came back ``Order must
+        have minimum value of $10. asset=3`` (measured on testnet 2026-09-17,
+        smoke 19; smoke 3 carries the same half-the-mark shape and would have
+        answered the same way).
+
+        ``price`` is REQUIRED rather than defaulted to the mark so a probe added
+        later cannot inherit that bug by omission: the caller has already
+        rounded the price it is about to send, and that rounded number is the
+        only one the exchange's check reads.
+        """
+        if price <= 0:
+            raise _SmokeAbort(f"probe price is non-positive ({price}); cannot size a probe order")
         step = self.ctx.qty_step
-        raw = _PROBE_NOTIONAL_USDC / mark
+        raw = _PROBE_NOTIONAL_USDC / price
         steps = (raw / step).to_integral_value(rounding=ROUND_CEILING)
         return max(step, steps * step)
 
@@ -1316,9 +1365,9 @@ class SmokeTestRunner:
     def _test_slice_order_submit(self) -> SmokeStepResult:
         # A far-below-mark IOC buy: the wire action round-trips but never fills
         # (so nothing is left to clean up) — a pure "can we submit a slice" test.
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         price = self._round_price(mark * Decimal("0.5"), up=False)
+        size = self._probe_size(price)
         _logical, cloid, ack = self._place_and_record_ioc(
             role="entry", tag=f"submit-{self._tag()}", is_buy=True, qty=size, price=price
         )
@@ -1422,9 +1471,9 @@ class SmokeTestRunner:
         # the fill path. Best-effort close afterwards keeps the account flat (the
         # reduce-only close is itself test 7, but 6 must not strand a position if
         # 7 is deselected).
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         marketable = self._round_price(mark * Decimal("1.01"), up=True)
+        size = self._probe_size(marketable)
         filled = Decimal(0)
         try:
             for i in range(2):
@@ -1491,9 +1540,9 @@ class SmokeTestRunner:
         apart. Returns the filled size (> 0), or raises.
         """
         self._require_not_net_short(what)
-        size = self._probe_size()
-        mark = self.ctx.mark_price()
+        mark = self._require_positive_mark()
         price = self._round_price(mark * Decimal("1.01"), up=True)
+        size = self._probe_size(price)
         _logical, _cloid, ack = self._place_and_record_ioc(
             role="entry", tag=tag, is_buy=True, qty=size, price=price
         )
@@ -1942,9 +1991,11 @@ class SmokeTestRunner:
             self.probe_residual = None
             return
         self.probe_residual = (
-            f"{len(self._resting_probes)} trigger probe(s) may still REST on the "
-            f"exchange (cloids: {', '.join(sorted(self._resting_probes))}). They carry "
-            "no local orders row, and §19.3's startup sweep validates rather than "
+            f"{len(self._resting_probes)} {_PROBE_RESIDUAL_HEADLINE} "
+            f"(cloids: {', '.join(sorted(self._resting_probes))}). They carry "
+            "no local orders row (trigger probes by design, and an UNFILLED "
+            "post-only slice probe likewise), and §19.3's startup sweep validates "
+            "rather than "
             "cancels protective roles — so the next `live` start files each as an "
             "orphan_exchange_order, which pins this run-id's `validate` at exit 5 "
             "permanently. Cancel them on the exchange before starting cycles"
@@ -2064,6 +2115,212 @@ class SmokeTestRunner:
         return SmokeStepResult(
             "passed", detail=f"emergency-closed {opened} in full (aggressive reduce-only IOC)"
         )
+
+    # -- §9.2.1 maker slices (PR B2) ---------------------------------------
+
+    def _listed_tif(self, cloid_hex_value: str) -> str | None:
+        """The ``tif`` ``frontendOpenOrders`` reports for our cloid.
+
+        ``None`` means the listing does not carry the order at all; ``""``
+        means it is listed WITHOUT a ``tif`` key — two different answers the
+        caller must keep apart: the API docs' example payload omits ``tif``,
+        which is exactly why reconcile's orphan backfill falls back to an
+        ``orderStatus`` probe (§12.3) instead of assuming the field is there.
+        Read with reconcile's own wire vocabulary (``cloid``), so a schema
+        drift has to be answered in both places.
+        """
+        for row in self._wire.open_orders() or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("cloid") or "").lower() == cloid_hex_value.lower():
+                if "tif" not in row:
+                    return ""  # listed, key absent: the documented fallback case
+                # Present-but-empty/null is NOT that case. Returning the empty
+                # string here would silently take the weaker-evidence branch;
+                # name it instead so the type check below goes red.
+                return str(row["tif"]) if row["tif"] else "<empty>"
+        return None
+
+    def _test_maker_slice_post_cancel(self) -> SmokeStepResult:
+        """A post-only slice that cannot cross must REST, be listed, and pull.
+
+        The §9.2.1 happy path on the real wire. Beyond "the Alo action
+        round-trips", what this proves is the listing's ``tif``: reconcile
+        derives an orphaned slice's ``orders.type`` from that field via
+        :data:`ORDER_TYPE_FOR_TIF`, and this is the one place that assumption
+        meets the venue instead of the API docs.
+        """
+        mark = self._require_positive_mark()
+        # The same far-from-mark rule test 3 uses: a buy at half the mark is not
+        # marketable, so the post-only condition is never even exercised here.
+        price = self._round_price(mark * Decimal("0.5"), up=False)
+        size = self._probe_size(price)
+        logical, cloid = self._register_cloid(role="entry", tag=f"alo-{self._tag()}")
+        self._track_probe(cloid)
+        ack = self._wire.place_limit(
+            coin=self.ctx.coin,
+            is_buy=True,
+            size=size,
+            limit_price=price,
+            cloid_hex=cloid,
+            tif=_ALO_TIF,
+        )
+        self._require_probe_accepted(ack, "post-only (Alo) slice", cloid)
+        if ack.status == "filled":
+            # ``accepted`` covers filled too, and place_limit's contract admits
+            # that a filled Alo is recorded as the fill it claims to be. A
+            # post-only buy at HALF the mark cannot legitimately fill, so this is
+            # a venue-semantics change — book it before flattening (an unbooked
+            # fill pins this run-id's validate at exit 5, §12.3) and say what
+            # actually happened, instead of letting the listing read below
+            # misdiagnose it as "accepted but unlisted".
+            self._book_alo_fill(
+                ack, cloid_logical=logical, cloid_hex_value=cloid, qty=size, price=price
+            )
+            raise _SmokeAbort(
+                f"the venue FILLED a post-only slice priced at half the mark "
+                f"(oid {ack.exchange_order_id}); " + self._flatten_alo_fill(ack)
+            )
+        listed = self._listed_tif(cloid)
+        if listed is None:
+            raise _SmokeAbort(
+                f"the venue accepted a post-only slice (oid {ack.exchange_order_id}) that "
+                f"frontendOpenOrders does not list under its cloid — §19.3 bot-ownership "
+                f"and §12.3 orphan reconciliation both decide off that listing"
+            )
+        if listed and ORDER_TYPE_FOR_TIF.get(listed) != _ALO_ORDER_TYPE:
+            raise _SmokeAbort(
+                f"frontendOpenOrders reports tif {listed!r} for a post-only slice; "
+                f"reconcile would type an orphan of it "
+                f"{ORDER_TYPE_FOR_TIF.get(listed)!r}, not {_ALO_ORDER_TYPE!r} (§12.3)"
+            )
+        self._cancel_tested_probe(cloid, "cancel-by-cloid")
+        tif_note = (
+            f"listed with tif {listed}"
+            if listed
+            else "listed WITHOUT a tif — reconcile's orderStatus fallback is the live path"
+        )
+        return SmokeStepResult(
+            "passed",
+            detail=(
+                f"post-only slice rested (oid {ack.exchange_order_id}), {tif_note}, "
+                f"then cancelled by cloid"
+            ),
+        )
+
+    def _test_maker_slice_post_only_refusal(self) -> SmokeStepResult:
+        """A post-only slice that WOULD cross must be refused, by a text we know.
+
+        §9.2.1 reads this refusal as "the quote is stale, re-post", not §9.2
+        rule 2's "refused, move on" — and tells them apart by the venue's
+        message (:func:`is_post_only_cross_error`, pinned from the API docs in
+        PR B and measured against testnet on 2026-09-17 — the venue's real text
+        wraps that sentence in a bid@ask and an ``asset=`` suffix, so only a
+        substring match survives it; the marker's own note carries the verbatim
+        answer). If the venue ever rewords it, every stale quote silently becomes
+        a dropped slice, so the string is checked here against the exchange.
+        """
+        mark = self._require_positive_mark()
+        # Marketable by construction: a buy 50% above the mark crosses any book
+        # the venue could show, so post-only has to refuse it.
+        price = self._round_price(mark * Decimal("1.5"), up=True)
+        size = self._probe_size(price)
+        logical, cloid = self._register_cloid(role="entry", tag=f"alox-{self._tag()}")
+        self._track_probe(cloid)
+        try:
+            ack = self._wire.place_limit(
+                coin=self.ctx.coin,
+                is_buy=True,
+                size=size,
+                limit_price=price,
+                cloid_hex=cloid,
+                tif=_ALO_TIF,
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised below; this only ASKS
+            # This probe is MARKETABLE, so a lost ack is the §8.3 rule 11 case,
+            # not a harmless retry: the venue may have filled it, and a fill with
+            # no local order row books fill_unmapped and pins this run-id's
+            # validate at exit 5 forever. Ask orderStatus once and record the
+            # answer — the same lane _place_and_record_ioc gives every other
+            # marketable probe.
+            raise self._recover_lost_ioc(
+                exc,
+                cloid_logical=logical,
+                cloid_hex_value=cloid,
+                role="entry",
+                side="buy",
+                qty=size,
+                price=price,
+                reduce_only=False,
+                order_type=_ALO_ORDER_TYPE,
+            ) from exc
+        if ack.status == "error":
+            # Refused per order: positive evidence nothing exists under this
+            # cloid, so the handle must not be swept (the same reading
+            # _require_probe_accepted applies on its refusal lane).
+            self._resting_probes.discard(cloid)
+            if not ack.is_post_only_cross:
+                raise _SmokeAbort(
+                    f"a crossing post-only slice was refused with text the engine does NOT "
+                    f"recognize as a post-only cross: {ack.error!r} — "
+                    f"is_post_only_cross_error must be retuned before sliced_maker is enabled"
+                )
+            return SmokeStepResult(
+                "passed", detail=f"crossing post-only slice refused by name: {ack.error!r}"
+            )
+        # Not refused. The finding IS that post-only stopped being honoured —
+        # the premise the whole §9.2.1 re-post lane rests on — so that is what
+        # the durable row must say. Cleanup is therefore best-effort and folded
+        # into this one message: a cleanup helper that raises on its own would
+        # replace the finding with a cancel error (and name a trigger order that
+        # does not exist here).
+        filled = ack.filled_size or Decimal(0)
+        if filled > 0:
+            self._book_alo_fill(
+                ack, cloid_logical=logical, cloid_hex_value=cloid, qty=size, price=price
+            )
+            cleanup = self._flatten_alo_fill(ack)
+        else:
+            # A marketable order the venue rested can fill at any moment, so a
+            # refused cancel keeps the cloid tracked for the exit sweep.
+            cleanup = self._best_effort_cancel(cloid) or "cancelled the unexpectedly resting order"
+        raise _SmokeAbort(
+            f"the venue did NOT refuse a crossing post-only slice (status={ack.status}, "
+            f"oid={ack.exchange_order_id}); {cleanup}"
+        )
+
+    def _book_alo_fill(self, ack, *, cloid_logical, cloid_hex_value, qty, price) -> None:
+        """Book a post-only probe the venue FILLED, typed ``alo_limit``.
+
+        The fill is the exposure: with no ``orders`` row the backfill maps it to
+        nothing, books ``fill_unmapped`` plus a position mismatch, and pins this
+        run-id's ``validate`` at exit 5 (§12.3) — flat wallet or not. An UNFILLED
+        resting probe is deliberately NOT booked: that is the orphan lane's job,
+        the same as every trigger probe.
+        """
+        self._insert_probe_row(
+            status="filled",
+            filled=ack.filled_size or Decimal(0),
+            ack=ack,
+            cloid_logical=cloid_logical,
+            cloid_hex_value=cloid_hex_value,
+            role="entry",
+            side="buy",
+            qty=qty,
+            price=price,
+            reduce_only=False,
+            order_type=_ALO_ORDER_TYPE,
+        )
+        # A filled order is off the book; keeping the handle would have the exit
+        # sweep chase it and report a residual that does not exist.
+        self._resting_probes.discard(cloid_hex_value)
+
+    def _flatten_alo_fill(self, ack) -> str:
+        """Reduce-only close a filled post-only probe; return what happened."""
+        filled = ack.filled_size or Decimal(0)
+        if filled <= 0:
+            return "the venue reported a fill with no size — check the position by hand"
+        return self._best_effort_close(filled) or f"reduce-only closed {filled}"
 
 
 # --------------------------------------------------------------------------

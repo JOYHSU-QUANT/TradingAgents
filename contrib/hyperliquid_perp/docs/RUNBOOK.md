@@ -354,9 +354,13 @@ PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 
 1. 確認空倉後，SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的
    `ExecStart` 改成新段參數（`--run-id paper-BTC-2 --create`），
    `sudo systemctl daemon-reload`，**先不要啟動**。
-2. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
+2. **這次部署若帶 schema migration（例如 v13，見 §4），在這裡備份 DB。**
+   停了、還沒 push，是唯一一個「舊 code 與舊 schema 都還在」的時點；一旦下一步
+   的新 binary 開過 store 把它升上去，要退回舊 binary 就只剩還原備份這條路。
+   沒有 migration 的部署跳過這步。
+3. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
    run-id 起段。
-3. 確認新段健康後，**立刻**把 unit 裡的 `--create` 拿掉再 `daemon-reload`：
+4. 確認新段健康後，**立刻**把 unit 裡的 `--create` 拿掉再 `daemon-reload`：
    run 已存在時帶 `--create` 是硬錯誤，留著的話**任何**後續 restart——crash
    自動重啟、主機重開機、下一次 deploy——都會直接失敗（systemd `Restart=`
    還可能因此 crash-loop），不是只有下次 deploy 才危險。
@@ -519,8 +523,8 @@ python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir expo
 （自動改讀 db 旁目錄時是兩行，中間夾一行 `note:`；第一行是記錄路徑那趟、第二行才是最終結果）。
 規則：只寫 NULL 格（daemon 寫過的值永遠不會被重算蓋掉，第二次跑 `stamped=0`）；`pre_v10`＝連
 `context_shape` 都沒有的列，**不填**（三鍵是一組，半組會變成 `validate` 上多出來的新桶）——**這些列永久留在
-`n/a` 桶是接受的現況**（2026-09-03 拍板：不另做 shape 回填工具；paper-BTC-3 自 v10 起跑，只有已封存的
-舊 run 有這種列）；payload 檔必須
+`n/a` 桶是接受的現況**（2026-09-03 拍板：不另做 shape 回填工具；paper-BTC-3 自 v10 起跑，所以這種列
+只會是 **v10 部署點之前寫下的**——判準是那一列什麼時候寫的，不是它的 run 封不封存，見 §4）；payload 檔必須
 存在、讀得到、**且** bytes 仍 hash 到該列的 `input_payload_hash`（被改過、截斷、從別處復原的檔不算證據）、
 JSON 裡要有字串 `format_instructions`——不符的列保持 NULL 並計數，不猜。回填後 `validate` 對 format 段
 沒變過的 run 只剩一行 `prompt_regime:`。它不是 migration（schema 步驟不做檔案 I/O、缺檔要容忍），對象是

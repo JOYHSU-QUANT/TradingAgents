@@ -133,7 +133,7 @@ Breaking changes within the 0.x line are called out explicitly.
   this one.
 
   Whenever the switch names a document, a `warning:` line on stderr now names
-  which way this host answered. BOTH directions, because the asymmetry runs
+  which way this host answered. BOTH directions, because the divergence runs
   both ways: a laptop that ran the radar by hand prints the `autoresearch`
   bucket while a server whose producer cron is broken writes the other one, so
   the token's presence is exactly as host-local as its absence. Speaking up

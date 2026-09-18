@@ -221,10 +221,13 @@ resume 時的 `config_drift` 只是「最新一次比對」的戳（下次乾淨
 cycle 數（`prompt_regime:` 行，見 §6），一眼看出 run 有沒有跨段。翻動這些 key 仍是跨越量測
 邊界、量測窗內禁止翻動——差別只是資料現在會自己標出來。另一條紀律：**改 `context_shape` 的字串文法**（排序、
 改名、加段）等同改 prompt 契約，同一個 commit 要 bump `PROMPT_VERSION`，否則新舊文法的
-字串會在同一欄裡互相撞桶。`volume_profile_window_candles` 預設 `0` 的理由不變：
+字串會在同一欄裡互相撞桶。**一個預設關閉、因此預設不出現的 token 不算**——`volume_profile`
+與 `autoresearch` 都是這樣進來的：開關關著時渲染出來的字串跟上一版逐字相同，同一欄裡沒有
+兩套文法可以撞，分段點是「你打開它那一刻」，而那一刻 `context_shape` 自己會標出來。`volume_profile_window_candles` 預設 `0` 的理由不變：
 merge 進來不動任何既有 prompt，分段點是「你改 config 那一刻」，由你選。`autoresearch_signal`
 預設 `""` 同理——而且它多一層前提：計畫 §7 說 run 5 換 maker 之後，promoted 的規則要先在
-maker 成本下重跑通過才可以翻這個開關（`signal` 指令每次都印 `scored under: … fills`）。
+maker 成本下重跑通過才可以翻這個開關。這條有程式擋著：`signal` 遇到 taker 成本的 experiment
+直接 exit 1，要照發得明寫 `--allow-taker`。
 
 **相反方向——只加一行預設值不是分段點，drift 比對現在自己知道。** 把
 `volume_profile_window_candles: 0` 這一行**加進**一個既有 run 的 config（例如照新版

@@ -99,7 +99,7 @@ def test_the_vocabularies_are_coerced_to_their_members_not_left_as_text():
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("bias", "flat", "unsupported research signal bias"),
+        ("bias", "neutral", "unsupported research signal bias"),
         ("confidence", "high", "unsupported research signal confidence band"),
         ("drawdown", "deepish", "unsupported research signal drawdown band"),
         ("interval", "4H", "unsupported candle interval"),
@@ -112,6 +112,17 @@ def test_the_vocabularies_are_coerced_to_their_members_not_left_as_text():
         ("notes", "  ", "must not be blank"),
         ("strategy_id", "a\nb", "must be a single line"),
         ("notes", "a\rb", "must be a single line"),
+        # Everything else Python itself calls a line break. A guard written as
+        # a list of two characters let all of these through, and each renders
+        # as a break in the prompt the model reads.
+        ("notes", "a\x0bb", "must be a single line"),
+        ("notes", "a\x0cb", "must be a single line"),
+        ("notes", "a\x1cb", "must be a single line"),
+        ("notes", "a\x1db", "must be a single line"),
+        ("notes", "a\x1eb", "must be a single line"),
+        ("notes", "a\x85b", "must be a single line"),
+        ("notes", "a\u2028b", "must be a single line"),
+        ("strategy_id", "a\u2029b", "must be a single line"),
     ],
 )
 def test_every_field_is_refused_by_name(field, value, message):
@@ -137,6 +148,11 @@ def test_surrounding_whitespace_is_stripped_but_the_sentence_is_not_touched():
         ([], "is a JSON object"),
         ("text", "is a JSON object"),
         ({"document_version": 99}, "the document declares 99"),
+        # ``True != 1`` is False, so a document declaring the JSON literal
+        # ``true`` would otherwise pass the one check that exists to refuse
+        # every other version by name. ``1.0`` is the same pun.
+        ({"document_version": True}, "the document declares True"),
+        ({"document_version": 1.0}, "the document declares 1.0"),
     ],
 )
 def test_a_payload_that_is_not_this_version_of_the_document_is_refused(payload, message):
@@ -195,7 +211,40 @@ def test_a_file_that_is_not_utf8_is_refused_rather_than_raised(tmp_path, caplog)
 def test_a_half_written_document_is_refused(tmp_path, caplog):
     assert _load(_write(tmp_path, '{"document_version": 1, "coin":'), caplog) is None
     assert len(caplog.records) == 1
-    assert "not valid JSON" in caplog.text
+    assert "could not be decoded as JSON" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Both come out of ``json.loads`` as something that is NOT a
+        # ``JSONDecodeError``: an integer literal past the interpreter's digit
+        # limit raises a bare ``ValueError``, and deep nesting raises
+        # ``RecursionError``. Unhandled they escape this reader entirely and
+        # fail the whole decision cycle — pre-LLM, every cycle, with an open
+        # position left to its stops — for what is only an operator pointing
+        # the switch at the wrong JSON file.
+        pytest.param("1" * 5000, id="integer-past-the-digit-limit"),
+        pytest.param("[" * 60000 + "]" * 60000, id="nesting-past-the-recursion-limit"),
+    ],
+)
+def test_json_that_escapes_the_obvious_decode_error_still_costs_only_the_section(
+    tmp_path, caplog, body
+):
+    assert _load(_write(tmp_path, body), caplog) is None
+    assert len(caplog.records) == 1
+    assert "could not be decoded as JSON" in caplog.text
+
+
+def test_a_document_holding_json_null_is_refused_out_loud(tmp_path, caplog):
+    # ``json.loads("null")`` returns ``None``, which a reader using ``None``
+    # as its own "already warned" sentinel reads as "say nothing" — and a
+    # four-byte file then makes the section vanish for good with no log line
+    # at all, the one outcome this module forbids. The named refusal for it
+    # already existed in ``from_document``; the shared sentinel suppressed it.
+    assert _load(_write(tmp_path, "null"), caplog) is None
+    assert len(caplog.records) == 1
+    assert "is a JSON object, got NoneType" in caplog.text
 
 
 def test_a_document_the_contract_refuses_is_logged_and_dropped(tmp_path, caplog):
@@ -253,5 +302,28 @@ def test_a_tilde_in_the_path_is_expanded_and_the_warning_names_where_it_looked(
     _write(tmp_path, _document())
     assert _load("~/signal.json", caplog) == _signal()
     assert _load("~/absent.json", caplog) is None
-    assert str(tmp_path) in caplog.text
+    assert str(tmp_path.resolve()) in caplog.text
     assert "~" not in caplog.text
+
+
+def test_a_home_that_cannot_be_resolved_costs_the_section_not_the_cycle(caplog, monkeypatch):
+    # ``expanduser`` raises ``RuntimeError`` — not ``OSError``, not
+    # ``ValueError`` — when there is no home to expand against: a Windows
+    # service account with no USERPROFILE, or ``~someuser`` for a user not in
+    # passwd. SETUP invites ``~`` paths, so this is on the documented path.
+    for name in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+        monkeypatch.delenv(name, raising=False)
+    assert _load("~/signal.json", caplog) is None
+    assert len(caplog.records) == 1
+    assert "could not be resolved" in caplog.text
+
+
+def test_a_relative_path_is_reported_as_the_absolute_one_it_looked_at(
+    tmp_path, caplog, monkeypatch
+):
+    # The producer's cron and the daemon's unit can start from different
+    # working directories, and then two processes disagree about one string
+    # with neither message able to say so.
+    monkeypatch.chdir(tmp_path)
+    assert _load("nowhere/signal.json", caplog) is None
+    assert str(tmp_path.resolve()) in caplog.text

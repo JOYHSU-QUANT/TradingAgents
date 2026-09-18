@@ -321,6 +321,14 @@ def _build_parser() -> argparse.ArgumentParser:
     signal_cmd.add_argument(
         "--out", required=True, help="path to write the handoff document to (JSON)"
     )
+    signal_cmd.add_argument(
+        "--allow-taker",
+        action="store_true",
+        help=(
+            "publish even though the promoted rule was scored under taker fills "
+            "(plan §7 wants it re-run under maker costs first)"
+        ),
+    )
     add_db(signal_cmd)
 
     research_cmd = subparsers.add_parser(
@@ -868,7 +876,9 @@ def _cmd_signal(args: argparse.Namespace) -> int:
 
     store, ledger = _open_ledger(args)
     with store:
-        signal, experiment, trial = build_signal(ledger, args.coin)
+        signal, experiment, trial = build_signal(
+            ledger, args.coin, allow_taker=args.allow_taker
+        )
         target = write_signal(args.out, signal)
     for line in describe_signal(signal, experiment, trial):
         print(line)
@@ -916,11 +926,19 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (StoreError, ExchangeError, HypothesistError, LedgerError, ValueError) as exc:
+    except (
+        StoreError,
+        ExchangeError,
+        HypothesistError,
+        LedgerError,
+        OSError,
+        ValueError,
+    ) as exc:
         # The families a well-formed invocation can still meet: this store
         # cannot be operated on, the venue failed, the model seam failed, the
-        # ledger refused, or an argument named a window, a spec or a split that
-        # is not one. Each
+        # ledger refused, a path could not be written (``signal --out`` on a
+        # full or read-only filesystem, or naming a directory), or an argument
+        # named a window, a spec or a split that is not one. Each
         # already carries a sentence written for an operator, so it is printed
         # as-is rather than wrapped.
         print(f"error: {exc}", file=sys.stderr)

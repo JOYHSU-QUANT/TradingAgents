@@ -1087,8 +1087,6 @@ def test_the_replay_decides_on_the_last_bar_where_the_scored_loop_will_not():
     replayed = _replay(_spec(), bundle)
     assert replayed.side is Side.LONG
     assert replayed.last_close_time == bundle.bars[-1].close_time
-    assert replayed.last_open_time == bundle.bars[-1].open_time
-    assert replayed.bars == 4
 
 
 def test_the_replay_keeps_a_position_the_scored_window_would_have_flattened():
@@ -1161,7 +1159,7 @@ def test_the_replay_flags_a_last_bar_whose_condition_it_could_not_evaluate():
     short = _bundle([100, 101, 102, 103], funding=_funding(4, hours=4))
     replayed = _replay(spec, short)
     assert replayed.last_bar_unevaluable is True
-    assert replayed.bars_unevaluable > 0
+    assert replayed.replayed_bars_unevaluable > 0
 
 
 def test_the_replay_models_no_equity_so_a_ruined_rule_still_shows_a_side():
@@ -1182,6 +1180,34 @@ def test_the_replay_models_no_equity_so_a_ruined_rule_still_shows_a_side():
     assert _replay(spec, bundle, costs=ruinous).side is Side.LONG
 
 
+def test_the_replay_counts_every_bar_it_could_not_be_asked_about_not_only_the_last():
+    # The freeze the signal refuses on, and what the last bar alone cannot
+    # show: while its feature is missing the rule can neither exit nor
+    # reverse, so it carries whatever side it was on — and by the newest bar
+    # the data can be back, leaving the last-bar flag clear.
+    spec = _spec(
+        entry={"long": [{"left": "close", "op": ">", "right": 99}]},
+        exit={"long": [{"left": "funding_rate", "op": ">", "right": -1}]},
+    )
+    # Settlements for the first three bars and the last one, none in
+    # between: the middle bars cannot be asked, the newest one can.
+    gapped = _bundle(
+        [100, 101, 102, 103, 104, 105],
+        funding=[*_funding(6, hours=12), *_funding(6, hours=24)[20:]],
+    )
+    replayed = _replay(spec, gapped)
+    assert replayed.replayed_bars_unevaluable > 0
+
+
 def test_the_replay_refuses_a_start_past_every_bar_it_was_given():
     with pytest.raises(EvaluationError, match="nothing to replay"):
         _replay(_spec(), _bundle([100, 101, 102]), since=3)
+
+
+def test_the_replay_refuses_a_history_that_does_not_reach_its_start():
+    # The other end of the same hazard, and the one no gap scan can see: a
+    # truncated PREFIX leaves no hole, and ``bisect_left`` reports it as index
+    # 0, so the replay would quietly begin late and a position opened before
+    # the store now starts would be invisible.
+    with pytest.raises(EvaluationError, match="a position opened before that is"):
+        _replay(_spec(), _bundle([100, 101, 102]), since=-1)

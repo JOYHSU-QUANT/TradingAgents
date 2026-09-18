@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from types import MappingProxyType
+from typing import Final
 
 from ...common.constants import (
     HOLDING_COST_HOURS,
@@ -135,20 +136,25 @@ def interval_to_ms(interval: str) -> int:
 
 
 class ResearchBias(VocabEnum, noun="research signal bias"):
-    """Which side the research radar's promoted rule decided at its latest bar.
+    """Which side the research radar's promoted rule holds at its latest bar.
 
-    Not a forecast and not an instruction: it is the side that rule's own
-    decision would be filled on at the next bar's open. ``NEUTRAL`` is the
-    rule sitting flat, which is a reading like the other two — a rule with no
-    position is saying something — so it is a member here rather than the
-    absence of a signal. A signal that could not be produced at all is
-    ``None`` on :class:`PerpMarketContext`, and the prompt then has no such
-    section at all.
+    Not a forecast and not an instruction: it is a state the rule's own
+    decisions arrived at. ``FLAT`` rather than "neutral", because that is what
+    was measured — the rule holds no position. "Neutral" would name a VIEW of
+    the market in the one prompt section whose whole discipline is naming only
+    what a rule measured, and it is not a SIDE, which is what the rendered line
+    calls it. It also matches the vocabulary the research package's own specs
+    are written in (``dsl.Side`` is long/short).
+
+    Flat is a reading like the other two, so it is a member here rather than
+    the absence of a signal: a signal that could not be produced AT ALL is
+    ``None`` on :class:`PerpMarketContext` and the prompt then has no such
+    section. The two facts are different and must not share a spelling.
     """
 
     LONG = "long"
     SHORT = "short"
-    NEUTRAL = "neutral"
+    FLAT = "flat"
 
 
 class ResearchConfidence(VocabEnum, noun="research signal confidence band"):
@@ -183,14 +189,14 @@ class ResearchDrawdown(VocabEnum, noun="research signal drawdown band"):
 # at the shape would be reading last month's fields with this month's
 # meanings. A document declaring any other version is refused by name and the
 # prompt's section is omitted — never partially read.
-RESEARCH_SIGNAL_DOCUMENT_VERSION: int = 1
+RESEARCH_SIGNAL_DOCUMENT_VERSION: Final = 1
 
 # Exactly the keys a document carries. Unknown keys are refused rather than
 # ignored, the same way the config loader refuses an unknown YAML key: a
 # producer that added a field without bumping the version is not the version
 # it claims to be, and the one symptom of reading it leniently would be a
 # prompt section quietly built from stale meanings.
-_RESEARCH_SIGNAL_KEYS = frozenset(
+_RESEARCH_SIGNAL_KEYS: Final = frozenset(
     {
         "document_version",
         "coin",
@@ -206,23 +212,35 @@ _RESEARCH_SIGNAL_KEYS = frozenset(
     }
 )
 
-# What a rendered field may not contain. Every line of the prompt's context is
-# either a section header (no indent) or a row under one (two spaces), and the
-# paper review segments runs on ``prompt_context.context_shape``, which reads
-# those headers back. A newline inside ``strategy_id`` or ``notes`` would
-# print an unindented line of the producer's choosing — a forged section
-# header, in a value that comes from outside this package. Refused at the DTO
-# rather than escaped at the renderer, so every consumer of the field sees the
-# value the renderer does (PR #251's rule: the value judged is the value
-# rendered).
-_FORBIDDEN_IN_RENDERED_TEXT = ("\n", "\r")
+# A rendered field must be ONE line. Every line of the prompt's context is
+# either a section header (no indent) or a row under one (two spaces), so a
+# line break inside ``strategy_id`` or ``notes`` prints an unindented line of
+# the producer's choosing — a forged section header, in a value that comes
+# from outside this package. Refused at the DTO rather than escaped at the
+# renderer, so every consumer of the field sees the value the renderer does
+# (PR #251's rule: the value judged is the value rendered).
+#
+# The reader at risk is the MODEL. An earlier version of this comment said the
+# paper review's ``context_shape`` reads those headers back; it does not —
+# that function is built from the context's own fields and never parses
+# rendered text. The prompt-context TESTS do read them back, to hold the
+# render and the shape in lockstep, so a forged header would break that lock
+# too; but naming a mechanism that does not exist is the failure PR #254's
+# rule was written for, so it is said accurately here instead.
+#
+# Tested with ``splitlines()`` rather than against a list of characters:
+# Python breaks lines on eight code points besides CR and LF (``\v``, ``\f``,
+# ``\x1c``-``\x1e``, ``\x85``, ``\u2028``, ``\u2029``), a two-item list let
+# every one of them through, and the invariant being enforced is "a single
+# line" — so the check is the language's own answer to that question rather
+# than a transcription of part of it.
 
 # A rendered field's length bound. The block is a handful of short lines by
 # design; a producer that put a paragraph in ``notes`` would push the position
 # section and the output contract further from the model's attention with
 # nothing refusing. Bounded rather than truncated, for the same reason a
 # truncated sentence is worse than none: it still reads as a complete one.
-MAX_RESEARCH_TEXT_CHARS = 200
+MAX_RESEARCH_TEXT_CHARS: Final = 200
 
 
 # --------------------------------------------------------------------------
@@ -1050,8 +1068,8 @@ class PositionContext:
 def _rendered_text(value: object, *, what: str) -> str:
     """A field of the handoff document that reaches the prompt verbatim.
 
-    Non-blank, single-line and bounded — see :data:`_FORBIDDEN_IN_RENDERED_TEXT`
-    and :data:`MAX_RESEARCH_TEXT_CHARS` for why each. Whitespace at the ends is
+    Non-blank, single-line and bounded — the comments above the single-line
+    rule and :data:`MAX_RESEARCH_TEXT_CHARS` say why each. Whitespace at the ends is
     stripped, because a producer's trailing newline is not a difference anyone
     means; whitespace INSIDE is left alone, because it is the sentence.
     """
@@ -1060,12 +1078,11 @@ def _rendered_text(value: object, *, what: str) -> str:
     text = value.strip()
     if not text:
         raise ValueError(f"{what} must not be blank")
-    for forbidden in _FORBIDDEN_IN_RENDERED_TEXT:
-        if forbidden in text:
-            raise ValueError(
-                f"{what} must be a single line — it is rendered into the prompt, where an "
-                f"unindented line reads as a section header; got {text!r}"
-            )
+    if len(text.splitlines()) > 1:
+        raise ValueError(
+            f"{what} must be a single line — it is rendered into the prompt, where an "
+            f"unindented line reads as a section header; got {text!r}"
+        )
     if len(text) > MAX_RESEARCH_TEXT_CHARS:
         raise ValueError(
             f"{what} must be at most {MAX_RESEARCH_TEXT_CHARS} characters, got {len(text)}"
@@ -1134,7 +1151,16 @@ class ResearchSignal:
             object.__setattr__(self, name, enum(getattr(self, name)))
         if not isinstance(self.coin, str) or not self.coin.strip():
             raise ValueError("ResearchSignal.coin must be a non-empty string")
-        object.__setattr__(self, "coin", self.coin.strip())
+        # Stripped AND upper-cased, because this field is the market identity
+        # the two sides compare on and there is nowhere else that rule could
+        # live. Three normalisations meet at that comparison — the daemon's
+        # ``_resolve_coin`` upper-cases, the research store's ``canonical_coin``
+        # strips and upper-cases, and this DTO is the seam between them. They
+        # agree today only because both sides reached for ``.upper()``
+        # independently; they diverge on whitespace, and the failure is the
+        # quietest one in the design: one WARNING a cycle, and a section an
+        # operator switched on that never appears.
+        object.__setattr__(self, "coin", self.coin.strip().upper())
         # The radar's bar cadence, through the package's one interval
         # vocabulary — so a document written at an interval this build does
         # not know is refused by the same sentence a mis-cased ``4H`` gets in
@@ -1186,7 +1212,16 @@ class ResearchSignal:
                 f"a research signal document is a JSON object, got {type(payload).__name__}"
             )
         version = payload.get("document_version")
-        if version != RESEARCH_SIGNAL_DOCUMENT_VERSION:
+        # ``bool`` first: ``True != 1`` is False, so a document declaring the
+        # JSON literal ``true`` would pass the one check whose entire purpose
+        # is to refuse any other version by name, and ``1.0`` is the same pun.
+        # The rest of this module already speaks that sentence twice
+        # (``_window_days``, ``_require_venue_stamp``).
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != RESEARCH_SIGNAL_DOCUMENT_VERSION
+        ):
             raise ValueError(
                 f"this build reads research signal document version "
                 f"{RESEARCH_SIGNAL_DOCUMENT_VERSION}, the document declares {version!r}"
@@ -1343,6 +1378,20 @@ class PerpMarketContext:
                 f"{self.prev_day_price})",
             )
             object.__setattr__(self, "day_change_pct", claimed)
+        if self.research_signal is not None and self.research_signal.coin != self.coin:
+            # The one relational fact about the research signal that does not
+            # need a clock, so it belongs here rather than in the reader. The
+            # reader does check it, but the reader is not the only way a
+            # context is built (fixtures, replays, a future second caller) and
+            # a context that carried another coin's rule would print an ETH
+            # side under a BTC mark with every bounds check green — the same
+            # contradiction ``day_change_pct`` above spends twenty-five lines
+            # refusing. Freshness genuinely needs this run's clock and stays
+            # with the reader; identity does not.
+            raise ValueError(
+                f"PerpMarketContext.research_signal is for {self.research_signal.coin}, but the "
+                f"context is for {self.coin}; a prompt must not print another market's rule"
+            )
         if self.candle_count < 0:
             raise ValueError(
                 f"PerpMarketContext.candle_count must be >= 0, got {self.candle_count}"

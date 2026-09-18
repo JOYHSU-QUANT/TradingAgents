@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Final
 
 from .constants import MS_PER_DAY
+from .costs import FillRole
 from .dsl import Side
 from .ledger import Experiment, Ledger, Trial
 from .metrics import SegmentMetrics
@@ -70,14 +71,15 @@ class SignalError(ValueError):
 
 # Where the selection window's return-to-volatility ratio is cut into three.
 #
-# The lower edge is deliberately ABOVE the promote gate rather than at it. A
-# rule only reaches this module by clearing ``sharpe_base + k * ln(n)``, which
-# starts at 1.0 and only rises, so nothing promoted can land under 1.0 and a
-# band boundary there would name a member that never occurs. "weak" therefore
-# means "cleared the gate and not much more", which is the honest reading of a
-# rule at 1.1 — and the gate rising with the number of rules tried is exactly
-# why the bands are NOT pinned to it: a late rule that had to clear a higher
-# bar should not read as more confident for having been tried later.
+# The lower edge sits ABOVE the promote gate rather than at it, so "weak"
+# reads as "cleared the gate and not much more". The gate is
+# ``sharpe_base + k * ln(n)``, and ``Penalty.sharpe_base`` takes its value
+# from ``ledger.SHARPE_BASE`` — a DEFAULT, not a floor: ``experiment
+# --sharpe-base`` can set it lower, and the lowest band then covers rules
+# under it, which is the operator's choice and still reads correctly. What
+# the edges must NOT do is track the gate, because the gate rises with the
+# number of rules tried, and a late rule that had to clear a higher bar
+# should not read as more confident for having been tried later.
 #
 # The numbers themselves are a convention, not a measurement, and they sit
 # here in one place so that is visible. They were not fitted to anything.
@@ -101,7 +103,9 @@ _DRAWDOWN_BANDS: Final = (
 )
 
 
-def build_signal(ledger: Ledger, coin: str) -> tuple[ResearchSignal, Experiment, Trial]:
+def build_signal(
+    ledger: Ledger, coin: str, *, allow_taker: bool = False
+) -> tuple[ResearchSignal, Experiment, Trial]:
     """``coin``'s promoted rule, as the live path would be told about it.
 
     Returns the signal with the experiment and trial it came from, so a caller
@@ -137,11 +141,37 @@ def build_signal(ledger: Ledger, coin: str) -> tuple[ResearchSignal, Experiment,
             f"figures; this store's trials table is inconsistent"
         )
 
+    if experiment.costs.fill_role is not FillRole.MAKER and not allow_taker:
+        # Plan §7's standing precondition for turning the live switch on at
+        # all: after run 5 moved the paper lane to maker fills, a rule scored
+        # under taker costs was selected against a cost model the account no
+        # longer pays. That precondition was prose in three documents and a
+        # line of stdout, which is not a guard — and the mistake it prevents
+        # is the LIKELY state on the day the switch is flipped, not a
+        # hypothetical. Refusing here keeps it entirely inside this package:
+        # nothing extra crosses the seam, and the escape hatch is explicit
+        # rather than implied.
+        raise SignalError(
+            f"{experiment.experiment_id} scored its trials under "
+            f"{experiment.costs.fill_role.value} fills, and the live lane trades maker "
+            f"(plan §7: promoted rules are re-run under maker costs before the prompt switch "
+            f"goes on) — open the experiment again with `--fill-role maker` and promote there, "
+            f"or pass --allow-taker to publish this anyway"
+        )
+
     interval = experiment.split.interval
     bundle = load_bundle(ledger.store, coin=experiment.coin, interval=interval)
     # The same scan a measurement runs, for a sharper reason here: a replayed
     # side is path dependent, so a missing bar does not merely shorten the
-    # history — it can silently change which side the rule is on today.
+    # history — it can silently change which side the rule is on today. Bar
+    # and daily holes are refused by the scan; funding holes it only COUNTS,
+    # which is why the replay's own unevaluable count is checked below.
+    #
+    # Known cost, stated rather than fixed: the scan starts at the bundle's
+    # first bar while the replay starts at the experiment's train start, so a
+    # hole older than the experiment refuses this command over a span the
+    # answer does not depend on. That is a loud false refusal naming the span,
+    # which is the safer direction to be wrong in.
     require_clean_history(bundle, interval)
     frame = FeatureFrame(bundle, indicator_lookback=experiment.indicator_lookback)
     replay = replay_position(
@@ -155,12 +185,35 @@ def build_signal(ledger: Ledger, coin: str) -> tuple[ResearchSignal, Experiment,
             f"holds there is one it held EARLIER rather than one it just re-took — fetch the "
             f"missing history (`fetch`, then `gaps`) and run this again"
         )
+    if replay.replayed_bars_unevaluable:
+        # Not a lesser version of the check above. A rule that cannot be
+        # evaluated does not go flat, it FREEZES on whatever side it held,
+        # unable to exit or reverse until its features come back. A month of
+        # missing settlements under a rule that exits on ``funding_zscore``
+        # therefore publishes a side the rule left long ago — and the newest
+        # bar alone cannot see it, because by then the data is back. The scan
+        # above cannot see it either: it only counts funding holes.
+        raise SignalError(
+            f"trial #{trial.trial_id}'s rule could not be evaluated on "
+            f"{replay.replayed_bars_unevaluable} of the bars replayed since "
+            f"{from_epoch_ms(experiment.split.train.start_ms).isoformat()}, where it held "
+            f"whatever side it was already on instead of deciding — so today's side is not the "
+            f"one a complete history would give. Fill the gaps (`fetch`, then `gaps`) and run "
+            f"this again"
+        )
 
     return (
         ResearchSignal(
             coin=experiment.coin,
             interval=interval,
             as_of_ms=replay.last_close_time,
+            # ``<experiment>#<trial>``. It cannot overflow the reader's
+            # ``MAX_RESEARCH_TEXT_CHARS`` bound on a rendered field: the
+            # ledger's own ``_EXPERIMENT_ID`` pattern caps a name at 64
+            # characters and a trial id is a small autoincrement integer, so
+            # the whole string is far inside it. A check here would be a
+            # branch nothing can reach; the bound is real, and it is the
+            # DTO's.
             strategy_id=f"{experiment.experiment_id}#{trial.trial_id}",
             bias=_bias(replay.side),
             confidence=_band(trial.validation.net.sharpe, CONFIDENCE_EDGES, _CONFIDENCE_BANDS),
@@ -232,8 +285,9 @@ def describe_signal(signal: ResearchSignal, experiment: Experiment, trial: Trial
 def _bias(side: Side | None) -> ResearchBias:
     """The replayed side in the document's vocabulary. Flat is a reading, not a gap."""
     if side is None:
-        return ResearchBias.NEUTRAL
+        return ResearchBias.FLAT
     return ResearchBias.LONG if side is Side.LONG else ResearchBias.SHORT
+
 
 
 def _band(value, edges, bands):
@@ -300,8 +354,15 @@ def _notes(validation: SegmentMetrics, holdout: SegmentMetrics) -> str:
 # reporting the wrong one for a whole range — which is precisely the failure
 # nothing downstream could notice, since every answer is a legal word.
 for _edges, _bands in ((CONFIDENCE_EDGES, _CONFIDENCE_BANDS), (DRAWDOWN_EDGES, _DRAWDOWN_BANDS)):
-    if len(_bands) != len(_edges) + 1 or list(_edges) != sorted(_edges):
+    # STRICTLY ascending. ``sorted()`` alone accepts EQUAL adjacent edges, and
+    # a repeated edge produces exactly the failure this check exists to catch:
+    # ``_band`` still answers, with the band between the two equal edges
+    # unreachable — and every answer it gives is a legal word, so nothing
+    # downstream could notice.
+    if len(_bands) != len(_edges) + 1 or any(
+        later <= earlier for earlier, later in zip(_edges, _edges[1:], strict=False)
+    ):
         raise RuntimeError(
-            f"a band table needs ascending edges and one more band than edges, got "
+            f"a band table needs strictly ascending edges and one more band than edges, got "
             f"{_edges} and {[band.value for band in _bands]}"
         )

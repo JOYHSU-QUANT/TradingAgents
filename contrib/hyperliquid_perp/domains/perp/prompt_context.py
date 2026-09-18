@@ -197,8 +197,9 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
 def _research_signal_lines(signal: ResearchSignal) -> list[str]:
     """The research-signal block. Only called when a signal exists.
 
-    Same label discipline as ``_SHAPE_NOTE`` and the macro-trend rules (PR
-    #95): every line says what was MEASURED and stops there. So the side is
+    Same label discipline as its two siblings in this file, ``_REGIME_NOTE``
+    and ``_SHAPE_NOTE`` (PR #95): every line says what was MEASURED and stops
+    there. So the side is
     named as a rule's own state rather than as a view of the market, the two
     bands are named with the window they were cut from, and nothing here says
     "bullish", "confirmed" or "expect".
@@ -220,28 +221,42 @@ def _research_signal_lines(signal: ResearchSignal) -> list[str]:
         f"{signal.interval} bars, as of {from_epoch_ms(signal.as_of_ms).isoformat()} UTC):",
         # "holds", not "recommends": the rule is a fixed set of conditions
         # replayed over history, and this is the side its latest decision
-        # leaves it on. The fill it implies is at the NEXT bar's open, which
-        # is said here because the alternative reading — that the side was
-        # taken at the close above — is the one a backtest most easily cheats
-        # with, and the model should not be handed it.
-        f"  Side the rule holds after its latest bar, to be filled at that "
-        f"rule's next bar open: {signal.bias.value}",
+        # leaves it on.
+        #
+        # It does NOT say "to be filled at that rule's next bar open", which
+        # an earlier draft did. Most of the time nothing is filled at all: the
+        # rule is usually continuing a side it already held, and when the
+        # answer is ``flat`` there is nothing to fill in the first place. The
+        # fill rule matters to how the side was DERIVED — decisions are taken
+        # at a bar's close and priced at the next open, which is what stops a
+        # backtest reading its own future — so it is stated as the derivation
+        # it is, under Basis, rather than as an event this block measured.
+        f"  Side the rule holds after its latest bar: {signal.bias.value}",
         f"  Confidence band, cut from its return-to-volatility ratio over the window it was "
         f"selected on: {signal.confidence.value}",
         f"  Drawdown band, cut from its deepest peak-to-trough fall over that same window: "
         f"{signal.drawdown.value}",
-        f"  Windows behind those two bands: {signal.eval_window_days} days it was selected on, "
-        f"then {signal.holdout_window_days} days held back and measured once",
+        # The bands come from the SELECTION window alone — the two lines above
+        # say so — so this line must not lump the two windows together as
+        # "behind those two bands", which an earlier draft did and which a
+        # reader could add up into one span of 120 days. The held-back window
+        # belongs to the note under it.
+        f"  Window the two bands were cut from: {signal.eval_window_days} days. A further "
+        f"{signal.holdout_window_days} days were held back from the search and measured once, "
+        f"which is what the note below reports",
         f"  Notes: {signal.notes}",
         # The disclosure the section cannot be read honestly without. Three
         # facts, each of which a reader would otherwise have to assume:
         # where the rule came from, that its bands are ordinal rather than
         # scaled, and that nothing here is wired to a decision.
         "  Basis: a fixed rule the research radar fitted and scored offline on its own copy of "
-        "this coin's history — not on the candles above, and not on this account's fills. The "
-        "two bands are ordinal labels over that rule's own measurements; the figures behind "
-        "them are deliberately not printed. Nothing in this section feeds the risk checks, the "
-        "sizing or any order — it is one more input to weigh.",
+        "this coin's history — not on the candles above, and not on this account's fills. That "
+        "rule decides at a bar's close and is priced as filling at the next bar's open, so the "
+        "side above is the one it carries into its next bar rather than a trade taken at the "
+        "close named above. The two bands are ordinal labels over that rule's own "
+        "measurements; the figures behind them are deliberately not printed. Nothing in this "
+        "section feeds the risk checks, the sizing or any order — it is one more input to "
+        "weigh.",
     ]
 
 

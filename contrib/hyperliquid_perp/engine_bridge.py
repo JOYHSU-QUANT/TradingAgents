@@ -295,22 +295,36 @@ def _build_context(
 
     # The research radar's handoff document, read AFTER the market reads and
     # judged against the very bar the context will be dated to — which is why
-    # the as-of is derived here, through the builder's own function, rather
-    # than spelled out a second time. Local disk, no network, so it sits
-    # outside the ``_between_reads`` chain above and costs the kill switch
-    # nothing. Off by default: with the switch empty nothing is opened, so
-    # the daemon does not stat a file it was never pointed at.
-    _, as_of_ms = context_as_of(candles)
-    research_signal = (
-        load_research_signal(
+    # the as-of comes from the builder's own function rather than being
+    # spelled out a second time.
+    #
+    # Only with candles in hand. The freshness bound is defined against a
+    # CLOSED BAR, and an empty window has none: ``context_as_of`` would fall
+    # back to the wall clock, which is the one reading
+    # ``load_research_signal`` documents itself as never using. Such a cycle
+    # is refused downstream anyway, so nothing is lost by not asking.
+    #
+    # Off by default: with the switch empty nothing is opened, so the daemon
+    # does not stat a file it was never pointed at.
+    research_signal = None
+    if candles and market_data.autoresearch_signal:
+        _, as_of_ms = context_as_of(candles)
+        research_signal = load_research_signal(
             market_data.autoresearch_signal,
             coin=coin,
             as_of_ms=as_of_ms,
             candle_interval_ms=interval_to_ms(market_data.candle_interval),
         )
-        if market_data.autoresearch_signal
-        else None
-    )
+    # A refresh after it, like every blocking read above. The comment this
+    # replaces argued the read costs the kill switch nothing because it is
+    # "local disk, no network" — but the path comes from YAML and is
+    # deliberately not validated at load, so an operator sharing the
+    # producer's output between two hosts over NFS or SMB puts an untimed
+    # blocking read on the single-threaded tick, charged to the same
+    # unrefreshed budget as a REST call. Blowing that budget lets the
+    # exchange-side dead man's switch cancel an open position's stops while
+    # the process is alive and healthy. One call closes it and costs nothing.
+    _between_reads()
 
     ctx = build_market_context(
         coin,

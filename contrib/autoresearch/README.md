@@ -3,9 +3,9 @@
 研究雷達不是另一套交易系統。
 
 它不下單、不持倉、不碰 `contrib/hyperliquid_perp/` 的 SQLite 或 schema，也不越過
-RiskGate。它做的事只有一件：把 BTC 的歷史資料落到**自己的** store，之後（PR A3–A4）
-在上面跑一個確定性的回測評估器，替 LLM 提出的擇時假說打分。唯一會流回實盤路徑的東西，
-是很久以後（計畫 §7、run 6）prompt 裡一段**定性**的研究訊號，而且藏在一個預設關閉的
+RiskGate。它做的事只有一件：把 BTC 的歷史資料落到**自己的** store，在上面跑一個確定性
+的回測評估器，替 LLM 提出的擇時假說打分。唯一會流回實盤路徑的東西，是 prompt 裡一段
+**定性**的研究訊號——用一份小 JSON 文件交接（計畫 §7、run 6），而且藏在一個預設關閉的
 config 開關後面。
 
 上面那句話就是這個套件的 scope 判準：**任何需要把它放寬的改動，都是 scope creep，不是
@@ -18,8 +18,8 @@ memory `hyperliquid-autoresearch-mvp-direction`。
 
 **PR A1＝資料落地層、PR A2＝假說寫得出來的那套語言、PR A3＝替假說打分的評估器、
 PR A4＝把打分變成實驗紀錄：ledger、trial penalty、五個指令、baseline 校準（Phase A 完成點）、
-PR B1（本次）＝讓模型自己提假說的那個迴圈：`research` 指令、答案預算、失敗回饋。
-B1 是計畫的 Phase B 完成點。**
+PR B1＝讓模型自己提假說的那個迴圈：`research` 指令、答案預算、失敗回饋（Phase B 完成點）、
+PR C1（本次）＝交接文件：`signal` 指令，以及 `hyperliquid_perp` 那一端的讀取器與 prompt 段落。**
 已經有的東西：
 
 - 自己的 store `autoresearch.sqlite`（schema v3：歷史的 `candles`、`funding`、`series_state`，
@@ -466,10 +466,20 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 - **日期是 bar，不是時鐘**。`as_of_ms` 是那根 bar 的收盤；讀的那端拿**自己**最新一根去比，
   所以寫的主機時鐘飄了也不會讓過期文件看起來很新。過期上限是讀端的
   `MAX_SIGNAL_AGE_INTERVALS`（借過來印，不另抄一份數字）。
-- **寧可拒絕也不給軟一點的答案**：沒有 promote 過的規則、store 有洞、最新一根讓規則
-  讀不到條件——三種都具名拒絕，不寫檔。文件存在＝寫的當下相信它；還新不新是讀端的問題。
+- **寧可拒絕也不給軟一點的答案**：沒有 promote 過的規則、store 有洞、最新一根讓規則讀不到
+  條件、**重播途中任何一根讀不到條件**、experiment 是在 taker 成本下打的分（計畫 §7 的前提；
+  要照發得寫 `--allow-taker`）——全部具名拒絕，不寫檔。文件存在＝寫的當下相信它；還新不新
+  是讀端的問題。
+- **「重播途中讀不到」跟「最後一根讀不到」是兩件事**：規則讀不到條件時不會變成空手，而是
+  **凍在**原本那一邊，既不能出場也不能反手。一個月的 funding 缺口配上一條用 `funding_zscore`
+  出場的規則，會發出一個那條規則早就離開的方向——而光看最後一根看不出來，因為那時資料已經
+  回來了；`require_clean_history` 也看不出來，它對 funding 洞只計數、不拒絕。
 - 文件的欄位與詞彙**不在這裡定義**：`ResearchSignal` 從 `upstream.py` 借自會讀它的套件，
   兩邊才不會各自釘自己那份而一起變綠。
+
+已知的一邊倒：clean-history 掃描從 bundle 第一根開始，重播卻從 experiment 的 train 起點
+開始，所以**比 experiment 還舊的歷史有洞，也會讓這個指令整個拒絕**——一個跟答案無關的 span
+造成的假拒絕。留著不修，因為它吵、訊息會指名那個 span，而錯在這一邊比錯在另一邊安全。
 
 `signal` 會讀到 holdout 之後、一直到最新的 bar。這不是 holdout lock 的破口：lock 是為了
 「窗口的分數不能挑在後面窗口會用到的 bar 上」，而這裡什麼都不評分——帶是從 ledger 裡
@@ -510,10 +520,12 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
 - **gross 的分母是 net 權益路徑**：gross bar return＝該根價差損益／當時實際持有的權益，
   再複利。所以 `gross.total_return` 不等於各筆 `gross_pnl` 的總和；兩組指標同分母，
   差的只有成本項，這才是「gross 好看、net 不好看」要比的東西。
-- **交接文件的帶邊界是一個約定，不是量出來的**：`CONFIDENCE_EDGES`＝1.5／2.5、
-  `DRAWDOWN_EDGES`＝10%／25%，沒有對任何東西擬合過。下限刻意高於 promote 門檻
-  （`sharpe_base + k·ln(n)` 從 1.0 起跳且只會上升），所以 `weak` 的意思是「剛過門檻，
-  沒有更多」，而不是一個永遠不會出現的成員。
+- **交接文件的帶邊界是一個約定，不是量出來的**：`CONFIDENCE_EDGES` 與 `DRAWDOWN_EDGES`
+  的值寫在 `signal.py`（這裡不抄一份，抄了就會過期），沒有對任何東西擬合過。
+  confidence 的下限刻意放在 promote 門檻**之上**：門檻是 `sharpe_base + k·ln(n)`，只會
+  隨試過的規則數上升，所以把帶界綁在門檻上，會讓「比較晚才試出來、因此要跨過比較高的
+  那根桿子」的規則讀起來反而比較有信心。代價是下限與門檻的關係取決於 `sharpe_base`——
+  它是 `experiment` 的一個旗標，不是常數，調低了 `weak` 就會涵蓋到門檻以下的規則。
 - **重播不模擬權益，所以一條早就 ruin 的規則照樣報得出一邊**：帶是從 validation 切的，
   而 promote 門檻已經擋掉 validation ruined 的 trial；validation 之後才爆掉的，這份文件
   量不到。要量的話得在重播裡帶一整套會計，那就是第二個評估器了。

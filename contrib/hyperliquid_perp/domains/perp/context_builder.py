@@ -124,18 +124,24 @@ def context_as_of(candles: Sequence[Candle]) -> tuple[datetime, int]:
     signal's freshness bound (:mod:`.research_signal`).
     ``from_epoch_ms`` is integer arithmetic, so ``as_of`` is exactly that
     millisecond by construction rather than by a float route happening to
-    round-trip at this magnitude (issue #157).
+    round-trip at this magnitude (issue #157). The funding window's strict
+    ``p.time < as_of_ms`` bound inside :func:`build_market_context` is the
+    first of those comparisons.
 
     With no candles at all there is no bar to date the context to and the
-    wall clock is the only answer left — the degenerate case the freshness
-    guard refuses downstream, kept here so the context can still be built and
-    refused rather than raising in the middle of a fetch.
+    wall clock is the only answer left. That context is refused downstream —
+    by the warm-up guard, which owns the empty-window case (the freshness
+    guard is vacuous there) — and it stays buildable so the refusal happens
+    where refusals are read rather than in the middle of a fetch.
 
     Its own function because the caller that fetches the candles needs the
-    SAME instant before the context exists: :mod:`..engine_bridge` judges the
-    research signal's freshness against it. Written out twice, the two could
-    drift — most easily on the no-candles branch, where one side would take
-    the wall clock and the other would have nothing.
+    same instant before the context exists: :mod:`..engine_bridge` judges the
+    research signal's freshness against it. What the two share is the RULE,
+    not the reading — the bridge calls this and so does the builder, so on the
+    no-candles branch their two wall-clock readings are milliseconds apart.
+    That is also why the bridge does not load a signal at all without candles:
+    the freshness bound is defined against a CLOSED BAR, and with no bar there
+    is nothing to judge against.
     """
     if candles:
         as_of_ms = candles[-1].close_time

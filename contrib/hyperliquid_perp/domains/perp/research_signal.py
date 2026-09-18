@@ -40,15 +40,30 @@ __all__ = ["MAX_SIGNAL_AGE_INTERVALS", "load_research_signal"]
 _MS_PER_HOUR = 3_600_000
 
 # How many of the DOCUMENT's own bars old the signal may be before it is
-# refused. Two rather than one: the producer is an out-of-band command, so the
-# newest bar it saw is at best the one this run is looking at and at worst the
-# one before it, and a bound of one would refuse a perfectly current document
-# whenever the producer happened to run a few minutes before a bar closed. Two
-# is also what an operator schedules against — at the project's 4h research
-# bars the producer must run at least every 8 hours or the section disappears
-# — which is why the number is stated in SETUP rather than left to be inferred
-# from a WARNING.
+# refused.
+#
+# NOT "because the producer may be one bar behind": the bound is a strict
+# ``>``, so one bar behind is accepted at a bound of one, and a comment
+# claiming otherwise was refuted by a probe in review. The reason for two is
+# tolerance for a SKIPPED producer run — one missed cron firing (or one that
+# overran its interval) still leaves the section standing — and for a research
+# interval finer than this run's candle interval, where several research bars
+# close between two of this run's.
+#
+# It is also what an operator schedules against: at the project's 4h research
+# bars the producer must run at least every 8 hours or the section disappears.
+# That is why the number is stated in SETUP and printed by the producer, and
+# why the producer BORROWS it from here rather than restating it.
 MAX_SIGNAL_AGE_INTERVALS = 2
+
+# What ``_read_document`` returns when it has already logged the refusal. A
+# private sentinel rather than ``None``, because ``None`` is also what
+# ``json.loads`` returns for a document holding ``null`` — and that document
+# has a named refusal waiting for it in ``ResearchSignal.from_document`` ("a
+# research signal document is a JSON object, got NoneType"). Sharing the two
+# meanings suppressed it: a four-byte file made the section vanish with no log
+# line at all, which is the one outcome this module's whole design forbids.
+_UNREAD = object()
 
 
 def load_research_signal(
@@ -61,7 +76,8 @@ def load_research_signal(
     document is judged against the market this prompt describes rather than
     against the host's clock. Same discipline as the freshness guard, for the
     same reason: measured against a host clock, a window a slow host cut looks
-    current.
+    current. The one caller only reaches here with candles in hand, so
+    ``as_of_ms`` is always a venue bar close and never a wall-clock reading.
 
     ``candle_interval_ms`` is THIS run's candle interval, and it bounds the
     future side. A closed bar cannot be newer than "now", and "now" is less
@@ -75,7 +91,7 @@ def load_research_signal(
     this run's.
     """
     document = _read_document(path)
-    if document is None:
+    if document is _UNREAD:
         return None
     try:
         signal = ResearchSignal.from_document(document)
@@ -120,50 +136,75 @@ def load_research_signal(
     return signal
 
 
-def _read_document(path: str) -> object | None:
-    """The decoded JSON at ``path``, or ``None`` with one WARNING.
+def _read_document(path: str) -> object:
+    """The decoded JSON at ``path``, or :data:`_UNREAD` with one WARNING.
 
-    ``~`` is expanded, and the messages print the path as it was LOOKED FOR
-    rather than as it was configured: an operator who wrote ``~/signal.json``
-    and an operator whose relative path resolved against a working directory
-    they did not expect both need to see where the daemon actually went.
+    Every message prints the path RESOLVED — ``~`` expanded and made absolute
+    — rather than as it was configured. A relative path is the case that needs
+    it: the producer's cron and the daemon's unit can be started from
+    different working directories, and two processes then disagree about one
+    string with nothing in either message able to say so.
+
+    The three ``except`` clauses are wider than the obvious ones on purpose,
+    because this runs inside a decision cycle and anything that escapes fails
+    the CYCLE rather than the section — a pre-LLM failure that repeats until a
+    human intervenes, with an open position left to its stops. Each was
+    checked against what the library actually raises rather than against what
+    it is usually described as raising.
     """
-    resolved = Path(path).expanduser()
+    try:
+        # Inside the try: ``expanduser`` raises ``RuntimeError`` — not
+        # ``OSError`` — when there is no home directory to expand against (a
+        # Windows service account with no ``USERPROFILE``, or ``~someuser``
+        # for a user not in passwd), and SETUP invites ``~`` paths.
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.warning(
+            "research signal path %r could not be resolved, so the prompt omits the section: %s",
+            path,
+            exc,
+        )
+        return _UNREAD
     try:
         text = resolved.read_text(encoding="utf-8")
     except OSError as exc:
         # Missing is the ordinary case on the day the switch is turned on and
-        # the producer has not run yet. Unreadable, a directory, and a bad
-        # encoding share this sentence because the answer is the same: the
-        # section is omitted, and the operator is told where it looked.
+        # the producer has not run yet. Unreadable, a directory, and a path
+        # the OS refuses outright (an embedded NUL) share this sentence
+        # because the answer is the same: the section is omitted, and the
+        # operator is told where it looked.
         logger.warning(
             "research signal document %s could not be read, so the prompt omits the section: %s",
             resolved,
             exc,
         )
-        return None
-    except ValueError as exc:
-        # A file that is not UTF-8 at all. Separate from OSError because
-        # ``read_text`` raises this one from the decoder, and it is not an
-        # ``OSError``, so it would otherwise escape this reader entirely and
-        # fail the cycle rather than the section.
+        return _UNREAD
+    except UnicodeDecodeError as exc:
+        # Raised by the decoder, and it is a ``ValueError``, not an
+        # ``OSError`` — so it needs its own clause or it escapes this reader
+        # entirely and fails the cycle rather than the section.
         logger.warning(
             "research signal document %s is not UTF-8 text, so the prompt omits the section: %s",
             resolved,
             exc,
         )
-        return None
+        return _UNREAD
     try:
         return json.loads(text)
-    except json.JSONDecodeError as exc:
-        # A half-written file is the expected shape of this failure, and it
-        # should be unreachable: the producer writes a temporary file and
-        # renames it into place, which is atomic on both platforms this runs
-        # on. Reaching here means that rule was broken somewhere, which is
-        # worth more to an operator than a bare parse error.
+    except (ValueError, RecursionError) as exc:
+        # ``ValueError``, not ``json.JSONDecodeError``: the scanner also
+        # raises a BARE ``ValueError`` for an integer literal past
+        # ``sys.get_int_max_str_digits()`` (4300 digits), and ``RecursionError``
+        # for nesting past the interpreter's limit. Neither is a
+        # ``JSONDecodeError``, and both are reachable by pointing the switch
+        # at the wrong JSON file — a store dump, an export — which is an
+        # operator mistake, not a defect, and must cost the section rather
+        # than the cycle. (``schema.epoch_ms_out_of_range`` already defends
+        # the digit limit at the DTO; this is the same bound at the parse.)
         logger.warning(
-            "research signal document %s is not valid JSON, so the prompt omits the section: %s",
+            "research signal document %s could not be decoded as JSON, so the prompt omits the "
+            "section: %s",
             resolved,
             exc,
         )
-        return None
+        return _UNREAD

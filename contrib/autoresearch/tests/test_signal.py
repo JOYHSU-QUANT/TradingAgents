@@ -23,6 +23,7 @@ import pytest
 
 from contrib.autoresearch import evaluator as evaluator_module
 from contrib.autoresearch.cli import main
+from contrib.autoresearch.costs import CostModel, FillRole
 from contrib.autoresearch.dsl import Side, parse_spec
 from contrib.autoresearch.ledger import Ledger
 from contrib.autoresearch.metrics import Tally
@@ -48,6 +49,7 @@ from contrib.autoresearch.upstream import (
 # the contract test's other half: what is written here has to satisfy the
 # module the daemon calls, not a local restatement of its rules.
 from contrib.hyperliquid_perp.domains.perp.research_signal import load_research_signal
+from contrib.hyperliquid_perp.domains.perp.schema import MAX_RESEARCH_TEXT_CHARS
 
 from .test_research import _BUY, _fill, _open
 
@@ -62,7 +64,10 @@ def promoted_store(tmp_path_factory):
     with ResearchStore(path) as store:
         ledger = Ledger(store)
         _fill(store)
-        experiment = _open(ledger)
+        # Maker fills: plan §7 makes that the precondition for publishing at
+        # all and ``build_signal`` enforces it, so the ordinary fixture is a
+        # maker experiment and the taker case gets its own test.
+        experiment = _open(ledger, costs=CostModel(fill_role=FillRole.MAKER))
         measurement = measure(ledger, experiment, parse_spec(_BUY))
         assert measurement.verdict.eligible, measurement.verdict.blockers
         promote(ledger, experiment, measurement.trial.trial_id)
@@ -182,7 +187,7 @@ def test_the_bias_is_the_side_the_replay_ended_on_from_the_experiments_first_bar
     assert signal.bias is {
         Side.LONG: ResearchBias.LONG,
         Side.SHORT: ResearchBias.SHORT,
-        None: ResearchBias.NEUTRAL,
+        None: ResearchBias.FLAT,
     }[seen["replayed"].side]
 
 
@@ -237,6 +242,52 @@ def test_the_latest_promotion_is_the_one_that_speaks(ledger):
 
 
 # -- what it refuses --------------------------------------------------------
+
+
+def test_a_rule_scored_under_taker_fills_is_not_published_without_being_asked(tmp_path):
+    # Plan §7's standing precondition, as a guard rather than as prose: run 5
+    # moved the paper lane to maker fills, so a rule selected against taker
+    # costs was chosen under a cost model the account no longer pays. The
+    # escape hatch is explicit rather than implied.
+    with ResearchStore(tmp_path / "taker.sqlite") as store:
+        ledger = Ledger(store)
+        _fill(store)
+        experiment = _open(ledger, costs=CostModel(fill_role=FillRole.TAKER))
+        measurement = measure(ledger, experiment, parse_spec(_BUY))
+        promote(ledger, experiment, measurement.trial.trial_id)
+        with pytest.raises(SignalError, match="scored its trials under taker fills"):
+            build_signal(ledger, "BTC")
+        signal, _experiment, _trial = build_signal(ledger, "BTC", allow_taker=True)
+        assert signal.bias in set(ResearchBias)
+
+
+def test_a_replay_that_could_not_be_asked_about_some_bars_is_refused(ledger, monkeypatch):
+    # The freeze, refused: a rule that cannot read its features does not go
+    # flat, it holds whatever side it was on and can neither exit nor reverse.
+    # By the newest bar the data can be back, so the last-bar flag is clear
+    # while the published side is one the rule left weeks ago.
+    original = evaluator_module.replay_position
+
+    def frozen(spec, frame, costs, *, since_ms):
+        return dataclasses.replace(
+            original(spec, frame, costs, since_ms=since_ms), replayed_bars_unevaluable=180
+        )
+
+    monkeypatch.setattr(evaluator_module, "replay_position", frozen)
+    with pytest.raises(SignalError, match="could not be evaluated on 180 of the bars"):
+        build_signal(ledger, "BTC")
+
+
+def test_a_rule_id_cannot_overflow_the_bound_the_reader_enforces(ledger):
+    # There is no producer-side length check because none can be reached: the
+    # ledger caps an experiment name at 64 characters and a trial id is a
+    # small integer, so ``<experiment>#<trial>`` is far inside the reader's
+    # bound on a rendered field. Pinned as arithmetic rather than left as a
+    # belief — if either cap moves, this is what goes red.
+    experiment, trial = ledger.latest_promotion("BTC")
+    assert len(f"{'e' * 64}#{trial.trial_id}") < MAX_RESEARCH_TEXT_CHARS
+    signal, _experiment, _trial = build_signal(ledger, "BTC")
+    assert signal.strategy_id == f"{experiment.experiment_id}#{trial.trial_id}"
 
 
 def test_a_store_with_no_promotion_has_nothing_to_tell_the_live_path(bare):
@@ -341,7 +392,7 @@ def test_the_command_writes_the_document_and_names_the_cost_model(promoted_store
     # promoted rules were scored under MAKER fills, and only the experiment
     # knows; the command says it every run rather than leaving it to be
     # looked up.
-    assert "scored under: taker fills" in printed
+    assert "scored under: maker fills" in printed
     assert str(out) in printed
     assert ResearchSignal.from_document(json.loads(out.read_text(encoding="utf-8")))
 

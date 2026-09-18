@@ -875,10 +875,14 @@ def test_the_research_signal_section_prints_every_field_it_was_given():
     block = _signal_block(render_market_context(_ctx(research_signal=_signal())))
     assert block.startswith("Research signal (rule btc-4h#7,")
     assert "4h bars" in block
-    assert "next bar open: long" in block
+    assert "Side the rule holds after its latest bar: long" in block
     assert "selected on: medium" in block
     assert "same window: moderate" in block
-    assert "90 days it was selected on, then 30 days held back" in block
+    # The two bands come from the SELECTION window only, so the line naming
+    # them may not lump the held-back window in beside it — a reader would add
+    # the two up into one span.
+    assert "Window the two bands were cut from: 90 days." in block
+    assert "A further 30 days were held back from the search and measured once" in block
     assert "Notes: held-back window, measured once: net return positive" in block
 
 
@@ -923,6 +927,19 @@ def test_the_research_signal_section_says_it_feeds_no_gate_and_came_from_elsewhe
     basis = next(line for line in block.split("\n") if line.strip().startswith("Basis:"))
     assert "not on the candles above" in basis
     assert "Nothing in this section feeds the risk checks" in basis
+    # The fill rule belongs HERE, as the derivation it is. The side line must
+    # not assert it as an event: most of the time nothing is filled, because
+    # the rule is continuing a side it already held — and when the side is
+    # flat there is nothing to fill at all.
+    assert "decides at a bar's close and is priced as filling at the next bar's open" in basis
+
+
+def test_the_side_line_does_not_assert_a_fill_that_may_never_happen():
+    for bias in ("long", "short", "flat"):
+        block = _signal_block(render_market_context(_ctx(research_signal=_signal(bias=bias))))
+        side_line = next(line for line in block.split("\n") if "Side the rule holds" in line)
+        assert side_line.endswith(f": {bias}")
+        assert "filled" not in side_line
 
 
 def test_the_research_signal_section_sits_between_the_profile_and_the_position():

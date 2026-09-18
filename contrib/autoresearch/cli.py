@@ -926,19 +926,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (
-        StoreError,
-        ExchangeError,
-        HypothesistError,
-        LedgerError,
-        OSError,
-        ValueError,
-    ) as exc:
+    except (StoreError, ExchangeError, HypothesistError, LedgerError, ValueError) as exc:
         # The families a well-formed invocation can still meet: this store
         # cannot be operated on, the venue failed, the model seam failed, the
-        # ledger refused, a path could not be written (``signal --out`` on a
-        # full or read-only filesystem, or naming a directory), or an argument
-        # named a window, a spec or a split that is not one. Each
+        # ledger refused, or an argument named a window, a spec or a split that
+        # is not one. Each
         # already carries a sentence written for an operator, so it is printed
         # as-is rather than wrapped.
         print(f"error: {exc}", file=sys.stderr)

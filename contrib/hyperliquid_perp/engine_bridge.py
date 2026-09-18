@@ -315,15 +315,17 @@ def _build_context(
             as_of_ms=as_of_ms,
             candle_interval_ms=interval_to_ms(market_data.candle_interval),
         )
-    # A refresh after it, like every blocking read above. The comment this
-    # replaces argued the read costs the kill switch nothing because it is
-    # "local disk, no network" — but the path comes from YAML and is
-    # deliberately not validated at load, so an operator sharing the
-    # producer's output between two hosts over NFS or SMB puts an untimed
-    # blocking read on the single-threaded tick, charged to the same
-    # unrefreshed budget as a REST call. Blowing that budget lets the
-    # exchange-side dead man's switch cancel an open position's stops while
-    # the process is alive and healthy. One call closes it and costs nothing.
+    # A refresh, for the same reason every blocking read above gets one.
+    # UNCONDITIONAL even though the read above is not: a refresh nobody needed
+    # is free (the hook reaches the wire only when one is due), and a missing
+    # one is not. The read it protects looks local, and an earlier comment
+    # argued from that — "local disk, no network, so it costs the kill switch
+    # nothing". But the path comes from YAML and is deliberately not validated
+    # at load, so an operator sharing the producer's output between two hosts
+    # over NFS or SMB puts an untimed blocking read on the single-threaded
+    # tick, charged to the same unrefreshed budget as a REST call. Blowing
+    # that budget lets the exchange-side dead man's switch cancel an open
+    # position's stops while the process is alive and healthy.
     _between_reads()
 
     ctx = build_market_context(

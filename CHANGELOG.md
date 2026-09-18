@@ -124,22 +124,26 @@ Breaking changes within the 0.x line are called out explicitly.
   `ValueError` for an integer literal past the interpreter's 4300-digit limit
   and `RecursionError` for deep nesting, neither of which is a
   `JSONDecodeError`; `Path.expanduser` raises `RuntimeError` with no home to
-  expand against; and `read_text` raises `UnicodeDecodeError`, which is not an
-  `OSError`. A document holding the JSON literal `null` gets its own named
+  expand against; `read_text` raises `UnicodeDecodeError`, which is not an
+  `OSError`; and both `Path.resolve` and `open` raise `ValueError` for a path
+  holding an embedded NUL, which a double-quoted YAML string can carry. A document holding the JSON literal `null` gets its own named
   refusal rather than vanishing silently - `None` was both "already warned" and
   a legal decode, and the collision suppressed the message. Paths are resolved
   before they are printed, so a relative path started from two different working
   directories can be seen to be two different files.
 
-  The producer refuses rather than softening: no promoted rule, a store with
-  holes, a newest bar that left the rule unasked, ANY bar in the replay that did
-  (a rule that cannot read its features does not go flat, it freezes on the side
-  it held and can neither exit nor reverse - a month of missing settlements
-  under a rule that exits on funding therefore publishes a side it left weeks
-  ago, which the newest bar alone cannot show), and - plan §7's standing
-  precondition, now a guard rather than three paragraphs of prose - an
-  experiment scored under TAKER fills, which `--allow-taker` overrides
-  explicitly.
+  The producer refuses rather than softening: no promoted rule, a store whose
+  bars or daily backdrop have holes, a newest bar that left the rule unasked,
+  and - plan §7's standing precondition, now a guard rather than three
+  paragraphs of prose - an experiment scored under TAKER fills, which
+  `--allow-taker` overrides explicitly. A rule the replay could not ask on
+  EARLIER bars is REPORTED, not refused: it freezes on the side it held and can
+  neither exit nor reverse, so a long run of missing settlements can publish a
+  side it left weeks ago - but `require_clean_history` tolerates funding holes
+  by name and the promote gate does not blame a trial for unevaluable bars, so
+  refusing on one of them would be stricter than the promotion that produced
+  the trial, and would name a remedy (fetch the missing settlement) that cannot
+  be performed.
 
   New pieces: `evaluator.replay_position` (the scored loop flattens at its
   window's last bar and never decides there - a signal wants exactly that

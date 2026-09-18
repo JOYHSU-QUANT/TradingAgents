@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import shutil
 
 import pytest
@@ -25,9 +26,10 @@ from contrib.autoresearch import evaluator as evaluator_module
 from contrib.autoresearch.cli import main
 from contrib.autoresearch.costs import CostModel, FillRole
 from contrib.autoresearch.dsl import Side, parse_spec
-from contrib.autoresearch.ledger import Ledger
+from contrib.autoresearch.evaluator import load_bundle
+from contrib.autoresearch.ledger import _EXPERIMENT_ID, Ledger
 from contrib.autoresearch.metrics import Tally
-from contrib.autoresearch.research import measure, promote
+from contrib.autoresearch.research import measure, promote, require_clean_history
 from contrib.autoresearch.signal import (
     CONFIDENCE_EDGES,
     DRAWDOWN_EDGES,
@@ -51,7 +53,15 @@ from contrib.autoresearch.upstream import (
 from contrib.hyperliquid_perp.domains.perp.research_signal import load_research_signal
 from contrib.hyperliquid_perp.domains.perp.schema import MAX_RESEARCH_TEXT_CHARS
 
-from .test_research import _BUY, _fill, _open
+from .test_research import _BUY, _SIZING, _fill, _open
+
+# A rule that READS FUNDING, so a gap in the settlements leaves bars the rule
+# cannot be asked about. ``_BUY`` reads only the close and could never show it.
+_FUNDING_RULE = {
+    "family": "breakout",
+    "entry": {"long": [{"left": "funding_rate", "op": ">", "right": -1}]},
+    "sizing": _SIZING,
+}
 
 _MS_PER_4H = 4 * 60 * 60_000
 _MS_PER_DAY = 24 * 60 * 60_000
@@ -261,31 +271,47 @@ def test_a_rule_scored_under_taker_fills_is_not_published_without_being_asked(tm
         assert signal.bias in set(ResearchBias)
 
 
-def test_a_replay_that_could_not_be_asked_about_some_bars_is_refused(ledger, monkeypatch):
-    # The freeze, refused: a rule that cannot read its features does not go
-    # flat, it holds whatever side it was on and can neither exit nor reverse.
-    # By the newest bar the data can be back, so the last-bar flag is clear
-    # while the published side is one the rule left weeks ago.
-    original = evaluator_module.replay_position
-
-    def frozen(spec, frame, costs, *, since_ms):
-        return dataclasses.replace(
-            original(spec, frame, costs, since_ms=since_ms), replayed_bars_unevaluable=180
+def test_a_funding_hole_this_package_tolerates_is_reported_rather_than_refused(tmp_path, caplog):
+    # The guard this replaced refused on a SINGLE unevaluable bar, which
+    # ``require_clean_history`` calls healthy by name ("the venue skips a
+    # settlement now and then") and which the promote gate does not blame a
+    # trial for. That made the command unusable on a store the package had
+    # already promoted from, with a remedy — fetch the missing settlement —
+    # that cannot be performed. Driven from a REAL gapped store here, which is
+    # what would have caught it the first time.
+    with ResearchStore(tmp_path / "gapped.sqlite") as store:
+        ledger = Ledger(store)
+        _fill(store)
+        experiment = _open(ledger, costs=CostModel(fill_role=FillRole.MAKER))
+        measurement = measure(ledger, experiment, parse_spec(_FUNDING_RULE))
+        assert measurement.verdict.eligible, measurement.verdict.blockers
+        promote(ledger, experiment, measurement.trial.trial_id)
+        # A day of settlements removed from inside the replay span, AFTER the
+        # promotion, so the trial's own filed figures are untouched.
+        start = experiment.split.validation.start_ms
+        store.conn.execute(
+            "DELETE FROM funding WHERE coin = 'BTC' AND time BETWEEN ? AND ?",
+            (start, start + 24 * 60 * 60_000),
         )
-
-    monkeypatch.setattr(evaluator_module, "replay_position", frozen)
-    with pytest.raises(SignalError, match="could not be evaluated on 180 of the bars"):
-        build_signal(ledger, "BTC")
+        # The store is still one this package will measure on...
+        assert require_clean_history(load_bundle(store, coin="BTC", interval="4h"), "4h") > 0
+        # ...so the command publishes, and says what it saw.
+        with caplog.at_level(logging.WARNING):
+            signal, _experiment, _trial = build_signal(ledger, "BTC")
+    assert signal.bias in set(ResearchBias)
+    assert "could not be evaluated on" in caplog.text
 
 
 def test_a_rule_id_cannot_overflow_the_bound_the_reader_enforces(ledger):
     # There is no producer-side length check because none can be reached: the
-    # ledger caps an experiment name at 64 characters and a trial id is a
-    # small integer, so ``<experiment>#<trial>`` is far inside the reader's
-    # bound on a rendered field. Pinned as arithmetic rather than left as a
-    # belief — if either cap moves, this is what goes red.
+    # ledger caps an experiment name and a trial id is a small integer, so
+    # ``<experiment>#<trial>`` is far inside the reader's bound on a rendered
+    # field. Pinned as arithmetic against the CAP ITSELF rather than against a
+    # copy of the number: a copy would keep this green while the real cap
+    # moved past the bound, which is the failure it claims to catch.
     experiment, trial = ledger.latest_promotion("BTC")
-    assert len(f"{'e' * 64}#{trial.trial_id}") < MAX_RESEARCH_TEXT_CHARS
+    longest_name = "e" * _EXPERIMENT_ID.match("e" * 4096).end()
+    assert len(f"{longest_name}#{trial.trial_id}") < MAX_RESEARCH_TEXT_CHARS
     signal, _experiment, _trial = build_signal(ledger, "BTC")
     assert signal.strategy_id == f"{experiment.experiment_id}#{trial.trial_id}"
 
@@ -373,7 +399,12 @@ def test_a_failed_write_leaves_no_temporary_beside_the_document(ledger, tmp_path
         raise OSError("the rename failed")
 
     monkeypatch.setattr("contrib.autoresearch.signal.os.replace", refuse)
-    with pytest.raises(OSError, match="the rename failed"):
+    # Named here rather than left as a bare errno: the CLI's refusal family
+    # promises every member carries a sentence written for an operator, and an
+    # errno naming a temporary file does not. (Putting ``OSError`` in that
+    # family instead would have swallowed ``requests``' exceptions, which ARE
+    # ``OSError``s, under ``fetch`` and ``research``.)
+    with pytest.raises(SignalError, match=r"could not write the handoff document to .*--out"):
         write_signal(tmp_path / "signal.json", signal)
     assert not (tmp_path / "signal.json").exists()
     assert [path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")] == []

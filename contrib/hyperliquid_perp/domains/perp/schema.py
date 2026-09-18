@@ -1378,7 +1378,17 @@ class PerpMarketContext:
                 f"{self.prev_day_price})",
             )
             object.__setattr__(self, "day_change_pct", claimed)
-        if self.research_signal is not None and self.research_signal.coin != self.coin:
+        if (
+            self.research_signal is not None
+            # Both sides normalised, because only ONE of them normalises
+            # itself: ``ResearchSignal.coin`` is stripped and upper-cased at
+            # construction, while this field is only checked non-blank.
+            # Comparing them raw would refuse a context for "btc" carrying its
+            # own "BTC" document — a refusal on SPELLING, from the guard whose
+            # whole point is identity, and on exactly the hand-built paths it
+            # exists for.
+            and self.research_signal.coin != self.coin.strip().upper()
+        ):
             # The one relational fact about the research signal that does not
             # need a clock, so it belongs here rather than in the reader. The
             # reader does check it, but the reader is not the only way a

@@ -90,14 +90,16 @@ def load_research_signal(
     because "too old" is a statement about the producer's cadence, not about
     this run's.
     """
-    document = _read_document(path)
+    resolved, document = _read_document(path)
     if document is _UNREAD:
         return None
     try:
         signal = ResearchSignal.from_document(document)
     except ValueError as exc:
         logger.warning(
-            "research signal at %s was refused, so the prompt omits the section: %s", path, exc
+            "research signal at %s was refused, so the prompt omits the section: %s",
+            resolved,
+            exc,
         )
         return None
 
@@ -105,7 +107,7 @@ def load_research_signal(
         logger.warning(
             "research signal at %s is for %s and this run trades %s, so the prompt omits the "
             "section",
-            path,
+            resolved,
             signal.coin,
             coin,
         )
@@ -118,7 +120,7 @@ def load_research_signal(
             "research signal at %s was decided %.1fh before this context's own bar, past the "
             "%d x %s bound, so the prompt omits the section — re-run the research radar's "
             "`signal` command",
-            path,
+            resolved,
             age_ms / _MS_PER_HOUR,
             MAX_SIGNAL_AGE_INTERVALS,
             signal.interval,
@@ -129,82 +131,87 @@ def load_research_signal(
             "research signal at %s is stamped %.1fh AFTER this context's own bar, which no "
             "closed bar of the same market can be, so the prompt omits the section — check the "
             "clock on the host that wrote it",
-            path,
+            resolved,
             -age_ms / _MS_PER_HOUR,
         )
         return None
     return signal
 
 
-def _read_document(path: str) -> object:
-    """The decoded JSON at ``path``, or :data:`_UNREAD` with one WARNING.
+def _read_document(path: str) -> tuple[object, object]:
+    """``(shown, decoded)`` — ``decoded`` is :data:`_UNREAD` after one WARNING.
 
-    Every message prints the path RESOLVED — ``~`` expanded and made absolute
-    — rather than as it was configured. A relative path is the case that needs
-    it: the producer's cron and the daemon's unit can be started from
-    different working directories, and two processes then disagree about one
-    string with nothing in either message able to say so.
+    ``shown`` is the path every message should print: ``~`` expanded and made
+    absolute, or the configured string when even that could not be worked out.
+    A relative path is the case that needs it — the producer's cron and the
+    daemon's unit can start from different working directories, and the two
+    then disagree about one string with nothing in either message able to say
+    so — and it is RETURNED rather than recomputed, so the caller's four
+    refusals name the same place these do.
 
-    The three ``except`` clauses are wider than the obvious ones on purpose,
-    because this runs inside a decision cycle and anything that escapes fails
-    the CYCLE rather than the section — a pre-LLM failure that repeats until a
-    human intervenes, with an open position left to its stops. Each was
-    checked against what the library actually raises rather than against what
-    it is usually described as raising.
+    The ``except`` clauses are wider than the obvious ones on purpose: this
+    runs inside a decision cycle, and anything that escapes fails the CYCLE
+    rather than the section — a pre-LLM failure that repeats until a human
+    intervenes, with an open position left to its stops. Each is written
+    against what the library actually raises, which is not always what it is
+    described as raising:
+
+    - ``expanduser`` raises ``RuntimeError`` with no home directory to expand
+      against (a service account with no ``USERPROFILE``, or ``~someuser`` for
+      a user not in passwd), and SETUP invites ``~`` paths;
+    - both ``resolve()`` and ``open()`` raise ``ValueError`` — not
+      ``OSError`` — for a path holding an embedded NUL, which a
+      double-quoted YAML string can carry;
+    - ``read_text`` raises ``UnicodeDecodeError`` from the decoder, which is a
+      ``ValueError`` and not an ``OSError``;
+    - ``json.loads`` raises a bare ``ValueError`` for an integer literal past
+      ``sys.get_int_max_str_digits()`` and ``RecursionError`` for deep
+      nesting, neither of them a ``JSONDecodeError``.
     """
     try:
-        # Inside the try: ``expanduser`` raises ``RuntimeError`` — not
-        # ``OSError`` — when there is no home directory to expand against (a
-        # Windows service account with no ``USERPROFILE``, or ``~someuser``
-        # for a user not in passwd), and SETUP invites ``~`` paths.
         resolved = Path(path).expanduser().resolve()
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         logger.warning(
             "research signal path %r could not be resolved, so the prompt omits the section: %s",
             path,
             exc,
         )
-        return _UNREAD
+        return path, _UNREAD
     try:
         text = resolved.read_text(encoding="utf-8")
-    except OSError as exc:
-        # Missing is the ordinary case on the day the switch is turned on and
-        # the producer has not run yet. Unreadable, a directory, and a path
-        # the OS refuses outright (an embedded NUL) share this sentence
-        # because the answer is the same: the section is omitted, and the
-        # operator is told where it looked.
-        logger.warning(
-            "research signal document %s could not be read, so the prompt omits the section: %s",
-            resolved,
-            exc,
-        )
-        return _UNREAD
     except UnicodeDecodeError as exc:
-        # Raised by the decoder, and it is a ``ValueError``, not an
-        # ``OSError`` — so it needs its own clause or it escapes this reader
-        # entirely and fails the cycle rather than the section.
+        # FIRST, because ``UnicodeDecodeError`` is a ``ValueError`` and would
+        # otherwise land in the clause below under the wrong sentence.
         logger.warning(
             "research signal document %s is not UTF-8 text, so the prompt omits the section: %s",
             resolved,
             exc,
         )
-        return _UNREAD
+        return resolved, _UNREAD
+    except (OSError, ValueError) as exc:
+        # Missing is the ordinary case on the day the switch is turned on and
+        # the producer has not run yet; unreadable, a directory, and a path
+        # the OS refuses outright share the sentence because the answer is the
+        # same: the section is omitted, and the operator is told where it
+        # looked.
+        logger.warning(
+            "research signal document %s could not be read, so the prompt omits the section: %s",
+            resolved,
+            exc,
+        )
+        return resolved, _UNREAD
     try:
-        return json.loads(text)
+        return resolved, json.loads(text)
     except (ValueError, RecursionError) as exc:
-        # ``ValueError``, not ``json.JSONDecodeError``: the scanner also
-        # raises a BARE ``ValueError`` for an integer literal past
-        # ``sys.get_int_max_str_digits()`` (4300 digits), and ``RecursionError``
-        # for nesting past the interpreter's limit. Neither is a
-        # ``JSONDecodeError``, and both are reachable by pointing the switch
-        # at the wrong JSON file — a store dump, an export — which is an
-        # operator mistake, not a defect, and must cost the section rather
-        # than the cycle. (``schema.epoch_ms_out_of_range`` already defends
-        # the digit limit at the DTO; this is the same bound at the parse.)
+        # Both are reachable by pointing the switch at the wrong JSON file — a
+        # store dump, an export — which is an operator mistake, not a defect,
+        # and must cost the section rather than the cycle.
+        # (``schema.epoch_ms_out_of_range`` already defends the digit limit at
+        # the DTO; this is the same bound at the parse.)
         logger.warning(
             "research signal document %s could not be decoded as JSON, so the prompt omits the "
             "section: %s",
             resolved,
             exc,
         )
-        return _UNREAD
+        return resolved, _UNREAD

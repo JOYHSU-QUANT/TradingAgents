@@ -33,6 +33,7 @@ green.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Final
@@ -59,6 +60,9 @@ __all__ = [
     "describe_signal",
     "write_signal",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 class SignalError(ValueError):
@@ -186,20 +190,33 @@ def build_signal(
             f"missing history (`fetch`, then `gaps`) and run this again"
         )
     if replay.replayed_bars_unevaluable:
-        # Not a lesser version of the check above. A rule that cannot be
-        # evaluated does not go flat, it FREEZES on whatever side it held,
-        # unable to exit or reverse until its features come back. A month of
-        # missing settlements under a rule that exits on ``funding_zscore``
-        # therefore publishes a side the rule left long ago — and the newest
-        # bar alone cannot see it, because by then the data is back. The scan
-        # above cannot see it either: it only counts funding holes.
-        raise SignalError(
-            f"trial #{trial.trial_id}'s rule could not be evaluated on "
-            f"{replay.replayed_bars_unevaluable} of the bars replayed since "
-            f"{from_epoch_ms(experiment.split.train.start_ms).isoformat()}, where it held "
-            f"whatever side it was already on instead of deciding — so today's side is not the "
-            f"one a complete history would give. Fill the gaps (`fetch`, then `gaps`) and run "
-            f"this again"
+        # REPORTED, not refused — and the difference was learned in review. A
+        # rule that cannot be evaluated does not go flat, it FREEZES on
+        # whatever side it held, so a long run of missing settlements under a
+        # rule that exits on funding can publish a side the rule left weeks
+        # ago, which the newest bar alone cannot show. That hazard is real.
+        #
+        # But a threshold of "any bar at all", over a span that is usually the
+        # whole store, refuses a store this package defines as HEALTHY:
+        # ``require_clean_history`` tolerates funding holes by name ("the
+        # venue skips a settlement now and then, and a store refused for it
+        # would be unmeasurable"), the promote gate has no blocker on
+        # unevaluable bars, and the scored windows print them as a note. A
+        # guard stricter than the promotion that produced the trial makes this
+        # command unusable — and the remedy it would name is impossible, since
+        # ``fetch`` cannot invent a settlement the venue never posted.
+        #
+        # So the operator is told, and the one refusal kept is the one that
+        # matches what the document actually CLAIMS: that the side is the one
+        # the rule holds after its LATEST bar's decision.
+        logger.warning(
+            "trial #%s's rule could not be evaluated on %d of the bars replayed since %s, "
+            "where it held whatever side it was already on instead of deciding. A few are "
+            "settlements the venue skipped; a long run is a gap worth filling (`fetch`, then "
+            "`gaps`) before today's side is trusted",
+            trial.trial_id,
+            replay.replayed_bars_unevaluable,
+            from_epoch_ms(experiment.split.train.start_ms).isoformat(),
         )
 
     return (
@@ -244,8 +261,20 @@ def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
     temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     body = json.dumps(signal.to_document(), indent=2, sort_keys=True, allow_nan=False)
     try:
-        temporary.write_text(body + "\n", encoding="utf-8")
-        os.replace(temporary, target)
+        try:
+            temporary.write_text(body + "\n", encoding="utf-8")
+            os.replace(temporary, target)
+        except OSError as exc:
+            # Named HERE, the way ``cli._read_spec`` names a spec it cannot
+            # open, rather than by adding ``OSError`` to the CLI's refusal
+            # family. That family's rule is that every member already carries
+            # a sentence written for an operator, and a bare errno naming a
+            # temporary file does not. Worse, ``requests``' exceptions ARE
+            # ``OSError``s, so a blanket catch would print a transport defect
+            # as an operator refusal under ``fetch`` and ``research`` too.
+            raise SignalError(
+                f"could not write the handoff document to {target} (--out): {exc}"
+            ) from exc
     finally:
         # A failed write leaves no litter beside the document the daemon reads.
         temporary.unlink(missing_ok=True)
@@ -287,7 +316,6 @@ def _bias(side: Side | None) -> ResearchBias:
     if side is None:
         return ResearchBias.FLAT
     return ResearchBias.LONG if side is Side.LONG else ResearchBias.SHORT
-
 
 
 def _band(value, edges, bands):

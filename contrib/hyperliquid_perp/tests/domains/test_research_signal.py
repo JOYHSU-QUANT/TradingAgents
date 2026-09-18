@@ -306,6 +306,16 @@ def test_a_tilde_in_the_path_is_expanded_and_the_warning_names_where_it_looked(
     assert "~" not in caplog.text
 
 
+def test_a_path_the_os_refuses_outright_costs_the_section_not_the_cycle(caplog):
+    # An embedded NUL makes both ``resolve()`` and ``open()`` raise
+    # ``ValueError`` — not ``OSError`` — so narrowing these clauses to the
+    # "obvious" exception types put it back on the cycle for one round. A
+    # double-quoted YAML string can carry one.
+    assert _load("signal\x00.json", caplog) is None
+    assert len(caplog.records) == 1
+    assert "could not be resolved" in caplog.text
+
+
 def test_a_home_that_cannot_be_resolved_costs_the_section_not_the_cycle(caplog, monkeypatch):
     # ``expanduser`` raises ``RuntimeError`` — not ``OSError``, not
     # ``ValueError`` — when there is no home to expand against: a Windows

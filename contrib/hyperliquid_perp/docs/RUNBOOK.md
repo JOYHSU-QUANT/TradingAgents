@@ -189,6 +189,13 @@ payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的
 `common/prompt_regime.py` 一個渲染函式，同一個字串可以 grep），改 YAML 後部署前就能看到會落在哪個
 桶——但注意它印的 `context_shape` **少一段**：prompt v4 起 paper／live daemon 的列一律多帶 `|position`
 （倉位段從本地帳本來，一次性 CLI 沒有帳本、維持 position-blind），比對時把這一段補上再比。
+**還有第二種會少的段，而且這一種不是固定的**（issue #276）：`autoresearch` token 在不在，取決於交接
+文件在**跑這個指令的那台機器上**存不存在、夠不夠新。拿筆電對著伺服器的 config 跑，會印出沒有那一段的
+shape，而 daemon 印的是有的那一個——`|position` 你知道要補回去，這一種你不會知道要補。所以開關有值而
+那一段沒進到渲染裡時，`prompt_regime:` **底下會多印一行 `note: …`** 說明這件事（另起一行、不動上面
+那一行，因為三處共用同一個渲染函式、同一個字串要能 grep 是紀律）；同一次執行的 stderr 還會有一句具名
+WARNING 說是哪一種拒絕（檔案不在、過期、幣別不符、讀不出來）。沒有那行 `note:` 就代表這一段沒有疑慮：
+不是開關關著，就是那一段真的渲染進去了。
 **daemon 自己也會說**（issue #163）：paper／live 第一個組出 prompt 並寫下 payload 的 cycle 會在 log 印
 同一行 `prompt_regime: …`（INFO，`cli._provider`），之後**只在三鍵翻桶時再印一次、仍是 INFO**——volume
 profile 段因歷史不夠被跳過、倉位段因權益 ≤ 0 被省略（見 §7）都算翻桶，多半是資料驅動、不是告警；一整段
@@ -243,6 +250,32 @@ drift。任一側 parser 讀不了（例如 genesis 帶著已改名的舊 key）
 執行期跳過（歷史不夠、零寬度、零成交量，各有一行 WARNING），那個 cycle 會落在「沒有 volume
 profile 段」的 shape——這是真的少了一段，不是假訊號；判讀時對照 WARNING 把它們併回去。
 （伺服器上跑著的 run 不受影響：`local.yaml` 整檔優先且不進版控，不會自動拿到這個 key。）
+
+**`context_shape` 只回答「那一段在不在」，回答不了「模型有沒有跟著它走」。** 這是 shape 的設計，
+不是缺陷——bias 怎麼變都不進 shape，否則每次 radar 翻邊就會多切一個桶。但 run 6 要問的正是後者，
+所以 **schema v13 起 `ai_inputs` 多兩欄**（issue #276）：**`autoresearch_bias`**（那個 cycle 印給
+模型的是哪一邊：`long`／`short`／`flat`）與 **`autoresearch_strategy_id`**（那是哪一條規則，
+`<experiment_id>#<trial_id>`——radar 會在 run 中途 promote 新規則，沒有這一欄兩條規則的 cycle 會
+加總成同一個分不開的數字）。兩欄都取自**渲染那份 prompt 的同一個 context**，所以描述的是模型真的
+看到的那一段，不是事後再讀一次交接文件（那時 radar 可能已經覆寫）；兩欄一起 export 進
+`ai_inputs.csv`（排在 `format_fingerprint` 之後）。「模型跟著 bias 走了嗎」現在是一句 SQL：
+
+```sql
+-- 每個 (規則, bias) 桶底下，模型要的目標方向怎麼分佈。
+-- 只算跑到決策的 cycle；ai_outputs.target_side 是 gate 之後的方向。
+SELECT i.autoresearch_strategy_id, i.autoresearch_bias, o.target_side, COUNT(*) AS cycles
+  FROM ai_inputs i JOIN ai_outputs o ON o.input_id = i.input_id
+ WHERE i.run_id = 'paper-BTC-6' AND i.autoresearch_bias IS NOT NULL
+ GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+```
+
+**空值有兩個意思，用 `context_shape` 分辨**：shape 有 `autoresearch` 而這兩欄是空的＝那一列寫在
+v13 之前（歷史，不是「沒有這一段」）；shape 沒有 `autoresearch`＝那個 cycle 真的沒有這一段。
+所以上面那句 SQL 的 `IS NOT NULL` 過濾掉的是兩種列，判讀時分母要自己決定算哪一種。
+**部署帶 migration，換 schema 前先備份 DB。** 不是怕資料壞——這次是 `ALTER TABLE` 加兩個 nullable
+欄，既有列全部維持有效。**備份保的是「退得回去」這個選項**：v13 的 build 開過的 store，只認得 v12 的
+checkout 會**整個拒絕開啟**（`store schema is vN but this build only knows vM`，連唯讀指令都拒），
+所以一旦升上去，要退回舊 binary 就只剩還原備份這條路。這與 #239 那次 migration 是同一條規矩。
 
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被

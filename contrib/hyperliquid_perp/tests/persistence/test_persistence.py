@@ -106,6 +106,42 @@ def test_v11_adds_a_nullable_format_fingerprint_and_indexes_fills_by_run_and_tim
     db.close()
 
 
+def test_audit_rows_docstring_counts_the_columns_it_actually_writes(tmp_path):
+    # ``audit_rows`` opens by saying how wide the two rows it assembles are.
+    # That number is a constant copied into prose, so it rots the way every
+    # such number does: it read 37 while the table already had 38, because a
+    # migration added a column and the sentence was not part of the diff.
+    # Pinned here for the same reason the volume-profile floor is pinned —
+    # nothing else makes a stale doc fail.
+    import re
+
+    from contrib.hyperliquid_perp.persistence import audit_rows
+
+    db = Database(tmp_path / "p.db")
+    actual = {
+        table: len(list(db.conn.execute(f"PRAGMA table_info({table})")))
+        for table in ("ai_inputs", "ai_outputs")
+    }
+    db.close()
+    claimed = dict(re.findall(r"``(ai_\w+)`` \((\d+) columns\)", audit_rows.__doc__))
+    assert {t: int(n) for t, n in claimed.items()} == actual
+
+
+def test_v13_adds_the_two_nullable_research_signal_columns_to_ai_inputs(tmp_path):
+    # Issue #276: WHICH rule and WHICH side the research section carried, so
+    # "did the decision follow the bias" is a query rather than a walk over
+    # the payload files. Nullable for the v10/v11 reason AND one more: a NULL
+    # is also how a cycle whose prompt had no such section reads, which is
+    # legal and common (the switch is off by default). ``context_shape`` is
+    # what tells those two NULLs apart — see the v13 comment in schema.py.
+    db = Database(tmp_path / "p.db")
+    cols = {row["name"]: row for row in db.conn.execute("PRAGMA table_info(ai_inputs)")}
+    for name in ("autoresearch_bias", "autoresearch_strategy_id"):
+        assert cols[name]["notnull"] == 0, name
+        assert cols[name]["type"] == "TEXT", name
+    db.close()
+
+
 _LEASE_READABLE_VERSIONS = list(range(LEASE_READABLE_SINCE, SCHEMA_VERSION + 1))
 
 

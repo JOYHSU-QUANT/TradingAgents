@@ -908,6 +908,84 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
     # The two pre-#163 lines are gone, not duplicated: one grammar to grep.
     assert "context_shape: " not in captured.out
     assert "format_fingerprint: " not in captured.out
+    # With the research switch empty there is nothing this lane's shape can
+    # disagree with the daemon about beyond the documented |position, so no
+    # note (issue #276 — its own tests below).
+    assert "autoresearch_signal names a document" not in captured.out
+
+
+def _context_only_out(monkeypatch, capsys, *, signal_path, research_signal):
+    """``--context-only`` on a healthy context; returns its stdout lines."""
+    ctx = SimpleNamespace(
+        candle_count=200,
+        indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
+        candle_interval="4h",
+        exchange_time=None,
+        as_of=datetime.now(timezone.utc),
+        research_signal=research_signal,
+    )
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
+    monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
+    monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
+    monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
+    config = {"market_data": {"autoresearch_signal": signal_path}}
+    assert main_mod.run_context_only(config, "BTC") == 0
+    return capsys.readouterr().out.splitlines()
+
+
+def test_context_only_says_when_its_shape_can_disagree_with_the_daemons(monkeypatch, capsys):
+    # Issue #276: this command exists to show which bucket a YAML edit lands
+    # in BEFORE deploying it, and on this one key it can answer differently
+    # from the daemon — the ``autoresearch`` token depends on a document being
+    # present and fresh on whichever host runs the command. A laptop pointed
+    # at the server's config would otherwise print the no-signal shape with
+    # nothing on the line saying the server will print the other one.
+    lines = _context_only_out(
+        monkeypatch, capsys, signal_path="/srv/research/btc-signal.json", research_signal=None
+    )
+    note = next(line for line in lines if line.startswith("note: "))
+    assert "autoresearch_signal names a document" in note
+    assert "`autoresearch` token" in note
+    assert "THIS host" in note
+    # Its OWN line. The three surfaces that print ``prompt_regime:`` share one
+    # renderer so the same string greps across all of them (RUNBOOK §4), and a
+    # caveat spliced into that line would end that — so the regime line has to
+    # still be byte-identical to the one the renderer produces.
+    from contrib.hyperliquid_perp.common.prompt_regime import PROMPT_VERSION, prompt_regime_line
+    from contrib.hyperliquid_perp.domains.perp import risk_gate
+    from contrib.hyperliquid_perp.domains.perp.target_decision import (
+        decision_format_instructions,
+        format_fingerprint,
+    )
+
+    risk_cfg, decision_cfg = bridge_mod._load_risk_decision({})
+    fingerprint = format_fingerprint(
+        decision_format_instructions(
+            decision_cfg,
+            max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
+        )
+    )
+    regime = prompt_regime_line(PROMPT_VERSION, "shape text", fingerprint)
+    assert regime in lines
+    assert lines.index(note) == lines.index(regime) + 1  # under it, not inside it
+
+
+@pytest.mark.parametrize(
+    ("signal_path", "research_signal", "why"),
+    [
+        ("", None, "switch off: there is no document for the two hosts to disagree about"),
+        ("/srv/research/btc-signal.json", object(), "the section IS in this render, token and all"),
+    ],
+)
+def test_context_only_stays_quiet_when_the_shape_cannot_be_wrong(
+    monkeypatch, capsys, signal_path, research_signal, why
+):
+    # The note is a claim about a specific disagreement; printed on a run that
+    # cannot have one it would be noise on the lane an operator trusts most.
+    lines = _context_only_out(
+        monkeypatch, capsys, signal_path=signal_path, research_signal=research_signal
+    )
+    assert not [line for line in lines if line.startswith("note: ")], why
 
 
 def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):

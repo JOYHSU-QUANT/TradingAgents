@@ -38,6 +38,7 @@ from . import engine_bridge
 from .audit.decision_log import log_target_decision
 from .config import dotenv_diagnosis, load_dotenv_files, wallet_address
 from .domains.perp import context_guards, risk_gate
+from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.prompt_context import context_shape, render_market_context
 from .domains.perp.target_decision import (
     decision_format_instructions,
@@ -112,7 +113,8 @@ def run_context_only(config: dict, coin: str) -> int:
     # ``|autoresearch`` too: that token appears only if the handoff document
     # exists and is fresh on THIS host, so a laptop run against a server's
     # config prints the no-signal shape while the daemon prints the other.
-    # The same run's ``research signal …`` WARNING on stderr says which.
+    # That second case says so in its own note under the line (below), on top
+    # of the ``research signal …`` WARNING the same run puts on stderr.
     # The fingerprint is over the
     # same block run_engine feeds the model (effective ceiling included), so
     # a grid or ceiling edit shows its new value here. A gate-threshold edit
@@ -134,6 +136,34 @@ def run_context_only(config: dict, coin: str) -> int:
             ),
         )
     )
+    # The one way this lane's shape can differ from the daemon's for a reason
+    # that is NOT this lane's own documented position-blindness (issue #276).
+    # ``|position`` is always absent here and an operator who read RUNBOOK §4
+    # knows to add it back; the research section is the opposite — whether its
+    # token is there depends on a file on the host this command runs on, so a
+    # laptop pointed at the server's YAML prints a shape the server will never
+    # write, with nothing on the line itself saying so.
+    #
+    # Its OWN line, never appended to the one above: the three surfaces that
+    # print ``prompt_regime:`` share one renderer precisely so the same string
+    # can be grepped across the daemon's log, ``validate`` and here (RUNBOOK
+    # §4), and a caveat spliced into it would end that.
+    #
+    # Said only when the switch names a document and the section did not make
+    # it into the render — the case where the printed shape is the one that
+    # can be wrong. With the switch empty there is nothing to disagree about,
+    # and a cycle that DID get the section printed the token. Which refusal it
+    # was (missing, stale, wrong coin, unreadable) is on stderr already, one
+    # named WARNING per cause, from ``load_research_signal``.
+    market_data = MarketDataConfig.from_dict(config.get("market_data"))
+    if market_data.autoresearch_signal and ctx.research_signal is None:
+        print(
+            "note: market_data.autoresearch_signal names a document but this run "
+            "carries no research signal, so the context_shape above has no "
+            "`autoresearch` token — see the research signal warning on stderr. "
+            "That is a fact about THIS host: the daemon reads the document on "
+            "its own machine and can land in the other bucket."
+        )
 
     # Keyless diagnostic loop: render rather than abort, but warn with the same
     # shared guard the trading paths refuse on — a refused context *looks* like

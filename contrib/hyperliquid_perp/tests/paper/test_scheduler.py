@@ -1449,3 +1449,123 @@ def test_ai_input_reports_open_position_and_active_plan(tmp_path):
     assert D(inp["configured_leverage"]) == D(5)
     assert D(inp["max_target_margin_pct"]) == D(60)
     db.close()
+
+
+# --------------------------------------------------------------------------
+# ai_inputs and the research-signal section (schema v13, issue #276)
+# --------------------------------------------------------------------------
+
+
+def _research_signal(**overrides):
+    from contrib.hyperliquid_perp.domains.perp.schema import ResearchSignal
+
+    base = {
+        "coin": "BTC",
+        "interval": "4h",
+        "as_of_ms": 1_704_182_399_999,
+        "strategy_id": "btc-4h#7",
+        "bias": "short",
+        "confidence": "medium",
+        "drawdown": "moderate",
+        "eval_window_days": 90,
+        "holdout_window_days": 30,
+        "notes": "held-back window, measured once: net return positive",
+    }
+    base.update(overrides)
+    return ResearchSignal(**base)
+
+
+def _cycle_with_context(tmp_path, name, ctx):
+    """Run ONE completed paper cycle whose provider hands back ``ctx``.
+
+    The provider stamps the three segmentation keys the way the real one does,
+    with the shape computed from this very context — the stored row then holds
+    BOTH halves of the pairing the disambiguation rule rests on (RUNBOOK §4:
+    a NULL bias under an ``autoresearch`` shape is pre-v13 history, under any
+    other shape it is a cycle that had no section), so a test can check them
+    against each other instead of against the context it already has.
+    """
+    from contrib.hyperliquid_perp.domains.perp.prompt_context import context_shape
+
+    class _Provider(_FakeProvider):
+        def build_input(self, *, coin, as_of):
+            self.build_calls += 1
+            return DecisionInput(
+                context=ctx,
+                prompt_version="v1",
+                context_shape=context_shape(ctx),
+                format_fingerprint="97aa0feaa4496d6f",
+            )
+
+    db = Database(tmp_path / name)
+    accounting.initialize_run(
+        db, run_id="r", mode="paper", initial_balance_usdc=D(1000), schema_version=1
+    )
+    clock = ManualClock(_T0)
+    asset = AssetSpec(
+        coin="BTC",
+        sz_decimals=3,
+        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+    )
+    risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
+    scheduler = PaperScheduler(
+        db=db,
+        run_id="r",
+        engine=PaperExecutionEngine(
+            db=db,
+            run_id="r",
+            asset=asset,
+            clock=clock,
+            provider=ScriptedSnapshotProvider("BTC", [_snap()]),
+            risk_config=risk,
+            decision_config=DecisionConfig(),
+            paper_config=PaperTradingConfig.from_dict(None),
+        ),
+        clock=clock,
+        provider=_Provider([_decision("long", 5)]),
+        asset=asset,
+        risk_config=risk,
+        decision_config=DecisionConfig(),
+    )
+    result = scheduler.poll()
+    assert result is not None and result.event is CycleEvent.COMPLETED
+    return db, db.conn.execute("SELECT * FROM ai_inputs WHERE run_id = 'r'").fetchone()
+
+
+def test_ai_input_records_the_rule_and_side_the_prompt_actually_printed(tmp_path):
+    # Issue #276: before v13 the store remembered only THAT the section was
+    # there (the ``autoresearch`` token in ``context_shape``), so "did the
+    # decision follow the side the rule held" meant opening one payload file
+    # per cycle. These two columns make it a query.
+    import dataclasses
+
+    from contrib.hyperliquid_perp.domains.perp.prompt_context import render_market_context
+
+    ctx = dataclasses.replace(_ctx(_T0), research_signal=_research_signal())
+    db, inp = _cycle_with_context(tmp_path, "s-signal.db", ctx)
+    # Compared against the RENDERED lines rather than against the literals the
+    # signal was built from: a column that disagreed with the words the model
+    # read would be worse than no column, and a literal on both sides of the
+    # assertion cannot catch that.
+    rendered = render_market_context(ctx).splitlines()
+    side_line = next(line for line in rendered if "Side the rule holds" in line)
+    assert side_line.endswith(f": {inp['autoresearch_bias']}")
+    header = next(line for line in rendered if line.startswith("Research signal ("))
+    assert f"rule {inp['autoresearch_strategy_id']}," in header
+    # ...and the ROW agrees with its own shape — read back off the same row,
+    # not recomputed from the context this test already holds. The token says
+    # the section was there, so neither column may be NULL; that pairing is
+    # what lets a reader tell a pre-v13 NULL apart from a no-section NULL.
+    assert "autoresearch" in inp["context_shape"]
+    db.close()
+
+
+def test_ai_input_leaves_both_research_columns_null_when_the_prompt_had_no_section(tmp_path):
+    # The common case — the switch is off by default, so most rows look like
+    # this. The NULL here means "no section in this cycle's prompt", and the
+    # row's own ``context_shape`` is what separates it from a pre-v13 NULL.
+    db, inp = _cycle_with_context(tmp_path, "s-nosignal.db", _ctx(_T0))
+    assert inp["autoresearch_bias"] is None
+    assert inp["autoresearch_strategy_id"] is None
+    assert "autoresearch" not in inp["context_shape"]
+    db.close()

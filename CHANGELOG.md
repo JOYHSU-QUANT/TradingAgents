@@ -84,6 +84,49 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Which rule and which side the research block carried, as two queryable
+  columns (schema v13, #276)** - the follow-up PR #275 left for the run-6
+  segment decision. Before this the store remembered only THAT the section was
+  in a cycle's prompt: the `autoresearch` token in `ai_inputs.context_shape`.
+  The question run 6 exists to answer is the other one - given the cycles whose
+  section said `long`, did the decisions lean long - and answering it meant
+  opening one payload JSON per cycle, which is not a measurement anyone runs.
+
+  `ai_inputs.autoresearch_bias` is the side the rule held (`long` / `short` /
+  `flat`), the same word the prompt's own line printed.
+  `ai_inputs.autoresearch_strategy_id` is which rule that was
+  (`<experiment_id>#<trial_id>`): not redundant with the bias, because the
+  radar can promote a new rule mid-run and without it two rules' cycles add up
+  into one indistinguishable number. Both are exported, after the documented
+  `ai_inputs.csv` prefix. RUNBOOK §4 carries the query they exist for.
+
+  Both are read off the SAME `PerpMarketContext` the prompt was rendered from,
+  never a second read of the handoff document - by the time the row is written
+  the radar may have rewritten it, and a column that disagrees with the words
+  the model saw is worse than no column.
+
+  NULLABLE, and the NULL is genuinely two-valued: "this cycle's prompt had no
+  such section" (the common case - the switch is off by default) and "written
+  before v13" read the same in the cell. `context_shape` is what tells them
+  apart, and every row this build writes carries both halves. Deploying this
+  runs a migration, so back the DB up first, per the v12 precedent.
+
+- **`--context-only` says when its `context_shape` can disagree with the
+  daemon's (#276)** - that command exists to show which segmentation bucket a
+  YAML edit lands in BEFORE deploying it, and on one key it could answer
+  differently from the daemon without saying so: the `autoresearch` token
+  appears only if the handoff document is present and fresh on the host running
+  the command, so a laptop pointed at the server's config printed the no-signal
+  shape while the server prints the other. An operator knows to add `|position`
+  back; there was nothing telling them about this one.
+
+  When the switch names a document and the section did not reach the render, a
+  `note:` line now follows the `prompt_regime:` line. Its OWN line, never
+  spliced into that one: the daemon log, `validate` and this command share one
+  renderer precisely so the same string greps across all three (RUNBOOK §4).
+  Silent otherwise - with the switch off there is nothing to disagree about,
+  and a cycle that got the section printed the token.
+
 - **autoresearch -> perp: one qualitative research block in the prompt, off by
   default (plan C1)** - the research radar's only output into the live path.
   `python -m contrib.autoresearch signal --coin BTC --out <path>` takes the

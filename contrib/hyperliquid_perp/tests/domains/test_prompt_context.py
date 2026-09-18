@@ -859,6 +859,23 @@ def _signal_block(text: str) -> str:
     return rest if end < 0 else rest[:end]
 
 
+def test_a_context_refuses_a_signal_for_another_market():
+    # The one relational fact that needs no clock, so it is the DTO's rather
+    # than the reader's: the reader is not the only way a context is built,
+    # and one carrying another coin's rule would print an ETH side under a BTC
+    # mark with every bounds check green.
+    with pytest.raises(ValueError, match="must not print another market's rule"):
+        _ctx(research_signal=_signal(coin="ETH"))
+
+
+@pytest.mark.parametrize("spelling", ["BTC", "btc", " BTC "])
+def test_a_context_accepts_its_own_market_however_the_caller_spelled_it(spelling):
+    # ``ResearchSignal.coin`` normalises itself and this field does not, so
+    # the guard compares normalised forms — otherwise it would refuse on
+    # SPELLING, from the check whose whole point is identity.
+    assert _ctx(coin=spelling, research_signal=_signal()).research_signal is not None
+
+
 def test_the_research_signal_section_is_absent_when_the_signal_is():
     text = render_market_context(_ctx())
     assert "Research signal" not in text

@@ -291,7 +291,7 @@ def test_a_funding_hole_this_package_tolerates_is_reported_rather_than_refused(t
         start = experiment.split.validation.start_ms
         store.conn.execute(
             "DELETE FROM funding WHERE coin = 'BTC' AND time BETWEEN ? AND ?",
-            (start, start + 24 * 60 * 60_000),
+            (start, start + _MS_PER_DAY),
         )
         # The store is still one this package will measure on...
         assert require_clean_history(load_bundle(store, coin="BTC", interval="4h"), "4h") > 0
@@ -390,6 +390,23 @@ def test_the_document_is_written_atomically_and_leaves_nothing_behind(ledger, tm
     target = write_signal(tmp_path / "nested" / "signal.json", signal)
     assert [path.name for path in sorted(target.parent.iterdir())] == ["signal.json"]
     assert ResearchSignal.from_document(json.loads(target.read_text(encoding="utf-8"))) == signal
+
+
+def test_an_out_path_whose_parent_cannot_be_made_is_refused_by_name(ledger, tmp_path, capsys):
+    # The likeliest operator mistake this command has — `--out` under a
+    # directory the cron user cannot create — and for one round it escaped as
+    # a bare traceback, because the wrap covered only the write and the
+    # rename while the CLI's refusal family no longer covered OSError. Driven
+    # through main(), which is where the exit-code contract lives.
+    blocker = tmp_path / "notadir"
+    blocker.write_text("i am a file", encoding="utf-8")
+    signal, _experiment, _trial = build_signal(ledger, "BTC")
+    with pytest.raises(SignalError, match="could not write the handoff document to"):
+        write_signal(blocker / "under" / "signal.json", signal)
+    assert main(
+        ["signal", "--db", str(ledger.store.path), "--out", str(blocker / "under" / "s.json")]
+    ) == 1
+    assert "could not write the handoff document to" in capsys.readouterr().err
 
 
 def test_a_failed_write_leaves_no_temporary_beside_the_document(ledger, tmp_path, monkeypatch):

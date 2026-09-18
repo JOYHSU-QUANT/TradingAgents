@@ -103,9 +103,15 @@ def load_research_signal(
         )
         return None
 
-    if signal.coin != coin:
+    # Normalised on BOTH sides, and this is the lane that actually runs:
+    # ``ResearchSignal.coin`` is stripped and upper-cased at construction
+    # while the run's is whatever the config named, and ``_resolve_coin``
+    # upper-cases without stripping — so ``coins: [" btc "]`` would otherwise
+    # mismatch its own document every cycle. ``%r`` on both, because the two
+    # spellings in that message are indistinguishable printed bare.
+    if signal.coin != coin.strip().upper():
         logger.warning(
-            "research signal at %s is for %s and this run trades %s, so the prompt omits the "
+            "research signal at %s is for %r and this run trades %r, so the prompt omits the "
             "section",
             resolved,
             signal.coin,
@@ -160,8 +166,13 @@ def _read_document(path: str) -> tuple[object, object]:
       against (a service account with no ``USERPROFILE``, or ``~someuser`` for
       a user not in passwd), and SETUP invites ``~`` paths;
     - both ``resolve()`` and ``open()`` raise ``ValueError`` — not
-      ``OSError`` — for a path holding an embedded NUL, which a
-      double-quoted YAML string can carry;
+      ``OSError`` — for a path holding an embedded NUL, which a double-quoted
+      YAML string can carry. ``resolve()`` runs first, so it is the one that
+      answers in practice; the arm on the read is a backstop, kept so that
+      reordering the two steps cannot put a NUL back on the cycle;
+    - a file far larger than memory raises ``MemoryError`` from the read or
+      the decode, which is neither of those — and "the switch is pointed at
+      the wrong JSON file" is exactly the mistake that produces one;
     - ``read_text`` raises ``UnicodeDecodeError`` from the decoder, which is a
       ``ValueError`` and not an ``OSError``;
     - ``json.loads`` raises a bare ``ValueError`` for an integer literal past
@@ -188,7 +199,7 @@ def _read_document(path: str) -> tuple[object, object]:
             exc,
         )
         return resolved, _UNREAD
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, MemoryError) as exc:
         # Missing is the ordinary case on the day the switch is turned on and
         # the producer has not run yet; unreadable, a directory, and a path
         # the OS refuses outright share the sentence because the answer is the
@@ -202,7 +213,7 @@ def _read_document(path: str) -> tuple[object, object]:
         return resolved, _UNREAD
     try:
         return resolved, json.loads(text)
-    except (ValueError, RecursionError) as exc:
+    except (ValueError, RecursionError, MemoryError) as exc:
         # Both are reachable by pointing the switch at the wrong JSON file — a
         # store dump, an export — which is an operator mistake, not a defect,
         # and must cost the section rather than the cycle.

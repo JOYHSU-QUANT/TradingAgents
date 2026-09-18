@@ -1058,9 +1058,15 @@ class ReplayedPosition:
     the same happened somewhere in the replay, which for a rule with no exit
     is how a hole in the history freezes it on one side for a month. The
     scored loop counts such bars and carries on, because over a measured
-    window they are a property of the rule worth reporting; a signal read off
-    the newest bar wants the opposite, so
-    :func:`~contrib.autoresearch.signal.build_signal` refuses on either.
+    window they are a property of the rule worth reporting.
+    :func:`~contrib.autoresearch.signal.build_signal` REFUSES on
+    ``last_bar_unevaluable``, because that is the bar the published side
+    claims to have been decided at, and only REPORTS the span count, because
+    refusing on one of those would be stricter than the promote gate that
+    produced the trial (that function says why at length).
+
+    ``replayed_bars`` is the denominator, and it exists for that message: "6
+    bars" and "6 bars out of 4,000" ask the reader for different judgements.
 
     The counter is named for its SPAN. ``SegmentResult.bars_unevaluable``
     counts the same event over one scored window; this one counts it from the
@@ -1070,6 +1076,7 @@ class ReplayedPosition:
 
     side: Side | None
     last_close_time: int
+    replayed_bars: int
     replayed_bars_unevaluable: int
     last_bar_unevaluable: bool
 
@@ -1181,6 +1188,7 @@ def replay_position(
     return ReplayedPosition(
         side=side,
         last_close_time=bars[stop - 1].close_time,
+        replayed_bars=stop - first,
         replayed_bars_unevaluable=unevaluable,
         last_bar_unevaluable=last_bar_unevaluable,
     )

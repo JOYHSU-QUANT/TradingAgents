@@ -930,9 +930,13 @@ def main(argv: list[str] | None = None) -> int:
         # The families a well-formed invocation can still meet: this store
         # cannot be operated on, the venue failed, the model seam failed, the
         # ledger refused, or an argument named a window, a spec or a split that
-        # is not one. Each
-        # already carries a sentence written for an operator, so it is printed
-        # as-is rather than wrapped.
+        # is not one. Each already carries a sentence written for an operator,
+        # so it is printed as-is rather than wrapped. ``OSError`` is NOT on
+        # the list: ``requests``' exceptions are ``OSError``s, so admitting
+        # the family would print a transport defect under ``fetch`` or
+        # ``research`` as though it were an operator's mistake. The one
+        # command that writes a file names its own failure
+        # (``signal.write_signal``), the way ``_read_spec`` above does.
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except RuntimeError as exc:

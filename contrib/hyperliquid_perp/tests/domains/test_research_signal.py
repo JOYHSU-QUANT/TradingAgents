@@ -255,10 +255,25 @@ def test_a_document_the_contract_refuses_is_logged_and_dropped(tmp_path, caplog)
 
 def test_another_coins_document_is_not_read_as_this_ones(tmp_path, caplog):
     # One host can run the radar over several coins; pointing a BTC daemon at
-    # the ETH document must not print ETH's rule under a BTC prompt.
+    # the ETH document must not print ETH's rule under a BTC prompt. Both
+    # names are quoted, because the pair this check most often prints differ
+    # only in whitespace and would otherwise look identical.
     assert _load(_write(tmp_path, _document(coin="ETH")), caplog) is None
     assert len(caplog.records) == 1
-    assert "is for ETH and this run trades BTC" in caplog.text
+    assert "is for 'ETH' and this run trades 'BTC'" in caplog.text
+
+
+@pytest.mark.parametrize("configured", ["BTC", " BTC ", "btc", " btc"])
+def test_the_run_coin_is_normalised_the_way_the_document_normalises_its_own(
+    tmp_path, caplog, configured
+):
+    # ``ResearchSignal.coin`` is stripped and upper-cased at construction, and
+    # the run's is whatever the config named — ``_resolve_coin`` upper-cases
+    # without stripping. Comparing them raw made ``coins: [" btc "]`` miss its
+    # own document every cycle, which is the quietest failure in the design:
+    # one WARNING, and a section an operator switched on that never appears.
+    assert _load(_write(tmp_path, _document()), caplog, coin=configured) == _signal()
+    assert caplog.records == []
 
 
 def test_the_stale_bound_is_the_documents_own_interval(tmp_path, caplog):

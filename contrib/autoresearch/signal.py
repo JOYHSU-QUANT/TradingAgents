@@ -32,6 +32,7 @@ green.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -169,7 +170,8 @@ def build_signal(
     # side is path dependent, so a missing bar does not merely shorten the
     # history — it can silently change which side the rule is on today. Bar
     # and daily holes are refused by the scan; funding holes it only COUNTS,
-    # which is why the replay's own unevaluable count is checked below.
+    # and the replay's own unevaluable count is REPORTED below rather than
+    # refused on — the comment there says why that asymmetry is deliberate.
     #
     # Known cost, stated rather than fixed: the scan starts at the bundle's
     # first bar while the replay starts at the experiment's train start, so a
@@ -210,12 +212,14 @@ def build_signal(
         # matches what the document actually CLAIMS: that the side is the one
         # the rule holds after its LATEST bar's decision.
         logger.warning(
-            "trial #%s's rule could not be evaluated on %d of the bars replayed since %s, "
+            "trial #%s's rule could not be evaluated on %d of the %d %s bars replayed since %s, "
             "where it held whatever side it was already on instead of deciding. A few are "
             "settlements the venue skipped; a long run is a gap worth filling (`fetch`, then "
             "`gaps`) before today's side is trusted",
             trial.trial_id,
             replay.replayed_bars_unevaluable,
+            replay.replayed_bars,
+            interval,
             from_epoch_ms(experiment.split.train.start_ms).isoformat(),
         )
 
@@ -252,32 +256,47 @@ def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
     schedule: it must never be able to open a half-written document, because
     that costs a cycle its research section for no reason at all.
     """
-    target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # The pid is in the temporary name so two producers cannot overwrite each
-    # other's half-finished file. They can still race on the rename, and that
-    # is harmless: a rename either happened or did not, and both documents are
-    # complete and valid.
-    temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-    body = json.dumps(signal.to_document(), indent=2, sort_keys=True, allow_nan=False)
+    # EVERY step that can touch the filesystem is inside the one wrap,
+    # expanding the path and making the parent included. The obvious version
+    # of this — wrapping only the write and the rename — left the likeliest
+    # operator mistake of all escaping as a bare traceback: ``--out`` under a
+    # directory the cron user cannot create. The same commit that named this
+    # refusal also took ``OSError`` back out of the CLI's refusal family, so
+    # there was nothing behind it any more.
+    #
+    # Named HERE, the way ``cli._read_spec`` names a spec it cannot open,
+    # rather than by putting ``OSError`` in that family: the family's rule is
+    # that every member already carries a sentence written for an operator,
+    # and a bare errno naming a temporary file does not. Worse, ``requests``'
+    # exceptions ARE ``OSError``s, so a blanket catch would print a transport
+    # defect under ``fetch`` or ``research`` as though it were a mistake.
+    temporary = None
     try:
-        try:
-            temporary.write_text(body + "\n", encoding="utf-8")
-            os.replace(temporary, target)
-        except OSError as exc:
-            # Named HERE, the way ``cli._read_spec`` names a spec it cannot
-            # open, rather than by adding ``OSError`` to the CLI's refusal
-            # family. That family's rule is that every member already carries
-            # a sentence written for an operator, and a bare errno naming a
-            # temporary file does not. Worse, ``requests``' exceptions ARE
-            # ``OSError``s, so a blanket catch would print a transport defect
-            # as an operator refusal under ``fetch`` and ``research`` too.
-            raise SignalError(
-                f"could not write the handoff document to {target} (--out): {exc}"
-            ) from exc
+        # ``expanduser`` raises ``RuntimeError`` — not ``OSError`` — for
+        # ``~someuser`` with no such user, which is an operator's typo.
+        target = Path(path).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # The pid is in the temporary name so two producers cannot overwrite
+        # each other's half-finished file. They can still race on the rename,
+        # and that is harmless: a rename either happened or did not, and both
+        # documents are complete and valid.
+        temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        body = json.dumps(signal.to_document(), indent=2, sort_keys=True, allow_nan=False)
+        temporary.write_text(body + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SignalError(
+            f"could not write the handoff document to {_shown(path)} — check that --out names a "
+            f"writable path whose parent this user may create: {exc}"
+        ) from exc
     finally:
-        # A failed write leaves no litter beside the document the daemon reads.
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            # A failed write leaves no litter beside the document the daemon
+            # reads. Suppressed rather than raised: this runs on the way out
+            # of a failure, and an errno from the cleanup would replace the
+            # sentence saying what actually went wrong.
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
     return target
 
 
@@ -309,6 +328,21 @@ def describe_signal(signal: ResearchSignal, experiment: Experiment, trial: Trial
         f"schedule: the reader refuses a document older than {MAX_SIGNAL_AGE_INTERVALS} of its "
         f"own {signal.interval} bars, so run this at least that often",
     ]
+
+
+def _shown(path: str | Path) -> str:
+    """``path`` as the operator should see it: expanded and absolute if it can be.
+
+    The consumer half of this seam resolves before printing for the same
+    reason — a relative path started from two working directories is two
+    files — and it is worth as much here, because the producer's cron and the
+    daemon's unit are exactly the two processes that disagree. Falls back to
+    the configured string when resolving is itself what failed.
+    """
+    try:
+        return str(Path(path).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return repr(path)
 
 
 def _bias(side: Side | None) -> ResearchBias:

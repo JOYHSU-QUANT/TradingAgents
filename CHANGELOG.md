@@ -125,12 +125,21 @@ Breaking changes within the 0.x line are called out explicitly.
   and `RecursionError` for deep nesting, neither of which is a
   `JSONDecodeError`; `Path.expanduser` raises `RuntimeError` with no home to
   expand against; `read_text` raises `UnicodeDecodeError`, which is not an
-  `OSError`; and both `Path.resolve` and `open` raise `ValueError` for a path
-  holding an embedded NUL, which a double-quoted YAML string can carry. A document holding the JSON literal `null` gets its own named
-  refusal rather than vanishing silently - `None` was both "already warned" and
-  a legal decode, and the collision suppressed the message. Paths are resolved
-  before they are printed, so a relative path started from two different working
+  `OSError`; both `Path.resolve` and `open` raise `ValueError` for a path
+  holding an embedded NUL, which a double-quoted YAML string can carry; and a
+  file far larger than memory raises `MemoryError` from either the read or the
+  decode. A document holding the JSON literal `null` gets its own named refusal
+  rather than vanishing silently - `None` was both "already warned" and a legal
+  decode, and the collision suppressed the message. Paths are resolved before
+  they are printed, so a relative path started from two different working
   directories can be seen to be two different files.
+
+  The producer names its own write failure (`--out` under a directory the cron
+  user cannot create is its likeliest operator error) rather than putting
+  `OSError` in the CLI's refusal family, whose rule is that every member
+  already carries a sentence written for an operator: `requests`' exceptions
+  are `OSError`s, so admitting the family would print a transport defect under
+  `fetch` or `research` as though it were a mistake.
 
   The producer refuses rather than softening: no promoted rule, a store whose
   bars or daily backdrop have holes, a newest bar that left the rule unasked,

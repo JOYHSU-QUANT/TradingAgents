@@ -943,14 +943,14 @@ def _research_warning(err):
 
 
 @pytest.mark.parametrize(
-    ("research_signal", "landed", "promises_a_warning"),
+    ("research_signal", "landed", "token_clause", "promises_a_warning"),
     [
-        (None, "did NOT use one", True),
-        (object(), "DID use one", False),
+        (None, "did NOT use one", "has no `autoresearch` token", True),
+        (object(), "DID use one", "carries the `autoresearch` token", False),
     ],
 )
 def test_context_only_says_which_bucket_this_host_landed_in(
-    monkeypatch, capsys, research_signal, landed, promises_a_warning
+    monkeypatch, capsys, research_signal, landed, token_clause, promises_a_warning
 ):
     # Issue #276: this command exists to show which bucket a YAML edit lands
     # in BEFORE deploying it, and on this one key it can answer differently
@@ -972,12 +972,17 @@ def test_context_only_says_which_bucket_this_host_landed_in(
     assert warning is not None
     assert warning.startswith("warning: ")  # the prefix this lane already uses
     assert landed in warning
+    # The token clause has to track the bucket too, not just the DID/did-NOT
+    # half: a message reading "did NOT use one, so the shape carries the
+    # `autoresearch` token" contradicts itself, and pinning only the first
+    # half leaves that green (measured — it survived as a mutant).
+    assert token_clause in warning
     assert "THIS host" in warning
     # It must not promise a companion warning that may not exist: the bridge
     # skips the document read entirely on an empty candle window, so the same
     # None arrives with nothing logged. Only the missing-section direction may
     # point at one, and even then conditionally.
-    assert ("research signal" in warning.replace("autoresearch_signal", "")) is promises_a_warning
+    assert ("`research signal ...` warning" in warning) is promises_a_warning
     if promises_a_warning:
         assert "candle window was empty" in warning
     # On stderr, NOT stdout: this lane's documented use is grepping stdout, and

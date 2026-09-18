@@ -109,13 +109,13 @@ def run_context_only(config: dict, coin: str) -> int:
     # line the daemon logs at its first cycle and ``validate`` prints per
     # bucket (issue #163), minus the ``|position`` token this lane never
     # carries (no local books — RUNBOOK §4) and, once
-    # ``market_data.autoresearch_signal`` is on, possibly minus
-    # ``|autoresearch`` too: that token appears only if the handoff document
-    # exists and is fresh on THIS host, so a laptop run against a server's
-    # config prints the no-signal shape while the daemon prints the other.
-    # That second case says so in its own note under the line (below), on top
-    # of the ``research signal …`` WARNING the same run puts on stderr.
-    # The fingerprint is over the
+    # ``market_data.autoresearch_signal`` is on, possibly differing on
+    # ``|autoresearch`` too — in EITHER direction: that token tracks a handoff
+    # document on THIS host, so a laptop run against a server's config can
+    # print the no-signal shape while the daemon prints the other, or carry
+    # the token while the server's producer cron is dead. Whenever the switch
+    # names a document, the block below says on stderr which way this host
+    # answered. The fingerprint is over the
     # same block run_engine feeds the model (effective ceiling included), so
     # a grid or ceiling edit shows its new value here. A gate-threshold edit
     # does NOT (prompt v5 keeps those out of the text): that one needs a new
@@ -164,36 +164,40 @@ def run_context_only(config: dict, coin: str) -> int:
     # Its OWN line on stderr, never appended to ``prompt_regime:``: that line
     # has one renderer across the daemon's log, ``validate`` and here (RUNBOOK
     # §4) so the same string greps on all three, and a caveat spliced into it
-    # would end that. stderr because this lane's documented use is grepping
-    # stdout — a caveat that a pipe can separate from the thing it qualifies
-    # is the failure it exists to prevent — and because it then lands beside
+    # would end that. stderr because this lane prints its answer on stdout and
+    # that line exists to be grepped — a caveat a pipe can separate from the
+    # thing it qualifies is the failure it prevents — and because it lands beside
     # the ``research signal …`` WARNINGs it refers to. Same channel pair and
     # same ``warning:`` prefix as the degraded-context notice below, through
     # the one helper that keeps log and stderr from drifting apart.
     market_data = MarketDataConfig.from_dict(config.get("market_data"))
     if market_data.autoresearch_signal:
-        if ctx.research_signal is None:
-            landed = (
-                "this host did NOT use one, so the context_shape above has no "
-                "`autoresearch` token"
-            )
-            why = (
+        # ``used`` is the whole verdict and is what the LOG half carries: it
+        # must read correctly on its own, because the ``prompt_regime:`` line
+        # it would otherwise point at goes to stdout and never reaches the log
+        # stream. The "above" deixis therefore belongs only in the stderr
+        # sentence, where that line really is above — the same split the
+        # degraded-context call below makes for the same reason.
+        used = "DID" if ctx.research_signal is not None else "did NOT"
+        token = "carries the" if ctx.research_signal is not None else "has no"
+        why = (
+            ""
+            if ctx.research_signal is not None
+            else (
                 " A named `research signal ...` warning above says why — unless the "
                 "candle window was empty, in which case the document was never "
                 "consulted at all and no such warning exists."
             )
-        else:
-            landed = (
-                "this host DID use one, so the context_shape above carries the "
-                "`autoresearch` token"
-            )
-            why = ""
+        )
         engine_bridge._warn_dual(
-            "context_shape research section is host-local: %s",
-            landed,
+            "market_data.autoresearch_signal names a document and this host %s use one; "
+            "the research section is host-local, so the daemon can land in the other "
+            "prompt_regime bucket",
+            used,
             stderr=(
-                f"warning: market_data.autoresearch_signal names a document and {landed}. "
-                f"Whether that token appears is a fact about THIS host, so the daemon "
+                f"warning: market_data.autoresearch_signal names a document and this "
+                f"host {used} use one, so the context_shape above {token} "
+                f"`autoresearch` token. That is a fact about THIS host: the daemon "
                 f"reads the document on its own machine and can land in the other "
                 f"bucket.{why}"
             ),

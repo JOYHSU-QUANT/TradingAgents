@@ -87,9 +87,15 @@ def test_exports_all_eight_csvs_with_contract_headers(tmp_path):
     # they were added: the payload hash (v1), the prompt's shape (v10, issue
     # #97), the format block's fingerprint (v11, issue #129) and the research
     # section's two facts (v13, issue #276 — which rule the section named and
-    # which side it held). Pinning the TAIL is what keeps a new augmentation
-    # column from being inserted among the documented §5.2 columns and
-    # shifting them; this assertion does not itself enumerate that prefix.
+    # which side it held).
+    #
+    # This pins the TAIL only. It catches an augmentation column appended in
+    # the wrong order, dropped, or added without the export contract moving —
+    # nothing more. It does NOT pin the documented §5.2 prefix: reordering
+    # EXPORT_SPECS' spec columns keeps this file green (measured), because the
+    # header and the SELECT are both built from EXPORT_SPECS, so every
+    # assertion here is downstream of it. That prefix's order lives in
+    # phase2-data §5.2 and is unpinned by any test.
     with (out / "ai_inputs.csv").open(encoding="utf-8", newline="") as fh:
         ai_header = next(csv.reader(fh))
     assert ai_header[-5:] == [

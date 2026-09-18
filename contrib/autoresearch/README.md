@@ -61,7 +61,14 @@ B1 是計畫的 Phase B 完成點。**
   用同一個 parser 讀、同一個評估器打分，每個答案都記進 `proposals`——被拒絕的也記。
   見下面「假說迴圈」段。
 
-**還沒有的東西**（依計畫 §5 的順序）：context bridge（C1，排 run 6）。
+- **交接文件**（`signal.py`、`evaluator.replay_position`）：`signal` 指令把某個 coin
+  **最近一次 promote 的規則**重播到 store 裡最新一根，寫出一份只有定性帶的 JSON；
+  `hyperliquid_perp` 用標準函式庫讀它、當成 prompt 裡的一段 analyst 輸入，開關預設關。
+  見下面「交接文件」段。
+
+**還沒有的東西**：無——計畫 §5 的 A1–A4、B1、C1 都做完了。C1 的開關要不要在 paper
+翻開是部署節奏的決定（計畫 §7：run 5 換 maker 之後，promoted 規則要先在 maker 成本下
+重跑過），不是這個套件的事。
 
 ## 用法
 
@@ -118,6 +125,9 @@ python -m contrib.autoresearch research --experiment btc-4h \
 
 # 先看模型會拿到什麼：印出整份 prompt，不問任何模型、什麼都不記
 python -m contrib.autoresearch research --experiment btc-4h --dry-run
+
+# 把最近一次 promote 的規則寫成交接文件，給 hyperliquid_perp 的 prompt 讀
+python -m contrib.autoresearch signal --coin BTC --out /srv/autoresearch-signal.json
 ```
 
 ### 交易所只給得起這麼多歷史（2026-09-11 實測）
@@ -430,6 +440,41 @@ trial → 不管結果是什麼，都記成一列 `proposals`。
 exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本身就是輸入，parser 不收的 spec
 是不值得花一次 trial 的 spec，所以 exit 1。
 
+## 交接文件（C1）
+
+`signal` 是這個套件唯一會流回實盤路徑的東西，形狀刻意小：
+
+```json
+{
+  "document_version": 1, "coin": "BTC", "interval": "4h",
+  "as_of_ms": 1704182399999, "strategy_id": "btc-4h#7",
+  "bias": "long", "confidence": "medium", "drawdown": "moderate",
+  "eval_window_days": 90, "holdout_window_days": 30,
+  "notes": "held-back window, measured once: ..."
+}
+```
+
+幾條規則寫在這裡，因為讀的那一端查不到：
+
+- **只有定性帶**。Sharpe、drawdown、報酬、權益一個都不過河；帶是在這裡切的
+  （`CONFIDENCE_EDGES`、`DRAWDOWN_EDGES`），原始數字留在 ledger。prompt 會讓模型
+  錨定在它看到的數字上，而這些數字是在另一段歷史、另一個窗口上量的。
+- **`bias` 是規則自己的持倉，不是預測**。`replay_position` 把規則的**決策**從
+  experiment 的 train 起點重播到最新一根：`evaluate_segment` 在窗口最後一根不做決策
+  （那一筆會成交在下一個窗口的 bar），而訊號要的正是那個決策。重播不模擬權益、手續費
+  與 ruin——`_decide` 除了下單金額之外不讀權益，而金額不改變哪一邊觸發。
+- **日期是 bar，不是時鐘**。`as_of_ms` 是那根 bar 的收盤；讀的那端拿**自己**最新一根去比，
+  所以寫的主機時鐘飄了也不會讓過期文件看起來很新。過期上限是讀端的
+  `MAX_SIGNAL_AGE_INTERVALS`（借過來印，不另抄一份數字）。
+- **寧可拒絕也不給軟一點的答案**：沒有 promote 過的規則、store 有洞、最新一根讓規則
+  讀不到條件——三種都具名拒絕，不寫檔。文件存在＝寫的當下相信它；還新不新是讀端的問題。
+- 文件的欄位與詞彙**不在這裡定義**：`ResearchSignal` 從 `upstream.py` 借自會讀它的套件，
+  兩邊才不會各自釘自己那份而一起變綠。
+
+`signal` 會讀到 holdout 之後、一直到最新的 bar。這不是 holdout lock 的破口：lock 是為了
+「窗口的分數不能挑在後面窗口會用到的 bar 上」，而這裡什麼都不評分——帶是從 ledger 裡
+**當初在 lock 下量好的**數字切的；重播要 tail，只是因為持倉是路徑相依的。
+
 ## 對 `hyperliquid_perp` 的關係
 
 唯讀，而且只從一個地方借：[`upstream.py`](./upstream.py) 列出全部借用的名字
@@ -465,6 +510,13 @@ Hyperliquid SDK）。所以 `gaps`／`vocab`／`validate-spec` 三個指令一�
 - **gross 的分母是 net 權益路徑**：gross bar return＝該根價差損益／當時實際持有的權益，
   再複利。所以 `gross.total_return` 不等於各筆 `gross_pnl` 的總和；兩組指標同分母，
   差的只有成本項，這才是「gross 好看、net 不好看」要比的東西。
+- **交接文件的帶邊界是一個約定，不是量出來的**：`CONFIDENCE_EDGES`＝1.5／2.5、
+  `DRAWDOWN_EDGES`＝10%／25%，沒有對任何東西擬合過。下限刻意高於 promote 門檻
+  （`sharpe_base + k·ln(n)` 從 1.0 起跳且只會上升），所以 `weak` 的意思是「剛過門檻，
+  沒有更多」，而不是一個永遠不會出現的成員。
+- **重播不模擬權益，所以一條早就 ruin 的規則照樣報得出一邊**：帶是從 validation 切的，
+  而 promote 門檻已經擋掉 validation ruined 的 trial；validation 之後才爆掉的，這份文件
+  量不到。要量的話得在重播裡帶一整套會計，那就是第二個評估器了。
 - **`_notional` 的 `None` 分支實務上到不了**：`realized_vol_N` 只在 warm-up 是 `None`，而
   warm-up 在窗口第一根就被拒絕；留著是型別上的完整，不是行為。
 - **短於 `indicator_lookback` 根（預設 200）的 bundle，regime 分桶全記 `unlabelled`**：那是

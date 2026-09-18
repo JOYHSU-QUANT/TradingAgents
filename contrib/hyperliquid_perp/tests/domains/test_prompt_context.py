@@ -27,6 +27,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     MarketRegime,
     PerpMarketContext,
     ProfileShape,
+    ResearchSignal,
     VolumeProfile,
 )
 from contrib.hyperliquid_perp.domains.perp.volume_profile import compute_volume_profile
@@ -548,12 +549,17 @@ def _rendered_headers(text: str) -> list[str]:
 def _shape_name(header: str) -> str:
     if header.startswith("Volume profile ("):
         return "volume_profile"
+    if header.startswith("Research signal ("):
+        return "autoresearch"
     return _HEADER_TO_SHAPE[header]
 
 
 @pytest.mark.parametrize("position", [None, "flat", "open"])
+@pytest.mark.parametrize("with_signal", [False, True])
 @pytest.mark.parametrize("with_profile", [False, True])
-def test_context_shape_names_the_rendered_headers_in_order_both_ways(with_profile, position):
+def test_context_shape_names_the_rendered_headers_in_order_both_ways(
+    with_profile, with_signal, position
+):
     # The shape and the render are two functions with no code in common, so
     # this is the lock between them, in BOTH directions: every header the
     # render prints has a shape entry at the same position, and the shape
@@ -563,6 +569,8 @@ def test_context_shape_names_the_rendered_headers_in_order_both_ways(with_profil
     overrides = {}
     if with_profile:
         overrides["volume_profile"] = _profile()
+    if with_signal:
+        overrides["research_signal"] = _signal()
     if position == "flat":
         overrides["position"] = _flat_position()
     elif position == "open":
@@ -570,7 +578,7 @@ def test_context_shape_names_the_rendered_headers_in_order_both_ways(with_profil
     ctx = _ctx(**overrides)
     headers = _rendered_headers(render_market_context(ctx))
     assert headers[:4] == ["Price:", "Market:", "Funding:", "Indicators:"]
-    assert len(headers) == 4 + int(with_profile) + int(position is not None)
+    assert len(headers) == 4 + int(with_profile) + int(with_signal) + int(position is not None)
     parts = context_shape(ctx).split("|")
     assert [part.split("(")[0] for part in parts] == [_shape_name(h) for h in headers]
     # The indicator rows are the fixture's names, in the fixture's order.
@@ -813,3 +821,129 @@ def test_context_shape_follows_the_indicator_set_and_its_order():
     assert fewer == "price|market|funding|indicators(rsi_14,ema_20)"
     assert reordered == "price|market|funding|indicators(macd,rsi_14,ema_20)"
     assert len({base, fewer, reordered}) == 3
+
+
+# --------------------------------------------------------------------------
+# Research signal — the radar's one block (plan §7 / PR C1)
+# --------------------------------------------------------------------------
+
+# The close of a 4h bar, a millisecond short of the next open, the way the
+# venue stamps one. Deliberately NOT ``_AS_OF``: the section carries its own
+# vintage, and a fixture that shared the context's would hide a render reading
+# the wrong one.
+_SIGNAL_AS_OF_MS = 1_704_182_399_999
+
+
+def _signal(**overrides) -> ResearchSignal:
+    base = {
+        "coin": "BTC",
+        "interval": "4h",
+        "as_of_ms": _SIGNAL_AS_OF_MS,
+        "strategy_id": "btc-4h#7",
+        "bias": "long",
+        "confidence": "medium",
+        "drawdown": "moderate",
+        "eval_window_days": 90,
+        "holdout_window_days": 30,
+        "notes": "held-back window, measured once: net return positive",
+    }
+    base.update(overrides)
+    return ResearchSignal(**base)
+
+
+def _signal_block(text: str) -> str:
+    """The Research signal: section alone — the header and everything under it."""
+    start = text.index("Research signal (")
+    rest = text[start:]
+    end = rest.find("\n\n")
+    return rest if end < 0 else rest[:end]
+
+
+def test_the_research_signal_section_is_absent_when_the_signal_is():
+    text = render_market_context(_ctx())
+    assert "Research signal" not in text
+    assert "autoresearch" not in context_shape(_ctx())
+
+
+def test_adding_a_research_signal_changes_nothing_else_in_the_render():
+    without = render_market_context(_ctx())
+    with_signal = render_market_context(_ctx(research_signal=_signal()))
+    assert with_signal.startswith(without)
+
+
+def test_the_research_signal_section_prints_every_field_it_was_given():
+    block = _signal_block(render_market_context(_ctx(research_signal=_signal())))
+    assert block.startswith("Research signal (rule btc-4h#7,")
+    assert "4h bars" in block
+    assert "next bar open: long" in block
+    assert "selected on: medium" in block
+    assert "same window: moderate" in block
+    assert "90 days it was selected on, then 30 days held back" in block
+    assert "Notes: held-back window, measured once: net return positive" in block
+
+
+def test_the_research_signal_section_is_dated_to_its_own_bar_not_the_contexts():
+    # The section comes from a separate fetch of the same venue, written out
+    # of band, so it can be behind the prices above. A block dated to the
+    # context's own as-of would say it was current when it is not.
+    block = _signal_block(render_market_context(_ctx(research_signal=_signal())))
+    assert "2024-01-02T07:59:59.999000+00:00 UTC" in block
+    assert _AS_OF.isoformat() not in block
+
+
+def test_the_research_signal_section_prints_no_figure_behind_a_band():
+    # Plan §7: the bands are ordinal and the measurements behind them stay in
+    # the research store. The only numbers the block may print are the two
+    # window lengths and its own bar's timestamp.
+    block = _signal_block(render_market_context(_ctx(research_signal=_signal())))
+    numbers = {
+        token.strip(".,;:()")
+        for line in block.split("\n")[1:]
+        for token in line.split()
+        if any(ch.isdigit() for ch in token)
+    }
+    assert numbers == {"90", "30"}
+
+
+@pytest.mark.parametrize(
+    "word",
+    ["bullish", "bearish", "expect", "predict", "forecast", "confirm", "recommend", "should"],
+)
+def test_no_research_signal_line_reads_as_a_view_of_the_market(word):
+    # The same label discipline the shape notes and the regime notes follow
+    # (PR #95): each line says what a rule MEASURED. A side that read as
+    # advice would be the one section of this prompt telling the model what
+    # to do.
+    block = _signal_block(render_market_context(_ctx(research_signal=_signal())))
+    assert word not in block.lower()
+
+
+def test_the_research_signal_section_says_it_feeds_no_gate_and_came_from_elsewhere():
+    block = _signal_block(render_market_context(_ctx(research_signal=_signal())))
+    basis = next(line for line in block.split("\n") if line.strip().startswith("Basis:"))
+    assert "not on the candles above" in basis
+    assert "Nothing in this section feeds the risk checks" in basis
+
+
+def test_the_research_signal_section_sits_between_the_profile_and_the_position():
+    text = render_market_context(
+        _ctx(research_signal=_signal(), volume_profile=_profile(), position=_open_position())
+    )
+    assert text.index("Volume profile (") < text.index("Research signal (") < text.index("Position:")
+
+
+def test_context_shape_changes_when_the_research_section_appears():
+    assert context_shape(_ctx()).split("|")[-1] == "indicators(rsi_14,ema_20,macd)"
+    assert context_shape(_ctx(research_signal=_signal())).endswith("|autoresearch")
+    assert context_shape(_ctx(research_signal=_signal(), position=_flat_position())).endswith(
+        "|autoresearch|position"
+    )
+
+
+def test_context_shape_does_not_split_on_what_the_signal_says():
+    # Same rule as the indicator VALUES and the open/flat position: the shape
+    # is the prompt's structure. A run whose rule flips from long to short, or
+    # whose bands move, is one prompt regime, not two.
+    one = _signal()
+    other = _signal(bias="short", confidence="strong", drawdown="deep", strategy_id="other#1")
+    assert context_shape(_ctx(research_signal=one)) == context_shape(_ctx(research_signal=other))

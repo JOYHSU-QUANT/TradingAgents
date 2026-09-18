@@ -13,11 +13,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from ...common.instants import from_epoch_ms
 from .schema import (
     MarketRegime,
     PerpMarketContext,
     PositionContext,
     ProfileShape,
+    ResearchSignal,
     VolumeProfile,
     derive_round_trip_rate,
 )
@@ -192,6 +194,57 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
     ]
 
 
+def _research_signal_lines(signal: ResearchSignal) -> list[str]:
+    """The research-signal block. Only called when a signal exists.
+
+    Same label discipline as ``_SHAPE_NOTE`` and the macro-trend rules (PR
+    #95): every line says what was MEASURED and stops there. So the side is
+    named as a rule's own state rather than as a view of the market, the two
+    bands are named with the window they were cut from, and nothing here says
+    "bullish", "confirmed" or "expect".
+
+    No figure behind a band is printed (plan §7). That is not tidiness: this
+    prompt's own history is that the model anchors on the numbers it is shown
+    (paper-BTC-2 put 27 of 48 decisions at exactly the advertised bar), and a
+    Sharpe is a number no reader of this prompt can put in context — it was
+    measured on a different history, over a window this section only names.
+    """
+    return [
+        # Dated to the RADAR's bar, not to this context's: the two are
+        # separate fetches of the same venue and the document is written out
+        # of band, so it can be up to ``research_signal.MAX_SIGNAL_AGE_INTERVALS``
+        # of its own bars behind the prices above. Same house rule as the
+        # volume profile's "as of the last closed candle": state the vintage
+        # rather than let a reader assume the section is as current as the mark.
+        f"Research signal (rule {signal.strategy_id}, decided on the research radar's own "
+        f"{signal.interval} bars, as of {from_epoch_ms(signal.as_of_ms).isoformat()} UTC):",
+        # "holds", not "recommends": the rule is a fixed set of conditions
+        # replayed over history, and this is the side its latest decision
+        # leaves it on. The fill it implies is at the NEXT bar's open, which
+        # is said here because the alternative reading — that the side was
+        # taken at the close above — is the one a backtest most easily cheats
+        # with, and the model should not be handed it.
+        f"  Side the rule holds after its latest bar, to be filled at that "
+        f"rule's next bar open: {signal.bias.value}",
+        f"  Confidence band, cut from its return-to-volatility ratio over the window it was "
+        f"selected on: {signal.confidence.value}",
+        f"  Drawdown band, cut from its deepest peak-to-trough fall over that same window: "
+        f"{signal.drawdown.value}",
+        f"  Windows behind those two bands: {signal.eval_window_days} days it was selected on, "
+        f"then {signal.holdout_window_days} days held back and measured once",
+        f"  Notes: {signal.notes}",
+        # The disclosure the section cannot be read honestly without. Three
+        # facts, each of which a reader would otherwise have to assume:
+        # where the rule came from, that its bands are ordinal rather than
+        # scaled, and that nothing here is wired to a decision.
+        "  Basis: a fixed rule the research radar fitted and scored offline on its own copy of "
+        "this coin's history — not on the candles above, and not on this account's fills. The "
+        "two bands are ordinal labels over that rule's own measurements; the figures behind "
+        "them are deliberately not printed. Nothing in this section feeds the risk checks, the "
+        "sizing or any order — it is one more input to weigh.",
+    ]
+
+
 def _funding_bps(rate: Decimal | None) -> str:
     """Funding as basis points (rate * 1e4). ``None`` -> ``n/a``."""
     if rate is None:
@@ -333,6 +386,18 @@ def render_market_context(ctx: PerpMarketContext) -> str:
         lines.append("")
         lines.extend(_volume_profile_lines(ctx.volume_profile, ctx.candle_interval))
 
+    # The research radar's reading, after the market sections and before the
+    # account's: it is a statement about this coin, like everything above it,
+    # but it is the only one that did not come from this cycle's own fetch,
+    # so it sits at the far end of the market half where its own dateline is
+    # read against the others rather than mistaken for them. Optional and
+    # absent whenever the switch is off or the document could not be believed
+    # — the WHOLE block drops out, like the profile's, and for the same
+    # reason (see :mod:`.research_signal`).
+    if ctx.research_signal is not None:
+        lines.append("")
+        lines.extend(_research_signal_lines(ctx.research_signal))
+
     # The account's own position, last: it is the one section about the
     # decision rather than the market, and it sits directly above the output
     # contract that asks for a target. Optional like the profile — absent
@@ -351,8 +416,9 @@ def context_shape(ctx: PerpMarketContext) -> str:
     One canonical string, e.g.
     ``price|market|funding|indicators(rsi_14,ema_20,macd)|volume_profile``:
     the fixed sections in render order, the indicator rows by configured name
-    (in render order — a reorder is a different prompt), and the optional
-    volume-profile section when it is present. It is stored beside
+    (in render order — a reorder is a different prompt), and each optional
+    section when it is present: the volume profile, the research radar's
+    signal (``autoresearch``) and the position. It is stored beside
     ``prompt_version`` on every ``ai_inputs`` row (issue #97) — and beside
     ``format_fingerprint``, the format block's content digest, since v11
     (issue #129; ``target_decision.format_fingerprint``) — so the paper
@@ -384,6 +450,15 @@ def context_shape(ctx: PerpMarketContext) -> str:
     on and an occasional skip will show those cycles as a small second bucket
     next to the WARNING that explains them.
 
+    The ``autoresearch`` token reads the same way, and it is the reason the
+    research signal fails closed by section rather than by row: a cycle whose
+    handoff document was missing, stale or refused really had no such section
+    in its prompt, so it files under the no-signal shape and can be counted.
+    A run with the switch on and an occasional refusal shows exactly that
+    split, beside the WARNING (:mod:`.research_signal`) naming which refusal
+    it was. Had the section instead printed "n/a" rows, every cycle would
+    file under one shape and the review could not tell the two apart at all.
+
     The position section (prompt ``phase2-target-v4``) files as one shape,
     ``position``, whether the account is open (cost table) or flat (one
     line). Open-vs-flat changes what the section prints, but it is the
@@ -405,6 +480,8 @@ def context_shape(ctx: PerpMarketContext) -> str:
     ]
     if ctx.volume_profile is not None:
         parts.append("volume_profile")
+    if ctx.research_signal is not None:
+        parts.append("autoresearch")
     if ctx.position is not None:
         parts.append("position")
     return "|".join(parts)

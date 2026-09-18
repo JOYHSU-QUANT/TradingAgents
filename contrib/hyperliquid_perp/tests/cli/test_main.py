@@ -34,6 +34,7 @@ from contrib.hyperliquid_perp.domains.perp import (
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
+    Candle,
     CandleInterval,
     PerpPosition,
     interval_to_ms,
@@ -2656,3 +2657,71 @@ def test_main_loads_dotenv_unconditionally_first(monkeypatch):
     with pytest.raises(SystemExit):
         main_mod.main(["--no-such-flag"])
     assert calls == [True]
+
+
+def test_build_context_reads_the_research_signal_only_when_the_switch_names_one(monkeypatch):
+    # The wiring pin for PR C1's seam, and the reason it needs one: with the
+    # switch empty nothing is opened at all, and with a path the reader is
+    # asked about THIS cycle's own bar rather than about the host's clock.
+    # Get either wrong and every other test stays green while the daemon
+    # either stats a file it was never pointed at or judges a document's
+    # freshness against the wrong instant.
+    asked = []
+    handed = {}
+    bar = Candle(
+        open_time=1_704_168_000_000,
+        close_time=1_704_182_399_999,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100"),
+        volume=Decimal("1"),
+    )
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            return [bar]
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    sentinel = object()
+
+    def _reader(path, *, coin, as_of_ms, candle_interval_ms):
+        asked.append((path, coin, as_of_ms, candle_interval_ms))
+        return sentinel
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "load_research_signal", _reader)
+    monkeypatch.setattr(
+        bridge_mod,
+        "build_market_context",
+        lambda *args, **kwargs: handed.update(signal=kwargs.get("research_signal", "ABSENT"))
+        or object(),
+    )
+
+    bridge_mod._build_context({}, "BTC", position=None)
+    assert asked == []
+    assert handed["signal"] is None
+
+    block = {"candle_interval": "1h", "autoresearch_signal": "/srv/signal.json"}
+    bridge_mod._build_context({"market_data": block}, "BTC", position=None)
+    assert asked == [("/srv/signal.json", "BTC", bar.close_time, interval_to_ms("1h"))]
+    assert handed["signal"] is sentinel

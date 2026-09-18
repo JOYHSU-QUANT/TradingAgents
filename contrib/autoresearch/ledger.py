@@ -757,6 +757,36 @@ class Ledger:
             (canonical_coin(coin), TrialStatus.PROMOTED.value),
         ).fetchone()[0]
 
+    def latest_promotion(self, coin: str) -> tuple[Experiment, Trial] | None:
+        """``coin``'s most recently promoted trial, and the experiment it belongs to.
+
+        ``None`` when the coin has never had one. A coin can have SEVERAL —
+        that is what :meth:`holdout_looks` counts, and no column marks one of
+        them current — so "most recent" is this method's own rule, stated
+        rather than implied: the largest ``promoted_at``, and the largest
+        ``trial_id`` among ties. The stamps are ISO-8601 UTC text written by
+        one writer, so they sort as text; the ``trial_id`` tie-break is there
+        because two promotions can share a stamp, and a reader must order
+        them the same way twice.
+
+        The experiment comes back WITH the trial because everything that
+        qualifies the trial's figures — the coin, the bar interval, the three
+        windows, the cost model they were measured under — lives on the
+        experiment, and a caller that looked it up separately could pair a
+        trial with another experiment's windows.
+        """
+        row = self.store.conn.execute(
+            "SELECT trials.* FROM trials"
+            " JOIN experiments ON experiments.experiment_id = trials.experiment_id"
+            " WHERE experiments.coin = ? AND trials.status = ?"
+            " ORDER BY trials.promoted_at DESC, trials.trial_id DESC LIMIT 1",
+            (canonical_coin(coin), TrialStatus.PROMOTED.value),
+        ).fetchone()
+        if row is None:
+            return None
+        trial = self._trial(row)
+        return self.experiment(trial.experiment_id), trial
+
     # -- proposals ---------------------------------------------------------
 
     def record_proposal(

@@ -45,11 +45,12 @@ from decimal import Decimal
 from .common.config_coercion import int_from_yaml
 from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, ENGINE_KEYS, load_config
 from .domains.perp import risk_gate
-from .domains.perp.context_builder import build_market_context
+from .domains.perp.context_builder import build_market_context, context_as_of
 from .domains.perp.indicator_vocab import indicator_names
 from .domains.perp.marginal_cost import PositionInputs
 from .domains.perp.market_data_config import MarketDataConfig
-from .domains.perp.schema import PerpMarketContext, PerpPosition
+from .domains.perp.research_signal import load_research_signal
+from .domains.perp.schema import PerpMarketContext, PerpPosition, interval_to_ms
 from .domains.perp.target_decision import DecisionConfig
 from .exchanges.hyperliquid.account import HyperliquidAccount
 from .exchanges.hyperliquid.errors import ExchangeError
@@ -292,6 +293,25 @@ def _build_context(
     )
     _between_reads()
 
+    # The research radar's handoff document, read AFTER the market reads and
+    # judged against the very bar the context will be dated to — which is why
+    # the as-of is derived here, through the builder's own function, rather
+    # than spelled out a second time. Local disk, no network, so it sits
+    # outside the ``_between_reads`` chain above and costs the kill switch
+    # nothing. Off by default: with the switch empty nothing is opened, so
+    # the daemon does not stat a file it was never pointed at.
+    _, as_of_ms = context_as_of(candles)
+    research_signal = (
+        load_research_signal(
+            market_data.autoresearch_signal,
+            coin=coin,
+            as_of_ms=as_of_ms,
+            candle_interval_ms=interval_to_ms(market_data.candle_interval),
+        )
+        if market_data.autoresearch_signal
+        else None
+    )
+
     ctx = build_market_context(
         coin,
         snapshot,
@@ -301,6 +321,7 @@ def _build_context(
         indicator_names=indicators,
         exchange_time=exchange_time,
         position=position,
+        research_signal=research_signal,
         host_time_at_exchange_read=host_time_at_exchange_read,
     )
     return ctx, client

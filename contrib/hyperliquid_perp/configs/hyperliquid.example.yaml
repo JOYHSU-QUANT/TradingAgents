@@ -23,6 +23,17 @@ market_data:
                                    # section silently never appear. Analyst input only: it feeds no
                                    # gate and no sizing. Turning it on CHANGES THE PROMPT, so on a
                                    # paper run treat the flip as a new input-side measurement point.
+  autoresearch_signal: ""          # "" = OFF (default). Set to the path of the research radar's
+                                   # handoff document (contrib/autoresearch: `signal --out <path>`)
+                                   # to add ONE qualitative block to the prompt: the promoted
+                                   # rule's current side plus two ordinal bands. No figure behind a
+                                   # band is printed, and it feeds no gate and no sizing.
+                                   # Write "" (quoted) or leave the key out to keep it off — a bare
+                                   # `off` is a YAML BOOLEAN and is rejected at config load.
+                                   # The document is written out of band: keep the producer on a
+                                   # schedule, or the reader drops the section as stale (SETUP §).
+                                   # Turning it on CHANGES THE PROMPT, so on a paper run treat the
+                                   # flip as a new input-side measurement point.
 
 indicators: [rsi_14, ema_20, ema_50, atr_14, macd]   # computed by context_builder; unknown names rejected at config load; a non-empty list must include atr_14, ema_20 and ema_50 (the regime classifier needs all three)
 

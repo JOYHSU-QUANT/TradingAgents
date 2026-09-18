@@ -134,6 +134,97 @@ def interval_to_ms(interval: str) -> int:
     return _INTERVAL_MS[parse_interval(interval)]
 
 
+class ResearchBias(VocabEnum, noun="research signal bias"):
+    """Which side the research radar's promoted rule decided at its latest bar.
+
+    Not a forecast and not an instruction: it is the side that rule's own
+    decision would be filled on at the next bar's open. ``NEUTRAL`` is the
+    rule sitting flat, which is a reading like the other two — a rule with no
+    position is saying something — so it is a member here rather than the
+    absence of a signal. A signal that could not be produced at all is
+    ``None`` on :class:`PerpMarketContext`, and the prompt then has no such
+    section at all.
+    """
+
+    LONG = "long"
+    SHORT = "short"
+    NEUTRAL = "neutral"
+
+
+class ResearchConfidence(VocabEnum, noun="research signal confidence band"):
+    """How well the promoted rule scored on the window it was selected on.
+
+    An ORDINAL band, never a probability: the radar cuts its own validation
+    Sharpe into three, and the edges are the radar's convention (plan §7 —
+    the raw figures stay in the research store and never enter a prompt).
+    """
+
+    WEAK = "weak"
+    MEDIUM = "medium"
+    STRONG = "strong"
+
+
+class ResearchDrawdown(VocabEnum, noun="research signal drawdown band"):
+    """How deep the promoted rule's worst peak-to-trough fall was on that window.
+
+    Ordinal, like :class:`ResearchConfidence`, and cut from the same window,
+    so the two bands are always about the same measurement span.
+    """
+
+    SHALLOW = "shallow"
+    MODERATE = "moderate"
+    DEEP = "deep"
+
+
+# The handoff document's contract version. The research radar writes the
+# document; this package reads it. The two live in one repository but run as
+# SEPARATE processes on their own cadence (the radar's producer is an
+# out-of-band command, this is the trading daemon), so a reader that guessed
+# at the shape would be reading last month's fields with this month's
+# meanings. A document declaring any other version is refused by name and the
+# prompt's section is omitted — never partially read.
+RESEARCH_SIGNAL_DOCUMENT_VERSION: int = 1
+
+# Exactly the keys a document carries. Unknown keys are refused rather than
+# ignored, the same way the config loader refuses an unknown YAML key: a
+# producer that added a field without bumping the version is not the version
+# it claims to be, and the one symptom of reading it leniently would be a
+# prompt section quietly built from stale meanings.
+_RESEARCH_SIGNAL_KEYS = frozenset(
+    {
+        "document_version",
+        "coin",
+        "interval",
+        "as_of_ms",
+        "strategy_id",
+        "bias",
+        "confidence",
+        "drawdown",
+        "eval_window_days",
+        "holdout_window_days",
+        "notes",
+    }
+)
+
+# What a rendered field may not contain. Every line of the prompt's context is
+# either a section header (no indent) or a row under one (two spaces), and the
+# paper review segments runs on ``prompt_context.context_shape``, which reads
+# those headers back. A newline inside ``strategy_id`` or ``notes`` would
+# print an unindented line of the producer's choosing — a forged section
+# header, in a value that comes from outside this package. Refused at the DTO
+# rather than escaped at the renderer, so every consumer of the field sees the
+# value the renderer does (PR #251's rule: the value judged is the value
+# rendered).
+_FORBIDDEN_IN_RENDERED_TEXT = ("\n", "\r")
+
+# A rendered field's length bound. The block is a handful of short lines by
+# design; a producer that put a paragraph in ``notes`` would push the position
+# section and the output contract further from the model's attention with
+# nothing refusing. Bounded rather than truncated, for the same reason a
+# truncated sentence is worse than none: it still reads as a complete one.
+MAX_RESEARCH_TEXT_CHARS = 200
+
+
 # --------------------------------------------------------------------------
 # Market data DTOs — what the exchange layer returns across the port boundary.
 # --------------------------------------------------------------------------
@@ -956,6 +1047,173 @@ class PositionContext:
             )
 
 
+def _rendered_text(value: object, *, what: str) -> str:
+    """A field of the handoff document that reaches the prompt verbatim.
+
+    Non-blank, single-line and bounded — see :data:`_FORBIDDEN_IN_RENDERED_TEXT`
+    and :data:`MAX_RESEARCH_TEXT_CHARS` for why each. Whitespace at the ends is
+    stripped, because a producer's trailing newline is not a difference anyone
+    means; whitespace INSIDE is left alone, because it is the sentence.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{what} must be a string, got {type(value).__name__} ({value!r})")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{what} must not be blank")
+    for forbidden in _FORBIDDEN_IN_RENDERED_TEXT:
+        if forbidden in text:
+            raise ValueError(
+                f"{what} must be a single line — it is rendered into the prompt, where an "
+                f"unindented line reads as a section header; got {text!r}"
+            )
+    if len(text) > MAX_RESEARCH_TEXT_CHARS:
+        raise ValueError(
+            f"{what} must be at most {MAX_RESEARCH_TEXT_CHARS} characters, got {len(text)}"
+        )
+    return text
+
+
+def _window_days(value: object, *, what: str) -> int:
+    """A measurement window's length in whole days: an ``int`` of at least one."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{what} must be an int of days, got {type(value).__name__} ({value!r})")
+    if value < 1:
+        raise ValueError(f"{what} must be >= 1 day, got {value}")
+    return value
+
+
+@dataclass(frozen=True)
+class ResearchSignal:
+    """The research radar's one qualitative reading, as the prompt will print it.
+
+    The whole contract between two packages that never import each other
+    (plan §7 / PR C1): ``contrib/autoresearch`` fits and scores rules offline
+    on its OWN history store and writes this document; the trading daemon
+    reads it and renders it as one analyst-input section. Nothing numeric
+    crosses — the Sharpe and the drawdown the bands are cut from stay in the
+    research store — and nothing here reaches a gate, a size or an order.
+
+    Why a document rather than a shared database or an import: the two sides
+    run as separate processes on separate cadences, the radar's own modules
+    cost a second of pandas import and a full indicator walk to answer "which
+    side now", and its SQLite schema migrates on open. A daemon that imported
+    any of that would pay for it every cycle and would break on the radar's
+    next migration. The document is the narrow, versioned thing in between.
+
+    ``as_of_ms`` is the CLOSE of the bar the bias was decided at, in UTC epoch
+    milliseconds — the radar's bar, not this run's. Freshness is judged
+    against it by :mod:`.research_signal`, which owns that rule; this type
+    only refuses a stamp that is not a venue instant at all.
+
+    Every field is validated here rather than at the reader, so a signal built
+    by hand (a fixture, a test) carries the same guarantees as one read off
+    disk — the same reason :class:`VolumeProfile` and :class:`PositionContext`
+    self-guard.
+    """
+
+    coin: str
+    interval: str
+    as_of_ms: int
+    strategy_id: str
+    bias: ResearchBias
+    confidence: ResearchConfidence
+    drawdown: ResearchDrawdown
+    eval_window_days: int
+    holdout_window_days: int
+    notes: str
+
+    def __post_init__(self) -> None:
+        for name, enum in (
+            ("bias", ResearchBias),
+            ("confidence", ResearchConfidence),
+            ("drawdown", ResearchDrawdown),
+        ):
+            # Coerced, not merely checked: a document hands over the string,
+            # and every reader downstream (the renderer, the shape) wants the
+            # member. The enum's own ``_missing_`` names the vocabulary.
+            object.__setattr__(self, name, enum(getattr(self, name)))
+        if not isinstance(self.coin, str) or not self.coin.strip():
+            raise ValueError("ResearchSignal.coin must be a non-empty string")
+        object.__setattr__(self, "coin", self.coin.strip())
+        # The radar's bar cadence, through the package's one interval
+        # vocabulary — so a document written at an interval this build does
+        # not know is refused by the same sentence a mis-cased ``4H`` gets in
+        # ``market_data.candle_interval``.
+        object.__setattr__(self, "interval", parse_interval(self.interval).value)
+        _require_venue_stamp(self.as_of_ms, what="ResearchSignal.as_of_ms")
+        object.__setattr__(
+            self, "strategy_id", _rendered_text(self.strategy_id, what="ResearchSignal.strategy_id")
+        )
+        object.__setattr__(self, "notes", _rendered_text(self.notes, what="ResearchSignal.notes"))
+        for name in ("eval_window_days", "holdout_window_days"):
+            object.__setattr__(
+                self, name, _window_days(getattr(self, name), what=f"ResearchSignal.{name}")
+            )
+
+    def to_document(self) -> dict[str, object]:
+        """The JSON-ready document the research radar writes.
+
+        The producer's half of the contract, written HERE beside the reader's
+        half so the key names have one definition. ``from_document`` reads
+        back an equal signal.
+        """
+        return {
+            "document_version": RESEARCH_SIGNAL_DOCUMENT_VERSION,
+            "coin": self.coin,
+            "interval": self.interval,
+            "as_of_ms": self.as_of_ms,
+            "strategy_id": self.strategy_id,
+            "bias": self.bias.value,
+            "confidence": self.confidence.value,
+            "drawdown": self.drawdown.value,
+            "eval_window_days": self.eval_window_days,
+            "holdout_window_days": self.holdout_window_days,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_document(cls, payload: object) -> ResearchSignal:
+        """Read a decoded document back; ``ValueError`` naming what is wrong with it.
+
+        Strict about the version and the key set (see
+        :data:`_RESEARCH_SIGNAL_KEYS`); everything else is the field guards'
+        job, so one document is judged by exactly the rules a hand-built
+        signal is. Says nothing about freshness — that needs this run's clock
+        and belongs to :mod:`.research_signal`.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"a research signal document is a JSON object, got {type(payload).__name__}"
+            )
+        version = payload.get("document_version")
+        if version != RESEARCH_SIGNAL_DOCUMENT_VERSION:
+            raise ValueError(
+                f"this build reads research signal document version "
+                f"{RESEARCH_SIGNAL_DOCUMENT_VERSION}, the document declares {version!r}"
+            )
+        keys = set(payload)
+        if keys != _RESEARCH_SIGNAL_KEYS:
+            missing = sorted(_RESEARCH_SIGNAL_KEYS - keys)
+            unknown = sorted(keys - _RESEARCH_SIGNAL_KEYS)
+            raise ValueError(
+                f"a version {RESEARCH_SIGNAL_DOCUMENT_VERSION} research signal document has "
+                f"exactly the keys {sorted(_RESEARCH_SIGNAL_KEYS)}; missing {missing}, "
+                f"unknown {unknown}"
+            )
+        return cls(
+            coin=payload["coin"],
+            interval=payload["interval"],
+            as_of_ms=payload["as_of_ms"],
+            strategy_id=payload["strategy_id"],
+            bias=payload["bias"],
+            confidence=payload["confidence"],
+            drawdown=payload["drawdown"],
+            eval_window_days=payload["eval_window_days"],
+            holdout_window_days=payload["holdout_window_days"],
+            notes=payload["notes"],
+        )
+
+
 @dataclass(frozen=True)
 class PerpMarketContext:
     """The market context the engine reasons over, built by context_builder.
@@ -1018,6 +1276,16 @@ class PerpMarketContext:
     # operator turns it on. ``None`` means the prompt omits the section
     # entirely — never a half-filled block (see :class:`VolumeProfile`).
     volume_profile: VolumeProfile | None = None
+    # The research radar's one qualitative reading (:class:`ResearchSignal`;
+    # plan §7 / PR C1). Optional and OFF by default: populated only when
+    # ``market_data.autoresearch_signal`` names a handoff document AND that
+    # document passes every check in :mod:`.research_signal`, so merging the
+    # feature changes no existing prompt until an operator turns it on.
+    # ``None`` means the prompt omits the section entirely — there is no
+    # "Research signal: n/a" form, for the same reason the volume profile has
+    # none: a header with nothing under it reads as a measurement that came
+    # back empty rather than one that was never taken.
+    research_signal: ResearchSignal | None = None
     # The account's own position and what moving it would cost
     # (:mod:`.marginal_cost`; prompt ``phase2-target-v4``). Optional: attached
     # by the daemon provider from the run's books; ``None`` on the one-shot

@@ -53,11 +53,16 @@ from contrib.hyperliquid_perp.domains.perp.indicator_vocab import (
     supported_indicators,
 )
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
+from contrib.hyperliquid_perp.domains.perp.research_signal import MAX_SIGNAL_AGE_INTERVALS
 from contrib.hyperliquid_perp.domains.perp.schema import (
     Candle,
     CandleInterval,
     FundingPoint,
     MarketRegime,
+    ResearchBias,
+    ResearchConfidence,
+    ResearchDrawdown,
+    ResearchSignal,
     interval_to_ms,
     parse_interval,
 )
@@ -74,6 +79,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and it must stay that 
 
 __all__ = [
     "BORROWED",
+    "MAX_SIGNAL_AGE_INTERVALS",
     "UPSTREAM_PACKAGES",
     "REGIME_INDICATORS",
     "Candle",
@@ -84,6 +90,10 @@ __all__ = [
     "FundingPoint",
     "MarketDataConfig",
     "MarketRegime",
+    "ResearchBias",
+    "ResearchConfidence",
+    "ResearchDrawdown",
+    "ResearchSignal",
     "VocabEnum",
     "build_chat_model",
     "build_market_data",
@@ -116,10 +126,26 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.domains.perp.indicator_vocab", "supported_indicators"),
     ("contrib.hyperliquid_perp.domains.perp.indicators", "compute_indicators"),
     ("contrib.hyperliquid_perp.domains.perp.market_data_config", "MarketDataConfig"),
+    # How stale the reader lets the handoff document get. Borrowed so the
+    # producer can tell an operator the schedule the READER will actually
+    # enforce — a second copy of the number here would keep printing the old
+    # cadence for as long as it took someone to notice the section had gone.
+    ("contrib.hyperliquid_perp.domains.perp.research_signal", "MAX_SIGNAL_AGE_INTERVALS"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "Candle"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "CandleInterval"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "FundingPoint"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "MarketRegime"),
+    # The handoff document's contract (plan §7 / PR C1). Borrowed rather than
+    # re-declared for the reason this module exists: the trading package READS
+    # the document this one writes, so its vocabulary and its encoding have to
+    # be one definition. Two copies of three closed vocabularies would agree
+    # on the day they were written and drift on the day one side gained a
+    # fourth band — with every test on both sides still green, because each
+    # would be pinning its own copy.
+    ("contrib.hyperliquid_perp.domains.perp.schema", "ResearchBias"),
+    ("contrib.hyperliquid_perp.domains.perp.schema", "ResearchConfidence"),
+    ("contrib.hyperliquid_perp.domains.perp.schema", "ResearchDrawdown"),
+    ("contrib.hyperliquid_perp.domains.perp.schema", "ResearchSignal"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "interval_to_ms"),
     ("contrib.hyperliquid_perp.domains.perp.schema", "parse_interval"),
     ("contrib.hyperliquid_perp.exchanges.hyperliquid.errors", "ExchangeError"),

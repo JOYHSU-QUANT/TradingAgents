@@ -60,3 +60,42 @@ def test_unknown_keys_are_refused_by_the_shared_seam():
     # typo'd key silently fell back to its default (issue #96).
     with pytest.raises(ValueError, match="unknown config key\\(s\\): 'candle_lookbak'"):
         MarketDataConfig.from_dict({"candle_lookbak": 50})
+
+
+def test_the_research_signal_switch_is_off_by_default():
+    # Off is the empty string, not a missing key: merging PR C1 changes no
+    # existing prompt until an operator writes a path.
+    assert MarketDataConfig().autoresearch_signal == ""
+    assert MarketDataConfig.from_dict({"autoresearch_signal": None}).autoresearch_signal == ""
+    assert (
+        MarketDataConfig.from_dict({"autoresearch_signal": "/srv/signal.json"}).autoresearch_signal
+        == "/srv/signal.json"
+    )
+
+
+@pytest.mark.parametrize("written", [False, True])
+def test_a_yaml_boolean_switch_is_refused_with_what_to_write_instead(written):
+    # The trap this key has its own converter for: YAML 1.1 reads a bare
+    # ``off`` / ``no`` / ``false`` as a BOOLEAN, and ``off`` is exactly what
+    # an operator reaches for on a switch. The refusal has to say what the
+    # two legal spellings are, not merely that a bool is not a string.
+    with pytest.raises(ValueError, match="got a YAML boolean") as exc_info:
+        MarketDataConfig.from_dict({"autoresearch_signal": written})
+    message = str(exc_info.value)
+    assert "autoresearch_signal" in message
+    assert "quote the path" in message
+
+
+def test_a_non_string_switch_is_refused_by_name():
+    with pytest.raises(ValueError, match="expected a path to the research signal document"):
+        MarketDataConfig.from_dict({"autoresearch_signal": 3})
+
+
+@pytest.mark.parametrize("value", ["  ", " /srv/signal.json", "/srv/signal.json "])
+def test_a_switch_that_is_only_whitespace_or_padded_is_refused(value):
+    # Nothing will ever write to a path made of spaces, and its one runtime
+    # symptom would be a missing prompt section — indistinguishable from the
+    # feature being off on purpose. So it is a load-time failure, like every
+    # other way of getting this block wrong.
+    with pytest.raises(ValueError, match="leading or trailing whitespace"):
+        MarketDataConfig(autoresearch_signal=value)

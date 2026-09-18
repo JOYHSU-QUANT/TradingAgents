@@ -108,24 +108,43 @@ Breaking changes within the 0.x line are called out explicitly.
   NULLABLE, and the NULL is genuinely two-valued: "this cycle's prompt had no
   such section" (the common case - the switch is off by default) and "written
   before v13" read the same in the cell. `context_shape` is what tells them
-  apart, and every row this build writes carries both halves. Deploying this
-  runs a migration, so back the DB up first, per the v12 precedent.
+  apart, and every row this build writes carries both halves. That rule has an
+  ordering precondition, now written into RUNBOOK §4: v13 must be deployed
+  BEFORE the switch is ever turned on, or the rows in between carry an
+  `autoresearch` shape with empty columns and are permanently
+  indistinguishable from pre-v13 history.
 
-- **`--context-only` says when its `context_shape` can disagree with the
-  daemon's (#276)** - that command exists to show which segmentation bucket a
-  YAML edit lands in BEFORE deploying it, and on one key it could answer
-  differently from the daemon without saying so: the `autoresearch` token
-  appears only if the handoff document is present and fresh on the host running
-  the command, so a laptop pointed at the server's config printed the no-signal
-  shape while the server prints the other. An operator knows to add `|position`
-  back; there was nothing telling them about this one.
+  Deploying this runs a migration, so back the DB up first - and do it AT the
+  run-5-to-run-6 segment boundary (stop, back up, deploy, open), not during
+  run 5. A store a v13 build has opened is refused outright by a v12 build,
+  read-only commands included, so an early deploy spends the running segment's
+  roll-back option on a column only the next one needs.
 
-  When the switch names a document and the section did not reach the render, a
-  `note:` line now follows the `prompt_regime:` line. Its OWN line, never
-  spliced into that one: the daemon log, `validate` and this command share one
-  renderer precisely so the same string greps across all three (RUNBOOK §4).
-  Silent otherwise - with the switch off there is nothing to disagree about,
-  and a cycle that got the section printed the token.
+- **`--context-only` says which research bucket THIS host landed in (#276)** -
+  that command exists to show which segmentation bucket a YAML edit lands in
+  BEFORE deploying it, and on one key it could answer differently from the
+  daemon without saying so: the `autoresearch` token appears only if the
+  handoff document is present and fresh on the host running the command. An
+  operator knows to add `|position` back; there was nothing telling them about
+  this one.
+
+  Whenever the switch names a document, a `warning:` line on stderr now names
+  which way this host answered. BOTH directions, because the asymmetry runs
+  both ways: a laptop that ran the radar by hand prints the `autoresearch`
+  bucket while a server whose producer cron is broken writes the other one, so
+  the token's presence is exactly as host-local as its absence. Speaking up
+  only when the section was missing would leave a preview trusted precisely
+  when it is wrong.
+
+  On stderr, not stdout, and with the prefix this lane already uses: the
+  documented workflow greps stdout, so a caveat a pipe can separate from the
+  line it qualifies is the failure it exists to prevent. Its own line, never
+  spliced into `prompt_regime:` - the daemon log, `validate` and this command
+  share one renderer precisely so the same string greps across all three
+  (RUNBOOK §4). It does not promise a companion `research signal ...` warning:
+  the bridge skips the document read entirely when the candle window is empty,
+  so that same "no section" arrives with nothing logged, and the sentence is a
+  conditional naming that case rather than a promise.
 
 - **autoresearch -> perp: one qualitative research block in the prompt, off by
   default (plan C1)** - the research radar's only output into the live path.

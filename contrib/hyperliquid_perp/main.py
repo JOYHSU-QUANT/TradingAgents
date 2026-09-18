@@ -140,29 +140,63 @@ def run_context_only(config: dict, coin: str) -> int:
     # that is NOT this lane's own documented position-blindness (issue #276).
     # ``|position`` is always absent here and an operator who read RUNBOOK §4
     # knows to add it back; the research section is the opposite — whether its
-    # token is there depends on a file on the host this command runs on, so a
-    # laptop pointed at the server's YAML prints a shape the server will never
-    # write, with nothing on the line itself saying so.
+    # token is there depends on a file on the host this command runs on, so
+    # the printed shape can be one the server will never write, with nothing
+    # on the line itself saying so.
     #
-    # Its OWN line, never appended to the one above: the three surfaces that
-    # print ``prompt_regime:`` share one renderer precisely so the same string
-    # can be grepped across the daemon's log, ``validate`` and here (RUNBOOK
-    # §4), and a caveat spliced into it would end that.
+    # Said whenever the switch names a document, in BOTH directions, naming
+    # which bucket THIS host landed in. An earlier draft spoke up only when
+    # the section was missing, on the reasoning that a rendered section proves
+    # itself. It does not: presence is exactly as host-local as absence — a
+    # laptop that ran the radar by hand prints the ``autoresearch`` bucket
+    # while the server, whose producer cron is broken, writes the other one.
+    # Staying silent there let a preview be trusted precisely when it was
+    # wrong, so the answer is one line either way and no line only when the
+    # switch is off, where there is nothing to disagree about.
     #
-    # Said only when the switch names a document and the section did not make
-    # it into the render — the case where the printed shape is the one that
-    # can be wrong. With the switch empty there is nothing to disagree about,
-    # and a cycle that DID get the section printed the token. Which refusal it
-    # was (missing, stale, wrong coin, unreadable) is on stderr already, one
-    # named WARNING per cause, from ``load_research_signal``.
+    # It does NOT promise a companion WARNING. The refusals inside
+    # ``load_research_signal`` each log one, but the bridge skips that call
+    # entirely when the candle window is empty — same ``None``, no WARNING —
+    # so a note pointing at "the warning on stderr" would send an operator
+    # hunting for a line nothing wrote. It reports its own observation and
+    # says where else to look, conditionally.
+    #
+    # Its OWN line on stderr, never appended to ``prompt_regime:``: that line
+    # has one renderer across the daemon's log, ``validate`` and here (RUNBOOK
+    # §4) so the same string greps on all three, and a caveat spliced into it
+    # would end that. stderr because this lane's documented use is grepping
+    # stdout — a caveat that a pipe can separate from the thing it qualifies
+    # is the failure it exists to prevent — and because it then lands beside
+    # the ``research signal …`` WARNINGs it refers to. Same channel pair and
+    # same ``warning:`` prefix as the degraded-context notice below, through
+    # the one helper that keeps log and stderr from drifting apart.
     market_data = MarketDataConfig.from_dict(config.get("market_data"))
-    if market_data.autoresearch_signal and ctx.research_signal is None:
-        print(
-            "note: market_data.autoresearch_signal names a document but this run "
-            "carries no research signal, so the context_shape above has no "
-            "`autoresearch` token — see the research signal warning on stderr. "
-            "That is a fact about THIS host: the daemon reads the document on "
-            "its own machine and can land in the other bucket."
+    if market_data.autoresearch_signal:
+        if ctx.research_signal is None:
+            landed = (
+                "this host did NOT use one, so the context_shape above has no "
+                "`autoresearch` token"
+            )
+            why = (
+                " A named `research signal ...` warning above says why — unless the "
+                "candle window was empty, in which case the document was never "
+                "consulted at all and no such warning exists."
+            )
+        else:
+            landed = (
+                "this host DID use one, so the context_shape above carries the "
+                "`autoresearch` token"
+            )
+            why = ""
+        engine_bridge._warn_dual(
+            "context_shape research section is host-local: %s",
+            landed,
+            stderr=(
+                f"warning: market_data.autoresearch_signal names a document and {landed}. "
+                f"Whether that token appears is a fact about THIS host, so the daemon "
+                f"reads the document on its own machine and can land in the other "
+                f"bucket.{why}"
+            ),
         )
 
     # Keyless diagnostic loop: render rather than abort, but warn with the same

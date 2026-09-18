@@ -83,11 +83,13 @@ def test_exports_all_eight_csvs_with_contract_headers(tmp_path):
     # Documented column prefix, then the schema-augmentation columns (§1.2).
     assert list(rows[0])[:3] == ["timestamp", "mode", "run_id"]
     assert "slice_id" in rows[0] and "fill_reason" in rows[0]
-    # ai_inputs closes with the prompt-side augmentation columns, in the order
-    # they were added and always after the documented prefix: the payload hash
-    # (v1), the prompt's shape (v10, issue #97), the format block's fingerprint
-    # (v11, issue #129) and the research section's two facts (v13, issue #276 —
-    # which rule the section named and which side it held).
+    # ai_inputs CLOSES with the prompt-side augmentation columns, in the order
+    # they were added: the payload hash (v1), the prompt's shape (v10, issue
+    # #97), the format block's fingerprint (v11, issue #129) and the research
+    # section's two facts (v13, issue #276 — which rule the section named and
+    # which side it held). Pinning the TAIL is what keeps a new augmentation
+    # column from being inserted among the documented §5.2 columns and
+    # shifting them; this assertion does not itself enumerate that prefix.
     with (out / "ai_inputs.csv").open(encoding="utf-8", newline="") as fh:
         ai_header = next(csv.reader(fh))
     assert ai_header[-5:] == [

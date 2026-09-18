@@ -889,7 +889,14 @@ def test_a_read_only_open_refuses_a_behind_store_instead_of_upgrading_it(tmp_pat
     # a command that DOES own the run — upgrades it exactly as before.
     with Database(path) as upgraded:
         assert stored_schema_version(upgraded.conn) == SCHEMA_VERSION
-        assert "last_backfill_status" in _columns(upgraded.conn, "funding_events")
+        # Same column as the two assertions above, and it has to stay that way:
+        # this half proves the refused step's DDL actually RUNS when an owning
+        # command opens the store, not merely that a schema_migrations row got
+        # recorded. Left on an older version's column it proves nothing about
+        # the newest one — that column is already present in the one-behind
+        # store, so the assertion passes even if the newest migration adds no
+        # columns at all.
+        assert "autoresearch_bias" in _columns(upgraded.conn, "ai_inputs")
 
 
 def test_a_deferred_open_owes_an_upgrade_only_when_the_store_is_not_current(tmp_path):

@@ -189,13 +189,22 @@ payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的
 `common/prompt_regime.py` 一個渲染函式，同一個字串可以 grep），改 YAML 後部署前就能看到會落在哪個
 桶——但注意它印的 `context_shape` **少一段**：prompt v4 起 paper／live daemon 的列一律多帶 `|position`
 （倉位段從本地帳本來，一次性 CLI 沒有帳本、維持 position-blind），比對時把這一段補上再比。
-**還有第二種會少的段，而且這一種不是固定的**（issue #276）：`autoresearch` token 在不在，取決於交接
-文件在**跑這個指令的那台機器上**存不存在、夠不夠新。拿筆電對著伺服器的 config 跑，會印出沒有那一段的
-shape，而 daemon 印的是有的那一個——`|position` 你知道要補回去，這一種你不會知道要補。所以開關有值而
-那一段沒進到渲染裡時，`prompt_regime:` **底下會多印一行 `note: …`** 說明這件事（另起一行、不動上面
-那一行，因為三處共用同一個渲染函式、同一個字串要能 grep 是紀律）；同一次執行的 stderr 還會有一句具名
-WARNING 說是哪一種拒絕（檔案不在、過期、幣別不符、讀不出來）。沒有那行 `note:` 就代表這一段沒有疑慮：
-不是開關關著，就是那一段真的渲染進去了。
+**還有第二種會少的段，而且這一種兩個方向都會錯**（issue #276）：`autoresearch` token 在不在，取決於
+交接文件在**跑這個指令的那台機器上**存不存在、夠不夠新。`|position` 是固定少、你知道要補回去；這一種
+不是——拿筆電對著伺服器的 config 跑會印出沒有那一段的 shape 而 daemon 有，**反過來**你在筆電上手動跑過
+radar、伺服器的 producer cron 卻壞著時，preview 會印出帶 `autoresearch` 的 shape 而 daemon 印的是沒有
+的那一個。**token 出現不比它不出現更可信，兩邊一樣是本機的事。**
+
+所以只要 `market_data.autoresearch_signal` 有值，`--context-only` 就會在 **stderr** 印一行
+`warning: market_data.autoresearch_signal names a document and this host DID／did NOT use one …`，
+**明講本機落在哪個桶**；開關關著才完全不印（沒有可爭議的事）。三件事要知道：
+
+- **在 stderr 不在 stdout**，前綴沿用這條 lane 既有的 `warning:`。理由是這個指令被記載的用法就是 grep
+  stdout，把一句「上面那行有前提」放在會被 pipe 切走的那半邊，正好是它要防的失效。
+- **不動 `prompt_regime:` 那一行**（另起一行）——三處共用同一個渲染函式、同一個字串要能 grep 是紀律。
+- **它不保證有伴隨的 WARNING。** 少那一段時通常還有一句具名 WARNING 說是哪一種拒絕（檔案不在、過期、
+  幣別不符、讀不出來），但**K 線視窗是空的時候，那份文件根本沒被讀過**——同樣是「沒有那一段」，卻一行
+  WARNING 也沒有。所以那句話是條件句而不是承諾，而且會點名這個情況。
 **daemon 自己也會說**（issue #163）：paper／live 第一個組出 prompt 並寫下 payload 的 cycle 會在 log 印
 同一行 `prompt_regime: …`（INFO，`cli._provider`），之後**只在三鍵翻桶時再印一次、仍是 INFO**——volume
 profile 段因歷史不夠被跳過、倉位段因權益 ≤ 0 被省略（見 §7）都算翻桶，多半是資料驅動、不是告警；一整段
@@ -261,21 +270,41 @@ profile 段」的 shape——這是真的少了一段，不是假訊號；判讀
 `ai_inputs.csv`（排在 `format_fingerprint` 之後）。「模型跟著 bias 走了嗎」現在是一句 SQL：
 
 ```sql
--- 每個 (規則, bias) 桶底下，模型要的目標方向怎麼分佈。
--- 只算跑到決策的 cycle；ai_outputs.target_side 是 gate 之後的方向。
-SELECT i.autoresearch_strategy_id, i.autoresearch_bias, o.target_side, COUNT(*) AS cycles
+-- 每個 (規則, bias) 桶底下，模型要的方向怎麼分佈，以及 gate 放行了沒有。
+-- ai_outputs.target_side 就是「模型要的那一邊」：RiskGate 從不改寫方向，
+-- 連被拒的路徑也原樣帶著它（只夾 margin 百分比），所以不必另外找一個
+-- 「request 版」的欄位。target_side 為 NULL 的是 maintain_current 與
+-- 連方向都沒解析出來的 cycle。
+-- risk_action 一定要在：沒有它，「偏多而且真的下單」跟「偏多但被 gate 擋下」
+-- 會塌進同一個數字，而 run 6 問的是模型有沒有跟著走、不是有沒有成交。
+SELECT i.autoresearch_strategy_id, i.autoresearch_bias,
+       o.target_side, o.risk_action, COUNT(*) AS cycles
   FROM ai_inputs i JOIN ai_outputs o ON o.input_id = i.input_id
  WHERE i.run_id = 'paper-BTC-6' AND i.autoresearch_bias IS NOT NULL
- GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+ GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;
 ```
+
+**分母要自己決定**：這是 INNER JOIN，所以**根本沒走到 gate 的 cycle**（api_failed、重試用光）
+不在結果裡；要把它們算進去就改 LEFT JOIN，那些列的 `o.*` 會是 NULL 自成一桶。
 
 **空值有兩個意思，用 `context_shape` 分辨**：shape 有 `autoresearch` 而這兩欄是空的＝那一列寫在
 v13 之前（歷史，不是「沒有這一段」）；shape 沒有 `autoresearch`＝那個 cycle 真的沒有這一段。
-所以上面那句 SQL 的 `IS NOT NULL` 過濾掉的是兩種列，判讀時分母要自己決定算哪一種。
-**部署帶 migration，換 schema 前先備份 DB。** 不是怕資料壞——這次是 `ALTER TABLE` 加兩個 nullable
-欄，既有列全部維持有效。**備份保的是「退得回去」這個選項**：v13 的 build 開過的 store，只認得 v12 的
-checkout 會**整個拒絕開啟**（`store schema is vN but this build only knows vM`，連唯讀指令都拒），
-所以一旦升上去，要退回舊 binary 就只剩還原備份這條路。這與 #239 那次 migration 是同一條規矩。
+**寫 SQL 時要 `COALESCE(context_shape,'')`**：v10 之前的列 `context_shape` 本身是 NULL，
+`context_shape NOT LIKE '%autoresearch%'` 對 NULL 求值還是 NULL，那些列會兩個桶都掉出去、
+而且不會有任何列數警告。單一 run 範圍的查詢碰不到這件事，跨 run 的會。
+
+**這條分辨規則有順序前提**：v13 要**先於開關被打開**部署。反過來做——先部署 #275 的 build 並把
+`autoresearch_signal` 填上、之後才升 v13——那段期間的列會帶著 `autoresearch` shape 而兩欄是空的，
+與 v13 之前的歷史**永久無法區分**。也補不回來：那兩個值當時只以散文形式存在 payload JSON 的
+`context_text` 裡，要救得靠正規表達式去剖 prompt 文字，而不是 `persistence/backfill.py` 賴以成立的
+純重算。
+
+**部署帶 migration，換 schema 前先備份 DB，而且時機綁在換段。** 不是怕資料壞——這次是 `ALTER TABLE`
+加兩個 nullable 欄，既有列全部維持有效。**備份保的是「退得回去」這個選項**：v13 的 build 開過的
+store，只認得 v12 的 checkout 會**整個拒絕開啟**（`store schema is vN but this build only knows
+vM`，連唯讀指令都拒），所以一旦升上去，要退回舊 binary 就只剩還原備份這條路。正因如此，**不要在
+run 5 跑到一半單獨部署它**：那等於拿現行 run 的「退回上一個 binary」去換一個只有 run 6 用得到的欄位。
+排進換段 SOP 當一個步驟：**停 run 5 → 備份 DB → 部署 v13 → 開 run 6**。
 
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被

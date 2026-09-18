@@ -910,12 +910,12 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
     assert "format_fingerprint: " not in captured.out
     # With the research switch empty there is nothing this lane's shape can
     # disagree with the daemon about beyond the documented |position, so no
-    # note (issue #276 — its own tests below).
-    assert "autoresearch_signal names a document" not in captured.out
+    # host-locality warning (issue #276 — its own tests below).
+    assert "autoresearch_signal names a document" not in captured.err
 
 
 def _context_only_out(monkeypatch, capsys, *, signal_path, research_signal):
-    """``--context-only`` on a healthy context; returns its stdout lines."""
+    """``--context-only`` on a healthy context; returns its (stdout, stderr)."""
     ctx = SimpleNamespace(
         candle_count=200,
         indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
@@ -930,27 +930,62 @@ def _context_only_out(monkeypatch, capsys, *, signal_path, research_signal):
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
     config = {"market_data": {"autoresearch_signal": signal_path}}
     assert main_mod.run_context_only(config, "BTC") == 0
-    return capsys.readouterr().out.splitlines()
+    captured = capsys.readouterr()
+    return captured.out.splitlines(), captured.err
 
 
-def test_context_only_says_when_its_shape_can_disagree_with_the_daemons(monkeypatch, capsys):
+def _research_warning(err):
+    """The one host-locality warning line, or None."""
+    return next(
+        (line for line in err.splitlines() if "autoresearch_signal names a document" in line),
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("research_signal", "landed", "promises_a_warning"),
+    [
+        (None, "did NOT use one", True),
+        (object(), "DID use one", False),
+    ],
+)
+def test_context_only_says_which_bucket_this_host_landed_in(
+    monkeypatch, capsys, research_signal, landed, promises_a_warning
+):
     # Issue #276: this command exists to show which bucket a YAML edit lands
     # in BEFORE deploying it, and on this one key it can answer differently
     # from the daemon — the ``autoresearch`` token depends on a document being
-    # present and fresh on whichever host runs the command. A laptop pointed
-    # at the server's config would otherwise print the no-signal shape with
-    # nothing on the line saying the server will print the other one.
-    lines = _context_only_out(
-        monkeypatch, capsys, signal_path="/srv/research/btc-signal.json", research_signal=None
+    # present and fresh on whichever host runs the command.
+    #
+    # BOTH directions, which is the point: an earlier draft spoke up only when
+    # the section was missing, leaving a laptop that had run the radar by hand
+    # to print the autoresearch bucket in silence while the server's broken
+    # producer cron writes the other one — a preview trusted exactly when it
+    # was wrong.
+    out, err = _context_only_out(
+        monkeypatch,
+        capsys,
+        signal_path="/srv/research/btc-signal.json",
+        research_signal=research_signal,
     )
-    note = next(line for line in lines if line.startswith("note: "))
-    assert "autoresearch_signal names a document" in note
-    assert "`autoresearch` token" in note
-    assert "THIS host" in note
-    # Its OWN line. The three surfaces that print ``prompt_regime:`` share one
-    # renderer so the same string greps across all of them (RUNBOOK §4), and a
-    # caveat spliced into that line would end that — so the regime line has to
-    # still be byte-identical to the one the renderer produces.
+    warning = _research_warning(err)
+    assert warning is not None
+    assert warning.startswith("warning: ")  # the prefix this lane already uses
+    assert landed in warning
+    assert "THIS host" in warning
+    # It must not promise a companion warning that may not exist: the bridge
+    # skips the document read entirely on an empty candle window, so the same
+    # None arrives with nothing logged. Only the missing-section direction may
+    # point at one, and even then conditionally.
+    assert ("research signal" in warning.replace("autoresearch_signal", "")) is promises_a_warning
+    if promises_a_warning:
+        assert "candle window was empty" in warning
+    # On stderr, NOT stdout: this lane's documented use is grepping stdout, and
+    # a caveat a pipe can separate from the line it qualifies is the failure it
+    # exists to prevent.
+    assert not [line for line in out if "autoresearch_signal names a document" in line]
+    # The regime line stays byte-identical to what the shared renderer produces
+    # — the three surfaces grep as one string (RUNBOOK §4).
     from contrib.hyperliquid_perp.common.prompt_regime import PROMPT_VERSION, prompt_regime_line
     from contrib.hyperliquid_perp.domains.perp import risk_gate
     from contrib.hyperliquid_perp.domains.perp.target_decision import (
@@ -965,27 +1000,51 @@ def test_context_only_says_when_its_shape_can_disagree_with_the_daemons(monkeypa
             max_pct=risk_gate.effective_max_target_margin_pct(risk_cfg, decision_cfg),
         )
     )
-    regime = prompt_regime_line(PROMPT_VERSION, "shape text", fingerprint)
-    assert regime in lines
-    assert lines.index(note) == lines.index(regime) + 1  # under it, not inside it
+    assert prompt_regime_line(PROMPT_VERSION, "shape text", fingerprint) in out
 
 
-@pytest.mark.parametrize(
-    ("signal_path", "research_signal", "why"),
-    [
-        ("", None, "switch off: there is no document for the two hosts to disagree about"),
-        ("/srv/research/btc-signal.json", object(), "the section IS in this render, token and all"),
-    ],
-)
-def test_context_only_stays_quiet_when_the_shape_cannot_be_wrong(
-    monkeypatch, capsys, signal_path, research_signal, why
+def test_context_only_does_not_promise_a_research_warning_that_was_never_logged(
+    monkeypatch, capsys
 ):
-    # The note is a claim about a specific disagreement; printed on a run that
-    # cannot have one it would be noise on the lane an operator trusts most.
-    lines = _context_only_out(
-        monkeypatch, capsys, signal_path=signal_path, research_signal=research_signal
+    # The case the wording has to survive: ``engine_bridge._build_context``
+    # guards the document read on ``if candles and ...``, so an empty candle
+    # window produces the same ``research_signal is None`` with NONE of
+    # ``load_research_signal``'s named WARNINGs logged. An earlier draft told
+    # the operator to "see the research signal warning on stderr" — sending
+    # them after a line nothing wrote, on a run whose real problem is the
+    # empty window.
+    ctx = SimpleNamespace(
+        candle_count=0,  # the under-warm guard fires; exit 4, not 0
+        indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
+        candle_interval="4h",
+        exchange_time=None,
+        as_of=datetime.now(timezone.utc),
+        research_signal=None,
     )
-    assert not [line for line in lines if line.startswith("note: ")], why
+    monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
+    monkeypatch.setattr(main_mod, "render_market_context", lambda c: "ctx text")
+    monkeypatch.setattr(main_mod, "context_shape", lambda c: "shape text")
+    monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")
+    config = {"market_data": {"autoresearch_signal": "/srv/research/btc-signal.json"}}
+    assert main_mod.run_context_only(config, "BTC") == 4
+    err = capsys.readouterr().err
+    warning = _research_warning(err)
+    assert warning is not None
+    # It may point at a companion warning, but only as a conditional that
+    # names this very case — never as a promise.
+    assert "candle window was empty" in warning
+    # And the run's real fault is still reported, unshadowed.
+    assert "degraded context" in err or "do not read it as live signal" in err
+
+
+def test_context_only_stays_quiet_about_research_when_the_switch_is_off(monkeypatch, capsys):
+    # With no document named there is nothing for two hosts to disagree about,
+    # and the default is off — so this is what almost every run prints.
+    out, err = _context_only_out(
+        monkeypatch, capsys, signal_path="", research_signal=None
+    )
+    assert _research_warning(err) is None
+    assert not [line for line in out if "autoresearch_signal" in line]
 
 
 def test_run_context_only_rejects_bad_risk_decision_config(monkeypatch, capsys):

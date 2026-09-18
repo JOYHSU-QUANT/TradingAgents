@@ -341,6 +341,23 @@ def test_a_home_that_cannot_be_resolved_costs_the_section_not_the_cycle(caplog, 
     # passwd. SETUP invites ``~`` paths, so this is on the documented path.
     for name in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
         monkeypatch.delenv(name, raising=False)
+    # An empty environment is the whole story only on Windows. POSIX
+    # ``expanduser`` falls back to the passwd database, so on a Linux host
+    # ``~`` still expands -- to a file that merely is not there, which is a
+    # DIFFERENT refusal with a different sentence, and the arm this test exists
+    # for never runs. ``~someuser`` for a user not in passwd is the real shape
+    # of "no home to expand against" there, and a ``KeyError`` out of the
+    # lookup is how the library says so.
+    try:
+        import pwd
+    except ImportError:  # Windows has no passwd database to fall back to.
+        pass
+    else:
+
+        def _not_in_passwd(_uid):
+            raise KeyError("uid not in passwd")
+
+        monkeypatch.setattr(pwd, "getpwuid", _not_in_passwd)
     assert _load("~/signal.json", caplog) is None
     assert len(caplog.records) == 1
     assert "could not be resolved" in caplog.text

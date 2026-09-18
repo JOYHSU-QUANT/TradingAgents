@@ -1867,6 +1867,19 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **The "no home to expand against" refusal is now tested on POSIX too (#275)**.
+  `test_a_home_that_cannot_be_resolved_costs_the_section_not_the_cycle` emptied
+  `HOME`/`USERPROFILE` and expected `Path.expanduser` to raise `RuntimeError`.
+  That is the Windows story: POSIX `expanduser` falls back to the passwd
+  database, so on Linux `~/signal.json` expanded to a real path and the test
+  passed through the *file-not-found* arm instead — green against a mutant that
+  drops `RuntimeError` from the reader's `except`, i.e. no discrimination at all
+  on the host the daemon actually runs on. The test now also makes the passwd
+  lookup fail (`~someuser` for a user not in passwd, which is what the comment
+  always claimed to cover) on platforms that have one. Found by the paper
+  deploy's own test gate, which is where these tests first meet Linux —
+  `contrib/` tests do not run in PR CI.
+
 - **`live --loop` no longer cancels its own SL/TP when the engine cannot be
   built over a live position (#268)**. `_run_live_loop` constructs the
   decision provider after the §19.1 verdict passes, and that construction

@@ -107,7 +107,13 @@ def run_context_only(config: dict, coin: str) -> int:
     # BEFORE deploying a config edit, printed as the same ``prompt_regime:``
     # line the daemon logs at its first cycle and ``validate`` prints per
     # bucket (issue #163), minus the ``|position`` token this lane never
-    # carries (no local books — RUNBOOK §4). The fingerprint is over the
+    # carries (no local books — RUNBOOK §4) and, once
+    # ``market_data.autoresearch_signal`` is on, possibly minus
+    # ``|autoresearch`` too: that token appears only if the handoff document
+    # exists and is fresh on THIS host, so a laptop run against a server's
+    # config prints the no-signal shape while the daemon prints the other.
+    # The same run's ``research signal …`` WARNING on stderr says which.
+    # The fingerprint is over the
     # same block run_engine feeds the model (effective ceiling included), so
     # a grid or ceiling edit shows its new value here. A gate-threshold edit
     # does NOT (prompt v5 keeps those out of the text): that one needs a new

@@ -274,18 +274,28 @@ def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
     # and a bare errno naming a temporary file does not. Worse, ``requests``'
     # exceptions ARE ``OSError``s, so a blanket catch would print a transport
     # defect under ``fetch`` or ``research`` as though it were a mistake.
-    # Resolving is its OWN step with its OWN sentence. Merged into the write's
-    # handler, three of its four lanes got advice about writability that had
-    # nothing to do with them: a NUL in the path, a path with no name, and
-    # ``~someuser`` for a user that does not exist are all mistakes in the
-    # ARGUMENT, not in the filesystem it points at. The consumer half of this
-    # seam splits them the same way.
+    # Resolving the argument is its OWN step with its OWN sentences. Merged
+    # into the write's handler, its lanes got advice about writability that
+    # had nothing to do with them: a NUL in the path, a path naming a
+    # directory ROOT, and ``~someuser`` for a user that does not exist are all
+    # mistakes in the ARGUMENT, not in the filesystem it points at. The
+    # consumer half of this seam splits them the same way.
     try:
         # ``expanduser`` raises ``RuntimeError`` and ``resolve`` raises
         # ``ValueError`` (an embedded NUL); neither is an ``OSError``.
         target = Path(path).expanduser().resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         raise SignalError(f"--out {path!r} is not a path this command can resolve: {exc}") from exc
+    if not target.name:
+        # A filesystem ROOT resolves perfectly well and then has no name to
+        # hang a temporary file off, so ``with_name`` below would raise a
+        # ``ValueError`` from inside the write's handler and be answered with
+        # advice about permissions. Named here instead — which is also what
+        # makes this step's comment true about its own lanes.
+        raise SignalError(
+            f"--out {path!r} resolves to {target}, which is a directory root and not a file "
+            f"this command can write"
+        )
 
     temporary = None
     try:
@@ -407,6 +417,10 @@ def _notes(validation: SegmentMetrics, holdout: SegmentMetrics) -> str:
 
     Comparative, never numeric, for the same reason the bands are.
     """
+    # ``>=``: a tie reads as "at or above", because the sentence is about
+    # whether the held-back window CONTRADICTED the selection window, and an
+    # equal figure did not. Written out because it is the one boundary in this
+    # module a reader cannot infer from the words it prints.
     ratio = "at or above" if holdout.net.sharpe >= validation.net.sharpe else "below"
     total = "positive" if holdout.net.total_return > 0 else "not positive"
     return (

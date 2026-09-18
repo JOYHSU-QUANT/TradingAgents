@@ -101,10 +101,14 @@ Breaking changes within the 0.x line are called out explicitly.
   NOTHING NUMERIC CROSSES. No Sharpe, drawdown, return or equity is in the
   document; the bands are cut at `signal.CONFIDENCE_EDGES` / `DRAWDOWN_EDGES`
   and the figures stay in the ledger. The rendered block states what each rule
-  MEASURED and nothing more (the `_SHAPE_NOTE` / PR #95 discipline): the side is
-  named as the rule's own state, to be filled at that rule's next bar open, and
-  the Basis line says the rule was fitted elsewhere, that the bands are ordinal,
-  and that the section feeds no gate, no sizing and no order.
+  MEASURED and nothing more (the `_REGIME_NOTE` / `_SHAPE_NOTE` / PR #95
+  discipline): the side is named as the rule's own state and nothing else - not
+  as a fill, because most cycles fill nothing (the rule is continuing a side it
+  already held) and a flat rule has nothing to fill at all. The Basis line
+  carries what the side line therefore must not assert: that the rule decides
+  at a bar's close and is priced as filling at the next open, that it was
+  fitted elsewhere, that the bands are ordinal labels, and that the section
+  feeds no gate, no sizing and no order.
 
   FAIL-CLOSED BY SECTION, never by row. A path that cannot be resolved, a
   missing file, an unreadable one, a non-UTF-8 one, JSON that will not decode, a

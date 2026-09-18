@@ -934,6 +934,30 @@ def test_the_setup_doc_quotes_the_volume_profile_floor_the_loader_enforces():
     assert f"視窗 ≥ {MIN_VOLUME_PROFILE_WINDOW}" in setup
 
 
+def test_the_docs_quote_the_staleness_bound_the_reader_enforces():
+    """The ``2`` and the ``8 hours`` in three docs are the reader's constant.
+
+    Same shape, and the same reason, as the volume-profile floor above: the
+    bound is written out in SETUP twice (the prose and a verbatim quote of the
+    reader's own refusal), in RUNBOOK as the derived cadence, and in the module
+    table. Raising MAX_SIGNAL_AGE_INTERVALS would leave all four wrong with the
+    suite green, and the only symptom is an operator scheduling the producer to
+    a cadence the reader no longer honours — which shows up as a prompt section
+    that quietly stops appearing.
+    """
+    from contrib.hyperliquid_perp.domains.perp.research_signal import MAX_SIGNAL_AGE_INTERVALS
+    from contrib.hyperliquid_perp.domains.perp.schema import interval_to_ms
+
+    bars = MAX_SIGNAL_AGE_INTERVALS
+    hours = bars * interval_to_ms("4h") // 3_600_000
+    setup = doc_text("SETUP.md")
+    assert f"舊超過 **{bars} 根文件自己的 bar** 的文件（4h 研究 bar ＝ {hours} 小時）" in setup
+    # The reader's refusal message, quoted verbatim in the troubleshooting table.
+    assert f"`past the {bars} x 4h bound`" in setup
+    assert f"producer 停掉超過 {hours} 小時" in doc_text("RUNBOOK.md")
+    assert f"舊超過 {bars} 根文件自己的 bar" in doc_text("README.md")
+
+
 def test_the_example_config_quotes_the_market_data_defaults_the_loader_enforces():
     """The example YAML's ``market_data`` comments, derived rather than retyped.
 

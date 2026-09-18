@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import pathlib
 import re
 import shutil
 
@@ -177,6 +178,31 @@ def test_the_notes_compare_the_held_back_window_to_the_selection_one(ledger):
     assert ("net return positive" in signal.notes) is (holdout.net.total_return > 0)
     ratio = "at or above" if holdout.net.sharpe >= validation.net.sharpe else "below"
     assert f"return-to-volatility {ratio} the selection window's" in signal.notes
+
+
+@pytest.mark.parametrize(
+    ("holdout_sharpe", "expected"),
+    # The exact tie is the case the round-4 review found untested: the
+    # assertion recomputed the same comparison from the same two values, so it
+    # could only have disagreed at equality, which the fixture never produces.
+    [(1.0, "at or above"), (1.5, "at or above"), (0.5, "below")],
+)
+def test_a_held_back_window_that_merely_ties_did_not_contradict_the_selection_one(
+    ledger, monkeypatch, holdout_sharpe, expected
+):
+    experiment, trial = ledger.latest_promotion("BTC")
+    edited = dataclasses.replace(
+        trial,
+        validation=dataclasses.replace(
+            trial.validation, net=dataclasses.replace(trial.validation.net, sharpe=1.0)
+        ),
+        holdout=dataclasses.replace(
+            trial.holdout, net=dataclasses.replace(trial.holdout.net, sharpe=holdout_sharpe)
+        ),
+    )
+    monkeypatch.setattr(ledger, "latest_promotion", lambda coin: (experiment, edited))
+    notes = build_signal(ledger, "BTC")[0].notes
+    assert f"return-to-volatility {expected} the selection window's" in notes
 
 
 def test_the_bias_is_the_side_the_replay_ended_on_from_the_experiments_first_bar(
@@ -415,6 +441,11 @@ def test_an_out_path_whose_parent_cannot_be_made_is_refused_by_name(ledger, tmp_
     # about writability would be about a filesystem this never reached.
     with pytest.raises(SignalError, match="is not a path this command can resolve"):
         write_signal("out" + chr(0) + ".json", signal)
+    # A filesystem ROOT resolves perfectly well and then has no name to hang a
+    # temporary off, so without its own check it died inside the write's
+    # handler and was answered with advice about permissions.
+    with pytest.raises(SignalError, match="is a directory root and not a file"):
+        write_signal(pathlib.Path(tmp_path.anchor), signal)
     assert main(
         ["signal", "--db", str(ledger.store.path), "--out", str(blocker / "under" / "s.json")]
     ) == 1

@@ -22,8 +22,10 @@ under that reason (:data:`Reason`), never guessed:
   writes, and ``validate`` would print it as a NEW bucket instead of folding
   one. The writer refuses it too. ACCEPTED STATE (decided 2026-09-03): such
   rows stay in the ``n/a`` bucket for good — no companion tool rebuilds the
-  shape from the payload's text. The running run (``paper-BTC-3``) started
-  on v10, so only archived runs carry them.
+  shape from the payload's text. The criterion is WHEN A ROW WAS WRITTEN,
+  not whether its run is archived: ``paper-BTC-3`` is archived and carries
+  none of these (it started on v10), while a run that straddled the v10
+  deploy is mixed. Only rows written before that point lack the column.
 - ``missing_payload``: no path on the row, or no file at it.
 - ``unreadable``: the file cannot be read (permissions), is not JSON, or
   carries no string ``format_instructions`` — each logged with its cause.

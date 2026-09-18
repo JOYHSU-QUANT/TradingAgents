@@ -28,7 +28,7 @@ from __future__ import annotations
 
 __all__ = ["LEASE_READABLE_SINCE", "MIGRATIONS", "SCHEMA_MIGRATIONS_DDL", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # The oldest schema an OWNING command (``paper``, ``live``, a real ``live-smoke``
 # run) can open AS-IS and consult the run lease in before it upgrades the store
@@ -757,5 +757,41 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE funding_events ADD COLUMN last_backfill_status TEXT",
         "ALTER TABLE funding_events ADD COLUMN last_backfill_error TEXT",
         "ALTER TABLE funding_events ADD COLUMN last_backfill_at TEXT",
+    ),
+    # v13: WHICH rule and WHICH side the research-signal section carried, for
+    # the cycles that had one (issue #276). The section itself arrived in PR
+    # #275, and the only thing the store remembered about it was the
+    # ``autoresearch`` token in ``context_shape`` — i.e. whether the section
+    # was THERE. The question run 6 exists to answer is the other one: given
+    # a cycle whose section said ``long``, did the decision lean long. That
+    # needs the side as a COLUMN; before these two it lived only inside
+    # ``context_text`` in the payload JSON on disk, so answering it meant
+    # opening one file per cycle instead of running one query.
+    #
+    # ``autoresearch_bias``        — the side the rule held (``ResearchBias``:
+    #                                ``long`` / ``short`` / ``flat``), the same
+    #                                word the prompt's own line printed.
+    # ``autoresearch_strategy_id`` — which rule that was
+    #                                (``<experiment_id>#<trial_id>``). Not
+    #                                redundant with the bias: the radar can
+    #                                promote a new rule mid-run, and without
+    #                                this the cycles of two different rules add
+    #                                up into one indistinguishable number.
+    #
+    # Both are written from the SAME ``PerpMarketContext`` the prompt was
+    # rendered from (``audit_rows.write_ai_input``), so they describe the
+    # section the model actually saw — never a second read of the handoff
+    # document, which by then can have been rewritten by the radar.
+    #
+    # Nullable, and the NULL is genuinely two-valued — "no section in this
+    # cycle's prompt" and "written before v13" read the same in the cell. The
+    # column that tells them apart is ``context_shape``, which every row this
+    # build writes also carries: a NULL bias on a row whose shape contains
+    # ``autoresearch`` is pre-v13 history, and a NULL bias on a row whose
+    # shape does not is a cycle that really had no section. Spelled out for
+    # the reader in phase2-data §5.2 and in RUNBOOK §4 beside the query.
+    13: (
+        "ALTER TABLE ai_inputs ADD COLUMN autoresearch_bias TEXT",
+        "ALTER TABLE ai_inputs ADD COLUMN autoresearch_strategy_id TEXT",
     ),
 }

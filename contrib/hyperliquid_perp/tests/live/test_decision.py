@@ -196,8 +196,16 @@ class _DriverEngine:
 
 
 def _decision_input():
+    # A stand-in for the market half of PerpMarketContext, carrying exactly the
+    # fields ``audit_rows.write_ai_input`` reads off it — so when that writer
+    # starts reading a new one, this fails rather than drifting.
+    # ``research_signal`` is the real type's own default: no research section
+    # in this cycle's prompt.
     ctx = SimpleNamespace(
-        mark_price=Decimal(50000), mid_price=Decimal(50000), funding_rate=Decimal("0.0001")
+        mark_price=Decimal(50000),
+        mid_price=Decimal(50000),
+        funding_rate=Decimal("0.0001"),
+        research_signal=None,
     )
     return DecisionInput(
         context=ctx,

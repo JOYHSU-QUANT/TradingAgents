@@ -1,6 +1,6 @@
 """One definition of the §5 / §7 audit-row assembly (phase2-data).
 
-``ai_inputs`` (37 columns) and ``ai_outputs`` (26 columns) are written from two
+``ai_inputs`` (40 columns) and ``ai_outputs`` (26 columns) are written from two
 call sites — the paper scheduler and the live decision driver — that previously
 each carried a full copy of the field mapping ("mirror of PaperScheduler",
 live/decision.py). A schema column added to one copy but not the other would
@@ -93,6 +93,15 @@ def write_ai_input(
     with localcontext(DECIMAL_CONTEXT):
         notional = position_notional(position.size, ctx.mark_price)
     side = "flat" if position.is_flat else ("long" if position.is_long else "short")
+    # The research-signal section's two facts (schema v13, issue #276), read
+    # off the SAME context the prompt was rendered from — like ``mark_price``
+    # and the rest above, and unlike a second read of the handoff document,
+    # which the radar can have rewritten since. ``None`` when this cycle's
+    # prompt carried no such section, which ``context_shape`` records too:
+    # the two are one predicate (``ctx.research_signal is not None``) on one
+    # frozen object, so a row can never say the section was there and leave
+    # the side blank.
+    signal = ctx.research_signal
     with db.transaction() as txn:
         repo.insert_ai_input(
             txn,
@@ -133,6 +142,8 @@ def write_ai_input(
             prompt_version=decision_input.prompt_version,
             context_shape=decision_input.context_shape,
             format_fingerprint=decision_input.format_fingerprint,
+            autoresearch_bias=None if signal is None else signal.bias.value,
+            autoresearch_strategy_id=None if signal is None else signal.strategy_id,
             model=decision_input.model,
         )
         repo.update_decision_attempt(txn, attempt_id, input_id=input_id, timestamp=now)

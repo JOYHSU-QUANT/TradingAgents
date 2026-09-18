@@ -84,6 +84,73 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Which rule and which side the research block carried, as two queryable
+  columns (schema v13, #276)** - the follow-up PR #275 left for the run-6
+  segment decision. Before this the store remembered only THAT the section was
+  in a cycle's prompt: the `autoresearch` token in `ai_inputs.context_shape`.
+  The question run 6 exists to answer is the other one - given the cycles whose
+  section said `long`, did the decisions lean long - and answering it meant
+  opening one payload JSON per cycle, which is not a measurement anyone runs.
+
+  `ai_inputs.autoresearch_bias` is the side the rule held (`long` / `short` /
+  `flat`), the same word the prompt's own line printed.
+  `ai_inputs.autoresearch_strategy_id` is which rule that was
+  (`<experiment_id>#<trial_id>`): not redundant with the bias, because the
+  radar can promote a new rule mid-run and without it two rules' cycles add up
+  into one indistinguishable number. Both are exported, after the documented
+  `ai_inputs.csv` prefix. RUNBOOK §4 carries the query they exist for.
+
+  Both are read off the SAME `PerpMarketContext` the prompt was rendered from,
+  never a second read of the handoff document - by the time the row is written
+  the radar may have rewritten it, and a column that disagrees with the words
+  the model saw is worse than no column.
+
+  NULLABLE, and the NULL is genuinely two-valued: "this cycle's prompt had no
+  such section" (the common case - the switch is off by default) and "written
+  before v13" read the same in the cell. `context_shape` is what tells them
+  apart, and every row this build writes carries both halves. That rule has an
+  ordering precondition, now written into RUNBOOK §4: v13 must be deployed
+  BEFORE the switch is ever turned on, or the rows in between carry an
+  `autoresearch` shape with empty columns and are permanently
+  indistinguishable from pre-v13 history.
+
+  Deploying this runs a migration, so back the DB up first - and do it AT the
+  run-5-to-run-6 segment boundary (stop, back up, deploy, open), not during
+  run 5. Once a store has been upgraded, a v12 build refuses it outright,
+  read-only commands included, so an early deploy spends the running
+  segment's roll-back option on a column only the next one needs. Note that
+  `safe-mode --status` opens with `migrate=True` by deliberate exception, so
+  pointing a v13 checkout at the store upgrades it before the command even
+  decides whether it can answer - against a paper run it migrates, then
+  refuses with "is a paper run" and exit 1.
+
+- **`--context-only` says which research bucket THIS host landed in (#276)** -
+  that command exists to show which segmentation bucket a YAML edit lands in
+  BEFORE deploying it, and on one key it could answer differently from the
+  daemon without saying so: the `autoresearch` token appears only if the
+  handoff document is present and fresh on the host running the command. An
+  operator knows to add `|position` back; there was nothing telling them about
+  this one.
+
+  Whenever the switch names a document, a `warning:` line on stderr now names
+  which way this host answered. BOTH directions, because the divergence runs
+  both ways: a laptop that ran the radar by hand prints the `autoresearch`
+  bucket while a server whose producer cron is broken writes the other one, so
+  the token's presence is exactly as host-local as its absence. Speaking up
+  only when the section was missing would leave a preview trusted precisely
+  when it is wrong.
+
+  On stderr, not stdout, and with the prefix this lane already uses: the
+  command's answer goes to stdout and that line exists to be grepped, so a
+  caveat on stdout is what a `| grep prompt_regime` silently filters away -
+  the failure it exists to prevent. Its own line, never
+  spliced into `prompt_regime:` - the daemon log, `validate` and this command
+  share one renderer precisely so the same string greps across all three
+  (RUNBOOK §4). It does not promise a companion `research signal ...` warning:
+  the bridge skips the document read entirely when the candle window is empty,
+  so that same "no section" arrives with nothing logged, and the sentence is a
+  conditional naming that case rather than a promise.
+
 - **autoresearch -> perp: one qualitative research block in the prompt, off by
   default (plan C1)** - the research radar's only output into the live path.
   `python -m contrib.autoresearch signal --coin BTC --out <path>` takes the

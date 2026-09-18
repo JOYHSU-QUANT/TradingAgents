@@ -189,6 +189,23 @@ payload JSON）：`domains/perp/prompt_context.context_shape` 把當次渲染的
 `common/prompt_regime.py` 一個渲染函式，同一個字串可以 grep），改 YAML 後部署前就能看到會落在哪個
 桶——但注意它印的 `context_shape` **少一段**：prompt v4 起 paper／live daemon 的列一律多帶 `|position`
 （倉位段從本地帳本來，一次性 CLI 沒有帳本、維持 position-blind），比對時把這一段補上再比。
+**還有第二種會少的段，而且這一種兩個方向都會錯**（issue #276）：`autoresearch` token 在不在，取決於
+交接文件在**跑這個指令的那台機器上**存不存在、夠不夠新。`|position` 是固定少、你知道要補回去；這一種
+不是——拿筆電對著伺服器的 config 跑會印出沒有那一段的 shape 而 daemon 有，**反過來**你在筆電上手動跑過
+radar、伺服器的 producer cron 卻壞著時，preview 會印出帶 `autoresearch` 的 shape 而 daemon 印的是沒有
+的那一個。**token 出現不比它不出現更可信，兩邊一樣是本機的事。**
+
+所以只要 `market_data.autoresearch_signal` 有值，`--context-only` 就會在 **stderr** 印一行
+`warning: market_data.autoresearch_signal names a document and this host DID／did NOT use one …`，
+**明講本機落在哪個桶**；開關關著才完全不印（沒有可爭議的事）。三件事要知道：
+
+- **在 stderr 不在 stdout**，前綴沿用這條 lane 既有的 `warning:`。理由是答案印在 stdout、而那一行
+  本來就是拿來 grep 的：註記如果也放 stdout，`| grep prompt_regime` 會把它安靜地濾掉——那正是它要防
+  的失效。放 stderr 它跨得過那個 pipe，也跟它提到的那些 WARNING 落在一起。
+- **不動 `prompt_regime:` 那一行**（另起一行）——三處共用同一個渲染函式、同一個字串要能 grep 是紀律。
+- **它不保證有伴隨的 WARNING。** 少那一段時通常還有一句具名 WARNING 說是哪一種拒絕（檔案不在、讀不出來、
+  JSON／schema 被拒、幣別不符、太舊、**戳記在未來**），但**K 線視窗是空的時候，那份文件根本沒被讀過**
+  ——同樣是「沒有那一段」，卻一行 WARNING 也沒有。所以那句話是條件句而不是承諾，而且會點名這個情況。
 **daemon 自己也會說**（issue #163）：paper／live 第一個組出 prompt 並寫下 payload 的 cycle 會在 log 印
 同一行 `prompt_regime: …`（INFO，`cli._provider`），之後**只在三鍵翻桶時再印一次、仍是 INFO**——volume
 profile 段因歷史不夠被跳過、倉位段因權益 ≤ 0 被省略（見 §7）都算翻桶，多半是資料驅動、不是告警；一整段
@@ -244,6 +261,65 @@ drift。任一側 parser 讀不了（例如 genesis 帶著已改名的舊 key）
 profile 段」的 shape——這是真的少了一段，不是假訊號；判讀時對照 WARNING 把它們併回去。
 （伺服器上跑著的 run 不受影響：`local.yaml` 整檔優先且不進版控，不會自動拿到這個 key。）
 
+**`context_shape` 只回答「那一段在不在」，回答不了「模型有沒有跟著它走」。** 這是 shape 的設計，
+不是缺陷——bias 怎麼變都不進 shape，否則每次 radar 翻邊就會多切一個桶。但 run 6 要問的正是後者，
+所以 **schema v13 起 `ai_inputs` 多兩欄**（issue #276）：**`autoresearch_bias`**（那個 cycle 印給
+模型的是哪一邊：`long`／`short`／`flat`）與 **`autoresearch_strategy_id`**（那是哪一條規則，
+`<experiment_id>#<trial_id>`——radar 會在 run 中途 promote 新規則，沒有這一欄兩條規則的 cycle 會
+加總成同一個分不開的數字）。兩欄都取自**渲染那份 prompt 的同一個 context**，所以描述的是模型真的
+看到的那一段，不是事後再讀一次交接文件（那時 radar 可能已經覆寫）；兩欄一起 export 進
+`ai_inputs.csv`（排在 `format_fingerprint` 之後）。「模型跟著 bias 走了嗎」現在是一句 SQL：
+
+```sql
+-- 每個 (規則, bias) 桶底下，模型要的方向怎麼分佈，以及 gate 怎麼處置。
+SELECT i.autoresearch_strategy_id, i.autoresearch_bias,
+       o.target_side, o.risk_action, COUNT(*) AS cycles
+  FROM ai_inputs i JOIN ai_outputs o ON o.input_id = i.input_id
+ WHERE i.run_id = 'paper-BTC-6' AND i.autoresearch_bias IS NOT NULL
+ GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;
+```
+
+`target_side`／`risk_action` 兩欄的既有語意這裡**不重述**——它們不是本節新增的東西，而重述一次
+就多一份會過期的拷貝（這一段本身在 review 裡連續三輪因為重述而寫錯）。要點只有一句：
+**`target_side` 的 NULL 不代表「模型沒有偏某一邊」。** 契約破損的 cycle 在 parse 接縫就被判掉、
+方向一併丟掉，所以模型講了 long 但少了 rationale 的 cycle，這一欄與「真的沒提方向」完全同形。
+查詢結果裡認得出來：那些列的 `risk_action` 是 **`invalid_fail_closed`**（`maintain_current` 的列
+則是 `approved`）。要再分「是哪一種格式問題」得另外把 `o.risk_reason` 也選出來——本節下面
+`requested_target_margin_pct` 那段列的六個 tag 就住在那一欄，是同一個接縫、同一個坑，判讀方式照
+那一段。
+`risk_action` 是 gate 的處置，不是「有沒有真的下單」；要問後者得往 `execution_plans`／`orders`／
+`fills` 看，那是另一個問題，run 6 問的是模型有沒有跟著 bias 走。
+
+**分母要自己決定**：這是 INNER JOIN，只有走到 gate 的 try 進得來。改 LEFT JOIN 時多出來的 NULL 列
+是**「試」不是「cycle」**（`ai_inputs` 列在呼叫 LLM 之前就寫，每次重試各有自己的 `input_id`），
+所以那一桶同時裝著整個失敗的 cycle 與「重試過但最後成功」的前幾次——拿它當分母會高估。另一邊也
+會漏：在寫 `ai_inputs` 之前就失敗的 cycle（市場資料讀不到）連列都沒有，兩種 JOIN 都看不到它。
+
+**空值有兩個意思，用 `context_shape` 分辨**：shape 有 `autoresearch` 而這兩欄是空的＝那一列寫在
+v13 之前（歷史，不是「沒有這一段」）；shape 沒有 `autoresearch`＝那個 cycle 真的沒有這一段。
+**寫 SQL 時要 `COALESCE(context_shape,'')`**：**v10 部署點之前寫下的列** `context_shape` 本身是
+NULL，`context_shape NOT LIKE '%autoresearch%'` 對 NULL 求值還是 NULL，那些列會兩個桶都掉出去、
+而且不會有任何列數警告。判準是「那一列什麼時候寫的」而不是「那個 run 封存了沒有」：跨過 v10
+部署點的 run 是混的，而 paper-BTC-3 雖然已封存卻是自 v10 起跑、每一列都有（見 §6）。
+
+**這條分辨規則有順序前提**：v13 要**先於開關被打開**部署。反過來做——先部署 #275 的 build 並把
+`autoresearch_signal` 填上、之後才升 v13——那段期間的列會帶著 `autoresearch` shape 而兩欄是空的，
+與 v13 之前的歷史**無法用這條規則區分**。真要救只能拿 payload JSON 的 `context_text` 去正規表達式
+剖 prompt 文字（那兩個值在裡面是定版格式的兩行），而不是 `persistence/backfill.py` 賴以成立的純
+重算——費工、且不是那支 backfill 的形狀，所以當成「別把順序做反」而不是「出事了還有救」。
+
+**部署帶 migration，換 schema 前先備份 DB，而且時機綁在換段。** 不是怕資料壞——這次是 `ALTER TABLE`
+加兩個 nullable 欄，既有列全部維持有效。**備份保的是「退得回去」這個選項**：store 一旦被 v13 的 build
+**升級過**，只認得 v12 的 checkout 就會**整個拒絕開啟**（`store schema is vN but this build only
+knows vM`，連唯讀指令都拒），所以升上去之後要退回舊 binary 就只剩還原備份這條路。
+**而「升級過」比你以為的容易觸發**：多數唯讀指令（`validate`／`export`）碰到落後的 store 是具名
+拒絕、不寫任何東西，但 **`safe-mode --status` 是刻意的例外，它 `migrate=True`、開檔就升級**（理由
+見 `cli/_common.py`：升級本身就可能讓 run latch 進 safe mode，那正是最需要這支診斷工具的時候）。
+所以拿 v13 的 checkout 對正式 store 跑一次 `safe-mode --status`，就已經把退路花掉了。
+正因如此，**不要在
+run 5 跑到一半單獨部署它**：那等於拿現行 run 的「退回上一個 binary」去換一個只有 run 6 用得到的欄位。
+排進換段 SOP 當一個步驟：**停 run 5 → 備份 DB → 部署 v13 → 開 run 6**。
+
 判讀時**主判準是提案率**（`requested_target_margin_pct` 非 null 的佔比）。**但這一欄
 會低估**：fail-closed 的 cycle 一律把它寫成 NULL，模型實際要求了什麼在 parse 接縫就被
 丟掉了，所以「提了案但格式被擋掉」與「根本沒提案」在這一欄完全同形。量提案率時要把
@@ -278,9 +354,13 @@ PnL，正是跨段對照要避免的汙染。等 cycle 自然回到空倉（或 
 1. 確認空倉後，SSH 上伺服器 `sudo systemctl stop hl-paper`，把 unit 的
    `ExecStart` 改成新段參數（`--run-id paper-BTC-2 --create`），
    `sudo systemctl daemon-reload`，**先不要啟動**。
-2. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
+2. **這次部署若帶 schema migration（例如 v13，見 §4），在這裡備份 DB。**
+   停了、還沒 push，是唯一一個「舊 code 與舊 schema 都還在」的時點；一旦下一步
+   的新 binary 開過 store 把它升上去，要退回舊 binary 就只剩還原備份這條路。
+   沒有 migration 的部署跳過這步。
+3. 再 push `deploy/paper`——workflow 部署新 code 並 restart，服務直接以新
    run-id 起段。
-3. 確認新段健康後，**立刻**把 unit 裡的 `--create` 拿掉再 `daemon-reload`：
+4. 確認新段健康後，**立刻**把 unit 裡的 `--create` 拿掉再 `daemon-reload`：
    run 已存在時帶 `--create` 是硬錯誤，留著的話**任何**後續 restart——crash
    自動重啟、主機重開機、下一次 deploy——都會直接失敗（systemd `Restart=`
    還可能因此 crash-loop），不是只有下次 deploy 才危險。
@@ -443,8 +523,8 @@ python -m contrib.hyperliquid_perp export --run-id paper-BTC-3 --output-dir expo
 （自動改讀 db 旁目錄時是兩行，中間夾一行 `note:`；第一行是記錄路徑那趟、第二行才是最終結果）。
 規則：只寫 NULL 格（daemon 寫過的值永遠不會被重算蓋掉，第二次跑 `stamped=0`）；`pre_v10`＝連
 `context_shape` 都沒有的列，**不填**（三鍵是一組，半組會變成 `validate` 上多出來的新桶）——**這些列永久留在
-`n/a` 桶是接受的現況**（2026-09-03 拍板：不另做 shape 回填工具；paper-BTC-3 自 v10 起跑，只有已封存的
-舊 run 有這種列）；payload 檔必須
+`n/a` 桶是接受的現況**（2026-09-03 拍板：不另做 shape 回填工具；paper-BTC-3 自 v10 起跑，所以這種列
+只會是 **v10 部署點之前寫下的**——判準是那一列什麼時候寫的，不是它的 run 封不封存，見 §4）；payload 檔必須
 存在、讀得到、**且** bytes 仍 hash 到該列的 `input_payload_hash`（被改過、截斷、從別處復原的檔不算證據）、
 JSON 裡要有字串 `format_instructions`——不符的列保持 NULL 並計數，不猜。回填後 `validate` 對 format 段
 沒變過的 run 只剩一行 `prompt_regime:`。它不是 migration（schema 步驟不做檔案 I/O、缺檔要容忍），對象是

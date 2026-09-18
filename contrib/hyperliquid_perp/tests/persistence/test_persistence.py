@@ -113,7 +113,9 @@ def test_audit_rows_docstring_counts_the_columns_it_actually_writes(tmp_path):
     # migration added a column and the sentence was not part of the diff.
     # Pinned here for the same reason the volume-profile floor is pinned —
     # nothing else makes a stale doc fail.
+    import ast
     import re
+    from pathlib import Path
 
     from contrib.hyperliquid_perp.persistence import audit_rows
 
@@ -125,6 +127,22 @@ def test_audit_rows_docstring_counts_the_columns_it_actually_writes(tmp_path):
     db.close()
     claimed = dict(re.findall(r"``(ai_\w+)`` \((\d+) columns\)", audit_rows.__doc__))
     assert {t: int(n) for t, n in claimed.items()} == actual
+    # ...and the WRITER fills every one of them. The count above is the
+    # TABLE's, so on its own it says nothing about the mapping this module
+    # exists to keep in one place — deleting a field from the insert call
+    # leaves it green, which is precisely the "silent NULLs that nothing
+    # downstream detects" the docstring names as its reason to exist. Counting
+    # the call's keywords closes that: a migration that adds a column without
+    # teaching the writer about it now fails here rather than exporting NULLs.
+    source = Path(audit_rows.__file__).read_text(encoding="utf-8")
+    written = {
+        node.func.attr.replace("insert_", "") + "s": len(node.keywords)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("insert_ai_input", "insert_ai_output")
+    }
+    assert written == actual
 
 
 def test_v13_adds_the_two_nullable_research_signal_columns_to_ai_inputs(tmp_path):

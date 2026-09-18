@@ -914,8 +914,12 @@ def test_run_context_only_exits_0_on_healthy_context(monkeypatch, capsys):
     assert "autoresearch_signal names a document" not in captured.err
 
 
-def _context_only_out(monkeypatch, capsys, *, signal_path, research_signal):
-    """``--context-only`` on a healthy context; returns its (stdout, stderr)."""
+def _context_only_out(monkeypatch, capsys, *, signal_path, research_signal, caplog=None):
+    """``--context-only`` on a healthy context; returns its (stdout, stderr).
+
+    Pass ``caplog`` (already at WARNING on ``engine_bridge``) to also capture
+    ``_warn_dual``'s log half.
+    """
     ctx = SimpleNamespace(
         candle_count=200,
         indicators={"rsi_14": 55.0, "ema_20": 60000.0, "ema_50": 59000.0, "atr_14": 250.0},
@@ -935,11 +939,16 @@ def _context_only_out(monkeypatch, capsys, *, signal_path, research_signal):
 
 
 def _research_warning(err):
-    """The one host-locality warning line, or None."""
-    return next(
-        (line for line in err.splitlines() if "autoresearch_signal names a document" in line),
-        None,
-    )
+    """The host-locality warning's STDERR half, or None.
+
+    Matched on the ``warning: `` prefix, not on the sentence alone: this lane
+    installs no logging handler, so ``_warn_dual``'s LOG half reaches stderr
+    too via ``logging.lastResort`` — unprefixed, and carrying the same
+    sentence. Matching the sentence alone would pick whichever came first and
+    silently change meaning under ``-p no:logging``.
+    """
+    wanted = "warning: market_data.autoresearch_signal names a document"
+    return next((line for line in err.splitlines() if line.startswith(wanted)), None)
 
 
 @pytest.mark.parametrize(
@@ -950,7 +959,7 @@ def _research_warning(err):
     ],
 )
 def test_context_only_says_which_bucket_this_host_landed_in(
-    monkeypatch, capsys, research_signal, landed, token_clause, promises_a_warning
+    monkeypatch, capsys, caplog, research_signal, landed, token_clause, promises_a_warning
 ):
     # Issue #276: this command exists to show which bucket a YAML edit lands
     # in BEFORE deploying it, and on this one key it can answer differently
@@ -962,12 +971,29 @@ def test_context_only_says_which_bucket_this_host_landed_in(
     # to print the autoresearch bucket in silence while the server's broken
     # producer cron writes the other one — a preview trusted exactly when it
     # was wrong.
-    out, err = _context_only_out(
-        monkeypatch,
-        capsys,
-        signal_path="/srv/research/btc-signal.json",
-        research_signal=research_signal,
-    )
+    with caplog.at_level(logging.WARNING, logger=bridge_mod.__name__):
+        out, err = _context_only_out(
+            monkeypatch,
+            capsys,
+            signal_path="/srv/research/btc-signal.json",
+            research_signal=research_signal,
+        )
+    # The LOG half, which nothing pinned until the exit check went looking.
+    # ``main.py`` argues it must read correctly ON ITS OWN — the line it would
+    # otherwise point at goes to stdout and never reaches the log stream — so
+    # the verdict has to be IN it and the stdout-only deixis has to be OUT.
+    # Rendered, not raw: a dropped ``%s`` argument leaves the record
+    # unformatted and logging swallows it into "--- Logging error ---" on
+    # every real run, which a raw-template assertion would not notice.
+    logged = [
+        r.getMessage()
+        for r in caplog.records
+        if "autoresearch_signal names a document" in r.getMessage()
+    ]
+    assert len(logged) == 1, logged
+    assert landed in logged[0]
+    assert "%s" not in logged[0]
+    assert "above" not in logged[0]
     warning = _research_warning(err)
     assert warning is not None
     assert warning.startswith("warning: ")  # the prefix this lane already uses

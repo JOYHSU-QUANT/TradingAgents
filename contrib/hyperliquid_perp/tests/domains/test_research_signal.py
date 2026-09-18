@@ -267,11 +267,14 @@ def test_another_coins_document_is_not_read_as_this_ones(tmp_path, caplog):
 def test_the_run_coin_is_normalised_the_way_the_document_normalises_its_own(
     tmp_path, caplog, configured
 ):
-    # ``ResearchSignal.coin`` is stripped and upper-cased at construction, and
-    # the run's is whatever the config named — ``_resolve_coin`` upper-cases
-    # without stripping. Comparing them raw made ``coins: [" btc "]`` miss its
-    # own document every cycle, which is the quietest failure in the design:
-    # one WARNING, and a section an operator switched on that never appears.
+    # ``ResearchSignal.coin`` normalises itself and nothing normalises the
+    # run's, so the comparison is made on normalised forms. Note what this is
+    # NOT claiming: a padded ``coins: [" btc "]`` never reaches this function
+    # in production, because the venue refuses a symbol it does not echo back
+    # and the caller only asks once it has candles. The case-only spellings
+    # are what ``_resolve_coin`` produces; the padded ones stand for the
+    # callers that skip it — fixtures, replays, a second caller later — which
+    # must not be refused on SPELLING by the check whose point is identity.
     assert _load(_write(tmp_path, _document()), caplog, coin=configured) == _signal()
     assert caplog.records == []
 

@@ -66,6 +66,16 @@ MAX_SIGNAL_AGE_INTERVALS = 2
 _UNREAD = object()
 
 
+def _why(exc: BaseException) -> str:
+    """``exc`` as a sentence fragment that is never empty.
+
+    ``str(MemoryError())`` is ``""``, and a WARNING whose whole job is to say
+    why the section is missing must not end in a bare colon. The type name is
+    the answer in that case, and it is the informative half of it anyway.
+    """
+    return str(exc) or type(exc).__name__
+
+
 def load_research_signal(
     path: str, *, coin: str, as_of_ms: int, candle_interval_ms: int
 ) -> ResearchSignal | None:
@@ -103,12 +113,22 @@ def load_research_signal(
         )
         return None
 
-    # Normalised on BOTH sides, and this is the lane that actually runs:
-    # ``ResearchSignal.coin`` is stripped and upper-cased at construction
-    # while the run's is whatever the config named, and ``_resolve_coin``
-    # upper-cases without stripping — so ``coins: [" btc "]`` would otherwise
-    # mismatch its own document every cycle. ``%r`` on both, because the two
-    # spellings in that message are indistinguishable printed bare.
+    # Normalised on BOTH sides because only ONE side normalises itself:
+    # ``ResearchSignal.coin`` is stripped and upper-cased at construction, and
+    # nothing normalises the run's — ``_resolve_coin`` upper-cases without
+    # stripping, and the config layer deliberately has no coin vocabulary at
+    # all (a bogus symbol is left to fail loud at the first exchange call).
+    #
+    # What this is NOT: a live failure mode. A padded ``coins: [" btc "]``
+    # never reaches here, because the venue refuses a symbol it does not echo
+    # back and this function is only asked once the run HAS candles. The
+    # reachable divergence is case, which ``_resolve_coin`` already settles.
+    # The guard is for the callers that skip all of that — fixtures, replays,
+    # a second caller later — and against the one thing worse than refusing
+    # them: refusing them on SPELLING, from the check whose point is identity.
+    #
+    # ``%r`` on both names regardless, because two spellings differing only in
+    # whitespace print identically bare.
     if signal.coin != coin.strip().upper():
         logger.warning(
             "research signal at %s is for %r and this run trades %r, so the prompt omits the "
@@ -208,21 +228,21 @@ def _read_document(path: str) -> tuple[object, object]:
         logger.warning(
             "research signal document %s could not be read, so the prompt omits the section: %s",
             resolved,
-            exc,
+            _why(exc),
         )
         return resolved, _UNREAD
     try:
         return resolved, json.loads(text)
     except (ValueError, RecursionError, MemoryError) as exc:
-        # Both are reachable by pointing the switch at the wrong JSON file — a
-        # store dump, an export — which is an operator mistake, not a defect,
-        # and must cost the section rather than the cycle.
+        # All three are reachable by pointing the switch at the wrong JSON
+        # file — a store dump, an export — which is an operator mistake, not a
+        # defect, and must cost the section rather than the cycle.
         # (``schema.epoch_ms_out_of_range`` already defends the digit limit at
         # the DTO; this is the same bound at the parse.)
         logger.warning(
             "research signal document %s could not be decoded as JSON, so the prompt omits the "
             "section: %s",
             resolved,
-            exc,
+            _why(exc),
         )
         return resolved, _UNREAD

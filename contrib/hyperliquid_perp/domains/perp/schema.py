@@ -1399,8 +1399,8 @@ class PerpMarketContext:
             # refusing. Freshness genuinely needs this run's clock and stays
             # with the reader; identity does not.
             raise ValueError(
-                f"PerpMarketContext.research_signal is for {self.research_signal.coin}, but the "
-                f"context is for {self.coin}; a prompt must not print another market's rule"
+                f"PerpMarketContext.research_signal is for {self.research_signal.coin!r}, but "
+                f"the context is for {self.coin!r}; a prompt must not print another market's rule"
             )
         if self.candle_count < 0:
             raise ValueError(

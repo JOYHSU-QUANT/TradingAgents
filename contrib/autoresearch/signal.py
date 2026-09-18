@@ -32,7 +32,6 @@ green.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -255,6 +254,11 @@ def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
     platforms this runs on. The reader is a trading daemon on its own
     schedule: it must never be able to open a half-written document, because
     that costs a cycle its research section for no reason at all.
+
+    The returned path is RESOLVED, and it is what the caller prints: the
+    producer's cron and the daemon's unit can start from different working
+    directories, and a relative ``--out`` is then two different files with
+    nothing in either process's output able to say so.
     """
     # EVERY step that can touch the filesystem is inside the one wrap,
     # expanding the path and making the parent included. The obvious version
@@ -270,11 +274,21 @@ def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
     # and a bare errno naming a temporary file does not. Worse, ``requests``'
     # exceptions ARE ``OSError``s, so a blanket catch would print a transport
     # defect under ``fetch`` or ``research`` as though it were a mistake.
+    # Resolving is its OWN step with its OWN sentence. Merged into the write's
+    # handler, three of its four lanes got advice about writability that had
+    # nothing to do with them: a NUL in the path, a path with no name, and
+    # ``~someuser`` for a user that does not exist are all mistakes in the
+    # ARGUMENT, not in the filesystem it points at. The consumer half of this
+    # seam splits them the same way.
+    try:
+        # ``expanduser`` raises ``RuntimeError`` and ``resolve`` raises
+        # ``ValueError`` (an embedded NUL); neither is an ``OSError``.
+        target = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SignalError(f"--out {path!r} is not a path this command can resolve: {exc}") from exc
+
     temporary = None
     try:
-        # ``expanduser`` raises ``RuntimeError`` — not ``OSError`` — for
-        # ``~someuser`` with no such user, which is an operator's typo.
-        target = Path(path).expanduser().resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
         # The pid is in the temporary name so two producers cannot overwrite
         # each other's half-finished file. They can still race on the rename,
@@ -284,19 +298,25 @@ def write_signal(path: str | Path, signal: ResearchSignal) -> Path:
         body = json.dumps(signal.to_document(), indent=2, sort_keys=True, allow_nan=False)
         temporary.write_text(body + "\n", encoding="utf-8")
         os.replace(temporary, target)
-    except (OSError, RuntimeError, ValueError) as exc:
+    except OSError as exc:
+        # ``target``, not the argument re-resolved: this is the path the call
+        # actually used, and resolving a second time here could answer
+        # differently if the tree moved in between.
         raise SignalError(
-            f"could not write the handoff document to {_shown(path)} — check that --out names a "
+            f"could not write the handoff document to {target} — check that --out names a "
             f"writable path whose parent this user may create: {exc}"
         ) from exc
     finally:
         if temporary is not None:
-            # A failed write leaves no litter beside the document the daemon
-            # reads. Suppressed rather than raised: this runs on the way out
-            # of a failure, and an errno from the cleanup would replace the
-            # sentence saying what actually went wrong.
-            with contextlib.suppress(OSError):
+            try:
                 temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                # Logged, not raised: this runs on the way out of a failure,
+                # and an errno from the cleanup would replace the sentence
+                # that says what actually went wrong. Not silent either — a
+                # repeating cron would otherwise leave one pid-named file per
+                # failure with nothing anywhere saying so.
+                logger.warning("could not remove the temporary %s: %s", temporary, exc)
     return target
 
 
@@ -328,21 +348,6 @@ def describe_signal(signal: ResearchSignal, experiment: Experiment, trial: Trial
         f"schedule: the reader refuses a document older than {MAX_SIGNAL_AGE_INTERVALS} of its "
         f"own {signal.interval} bars, so run this at least that often",
     ]
-
-
-def _shown(path: str | Path) -> str:
-    """``path`` as the operator should see it: expanded and absolute if it can be.
-
-    The consumer half of this seam resolves before printing for the same
-    reason — a relative path started from two working directories is two
-    files — and it is worth as much here, because the producer's cron and the
-    daemon's unit are exactly the two processes that disagree. Falls back to
-    the configured string when resolving is itself what failed.
-    """
-    try:
-        return str(Path(path).expanduser().resolve())
-    except (OSError, RuntimeError, ValueError):
-        return repr(path)
 
 
 def _bias(side: Side | None) -> ResearchBias:

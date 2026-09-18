@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import re
 import shutil
 
 import pytest
@@ -299,7 +300,14 @@ def test_a_funding_hole_this_package_tolerates_is_reported_rather_than_refused(t
         with caplog.at_level(logging.WARNING):
             signal, _experiment, _trial = build_signal(ledger, "BTC")
     assert signal.bias in set(ResearchBias)
-    assert "could not be evaluated on" in caplog.text
+    # The whole point of the message is the RATIO — "6 bars" and "6 of 4,000"
+    # ask the reader for different judgements — so both numbers are pinned,
+    # and in the right order. Without this, swapping them leaves the suite
+    # green while the operator reads the denominator as the count.
+    reported = re.search(r"evaluated on (\d+) of the (\d+) 4h bars", caplog.text)
+    assert reported, caplog.text
+    unevaluable, replayed = (int(group) for group in reported.groups())
+    assert 0 < unevaluable < replayed
 
 
 def test_a_rule_id_cannot_overflow_the_bound_the_reader_enforces(ledger):
@@ -403,6 +411,10 @@ def test_an_out_path_whose_parent_cannot_be_made_is_refused_by_name(ledger, tmp_
     signal, _experiment, _trial = build_signal(ledger, "BTC")
     with pytest.raises(SignalError, match="could not write the handoff document to"):
         write_signal(blocker / "under" / "signal.json", signal)
+    # An argument that is not a path at all gets its OWN sentence: the advice
+    # about writability would be about a filesystem this never reached.
+    with pytest.raises(SignalError, match="is not a path this command can resolve"):
+        write_signal("out" + chr(0) + ".json", signal)
     assert main(
         ["signal", "--db", str(ledger.store.path), "--out", str(blocker / "under" / "s.json")]
     ) == 1

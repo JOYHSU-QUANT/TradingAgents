@@ -199,9 +199,9 @@ radar、伺服器的 producer cron 卻壞著時，preview 會印出帶 `autorese
 `warning: market_data.autoresearch_signal names a document and this host DID／did NOT use one …`，
 **明講本機落在哪個桶**；開關關著才完全不印（沒有可爭議的事）。三件事要知道：
 
-- **在 stderr 不在 stdout**，前綴沿用這條 lane 既有的 `warning:`。理由是這個指令的答案印在 stdout、
-  而且那一行本來就是拿來 grep 的，把一句「上面那行有前提」放在會被 pipe 切走的那半邊，正好是它要防的
-  失效；放 stderr 還讓它跟它提到的那些 WARNING 落在一起。
+- **在 stderr 不在 stdout**，前綴沿用這條 lane 既有的 `warning:`。理由是答案印在 stdout、而那一行
+  本來就是拿來 grep 的：註記如果也放 stdout，`| grep prompt_regime` 會把它安靜地濾掉——那正是它要防
+  的失效。放 stderr 它跨得過那個 pipe，也跟它提到的那些 WARNING 落在一起。
 - **不動 `prompt_regime:` 那一行**（另起一行）——三處共用同一個渲染函式、同一個字串要能 grep 是紀律。
 - **它不保證有伴隨的 WARNING。** 少那一段時通常還有一句具名 WARNING 說是哪一種拒絕（檔案不在、讀不出來、
   JSON／schema 被拒、幣別不符、太舊、**戳記在未來**），但**K 線視窗是空的時候，那份文件根本沒被讀過**
@@ -272,9 +272,6 @@ profile 段」的 shape——這是真的少了一段，不是假訊號；判讀
 
 ```sql
 -- 每個 (規則, bias) 桶底下，模型要的方向怎麼分佈，以及 gate 怎麼處置。
--- ai_outputs.target_side 就是「模型要的那一邊」：RiskGate 不改寫方向，只夾
--- margin 百分比，rejected 的列也原樣帶著方向。
--- risk_action 一定要一起看，因為 target_side 的 NULL 有兩種意思（見下）。
 SELECT i.autoresearch_strategy_id, i.autoresearch_bias,
        o.target_side, o.risk_action, COUNT(*) AS cycles
   FROM ai_inputs i JOIN ai_outputs o ON o.input_id = i.input_id
@@ -282,29 +279,25 @@ SELECT i.autoresearch_strategy_id, i.autoresearch_bias,
  GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4;
 ```
 
-**`target_side` 的 NULL 有兩種，一定要配著 `risk_action` 讀**：`maintain_current`（模型真的沒
-提方向）以及**每一個 `invalid_fail_closed` 的 cycle**——契約破了就整個收斂成
-`TargetDecision.fail_closed()`，那個建構子把 `target_side` 寫死成 `None`，所以**模型明明講了
-long、只是少了 rationale 或 margin 落在格線外，這一欄一樣是空的**。這與本節下面那段講
-`requested_target_margin_pct` 「提了案但格式被擋掉／根本沒提案完全同形」是同一個坑，同一個
-parse 接縫；判讀 run 6 時把 `risk_action = 'invalid_fail_closed'` 的列當成「不知道模型偏哪邊」，
-不要當成「模型沒有偏」。
+`target_side`／`risk_action` 兩欄的既有語意這裡**不重述**——它們不是本節新增的東西，而重述一次
+就多一份會過期的拷貝（這一段本身在 review 裡連續三輪因為重述而寫錯）。要點只有一句：
+**`target_side` 的 NULL 不代表「模型沒有偏某一邊」。** 契約破損的 cycle 在 parse 接縫就被判掉、
+方向一併丟掉，所以模型講了 long 但少了 rationale 的 cycle，這一欄與「真的沒提方向」完全同形——
+與本節下面 `requested_target_margin_pct` 那段講的是同一個接縫、同一個坑，判讀方式照那一段。
+`risk_action` 是 gate 的處置，不是「有沒有真的下單」；要問後者得往 `execution_plans`／`orders`／
+`fills` 看，那是另一個問題，run 6 問的是模型有沒有跟著 bias 走。
 
-**`risk_action` 說的是 gate 的處置，不是有沒有下單**：`approved` 仍可能沒有任何訂單
-（`already_flat`、`within_deadband`、`zero_delta` 三條路；run 5 的 `rebalance_deadband_pct`＝4，
-所以 deadband 那條很常走）。要問「真的下單了嗎」看 `ai_outputs.order_created` 與
-`no_order_reason`，那是另一個問題——run 6 問的是模型有沒有跟著 bias 走。
-
-**分母要自己決定**：這是 INNER JOIN，所以只有走到 gate 的 try 會進來。反過來用 LEFT JOIN 時要
-知道多出來的 NULL 列是**「試」不是「cycle」**：`ai_inputs` 列在呼叫 LLM 之前就寫、而且每一次重試
-各有自己的 `input_id`，所以那一桶同時裝著「整個 cycle 失敗」與「重試過但最後成功的 cycle 的前幾
-次失敗」，拿它當分母會高估。
+**分母要自己決定**：這是 INNER JOIN，只有走到 gate 的 try 進得來。改 LEFT JOIN 時多出來的 NULL 列
+是**「試」不是「cycle」**（`ai_inputs` 列在呼叫 LLM 之前就寫，每次重試各有自己的 `input_id`），
+所以那一桶同時裝著整個失敗的 cycle 與「重試過但最後成功」的前幾次——拿它當分母會高估。另一邊也
+會漏：在寫 `ai_inputs` 之前就失敗的 cycle（市場資料讀不到）連列都沒有，兩種 JOIN 都看不到它。
 
 **空值有兩個意思，用 `context_shape` 分辨**：shape 有 `autoresearch` 而這兩欄是空的＝那一列寫在
 v13 之前（歷史，不是「沒有這一段」）；shape 沒有 `autoresearch`＝那個 cycle 真的沒有這一段。
-**寫 SQL 時要 `COALESCE(context_shape,'')`**：v10 之前的列 `context_shape` 本身是 NULL，
-`context_shape NOT LIKE '%autoresearch%'` 對 NULL 求值還是 NULL，那些列會兩個桶都掉出去、
-而且不會有任何列數警告。v10 之後才開的 run 碰不到這件事；封存的舊 run 每一列都是 NULL。
+**寫 SQL 時要 `COALESCE(context_shape,'')`**：**v10 部署點之前寫下的列** `context_shape` 本身是
+NULL，`context_shape NOT LIKE '%autoresearch%'` 對 NULL 求值還是 NULL，那些列會兩個桶都掉出去、
+而且不會有任何列數警告。判準是「那一列什麼時候寫的」而不是「那個 run 封存了沒有」：跨過 v10
+部署點的 run 是混的，而 paper-BTC-3 雖然已封存卻是自 v10 起跑、每一列都有（見 §6）。
 
 **這條分辨規則有順序前提**：v13 要**先於開關被打開**部署。反過來做——先部署 #275 的 build 並把
 `autoresearch_signal` 填上、之後才升 v13——那段期間的列會帶著 `autoresearch` shape 而兩欄是空的，
@@ -313,10 +306,14 @@ v13 之前（歷史，不是「沒有這一段」）；shape 沒有 `autoresearc
 重算——費工、且不是那支 backfill 的形狀，所以當成「別把順序做反」而不是「出事了還有救」。
 
 **部署帶 migration，換 schema 前先備份 DB，而且時機綁在換段。** 不是怕資料壞——這次是 `ALTER TABLE`
-加兩個 nullable 欄，既有列全部維持有效。**備份保的是「退得回去」這個選項**：store 一旦被 v13
-**升級過**（唯讀指令不會升級，它們對更新的 store 是直接拒絕、不寫任何東西），只認得 v12 的 checkout
-就會**整個拒絕開啟**（`store schema is vN but this build only knows vM`，連唯讀指令都拒），所以升上去
-之後要退回舊 binary 就只剩還原備份這條路。正因如此，**不要在
+加兩個 nullable 欄，既有列全部維持有效。**備份保的是「退得回去」這個選項**：store 一旦被 v13 的 build
+**升級過**，只認得 v12 的 checkout 就會**整個拒絕開啟**（`store schema is vN but this build only
+knows vM`，連唯讀指令都拒），所以升上去之後要退回舊 binary 就只剩還原備份這條路。
+**而「升級過」比你以為的容易觸發**：多數唯讀指令（`validate`／`export`）碰到落後的 store 是具名
+拒絕、不寫任何東西，但 **`safe-mode --status` 是刻意的例外，它 `migrate=True`、開檔就升級**（理由
+見 `cli/_common.py`：升級本身就可能讓 run latch 進 safe mode，那正是最需要這支診斷工具的時候）。
+所以拿 v13 的 checkout 對正式 store 跑一次 `safe-mode --status`，就已經把退路花掉了。
+正因如此，**不要在
 run 5 跑到一半單獨部署它**：那等於拿現行 run 的「退回上一個 binary」去換一個只有 run 6 用得到的欄位。
 排進換段 SOP 當一個步驟：**停 run 5 → 備份 DB → 部署 v13 → 開 run 6**。
 

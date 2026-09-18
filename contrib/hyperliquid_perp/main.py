@@ -164,9 +164,10 @@ def run_context_only(config: dict, coin: str) -> int:
     # Its OWN line on stderr, never appended to ``prompt_regime:``: that line
     # has one renderer across the daemon's log, ``validate`` and here (RUNBOOK
     # §4) so the same string greps on all three, and a caveat spliced into it
-    # would end that. stderr because this lane prints its answer on stdout and
-    # that line exists to be grepped — a caveat a pipe can separate from the
-    # thing it qualifies is the failure it prevents — and because it lands beside
+    # would end that. stderr because the answer goes to stdout and that line
+    # exists to be grepped: a caveat sitting on stdout is what a
+    # ``| grep prompt_regime`` silently filters away, which is the failure
+    # this exists to prevent. On stderr it survives that pipe, and lands beside
     # the ``research signal …`` WARNINGs it refers to. Same channel pair and
     # same ``warning:`` prefix as the degraded-context notice below, through
     # the one helper that keeps log and stderr from drifting apart.

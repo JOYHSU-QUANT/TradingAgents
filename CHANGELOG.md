@@ -116,10 +116,11 @@ Breaking changes within the 0.x line are called out explicitly.
 
   Deploying this runs a migration, so back the DB up first - and do it AT the
   run-5-to-run-6 segment boundary (stop, back up, deploy, open), not during
-  run 5. Once a store has been UPGRADED (a read-only command refuses a newer
-  store rather than migrating it), a v12 build refuses it outright, read-only
-  commands included - so an early deploy spends the running segment's
-  roll-back option on a column only the next one needs.
+  run 5. Once a store has been upgraded, a v12 build refuses it outright,
+  read-only commands included, so an early deploy spends the running
+  segment's roll-back option on a column only the next one needs. Note that
+  `safe-mode --status` opens with `migrate=True` by deliberate exception, so
+  merely diagnosing the run from a v13 checkout upgrades the store.
 
 - **`--context-only` says which research bucket THIS host landed in (#276)** -
   that command exists to show which segmentation bucket a YAML edit lands in
@@ -139,8 +140,8 @@ Breaking changes within the 0.x line are called out explicitly.
 
   On stderr, not stdout, and with the prefix this lane already uses: the
   command's answer goes to stdout and that line exists to be grepped, so a
-  caveat a pipe can separate from the line it qualifies is the failure it
-  exists to prevent. Its own line, never
+  caveat on stdout is what a `| grep prompt_regime` silently filters away -
+  the failure it exists to prevent. Its own line, never
   spliced into `prompt_regime:` - the daemon log, `validate` and this command
   share one renderer precisely so the same string greps across all three
   (RUNBOOK §4). It does not promise a companion `research signal ...` warning:

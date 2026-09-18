@@ -120,7 +120,9 @@ Breaking changes within the 0.x line are called out explicitly.
   read-only commands included, so an early deploy spends the running
   segment's roll-back option on a column only the next one needs. Note that
   `safe-mode --status` opens with `migrate=True` by deliberate exception, so
-  merely diagnosing the run from a v13 checkout upgrades the store.
+  pointing a v13 checkout at the store upgrades it before the command even
+  decides whether it can answer - against a paper run it migrates, then
+  refuses with "is a paper run" and exit 1.
 
 - **`--context-only` says which research bucket THIS host landed in (#276)** -
   that command exists to show which segmentation bucket a YAML edit lands in

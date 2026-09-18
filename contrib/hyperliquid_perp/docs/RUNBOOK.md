@@ -282,8 +282,11 @@ SELECT i.autoresearch_strategy_id, i.autoresearch_bias,
 `target_side`／`risk_action` 兩欄的既有語意這裡**不重述**——它們不是本節新增的東西，而重述一次
 就多一份會過期的拷貝（這一段本身在 review 裡連續三輪因為重述而寫錯）。要點只有一句：
 **`target_side` 的 NULL 不代表「模型沒有偏某一邊」。** 契約破損的 cycle 在 parse 接縫就被判掉、
-方向一併丟掉，所以模型講了 long 但少了 rationale 的 cycle，這一欄與「真的沒提方向」完全同形——
-與本節下面 `requested_target_margin_pct` 那段講的是同一個接縫、同一個坑，判讀方式照那一段。
+方向一併丟掉，所以模型講了 long 但少了 rationale 的 cycle，這一欄與「真的沒提方向」完全同形。
+查詢結果裡認得出來：那些列的 `risk_action` 是 **`invalid_fail_closed`**（`maintain_current` 的列
+則是 `approved`）。要再分「是哪一種格式問題」得另外把 `o.risk_reason` 也選出來——本節下面
+`requested_target_margin_pct` 那段列的六個 tag 就住在那一欄，是同一個接縫、同一個坑，判讀方式照
+那一段。
 `risk_action` 是 gate 的處置，不是「有沒有真的下單」；要問後者得往 `execution_plans`／`orders`／
 `fills` 看，那是另一個問題，run 6 問的是模型有沒有跟著 bias 走。
 

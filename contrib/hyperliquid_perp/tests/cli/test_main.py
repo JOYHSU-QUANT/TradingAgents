@@ -985,9 +985,9 @@ def test_context_only_says_which_bucket_this_host_landed_in(
     assert ("`research signal ...` warning" in warning) is promises_a_warning
     if promises_a_warning:
         assert "candle window was empty" in warning
-    # On stderr, NOT stdout: this lane's documented use is grepping stdout, and
-    # a caveat a pipe can separate from the line it qualifies is the failure it
-    # exists to prevent.
+    # On stderr, NOT stdout: the answer goes to stdout and that line exists to
+    # be grepped, so a caveat on stdout is what a ``| grep prompt_regime``
+    # silently filters away — which is the failure this exists to prevent.
     assert not [line for line in out if "autoresearch_signal names a document" in line]
     # The regime line stays byte-identical to what the shared renderer produces
     # — the three surfaces grep as one string (RUNBOOK §4).
@@ -1038,8 +1038,11 @@ def test_context_only_does_not_promise_a_research_warning_that_was_never_logged(
     # It may point at a companion warning, but only as a conditional that
     # names this very case — never as a promise.
     assert "candle window was empty" in warning
-    # And the run's real fault is still reported, unshadowed.
-    assert "degraded context" in err or "do not read it as live signal" in err
+    # And the run's real fault is still reported, unshadowed. Only the stderr
+    # half is assertable here: "degraded context: %s" is the LOG half of the
+    # same dual-channel warning, and capsys does not see logging output — an
+    # earlier draft or-ed the two and so only ever tested this one.
+    assert "do not read it as live signal" in err
 
 
 def test_context_only_stays_quiet_about_research_when_the_switch_is_off(monkeypatch, capsys):

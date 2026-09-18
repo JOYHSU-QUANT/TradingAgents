@@ -179,17 +179,22 @@ def run_context_only(config: dict, coin: str) -> int:
         # stream. The "above" deixis therefore belongs only in the stderr
         # sentence, where that line really is above — the same split the
         # degraded-context call below makes for the same reason.
-        used = "DID" if ctx.research_signal is not None else "did NOT"
-        token = "carries the" if ctx.research_signal is not None else "has no"
-        why = (
-            ""
-            if ctx.research_signal is not None
-            else (
+        # Assigned as ONE tuple per branch rather than three conditionals on
+        # the same predicate: the three clauses have to agree, and a message
+        # reading "did NOT use one, so the shape carries the token" would be
+        # self-contradicting. Written separately, they can drift out of step —
+        # measured, that exact mutation once passed the whole suite. Written
+        # together, it is not expressible.
+        if ctx.research_signal is not None:
+            used, token, why = "DID", "carries the", ""
+        else:
+            used, token, why = (
+                "did NOT",
+                "has no",
                 " A named `research signal ...` warning above says why — unless the "
                 "candle window was empty, in which case the document was never "
-                "consulted at all and no such warning exists."
+                "consulted at all and no such warning exists.",
             )
-        )
         engine_bridge._warn_dual(
             "market_data.autoresearch_signal names a document and this host %s use one; "
             "the research section is host-local, so the daemon can land in the other "

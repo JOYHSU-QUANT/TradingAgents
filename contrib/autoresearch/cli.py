@@ -311,6 +311,26 @@ def _build_parser() -> argparse.ArgumentParser:
     calibrate_cmd.add_argument("--experiment", required=True)
     add_db(calibrate_cmd)
 
+    signal_cmd = subparsers.add_parser(
+        "signal", help="write the promoted rule's current qualitative signal for the live path"
+    )
+    # ``--coin`` but no ``--interval``: the bar cadence is the promoted
+    # experiment's, not the operator's to pick here, and offering the flag
+    # would invite an answer measured on bars the rule was never scored on.
+    signal_cmd.add_argument("--coin", default="BTC", help="perp coin symbol (default: BTC)")
+    signal_cmd.add_argument(
+        "--out", required=True, help="path to write the handoff document to (JSON)"
+    )
+    signal_cmd.add_argument(
+        "--allow-taker",
+        action="store_true",
+        help=(
+            "publish even though the promoted rule was scored under taker fills "
+            "(plan §7 wants it re-run under maker costs first)"
+        ),
+    )
+    add_db(signal_cmd)
+
     research_cmd = subparsers.add_parser(
         "research", help="ask a model for rules, score each one, and file what it answered"
     )
@@ -849,6 +869,23 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_signal(args: argparse.Namespace) -> int:
+    # Inside the command, like the other computing ones: this replays a rule
+    # over the whole store and pays for the feature stack.
+    from .signal import build_signal, describe_signal, write_signal
+
+    store, ledger = _open_ledger(args)
+    with store:
+        signal, experiment, trial = build_signal(
+            ledger, args.coin, allow_taker=args.allow_taker
+        )
+        target = write_signal(args.out, signal)
+    for line in describe_signal(signal, experiment, trial):
+        print(line)
+    print(f"wrote {target}")
+    return 0
+
+
 _COMMANDS = {
     "fetch": _cmd_fetch,
     "gaps": _cmd_gaps,
@@ -860,6 +897,7 @@ _COMMANDS = {
     "report": _cmd_report,
     "calibrate": _cmd_calibrate,
     "research": _cmd_research,
+    "signal": _cmd_signal,
 }
 
 # The two refusals that live beside the feature stack, named by module and
@@ -892,9 +930,13 @@ def main(argv: list[str] | None = None) -> int:
         # The families a well-formed invocation can still meet: this store
         # cannot be operated on, the venue failed, the model seam failed, the
         # ledger refused, or an argument named a window, a spec or a split that
-        # is not one. Each
-        # already carries a sentence written for an operator, so it is printed
-        # as-is rather than wrapped.
+        # is not one. Each already carries a sentence written for an operator,
+        # so it is printed as-is rather than wrapped. ``OSError`` is NOT on
+        # the list: ``requests``' exceptions are ``OSError``s, so admitting
+        # the family would print a transport defect under ``fetch`` or
+        # ``research`` as though it were an operator's mistake. The one
+        # command that writes a file names its own failure
+        # (``signal.write_signal``), the way ``_read_spec`` above does.
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except RuntimeError as exc:

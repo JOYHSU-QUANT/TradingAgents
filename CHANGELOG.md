@@ -84,6 +84,104 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **autoresearch -> perp: one qualitative research block in the prompt, off by
+  default (plan C1)** - the research radar's only output into the live path.
+  `python -m contrib.autoresearch signal --coin BTC --out <path>` takes the
+  coin's most recently promoted rule, replays its DECISIONS to the newest bar
+  the research store holds, cuts its selection-window figures into ordinal
+  bands, and writes one small JSON document; the trading daemon reads that
+  document with the standard library alone behind
+  `market_data.autoresearch_signal` (`""` = off, the default) and renders it as
+  a `Research signal (...)` section between the volume profile and the position.
+  The two packages do not import each other and the daemon knows nothing of the
+  research SQLite schema: the contract is `domains/perp/schema.ResearchSignal`,
+  which owns the vocabulary AND the encoding, and which `autoresearch/upstream`
+  borrows so neither side can pin its own copy and stay green while they drift.
+
+  NOTHING NUMERIC CROSSES. No Sharpe, drawdown, return or equity is in the
+  document; the bands are cut at `signal.CONFIDENCE_EDGES` / `DRAWDOWN_EDGES`
+  and the figures stay in the ledger. The rendered block states what each rule
+  MEASURED and nothing more (the `_REGIME_NOTE` / `_SHAPE_NOTE` / PR #95
+  discipline): the side is named as the rule's own state and nothing else - not
+  as a fill, because most cycles fill nothing (the rule is continuing a side it
+  already held) and a flat rule has nothing to fill at all. The Basis line
+  carries what the side line therefore must not assert: that the rule decides
+  at a bar's close and is priced as filling at the next open, that it was
+  fitted elsewhere, that the bands are ordinal labels, and that the section
+  feeds no gate, no sizing and no order.
+
+  FAIL-CLOSED BY SECTION, never by row. A path that cannot be resolved, a
+  missing file, an unreadable one, a non-UTF-8 one, JSON that will not decode, a
+  version this build does not read, an unknown or missing key, another coin's
+  document, a bar older than 2 of the document's own bars, or a bar at or past
+  one of THIS run's intervals ahead of its own - each answers `None` with one
+  named WARNING and the prompt has no such section, so `context_shape` loses its
+  `autoresearch` token and the paper review counts those cycles as their own
+  bucket. There is no "n/a" form. Freshness is judged against this cycle's own
+  newest candle, not the host clock, so a producer host whose clock drifts
+  cannot make a stale document look current; the future bound is THIS run's
+  candle interval, because "now" is less than one of those past the newest close.
+
+  The refusal lanes are wider than the obvious ones, because anything that
+  escapes this reader fails the CYCLE rather than the section - pre-LLM, every
+  cycle, with an open position left to its stops. `json.loads` raises a bare
+  `ValueError` for an integer literal past the interpreter's 4300-digit limit
+  and `RecursionError` for deep nesting, neither of which is a
+  `JSONDecodeError`; `Path.expanduser` raises `RuntimeError` with no home to
+  expand against; `read_text` raises `UnicodeDecodeError`, which is not an
+  `OSError`; both `Path.resolve` and `open` raise `ValueError` for a path
+  holding an embedded NUL, which a double-quoted YAML string can carry; and a
+  file far larger than memory raises `MemoryError` from either the read or the
+  decode. A document holding the JSON literal `null` gets its own named refusal
+  rather than vanishing silently - `None` was both "already warned" and a legal
+  decode, and the collision suppressed the message. Paths are resolved before
+  they are printed, so a relative path started from two different working
+  directories can be seen to be two different files.
+
+  The producer names its own write failure (`--out` under a directory the cron
+  user cannot create is its likeliest operator error) rather than putting
+  `OSError` in the CLI's refusal family, whose rule is that every member
+  already carries a sentence written for an operator: `requests`' exceptions
+  are `OSError`s, so admitting the family would print a transport defect under
+  `fetch` or `research` as though it were a mistake.
+
+  The producer refuses rather than softening: no promoted rule, a store whose
+  bars or daily backdrop have holes, a newest bar that left the rule unasked,
+  and - plan §7's standing precondition, now a guard rather than three
+  paragraphs of prose - an experiment scored under TAKER fills, which
+  `--allow-taker` overrides explicitly. A rule the replay could not ask on
+  EARLIER bars is REPORTED, not refused: it freezes on the side it held and can
+  neither exit nor reverse, so a long run of missing settlements can publish a
+  side it left weeks ago - but `require_clean_history` tolerates funding holes
+  by name and the promote gate does not blame a trial for unevaluable bars, so
+  refusing on one of them would be stricter than the promotion that produced
+  the trial, and would name a remedy (fetch the missing settlement) that cannot
+  be performed.
+
+  New pieces: `evaluator.replay_position` (the scored loop flattens at its
+  window's last bar and never decides there - a signal wants exactly that
+  decision, and it models no equity, so a rule that would have been ruined still
+  reports a side, pinned as a test; it refuses a history that does not reach its
+  own start, where `bisect_left` would otherwise report a truncated prefix as
+  index 0 and begin the replay late); `Ledger.latest_promotion`, whose
+  "most recent" rule is stated rather than implied because a coin can carry
+  several promotions and no column marks one current; `build_market_context`
+  gains a REQUIRED `research_signal` kwarg, for the third time and the same
+  reason as `exchange_time` and `position`; `context_as_of` is now one function
+  the builder and `_build_context` share, because the freshness check needs the
+  very instant the context will be dated to. The YAML switch has its own
+  converter: a bare `off` is a YAML 1.1 BOOLEAN, and it is exactly what an
+  operator reaches for, so it is refused by name with both legal spellings in
+  the sentence. `PerpMarketContext` refuses a signal whose coin is not its own -
+  the one relational fact that needs no clock, and the same contradiction
+  `day_change_pct` already spends twenty-five lines preventing. The bias
+  vocabulary reads `flat`, not "neutral": the section's whole discipline is
+  naming what a rule measured, "neutral" names a view of the market, and it is
+  not a side, which is what the line calls it. Turning the switch on CHANGES THE PROMPT and is a segment
+  point; plan §7's standing precondition (promoted rules re-run under maker
+  costs after run 5) is unchanged, and `signal` prints the cost model it was
+  scored under on every run so it can be checked.
+
 - **perp: live smoke tests 19 / 20 for the post-only slice (maker path, PR B2)** -
   test 19 places an Alo buy far below the touch, requires the venue to REST it,
   reads `frontendOpenOrders` and refuses any `tif` that would make reconcile's

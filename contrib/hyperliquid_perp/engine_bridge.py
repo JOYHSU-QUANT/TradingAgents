@@ -45,11 +45,12 @@ from decimal import Decimal
 from .common.config_coercion import int_from_yaml
 from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, ENGINE_KEYS, load_config
 from .domains.perp import risk_gate
-from .domains.perp.context_builder import build_market_context
+from .domains.perp.context_builder import build_market_context, context_as_of
 from .domains.perp.indicator_vocab import indicator_names
 from .domains.perp.marginal_cost import PositionInputs
 from .domains.perp.market_data_config import MarketDataConfig
-from .domains.perp.schema import PerpMarketContext, PerpPosition
+from .domains.perp.research_signal import load_research_signal
+from .domains.perp.schema import PerpMarketContext, PerpPosition, interval_to_ms
 from .domains.perp.target_decision import DecisionConfig
 from .exchanges.hyperliquid.account import HyperliquidAccount
 from .exchanges.hyperliquid.errors import ExchangeError
@@ -292,6 +293,41 @@ def _build_context(
     )
     _between_reads()
 
+    # The research radar's handoff document, read AFTER the market reads and
+    # judged against the very bar the context will be dated to — which is why
+    # the as-of comes from the builder's own function rather than being
+    # spelled out a second time.
+    #
+    # Only with candles in hand. The freshness bound is defined against a
+    # CLOSED BAR, and an empty window has none: ``context_as_of`` would fall
+    # back to the wall clock, which is the one reading
+    # ``load_research_signal`` documents itself as never using. Such a cycle
+    # is refused downstream anyway, so nothing is lost by not asking.
+    #
+    # Off by default: with the switch empty nothing is opened, so the daemon
+    # does not stat a file it was never pointed at.
+    research_signal = None
+    if candles and market_data.autoresearch_signal:
+        _, as_of_ms = context_as_of(candles)
+        research_signal = load_research_signal(
+            market_data.autoresearch_signal,
+            coin=coin,
+            as_of_ms=as_of_ms,
+            candle_interval_ms=interval_to_ms(market_data.candle_interval),
+        )
+    # A refresh, for the same reason every blocking read above gets one.
+    # UNCONDITIONAL even though the read above is not: a refresh nobody needed
+    # is free (the hook reaches the wire only when one is due), and a missing
+    # one is not. The read it protects looks local, and an earlier comment
+    # argued from that — "local disk, no network, so it costs the kill switch
+    # nothing". But the path comes from YAML and is deliberately not validated
+    # at load, so an operator sharing the producer's output between two hosts
+    # over NFS or SMB puts an untimed blocking read on the single-threaded
+    # tick, charged to the same unrefreshed budget as a REST call. Blowing
+    # that budget lets the exchange-side dead man's switch cancel an open
+    # position's stops while the process is alive and healthy.
+    _between_reads()
+
     ctx = build_market_context(
         coin,
         snapshot,
@@ -301,6 +337,7 @@ def _build_context(
         indicator_names=indicators,
         exchange_time=exchange_time,
         position=position,
+        research_signal=research_signal,
         host_time_at_exchange_read=host_time_at_exchange_read,
     )
     return ctx, client

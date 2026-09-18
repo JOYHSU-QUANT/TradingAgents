@@ -34,6 +34,7 @@ from contrib.hyperliquid_perp.domains.perp import (
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.schema import (
     AccountSnapshot,
+    Candle,
     CandleInterval,
     PerpPosition,
     interval_to_ms,
@@ -2656,3 +2657,133 @@ def test_main_loads_dotenv_unconditionally_first(monkeypatch):
     with pytest.raises(SystemExit):
         main_mod.main(["--no-such-flag"])
     assert calls == [True]
+
+
+def test_build_context_reads_the_research_signal_only_when_the_switch_names_one(monkeypatch):
+    # The wiring pin for PR C1's seam, and the reason it needs one: with the
+    # switch empty nothing is opened at all, and with a path the reader is
+    # asked about THIS cycle's own bar rather than about the host's clock.
+    # Get either wrong and every other test stays green while the daemon
+    # either stats a file it was never pointed at or judges a document's
+    # freshness against the wrong instant.
+    asked = []
+    handed = {}
+    bar = Candle(
+        open_time=1_704_168_000_000,
+        close_time=1_704_182_399_999,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100"),
+        volume=Decimal("1"),
+    )
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            return [bar]
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    sentinel = object()
+
+    def _reader(path, *, coin, as_of_ms, candle_interval_ms):
+        asked.append((path, coin, as_of_ms, candle_interval_ms))
+        return sentinel
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "load_research_signal", _reader)
+    monkeypatch.setattr(
+        bridge_mod,
+        "build_market_context",
+        lambda *args, **kwargs: handed.update(signal=kwargs.get("research_signal", "ABSENT"))
+        or object(),
+    )
+
+    refreshes = []
+
+    def _count():
+        refreshes.append(1)
+
+    bridge_mod._build_context({}, "BTC", position=None, on_blocking_read=_count)
+    assert asked == []
+    assert handed["signal"] is None
+    # Six blocking reads, six refreshes: the client's own perp-meta fetch,
+    # the snapshot, the exchange clock, the candles, the funding — and the
+    # research document, whose refresh is UNCONDITIONAL. The path is
+    # operator-configured and deliberately not validated at load, so an
+    # operator sharing the producer's output over NFS puts an untimed
+    # blocking read on the single-threaded tick; without the sixth call the
+    # longest unrefreshed span grows by one and the venue-side dead man's
+    # switch can cancel an open position's stops while the process looks
+    # healthy. Deleting that call left the whole suite green until this line.
+    assert len(refreshes) == 6
+
+    refreshes.clear()
+    block = {"candle_interval": "1h", "autoresearch_signal": "/srv/signal.json"}
+    bridge_mod._build_context({"market_data": block}, "BTC", position=None, on_blocking_read=_count)
+    assert asked == [("/srv/signal.json", "BTC", bar.close_time, interval_to_ms("1h"))]
+    assert handed["signal"] is sentinel
+    assert len(refreshes) == 6
+
+
+def test_build_context_does_not_ask_about_a_research_signal_without_candles(monkeypatch):
+    # ``load_research_signal`` documents itself as never judging freshness
+    # against the host clock, and the ONLY thing enforcing that is this
+    # guard: with no candles ``context_as_of`` falls back to
+    # ``datetime.now()``. Such a cycle is refused downstream either way, so
+    # nothing else would have gone red.
+    asked = []
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            return []
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(
+        bridge_mod,
+        "load_research_signal",
+        lambda path, **kwargs: asked.append(path) or object(),
+    )
+    monkeypatch.setattr(bridge_mod, "build_market_context", lambda *a, **k: object())
+    bridge_mod._build_context(
+        {"market_data": {"autoresearch_signal": "/srv/signal.json"}}, "BTC", position=None
+    )
+    assert asked == []

@@ -73,7 +73,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -109,6 +109,7 @@ __all__ = [
     "EvaluationError",
     "ExitReason",
     "RegimeBucket",
+    "ReplayedPosition",
     "SegmentResult",
     "SplitResult",
     "Tally",
@@ -117,6 +118,7 @@ __all__ = [
     "evaluate_segment",
     "evaluate_split",
     "load_bundle",
+    "replay_position",
 ]
 
 # The annualisation base. Stated as a constant so the report can print the
@@ -1034,6 +1036,161 @@ def describe_result(result: SplitResult) -> list[str]:
         result.split,
         result.indicator_lookback,
         [SegmentMetrics.from_result(segment) for segment in result.results],
+    )
+
+
+# -- where the decisions leave the rule ------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReplayedPosition:
+    """Which side a spec's decisions leave it on after the LAST bar of a replay.
+
+    ``side`` is the side the rule HOLDS once the decision at
+    ``last_close_time`` has been applied — the same decide-at-close /
+    fill-at-next-open rule the scored loop obeys, read one bar further along.
+    ``None`` is flat.
+
+    Read it with the two flags, not on its own. ``last_bar_unevaluable`` says
+    the final decision consulted a condition it could not evaluate (a ``None``
+    feature), in which case ``side`` is one carried in from an EARLIER bar
+    rather than one the rule just re-took. ``replayed_bars_unevaluable`` says
+    the same happened somewhere in the replay, which for a rule with no exit
+    is how a hole in the history freezes it on one side for a month. The
+    scored loop counts such bars and carries on, because over a measured
+    window they are a property of the rule worth reporting.
+    :func:`~contrib.autoresearch.signal.build_signal` REFUSES on
+    ``last_bar_unevaluable``, because that is the bar the published side
+    claims to have been decided at, and only REPORTS the span count, because
+    refusing on one of those would be stricter than the promote gate that
+    produced the trial (that function says why at length).
+
+    ``replayed_bars`` is the denominator, and it exists for that message: "6
+    bars" and "6 bars out of 4,000" ask the reader for different judgements.
+
+    The counter is named for its SPAN. ``SegmentResult.bars_unevaluable``
+    counts the same event over one scored window; this one counts it from the
+    experiment's train start through the unscored tail. Two spans under one
+    name is how a report ends up comparing two different measurements.
+    """
+
+    side: Side | None
+    last_close_time: int
+    replayed_bars: int
+    replayed_bars_unevaluable: int
+    last_bar_unevaluable: bool
+
+
+def replay_position(
+    spec: StrategySpec, frame: FeatureFrame, costs: CostModel, *, since_ms: int
+) -> ReplayedPosition:
+    """Replay ``spec``'s DECISIONS from ``since_ms`` to the frame's last bar.
+
+    What this is for: a promoted rule's current side, for the one qualitative
+    block the research radar hands to the live prompt (plan §7, C1). The
+    scored loop cannot answer it. ``evaluate_segment`` flattens whatever is
+    held at its window's last bar and deliberately takes no decision there —
+    a window is an island, so the last bar's decision would fill at a bar
+    belonging to the next window. A signal wants exactly that decision, and
+    the bar it would fill at is the future.
+
+    What it does NOT model, and the caller must not read into it: equity,
+    fills, fees, funding, and therefore ruin. Only whether a side is HELD is
+    tracked, which is enough because nothing in :func:`_decide` reads equity
+    except the notional a firing rule asks for, and that changes the size of
+    a position, never which side fires or whether it does. A ``vol_target``
+    rule that cannot read its volatility still declines to fire, since that
+    branch turns on the feature, not on the stake. So the equity handed to
+    every bar is :data:`STARTING_EQUITY`, and the returned side is a
+    statement about the rule's signal, not about an account that survived to
+    obey it.
+
+    The replay starts at ``since_ms`` because a rule's side is path
+    dependent: an empty ``exit`` holds until a reversal, and ``max_bars``
+    counts from the entry. Start it later than the rule's own history and a
+    position opened before the start is invisible, so the first entry after
+    it reads as an open rather than as a reversal. Callers pass the first bar
+    the experiment ever considered measurable (its train window's start), not
+    a recent tail.
+    """
+    bars = frame.bundle.bars
+    first = bisect_left([bar.open_time for bar in bars], since_ms)
+    stop = len(bars)
+    if first >= stop:
+        raise EvaluationError(
+            f"the frame's {stop} bars all open before "
+            f"{from_epoch_ms(since_ms).isoformat()}, so there is nothing to replay"
+        )
+    if bars[0].open_time > since_ms:
+        # The other end of the same hazard, and the one nothing else catches:
+        # a store whose history no longer REACHES the start silently begins
+        # the replay late, and ``bisect_left`` reports that as index 0. A
+        # truncated prefix leaves no hole, so the gap scan cannot see it
+        # either. A rule with no exit that entered before the store now begins
+        # would read as flat — the very mistake ``since_ms`` exists to
+        # prevent, arrived at from the other side.
+        raise EvaluationError(
+            f"the replay must start at {from_epoch_ms(since_ms).isoformat()} but this store's "
+            f"{len(bars)}-bar history begins at "
+            f"{from_epoch_ms(bars[0].open_time).isoformat()}; a position opened before that is "
+            f"invisible, so the side would be wrong rather than merely short — fetch the older "
+            f"history back"
+        )
+
+    reader = _Reader(frame, spec)
+    held: _Open | None = None
+    pending: _Pending | None = None
+    unevaluable = 0
+    last_bar_unevaluable = False
+
+    for index in range(first, stop):
+        bar = bars[index]
+        # 1. Fill what the previous close decided, at THIS bar's open — the
+        #    positions only, none of the money. ``_open``/``_close`` are not
+        #    used: they book fees and slippage into a running bar total this
+        #    replay has no place to put, and the entry INDEX is the only
+        #    field a later decision reads (``max_bars`` counts from it).
+        if pending is not None:
+            if pending.close is not None:
+                held = None
+            if pending.open_side is not None:
+                open_price = float(bar.open)
+                held = _Open(
+                    side=pending.open_side,
+                    entry_index=index,
+                    entry_price=open_price,
+                    size=pending.open_notional / open_price,
+                    notional=pending.open_notional,
+                )
+            pending = None
+
+        # 2. Decide at this close — INCLUDING the last bar, which is the
+        #    whole point of this function.
+        reader.unevaluable = False
+        # The conflict count is deliberately dropped rather than carried: a
+        # bar where both entries fire is a property of the RULE that the
+        # scored windows already report, and a second counter over a different
+        # span with the same name is how two measurements get compared as one.
+        pending, _both = _decide(reader, index, held, STARTING_EQUITY, costs)
+        unevaluable += reader.unevaluable
+        last_bar_unevaluable = reader.unevaluable
+
+    # The fill the last decision asks for, applied to the side alone. Closing
+    # before opening, in that order, so a reversal — which carries both —
+    # lands on the new side rather than on flat.
+    side = held.side if held is not None else None
+    if pending is not None:
+        if pending.close is not None:
+            side = None
+        if pending.open_side is not None:
+            side = pending.open_side
+
+    return ReplayedPosition(
+        side=side,
+        last_close_time=bars[stop - 1].close_time,
+        replayed_bars=stop - first,
+        replayed_bars_unevaluable=unevaluable,
+        last_bar_unevaluable=last_bar_unevaluable,
     )
 
 

@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import math
+from datetime import timezone
 from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.common.instants import epoch_ms, from_epoch_ms
 from contrib.hyperliquid_perp.domains.perp.context_builder import (
     MIN_FUNDING_SAMPLES,
     build_market_context,
     classify_regime,
+    context_as_of,
     funding_zscore,
 )
 from contrib.hyperliquid_perp.domains.perp.indicator_vocab import REGIME_INDICATORS
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
-from contrib.hyperliquid_perp.domains.perp.schema import FundingPoint, derive_day_change_pct
+from contrib.hyperliquid_perp.domains.perp.schema import (
+    FundingPoint,
+    ResearchSignal,
+    derive_day_change_pct,
+)
 from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper
 
 _H = 3600_000
@@ -213,6 +220,7 @@ def test_build_market_context_end_to_end(meta_and_asset_ctxs, candle_snapshot, f
         indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14", "macd"],
         exchange_time=None,
         position=None,
+        research_signal=None,
     )
 
     assert ctx.coin == "BTC"
@@ -240,7 +248,12 @@ def test_build_market_context_carries_the_exchange_clock_through(
     snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)
-    kwargs = {"market_data": _MD, "indicator_names": ["rsi_14"], "position": None}
+    kwargs = {
+        "market_data": _MD,
+        "indicator_names": ["rsi_14"],
+        "position": None,
+        "research_signal": None,
+    }
     stamp = datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc)
     with_clock = build_market_context(
         "BTC", snapshot, candles, funding, exchange_time=stamp, **kwargs
@@ -314,6 +327,7 @@ def test_the_position_section_is_priced_onto_the_context_at_its_own_snapshot(
         indicator_names=["rsi_14"],
         exchange_time=None,
         position=_long_at_50k(),
+        research_signal=None,
     )
     pos = ctx.position
     assert pos is not None
@@ -346,6 +360,7 @@ def test_a_position_the_books_cannot_price_leaves_the_context_position_blind(
         indicator_names=["rsi_14"],
         exchange_time=None,
         position=broke,
+        research_signal=None,
     )
     assert ctx.position is None
 
@@ -379,7 +394,12 @@ def test_volume_profile_is_absent_unless_a_window_is_configured(
     snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)
-    kwargs = {"indicator_names": ["rsi_14"], "exchange_time": None, "position": None}
+    kwargs = {
+        "indicator_names": ["rsi_14"],
+        "exchange_time": None,
+        "position": None,
+        "research_signal": None,
+    }
     assert (
         build_market_context(
             "BTC", snapshot, candles, funding, market_data=MarketDataConfig(), **kwargs
@@ -419,6 +439,7 @@ def test_volume_profile_is_cut_from_the_same_candles_as_the_indicators(
         indicator_names=["rsi_14", "ema_20", "ema_50", "atr_14"],
         exchange_time=None,
         position=None,
+        research_signal=None,
     )
     assert ctx.volume_profile is not None
     assert ctx.volume_profile == compute_volume_profile(candles, 30)
@@ -442,6 +463,7 @@ def test_volume_profile_stays_none_when_the_window_cannot_be_filled(
         indicator_names=["rsi_14"],
         exchange_time=None,
         position=None,
+        research_signal=None,
     )
     assert ctx.volume_profile is None
 
@@ -462,6 +484,7 @@ def test_build_market_context_with_zero_candles(meta_and_asset_ctxs, funding_his
         indicator_names=["rsi_14", "atr_14"],
         exchange_time=None,
         position=None,
+        research_signal=None,
     )
 
     assert ctx.candle_count == 0
@@ -496,6 +519,7 @@ def test_build_market_context_funding_window_days_plumbs_to_zscore(
             indicator_names=["rsi_14"],
             exchange_time=None,
             position=None,
+            research_signal=None,
         )
 
     wide = _ctx_with_window(30)
@@ -523,6 +547,7 @@ def test_context_indicators_are_read_only(meta_and_asset_ctxs, candle_snapshot, 
         indicator_names=["rsi_14"],
         exchange_time=None,
         position=None,
+        research_signal=None,
     )
     with pytest.raises(TypeError):
         ctx.indicators["rsi_14"] = 99.9
@@ -549,3 +574,82 @@ def test_day_change_pct_zero_prev_day_is_none():
     # A zero prior price can't yield a percentage change; return None rather than
     # divide-by-zero, so the renderer omits the field instead of crashing.
     assert derive_day_change_pct(Decimal("100"), Decimal("0")) is None
+
+
+# -- the research signal the builder carries (plan §7 / PR C1) -----------------
+
+
+def _signal():
+    return ResearchSignal(
+        coin="BTC",
+        interval="4h",
+        as_of_ms=1_704_182_399_999,
+        strategy_id="btc-4h#7",
+        bias="long",
+        confidence="medium",
+        drawdown="moderate",
+        eval_window_days=90,
+        holdout_window_days=30,
+        notes="held-back window, measured once: net return positive",
+    )
+
+
+def test_the_research_signal_argument_has_no_default(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # The third kwarg on this rule, after exchange_time and position, and for
+    # the same reason: forgetting it costs a prompt quietly missing a section
+    # and a context_shape quietly missing its token, with nothing raising.
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    with pytest.raises(TypeError, match="research_signal"):
+        build_market_context(
+            "BTC",
+            snapshot,
+            mapper.map_candles(candle_snapshot),
+            mapper.map_funding_history(funding_history),
+            market_data=_MD,
+            indicator_names=["rsi_14"],
+            exchange_time=None,
+            position=None,
+        )
+
+
+def test_the_research_signal_is_carried_through_untouched(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # Unlike the profile and the position section, the builder does not build
+    # this one — every rule about whether the document may be believed belongs
+    # to ``research_signal``, so the builder must neither re-judge it nor drop
+    # it. Pinned by identity.
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    kwargs = {
+        "market_data": _MD,
+        "indicator_names": ["rsi_14"],
+        "exchange_time": None,
+        "position": None,
+    }
+    candles = mapper.map_candles(candle_snapshot)
+    funding = mapper.map_funding_history(funding_history)
+    signal = _signal()
+    built = build_market_context(
+        "BTC", snapshot, candles, funding, research_signal=signal, **kwargs
+    )
+    assert built.research_signal is signal
+    blind = build_market_context(
+        "BTC", snapshot, candles, funding, research_signal=None, **kwargs
+    )
+    assert blind.research_signal is None
+
+
+def test_the_context_as_of_is_one_function_the_builder_and_its_caller_share(candle_snapshot):
+    # The bridge judges the signal's freshness against the very instant the
+    # context will be dated to, so the derivation has one home. Written twice
+    # the two would drift most easily on the no-candles branch, where one side
+    # takes the wall clock and the other has nothing.
+    candles = mapper.map_candles(candle_snapshot)
+    as_of, as_of_ms = context_as_of(candles)
+    assert as_of_ms == candles[-1].close_time
+    assert as_of == from_epoch_ms(as_of_ms)
+    empty_as_of, empty_ms = context_as_of([])
+    assert empty_as_of.tzinfo is timezone.utc
+    assert empty_ms == epoch_ms(empty_as_of, what="test")

@@ -30,6 +30,7 @@ from .schema import (
     MarketRegime,
     MarketSnapshot,
     PerpMarketContext,
+    ResearchSignal,
     derive_day_change_pct,
 )
 from .volume_profile import compute_volume_profile
@@ -113,6 +114,42 @@ def classify_regime(indicators: dict[str, float | None], reference_price: Decima
     return MarketRegime.RANGING
 
 
+def context_as_of(candles: Sequence[Candle]) -> tuple[datetime, int]:
+    """The instant a context built on ``candles`` describes: ``(as_of, as_of_ms)``.
+
+    The newest bar's CLOSE, taken from the raw epoch-ms integer the exchange
+    sent, because two comparisons downstream are comparisons of exchange
+    stamps and must not depend on a conversion in between: the funding
+    window's strict ``p.time < as_of_ms`` bound below, and the research
+    signal's freshness bound (:mod:`.research_signal`).
+    ``from_epoch_ms`` is integer arithmetic, so ``as_of`` is exactly that
+    millisecond by construction rather than by a float route happening to
+    round-trip at this magnitude (issue #157). The funding window's strict
+    ``p.time < as_of_ms`` bound inside :func:`build_market_context` is the
+    first of those comparisons.
+
+    With no candles at all there is no bar to date the context to and the
+    wall clock is the only answer left. That context is refused downstream —
+    by the warm-up guard, which owns the empty-window case (the freshness
+    guard is vacuous there) — and it stays buildable so the refusal happens
+    where refusals are read rather than in the middle of a fetch.
+
+    Its own function because the caller that fetches the candles needs the
+    same instant before the context exists: :mod:`..engine_bridge` judges the
+    research signal's freshness against it. What the two share is the RULE,
+    not the reading — the bridge calls this and so does the builder, so on the
+    no-candles branch their two wall-clock readings are milliseconds apart.
+    That is also why the bridge does not load a signal at all without candles:
+    the freshness bound is defined against a CLOSED BAR, and with no bar there
+    is nothing to judge against.
+    """
+    if candles:
+        as_of_ms = candles[-1].close_time
+        return from_epoch_ms(as_of_ms), as_of_ms
+    as_of = datetime.now(tz=timezone.utc)
+    return as_of, epoch_ms(as_of, what="context as_of")
+
+
 def build_market_context(
     coin: str,
     snapshot: MarketSnapshot,
@@ -123,6 +160,7 @@ def build_market_context(
     indicator_names: Sequence[str],
     exchange_time: datetime | None,
     position: PositionInputs | None,
+    research_signal: ResearchSignal | None,
     host_time_at_exchange_read: datetime | None = None,
 ) -> PerpMarketContext:
     """Build the full :class:`PerpMarketContext` from raw domain inputs.
@@ -159,19 +197,19 @@ def build_market_context(
     the very ``snapshot.mark_price`` / ``snapshot.funding`` the rest of the
     context is built from, so the ``Mark:`` line and the notional under it are
     the same reading by construction, not by a later cross-check.
+
+    ``research_signal`` is REQUIRED with no default too, for the third time
+    and the same reason: forgetting it would cost a prompt quietly missing a
+    section and a ``context_shape`` quietly missing its token, with nothing
+    raising — exactly the failure the position kwarg's rule exists for. It is
+    carried through untouched. Unlike the profile and the position section,
+    nothing here builds it: it is read from a document another process wrote,
+    and every rule about whether that document may be believed — version,
+    coin, freshness — belongs to :mod:`.research_signal`, which answers
+    ``None`` and logs when it may not. This function stays pure, so the one
+    caller that does the reading does it before calling.
     """
-    if candles:
-        # Anchor the funding window on the raw epoch-ms integer the exchange
-        # sent: the strict ``p.time < as_of_ms`` boundary below is a comparison
-        # of two exchange stamps, and must not depend on a conversion in
-        # between. ``from_epoch_ms`` is integer arithmetic, so ``as_of`` is
-        # exactly that millisecond by construction — not by a float route
-        # happening to round-trip at this magnitude (issue #157).
-        as_of_ms = candles[-1].close_time
-        as_of = from_epoch_ms(as_of_ms)
-    else:
-        as_of = datetime.now(tz=timezone.utc)
-        as_of_ms = epoch_ms(as_of, what="context as_of")
+    as_of, as_of_ms = context_as_of(candles)
 
     indicators = compute_indicators(candles, indicator_names)
     zscore, sample_count = funding_zscore(
@@ -218,5 +256,6 @@ def build_market_context(
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
         volume_profile=volume_profile,
+        research_signal=research_signal,
         position=position_context,
     )

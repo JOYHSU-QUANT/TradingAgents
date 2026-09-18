@@ -23,7 +23,7 @@ from decimal import Decimal
 import pytest
 
 from contrib.autoresearch.costs import CostModel
-from contrib.autoresearch.dsl import Condition, Op, SpecError, StrategySpec, parse_spec
+from contrib.autoresearch.dsl import Condition, Op, Side, SpecError, StrategySpec, parse_spec
 from contrib.autoresearch.evaluator import (
     MS_PER_YEAR,
     UNLABELLED,
@@ -34,6 +34,7 @@ from contrib.autoresearch.evaluator import (
     evaluate_segment,
     evaluate_split,
     load_bundle,
+    replay_position,
 )
 from contrib.autoresearch.features import (
     LIVE_CANDLE_LOOKBACK,
@@ -1066,3 +1067,147 @@ def test_the_evaluator_refuses_an_interval_this_package_does_not_study():
     frame = FeatureFrame(_bundle([110, 120, 130]))
     with pytest.raises(SplitError, match="not '1h'"):
         evaluate_segment(_spec(), frame, _segment(0, 3), _COSTS, interval="1h")
+
+
+# -- where the decisions leave the rule (the signal's primitive) ----------------
+
+
+def _replay(spec, bundle, *, since=0, costs=_FREE, lookback=LIVE_CANDLE_LOOKBACK):
+    frame = FeatureFrame(bundle, indicator_lookback=lookback)
+    return replay_position(spec, frame, costs, since_ms=ANCHOR_MS + since * _STEP)
+
+
+def test_the_replay_decides_on_the_last_bar_where_the_scored_loop_will_not():
+    # The whole reason this primitive exists. The window is an island, so
+    # ``evaluate_segment`` never decides at its final bar — a fill there would
+    # belong to the next window. A signal wants exactly that decision, and the
+    # bar it would fill at is the future.
+    bundle = _bundle([100, 100, 100, 105])
+    assert _run(_spec(), bundle, costs=_FREE).trades == ()
+    replayed = _replay(_spec(), bundle)
+    assert replayed.side is Side.LONG
+    assert replayed.last_close_time == bundle.bars[-1].close_time
+
+
+def test_the_replay_keeps_a_position_the_scored_window_would_have_flattened():
+    # Same series, two readings: the window closes what it holds at its last
+    # bar (an exposure figure has to end somewhere), while the rule itself is
+    # still long — which is what the live path is being told.
+    bundle = _bundle([105, 106, 107])
+    result = _run(_spec(), bundle, costs=_FREE)
+    assert [trade.exit_reason for trade in result.trades] == [ExitReason.SEGMENT_END]
+    assert _replay(_spec(), bundle).side is Side.LONG
+
+
+def test_the_replay_reverses_on_the_opposite_entry_like_the_scored_loop():
+    spec = _spec(
+        entry={
+            "long": [{"left": "close", "op": ">", "right": 102}],
+            "short": [{"left": "close", "op": "<", "right": 98}],
+        }
+    )
+    assert _replay(spec, _bundle([100, 105, 100])).side is Side.LONG
+    assert _replay(spec, _bundle([100, 105, 95])).side is Side.SHORT
+
+
+def test_the_replay_reports_flat_after_an_exit_decision():
+    spec = _spec(
+        entry={"long": [{"left": "close", "op": ">", "right": 102}]},
+        exit={"long": [{"left": "close", "op": "<", "right": 101}]},
+    )
+    assert _replay(spec, _bundle([100, 105, 106])).side is Side.LONG
+    assert _replay(spec, _bundle([100, 105, 100])).side is None
+
+
+def test_the_replay_counts_max_bars_from_the_entry_it_replayed():
+    # ``max_bars`` is why the replay has to start where the rule's own history
+    # does rather than at a recent tail: the count runs from an entry that may
+    # be far behind the newest bar.
+    spec = _spec(exit={"max_bars": 2})
+    # Entered at bar 1 (bar 0 decided it), so bar 2 is the second bar held and
+    # the hold expires there. One bar earlier it is still open; one bar later
+    # the rule has re-entered, which is the loop's own rule and not this one.
+    assert _replay(spec, _bundle([105, 106])).side is Side.LONG
+    assert _replay(spec, _bundle([105, 106, 107])).side is None
+    assert _replay(spec, _bundle([105, 106, 107, 108])).side is Side.LONG
+
+
+def test_a_replay_that_starts_after_the_entry_cannot_see_the_position():
+    # The documented cost of ``since_ms``, pinned so nobody "optimises" the
+    # start forward: the same series answers differently when the replay
+    # begins after the bar that opened the position.
+    spec = _spec(
+        entry={"long": [{"left": "close", "op": ">", "right": 102}]},
+        exit={"long": [{"left": "close", "op": "<", "right": 90}]},
+    )
+    bundle = _bundle([105, 100, 100, 100])
+    assert _replay(spec, bundle, since=0).side is Side.LONG
+    assert _replay(spec, bundle, since=2).side is None
+
+
+def test_the_replay_flags_a_last_bar_whose_condition_it_could_not_evaluate():
+    # The signal's fail-closed trigger. A ``None`` feature is "does not fire",
+    # which over a window is a property worth counting and at the newest bar
+    # is the opposite: the rule was never asked, so the side it shows is one
+    # it took earlier. The producer refuses on this flag.
+    spec = _spec(entry={"long": [{"left": "funding_rate", "op": ">", "right": -1}]})
+    covered = _bundle([100, 101, 102, 103])
+    assert _replay(spec, covered).last_bar_unevaluable is False
+    assert _replay(spec, covered).side is Side.LONG
+    # Funding that stops two bars early: the rate is stale past one interval,
+    # so the last bar reads ``None`` and the flag is raised.
+    short = _bundle([100, 101, 102, 103], funding=_funding(4, hours=4))
+    replayed = _replay(spec, short)
+    assert replayed.last_bar_unevaluable is True
+    assert replayed.replayed_bars_unevaluable > 0
+
+
+def test_the_replay_models_no_equity_so_a_ruined_rule_still_shows_a_side():
+    # The documented limitation, pinned rather than left in prose: the same
+    # spec and history that the scored loop marks ``ruined`` still leaves the
+    # replay with a side, because nothing here tracks an account.
+    ruinous = CostModel(taker_fee_rate=0.9, slippage_bps=1000, leverage=1)
+    spec = _spec(
+        entry={"long": [{"left": "close", "op": ">", "right": 99}]},
+        exit={"long": [{"left": "close", "op": ">", "right": 0}]},
+        sizing={"mode": "fixed_margin_fraction", "fraction": 0.6},
+    )
+    # An odd bar count, so the churn's last decision is an entry rather than
+    # the exit that follows it: the point is that a side survives the ruin,
+    # not that the rule happens to be in one.
+    bundle = _bundle([100, 101, 102, 103, 104, 105, 106, 107, 108])
+    assert _run(spec, bundle, costs=ruinous).ruined
+    assert _replay(spec, bundle, costs=ruinous).side is Side.LONG
+
+
+def test_the_replay_counts_every_bar_it_could_not_be_asked_about_not_only_the_last():
+    # The freeze the signal refuses on, and what the last bar alone cannot
+    # show: while its feature is missing the rule can neither exit nor
+    # reverse, so it carries whatever side it was on — and by the newest bar
+    # the data can be back, leaving the last-bar flag clear.
+    spec = _spec(
+        entry={"long": [{"left": "close", "op": ">", "right": 99}]},
+        exit={"long": [{"left": "funding_rate", "op": ">", "right": -1}]},
+    )
+    # Settlements for the first three bars and the last one, none in
+    # between: the middle bars cannot be asked, the newest one can.
+    gapped = _bundle(
+        [100, 101, 102, 103, 104, 105],
+        funding=[*_funding(6, hours=12), *_funding(6, hours=24)[20:]],
+    )
+    replayed = _replay(spec, gapped)
+    assert replayed.replayed_bars_unevaluable > 0
+
+
+def test_the_replay_refuses_a_start_past_every_bar_it_was_given():
+    with pytest.raises(EvaluationError, match="nothing to replay"):
+        _replay(_spec(), _bundle([100, 101, 102]), since=3)
+
+
+def test_the_replay_refuses_a_history_that_does_not_reach_its_start():
+    # The other end of the same hazard, and the one no gap scan can see: a
+    # truncated PREFIX leaves no hole, and ``bisect_left`` reports it as index
+    # 0, so the replay would quietly begin late and a position opened before
+    # the store now starts would be invisible.
+    with pytest.raises(EvaluationError, match="a position opened before that is"):
+        _replay(_spec(), _bundle([100, 101, 102]), since=-1)

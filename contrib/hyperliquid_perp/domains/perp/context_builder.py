@@ -210,11 +210,11 @@ def build_market_context(
     own refusals then apply (and log) — with ONE exception, below: a context
     built without ``candles`` drops the section silently however good the
     daily series is, because there is no closed bar to judge that series
-    against. REQUIRED with no default, the last of
-    the four kwargs on that rule in this signature and for the same reason as
-    the others: forgetting it would silently produce a context with no macro
-    section and a ``context_shape`` quietly missing its token, with nothing
-    raising — indistinguishable from an operator having left the switch off.
+    against. REQUIRED with no default, like the three kwargs above it, and for
+    the same reason: forgetting it would silently produce a context with no
+    macro section and a ``context_shape`` quietly missing its token, with
+    nothing raising — indistinguishable from an operator having left the
+    switch off.
 
     It is a separate argument rather than something built from ``candles``
     because it is a separate FETCH: taking the daily bars from the ``4h``
@@ -222,9 +222,10 @@ def build_market_context(
     indicator (see :mod:`.macro_trend`). ``market_data`` is what decides
     whether the caller fetches it at all; this function is handed the result.
 
-    ``research_signal`` is REQUIRED with no default too, for the same reason: forgetting it would cost a prompt quietly missing a
-    section and a ``context_shape`` quietly missing its token, with nothing
-    raising — exactly the failure the position kwarg's rule exists for. It is
+    ``research_signal`` is REQUIRED with no default too, for the same reason:
+    forgetting it would cost a prompt quietly missing a section and a
+    ``context_shape`` quietly missing its token, with nothing raising —
+    exactly the failure the position kwarg's rule exists for. It is
     carried through untouched. Unlike the profile and the position section,
     nothing here builds it: it is read from a document another process wrote,
     and every rule about whether that document may be believed — version,

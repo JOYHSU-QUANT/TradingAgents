@@ -257,7 +257,7 @@ def test_a_bar_is_dated_by_its_own_day_under_either_close_stamp_convention():
 
 
 # --------------------------------------------------------------------------
-# The three refusals — each drops the WHOLE section and says which it was
+# The four refusals — each drops the WHOLE section and says which it was
 # --------------------------------------------------------------------------
 
 
@@ -330,9 +330,11 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
         (1_500, "1.5 s"),
         (59_999, "60.0 s"),
         (60_000, "1.0 min"),
-        # Rounding BEFORE the comparison would promote these two a unit and
-        # overstate them: "1.0 min" for 57 seconds, "1.0h" for 57 minutes. The
-        # second is the figure that sizes a stalled feed in the WARNING.
+        # Rounding BEFORE the comparison promotes from 0.95 of a unit up, so
+        # it would render these two as "1.0 min" and "1.0h" — overstating a
+        # stalled feed's age by up to 5% in the WARNING that sizes it. (The
+        # promotion starts at 57_001 ms and 3_420_001 ms, not at a round 57
+        # seconds or 57 minutes: round(0.95, 1) is 0.9.)
         (57_001, "57.0 s"),
         (3_421_000, "57.0 min"),
         (3_599_999, "60.0 min"),
@@ -341,12 +343,11 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
     ],
 )
 def test_a_gap_is_rendered_in_the_largest_unit_that_reaches_one(ms, expected):
-    # Two properties in one table, because they are the same rule seen from
-    # two sides: nothing ever prints as "0.0" of a unit (which would read as
-    # NO gap inside a sentence about one), and nothing is promoted into a unit
-    # it has not reached (which would overstate it).
+    # Exact strings, not a property: the property this helper exists for
+    # ("never prints as 0.0 of a unit") is satisfied by several rules,
+    # including the two wrong ones this branch shipped, so asserting it alone
+    # is what let the second of them through.
     assert _gap(ms) == expected
-    assert not _gap(ms).startswith("0.0")
 
 
 def test_the_gap_is_reported_at_a_scale_that_cannot_contradict_the_sentence(caplog):

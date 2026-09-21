@@ -120,16 +120,19 @@ def run_context_only(config: dict, coin: str) -> int:
     # ``|macro_trend`` can differ too, for a weaker reason that earns no such
     # notice. It depends on a daily candle READ plus that series' freshness
     # against this run's own newest closed bar, so two hosts can answer
-    # differently either when one cannot reach the venue or simply by running
-    # at different MOMENTS — a preview 23h after the last published daily bar
-    # renders the section, the daemon's next cycle two hours later does not.
-    # What makes that tolerable, and unlike the research document, is that
-    # every such case is public, reproducible and logged with its own named
-    # WARNING: nothing here depends on a file only one host has.
+    # differently when one cannot reach the venue, or across a bar boundary:
+    # the age is measured to the newest CLOSED candle, so it moves in whole
+    # intervals, and a preview taken before one closes can render a section
+    # the daemon's next cycle drops. What makes that tolerable, and unlike
+    # the research document, is that every such case is public and
+    # reproducible from data both hosts can fetch — nothing here turns on a
+    # file only one of them has. Most of them also log a named WARNING; the
+    # one that does not is a cycle with no candles at all, which is refused
+    # upstream for a louder reason.
     #
-    # The fingerprint is over the
-    # same block run_engine feeds the model (effective ceiling included), so
-    # a grid or ceiling edit shows its new value here. A gate-threshold edit
+    # The fingerprint is over the same block run_engine feeds the model
+    # (effective ceiling included), so a grid or ceiling edit shows its new
+    # value here. A gate-threshold edit
     # does NOT (prompt v5 keeps those out of the text): that one needs a new
     # run-id, and an unchanged fingerprint here is not evidence it can skip
     # one.
@@ -148,15 +151,14 @@ def run_context_only(config: dict, coin: str) -> int:
             ),
         )
     )
-    # The one DIVERGENCE worth a notice, of the two this lane has beyond its
-    # own documented position-blindness (issue #276; the other is
-    # ``|macro_trend``, argued above — public data, and the conditions that
-    # split the two hosts announce themselves in the log).
-    # ``|position`` is always absent here and an operator who read RUNBOOK §4
-    # knows to add it back; the research section is the opposite — whether its
-    # token is there depends on a file on the host this command runs on, so
-    # the printed shape can be one the server will never write, with nothing
-    # on the line itself saying so.
+    # The one divergence worth a NOTICE (issue #276). Others exist and are
+    # argued where they arise: ``|position`` is always absent here and an
+    # operator who read RUNBOOK §4 knows to add it back, while ``|macro_trend``
+    # (above) and ``|volume_profile`` can each drop out per cycle on data both
+    # hosts can fetch. The research section is the one that is different —
+    # whether its token is there depends on a FILE on the host this command
+    # runs on, so the printed shape can be one the server will never write,
+    # with nothing on the line itself saying so.
     #
     # Said whenever the switch names a document, in BOTH directions, naming
     # which bucket THIS host landed in. An earlier draft spoke up only when

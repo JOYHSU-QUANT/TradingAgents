@@ -59,9 +59,9 @@ MIN_VOLUME_PROFILE_WINDOW = 12
 # the producer imports schema. ``market_data_config`` enforces the band at
 # config load and MUST NOT import a compute module — that one is policy, not a
 # cycle, held by ``tests/common/test_layering.py`` so the keyless
-# ``--context-only`` path stays cheap. And ``domains/perp/macro_trend``
-# computes the averages. A module below all three is the only place all three
-# can read.
+# ``live --config-check`` path does not acquire a compute closure. And
+# ``domains/perp/macro_trend`` computes the averages. A module below all three
+# is the only place all three can read.
 #
 # The floor is not an independent tuning choice — it IS the slow period,
 # because a window holding fewer bars than that has no SMA(200) at any position

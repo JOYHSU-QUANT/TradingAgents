@@ -110,18 +110,19 @@ def _gap(ms: int) -> str:
     A fixed unit makes a small gap vanish: at hours to one decimal, a bar one
     millisecond early prints as ``0.0h`` — no gap, in a sentence about a gap.
     So the unit is the LARGEST whose figure is at least 1.0, and milliseconds
-    are printed as an integer when even seconds would not reach that. Choosing
-    on a threshold over the raw value instead (``ms < 60_000`` and so on)
-    reintroduces the same defect one unit down: 1.5 s is 0.025 minutes, which
-    prints as ``0.0 min``.
+    are printed as an integer when even seconds would not reach that. (``value
+    >= 1.0`` is the same test as ``ms >= scale``; either spelling is fine. The
+    rule that had the defect offered no unit between milliseconds and hours at
+    all, so 1.5 s had nowhere to go but ``0.0h``.)
 
     The comparison is against the unrounded figure deliberately. Rounding
-    first (``round(value, 1) >= 1.0``) promotes anything from 0.95 of a unit
-    upward, so 57 minutes of a stalled feed would print as ``1.0h`` — a 5%
+    first (``round(value, 1) >= 1.0``) promotes from 0.95 of a unit upward, so
+    a stalled feed just under an hour prints as ``1.0h`` — up to a 5%
     overstatement of the one number that sizes the outage. The cost of not
     rounding is that the top of a unit is not normalised: 59.999 s prints as
-    ``60.0 s`` rather than ``1.0 min``. That is unidiomatic and exactly true,
-    which is the right way round for a log line an operator acts on.
+    ``60.0 s`` rather than ``1.0 min``. That is unidiomatic, and it still
+    rounds (to 1 ms here) — what it does not do is promote a figure into a
+    unit it has not reached, which is the error that misleads.
 
     What this does NOT fix, because no choice of unit can: a value just past a
     bound still prints as that bound. 24h + 1 ms is ``24.0h`` at any sane

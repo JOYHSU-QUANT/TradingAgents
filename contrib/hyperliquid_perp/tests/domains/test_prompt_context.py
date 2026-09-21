@@ -674,11 +674,12 @@ def test_the_direction_word_and_the_sign_of_the_separation_agree():
 
 
 def test_a_separation_near_a_crossing_never_renders_as_a_bare_zero():
-    # The case this section exists to surface is exactly the one two decimal
-    # places destroy: as the pair crosses, the separation passes through zero,
-    # and anything inside half a hundredth prints as "+0.00%" — "no gap" on
-    # the same line as a word asserting a strict ordering. The DTO refuses
-    # only a BIT-EXACT tie, so this window is reachable on a real cycle.
+    # The case this section exists to surface is exactly the one ``_num``'s
+    # default precision destroys: as the pair crosses, the separation passes
+    # through zero, and anything inside half of its last place prints as a
+    # bare signed zero — "no gap" on the same line as a word asserting a
+    # strict ordering. The DTO refuses only a BIT-EXACT tie, so this window
+    # is reachable on a real cycle.
     #
     # A separation of 1e-5% of the slow average, built by replacing both
     # averages on a real producer output (the percentages are cross-checked

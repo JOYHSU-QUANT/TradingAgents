@@ -194,6 +194,23 @@ def _with_freshness_note(payload: dict, note: str) -> str:
     return json.dumps({_FRESHNESS_NOTE_KEY: note, **body}, indent=2)
 
 
+def _rate_limited(response) -> None:
+    """This vendor's 429 policy, handed to the shared status helper.
+
+    Passed there rather than checked above the call so the ORDER is the
+    helper's: a 429 read after it would already have become an ``HTTPError``
+    and missed the router's rate-limit lane (#72).
+
+    ``Retry-After`` is quoted when the vendor sends one. The type takes the
+    shared stand-off window either way: a 429 carries no notice text to tell a
+    spent daily quota from a burst, and whether Alpha Vantage ever reports the
+    quota that way is unmeasured (#153).
+    """
+    retry_after = response.headers.get("Retry-After")
+    after = f" (Retry-After: {retry_after})" if retry_after else ""
+    raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: HTTP 429{after}")
+
+
 def _make_api_request(function_name: str, params: dict, subject: str | None = None) -> str:
     """Helper function to make API requests and handle responses.
 
@@ -261,11 +278,7 @@ def _make_api_request(function_name: str, params: dict, subject: str | None = No
     # its HTTPError behaviour. A 429 carries no notice text to tell a spent
     # daily quota from a burst, so it takes the shared window; whether Alpha
     # Vantage ever reports the quota that way is unmeasured (#153).
-    if response.status_code == 429:
-        retry_after = response.headers.get("Retry-After")
-        after = f" (Retry-After: {retry_after})" if retry_after else ""
-        raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: HTTP 429{after}")
-    raise_for_http_status(response, "Alpha Vantage")
+    raise_for_http_status(response, "Alpha Vantage", rate_limit=_rate_limited)
 
     response_text = response.text
 

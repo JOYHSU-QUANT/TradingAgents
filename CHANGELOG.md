@@ -10,6 +10,52 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **`raise_for_http_status` now owns the ORDER of the 429 check, and declining
+  to give it one is declared rather than implicit** (issue #279). The helper
+  types only a 5xx and `is_unreached` excludes `requests.HTTPError`, so a 429
+  left to the library raise reaches a boundary's generic lane and is filed as
+  that module's own breakage - an ERROR with a traceback blaming the parser,
+  and a router verdict of "the client needs a fix" for a routine throttle no
+  code change heals. PR #278 shipped exactly that bug, and the helper's
+  docstring already claimed its value was that "a boundary has nothing of its
+  own to sequence" - a promise only half kept, since any boundary that cared
+  about 429 still had to sequence a check above the call.
+
+  It now takes `rate_limit=`, the boundary's own policy, consulted first. Alpha
+  Vantage and the two Hyperliquid boundaries hand theirs over; a policy that
+  RETURNS instead of raising is a `WiringGapError` rather than a silent
+  fall-through to the misclassification the parameter exists to prevent.
+
+  A boundary passing nothing keeps today's behaviour exactly, and that is the
+  correction to the issue's own premise. The issue said five boundaries
+  re-derive one rule; measured, only three do. SoSoValue reads the whole 4xx
+  range before the helper is reached (there, a 4xx is the vendor answering
+  whatever the body carries) and Deribit orders its 429 ahead of its body read
+  (a throttle's body is not JSON, so the body read would return an outage
+  verdict). More importantly, typing 429 by DEFAULT would have been a new bug
+  of the same shape in the other direction: farside absorbs a throttle in its
+  stale-cache lane and fear_greed in its retry lane, and a typed raise from the
+  helper would walk straight past both. Which boundaries decline, and why, is
+  now a declared table with a lock - "whatever does not pass one is exempt"
+  would be vacuous for the next boundary that simply forgot.
+
+- **One bool-rejecting numeric rule (`utils.finite_float`) for the four vendor
+  modules that each kept a copy** (issue #279). Not the same question as
+  `is_finite_number`, which asks whether a raw report CELL is a number before
+  it is rendered and lets `True` through as 1.0; these values are about to be
+  summed, compared or weighted, so a JSON `true` passing as 1 would be a figure
+  nobody sent. It returns the value rather than a verdict because half the
+  callers need it, and a second conversion is a second place for the rule to
+  differ.
+
+  Sharing closed a divergence that was already there: deribit and
+  sosovalue_common both guard the `OverflowError` `math.isfinite` raises on an
+  int too large to convert to a float (a JSON integer literal has no bound),
+  and farside's copy did not. `allow_str` stays opt-in because it is a property
+  of the vendor, not the question - Hyperliquid sends every number as a string,
+  while a string reaching the others means the payload is not the shape they
+  parsed.
+
 - **Live-only data is WITHHELD on a past analysis date, by one shared rule
   (`date_window.is_past_analysis_date`)** - previously the codebase gave two
   answers to one question. The Deribit chain withheld its figures for any

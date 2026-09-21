@@ -1546,3 +1546,71 @@ def test_a_shipped_off_category_never_reaches_its_vendor():
                 out = interface.route_to_vendor(method, "BTC", "2026-06-05")
             assert calls == [], f"{method} ran while {category} ships off"
             assert "DATA_UNAVAILABLE" in out
+
+
+# Which request boundaries hand `raise_for_http_status` a 429 policy, and which
+# deliberately do not. A boundary that passes none keeps the library's
+# `HTTPError`, which its own lane then absorbs - correct for the modules below,
+# and wrong for the ones that pass one, where it meant a routine throttle was
+# filed as the module's own breakage (#278).
+#
+# Declared rather than inferred: "whatever does not pass one is exempt" would
+# make the lock vacuous for the next boundary that simply forgot, which is the
+# omission it exists to catch.
+_NO_RATE_LIMIT_POLICY = {
+    # Reads the whole 4xx range itself, ahead of this helper: at that boundary
+    # a 4xx is the vendor answering whatever the body carries, and the key
+    # verdict, the throttle and the error envelope are all read from it.
+    "sosovalue_common.py": "handles 4xx before the helper is reached",
+    # Checks 429 itself BEFORE reading the body, which this helper cannot do
+    # for it: a throttle's body is not JSON, so the body read would return an
+    # outage verdict for what is a throttle.
+    "deribit.py": "orders its own 429 ahead of the body read",
+    # No 429 policy at all, on purpose. Each absorbs a throttle in its own
+    # retry or stale-cache lane, and a typed raise from the helper would walk
+    # straight past that lane - the mirror of the bug the parameter prevents.
+    "farside.py": "absorbs a throttle in its stale-cache lane",
+    "fear_greed.py": "absorbs a throttle in its retry lane",
+    "fred.py": "no throttle policy; the router's generic lane answers",
+    "polymarket.py": "degrades to prose rather than raising",
+}
+
+
+def _status_boundary_calls():
+    """Every ``raise_for_http_status`` call in the package, by module, with
+    whether it was handed a ``rate_limit`` policy."""
+    calls = {}
+    for source, tree in dataflows_module_trees(containing="raise_for_http_status"):
+        for node in ast.walk(tree):
+            func = getattr(node, "func", None)
+            if not isinstance(node, ast.Call) or getattr(func, "id", None) != "raise_for_http_status":
+                continue
+            given = any(kw.arg == "rate_limit" for kw in node.keywords)
+            calls.setdefault(source.name, set()).add(given)
+    return calls
+
+
+@pytest.mark.unit
+def test_every_status_boundary_declares_its_429_policy():
+    """A boundary either hands the helper a 429 policy or is declared exempt.
+
+    The helper types only a 5xx and `is_unreached` excludes `HTTPError`, so a
+    429 nobody claimed becomes the module's own structural error - an ERROR
+    with a traceback blaming the parser, for a throttle no code change heals.
+    Passing the policy to the helper rather than checking above the call is
+    what makes the ORDER one place's business; this lock is what makes the
+    decision NOT to pass one visible.
+    """
+    calls = _status_boundary_calls()
+    assert calls, "no raise_for_http_status calls found - the AST scan is broken"
+    for module, given in calls.items():
+        if module in _NO_RATE_LIMIT_POLICY:
+            assert given == {False}, f"{module} is declared exempt but passes rate_limit"
+        else:
+            assert given == {True}, f"{module} passes no rate_limit policy and is not declared"
+
+
+@pytest.mark.unit
+def test_the_exemptions_name_boundaries_that_exist():
+    """A declared exemption that no longer calls the helper is stale."""
+    assert set(_NO_RATE_LIMIT_POLICY) <= set(_status_boundary_calls())

@@ -2,11 +2,13 @@
 condition derives from VendorError, so the router catches base types and any
 vendor slots in without new handling.
 """
+import contextlib
 import copy
 import unittest
 from unittest import mock
 
 import pytest
+import requests
 
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
@@ -24,8 +26,10 @@ from tradingagents.dataflows.errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
+    WiringGapError,
 )
 from tradingagents.dataflows.fred import FredNotConfiguredError
+from tradingagents.dataflows.utils import raise_for_http_status
 
 
 @pytest.mark.unit
@@ -125,3 +129,60 @@ class RouterHandlesBaseTypesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.unit
+class TestRateLimitPolicyOrdering:
+    """``raise_for_http_status`` consults the boundary's 429 policy FIRST.
+
+    The parameter exists because the helper types only a 5xx: a 429 left to
+    ``raise_for_status()`` becomes an ``HTTPError``, which ``is_unreached``
+    excludes, so the boundary files a routine throttle as its own structural
+    breakage (#278 shipped that).
+    """
+
+    def _response(self, status):
+        response = mock.Mock(spec=["status_code", "raise_for_status", "headers"])
+        response.status_code = status
+        response.headers = {}
+        response.raise_for_status.side_effect = (
+            requests.HTTPError(f"HTTP {status}", response=response) if status >= 400 else None
+        )
+        return response
+
+    def test_the_policy_is_consulted_before_the_library_raise(self):
+        class _Throttled(VendorRateLimitError):
+            pass
+
+        def _policy(_response):
+            raise _Throttled("this vendor is throttling us")
+
+        response = self._response(429)
+        with pytest.raises(_Throttled):
+            raise_for_http_status(response, "Vendor", rate_limit=_policy)
+        # The library's raise never ran: reaching it is the misfiling.
+        response.raise_for_status.assert_not_called()
+
+    def test_without_a_policy_a_429_keeps_the_library_behaviour(self):
+        # Deliberate: several boundaries absorb a throttle in their own retry
+        # or stale-cache lane, and a typed raise from here would bypass it.
+        with pytest.raises(requests.HTTPError):
+            raise_for_http_status(self._response(429), "Vendor")
+
+    def test_the_policy_is_not_consulted_for_any_other_status(self):
+        seen = []
+        for status in (200, 403, 500):
+            response = self._response(status)
+            with contextlib.suppress(requests.HTTPError, VendorUnavailableError):
+                raise_for_http_status(response, "Vendor", rate_limit=lambda r: seen.append(r))
+        assert seen == []
+
+    def test_a_5xx_still_outranks_the_library_raise_with_a_policy_given(self):
+        with pytest.raises(VendorUnavailableError):
+            raise_for_http_status(self._response(503), "Vendor", rate_limit=lambda r: None)
+
+    def test_a_policy_that_returns_is_our_bug_not_a_silent_fallthrough(self):
+        # Returning would leave the throttle to fall through to the library
+        # raise - the exact misclassification the parameter prevents.
+        with pytest.raises(WiringGapError, match="returned instead of raising"):
+            raise_for_http_status(self._response(429), "Vendor", rate_limit=lambda r: None)

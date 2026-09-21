@@ -53,6 +53,7 @@ from .utils import (
     date_refusal,
     echo_argument,
     failure_account,
+    finite_float,
     is_unreached,
     quote_argument,
     raise_for_http_status,
@@ -548,8 +549,13 @@ def _is_finite_number(x: object) -> bool:
     default, which would defeat the Total cross-check (every comparison with NaN
     is False) and render as a literal "nan"/"inf" figure, so those are rejected
     at the cache boundary too.
+
+    The rule is ``utils.finite_float``, shared with the other vendors that ask
+    it. Adopting it also brought the huge-int guard this copy lacked: a JSON
+    integer literal has no bound, and ``math.isfinite`` RAISES rather than
+    answering on one too large to convert to a float.
     """
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    return finite_float(x) is not None
 
 
 def _is_iso_date(x: object) -> bool:

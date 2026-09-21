@@ -79,6 +79,7 @@ from .utils import (
     date_refusal,
     echo_argument,
     failure_account,
+    finite_float,
     json_body_or_outage,
     quote_argument,
     raise_for_http_status,
@@ -744,7 +745,7 @@ def _is_finite_number(x: object) -> bool:
 
     ``math.isfinite`` RAISES on an int too large to convert to a float, and a JSON
     integer literal has no bound, so ``json.loads`` can hand back an
-    arbitrary-precision int that makes this predicate throw rather than answer.
+    arbitrary-precision int that makes a naive predicate throw rather than answer.
     That inverts its contract at one of the input classes it exists to turn away,
     and it does so at every call site: ``parse_chain`` documents "rows that cannot
     be used are skipped, not fatal" and would instead lose all six chain figures to
@@ -752,13 +753,11 @@ def _is_finite_number(x: object) -> bool:
     replaced by a bare "int too large to convert to float" — a message that reaches
     the model through route_to_vendor's sentinel and sends an operator to
     ``math.isfinite`` as though the bug were here.
+
+    All of that is ``utils.finite_float`` now, shared with the other vendors
+    that ask the same question.
     """
-    if not isinstance(x, (int, float)) or isinstance(x, bool):
-        return False
-    try:
-        return math.isfinite(x)
-    except OverflowError:
-        return False
+    return finite_float(x) is not None
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from .errors import (
 from .farside import get_etf_flow_data as get_farside_etf_flows
 from .fear_greed import get_fear_greed_data as get_alternative_me_fear_greed
 from .fred import get_macro_data as get_fred_macro_data
+from .hyperliquid_whales import get_whale_positions_data as get_hyperliquid_whale_positions
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
 from .sosovalue import get_etf_flow_data as get_sosovalue_etf_flows
 from .sosovalue_macro import get_economic_calendar_data as get_sosovalue_economic_calendar
@@ -115,6 +116,12 @@ TOOLS_CATEGORIES = {
             "get_btc_treasuries",
         ],
     },
+    "whale_positioning": {
+        "description": "Hyperliquid large-account perp positioning: long/short split and 24h change (crypto)",
+        "tools": [
+            "get_whale_positions",
+        ],
+    },
 }
 
 # Configuring a category (or tool) to this sentinel switches it off entirely.
@@ -140,6 +147,7 @@ VENDOR_LIST = [
     "farside",
     "alternative_me",
     "deribit",
+    "hyperliquid_stats",
 ]
 
 # Optional enrichment categories. These add macro/event/positioning context to
@@ -156,6 +164,7 @@ OPTIONAL_CATEGORIES = {
     "options_data",
     "economic_calendar",
     "btc_treasuries",
+    "whale_positioning",
 }
 
 # Categories whose vendor's own library failing is never rendered as the
@@ -274,6 +283,10 @@ VENDOR_METHODS = {
     "get_btc_treasuries": {
         "sosovalue": get_sosovalue_btc_treasuries,
     },
+    # whale_positioning
+    "get_whale_positions": {
+        "hyperliquid_stats": get_hyperliquid_whale_positions,
+    },
 }
 
 
@@ -310,6 +323,7 @@ _LIBRARY_SUBJECTS = {
     "get_options_market": "options market for {0}",
     "get_economic_calendar": "economic calendar",
     "get_btc_treasuries": "BTC treasuries for {0}",
+    "get_whale_positions": "whale positioning for {0}",
 }
 
 

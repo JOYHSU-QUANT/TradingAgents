@@ -84,6 +84,106 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Hyperliquid whale positioning as a crypto-only news-analyst tool
+  (`whale_positioning`, vendor `hyperliquid_stats`, keyless)** - the third and
+  last of the new data-source PRs. It reads the venue's public stats
+  leaderboard for the largest accounts by that leaderboard's own account
+  value, then `clearinghouseState` once per sampled address, and reports one
+  coin's long/short split by account count and by notional, the long/short
+  ratio, the notional-weighted leverage, the three largest positions, and the
+  24-hour change. Analyst-side only: nothing enters `PerpMarketContext` and no
+  file under `contrib/hyperliquid_perp/` is touched.
+
+  **Ships disabled**, like `options_data` (cut over 2026-08-12) and the
+  SoSoValue pair (2026-09-02). A keyless vendor merged ON changes a running
+  deployment's analyst input surface - a new tool, a new prompt clause, a new
+  report section - the moment the code lands, with no server-side action to
+  attribute a behaviour change to. The dated flip to `"hyperliquid_stats"` is
+  that action, and the date-refusal coverage lock now names the shipped-off
+  categories so the exemption is auditable and expires with the cutover.
+
+  What the report refuses to imply is most of the work. The leaderboard's
+  account value is not perp equity: of the top 20 addresses measured on
+  2026-09-21, ELEVEN held no perp position at all, and the holders were
+  dominated by large systematically short books - market makers and vaults
+  hedging exposure held elsewhere. So the report frames the split as
+  venue-level positioning of large accounts rather than crowd sentiment or a
+  directional signal, prints how many sampled accounts actually held the coin,
+  and answers a coin none of them hold with an explicit "no position in this
+  sample" statement instead of figures - absence in a sample is not absence of
+  open interest. Both endpoints are live-only, so the report is labelled with
+  the UTC instant it was fetched and a past `curr_date` carries the shared
+  live-snapshot disclosure (decision 6 of the data-source plan: label
+  live-only data, never dress it as history).
+
+  The 24-hour change needs MORE than the two snapshots the plan sketched, and
+  that is arithmetic rather than preference: with a one-hour snapshot TTL the
+  second-newest snapshot is an hour old, never a day, so a two-slot cache can
+  never hold a comparison point in the 20-30 hour band the change is measured
+  over. One rolling file therefore holds the newest snapshot, the trimmed
+  cohort (its own 12-hour TTL - the undocumented leaderboard body measured
+  38 MB, so re-downloading it hourly buys nothing) and a bounded history of
+  per-coin aggregates, pruned to 32 hours. The comparison is measured BETWEEN
+  the two snapshots rather than against the wall clock, so it does not drift
+  while the cache sits, and a cohort change between them is disclosed - a
+  turnover at the leaderboard TTL must not read as a position change nobody
+  made.
+
+  Failure behaviour follows the family. The undocumented leaderboard is read
+  in chunks under a hard byte cap, because an endpoint whose size is not a
+  contract must degrade rather than OOM; an unreachable host, a 5xx and an
+  undecodable body are the outage type, a decoded body of the wrong shape
+  stays structural, and an HTTP 429 is a rate limit - a type of its own,
+  because the shared status helper types only a 5xx and `is_unreached`
+  excludes `requests.HTTPError`, so without it a routine throttle was filed as
+  this module's STRUCTURAL error and got the ending meant for a broken parser
+  (an ERROR with a traceback saying the endpoint likely changed, and a router
+  verdict of "the client needs a fix"). It now drains the sweep instead - the
+  info endpoint's budget is per-IP, so one refusal answers for every remaining
+  address - and arms the router's per-vendor throttle latch. A sweep of the
+  whole package's vendor boundaries for the same mis-filing found no other
+  instance: Farside's and Fear & Greed's 4xx handling is a documented decision
+  (#170) and every other boundary types its 429 explicitly.
+
+  The per-address sweep is throttled to 5 req/s and bounded by a 30s
+  wall-clock budget: one account that cannot be read costs that account, and
+  what stopped the sweep early is RECORDED rather than assumed, because a
+  spent budget and a throttle leave an identical count of unvisited accounts
+  behind while the coverage sentence names a cause. A refresh failure serves
+  the newest snapshot for at most 6 hours marked STALE - far shorter than the
+  ETF vendors' day-scale caps, since positioning presented as live must not be
+  half a day old - and degrades to the router sentinel beyond that. A failed
+  fetch is never written to cache.
+
+  Two things the report refuses to leave implied, both found in review. The
+  24-hour change discloses when the BASELINE's own sweep was short of its
+  cohort: the current snapshot's coverage is always printed, so dropping the
+  older one's would make the subtraction look better-founded than it is, and
+  coverage missing a day ago would read as a position change today. And a coin
+  absent from BOTH snapshots answers "no change to report" rather than the
+  "the whole of the current $0.0m long / $0.0m short was opened since"
+  sentence, which asserted an event over two zeroes directly under the
+  report's own "No position" line.
+
+  The live-snapshot disclosure is passed `max_behind_days=0` rather than the
+  shared default of 2. This vendor serves present state, so a report for any
+  past date shows something that date could not have seen; at the default, a
+  `curr_date` one or two days back carried the fetch-instant header and no
+  sentence at all, which is the band a backtest most often sits in. (The
+  sibling `deribit` vendor withholds its live chain entirely for a past date -
+  a stricter answer to the same question, left as it is here per decision 6 of
+  the data-source plan, and worth reconciling across both vendors one day.)
+
+  Also: `utils.json_bytes_or_outage`, the streamed twin of
+  `json_body_or_outage`, so the "answered HTTP N with a body that is not JSON"
+  sentence stays authored in `utils` alone (#217-4) now that a boundary
+  decodes a body it read by hand. Writing that boundary first revealed that
+  the shared `raise_for_http_status` raises the BARE `VendorUnavailableError`:
+  a vendor module that catches only `requests.RequestException` lets a 5xx walk
+  past its own cache lane's `except <Module>Error` and reach the router with
+  the stale-snapshot fallback never tried. Caught here before it shipped; the
+  sibling boundaries already catch both.
+
 - **Which rule and which side the research block carried, as two queryable
   columns (schema v13, #276)** - the follow-up PR #275 left for the run-6
   segment decision. Before this the store remembered only THAT the section was

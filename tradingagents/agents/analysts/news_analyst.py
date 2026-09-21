@@ -13,6 +13,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_macro_indicators,
     get_news,
     get_prediction_markets,
+    get_whale_positions,
 )
 from tradingagents.dataflows.interface import (
     get_category_for_method,
@@ -129,6 +130,21 @@ OPTIONAL_NEWS_TOOLS = (
             "holders — an announcement-driven demand-side signal (for assets "
             "other than BTC it is a market-wide proxy, not that asset's own "
             "flows)"
+        ),
+    ),
+    _OptionalNewsTool(
+        tool=get_whale_positions,
+        category="whale_positioning",
+        scope="crypto",
+        hint=(
+            "get_whale_positions(asset, curr_date) for how the largest "
+            "Hyperliquid accounts are positioned in that coin's perpetual — the "
+            "long/short split by notional, the leverage behind it and the "
+            "24-hour change; those accounts are ranked by the venue's own "
+            "leaderboard and many are market makers or vaults hedging exposure "
+            "held elsewhere, so treat it as venue-level positioning of large "
+            "accounts rather than crowd sentiment, and never as a standalone "
+            "directional signal"
         ),
     ),
 )

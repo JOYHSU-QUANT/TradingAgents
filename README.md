@@ -419,6 +419,65 @@ config["data_vendors"]["economic_calendar"] = "none"
 config["data_vendors"]["btc_treasuries"] = "none"
 ```
 
+A fourth news-analyst source is **Hyperliquid whale positioning**
+(`whale_positioning`, vendor `hyperliquid_stats`, keyless): how the largest
+accounts on the Hyperliquid perpetual venue are positioned in one coin — the
+long/short split by account count and by notional with the long/short ratio,
+the notional-weighted leverage, the three largest individual positions, and the
+change in all of that since a snapshot about a day earlier. It reads the
+venue's public stats leaderboard (an **undocumented** endpoint, tens of
+megabytes, read under a hard byte cap) for the top accounts by the
+leaderboard's own account value, then the documented `clearinghouseState` info
+endpoint once per sampled address.
+
+Read what it says, not what it sounds like. The leaderboard's account value is
+**not** perp equity: of the top 20 addresses measured on 2026-09-21, eleven
+held no perp position at all, and the ones that did were dominated by large,
+systematically short books — market makers and vaults hedging exposure held
+elsewhere rather than accounts expressing a view. So the report frames the
+split as *venue-level positioning of large accounts*, never as crowd sentiment
+or a standalone directional signal, and it always prints how many sampled
+accounts actually held the coin: a coin none of them hold yields an explicit
+"no position in this sample" statement, which is not the same claim as no open
+interest. Both endpoints are **live-only**, so the report is a snapshot
+labelled with the UTC instant it was fetched, and a past `curr_date` carries
+the live-snapshot disclosure rather than being served as that date's state.
+
+One rolling cache file holds the newest snapshot (reused for an hour, which is
+what keeps the N+1 fan-out off every tool call), the trimmed cohort (its own
+12-hour TTL — re-downloading tens of megabytes hourly buys nothing) and a
+bounded history of earlier snapshots' per-coin aggregates. That history is what
+makes the 24-hour change computable: the comparison point is the snapshot
+closest to 24 hours before the one being shown, inside a 20–30 hour band, and
+the report says so — including when the sampled accounts changed between the
+two, so a cohort turnover is never read as a position change nobody made. A
+refresh failure serves the newest snapshot for at most 6 hours, marked STALE,
+and degrades to the sentinel beyond that: positioning presented as live must
+not be half a day old. The per-address sweep is throttled and bounded by a 30s
+budget; an account that cannot be read costs that account, and the report's
+coverage line states what the sweep reached either way — naming the reason it
+stopped, since a spent budget and a rate limit leave an identical count of
+unvisited accounts behind. An HTTP 429 is typed as a rate limit rather than as
+a contract break, so it drains the remaining requests (the info endpoint's
+budget is per-IP, so one refusal answers for all of them), stands the vendor
+off at the router, and is logged as the vendor answering rather than as a
+parser that needs fixing.
+
+Because the figures are present-state, the live-snapshot disclosure fires on
+**any** `curr_date` behind today, not on the shared helper's two-day default:
+the one- and two-day band is exactly where a backtest sits.
+
+This vendor **ships disabled** and needs a deliberate, dated flip to
+`"hyperliquid_stats"` to turn on, exactly as `options_data` (2026-08-12) and
+the SoSoValue pair (2026-09-02) did: being keyless, shipping it on at merge
+time would change a running deployment's analyst input surface — a new tool, a
+new prompt clause, a new report section — the moment the code landed, with no
+server-side action to attribute the change to.
+
+```python
+config["data_vendors"]["whale_positioning"] = "hyperliquid_stats"  # the dated cutover
+```
+
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python

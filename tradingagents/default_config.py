@@ -332,6 +332,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # off is a code change, not a YAML edit.
         "economic_calendar": "sosovalue",    # Options: sosovalue (SOSOVALUE_API_KEY), none
         "btc_treasuries": "sosovalue",       # Options: sosovalue (SOSOVALUE_API_KEY), none
+        # Hyperliquid large-account perp positioning (long/short split + 24h
+        # change), from the venue's public leaderboard and info endpoints.
+        # Keyless, so merging it would change a running deployment's analyst
+        # input surface the moment the code landed, with no server-side action
+        # to date the change from. It therefore ships OFF, exactly as
+        # options_data (cut over 2026-08-12) and the two SoSoValue categories
+        # (2026-09-02) did: the deliberate, dated flip to "hyperliquid_stats"
+        # is what a later paper review attributes a behaviour change to. Per
+        # the note above, this default IS the perp deployment's live value.
+        "whale_positioning": "none",         # Options: hyperliquid_stats (keyless), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

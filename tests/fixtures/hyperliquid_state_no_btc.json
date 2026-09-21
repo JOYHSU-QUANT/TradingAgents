@@ -1,0 +1,42 @@
+{
+ "marginSummary": {
+  "accountValue": "89260215.373081997",
+  "totalNtlPos": "647100248.2375069857",
+  "totalRawUsd": "736360463.6105890274",
+  "totalMarginUsed": "123659500.126996994"
+ },
+ "crossMarginSummary": {
+  "accountValue": "89260215.373081997",
+  "totalNtlPos": "647100248.2375069857",
+  "totalRawUsd": "736360463.6105890274",
+  "totalMarginUsed": "123659500.126996994"
+ },
+ "crossMaintenanceMarginUsed": "20125114.3992649987",
+ "withdrawable": "0.0",
+ "assetPositions": [
+  {
+   "type": "oneWay",
+   "position": {
+    "coin": "SOL",
+    "szi": "-736071.3",
+    "leverage": {
+     "type": "cross",
+     "value": 10
+    },
+    "entryPx": "94.0205",
+    "positionValue": "82314853.4790000021",
+    "unrealizedPnl": "-13109045.920589",
+    "returnOnEquity": "-1.8942118275",
+    "liquidationPx": "212.9931478863",
+    "marginUsed": "8231485.3479000004",
+    "maxLeverage": 10,
+    "cumFunding": {
+     "allTime": "-3202899.9377020001",
+     "sinceOpen": "-3202899.9377020001",
+     "sinceChange": "-125345.845662"
+    }
+   }
+  }
+ ],
+ "time": 1789957687337
+}

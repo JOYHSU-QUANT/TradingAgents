@@ -1354,6 +1354,7 @@ _SUBJECT_WITH_ARGUMENT_NAMES = {
     "get_options_market": "options market for asset",
     "get_economic_calendar": "economic calendar",
     "get_btc_treasuries": "BTC treasuries for asset",
+    "get_whale_positions": "whale positioning for asset",
 }
 
 

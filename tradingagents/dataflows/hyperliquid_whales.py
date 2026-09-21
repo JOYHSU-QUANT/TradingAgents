@@ -47,8 +47,9 @@ within ``SNAPSHOT_TTL_MINUTES`` of the newest snapshot reuses it, which is what
 keeps the N+1 fan-out off every tool call; the leaderboard carries its own,
 much longer TTL because the largest accounts change slowly and re-downloading
 38 MB hourly buys nothing. A refresh failure falls back to the newest snapshot
-(marked STALE) up to ``MAX_STALE_HOURS`` and no further — positioning presented
-as live must not be half a day old. A failed fetch is never written to cache.
+(marked STALE) up to ``MAX_STALE_HOURS`` (six) and no further — a report headed
+"live snapshot" must not be serving a quarter-day-old book. A failed fetch is
+never written to cache.
 
 The history is what makes the 24-hour change computable at all, and it is why
 this module keeps more than the two snapshots the plan sketched: with an hourly
@@ -163,8 +164,10 @@ LEADERBOARD_MAX_STALE_HOURS = 72
 
 # How stale the newest snapshot may be served when a refresh fails. Short, and
 # much shorter than the ETF-flow vendors' day-scale caps: this report is
-# labelled a live snapshot, and positioning from half a day ago presented under
-# that heading would be a false claim rather than a lagging one.
+# labelled a live snapshot, so a figure from a quarter of a day ago presented
+# under that heading would be a false claim rather than a lagging one. Against
+# the 4-hour analyst cycle it means one failed refresh still serves; two
+# consecutive ones degrade to the sentinel.
 MAX_STALE_HOURS = 6
 
 # The band an earlier snapshot must fall in to serve as the "24h ago"
@@ -753,7 +756,7 @@ def _coin_totals(records: list[dict]) -> dict[str, dict]:
     All coins, not just the one a call asked about: the coin is a tool argument
     and the history has to answer for whichever coin the NEXT call names. Per
     coin this is four numbers, which is what keeps the history small enough to
-    hold a day and a half of snapshots.
+    hold ``HISTORY_KEEP_HOURS`` (32) of snapshots.
     """
     totals: dict[str, dict] = {}
     for r in records:
@@ -773,17 +776,20 @@ def _coin_totals(records: list[dict]) -> dict[str, dict]:
 def _fetch_positions(addresses: list[dict]) -> dict:
     """Sweep the sampled addresses, absorbing per-address failures.
 
-    Four things end the sweep short of the full list, and the snapshot records
-    which in ``stopped``, because the coverage sentence states a REASON and a
-    wrong reason is worse than none: an address that fails is skipped and
-    counted; the wall-clock budget stops the sweep with the remainder
-    unattempted (``"budget"``); a 429 drains it (``"rate_limit"``), the info
-    endpoint's budget being per-IP, so the remaining addresses would each spend
-    a request learning the same refusal; and a sweep where NOTHING answered
-    raises — the rate-limit type when a throttle drained it (the router then
-    stands the vendor off rather than reading a routine throttle as breakage),
-    the outage type when every failure was transport, and the module type when
-    any structural break was in the mix.
+    TWO things end the sweep early, and ``stopped`` records which, because the
+    coverage sentence states a REASON and a wrong reason is worse than none:
+    the wall-clock budget (``"budget"``), and a 429 draining it
+    (``"rate_limit"``) — the info endpoint's budget is per-IP, so the remaining
+    addresses would each spend a request learning the same refusal. A complete
+    sweep leaves it ``""``.
+
+    An address that merely FAILS does not end the sweep: it is skipped and
+    counted, costing that account rather than the report. And a sweep where
+    nothing answered at all returns no snapshot to carry a reason — it raises:
+    the rate-limit type when a throttle drained it (the router then stands the
+    vendor off rather than reading a routine throttle as breakage), the outage
+    type when every failure was transport, and the module type when any
+    structural break was in the mix.
     """
     deadline = time.monotonic() + POSITION_FETCH_BUDGET_S
     records: list[dict] = []
@@ -1213,13 +1219,18 @@ def _delta_line(snapshot: _Snapshot, coin: str, aggregate: CoinAggregate) -> str
     reads as "nothing changed", and the first run of a fresh deployment has no
     comparison point at all.
 
-    Three things can qualify the figure, and each is said rather than assumed
-    away: the sampled accounts may have changed between the two snapshots (a
-    cohort turnover at the leaderboard TTL is not a position anyone moved), the
+    Two things can QUALIFY a figure, and each is said rather than assumed away:
+    the sampled accounts may have changed between the two snapshots (a cohort
+    turnover at the leaderboard TTL is not a position anyone moved), and the
     BASELINE's own sweep may have been short of its cohort (the current
     snapshot's coverage is always printed, so dropping the older one's would
-    make the subtraction look better-founded than it is), and the coin may
-    simply have been absent from both.
+    make the subtraction look better-founded than it is).
+
+    Two further shapes REPLACE the figure rather than qualifying it, because a
+    subtraction is the wrong sentence for them: the coin absent from both
+    snapshots (no change to report), and a position held a day ago and gone now
+    (an exit, which the ordinary ratio wording would render as a one-sided
+    book).
     """
     current = snapshot.current
     baseline, age = _baseline_entry(snapshot.history, current)
@@ -1257,11 +1268,28 @@ def _delta_line(snapshot: _Snapshot, coin: str, aggregate: CoinAggregate) -> str
             f"rather than a position change"
         )
     if totals is None:
+        # "since then", not "since": ``caveats`` is empty in the ordinary case,
+        # and the sentence has to read as a sentence without it.
         return (
             f"**24h change** (vs {age:.1f} hours earlier, {baseline['fetched_at']}): "
             f"that snapshot held no {coin} position at all, so the whole of the current "
             f"US${fmt_usd_m(aggregate.long_notional)}m long / "
-            f"US${fmt_usd_m(aggregate.short_notional)}m short was opened since"
+            f"US${fmt_usd_m(aggregate.short_notional)}m short was opened since then"
+            f"{caveats}"
+        )
+    prior_total = totals["long_notional"] + totals["short_notional"]
+    if aggregate.holders == 0:
+        # The mirror of the branch above: held a day ago, gone now. Left to the
+        # ordinary branch it borrowed the ratio's "n/a (no short notional)",
+        # which describes a book that is all long — the opposite of an exit —
+        # beside two figures that are the whole of the old position with a
+        # minus sign. Say what happened instead.
+        return (
+            f"**24h change** (vs {age:.1f} hours earlier, {baseline['fetched_at']}): the "
+            f"sampled accounts now hold no {coin} position at all, down from "
+            f"US${fmt_usd_m(prior_total)}m "
+            f"(long {fmt_signed_usd_m(-totals['long_notional'])}m, "
+            f"short {fmt_signed_usd_m(-totals['short_notional'])}m)"
             f"{caveats}"
         )
     prior_ratio = _ratio_of(totals["long_notional"], totals["short_notional"])

@@ -178,8 +178,6 @@ MAX_CONSECUTIVE_NETWORK_FAILURES = 3
 # validator then rejects forever (a silent perpetual-refetch loop).
 _AMOUNT_RE = re.compile(r"^-?(?:\d{1,3}(?:,\d{3}){1,4}|\d{1,15})(?:\.\d{1,8})?$")
 
-# The report renders costs in US$m, unit-consistent with the ETF module.
-_USD_PER_MILLION = 1e6
 
 
 def _parse_amount(x: object) -> float | None:

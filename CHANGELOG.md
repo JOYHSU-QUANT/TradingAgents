@@ -155,7 +155,14 @@ Breaking changes within the 0.x line are called out explicitly.
   half a day old - and degrades to the router sentinel beyond that. A failed
   fetch is never written to cache.
 
-  Two things the report refuses to leave implied, both found in review. The
+  Four things the report refuses to leave implied, all found in review. A
+  position held a day ago and gone now reads as an exit ("the sampled accounts
+  now hold no BTC position at all, down from US$40.0m") rather than borrowing
+  the ratio's "n/a (no short notional)", which describes an all-long book - the
+  opposite of what happened - beside two figures that are the old position with
+  a minus sign. The newly-opened sentence ends "opened since THEN": its trailing
+  caveat is empty in the ordinary case, so a sentence ending on the
+  interpolation dangled. The
   24-hour change discloses when the BASELINE's own sweep was short of its
   cohort: the current snapshot's coverage is always printed, so dropping the
   older one's would make the subtraction look better-founded than it is, and
@@ -164,6 +171,13 @@ Breaking changes within the 0.x line are called out explicitly.
   "the whole of the current $0.0m long / $0.0m short was opened since"
   sentence, which asserted an event over two zeroes directly under the
   report's own "No position" line.
+
+  On the test side, the same review found a caveat with no negative pin: a
+  mutation that appended the cohort-changed warning UNCONDITIONALLY passed all
+  146 tests, so every report would have carried a sample-changed warning that
+  was not true. Its sibling caveat had that pin; this one did not. Added, along
+  with coverage for the unparsed-entry disclosure (dark at every layer), the
+  case-insensitive coin match, and a cohort shorter than `TOP_N`.
 
   The live-snapshot disclosure is passed `max_behind_days=0` rather than the
   shared default of 2. This vendor serves present state, so a report for any

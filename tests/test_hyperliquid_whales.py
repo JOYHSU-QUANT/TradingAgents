@@ -177,6 +177,13 @@ class TestParseLeaderboard:
             float(r["accountValue"]) for r in LEADERBOARD["leaderboardRows"]
         )
 
+    def test_a_cohort_shorter_than_top_n_is_served_whole(self):
+        # The fixture carries fewer rows than TOP_N, which is the shape every
+        # cache test already runs through - but nothing pinned the count, so a
+        # parser that silently dropped rows would not have shown up.
+        assert len(hlw._parse_leaderboard(LEADERBOARD)) == len(LEADERBOARD["leaderboardRows"])
+        assert len(LEADERBOARD["leaderboardRows"]) < hlw.TOP_N
+
     def test_addresses_are_lowercased(self):
         payload = {"leaderboardRows": [{"ethAddress": "0x" + "AB" * 20, "accountValue": "5"}]}
         assert hlw._parse_leaderboard(payload)[0]["address"] == "0x" + "ab" * 20
@@ -400,6 +407,16 @@ class TestAggregate:
         assert len(hlw._positions_from_records(records, "BTC")) == 1
         assert len(hlw._positions_from_records(records, "ETH")) == 1
 
+    def test_the_coin_match_is_case_insensitive(self):
+        # The docstring promises it: the coins this module is ASKED about are
+        # upper-case bases, while the venue's own spelling is its business.
+        records = [_record(LONG_ADDR, coin="btc"), _record(SHORT_ADDR, coin="Btc", szi=-1.0)]
+        assert len(hlw._positions_from_records(records, "BTC")) == 2
+
+    def test_coin_totals_are_keyed_case_insensitively(self):
+        totals = hlw._coin_totals([_record(LONG_ADDR, coin="btc", notional=10.0)])
+        assert totals["BTC"]["long_notional"] == 10.0
+
     def test_coin_totals_cover_every_coin_in_the_snapshot(self):
         records = [
             _record(LONG_ADDR, coin="BTC", szi=1.0, notional=10.0),
@@ -564,6 +581,34 @@ class TestSweep:
         )
         assert "fetch budget was spent" in budget
         assert "rate limited" not in budget
+
+    def test_the_coverage_line_discloses_unparsed_position_entries(self):
+        # An aggregate quietly short of a leg is the thing ``malformed`` exists
+        # to disclose; the sentence had no coverage from any direction.
+        line = hlw._coverage_line(
+            _snapshot("2026-09-21T00:00:00Z", sampled=3, attempted=3, answered=3, malformed=2)
+        )
+        assert "2 position entries could not be parsed and are excluded" in line
+        clean = hlw._coverage_line(
+            _snapshot("2026-09-21T00:00:00Z", sampled=3, attempted=3, answered=3)
+        )
+        assert "could not be parsed" not in clean
+
+    def test_a_malformed_entry_reaches_the_snapshot_count(self, monkeypatch):
+        # End to end, not just the sentence: a bad entry has to survive the
+        # sweep as a count rather than being dropped on the floor.
+        state = {
+            "assetPositions": [
+                {"position": {"coin": "BTC", "szi": "1", "positionValue": "oops"}},
+                {"position": {"coin": "BTC", "szi": "1", "positionValue": "5"}},
+            ]
+        }
+        monkeypatch.setattr(hlw, "_request_state", lambda a: state)
+        monkeypatch.setattr(hlw, "_sleep", lambda s: None)
+        _freeze(monkeypatch, "2026-09-21T00:00:00Z")
+        snapshot = hlw._fetch_positions(self._addresses(2))
+        assert snapshot["malformed"] == 2
+        assert "2 position entries could not be parsed" in hlw._coverage_line(snapshot)
 
     def test_a_throttle_that_drained_everything_raises_the_rate_limit_type(self, monkeypatch):
         # Not the structural type: the router stands the vendor off on this
@@ -1161,6 +1206,20 @@ class TestDelta:
         assert "long +20.0m" in line and "short -10.0m" in line
         assert "long/short 0.25 -> 1.00" in line
 
+    def test_a_position_closed_since_the_baseline_reads_as_an_exit(self):
+        # Held a day ago, gone now. Left to the ordinary branch this borrowed
+        # the ratio's "n/a (no short notional)" - which describes an all-long
+        # book, the opposite of an exit - beside two figures that are the whole
+        # of the old position with a minus sign.
+        history = [
+            _history("2026-09-20T12:00:00Z", {"BTC": _totals(1, 1, 10_000_000.0, 30_000_000.0)})
+        ]
+        snapshot = self._snapshot_with(history)
+        line = hlw._delta_line(snapshot, "BTC", self._aggregate(snapshot))
+        assert "now hold no BTC position at all, down from US$40.0m" in line
+        assert "long -10.0m, short -30.0m" in line
+        assert "no short notional" not in line
+
     def test_a_cohort_change_is_disclosed(self):
         # Otherwise a cohort turnover at the leaderboard TTL reads as a
         # position change nobody made.
@@ -1172,6 +1231,16 @@ class TestDelta:
         snapshot = self._snapshot_with(history, [_record(LONG_ADDR)])
         line = hlw._delta_line(snapshot, "BTC", self._aggregate(snapshot))
         assert "the sampled accounts changed" in line
+
+    def test_an_unchanged_cohort_carries_no_cohort_caveat(self):
+        # The negative half. Without it a mutation that appends the caveat
+        # UNCONDITIONALLY passes every other test in this file, and every
+        # report would carry a sample-changed warning that is not true.
+        history = [_history("2026-09-20T12:00:00Z", {"BTC": _totals(1, 0, 10.0, 0.0)})]
+        snapshot = self._snapshot_with(history, [_record(LONG_ADDR)])
+        assert "sampled accounts changed" not in hlw._delta_line(
+            snapshot, "BTC", self._aggregate(snapshot)
+        )
 
     def test_neither_end_holding_the_coin_is_not_an_opening(self):
         # The "was opened since" wording over two zero figures, printed under
@@ -1210,6 +1279,9 @@ class TestDelta:
         snapshot = self._snapshot_with(history, [_record(LONG_ADDR, notional=5_000_000.0)])
         line = hlw._delta_line(snapshot, "BTC", self._aggregate(snapshot))
         assert "held no BTC position at all" in line
+        # The tail matters: ``caveats`` is empty here, so a sentence ending on
+        # the interpolation dangles ("...was opened since").
+        assert line.endswith("was opened since then")
 
 
 # --------------------------------------------------------------------------- #

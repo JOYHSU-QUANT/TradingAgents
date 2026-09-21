@@ -107,13 +107,21 @@ MAX_DAILY_CANDLE_AGE_MS: Final = 24 * 60 * 60_000
 def _gap(ms: int) -> str:
     """A duration rendered at a scale that never reads as no duration at all.
 
-    Fixed hours to one decimal makes a small gap vanish: a bar one millisecond
-    early prints as ``0.0h``, i.e. no gap, in a sentence about a gap. The unit
-    is therefore chosen by the ROUNDED magnitude rather than by a threshold on
-    the raw value — the first unit whose figure does not round to zero wins,
-    and below a second the integer milliseconds are printed outright. Picking
-    on the raw value instead reintroduces the same defect one unit down
-    (1.5 s is 0.025 minutes, which prints as ``0.0 min``).
+    A fixed unit makes a small gap vanish: at hours to one decimal, a bar one
+    millisecond early prints as ``0.0h`` — no gap, in a sentence about a gap.
+    So the unit is the LARGEST whose figure is at least 1.0, and milliseconds
+    are printed as an integer when even seconds would not reach that. Choosing
+    on a threshold over the raw value instead (``ms < 60_000`` and so on)
+    reintroduces the same defect one unit down: 1.5 s is 0.025 minutes, which
+    prints as ``0.0 min``.
+
+    The comparison is against the unrounded figure deliberately. Rounding
+    first (``round(value, 1) >= 1.0``) promotes anything from 0.95 of a unit
+    upward, so 57 minutes of a stalled feed would print as ``1.0h`` — a 5%
+    overstatement of the one number that sizes the outage. The cost of not
+    rounding is that the top of a unit is not normalised: 59.999 s prints as
+    ``60.0 s`` rather than ``1.0 min``. That is unidiomatic and exactly true,
+    which is the right way round for a log line an operator acts on.
 
     What this does NOT fix, because no choice of unit can: a value just past a
     bound still prints as that bound. 24h + 1 ms is ``24.0h`` at any sane
@@ -124,7 +132,7 @@ def _gap(ms: int) -> str:
     """
     for scale, unit in ((3_600_000, "h"), (60_000, " min"), (1000, " s")):
         value = ms / scale
-        if round(value, 1) >= 1.0:
+        if value >= 1.0:
             return f"{value:.1f}{unit}"
     return f"{ms} ms"
 
@@ -199,10 +207,13 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
     newest = daily_candles[-1]
     age_ms = as_of_ms - newest.close_time
     if age_ms > MAX_DAILY_CANDLE_AGE_MS:
-        # Hours, not raw epoch-ms: this repeats every cycle while a feed is
-        # down, and an operator should not have to convert two 13-digit
-        # integers to learn that it is two days stale. The date is printed for
-        # the same reason.
+        # A readable scale, not raw epoch-ms: this repeats every cycle while
+        # a feed is down, and an operator should not have to subtract two
+        # 13-digit integers to learn that it is two days stale. Two figures,
+        # because the age alone cannot say the bound was passed when it
+        # rounds to the bound (``24.0h`` against a 24h limit) — the second
+        # is the excess, and it can be milliseconds. The date is printed
+        # for the same readability reason.
         logger.warning(
             "the newest daily candle is dated %s and closed %s before this context's "
             "as-of — %s past the %.0fh a healthy daily feed stays within; the daily feed "

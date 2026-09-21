@@ -233,7 +233,7 @@ def _signed_pct(value: float) -> str:
 
     ``_num``'s two decimals are right for the usual case and wrong for the one
     this section exists to surface: at a crossing the separation passes through
-    zero, so anything inside half a hundredth renders as ``+0.00%`` — a figure
+    zero, so anything inside half of ``_num``'s last place renders as ``+0.00%`` — a figure
     that reads as "no gap" on the same line as a word asserting a strict
     ordering. The DTO refuses only a BIT-EXACT tie, so that window is reachable
     on any cycle near a crossing. The sign always comes from the value, so it
@@ -294,9 +294,11 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         # claim. And the DATE of the newest closed daily bar, like the volume
         # profile's "as of the last closed candle" but for a stronger version
         # of the same reason: a daily bar closes once a day, so this block can
-        # be a whole day behind the Mark printed further up, and it is cut
-        # from a different fetch than everything above it. Printed rather than
-        # described, so the reader can measure that lag instead of assuming it.
+        # be a whole day behind the As-of line above it — and further still
+        # behind the live Mark, which nothing bounds it against (see the
+        # vintage clause in the Basis note). It is also cut from a different
+        # fetch than everything above it. Printed rather than described, so
+        # the reader can measure that lag instead of assuming it.
         f"Macro trend (its own series of {macro.candle_count} daily candles, SMA({fast}) "
         f"vs SMA({slow}), newest daily bar dated {macro.as_of_date.isoformat()}):",
         f"  SMA({fast}): {_num(macro.sma_fast)}   SMA({slow}): {_num(macro.sma_slow)}",
@@ -327,11 +329,15 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         #
         # The vintage clause is bounded against the As-of line, NOT the Mark,
         # because As-of is the bound the code actually enforces
-        # (``macro_trend`` measures its 24h against ``as_of_ms``). The Mark is
-        # a live snapshot and the 4h series may itself lag it by up to the
-        # freshness guard's three intervals, so a block ~36h behind the
-        # printed Mark passes every guard — and "up to a day behind the Mark",
-        # which this sentence used to say, would be a promise nothing keeps.
+        # (``macro_trend`` measures its 24h against ``as_of_ms``, which IS
+        # this context's as-of). The Mark is a live snapshot that nothing
+        # here is measured against, and the candle series may itself lag it
+        # by whatever the freshness guard tolerates — so a block well past a
+        # day behind the printed Mark passes every guard, and "up to a day
+        # behind the Mark", which this sentence used to say, would be a
+        # promise nothing keeps. No figure is given for that slack here: it
+        # depends on the configured interval, and a literal would be one
+        # more 4h-specific claim in a file whose rule is not to write one.
         #
         # The regime clause says only that the two are independent and can
         # disagree. It deliberately does NOT describe how the regime is built:

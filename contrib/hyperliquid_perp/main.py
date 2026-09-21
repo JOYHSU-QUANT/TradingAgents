@@ -118,11 +118,15 @@ def run_context_only(config: dict, coin: str) -> int:
     # answered.
     #
     # ``|macro_trend`` can differ too, for a weaker reason that earns no such
-    # notice: it depends on a daily candle READ, whose failure this lane
-    # tolerates exactly as the daemon does (section dropped, WARNING logged).
-    # That data is public and deterministic, so the two hosts disagree only
-    # while one of them cannot reach the venue — a condition that announces
-    # itself in the log rather than hiding behind a plausible bucket.
+    # notice. It depends on a daily candle READ plus that series' freshness
+    # against this run's own newest closed bar, so two hosts can answer
+    # differently either when one cannot reach the venue or simply by running
+    # at different MOMENTS — a preview 23h after the last published daily bar
+    # renders the section, the daemon's next cycle two hours later does not.
+    # What makes that tolerable, and unlike the research document, is that
+    # every such case is public, reproducible and logged with its own named
+    # WARNING: nothing here depends on a file only one host has.
+    #
     # The fingerprint is over the
     # same block run_engine feeds the model (effective ceiling included), so
     # a grid or ceiling edit shows its new value here. A gate-threshold edit
@@ -144,8 +148,10 @@ def run_context_only(config: dict, coin: str) -> int:
             ),
         )
     )
-    # The one way this lane's shape can differ from the daemon's for a reason
-    # that is NOT this lane's own documented position-blindness (issue #276).
+    # The one DIVERGENCE worth a notice, of the two this lane has beyond its
+    # own documented position-blindness (issue #276; the other is
+    # ``|macro_trend``, argued above — public data, and the conditions that
+    # split the two hosts announce themselves in the log).
     # ``|position`` is always absent here and an operator who read RUNBOOK §4
     # knows to add it back; the research section is the opposite — whether its
     # token is there depends on a file on the host this command runs on, so

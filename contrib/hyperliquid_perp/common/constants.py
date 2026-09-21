@@ -53,13 +53,15 @@ MIN_VOLUME_PROFILE_WINDOW = 12
 
 # The macro trend's two periods and the config band around them. Here, not in
 # ``domains/perp/macro_trend.py``, for the reason the volume profile's
-# vocabulary is: three layers read these, and the one that would have to own
-# them sits ABOVE two of its readers. ``market_data_config`` enforces the band
-# at config load and must not import a compute module; ``domains/perp/schema``
-# pins ``MacroTrend``'s two period fields at construction and cannot import
-# the producer, because the producer imports IT; and
-# ``domains/perp/macro_trend`` computes the averages. Only a module below all
-# three can be read by all three.
+# vocabulary is: three modules read these, and no one of them can own them.
+# ``domains/perp/schema`` pins ``MacroTrend``'s two period fields at
+# construction and CANNOT import the producer — that is a real cycle, since
+# the producer imports schema. ``market_data_config`` enforces the band at
+# config load and MUST NOT import a compute module — that one is policy, not a
+# cycle, held by ``tests/common/test_layering.py`` so the keyless
+# ``--context-only`` path stays cheap. And ``domains/perp/macro_trend``
+# computes the averages. A module below all three is the only place all three
+# can read.
 #
 # The floor is not an independent tuning choice — it IS the slow period,
 # because a window holding fewer bars than that has no SMA(200) at any position

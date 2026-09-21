@@ -315,30 +315,38 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
 
 
 @pytest.mark.parametrize(
-    "ms",
+    ("ms", "expected"),
     [
-        1,
-        999,
-        1_000,
-        1_500,  # 0.025 minutes — rendered "0.0 min" by a threshold on the raw value
-        2_999,
-        59_999,
-        60_000,
-        90_000,
-        3_599_999,
-        3_600_000,
-        86_400_001,
+        # Both sides of every unit boundary. The boundaries ARE 1000 / 60_000
+        # / 3_600_000 because the rule compares the unrounded figure; each
+        # pair below is the last value that keeps the smaller unit and the
+        # first that earns the larger one.
+        (1, "1 ms"),
+        (999, "999 ms"),
+        (1_000, "1.0 s"),
+        # 0.025 minutes. A threshold on the raw value rendered this "0.0 min"
+        # — the defect the helper exists to prevent, one unit down from where
+        # it was first found.
+        (1_500, "1.5 s"),
+        (59_999, "60.0 s"),
+        (60_000, "1.0 min"),
+        # Rounding BEFORE the comparison would promote these two a unit and
+        # overstate them: "1.0 min" for 57 seconds, "1.0h" for 57 minutes. The
+        # second is the figure that sizes a stalled feed in the WARNING.
+        (57_001, "57.0 s"),
+        (3_421_000, "57.0 min"),
+        (3_599_999, "60.0 min"),
+        (3_600_000, "1.0h"),
+        (86_400_001, "24.0h"),
     ],
 )
-def test_no_duration_ever_renders_as_zero_of_anything(ms):
-    # The whole point of the helper: a gap must never print as "0.0" of a
-    # unit, because that reads as NO gap inside a sentence about one. Choosing
-    # the unit from the raw value reintroduced exactly that one unit down —
-    # 1.5s is 0.025 minutes — which is why the unit is picked from the ROUNDED
-    # magnitude instead, and why this table walks both sides of every boundary.
-    rendered = _gap(ms)
-    assert not rendered.startswith("0.0"), rendered
-    assert not rendered.startswith("0 "), rendered
+def test_a_gap_is_rendered_in_the_largest_unit_that_reaches_one(ms, expected):
+    # Two properties in one table, because they are the same rule seen from
+    # two sides: nothing ever prints as "0.0" of a unit (which would read as
+    # NO gap inside a sentence about one), and nothing is promoted into a unit
+    # it has not reached (which would overstate it).
+    assert _gap(ms) == expected
+    assert not _gap(ms).startswith("0.0")
 
 
 def test_the_gap_is_reported_at_a_scale_that_cannot_contradict_the_sentence(caplog):

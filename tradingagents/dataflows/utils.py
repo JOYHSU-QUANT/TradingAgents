@@ -61,9 +61,16 @@ def safe_ticker_component(value: str, *, max_len: int = 32) -> str:
 
 
 # How far the analysis date may sit behind the wall clock before a live-only
-# vendor's report discloses that its values are today's, not that date's. One
-# shared bound (the default of live_snapshot_note) so every live-only vendor
-# agrees on what counts as "a backtest" within the same run (#30).
+# vendor that DISCLOSES says its values are today's, not that date's. One
+# shared bound (the default of live_snapshot_note) so those vendors agree on
+# what counts as "a backtest" within the same run (#30).
+#
+# Not every live-only vendor discloses: the options chain, whale positioning
+# and the fundamentals profile WITHHOLD instead, on the stricter family rule in
+# ``date_window.is_past_analysis_date`` (any date before today, because a prose
+# warning is not a guard). This bound governs the vendors that still render -
+# prediction markets and the live message streams - and a vendor moving to the
+# withholding rule leaves this one behind rather than tightening it.
 MAX_LIVE_SNAPSHOT_BEHIND_DAYS = 2
 
 # A vendor's latest OHLCV row this many calendar days before the requested date
@@ -831,9 +838,10 @@ def live_snapshot_note(
 ) -> str:
     """Return a disclosure when live-only data is rendered for a past analysis date.
 
-    Some vendors (prediction markets, current-state fundamentals, live message
-    streams) can only serve *today's* values — there is no historical snapshot
-    to fetch. When the date being analysed sits meaningfully behind the wall
+    Some vendors (prediction markets, live message streams) can only serve
+    *today's* values — there is no historical snapshot to fetch. The vendors
+    that WITHHOLD instead of disclosing do not call this: see
+    ``date_window.is_past_analysis_date``. When the date being analysed sits meaningfully behind the wall
     clock (a backtest), the report must say the numbers are live as of the
     fetch, not as of ``curr_date``, or the agent will read today's state as
     history (#30).

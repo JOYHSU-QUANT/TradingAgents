@@ -440,8 +440,8 @@ or a standalone directional signal, and it always prints how many sampled
 accounts actually held the coin: a coin none of them hold yields an explicit
 "no position in this sample" statement, which is not the same claim as no open
 interest. Both endpoints are **live-only**, so the report is a snapshot
-labelled with the UTC instant it was fetched, and a past `curr_date` carries
-the live-snapshot disclosure rather than being served as that date's state.
+labelled with the UTC instant it was fetched, and a past `curr_date` is
+withheld outright (see below) rather than served as that date's state.
 
 One rolling cache file holds the newest snapshot (reused for an hour, which is
 what keeps the N+1 fan-out off every tool call), the trimmed cohort (its own
@@ -463,9 +463,15 @@ budget is per-IP, so one refusal answers for all of them), stands the vendor
 off at the router, and is logged as the vendor answering rather than as a
 parser that needs fixing.
 
-Because the figures are present-state, the live-snapshot disclosure fires on
-**any** `curr_date` behind today, not on the shared helper's two-day default:
-the one- and two-day band is exactly where a backtest sits.
+Because the figures are present-state, a `curr_date` **before today** is
+answered with a notice carrying no figures at all, rather than with figures
+plus a warning. That is the family rule for live-only data
+(`date_window.is_past_analysis_date`), the same one the Deribit chain
+withholds on: a warning is not a guard — whether it holds depends on the model
+choosing to obey it, nothing in the run records whether it did, and a
+downstream summary can drop the sentence while keeping the number. The test is
+"earlier than the clock", not "different from it", so a caller east of UTC
+running a few hours ahead is still served.
 
 This vendor **ships disabled** and needs a deliberate, dated flip to
 `"hyperliquid_stats"` to turn on, exactly as `options_data` (2026-08-12) and

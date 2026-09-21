@@ -1358,26 +1358,52 @@ class TestReport:
         out = hlw.get_whale_positions_data("BTC", DATE)
         assert "_STALE by 3.0 hours" in out
 
-    def test_a_backtest_date_carries_the_live_snapshot_disclosure(self, tmp_path, monkeypatch):
-        # Live-only data rendered for a past date must say the figures are the
-        # fetch's, not that date's.
+    def test_a_past_date_is_withheld_rather_than_labelled(self, tmp_path, monkeypatch):
+        # The family rule (date_window.is_past_analysis_date): open positions
+        # read for a date before today are future information, and a warning
+        # beside the numbers is not a guard - a downstream summary can drop the
+        # sentence and keep the number.
         out = self._report(tmp_path, monkeypatch, curr_date="2026-01-05")
-        assert "live values as of the fetch" in out
+        assert "Withheld for 2026-01-05" in out
+        # No figures at all, not figures with a caveat.
+        for leaked in ("long/short", "US$", "24h change", "Coverage:"):
+            assert leaked not in out
 
-    def test_even_one_day_behind_carries_the_disclosure(self, tmp_path, monkeypatch):
-        # The shared helper's default threshold is 2 days, which left a
-        # curr_date one or two days back carrying the fetch-instant header and
-        # no sentence at all - the band a backtest most often sits in. This
-        # vendor passes max_behind_days=0 because it serves PRESENT state.
+    def test_even_one_day_behind_is_withheld(self, tmp_path, monkeypatch):
+        # One day back is the band a backtest most often sits in, and the band
+        # the previous labelling threshold left completely silent.
         yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
         out = self._report(tmp_path, monkeypatch, curr_date=yesterday)
-        assert "live values as of the fetch" in out
+        assert f"Withheld for {yesterday}" in out
 
-    def test_a_same_day_date_carries_no_disclosure(self, tmp_path, monkeypatch):
-        out = self._report(
-            tmp_path, monkeypatch, curr_date=datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def test_the_withheld_notice_prints_the_canonical_date(self, monkeypatch):
+        # strptime accepts "2026-6-5"; the notice prints the date back, and the
+        # sibling vendors all re-derive the canonical spelling before rendering.
+        monkeypatch.setattr(
+            hlw, "_load_snapshot", mock.Mock(side_effect=AssertionError("must not fetch"))
         )
-        assert "live values as of the fetch" not in out
+        out = hlw.get_whale_positions_data("BTC", "2026-1-5")
+        assert "Withheld for 2026-01-05" in out
+        assert "2026-1-5" not in out
+
+    def test_a_withheld_date_never_reaches_the_network(self, tmp_path, monkeypatch):
+        # There is nothing this vendor could serve for a past date, so spending
+        # the N+1 sweep to produce a notice would be pure waste.
+        monkeypatch.setattr(
+            hlw, "_load_snapshot", mock.Mock(side_effect=AssertionError("must not fetch"))
+        )
+        assert "Withheld for 2026-01-05" in hlw.get_whale_positions_data("BTC", "2026-01-05")
+
+    def test_today_and_a_future_date_are_served(self, tmp_path, monkeypatch):
+        # "Earlier than the clock", not "different from it": callers east of
+        # UTC routinely run a few hours ahead, and a live snapshot is then no
+        # later than the analysis date - not lookahead at all.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+        for served in (today, tomorrow):
+            out = self._report(tmp_path, monkeypatch, curr_date=served)
+            assert "Withheld for" not in out
+            assert "long/short" in out
 
     def test_the_delta_line_is_always_present(self, tmp_path, monkeypatch):
         out = self._report(tmp_path, monkeypatch)

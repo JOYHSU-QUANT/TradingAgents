@@ -71,6 +71,7 @@ from typing import Literal, NamedTuple, TypeVar
 
 import requests
 
+from .date_window import is_past_analysis_date
 from .errors import VendorError, VendorRateLimitError, VendorUnavailableError, WiringGapError
 from .symbol_utils import classify_crypto_asset
 from .utils import (
@@ -2715,18 +2716,15 @@ def get_options_market_data(asset: str, curr_date: str) -> str:
 
     now = _utc_now()
     today = now.strftime("%Y-%m-%d")
-    # The chain endpoint takes no date, so its figures are always the present.
-    # Serving them for a PAST curr_date would be future information, and a prose
-    # warning is not a guard — whether it holds depends on the model choosing to
-    # obey it, and nothing in the run records whether it did — so that half is
-    # simply withheld. Note the test is "earlier than the clock", not "not equal
-    # to it": callers derive curr_date from a local clock (cli/main.py does), so
-    # east of UTC it routinely runs a few hours AHEAD of today. The live chain is
-    # then never later than the analysis date, which is not lookahead at all, and
-    # treating it as such would withhold this vendor's main signal for the first
-    # hours of every local day. The DVOL half is genuinely date-filtered and is
-    # served either way.
-    is_historical = curr_date < today
+    # The chain endpoint takes no date, so its figures are always the present,
+    # and on a past analysis date they are future information. That judgement is
+    # the family's, not this vendor's: ``date_window.is_past_analysis_date``
+    # owns it (including why the test is "earlier than the clock" rather than
+    # "different from it"), and the whale-positioning vendor withholds on the
+    # same one. ``today`` is this module's own clock, taken once above, so the
+    # rule cannot straddle midnight against the windowing below. The DVOL half
+    # is genuinely date-filtered and is served either way.
+    is_historical = is_past_analysis_date(curr_date, today)
     # Naive on both sides (``today`` is re-parsed rather than compared as text) so
     # this is a day count, not a string ordering.
     days_ahead = (curr_dt - datetime.strptime(today, "%Y-%m-%d")).days

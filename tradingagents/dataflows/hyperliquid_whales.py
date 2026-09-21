@@ -35,11 +35,16 @@ coin as an absence of open interest. ``TOP_N`` is the one knob that changes the
 sample's character; it is deliberately small enough to finish inside the
 fan-out budget below.
 
-Live-only. Neither endpoint has a historical form, so a past ``curr_date``
-cannot be served as that date's state: the report is labelled with the UTC
-instant it was fetched, and a ``curr_date`` meaningfully behind the wall clock
-additionally carries the shared live-snapshot disclosure (decision 6 of the
-data-source plan: label live-only data, never dress it as history).
+Live-only, and WITHHELD on a past analysis date. Neither endpoint has a
+historical form, so open positions read for a ``curr_date`` before today are
+future information; the report then carries no figures at all, only a notice
+saying why. That is the family policy, not this module's preference —
+``date_window.is_past_analysis_date`` owns it, and the Deribit chain withholds
+on the same rule. A warning beside the numbers was the earlier answer here and
+is not a guard: whether it holds depends on the model choosing to obey it, and
+a downstream summary can drop the sentence while keeping the number. For a
+present-or-future date the report is labelled with the UTC instant it was
+fetched.
 
 Caching. One rolling file holds the newest snapshot, a bounded history of
 earlier snapshots' per-coin aggregates, and the trimmed leaderboard. A call
@@ -78,6 +83,7 @@ from typing import NamedTuple
 
 import requests
 
+from .date_window import is_past_analysis_date
 from .errors import VendorError, VendorRateLimitError, VendorUnavailableError
 from .sosovalue_common import (
     _cache_dir,
@@ -95,7 +101,6 @@ from .utils import (
     is_unreached,
     json_body_or_outage,
     json_bytes_or_outage,
-    live_snapshot_note,
     quote_argument,
     raise_for_http_status,
 )
@@ -1197,6 +1202,28 @@ def _fmt_leverage(value: float | None) -> str:
     return "n/a" if value is None else f"{value:g}x"
 
 
+def _withheld_for_past_date(coin: str, curr_date: str, today: str) -> str:
+    """What the report says instead of figures, for an analysis date in the past.
+
+    Its own sentence rather than the Deribit chain's: what is missing differs
+    (there, half a report; here, all of it), and so does what the reader can do
+    about it (nothing — the venue publishes no historical position snapshot).
+    What the two share is the rule above them, not the wording.
+    """
+    return (
+        f"## Hyperliquid Whale Positioning — {coin}\n"
+        f"- Withheld for {curr_date}\n"
+        f"\nWhale positioning is withheld for this date. Both endpoints serve only "
+        f"the present — open positions as they stand now ({today}), with no "
+        f"historical snapshot to ask for — so reporting them for {curr_date} would "
+        f"put post-decision information into that analysis. No figures are shown "
+        f"rather than shown with a warning, because a warning is not a guard. "
+        f"There is no point-in-time substitute for this signal; treat {coin} "
+        f"positioning as unavailable for {curr_date} and do not infer it from the "
+        f"other reports."
+    )
+
+
 def _classify_asset(asset: str) -> str | None:
     """The venue coin a caller symbol maps to, or None for no signal.
 
@@ -1348,21 +1375,28 @@ def get_whale_positions_data(asset: str, curr_date: str) -> str:
             message, since there is no other coin whose positioning would
             answer the question.
         curr_date: The analysis date (yyyy-mm-dd). Both endpoints are
-            live-only, so this does not select a historical state: it is used to
-            refuse an unusable date up front and to disclose how far the live
-            figures sit from the date being analysed.
+            live-only, so this does not select a historical state: a date
+            BEFORE today is answered with a withheld notice carrying no
+            figures (``date_window.is_past_analysis_date``), and an unusable
+            one is refused up front.
 
     Returns:
         A markdown report: the long/short split by account count and by
         notional, the long/short ratio, the notional-weighted leverage, the
         24-hour change where a comparison snapshot exists, the largest
-        positions, and the coverage and sample caveats. An unusable
+        positions, and the coverage and sample caveats — or, for an analysis
+        date before today, a notice carrying no figures at all. An unusable
         ``curr_date`` answers the shared ``INVALID_CURR_DATE`` sentinel before
         any request, as the sibling crypto tools do (#119).
     """
     refusal = date_refusal(curr_date, what="whale positioning", kind="point")
     if refusal is not None:
         return refusal
+    # Re-derive the canonical spelling before it is rendered: strptime accepts
+    # "2026-6-5", and the withheld notice below prints this value back. The
+    # refusal above already proved it parses. (farside and fear_greed carry the
+    # same guard, there because they also COMPARE the value lexically.)
+    curr_date = datetime.strptime(curr_date, "%Y-%m-%d").strftime("%Y-%m-%d")
 
     # Before the echo, not after: ``echo_argument`` goes through ``str``, so a
     # truthy non-string would be silently turned into a symbol and answered
@@ -1385,6 +1419,12 @@ def get_whale_positions_data(asset: str, curr_date: str) -> str:
             f"crypto risk asset with a Hyperliquid perpetual market (a stablecoin or an "
             f"unrecognized symbol). Do not substitute another coin's positioning."
         )
+
+    # Ahead of the fetch, not after it: on a past date there is nothing this
+    # vendor could serve, so the N+1 sweep would be spent to produce a notice.
+    today = _utc_now().strftime("%Y-%m-%d")
+    if is_past_analysis_date(curr_date, today):
+        return _withheld_for_past_date(coin, curr_date, today)
 
     snapshot = _load_snapshot()
     current = snapshot.current
@@ -1410,17 +1450,6 @@ def get_whale_positions_data(asset: str, curr_date: str) -> str:
                 humanize=_stale_age,
             )
         )
-    # ``max_behind_days=0`` rather than the shared default of 2: this vendor
-    # serves PRESENT state (open positions), so a report for any past date is
-    # showing something that date could not have seen. At the default, a
-    # curr_date one or two days back carried only the fetch-instant header and
-    # no sentence at all - and that band is where a backtest most often sits.
-    live_note = live_snapshot_note(
-        curr_date, "Hyperliquid whale positioning shows", max_behind_days=0
-    )
-    if live_note:
-        lines.append(live_note)
-
     lines.append("")
     if aggregate.holders == 0:
         lines.append(

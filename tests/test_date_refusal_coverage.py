@@ -39,6 +39,7 @@ from tests._date_refusal_table import (
     rows,
 )
 from tests.conftest import registry_pairs
+from tests.test_vendor_routing import SHIPPED_OFF_CATEGORIES
 from tradingagents.dataflows import interface
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import _DATE_ARGUMENT_TAGS, invalid_date_sentinel
@@ -207,15 +208,10 @@ def _vendors_of(method):
 
 _DATED_METHODS = sorted({m for (m, _v), row in DATE_CALLS.items() if row})
 
-# Categories whose vendor ships deliberately as ``none``, awaiting the dated
-# server-side flip that turns them on — the pattern ``options_data``
-# (2026-08-12) and the two SoSoValue categories (2026-09-02) each went
-# through. A keyless vendor merged ON changes a running deployment's analyst
-# input surface the moment the code lands, with no server-side action to
-# attribute the change to; shipping off and flipping on a named date is that
-# action. Named here rather than exempted silently, and held to being
-# genuinely off by the test below.
-SHIPPED_OFF_CATEGORIES = {"whale_positioning"}
+# Which categories ship disabled is not this suite's business - it is a fact
+# about shipped defaults, and ``test_vendor_routing`` owns it (and holds the
+# declaration to being true over EVERY category, not just the dated ones).
+# Imported above only because the exemption below needs it.
 
 
 @pytest.mark.unit
@@ -267,17 +263,3 @@ class TestEveryRowRefusesThroughTheRouter:
             if interface.get_category_for_method(m) not in SHIPPED_OFF_CATEGORIES
         }
         assert first_by_default <= set(DATE_CALLS)
-
-    def test_exactly_the_declared_categories_ship_off(self):
-        # The declaration is self-expiring in both directions: a category
-        # switched off without being declared fails here (the accident the
-        # lock above was written for), and a declared one whose dated cutover
-        # has since flipped it on fails until the name is removed — so the
-        # exemption cannot outlive the reason for it.
-        off = {
-            category
-            for m in _DATED_METHODS
-            if (category := interface.get_category_for_method(m))
-            and interface.get_vendor(category, m) == interface.DISABLED_VENDOR
-        }
-        assert off == SHIPPED_OFF_CATEGORIES

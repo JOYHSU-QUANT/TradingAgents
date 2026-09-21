@@ -115,12 +115,26 @@ def run_context_only(config: dict, coin: str) -> int:
     # print the no-signal shape while the daemon prints the other, or carry
     # the token while the server's producer cron is dead. Whenever the switch
     # names a document, the block below says on stderr which way this host
-    # answered. The fingerprint is over the
-    # same block run_engine feeds the model (effective ceiling included), so
-    # a grid or ceiling edit shows its new value here. A gate-threshold edit
-    # does NOT (prompt v5 keeps those out of the text): that one needs a new
-    # run-id, and an unchanged fingerprint here is not evidence it can skip
-    # one.
+    # answered.
+    #
+    # ``|macro_trend`` can differ too, for a weaker reason that earns no such
+    # notice. It depends on a daily candle READ plus that series' freshness
+    # against this run's own newest closed bar, so two hosts can answer
+    # differently when one cannot reach the venue, or across a bar boundary:
+    # the age is measured to the newest CLOSED candle, so it moves in whole
+    # intervals, and a preview taken before one closes can render a section
+    # the daemon's next cycle drops. What makes that tolerable, and unlike
+    # the research document, is that every such case is public and
+    # reproducible from data both hosts can fetch — nothing here turns on a
+    # file only one of them has. Most of them also log a named WARNING; the
+    # one that does not is a cycle with no candles at all, which is refused
+    # upstream for a louder reason.
+    #
+    # The fingerprint is over the same block run_engine feeds the model
+    # (effective ceiling included), so a grid or ceiling edit shows its new
+    # value here. A gate-threshold edit does NOT (prompt v5 keeps those out of
+    # the text): that one needs a new run-id, and an unchanged fingerprint
+    # here is not evidence it can skip one.
     from .common.prompt_regime import PROMPT_VERSION, prompt_regime_line
 
     risk_cfg, decision_cfg = cfgs
@@ -136,13 +150,14 @@ def run_context_only(config: dict, coin: str) -> int:
             ),
         )
     )
-    # The one way this lane's shape can differ from the daemon's for a reason
-    # that is NOT this lane's own documented position-blindness (issue #276).
-    # ``|position`` is always absent here and an operator who read RUNBOOK §4
-    # knows to add it back; the research section is the opposite — whether its
-    # token is there depends on a file on the host this command runs on, so
-    # the printed shape can be one the server will never write, with nothing
-    # on the line itself saying so.
+    # The one divergence worth a NOTICE (issue #276). Others exist and are
+    # argued where they arise: ``|position`` is always absent here and an
+    # operator who read RUNBOOK §4 knows to add it back, while ``|macro_trend``
+    # (above) and ``|volume_profile`` can each drop out per cycle on data both
+    # hosts can fetch. The research section is the one that is different —
+    # whether its token is there depends on a FILE on the host this command
+    # runs on, so the printed shape can be one the server will never write,
+    # with nothing on the line itself saying so.
     #
     # Said whenever the switch names a document, in BOTH directions, naming
     # which bucket THIS host landed in. An earlier draft spoke up only when

@@ -23,6 +23,33 @@ market_data:
                                    # section silently never appear. Analyst input only: it feeds no
                                    # gate and no sizing. Turning it on CHANGES THE PROMPT, so on a
                                    # paper run treat the flip as a new input-side measurement point.
+  macro_trend_daily_lookback: 0    # 0 = OFF (default). Set to the number of DAILY candles to fetch
+                                   # as a second series for the macro-trend block (daily SMA(50) vs
+                                   # SMA(200): which way round they sit, how far apart, how many
+                                   # daily bars have carried that, and the latest daily close
+                                   # against SMA(200)). Must be 0, or between 200 and 2000 — below
+                                   # 200 the slow average does not exist at all; the ceiling is a
+                                   # judgement that nothing here needs more than ~5.5 years of
+                                   # alignment history, not a claim that more would show nothing
+                                   # (it would — the run this block can date grows with the
+                                   # window). Both ends are rejected at config load, because a bad
+                                   # value fails SILENTLY at runtime (the section just never
+                                   # appears, or the tick quietly gets slower).
+                                   # 400 is the suggested starting value: 200 bars of warm-up plus
+                                   # 200 over which the start of the current alignment can be SEEN.
+                                   # Go lower and the block usually cannot date that start at all —
+                                   # BTC's daily 50/200 alignment typically holds for months — and
+                                   # at exactly 200 it never can. NOT cross-checked against
+                                   # candle_lookback — that one counts 4h bars of a different
+                                   # series. Costs one extra REST read per cycle while on; if that
+                                   # read fails the section is dropped for the cycle and the
+                                   # decision still happens (it is an analyst input, not a gate).
+                                   # Needs the venue to have >= 200 daily BARS for the coin (bars,
+                                   # not days: gaps are not checked) — below that every cycle logs
+                                   # a WARNING and the section is absent.
+                                   # Analyst input only: it feeds no gate and no sizing. Turning it
+                                   # on CHANGES THE PROMPT, so on a paper run treat the flip as a
+                                   # new input-side measurement point.
   autoresearch_signal: ""          # "" = OFF (default). Set to the path of the research radar's
                                    # handoff document (contrib/autoresearch: `signal --out <path>`)
                                    # to add ONE qualitative block to the prompt: the promoted

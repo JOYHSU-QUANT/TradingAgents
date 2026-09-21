@@ -2529,6 +2529,27 @@ def test_config_drift_still_reports_a_key_added_at_a_live_value():
     assert "market_data" in msg
 
 
+def test_config_drift_covers_the_macro_trend_key_without_being_told_about_it():
+    # The drift report compares the PARSED block, not the raw YAML, so a new
+    # ``MarketDataConfig`` field joins the comparison by existing — there is no
+    # second list to remember to update. Both directions, because only the
+    # pair says anything: the inert default must not raise a breadcrumb the
+    # review would read as a regime break, and the key switched ON must,
+    # because the prompt then grows a whole section.
+    stored = _subset_json({"market_data": _MD_GENESIS}, "BTC")
+    assert (
+        _config_drift_report(
+            stored, {"market_data": {**_MD_GENESIS, "macro_trend_daily_lookback": 0}}, "BTC"
+        )
+        is None
+    )
+    kind, msg = _config_drift_report(
+        stored, {"market_data": {**_MD_GENESIS, "macro_trend_daily_lookback": 260}}, "BTC"
+    )
+    assert kind == "params"
+    assert "market_data" in msg
+
+
 def test_config_drift_ignores_a_default_valued_key_removed_from_the_yaml():
     # Symmetric: deleting the `: 0` line is the same non-event as adding it.
     stored = _subset_json(

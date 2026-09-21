@@ -8,11 +8,13 @@ when absent.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 
+from contrib.hyperliquid_perp.domains.perp.macro_trend import compute_macro_trend
 from contrib.hyperliquid_perp.domains.perp.marginal_cost import (
     BookPosition,
     PositionInputs,
@@ -20,6 +22,7 @@ from contrib.hyperliquid_perp.domains.perp.marginal_cost import (
     build_position_context,
 )
 from contrib.hyperliquid_perp.domains.perp.prompt_context import (
+    _num,
     context_shape,
     render_market_context,
 )
@@ -32,9 +35,22 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
 )
 from contrib.hyperliquid_perp.domains.perp.volume_profile import compute_volume_profile
 
+from .test_macro_trend import (
+    _DAY0_MS,
+    _DAY_MS,
+    _as_of as _macro_as_of,
+    _daily,
+    _stepped,
+)
 from .test_volume_profile import _candle, _classify, _shaped
 
 _AS_OF = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+# The daily series the macro fixtures are cut from has to END at or before the
+# context's own ``as_of`` — ``PerpMarketContext`` refuses a macro block dated
+# after the bar the context describes. So the grid is shifted to put the
+# NEWEST of 260 bars on 2024-01-01, the day before ``_AS_OF``.
+_MACRO_DAY0_MS = _DAY0_MS - 259 * _DAY_MS
 
 
 def _ctx(**overrides) -> PerpMarketContext:
@@ -523,6 +539,222 @@ def test_the_p_note_does_not_claim_where_the_bulk_of_the_volume_sat():
 
 
 # --------------------------------------------------------------------------
+# Macro trend — the daily SMA(50)/SMA(200) backdrop
+# --------------------------------------------------------------------------
+
+
+def _macro(**overrides):
+    """A real producer output: flat 100 stepping to 110 fifty bars from the end.
+
+    Built by ``compute_macro_trend`` rather than by hand, so the rendered
+    block is one the pipeline can actually produce. ``overrides`` go through
+    ``dataclasses.replace``, which re-runs every guard — a variant that
+    contradicts itself fails here rather than rendering.
+    """
+    candles = _stepped(260, 100, {210: "10"}, day0=_MACRO_DAY0_MS)
+    macro = compute_macro_trend(candles, as_of_ms=_macro_as_of(candles))
+    assert macro is not None
+    return replace(macro, **overrides) if overrides else macro
+
+
+def _below_macro():
+    """The mirror: the same step, downward, so the fast average sits below."""
+    candles = _stepped(260, 100, {210: "-10"}, day0=_MACRO_DAY0_MS)
+    macro = compute_macro_trend(candles, as_of_ms=_macro_as_of(candles))
+    assert macro is not None
+    return macro
+
+
+def _macro_capped():
+    """A run filling the window: nothing before it to have begun from."""
+    candles = [_daily(i, 100 + i, day0=_MACRO_DAY0_MS) for i in range(260)]
+    macro = compute_macro_trend(candles, as_of_ms=_macro_as_of(candles))
+    assert macro is not None and macro.state_age_capped
+    return macro
+
+
+def _macro_block(text: str) -> list[str]:
+    """The macro-trend section's own lines, header included.
+
+    Scoped deliberately: the forbidden-word checks below are about what THIS
+    section says. Run over the whole render they would be answering a
+    different question — the volume profile's basis line contains "across",
+    and a whole-render check for "cross" would either fail on it or have to be
+    weakened until it no longer bites here.
+    """
+    lines = text.split("\n")
+    start = next(i for i, line in enumerate(lines) if line.startswith("Macro trend ("))
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i]), len(lines))
+    return lines[start:end]
+
+
+def test_the_macro_block_is_absent_unless_a_macro_trend_is_carried():
+    # Off by default: merging the feature changes no existing prompt. The
+    # WHOLE block drops out — there is no "Macro trend: n/a" form, for the
+    # reason the profile has none.
+    text = render_market_context(_ctx())
+    assert "Macro trend" not in text
+    assert "SMA(200)" not in text
+
+
+def test_the_macro_block_renders_each_of_its_lines():
+    # The producer's own output for a 100 -> 110 step fifty bars from the end:
+    # fast average 110, slow 102.5, separation +7.317…%, run of 50 bars ending
+    # on the newest bar (2024-01-01) and beginning 49 bars earlier
+    # (2023-11-13).
+    macro = _macro()
+    block = _macro_block(render_market_context(_ctx(macro_trend=macro)))
+
+    assert block[0].startswith("Macro trend (its own series of 260 daily candles,")
+    assert "newest daily bar dated 2024-01-01" in block[0]
+    assert block[1] == "  SMA(50): 110.00   SMA(200): 102.50"
+    assert "Alignment: SMA(50) above SMA(200)" in block[2]
+    assert "SMA(50) - SMA(200) is +7.32% of SMA(200)" in block[2]
+    assert block[3] == "  Held for: 50 daily bars (this run began on the bar dated 2023-11-13)"
+    assert block[4] == "  Latest daily close vs SMA(200): +7.32%"
+    assert block[5].startswith("  Basis: ")
+
+
+def test_the_header_states_the_window_every_held_for_reading_is_relative_to():
+    # Without it the capped line below is unmeasurable, and a short venue read
+    # would silently shrink the run length with nothing on the page to explain
+    # it. Both sibling blocks state their window; this is the third.
+    short = _macro_block(render_market_context(_ctx(macro_trend=_macro_capped())))[0]
+    assert "its own series of 260 daily candles" in short
+
+
+def test_the_held_for_line_gives_a_figure_only_when_the_window_can_date_the_start():
+    # Two different claims, and the difference is the whole point: a capped
+    # run's figure is the WINDOW's width, not a measured age. Printing it —
+    # even hedged with "at least" — reports a config value, and a venue that
+    # short-reads 203 of 400 bars renders an alignment that may be two years
+    # old as "4 daily bars", which reads as a trend that just turned.
+    dated = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[3]
+    capped = _macro_block(render_market_context(_ctx(macro_trend=_macro_capped())))[3]
+
+    assert "50 daily bars" in dated
+    assert "this run began on the bar dated" in dated
+    # No digits at all on the capped branch — the window is in the header.
+    assert not any(ch.isdigit() for ch in capped), capped
+    assert "longer than this window can date" in capped
+
+
+def test_the_dated_line_says_the_run_began_rather_than_that_the_alignment_changed():
+    # The bar before this run carried something else — usually the opposite
+    # alignment, occasionally an exact tie between the two averages. "Changed"
+    # reads as a turn in both cases while only the first is one; "began" is
+    # true of both, and is what the rule measured.
+    dated = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[3]
+    assert "began" in dated
+    assert "changed" not in dated
+
+
+@pytest.mark.parametrize("build", [_macro, _below_macro, _macro_capped])
+def test_the_macro_block_never_uses_the_narrative_vocabulary(build):
+    # The standing rule for this section (plan §2): a label may claim only
+    # what its rule measured, and this rule measured which of two averages is
+    # larger. "golden"/"death" and "bull"/"bear" are the readings a trader
+    # supplies; "cross" is the EVENT this section deliberately does not
+    # report. Checked on this section's lines only — see _macro_block for why
+    # a whole-render check would be a different, weaker test.
+    block = " ".join(_macro_block(render_market_context(_ctx(macro_trend=build())))).lower()
+    for word in ("golden", "death", "bull", "bear", "cross"):
+        assert word not in block, f"the macro block used {word!r}"
+
+
+def test_the_direction_word_and_the_sign_of_the_separation_agree():
+    # Two ways of saying the same thing on one line, from two different
+    # fields. A block that said "below" over a positive separation would be
+    # self-contradicting in the sentence the model reads first.
+    for macro, word, positive in ((_macro(), "above", True), (_below_macro(), "below", False)):
+        line = _macro_block(render_market_context(_ctx(macro_trend=macro)))[2]
+        assert f"SMA(50) {word} SMA(200)" in line
+        assert ("is +" in line) is positive
+        assert ("is -" in line) is not positive
+
+
+def test_a_separation_near_a_crossing_never_renders_as_a_bare_zero():
+    # The case this section exists to surface is exactly the one ``_num``'s
+    # default precision destroys: as the pair crosses, the separation passes
+    # through zero, and anything inside half of its last place prints as a
+    # bare signed zero — "no gap" on the same line as a word asserting a
+    # strict ordering. The DTO refuses only a BIT-EXACT tie, so this window
+    # is reachable on a real cycle.
+    #
+    # A separation of 1e-5% of the slow average, built by replacing both
+    # averages on a real producer output (the percentages are cross-checked
+    # against them, so all three move together).
+    slow = Decimal("102.5")
+    fast = slow * (1 + Decimal("1e-7"))
+    tiny = _macro(
+        sma_fast=fast,
+        sma_slow=slow,
+        separation_pct=float((fast - slow) / slow * 100),
+        latest_close=fast,
+        close_vs_slow_pct=float((fast - slow) / slow * 100),
+    )
+    line = _macro_block(render_market_context(_ctx(macro_trend=tiny)))[2]
+    assert "SMA(50) above SMA(200)" in line
+    assert "+0.00%" not in line
+    assert "is +1e-05%" in line
+
+
+def test_the_basis_line_names_the_other_series_interval_from_the_context():
+    # The contrast the block draws ("its own daily series") is only checkable
+    # if the other series is named, and naming it as a literal "4h" would go
+    # on asserting today's configured value after it moved.
+    text = render_market_context(_ctx(candle_interval="1h", macro_trend=_macro()))
+    basis = _macro_block(text)[5]
+    assert "the candles and indicators above are 1h bars" in basis
+
+
+def test_the_basis_line_discloses_that_gaps_are_not_checked():
+    # The producer does not verify bar continuity, so a window with a hole
+    # still averages the 200 most recent bars it HAS and still calls that
+    # SMA(200). Stated in the prompt rather than only in a docstring, because
+    # the reader of the label is the model.
+    basis = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[5]
+    assert "Gaps in the daily series are not checked" in basis
+    assert "feeds the risk checks, the sizing or any order" in basis
+
+
+def test_the_basis_line_closes_by_saying_how_to_weigh_the_section():
+    # "Nothing here feeds the risk checks" states what the SYSTEM does with
+    # the block; it says nothing about how the model should weight it, and the
+    # worry behind this whole feature is a 50/200 alignment being read as a
+    # trade trigger. The volume profile's basis carries the same kind of
+    # directive ("treat these levels as approximate reference").
+    basis = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[5]
+    assert "Treat it as trend context, not as an entry or exit signal." in basis
+
+
+def test_the_basis_line_names_the_regime_line_as_an_independent_reading():
+    # The two can disagree in the same prompt — 4h EMA(20)/EMA(50) against
+    # daily SMA(50)/SMA(200) — and that disagreement is arguably the point of
+    # the feature. Saying only that they come from different series is a
+    # statement about computation, not about how to read the conflict.
+    #
+    # What the clause must NOT do is describe how the regime is built: with
+    # ``indicators: []`` it is the RANGING default computed from nothing.
+    basis = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[5]
+    assert "'Regime (computed)' line near the top" in basis
+    assert "not derived from this block" in basis
+    assert "can disagree" in basis
+
+
+def test_the_macro_block_prints_no_absolute_daily_close():
+    # A third price level from this block would be up to 24h stale, a dozen
+    # lines under the live Mark, with nothing reconciling the two — and this
+    # prompt's history is that the model anchors on the numbers it is shown
+    # (the reason _research_signal_lines withholds its own figures).
+    macro = _macro()
+    block = _macro_block(render_market_context(_ctx(macro_trend=macro)))
+    close = _num(macro.latest_close)
+    assert close not in "\n".join(block[3:])
+    assert block[4] == "  Latest daily close vs SMA(200): +7.32%"
+
+
+# --------------------------------------------------------------------------
 # context_shape — the prompt's STRUCTURE, the second segmentation key (#97)
 # --------------------------------------------------------------------------
 
@@ -547,6 +779,8 @@ def _rendered_headers(text: str) -> list[str]:
 
 
 def _shape_name(header: str) -> str:
+    if header.startswith("Macro trend ("):
+        return "macro_trend"
     if header.startswith("Volume profile ("):
         return "volume_profile"
     if header.startswith("Research signal ("):
@@ -557,8 +791,9 @@ def _shape_name(header: str) -> str:
 @pytest.mark.parametrize("position", [None, "flat", "open"])
 @pytest.mark.parametrize("with_signal", [False, True])
 @pytest.mark.parametrize("with_profile", [False, True])
+@pytest.mark.parametrize("with_macro", [False, True])
 def test_context_shape_names_the_rendered_headers_in_order_both_ways(
-    with_profile, with_signal, position
+    with_macro, with_profile, with_signal, position
 ):
     # The shape and the render are two functions with no code in common, so
     # this is the lock between them, in BOTH directions: every header the
@@ -567,6 +802,8 @@ def test_context_shape_names_the_rendered_headers_in_order_both_ways(
     # forgotten in the other fails here instead of silently filing two prompt
     # regimes under one shape.
     overrides = {}
+    if with_macro:
+        overrides["macro_trend"] = _macro()
     if with_profile:
         overrides["volume_profile"] = _profile()
     if with_signal:
@@ -578,13 +815,37 @@ def test_context_shape_names_the_rendered_headers_in_order_both_ways(
     ctx = _ctx(**overrides)
     headers = _rendered_headers(render_market_context(ctx))
     assert headers[:4] == ["Price:", "Market:", "Funding:", "Indicators:"]
-    assert len(headers) == 4 + int(with_profile) + int(with_signal) + int(position is not None)
+    assert len(headers) == 4 + sum(
+        (int(with_macro), int(with_profile), int(with_signal), int(position is not None))
+    )
     parts = context_shape(ctx).split("|")
     assert [part.split("(")[0] for part in parts] == [_shape_name(h) for h in headers]
     # The indicator rows are the fixture's names, in the fixture's order.
     assert parts[3] == "indicators(rsi_14,ema_20,macd)"
     if position is not None:
         assert parts[-1] == "position"
+
+
+def test_context_shape_ignores_what_the_macro_trend_says():
+    # The shape is the prompt's STRUCTURE, not its content: an alignment that
+    # flipped, a different separation or a different run length is the same
+    # prompt regime and must not split a paper run into two buckets. Same rule
+    # as "the numbers inside labels" for the other sections.
+    above = context_shape(_ctx(macro_trend=_macro()))
+    below = context_shape(_ctx(macro_trend=_below_macro()))
+    capped = context_shape(_ctx(macro_trend=_macro_capped()))
+    assert above == below == capped
+    assert "macro_trend" in above
+
+
+def test_context_shape_places_macro_trend_between_the_indicators_and_the_profile():
+    # The order is the render's, and it is the backdrop-first reading: the
+    # daily pair widens the 4h indicators above it, and the profile's ~5-day
+    # window narrows again below. A reorder is a different prompt, so it is
+    # pinned here as well as by the both-ways lock.
+    parts = context_shape(_ctx(macro_trend=_macro(), volume_profile=_profile())).split("|")
+    assert parts.index("macro_trend") == parts.index("indicators(rsi_14,ema_20,macd)") + 1
+    assert parts.index("volume_profile") == parts.index("macro_trend") + 1
 
 
 # --------------------------------------------------------------------------

@@ -47,6 +47,7 @@ from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, ENGINE_KEYS, load_co
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context, context_as_of
 from .domains.perp.indicator_vocab import indicator_names
+from .domains.perp.macro_trend import MACRO_CANDLE_INTERVAL
 from .domains.perp.marginal_cost import PositionInputs
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.research_signal import load_research_signal
@@ -131,7 +132,11 @@ def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
     cannot silently drift apart. Single-channel warnings exist and are each a
     deliberate exception, not a missed migration: the ``on_blocking_read``
     failure in :func:`_build_context` is log-only (mid-read, no operator
-    moment to interrupt), :func:`_resolve_coin`'s multi-coin notice is
+    moment to interrupt), the macro-trend daily read's failure in the same
+    function is log-only (it degrades one optional prompt section and the
+    cycle goes on; it belongs with the section's other per-cycle WARNINGs in
+    the log, which is where a reader counts them),
+    :func:`_resolve_coin`'s multi-coin notice is
     stderr-only (interactive CLI feedback, not an operational event), and the
     host-vs-exchange clock-skew notice in the freshness guard
     (:func:`~.domains.perp.freshness.freshness_refusal`) is log-only (it fires
@@ -205,12 +210,14 @@ def _build_context(
 ) -> tuple[PerpMarketContext, HyperliquidClient]:
     """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``.
 
-    ``on_blocking_read`` is called between the network reads below. It exists for
-    ONE caller — the live loop, where this runs on the single-threaded tick and
-    the five reads here (constructing the client fetches perp meta, then
-    snapshot, the exchange clock, candles, funding) are the longest run of
-    back-to-back REST calls in the system, each riding the full
-    ``network_timeout_s``. Left unrefreshed, this chain would set
+    ``on_blocking_read`` is called between the network reads below. It exists
+    for ONE caller — the live loop, where this runs on the single-threaded tick
+    and the reads here are the longest run of back-to-back REST calls in the
+    system, each riding the full ``network_timeout_s``. Five of them always
+    happen (constructing the client fetches perp meta, then snapshot, the
+    exchange clock, candles, funding); a sixth, the daily candle series, only
+    when ``market_data.macro_trend_daily_lookback`` is on.
+    Left unrefreshed, this chain would set
     ``kill_switch._MAX_UNREFRESHED_REST_CALLS`` to its own length — four when
     that constant was last argued, five since the exchange-clock read joined
     (issue #51) — which made the
@@ -292,6 +299,74 @@ def _build_context(
         coin, market_data.funding_zscore_window_days, end=exchange_time
     )
     _between_reads()
+    # The daily series the macro-trend section is built from — LAST among the
+    # market reads, and conditional on the switch.
+    #
+    # Last, because every timing argument above it is about ADJACENCY and
+    # would have to be re-made if this landed in the middle: the clock read is
+    # argued from sitting immediately before the two windows it cuts (issue
+    # #51), and both of those windows are then cut at that one reading. This
+    # read is cut at the same reading and changes none of that.
+    #
+    # Conditional, so a run with the feature off pays nothing: no extra REST
+    # call, no extra latency on the single-threaded live tick. With the
+    # feature on it is one more read with a refresh on either side, so the
+    # longest UNREFRESHED run is unchanged — and that, not the chain's total
+    # length, is what ``_MAX_UNREFRESHED_REST_CALLS`` is reasoned about.
+    # Pinned by driving this function in tests/live/test_kill_switch.py, with
+    # the switch ON as well as off, rather than claimed here.
+    #
+    # Only with candles in hand, for the reason the research-signal read below
+    # is gated the same way: the macro section's freshness is defined against
+    # a CLOSED BAR, and an empty window has none — ``context_as_of`` would
+    # fall back to the wall clock, against which a daily series cut at the
+    # exchange clock always looks current. The builder refuses that case
+    # outright; not fetching is just not paying for a read whose answer is
+    # already decided.
+    #
+    # Its failures do NOT fail the cycle. Everything else in this chain feeds
+    # the decision, so a read that dies rightly ends the cycle; this one is an
+    # analyst input the module itself documents as "Not a gate" and
+    # "fail-closed as a WHOLE", and honouring that has to include the
+    # transport. Left unguarded, a 429 or a malformed 1d response propagated
+    # out of here and ``cli/_provider`` filed it as ``connection`` /
+    # ``malformed_response`` — a whole 4h cycle reaching no decision, with an
+    # open position carried through unreassessed, because an optional backdrop
+    # could not be drawn. Worse, ``call_sdk``'s message names no endpoint, so
+    # the durable record could not tell that from the candle feed the decision
+    # is actually built on. Caught here rather than inside the adapter: the
+    # adapter cannot know its caller considers this read optional.
+    daily_candles = None
+    if candles and market_data.macro_trend_daily_lookback > 0:
+        try:
+            daily_candles = market.get_candles(
+                coin,
+                MACRO_CANDLE_INTERVAL,
+                market_data.macro_trend_daily_lookback,
+                end=exchange_time,
+            )
+        except ExchangeError as exc:
+            # One line, no traceback: this is a degraded optional section —
+            # the same event class the module's own refusals log — and it must
+            # read as something an operator can count per cycle rather than as
+            # a fault. The exception's TYPE is in the message instead, because
+            # the two classes reaching here are not the same news and the
+            # ``§6.2`` vocabulary this cycle no longer files under cannot tell
+            # them apart: ``ExchangeThrottledError`` is a blip that heals by
+            # itself, while ``MalformedResponseError`` (a misrouted response,
+            # wire drift) recurs every cycle until a human acts. Collapsing
+            # them into one sentence is the defect ``cli/_provider`` exists to
+            # avoid (issue #47), and the type is the cheapest way to keep it
+            # out of this seam too.
+            logger.warning(
+                "the %s candle read for the macro-trend section failed (%s: %s); the "
+                "section is omitted for this cycle and the decision proceeds without it — "
+                "this is NOT the switch being off",
+                MACRO_CANDLE_INTERVAL,
+                type(exc).__name__,
+                exc,
+            )
+        _between_reads()
 
     # The research radar's handoff document, read AFTER the market reads and
     # judged against the very bar the context will be dated to — which is why
@@ -338,6 +413,7 @@ def _build_context(
         exchange_time=exchange_time,
         position=position,
         research_signal=research_signal,
+        daily_candles=daily_candles,
         host_time_at_exchange_read=host_time_at_exchange_read,
     )
     return ctx, client

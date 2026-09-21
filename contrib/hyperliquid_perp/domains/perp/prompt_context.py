@@ -15,6 +15,8 @@ from decimal import Decimal
 
 from ...common.instants import from_epoch_ms
 from .schema import (
+    MacroAlignment,
+    MacroTrend,
     MarketRegime,
     PerpMarketContext,
     PositionContext,
@@ -116,10 +118,20 @@ _SHAPE_NOTE = {
 }
 
 
-def _num(value, places: int = 2, *, sign: bool = False) -> str:
+# The decimal places ``_num`` prints to unless a caller says otherwise. Named
+# because ``_signed_pct`` has to know where ``_num`` rounds a percentage to a
+# bare zero, and a second literal 2 there could drift from this one. It is
+# ``_num``'s DEFAULT, not a house rule for percentages: ``_whole_pct`` prints
+# at zero places, and several call sites pass their own.
+_DEFAULT_PLACES = 2
+
+
+def _num(value, places: int = _DEFAULT_PLACES, *, sign: bool = False) -> str:
     """Format a number to ``places`` decimals; ``None`` -> ``n/a``.
 
-    ``sign`` forces an explicit ``+``/``-`` (a PnL, never a price).
+    ``sign`` forces an explicit ``+``/``-`` — for a value whose direction is
+    part of the reading (a PnL, a percentage against a reference), never for a
+    price.
     """
     if value is None:
         return "n/a"
@@ -191,6 +203,166 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
         f"This is a coarse approximation of intra-candle volume, not tick data — "
         f"treat these levels as approximate reference, not precise support or "
         f"resistance.",
+    ]
+
+
+# Which way round the two daily averages are, as one word. Exhaustive over
+# MacroAlignment — a new member fails loud at render time rather than silently
+# inheriting the other's word.
+#
+# One word each, and no second clause: this is the whole vocabulary the
+# section is allowed for the ordering. "golden"/"death", "bullish"/"bearish"
+# and "confirmed" are the words a reader supplies for themselves and that this
+# rule never measured — it measured which of two averages is the larger. Same
+# restraint as ``_SHAPE_NOTE`` above, and pinned by a test that renders the
+# block and looks for those words.
+_MACRO_ALIGNMENT_WORD = {
+    MacroAlignment.ABOVE: "above",
+    MacroAlignment.BELOW: "below",
+}
+
+
+# The magnitude below which ``_num`` rounds a percentage to a bare zero.
+# DERIVED from the same constant ``_num`` takes as its default, rather than
+# written out as 0.005, so the two cannot desync if the places ever change.
+_PCT_ROUNDS_TO_ZERO_BELOW = 10 ** -_DEFAULT_PLACES / 2
+
+
+def _signed_pct(value: float) -> str:
+    """A signed percentage, never rounded into a bare signed zero.
+
+    ``_num``'s default precision is right for the usual case and wrong for the
+    one this section exists to surface: at a crossing the separation passes
+    through zero, so anything inside half of its last place renders as a bare
+    signed zero — a figure that reads as "no gap" on the same line as a word
+    asserting a strict ordering. The DTO refuses only a BIT-EXACT tie, so that
+    window is reachable on any cycle near a crossing. The sign always comes
+    from the value, so it cannot disagree with the direction word beside it.
+    """
+    if 0 < abs(value) < _PCT_ROUNDS_TO_ZERO_BELOW:
+        # Two significant FIGURES rather than two decimal places, so the value
+        # keeps its own magnitude however small it is (``+1.2e-05``) instead
+        # of collapsing to a zero it is not.
+        return f"{value:+.2g}"
+    return _num(value, sign=True)
+
+
+def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
+    """The macro-trend block. Only called when a macro trend exists.
+
+    ``candle_interval`` is the interval the CANDLE-derived lines above this
+    block are cut from — the indicators and the regime label, not the
+    snapshot-derived price and funding lines — named in the basis note so "its
+    own daily series" is a contrast a reader can check rather than a claim.
+    Taken from the context, never written out as ``4h``: the interval is
+    configurable, and a literal here would go on asserting today's value after
+    it moved.
+    """
+    fast, slow = macro.fast_period, macro.slow_period
+    bars = macro.bars_in_state
+    unit = "bar" if bars == 1 else "bars"
+    if macro.state_age_capped:
+        # No NUMBER on this branch. The run length here is bounded by the
+        # window, not by the market: at the configured floor it is always 1,
+        # and when the venue short-reads 203 of a requested 400 it comes out
+        # as "4" for an alignment that may be two years old — a feed artefact
+        # rendered as a freshly turned trend. The window itself is stated in
+        # the header, which is where a reader can see what bounded it.
+        held = (
+            "  Held for: longer than this window can date — the alignment holds on every "
+            "bar of it that has both averages, so no change is visible from here"
+        )
+    else:
+        # ``state_age_capped`` is False exactly when this date exists
+        # (``MacroTrend`` enforces the equivalence), so the narrowing is the
+        # DTO's guarantee rather than an assumption of this branch.
+        assert macro.run_started_date is not None
+        # "Began on", not "changed on". The bar before this run carried
+        # something else — usually the opposite alignment, occasionally an
+        # exact tie between the two averages — and "changed" would read as a
+        # turn in both cases while only the first is one. What the rule
+        # measured is where this run starts.
+        held = (
+            f"  Held for: {bars} daily {unit} (this run began on the bar dated "
+            f"{macro.run_started_date.isoformat()})"
+        )
+    return [
+        # Two facts in the header. The WINDOW, because every "held for" reading
+        # is relative to it and because both sibling blocks state theirs
+        # (``Volume profile (rolling window of N x 4h candles…)``, ``Candles:
+        # N x 4h``) — without it the capped line above is an unmeasurable
+        # claim. And the DATE of the newest closed daily bar, like the volume
+        # profile's "as of the last closed candle" but for a stronger version
+        # of the same reason: a daily bar closes once a day, so this block can
+        # be a whole day behind the As-of line above it — and further still
+        # behind the live Mark, which nothing bounds it against (see the
+        # vintage clause in the Basis note). It is also cut from a different
+        # fetch than everything above it. Printed rather than described, so
+        # the reader can measure that lag instead of assuming it.
+        f"Macro trend (its own series of {macro.candle_count} daily candles, SMA({fast}) "
+        f"vs SMA({slow}), newest daily bar dated {macro.as_of_date.isoformat()}):",
+        f"  SMA({fast}): {_num(macro.sma_fast)}   SMA({slow}): {_num(macro.sma_slow)}",
+        # The separation is printed as the SIGNED difference over the slow
+        # average, spelled as the subtraction it is. Writing it unsigned under
+        # the word "below" would read as a magnitude whose sign the reader has
+        # to reconstruct from the word, and the two could then disagree
+        # without either line being wrong on its own.
+        f"  Alignment: SMA({fast}) {_MACRO_ALIGNMENT_WORD[macro.alignment]} SMA({slow}); "
+        f"SMA({fast}) - SMA({slow}) is {_signed_pct(macro.separation_pct)}% of SMA({slow})",
+        held,
+        # The percentage only. The absolute close is deliberately NOT printed:
+        # it would be a third price level entering the prompt from this block,
+        # up to 24h stale, a dozen lines under the live ``Mark:`` with nothing
+        # reconciling the two — and the standing reason is in
+        # ``_research_signal_lines``, which withholds its own figures because
+        # this prompt's history is that the model anchors on the numbers it is
+        # shown (paper-BTC-2: 27 of 48 decisions at exactly the advertised bar).
+        f"  Latest daily close vs SMA({slow}): {_signed_pct(macro.close_vs_slow_pct)}%",
+        # Six disclosures, each of which a reader would otherwise have to
+        # assume: which candles these came from, that this prompt's OTHER
+        # trend reading is independent of this one, that the measure lags by
+        # construction, what its vintage is bounded against, that gaps in the
+        # daily series are not checked (the producer says the same in its
+        # docstring), and that nothing here is wired to a decision — closing
+        # with how to weigh it, which is the one thing the model has to decide
+        # and the one thing the six before it do not answer.
+        #
+        # The vintage clause is bounded against the As-of line, NOT the Mark,
+        # because As-of is the bound the code actually enforces
+        # (``macro_trend`` measures its 24h against ``as_of_ms``, which IS
+        # this context's as-of). The Mark is a live snapshot that nothing
+        # here is measured against, and the candle series may itself lag it
+        # by whatever the freshness guard tolerates — so a block well past a
+        # day behind the printed Mark passes every guard, and "up to a day
+        # behind the Mark", which this sentence used to say, would be a
+        # promise nothing keeps. No figure is given for that slack here: it
+        # depends on the configured interval, and a literal would be one
+        # more 4h-specific claim in a file whose rule is not to write one.
+        #
+        # The regime clause says only that the two are independent and can
+        # disagree. It deliberately does NOT describe how the regime is built:
+        # with ``indicators: []`` (a legal, deliberate configuration)
+        # ``classify_regime`` returns its RANGING default from no indicators
+        # at all, so any sentence here about "built from the 4h bars" would be
+        # false on that config — and one of its three outcomes, VOLATILE, is
+        # an ATR reading with no counterpart in this block at all. It does say
+        # the regime covers less history, which holds for every configuration
+        # that renders a regime from indicators at all; under the empty-list
+        # config the line is a constant default and the clause is merely
+        # uninformative rather than wrong.
+        f"  Basis: two simple moving averages over closed daily candles, fetched as their "
+        f"own series — the candles and indicators above are {candle_interval} bars and are "
+        f"not affected by this section. This prompt's other trend reading is the "
+        f"'Regime (computed)' line near the top; it is not derived from this block, it "
+        f"covers far less history, and the two can disagree. A lagging measure by "
+        f"construction: it describes an alignment that has already formed, not one that is "
+        f"starting. The figures date to the newest closed daily bar, which is at most a "
+        f"day behind the As-of time at the top of this context — and the Mark above is a "
+        f"live reading, so the gap to THAT can be larger. Gaps in the daily series are not "
+        f"checked, so a window missing bars still averages the {slow} most recent bars it "
+        f"has and still calls that SMA({slow}). Nothing in this section feeds the risk "
+        f"checks, the sizing or any order. Treat it as trend context, not as an entry or "
+        f"exit signal.",
     ]
 
 
@@ -393,10 +565,21 @@ def render_market_context(ctx: PerpMarketContext) -> str:
         label = _INDICATOR_LABEL.get(name, name)
         lines.append(f"  {label}: {_num(value, 4)}")
 
-    # Optional and last: absent whenever the feature is off or the window was
-    # unusable. The WHOLE block drops out — there is no "Volume profile: n/a"
-    # form, because a header with nothing under it reads as a measurement that
-    # came back empty rather than one that was never taken.
+    # The widest backdrop, directly under the indicators it widens: those are
+    # cut from ~33 days of 4h bars, this from 200 daily ones, so the context
+    # reads outward-in from here (macro trend, then the profile's window of
+    # ~5 days, then the radar, then the account). Optional and absent
+    # whenever the switch is off or the daily series was unusable — the WHOLE
+    # block drops out, for the reason spelled out on the profile below.
+    if ctx.macro_trend is not None:
+        lines.append("")
+        lines.extend(_macro_trend_lines(ctx.macro_trend, ctx.candle_interval))
+
+    # Optional, and the second of the market sections that can drop out:
+    # absent whenever the feature is off or the window was unusable. The
+    # WHOLE block drops out — there is no "Volume profile: n/a" form, because
+    # a header with nothing under it reads as a measurement that came back
+    # empty rather than one that was never taken.
     if ctx.volume_profile is not None:
         lines.append("")
         lines.extend(_volume_profile_lines(ctx.volume_profile, ctx.candle_interval))
@@ -432,14 +615,16 @@ def context_shape(ctx: PerpMarketContext) -> str:
     ``price|market|funding|indicators(rsi_14,ema_20,macd)|volume_profile``:
     the fixed sections in render order, the indicator rows by configured name
     (in render order — a reorder is a different prompt), and each optional
-    section when it is present: the volume profile, the research radar's
-    signal (``autoresearch``) and the position. It is stored beside
+    section when it is present: the daily macro trend, the volume profile,
+    the research radar's signal (``autoresearch``) and the position. It is
+    stored beside
     ``prompt_version`` on every ``ai_inputs`` row (issue #97) — and beside
     ``format_fingerprint``, the format block's content digest, since v11
     (issue #129; ``target_decision.format_fingerprint``) — so the paper
     review can segment on all three keys and a
     config-only change that adds or removes a section — flipping
-    ``market_data.volume_profile_window_candles``, editing ``indicators`` —
+    ``market_data.volume_profile_window_candles`` or
+    ``market_data.macro_trend_daily_lookback``, editing ``indicators`` —
     lands in the data by itself, with no code deploy and nobody remembering
     to bump anything.
 
@@ -464,6 +649,21 @@ def context_shape(ctx: PerpMarketContext) -> str:
     prompt the model was shown, not the configuration. A run with the window
     on and an occasional skip will show those cycles as a small second bucket
     next to the WARNING that explains them.
+
+    The ``macro_trend`` token reads the same way, with one caveat worth
+    knowing before it is used to segment a run. The builder leaves the field
+    ``None`` when the lookback is configured off AND on every cycle whose
+    section could not be built: too few daily bars, a stale daily feed, a
+    daily bar ahead of this context, two exactly equal averages (each logged
+    by ``macro_trend``), a failed ``1d`` read (logged by
+    ``engine_bridge``), or no ``4h`` candles at all — that last one silently,
+    since such a cycle is refused wholesale upstream anyway.
+
+    The caveat: unlike the profile, this section depends on a NETWORK read of
+    its own, so a read that fails every cycle yields no second bucket to
+    notice — it reads exactly like the switch being off. The switch's real
+    state is in the run's recorded config, and the WARNINGs say which cause
+    it was; the shape alone cannot, and is not meant to.
 
     The ``autoresearch`` token reads the same way, and it is the reason the
     research signal fails closed by section rather than by row: a cycle whose
@@ -493,6 +693,8 @@ def context_shape(ctx: PerpMarketContext) -> str:
         "funding",
         f"indicators({','.join(ctx.indicators)})",
     ]
+    if ctx.macro_trend is not None:
+        parts.append("macro_trend")
     if ctx.volume_profile is not None:
         parts.append("volume_profile")
     if ctx.research_signal is not None:

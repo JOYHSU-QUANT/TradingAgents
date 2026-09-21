@@ -938,6 +938,115 @@ def _context_only_out(monkeypatch, capsys, *, signal_path, research_signal, capl
     return captured.out.splitlines(), captured.err
 
 
+def test_context_only_renders_the_macro_block_end_to_end_when_the_switch_is_on(
+    monkeypatch, capsys
+):
+    """The one test where config -> fetch -> compute -> render -> shape runs unstubbed.
+
+    Every other macro-trend test stubs one of those seams, so each could stay
+    green while the feature never reached a prompt: the module is tested, the
+    renderer is tested, the bridge's read is tested — and an operator flipping
+    the YAML key would still see nothing. This is the preview command an
+    operator actually runs before deploying that edit, so it is where the
+    whole chain is pinned.
+    """
+    from decimal import Decimal
+
+    from contrib.hyperliquid_perp.domains.perp.schema import Candle, MarketSnapshot
+
+    now = datetime.now(timezone.utc)
+    four_h_ms = 4 * 60 * 60_000
+    day_ms = 24 * 60 * 60_000
+    end_ms = int(now.timestamp() * 1000)
+
+    def _bar(close_ms: int, span_ms: int, price: Decimal) -> Candle:
+        return Candle(
+            open_time=close_ms - span_ms + 1,
+            close_time=close_ms,
+            open=price,
+            high=price + 10,
+            low=price - 10,
+            close=price,
+            volume=Decimal(1),
+        )
+
+    # 200 four-hour bars ending now (so the freshness guard passes), with
+    # prices that move enough for ATR/EMA to be alive.
+    four_h = [
+        _bar(end_ms - (199 - i) * four_h_ms, four_h_ms, Decimal(60000 + (i % 7) * 50))
+        for i in range(200)
+    ]
+    # 260 daily bars ending on the same instant: flat at 100, stepping to 110
+    # fifty bars from the end, which is the worked case in test_macro_trend —
+    # fast average 110, slow 102.5.
+    daily = [
+        _bar(end_ms - (259 - i) * day_ms, day_ms, Decimal(110) if i >= 210 else Decimal(100))
+        for i in range(260)
+    ]
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return MarketSnapshot(
+                coin=coin,
+                mark_price=Decimal(60000),
+                oracle_price=Decimal(60000),
+                prev_day_price=Decimal(59000),
+                mid_price=None,
+                open_interest=Decimal(1),
+                day_ntl_volume=Decimal(1),
+                funding=Decimal("0.0000125"),
+                premium=None,
+            )
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            return daily if interval == "1d" else four_h
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return now
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
+
+    config = {
+        "indicators": ["rsi_14", "ema_20", "ema_50", "atr_14"],
+        "market_data": {"macro_trend_daily_lookback": 260},
+    }
+    assert main_mod.run_context_only(config, "BTC") == 0
+    out = capsys.readouterr().out
+
+    assert "Macro trend (its own series of 260 daily candles, SMA(50) vs SMA(200)" in out
+    assert "  SMA(50): 110.00   SMA(200): 102.50" in out
+    assert "Alignment: SMA(50) above SMA(200)" in out
+    # And the segmentation bucket an operator is running this command to see:
+    # the token is present and sits directly after the indicator row.
+    regime = next(line for line in out.splitlines() if line.startswith("prompt_regime: "))
+    shape = next(part for part in regime.split() if part.startswith("context_shape="))
+    parts = shape.split("=", 1)[1].split("|")
+    assert parts[parts.index("macro_trend") - 1].startswith("indicators(")
+
+    # The same config with the switch off renders no such section and no
+    # token — the whole point of shipping it off by default.
+    config["market_data"]["macro_trend_daily_lookback"] = 0
+    assert main_mod.run_context_only(config, "BTC") == 0
+    off = capsys.readouterr().out
+    assert "Macro trend" not in off
+    assert "macro_trend" not in off
+
+
 def _research_warning(err):
     """The host-locality warning's STDERR half, or None.
 
@@ -2218,6 +2327,247 @@ def test_build_context_hands_the_parsed_market_data_block_to_the_fetch_and_the_b
         {"market_data": {"volume_profile_window_candles": None}}, "BTC", position=None
     )
     assert handed["market_data"].volume_profile_window_candles == 0
+
+
+def test_build_context_reads_the_daily_series_last_and_only_when_the_switch_is_on(monkeypatch):
+    # Three things, none of which any other test can see:
+    #
+    # 1. OFF costs nothing. With the default block there is no sixth read at
+    #    all — not a read returning nothing, no read — so a run with the
+    #    feature off pays no REST call and no latency on the live tick.
+    # 2. ON reads the DAILY interval, at the configured lookback, cut at the
+    #    same exchange clock reading the other two windows are cut at. A
+    #    second call at the 4h interval would silently build the macro trend
+    #    from 260 four-hour bars (43 days) while the prompt labelled it
+    #    SMA(200) of DAYS.
+    # 3. It is LAST. Everything above it is argued from adjacency (the clock
+    #    read sits immediately before the two windows it bounds, issue #51),
+    #    so a read landing in the middle would quietly invalidate that.
+    from decimal import Decimal
+
+    from contrib.hyperliquid_perp.domains.perp.schema import Candle
+
+    order = []
+    daily_calls = []
+    daily_result = [object()]
+    clock = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+    # A real 4h bar, because the daily read is gated on having one: the macro
+    # section's freshness is measured against a CLOSED bar, and an empty 4h
+    # window leaves ``context_as_of`` on the wall clock. A fake returning
+    # nothing would take the daily read out of the chain for the wrong reason.
+    bar = Candle(
+        open_time=1_700_000_000_000,
+        close_time=1_700_000_001_000,
+        open=Decimal(1),
+        high=Decimal(1),
+        low=Decimal(1),
+        close=Decimal(1),
+        volume=Decimal(0),
+    )
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            order.append("snapshot")
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            order.append(f"candles:{interval}")
+            if interval != "4h":
+                daily_calls.append((interval, lookback, end))
+                return daily_result
+            return [bar]
+
+        def get_funding_history(self, coin, window_days, *, end):
+            order.append("funding")
+            return []
+
+        def get_exchange_time(self, coin):
+            order.append("clock")
+            return clock
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    handed = {}
+
+    def _builder(*args, **kwargs):
+        handed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+
+    bridge_mod._build_context({}, "BTC", position=None)
+    assert order == ["snapshot", "clock", "candles:4h", "funding"]
+    assert daily_calls == []
+    # ``None``, not an empty list: the builder tells the configured-off state
+    # from an on-but-empty feed by exactly this, and only one of the two logs.
+    assert handed["daily_candles"] is None
+
+    order.clear()
+    bridge_mod._build_context(
+        {"market_data": {"macro_trend_daily_lookback": 260}}, "BTC", position=None
+    )
+    assert order == ["snapshot", "clock", "candles:4h", "funding", "candles:1d"]
+    assert daily_calls == [("1d", 260, clock)]
+    assert handed["daily_candles"] is daily_result
+
+
+def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monkeypatch, caplog):
+    """The optional section's fail-closed contract has to cover the TRANSPORT.
+
+    ``macro_trend`` documents itself as "Not a gate" and "fail-closed as a
+    WHOLE", which held for its three compute refusals and not for the read
+    that feeds them: unguarded, a 429 or a malformed 1d response propagated
+    out of ``_build_context``, ``cli/_provider`` filed it as
+    ``connection`` / ``malformed_response``, and a whole 4h cycle reached no
+    decision — carrying an open position through unreassessed — because an
+    optional backdrop could not be drawn. ``call_sdk``'s message names no
+    endpoint, so the durable record could not tell that from the candle feed
+    the decision is actually built on.
+    """
+    from decimal import Decimal
+
+    from contrib.hyperliquid_perp.domains.perp.schema import Candle
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
+        ExchangeThrottledError,
+        MalformedResponseError,
+    )
+
+    bar = Candle(
+        open_time=1_700_000_000_000,
+        close_time=1_700_000_001_000,
+        open=Decimal(1),
+        high=Decimal(1),
+        low=Decimal(1),
+        close=Decimal(1),
+        volume=Decimal(0),
+    )
+    handed = {}
+    boom: list[Exception] = []
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            if interval == "1d":
+                raise boom[0]
+            return [bar]
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    def _builder(*args, **kwargs):
+        handed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+    config = {"market_data": {"macro_trend_daily_lookback": 260}}
+
+    # Both shapes the 1d read really fails as: the venue refusing to serve it,
+    # and the venue answering with something the mapper cannot use. They are
+    # NOT the same news — a throttle heals by itself, a misrouted or drifted
+    # response recurs every cycle until a human acts — so the line has to tell
+    # them apart. Collapsing them is the defect cli/_provider exists to avoid
+    # (issue #47), and this cycle no longer passes through that classifier.
+    seen = []
+    for failure in (ExchangeThrottledError("429 slow down"), MalformedResponseError("bad echo")):
+        boom[:] = [failure]
+        handed.clear()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=bridge_mod.__name__):
+            ctx, _ = bridge_mod._build_context(config, "BTC", position=None)
+        # The cycle produced a context — it did not raise.
+        assert ctx is not None
+        # ...with the section absent, exactly as the compute refusals leave
+        # it, and one WARNING naming which read it was.
+        assert handed["daily_candles"] is None
+        logged = [r.getMessage() for r in caplog.records if "macro-trend" in r.getMessage()]
+        assert len(logged) == 1, logged
+        assert "1d" in logged[0]
+        assert "the decision proceeds without it" in logged[0]
+        # The state it leaves behind is the same one "switch off" leaves, and
+        # nothing downstream can tell them apart — so the line says so.
+        assert "NOT the switch being off" in logged[0]
+        assert type(failure).__name__ in logged[0]
+        assert str(failure) in logged[0]
+        seen.append(logged[0])
+    # And the two lines really are different text, not one template that
+    # happens to mention a type.
+    assert seen[0] != seen[1]
+
+
+def test_no_candles_means_no_daily_read_at_all(monkeypatch):
+    # The macro section's freshness is defined against a CLOSED bar, and an
+    # empty 4h window has none — ``context_as_of`` falls back to the wall
+    # clock, against which a daily series cut at the exchange clock always
+    # looks current. The builder refuses that case outright, so fetching would
+    # be paying for a read whose answer is already decided. Same gate, and the
+    # same reason, as the research-signal read beside it.
+    reads = []
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            reads.append(interval)
+            return []
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    handed = {}
+
+    def _builder(*args, **kwargs):
+        handed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+    bridge_mod._build_context(
+        {"market_data": {"macro_trend_daily_lookback": 260}}, "BTC", position=None
+    )
+    assert reads == ["4h"]
+    assert handed["daily_candles"] is None
 
 
 def test_build_context_forwards_the_position_inputs_to_the_builder_verbatim(monkeypatch):

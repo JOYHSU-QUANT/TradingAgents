@@ -1940,9 +1940,27 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     #    themselves, or they — not the submit chain — become the longest run and
     #    this constant is understated. Asserted by counting the hook's calls
     #    against the reads, not by reading the source.
+    from decimal import Decimal
+
     from contrib.hyperliquid_perp import engine_bridge as bridge_mod
+    from contrib.hyperliquid_perp.domains.perp.schema import Candle
 
     reads: list[str] = []
+    # A real bar, not an empty window: the research-signal read below is
+    # guarded on ``if candles and ...``, so a fake returning nothing quietly
+    # removes that read from the chain — and with it the ability to see a
+    # missing refresh in FRONT of it. Found by mutation probe: deleting the
+    # refresh after the (optional) daily read left this test green, because
+    # the only thing that would then have been adjacent to it never ran.
+    bar = Candle(
+        open_time=1_700_000_000_000,
+        close_time=1_700_000_001_000,
+        open=Decimal(1),
+        high=Decimal(1),
+        low=Decimal(1),
+        close=Decimal(1),
+        volume=Decimal(0),
+    )
 
     class _Market:
         def __init__(self, _client):
@@ -1954,7 +1972,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
 
         def get_candles(self, coin, interval, lookback, *, end):
             reads.append("candles")
-            return []
+            return [bar]
 
         def get_funding_history(self, coin, window_days, *, end):
             reads.append("funding")
@@ -1972,21 +1990,53 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
             reads.append("meta")  # Info() fetches perp meta at construction
             return cls()
 
-    monkeypatch = pytest.MonkeyPatch()
-    try:
-        monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
-        monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
-        monkeypatch.setattr(bridge_mod, "build_market_context", lambda *a, **k: object())
-        bridge_mod._build_context(
-            {}, "BTC", on_blocking_read=lambda: reads.append("refresh"), position=None
-        )
-    finally:
-        monkeypatch.undo()
+    def _drive(config):
+        reads.clear()
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+            monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+            monkeypatch.setattr(bridge_mod, "build_market_context", lambda *a, **k: object())
+            # The handoff document's read is blocking too, and deliberately
+            # not validated as local (engine_bridge argues the NFS case), so
+            # it belongs in this chain rather than beside it.
+            monkeypatch.setattr(
+                bridge_mod,
+                "load_research_signal",
+                lambda *a, **k: reads.append("signal"),
+            )
+            bridge_mod._build_context(
+                config, "BTC", on_blocking_read=lambda: reads.append("refresh"), position=None
+            )
+        finally:
+            monkeypatch.undo()
+        # No two REST reads may be adjacent without a refresh between them.
+        rest = [i for i, r in enumerate(reads) if r != "refresh"]
+        for earlier, later in zip(rest, rest[1:], strict=False):
+            assert later - earlier > 1, f"two market reads with no refresh between them: {reads}"
+        return [r for r in reads if r != "refresh"]
 
-    # No two REST reads may be adjacent without a refresh between them.
-    rest = [i for i, r in enumerate(reads) if r != "refresh"]
-    for earlier, later in zip(rest, rest[1:], strict=False):
-        assert later - earlier > 1, f"two market reads with no refresh between them: {reads}"
+    assert _drive({}) == ["meta", "snapshot", "clock", "candles", "funding"]
+    #    ...and again with BOTH optional reads on: the daily candle series
+    #    behind the macro-trend section, and the research radar's handoff
+    #    document. What this constant is reasoned about is the longest run of
+    #    reads with NO refresh between them, not the chain's total length — so
+    #    a conditional extra read costs it nothing as long as it brings its
+    #    own refresh. Measured here rather than asserted in engine_bridge's
+    #    comment: the chain really does get longer, and what must hold is that
+    #    it stays refreshed throughout.
+    #
+    #    Both switches, not one at a time, because the two optional reads are
+    #    ADJACENT in the chain — the gap a missing refresh opens is the one
+    #    between them, and neither switch alone can show it.
+    assert _drive(
+        {
+            "market_data": {
+                "macro_trend_daily_lookback": 260,
+                "autoresearch_signal": "/srv/research/btc-signal.json",
+            }
+        }
+    ) == ["meta", "snapshot", "clock", "candles", "funding", "candles", "signal"]
 
     # 4. The market snapshot inside engine.tick() is the other full-timeout read
     #    that used to chain into the submit ladder. Covered by DRIVING the engine,

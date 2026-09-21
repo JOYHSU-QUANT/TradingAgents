@@ -19,7 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ...common.config_coercion import config_overrides, int_from_yaml, str_from_yaml
-from ...common.constants import MIN_VOLUME_PROFILE_WINDOW
+from ...common.constants import (
+    MAX_MACRO_TREND_LOOKBACK,
+    MIN_MACRO_TREND_LOOKBACK,
+    MIN_VOLUME_PROFILE_WINDOW,
+)
 from .schema import interval_to_ms
 
 __all__ = ["MarketDataConfig"]
@@ -54,15 +58,17 @@ class MarketDataConfig:
     ``volume_profile_window_candles`` is ``0`` (off) by default — see the
     module docstring of :mod:`.volume_profile` for why the feature ships
     switched off, and ``hyperliquid.example.yaml`` for the operator-facing
-    contract on the value. ``autoresearch_signal`` is the same kind of
-    switch, spelled as the empty string because its "on" value is a path (see
-    :mod:`.research_signal`).
+    contract on the value. ``macro_trend_daily_lookback`` is the same kind of
+    switch over a SECOND candle series (:mod:`.macro_trend`), and
+    ``autoresearch_signal`` is the same kind again, spelled as the empty
+    string because its "on" value is a path (see :mod:`.research_signal`).
     """
 
     candle_interval: str = "4h"
     candle_lookback: int = 200
     funding_zscore_window_days: int = 30
     volume_profile_window_candles: int = 0
+    macro_trend_daily_lookback: int = 0
     autoresearch_signal: str = ""
 
     def __post_init__(self) -> None:
@@ -113,6 +119,44 @@ class MarketDataConfig:
                 f"'market_data.candle_lookback' ({self.candle_lookback}) — the window could "
                 f"never be filled and the volume profile would be skipped on every cycle"
             )
+        # Same rule as the window above, and the same reason for it: a
+        # macro-trend lookback that cannot work makes the section silently
+        # absent, which is exactly what ``0`` means on purpose.
+        #
+        # What is deliberately NOT checked here is any relation to
+        # ``candle_lookback``. The volume profile is cut from the SAME series
+        # the lookback fetches, so a window wider than the lookback is
+        # unfillable by construction; the macro trend fetches its own daily
+        # series, and the two numbers count bars of different lengths. A
+        # cross-check between them would refuse legal configurations (260
+        # daily bars under a 200-candle 4h lookback is the recommended one).
+        lookback = self.macro_trend_daily_lookback
+        if lookback < 0:
+            raise ValueError(
+                f"'market_data.macro_trend_daily_lookback' must be >= 0 "
+                f"(0 disables the macro-trend section), got {lookback}"
+            )
+        if 0 < lookback < MIN_MACRO_TREND_LOOKBACK:
+            raise ValueError(
+                f"'market_data.macro_trend_daily_lookback' must be 0 (off) or at least "
+                f"{MIN_MACRO_TREND_LOOKBACK}; {lookback} daily candle(s) is fewer than the "
+                f"SMA({MIN_MACRO_TREND_LOOKBACK}) needs to exist at all, so the section "
+                f"would be skipped on every cycle"
+            )
+        # A ceiling too, unlike the profile window — because the two ways this
+        # one goes wrong at the top end BOTH degrade silently rather than
+        # fail: the per-bar averages cost measurable Decimal time on the
+        # single-threaded live tick, and past ~20,700 the fetch's computed
+        # ``startTime`` goes negative. Neither raises, so an operator would
+        # never learn of either.
+        if lookback > MAX_MACRO_TREND_LOOKBACK:
+            raise ValueError(
+                f"'market_data.macro_trend_daily_lookback' must be at most "
+                f"{MAX_MACRO_TREND_LOOKBACK} (~5.5 years of daily bars), got {lookback}; "
+                f"a wider window would see further back, but the per-cycle cost of the "
+                f"averages lands on the live tick and nothing this section reports needs "
+                f"that much alignment history"
+            )
         # Same rule as the window above, for the same reason: every way of
         # getting this key wrong fails SILENTLY at runtime — the prompt simply
         # has no research-signal section, which is exactly what ``""`` means on
@@ -144,6 +188,7 @@ class MarketDataConfig:
                     "candle_lookback": int_from_yaml,
                     "funding_zscore_window_days": int_from_yaml,
                     "volume_profile_window_candles": int_from_yaml,
+                    "macro_trend_daily_lookback": int_from_yaml,
                     "autoresearch_signal": _signal_path_from_yaml,
                 },
             )

@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from contrib.hyperliquid_perp.common.constants import MIN_VOLUME_PROFILE_WINDOW
+from contrib.hyperliquid_perp.common.constants import (
+    MAX_MACRO_TREND_LOOKBACK,
+    MIN_MACRO_TREND_LOOKBACK,
+    MIN_VOLUME_PROFILE_WINDOW,
+)
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.schema import CandleInterval
 
@@ -40,6 +44,43 @@ def test_the_profile_floor_is_the_shared_constant():
     MarketDataConfig(volume_profile_window_candles=MIN_VOLUME_PROFILE_WINDOW)
     with pytest.raises(ValueError, match=f"at least {MIN_VOLUME_PROFILE_WINDOW}"):
         MarketDataConfig(volume_profile_window_candles=MIN_VOLUME_PROFILE_WINDOW - 1)
+
+
+def test_the_macro_trend_band_is_the_shared_constants_on_both_sides():
+    # Same layering rule as the profile floor above: the loader enforces the
+    # band without importing the compute module that also reads it. Both ends
+    # are pinned to the constants rather than to retyped numbers, and both
+    # edges are exercised from INSIDE and OUT — the legal value at each bound
+    # and the first illegal one past it.
+    MarketDataConfig(macro_trend_daily_lookback=0)  # the off switch
+    MarketDataConfig(macro_trend_daily_lookback=MIN_MACRO_TREND_LOOKBACK)
+    MarketDataConfig(macro_trend_daily_lookback=MAX_MACRO_TREND_LOOKBACK)
+    with pytest.raises(ValueError, match=f"at least {MIN_MACRO_TREND_LOOKBACK}"):
+        MarketDataConfig(macro_trend_daily_lookback=MIN_MACRO_TREND_LOOKBACK - 1)
+    with pytest.raises(ValueError, match="must be >= 0"):
+        MarketDataConfig(macro_trend_daily_lookback=-1)
+    # 1 is the other end of the sub-floor band, and the one the floor message
+    # has to cover as well as 199.
+    with pytest.raises(ValueError, match=f"at least {MIN_MACRO_TREND_LOOKBACK}"):
+        MarketDataConfig(macro_trend_daily_lookback=1)
+    # A ceiling, unlike the profile window — because both ways this one goes
+    # wrong at the top end degrade SILENTLY rather than fail: measurable
+    # Decimal time on the single-threaded live tick, and past ~20,700 a
+    # negative computed ``startTime``. Neither raises, so an operator would
+    # never learn of either.
+    with pytest.raises(ValueError, match=f"at most {MAX_MACRO_TREND_LOOKBACK}"):
+        MarketDataConfig(macro_trend_daily_lookback=MAX_MACRO_TREND_LOOKBACK + 1)
+
+
+def test_the_macro_trend_lookback_is_not_cross_checked_against_the_candle_lookback():
+    # The volume profile's window is cut from the SAME series candle_lookback
+    # fetches, so a window wider than it can never be filled. The macro trend
+    # fetches its own daily series, and the two count bars of different
+    # lengths — so the recommended pairing (200 4h candles, 260 daily ones)
+    # must be legal. A cross-check copied over from the profile would refuse
+    # exactly the configuration the docs tell an operator to write.
+    config = MarketDataConfig(candle_lookback=200, macro_trend_daily_lookback=260)
+    assert config.macro_trend_daily_lookback == 260
 
 
 @pytest.mark.parametrize("interval", [i.value for i in CandleInterval])

@@ -21,7 +21,7 @@ structured target 與 Phase 1 legacy `PerpTradeDecision`）。決策如何從引
 | `type` | 用途 | 主要回傳欄位 | 認證 |
 |---|---|---|---|
 | `metaAndAssetCtxs` | 市場 snapshot：mark/index price、OI、funding、volume。Phase 1 最重要的一支呼叫——所有市場資料都來自這裡。 | `markPx`, `oraclePx`, `funding`, `openInterest`, `dayNtlVlm`, `prevDayPx`, `premium` | 公開 |
-| `candleSnapshot` | OHLCV K 線歷史。Body：`req:{coin, interval:"4h", startTime, endTime}` | `o`, `h`, `l`, `c`, `v`, `t`, `T`；每根還回聲 `s`（coin）與 `i`（interval）——Phase 3 會拿它們比對請求，不符或缺少即拒收整份回應 | 公開 |
+| `candleSnapshot` | OHLCV K 線歷史。Body：`req:{coin, interval:"4h", startTime, endTime}`。**同一個端點也用 `interval:"1d"` 讀第二條序列**——macro trend 的日線 SMA(50)/SMA(200)，只在 `market_data.macro_trend_daily_lookback > 0` 時讀、排在每個 cycle 市場讀鏈的最後；兩條序列互不影響，4h 那條的根數不會因為開了 macro 而改變 | `o`, `h`, `l`, `c`, `v`, `t`, `T`；每根還回聲 `s`（coin）與 `i`（interval）——Phase 3 會拿它們比對請求，不符或缺少即拒收整份回應（回聲比的就是這次送出去的 `interval`，所以兩條序列不會互相錯收） | 公開 |
 | `fundingHistory` | 歷史 funding rate。Body：`coin`、`startTime` | `fundingRate`, `premium`, `time`；每筆還回聲 `coin`（同上，會比對） | 公開 |
 | `predictedFundings` | 預測的下一期 funding rate，含各交易所的預測值可跨場所比較。 | `nextFunding`, `nextFundingTime` | 公開 |
 | `clearinghouseState` | 帳戶狀態：margin、倉位、掛單。Body：`user`——**必須是 wallet address，不是 agent address**。 | `marginSummary`, `accountValue`, `withdrawable`, `assetPositions[].szi`, `entryPx`, `leverage`, `unrealizedPnl`, `liquidationPx`, `openOrders[]` | Wallet address |

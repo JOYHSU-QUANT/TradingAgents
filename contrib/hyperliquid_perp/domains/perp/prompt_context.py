@@ -235,9 +235,9 @@ def _signed_pct(value: float) -> str:
     one this section exists to surface: at a crossing the separation passes
     through zero, so anything inside half of its last place renders as a bare
     signed zero — a figure that reads as "no gap" on the same line as a word
-    asserting a strict ordering. The DTO refuses only a BIT-EXACT tie, so that window is reachable
-    on any cycle near a crossing. The sign always comes from the value, so it
-    cannot disagree with the direction word beside it.
+    asserting a strict ordering. The DTO refuses only a BIT-EXACT tie, so that
+    window is reachable on any cycle near a crossing. The sign always comes
+    from the value, so it cannot disagree with the direction word beside it.
     """
     if 0 < abs(value) < _PCT_ROUNDS_TO_ZERO_BELOW:
         # Two significant FIGURES rather than two decimal places, so the value

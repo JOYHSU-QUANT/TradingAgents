@@ -122,8 +122,10 @@ def _gap(ms: int) -> str:
       vanishing gap one unit down from where it was first found.
     - **The unrounded comparison.** The second version selected on
       ``round(value, 1) >= 1.0``, which promotes from 0.95 of a unit upward,
-      so a stalled feed at 57 minutes printed ``1.0h`` — overstating the one
-      number that sizes the outage by about 5%.
+      so a stalled feed anywhere from just past 57 minutes to just under an
+      hour printed ``1.0h`` — overstating the one number that sizes the
+      outage by up to about 5%. (Just PAST: ``round(0.95, 1)`` is 0.9, so
+      exactly 57 minutes still printed ``57.0 min``.)
 
     The cost of not rounding is that the top of a unit is not normalised:
     59.999 s prints as ``60.0 s`` rather than ``1.0 min``. That is

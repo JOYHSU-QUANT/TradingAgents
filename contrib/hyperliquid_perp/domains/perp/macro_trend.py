@@ -105,20 +105,28 @@ MAX_DAILY_CANDLE_AGE_MS: Final = 24 * 60 * 60_000
 
 
 def _gap(ms: int) -> str:
-    """A duration an operator reads, at a scale that cannot contradict itself.
+    """A duration rendered at a scale that never reads as no duration at all.
 
-    Hours to one decimal is right for the usual case and wrong at both ends of
-    this module's own bound. One millisecond past a 24h limit renders as
-    ``24.0h``, which reads as exactly the limit in a sentence saying it was
-    exceeded; a bar one millisecond early renders as ``0.0h``, i.e. no gap at
-    all in a sentence about a gap. Both are the defect ``_signed_pct`` exists
-    to avoid in the prompt, in the log instead.
+    Fixed hours to one decimal makes a small gap vanish: a bar one millisecond
+    early prints as ``0.0h``, i.e. no gap, in a sentence about a gap. The unit
+    is therefore chosen by the ROUNDED magnitude rather than by a threshold on
+    the raw value — the first unit whose figure does not round to zero wins,
+    and below a second the integer milliseconds are printed outright. Picking
+    on the raw value instead reintroduces the same defect one unit down
+    (1.5 s is 0.025 minutes, which prints as ``0.0 min``).
+
+    What this does NOT fix, because no choice of unit can: a value just past a
+    bound still prints as that bound. 24h + 1 ms is ``24.0h`` at any sane
+    precision, and in a sentence saying the 24h limit was exceeded that reads
+    as a contradiction. The caller closes that by printing the EXCESS as a
+    second figure — ``24.0h ... 1 ms past the 24h`` — which this helper only
+    supplies the formatting for.
     """
-    if ms < 1000:
-        return f"{ms} ms"
-    if ms < 3_600_000:
-        return f"{ms / 60_000:.1f} min"
-    return f"{ms / 3_600_000:.1f}h"
+    for scale, unit in ((3_600_000, "h"), (60_000, " min"), (1000, " s")):
+        value = ms / scale
+        if round(value, 1) >= 1.0:
+            return f"{value:.1f}{unit}"
+    return f"{ms} ms"
 
 
 def _bar_date(candle: Candle) -> date:

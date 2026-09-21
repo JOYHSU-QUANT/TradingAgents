@@ -115,7 +115,15 @@ def run_context_only(config: dict, coin: str) -> int:
     # print the no-signal shape while the daemon prints the other, or carry
     # the token while the server's producer cron is dead. Whenever the switch
     # names a document, the block below says on stderr which way this host
-    # answered. The fingerprint is over the
+    # answered.
+    #
+    # ``|macro_trend`` can differ too, for a weaker reason that earns no such
+    # notice: it depends on a daily candle READ, whose failure this lane
+    # tolerates exactly as the daemon does (section dropped, WARNING logged).
+    # That data is public and deterministic, so the two hosts disagree only
+    # while one of them cannot reach the venue — a condition that announces
+    # itself in the log rather than hiding behind a plausible bucket.
+    # The fingerprint is over the
     # same block run_engine feeds the model (effective ceiling included), so
     # a grid or ceiling edit shows its new value here. A gate-threshold edit
     # does NOT (prompt v5 keeps those out of the text): that one needs a new

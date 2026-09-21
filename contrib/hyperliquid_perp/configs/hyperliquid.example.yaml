@@ -28,9 +28,11 @@ market_data:
                                    # SMA(200): which way round they sit, how far apart, how many
                                    # daily bars have carried that, and the latest daily close
                                    # against SMA(200)). Must be 0, or between 200 and 2000 — below
-                                   # 200 the slow average does not exist at all, above 2000 the
-                                   # per-cycle cost grows without buying history the block can
-                                   # report. Both ends are rejected at config load, because a bad
+                                   # 200 the slow average does not exist at all; the ceiling is a
+                                   # judgement that nothing here needs more than ~5.5 years of
+                                   # alignment history, not a claim that more would show nothing
+                                   # (it would — the run this block can date grows with the
+                                   # window). Both ends are rejected at config load, because a bad
                                    # value fails SILENTLY at runtime (the section just never
                                    # appears, or the tick quietly gets slower).
                                    # 400 is the suggested starting value: 200 bars of warm-up plus
@@ -42,8 +44,9 @@ market_data:
                                    # series. Costs one extra REST read per cycle while on; if that
                                    # read fails the section is dropped for the cycle and the
                                    # decision still happens (it is an analyst input, not a gate).
-                                   # Needs the coin to have >= 200 days of history — below that
-                                   # every cycle logs a WARNING and the section is absent.
+                                   # Needs the venue to have >= 200 daily BARS for the coin (bars,
+                                   # not days: gaps are not checked) — below that every cycle logs
+                                   # a WARNING and the section is absent.
                                    # Analyst input only: it feeds no gate and no sizing. Turning it
                                    # on CHANGES THE PROMPT, so on a paper run treat the flip as a
                                    # new input-side measurement point.

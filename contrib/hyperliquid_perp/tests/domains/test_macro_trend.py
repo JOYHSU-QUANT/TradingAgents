@@ -29,6 +29,7 @@ from contrib.hyperliquid_perp.domains.perp.macro_trend import (
     MACRO_FAST_PERIOD,
     MACRO_SLOW_PERIOD,
     MAX_DAILY_CANDLE_AGE_MS,
+    _gap,
     compute_macro_trend,
 )
 from contrib.hyperliquid_perp.domains.perp.schema import (
@@ -299,10 +300,10 @@ def test_the_daily_feed_is_admitted_up_to_one_day_behind_and_never_ahead(lag_ms,
     assert (macro is not None) is expected
 
 
-def test_a_stale_daily_feed_is_refused_in_hours_and_blames_the_daily_feed(caplog):
+def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog):
     # Two days behind. An operator reads this line every cycle while the feed
-    # is down, so it says the date and the lag in hours rather than handing
-    # over two 13-digit epoch stamps to subtract.
+    # is down, so it says the date and the lag at a readable scale rather
+    # than handing over two 13-digit epoch stamps to subtract.
     candles = _stepped(260, 100, {205: "1"})
     as_of = _as_of(candles) + 2 * MAX_DAILY_CANDLE_AGE_MS
     with caplog.at_level(logging.WARNING):
@@ -311,6 +312,33 @@ def test_a_stale_daily_feed_is_refused_in_hours_and_blames_the_daily_feed(caplog
     assert "48.0h" in caplog.text
     assert "stopped publishing" in caplog.text
     assert str(as_of) not in caplog.text  # no raw epoch stamps
+
+
+@pytest.mark.parametrize(
+    "ms",
+    [
+        1,
+        999,
+        1_000,
+        1_500,  # 0.025 minutes — rendered "0.0 min" by a threshold on the raw value
+        2_999,
+        59_999,
+        60_000,
+        90_000,
+        3_599_999,
+        3_600_000,
+        86_400_001,
+    ],
+)
+def test_no_duration_ever_renders_as_zero_of_anything(ms):
+    # The whole point of the helper: a gap must never print as "0.0" of a
+    # unit, because that reads as NO gap inside a sentence about one. Choosing
+    # the unit from the raw value reintroduced exactly that one unit down —
+    # 1.5s is 0.025 minutes — which is why the unit is picked from the ROUNDED
+    # magnitude instead, and why this table walks both sides of every boundary.
+    rendered = _gap(ms)
+    assert not rendered.startswith("0.0"), rendered
+    assert not rendered.startswith("0 "), rendered
 
 
 def test_the_gap_is_reported_at_a_scale_that_cannot_contradict_the_sentence(caplog):

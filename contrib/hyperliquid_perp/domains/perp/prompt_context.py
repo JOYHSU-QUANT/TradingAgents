@@ -118,11 +118,15 @@ _SHAPE_NOTE = {
 }
 
 
-# The decimal places every percentage in this file is printed to.
-_PCT_PLACES = 2
+# The decimal places ``_num`` prints to unless a caller says otherwise. Named
+# because ``_signed_pct`` has to know where ``_num`` rounds a percentage to a
+# bare zero, and a second literal 2 there could drift from this one. It is
+# ``_num``'s DEFAULT, not a house rule for percentages: ``_whole_pct`` prints
+# at zero places, and several call sites pass their own.
+_DEFAULT_PLACES = 2
 
 
-def _num(value, places: int = 2, *, sign: bool = False) -> str:
+def _num(value, places: int = _DEFAULT_PLACES, *, sign: bool = False) -> str:
     """Format a number to ``places`` decimals; ``None`` -> ``n/a``.
 
     ``sign`` forces an explicit ``+``/``-`` — for a value whose direction is
@@ -218,10 +222,10 @@ _MACRO_ALIGNMENT_WORD = {
 }
 
 
-# The magnitude below which ``_num``'s two decimal places round a percentage
-# to a bare zero. DERIVED from that default rather than written as 0.005, so
-# the two cannot desync if the places ever change.
-_PCT_ROUNDS_TO_ZERO_BELOW = 10 ** -_PCT_PLACES / 2
+# The magnitude below which ``_num`` rounds a percentage to a bare zero.
+# DERIVED from the same constant ``_num`` takes as its default, rather than
+# written out as 0.005, so the two cannot desync if the places ever change.
+_PCT_ROUNDS_TO_ZERO_BELOW = 10 ** -_DEFAULT_PLACES / 2
 
 
 def _signed_pct(value: float) -> str:
@@ -240,7 +244,7 @@ def _signed_pct(value: float) -> str:
         # keeps its own magnitude however small it is (``+1.2e-05``) instead
         # of collapsing to a zero it is not.
         return f"{value:+.2g}"
-    return _num(value, places=_PCT_PLACES, sign=True)
+    return _num(value, sign=True)
 
 
 def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
@@ -315,11 +319,19 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         # Six disclosures, each of which a reader would otherwise have to
         # assume: which candles these came from, that this prompt's OTHER
         # trend reading is independent of this one, that the measure lags by
-        # construction, how far behind the mark it can be, that gaps in the
+        # construction, what its vintage is bounded against, that gaps in the
         # daily series are not checked (the producer says the same in its
         # docstring), and that nothing here is wired to a decision — closing
         # with how to weigh it, which is the one thing the model has to decide
         # and the one thing the six before it do not answer.
+        #
+        # The vintage clause is bounded against the As-of line, NOT the Mark,
+        # because As-of is the bound the code actually enforces
+        # (``macro_trend`` measures its 24h against ``as_of_ms``). The Mark is
+        # a live snapshot and the 4h series may itself lag it by up to the
+        # freshness guard's three intervals, so a block ~36h behind the
+        # printed Mark passes every guard — and "up to a day behind the Mark",
+        # which this sentence used to say, would be a promise nothing keeps.
         #
         # The regime clause says only that the two are independent and can
         # disagree. It deliberately does NOT describe how the regime is built:
@@ -327,15 +339,20 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         # ``classify_regime`` returns its RANGING default from no indicators
         # at all, so any sentence here about "built from the 4h bars" would be
         # false on that config — and one of its three outcomes, VOLATILE, is
-        # an ATR reading with no counterpart in this block at all.
+        # an ATR reading with no counterpart in this block at all. It does say
+        # the regime covers less history, which holds for every configuration
+        # that renders a regime from indicators at all; under the empty-list
+        # config the line is a constant default and the clause is merely
+        # uninformative rather than wrong.
         f"  Basis: two simple moving averages over closed daily candles, fetched as their "
         f"own series — the candles and indicators above are {candle_interval} bars and are "
         f"not affected by this section. This prompt's other trend reading is the "
         f"'Regime (computed)' line near the top; it is not derived from this block, it "
         f"covers far less history, and the two can disagree. A lagging measure by "
         f"construction: it describes an alignment that has already formed, not one that is "
-        f"starting. The figures date to the newest closed daily bar, so this whole block "
-        f"can be up to a day behind the Mark above. Gaps in the daily series are not "
+        f"starting. The figures date to the newest closed daily bar, which is at most a "
+        f"day behind the As-of time at the top of this context — and the Mark above is a "
+        f"live reading, so the gap to THAT can be larger. Gaps in the daily series are not "
         f"checked, so a window missing bars still averages the {slow} most recent bars it "
         f"has and still calls that SMA({slow}). Nothing in this section feeds the risk "
         f"checks, the sizing or any order. Treat it as trend context, not as an entry or "

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -770,7 +770,7 @@ def _macro(**overrides) -> dict:
         "separation_pct": float(Decimal("7.5") / Decimal("102.5") * 100),
         "bars_in_state": 50,
         "state_age_capped": False,
-        "last_change_date": date(2024, 7, 29),
+        "run_started_date": date(2024, 7, 29),
         "as_of_date": date(2024, 9, 16),
         "latest_close": Decimal("110"),
         "close_vs_slow_pct": float(Decimal("7.5") / Decimal("102.5") * 100),
@@ -836,14 +836,14 @@ def test_macro_trend_builds_from_consistent_values():
         # keeps a date anyway.
         (
             {"bars_in_state": 61, "state_age_capped": True},
-            "must say exactly what last_change_date",
+            "must say exactly what run_started_date",
         ),
-        ({"last_change_date": None}, "must say exactly what last_change_date"),
+        ({"run_started_date": None}, "must say exactly what run_started_date"),
         # A datetime IS a date subclass, so the annotation alone lets one
         # through — and it renders as a full ISO timestamp on a line labelled
         # a date.
         (
-            {"last_change_date": datetime(2024, 7, 29, tzinfo=timezone.utc)},
+            {"run_started_date": datetime(2024, 7, 29, tzinfo=timezone.utc)},
             "must be a plain date",
         ),
         ({"as_of_date": datetime(2024, 9, 16, tzinfo=timezone.utc)}, "must be a plain date"),
@@ -855,12 +855,12 @@ def test_macro_trend_builds_from_consistent_values():
                 "as_of_date": None,
                 "bars_in_state": 61,
                 "state_age_capped": True,
-                "last_change_date": None,
+                "run_started_date": None,
             },
             "as_of_date must be a plain date",
         ),
         # The alignment cannot have changed on a bar the window does not reach.
-        ({"last_change_date": date(2024, 9, 17)}, "is after as_of_date"),
+        ({"run_started_date": date(2024, 9, 17)}, "is after as_of_date"),
     ],
 )
 def test_macro_trend_rejects_self_contradictory_values(overrides, match):
@@ -886,15 +886,15 @@ def test_a_run_of_one_must_be_dated_to_the_newest_bar():
     # the newest bar, whatever the spacing. Longer runs say nothing checkable
     # here, because bar continuity is deliberately not checked — so this is
     # the only equality the DTO may assert between the two dates.
-    one = _macro(bars_in_state=1, last_change_date=date(2024, 9, 16))
+    one = _macro(bars_in_state=1, run_started_date=date(2024, 9, 16))
     assert MacroTrend(**one).bars_in_state == 1
     with pytest.raises(ValueError, match="bars_in_state is 1"):
-        MacroTrend(**_macro(bars_in_state=1, last_change_date=date(2024, 9, 15)))
+        MacroTrend(**_macro(bars_in_state=1, run_started_date=date(2024, 9, 15)))
     # And a longer run with a date far older than the run length is ACCEPTED:
     # that is what a daily series with missing bars looks like, and refusing
     # it would crash a cycle on data this module never promised to check.
-    gapped = _macro(bars_in_state=50, last_change_date=date(2023, 1, 1))
-    assert MacroTrend(**gapped).last_change_date == date(2023, 1, 1)
+    gapped = _macro(bars_in_state=50, run_started_date=date(2023, 1, 1))
+    assert MacroTrend(**gapped).run_started_date == date(2023, 1, 1)
 
 
 @pytest.mark.parametrize(
@@ -920,6 +920,55 @@ def test_perp_market_context_carries_a_macro_trend_when_given_one():
     macro = MacroTrend(**_macro())
     ctx = PerpMarketContext(**_context(), macro_trend=macro)
     assert ctx.macro_trend is macro
+
+
+def test_perp_market_context_refuses_a_macro_block_dated_after_its_own_as_of():
+    # The clock-free half of the macro section's freshness rule, checked here
+    # for the reason the research signal's coin identity is: the producer is
+    # not the only way a context is built. Without it a fixture-built context
+    # prints "newest daily bar dated 2027-01-01" under an "As of: 2026-..."
+    # header, with every bounds check green and a basis line promising the
+    # block is at most a day behind.
+    #
+    # The fixture's macro block is dated 2024-09-16, so the context is dated
+    # to the day before it.
+    macro = MacroTrend(**_macro())
+    assert macro.as_of_date == date(2024, 9, 16)
+    day_before = datetime(2024, 9, 15, 12, 0, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="after the context's own as_of"):
+        PerpMarketContext(**_context(as_of=day_before), macro_trend=macro)
+    # Same day is fine — the daily bar opens at 00:00 UTC and the context is
+    # dated to a 4h bar closing later that day.
+    same_day = datetime(2024, 9, 16, 4, 0, tzinfo=timezone.utc)
+    assert PerpMarketContext(**_context(as_of=same_day), macro_trend=macro).macro_trend is macro
+
+
+def test_the_macro_date_check_compares_in_utc_not_in_the_as_ofs_own_offset():
+    # ``as_of`` is required to be tz-AWARE, not to be UTC. A context at
+    # 2024-09-16 21:00-05:00 is 2024-09-17 02:00Z, so its UTC day is the 17th
+    # and a daily bar dated the 16th is comfortably behind it — but comparing
+    # the LOCAL date (the 16th) against the bar's date (the 16th) only passes
+    # by luck, and one hour earlier it would refuse a legal context. Hand-built
+    # contexts are this guard's only audience, so the conversion is the point.
+    macro = MacroTrend(**_macro())  # dated 2024-09-16
+    minus_five = timezone(timedelta(hours=-5))
+    # Local date 2024-09-15, UTC date 2024-09-16: legal, and refused outright
+    # if the comparison used the local date.
+    late_on_the_15th = datetime(2024, 9, 15, 21, 0, tzinfo=minus_five)
+    assert late_on_the_15th.date() == date(2024, 9, 15)  # the premise
+    assert late_on_the_15th.astimezone(timezone.utc).date() == date(2024, 9, 16)
+    ctx = PerpMarketContext(**_context(as_of=late_on_the_15th), macro_trend=macro)
+    assert ctx.macro_trend is macro
+
+
+def test_a_naive_as_of_is_refused_for_being_naive_not_for_the_macro_date():
+    # Ordering: the macro date check calls ``as_of.astimezone(...)``, which on
+    # a naive datetime silently assumes the HOST's zone. It has to run after
+    # the tz guard, or a naive context gets a confusing sentence about daily
+    # bars instead of the one that names the real problem.
+    macro = MacroTrend(**_macro())
+    with pytest.raises(ValueError, match="as_of must be timezone-aware"):
+        PerpMarketContext(**_context(as_of=datetime(2024, 1, 1, 12, 0)), macro_trend=macro)
 
 
 # --------------------------------------------------------------------------

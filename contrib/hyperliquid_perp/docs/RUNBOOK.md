@@ -262,8 +262,12 @@ drift。任一側 parser 讀不了（例如 genesis 帶著已改名的舊 key）
 另注意 `context_shape` 描述的是**模型實際看到的 prompt**：視窗開著但該 cycle 的 profile 被
 執行期跳過（歷史不夠、零寬度、零成交量，各有一行 WARNING），那個 cycle 會落在「沒有 volume
 profile 段」的 shape——這是真的少了一段，不是假訊號；判讀時對照 WARNING 把它們併回去。
-`macro_trend` token 讀法一樣：開關開著但該 cycle 的日線序列不足 200 根／過期或超前／兩條均線
-完全相等（各有一行 WARNING），那個 cycle 一樣落在「沒有 `macro_trend` 段」的桶。
+`macro_trend` token 讀法一樣，但多一個要知道的地方：開關開著而該 cycle 的日線序列不足 200 根／
+過期／反而比 as-of 新／兩條均線完全相等／那一次 1d 讀失敗（各有一行 WARNING），或本 cycle 根本
+沒有 4h K 線（不留 log，那種 cycle 上游本來就整個拒掉），都會落在「沒有 `macro_trend` 段」的桶。
+**caveat**：這一段跟 volume profile 不同，它自己要做一次網路讀——所以那次讀要是每個 cycle 都失敗，
+就不會有「一小撮第二個桶」可以看，整個 run 讀起來會跟開關沒開一模一樣。開關到底有沒有開看 run 記下來的
+config，是哪一種失敗看 WARNING；shape 本身回答不了，也不該拿來回答。
 （伺服器上跑著的 run 不受影響：`local.yaml` 整檔優先且不進版控，不會自動拿到這個 key。）
 
 **`context_shape` 只回答「那一段在不在」，回答不了「模型有沒有跟著它走」。** 這是 shape 的設計，

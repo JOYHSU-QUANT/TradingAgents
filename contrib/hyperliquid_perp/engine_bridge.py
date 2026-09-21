@@ -132,7 +132,11 @@ def _warn_dual(log_msg: str, *args: object, stderr: str) -> None:
     cannot silently drift apart. Single-channel warnings exist and are each a
     deliberate exception, not a missed migration: the ``on_blocking_read``
     failure in :func:`_build_context` is log-only (mid-read, no operator
-    moment to interrupt), :func:`_resolve_coin`'s multi-coin notice is
+    moment to interrupt), the macro-trend daily read's failure in the same
+    function is log-only (it degrades one optional prompt section and the
+    cycle goes on; it belongs with the section's other per-cycle WARNINGs in
+    the log, which is where a reader counts them),
+    :func:`_resolve_coin`'s multi-coin notice is
     stderr-only (interactive CLI feedback, not an operational event), and the
     host-vs-exchange clock-skew notice in the freshness guard
     (:func:`~.domains.perp.freshness.freshness_refusal`) is log-only (it fires
@@ -341,16 +345,26 @@ def _build_context(
                 market_data.macro_trend_daily_lookback,
                 end=exchange_time,
             )
-        except ExchangeError:
-            # WARNING, not exception-with-traceback: this is a degraded
-            # optional section, the same event class the module's own three
-            # refusals log, and it must read as one line an operator can count
-            # per cycle rather than as a fault.
+        except ExchangeError as exc:
+            # One line, no traceback: this is a degraded optional section —
+            # the same event class the module's own refusals log — and it must
+            # read as something an operator can count per cycle rather than as
+            # a fault. The exception's TYPE is in the message instead, because
+            # the two classes reaching here are not the same news and the
+            # ``§6.2`` vocabulary this cycle no longer files under cannot tell
+            # them apart: ``ExchangeThrottledError`` is a blip that heals by
+            # itself, while ``MalformedResponseError`` (a misrouted response,
+            # wire drift) recurs every cycle until a human acts. Collapsing
+            # them into one sentence is the defect ``cli/_provider`` exists to
+            # avoid (issue #47), and the type is the cheapest way to keep it
+            # out of this seam too.
             logger.warning(
-                "the %s candle read for the macro-trend section failed; the section is "
-                "omitted for this cycle and the decision proceeds without it",
+                "the %s candle read for the macro-trend section failed (%s: %s); the "
+                "section is omitted for this cycle and the decision proceeds without it — "
+                "this is NOT the switch being off",
                 MACRO_CANDLE_INTERVAL,
-                exc_info=True,
+                type(exc).__name__,
+                exc,
             )
         _between_reads()
 

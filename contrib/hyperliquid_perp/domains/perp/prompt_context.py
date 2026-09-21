@@ -118,6 +118,10 @@ _SHAPE_NOTE = {
 }
 
 
+# The decimal places every percentage in this file is printed to.
+_PCT_PLACES = 2
+
+
 def _num(value, places: int = 2, *, sign: bool = False) -> str:
     """Format a number to ``places`` decimals; ``None`` -> ``n/a``.
 
@@ -214,6 +218,12 @@ _MACRO_ALIGNMENT_WORD = {
 }
 
 
+# The magnitude below which ``_num``'s two decimal places round a percentage
+# to a bare zero. DERIVED from that default rather than written as 0.005, so
+# the two cannot desync if the places ever change.
+_PCT_ROUNDS_TO_ZERO_BELOW = 10 ** -_PCT_PLACES / 2
+
+
 def _signed_pct(value: float) -> str:
     """A signed percentage, never rounded into a bare ``0.00``.
 
@@ -222,16 +232,15 @@ def _signed_pct(value: float) -> str:
     zero, so anything inside half a hundredth renders as ``+0.00%`` — a figure
     that reads as "no gap" on the same line as a word asserting a strict
     ordering. The DTO refuses only a BIT-EXACT tie, so that window is reachable
-    on any cycle near a crossing. Below the threshold the magnitude is stated
-    as the bound it is; the sign still comes from the value, so it cannot
-    disagree with the direction word beside it.
+    on any cycle near a crossing. The sign always comes from the value, so it
+    cannot disagree with the direction word beside it.
     """
-    if 0 < abs(value) < 0.005:
-        # Two significant figures rather than two decimal places, so the value
-        # keeps its magnitude however small it is (``+1.2e-05``) instead of
-        # collapsing to a zero it is not.
+    if 0 < abs(value) < _PCT_ROUNDS_TO_ZERO_BELOW:
+        # Two significant FIGURES rather than two decimal places, so the value
+        # keeps its own magnitude however small it is (``+1.2e-05``) instead
+        # of collapsing to a zero it is not.
         return f"{value:+.2g}"
-    return _num(value, sign=True)
+    return _num(value, places=_PCT_PLACES, sign=True)
 
 
 def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
@@ -263,7 +272,7 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         # ``state_age_capped`` is False exactly when this date exists
         # (``MacroTrend`` enforces the equivalence), so the narrowing is the
         # DTO's guarantee rather than an assumption of this branch.
-        assert macro.last_change_date is not None
+        assert macro.run_started_date is not None
         # "Began on", not "changed on". The bar before this run carried
         # something else — usually the opposite alignment, occasionally an
         # exact tie between the two averages — and "changed" would read as a
@@ -271,7 +280,7 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         # measured is where this run starts.
         held = (
             f"  Held for: {bars} daily {unit} (this run began on the bar dated "
-            f"{macro.last_change_date.isoformat()})"
+            f"{macro.run_started_date.isoformat()})"
         )
     return [
         # Two facts in the header. The WINDOW, because every "held for" reading
@@ -304,18 +313,26 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         # shown (paper-BTC-2: 27 of 48 decisions at exactly the advertised bar).
         f"  Latest daily close vs SMA({slow}): {_signed_pct(macro.close_vs_slow_pct)}%",
         # Six disclosures, each of which a reader would otherwise have to
-        # assume: which candles these came from, what the short-window
-        # counterpart in this same prompt is, that the measure lags by
+        # assume: which candles these came from, that this prompt's OTHER
+        # trend reading is independent of this one, that the measure lags by
         # construction, how far behind the mark it can be, that gaps in the
         # daily series are not checked (the producer says the same in its
         # docstring), and that nothing here is wired to a decision — closing
         # with how to weigh it, which is the one thing the model has to decide
-        # and the one thing the other five sentences do not answer.
+        # and the one thing the six before it do not answer.
+        #
+        # The regime clause says only that the two are independent and can
+        # disagree. It deliberately does NOT describe how the regime is built:
+        # with ``indicators: []`` (a legal, deliberate configuration)
+        # ``classify_regime`` returns its RANGING default from no indicators
+        # at all, so any sentence here about "built from the 4h bars" would be
+        # false on that config — and one of its three outcomes, VOLATILE, is
+        # an ATR reading with no counterpart in this block at all.
         f"  Basis: two simple moving averages over closed daily candles, fetched as their "
         f"own series — the candles and indicators above are {candle_interval} bars and are "
-        f"not affected by this section. The computed regime near the top of this context is "
-        f"the short-window counterpart of this block, built from those {candle_interval} "
-        f"bars; the two describe different spans and can disagree. A lagging measure by "
+        f"not affected by this section. This prompt's other trend reading is the "
+        f"'Regime (computed)' line near the top; it is not derived from this block, it "
+        f"covers far less history, and the two can disagree. A lagging measure by "
         f"construction: it describes an alignment that has already formed, not one that is "
         f"starting. The figures date to the newest closed daily bar, so this whole block "
         f"can be up to a day behind the Mark above. Gaps in the daily series are not "
@@ -609,11 +626,20 @@ def context_shape(ctx: PerpMarketContext) -> str:
     on and an occasional skip will show those cycles as a small second bucket
     next to the WARNING that explains them.
 
-    The ``macro_trend`` token reads the same way: the builder leaves the
-    field ``None`` both when the lookback is configured off and on a cycle
-    whose daily series was unusable (too short, stale, or two exactly equal
-    averages — each logged as a WARNING by ``macro_trend``), and that cycle's
-    prompt really had no such section.
+    The ``macro_trend`` token reads the same way, with one caveat worth
+    knowing before it is used to segment a run. The builder leaves the field
+    ``None`` when the lookback is configured off AND on every cycle whose
+    section could not be built: too few daily bars, a stale daily feed, a
+    daily bar ahead of this context, two exactly equal averages (each logged
+    by ``macro_trend``), a failed ``1d`` read (logged by
+    ``engine_bridge``), or no ``4h`` candles at all — that last one silently,
+    since such a cycle is refused wholesale upstream anyway.
+
+    The caveat: unlike the profile, this section depends on a NETWORK read of
+    its own, so a read that fails every cycle yields no second bucket to
+    notice — it reads exactly like the switch being off. The switch's real
+    state is in the run's recorded config, and the WARNINGs say which cause
+    it was; the shape alone cannot, and is not meant to.
 
     The ``autoresearch`` token reads the same way, and it is the reason the
     research signal fails closed by section rather than by row: a cycle whose

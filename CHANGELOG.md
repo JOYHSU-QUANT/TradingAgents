@@ -16,8 +16,8 @@ Breaking changes within the 0.x line are called out explicitly.
   `4h` series — the slower of those two averages spans about eight days, so
   the widest thing it could see was a swing. The new section reports the daily SMA(50)/SMA(200)
   pair: which way round they sit, how far apart as a percentage of the slow
-  one, how many daily bars have carried that alignment (with the date it
-  changed, when the window can see it), and where the latest daily close sits
+  one, how many daily bars have carried that alignment (with the date that run
+  began, when the window reaches back far enough to see it), and where the latest daily close sits
   against SMA(200).
 
   **A state, never an event.** No "a crossing happened" flag and none of the

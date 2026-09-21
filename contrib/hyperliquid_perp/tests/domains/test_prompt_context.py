@@ -727,13 +727,17 @@ def test_the_basis_line_closes_by_saying_how_to_weigh_the_section():
     assert "Treat it as trend context, not as an entry or exit signal." in basis
 
 
-def test_the_basis_line_names_the_regime_as_this_blocks_short_window_counterpart():
+def test_the_basis_line_names_the_regime_line_as_an_independent_reading():
     # The two can disagree in the same prompt — 4h EMA(20)/EMA(50) against
     # daily SMA(50)/SMA(200) — and that disagreement is arguably the point of
     # the feature. Saying only that they come from different series is a
     # statement about computation, not about how to read the conflict.
+    #
+    # What the clause must NOT do is describe how the regime is built: with
+    # ``indicators: []`` it is the RANGING default computed from nothing.
     basis = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[5]
-    assert "short-window counterpart" in basis
+    assert "'Regime (computed)' line near the top" in basis
+    assert "not derived from this block" in basis
     assert "can disagree" in basis
 
 

@@ -53,11 +53,13 @@ MIN_VOLUME_PROFILE_WINDOW = 12
 
 # The macro trend's two periods and the config band around them. Here, not in
 # ``domains/perp/macro_trend.py``, for the reason the volume profile's
-# vocabulary is: THREE layers read these and none may import another's module —
-# ``market_data_config`` enforces the band at config load without importing a
-# compute module, ``domains/perp/macro_trend`` computes the averages, and
-# ``domains/perp/schema`` pins ``MacroTrend``'s two period fields to them at
-# construction (that module sits below the producer, which imports it).
+# vocabulary is: three layers read these, and the one that would have to own
+# them sits ABOVE two of its readers. ``market_data_config`` enforces the band
+# at config load and must not import a compute module; ``domains/perp/schema``
+# pins ``MacroTrend``'s two period fields at construction and cannot import
+# the producer, because the producer imports IT; and
+# ``domains/perp/macro_trend`` computes the averages. Only a module below all
+# three can be read by all three.
 #
 # The floor is not an independent tuning choice — it IS the slow period,
 # because a window holding fewer bars than that has no SMA(200) at any position
@@ -76,8 +78,12 @@ MIN_MACRO_TREND_LOOKBACK = 200
 # lands in the unrefreshed window after the last kill-switch refresh; and above
 # roughly 20,700 the adapter's ``start = end_ms - (lookback + 1) * 86_400_000``
 # goes negative and sends a nonsensical ``startTime`` to ``candleSnapshot``.
-# Neither crashes, which is exactly why an operator would never find out. 2000
-# is ~5.5 years of daily bars — far past any use this section has.
+# Neither crashes, which is exactly why an operator would never find out.
+#
+# 2000 is ~5.5 years of daily bars. A wider window would genuinely see further
+# back — the run length this section can date grows with it — so the ceiling
+# is a judgement that nothing this prompt does needs more than 5.5 years of
+# alignment history, not a claim that more would buy nothing.
 MAX_MACRO_TREND_LOOKBACK = 2000
 
 # The rest of the volume profile's vocabulary — the bucket resolution, the

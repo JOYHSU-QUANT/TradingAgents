@@ -207,7 +207,10 @@ def build_market_context(
     by the caller — from which the macro-trend section is computed
     (:mod:`.macro_trend`). ``None`` means the feature is off and the section
     is absent with no log line; a sequence means it is on, and the module's
-    own refusals then apply (and log). REQUIRED with no default, the last of
+    own refusals then apply (and log) — with ONE exception, below: a context
+    built without ``candles`` drops the section silently however good the
+    daily series is, because there is no closed bar to judge that series
+    against. REQUIRED with no default, the last of
     the four kwargs on that rule in this signature and for the same reason as
     the others: forgetting it would silently produce a context with no macro
     section and a ``context_shape`` quietly missing its token, with nothing
@@ -257,6 +260,13 @@ def build_market_context(
     # so the one degraded context where every other number is missing would
     # carry a full, confident, internally consistent macro block. Same rule
     # the research signal follows, for the same reason.
+    #
+    # Silent, unlike the producer's refusals, and that is the deliberate part:
+    # a context with no candles is refused wholesale upstream (the warm-up
+    # guard owns the empty window), so a WARNING here would fire on every
+    # cycle of a run that is already failing loudly for a better-named
+    # reason. The docstring above says so, because the silence is otherwise
+    # indistinguishable from the switch being off.
     macro_trend = (
         None
         if daily_candles is None or not candles

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Final
@@ -956,11 +956,11 @@ class MacroTrend:
 
     ``state_age_capped`` says the run fills every bar of the window that has
     both averages, so there is nothing before it to have begun from: the run
-    length is then a lower bound on its true age and ``last_change_date`` is
+    length is then a lower bound on its true age and ``run_started_date`` is
     ``None``. All three statements are the same statement, and all three are
     checked against each other below.
 
-    ``last_change_date`` names the bar the run BEGAN on — the first bar
+    ``run_started_date`` names the bar the run BEGAN on — the first bar
     carrying the current alignment — and nothing more. The bar before it
     carried something else, which is usually the opposite alignment and
     occasionally an exact tie; those are not the same event, so the renderer
@@ -974,7 +974,7 @@ class MacroTrend:
       confirmed signal.
     - **bar continuity.** The producer does not check that the daily series
       has no missing bars (:mod:`.macro_trend` says so in the prompt as well
-      as in its docstring), so ``as_of_date - last_change_date`` is NOT
+      as in its docstring), so ``as_of_date - run_started_date`` is NOT
       ``bars_in_state - 1`` days in general and is not checked to be. Only
       the two facts that survive a gap are checked below.
     """
@@ -985,7 +985,7 @@ class MacroTrend:
     separation_pct: float
     bars_in_state: int
     state_age_capped: bool
-    last_change_date: date | None
+    run_started_date: date | None
     as_of_date: date
     latest_close: Decimal
     close_vs_slow_pct: float
@@ -1098,7 +1098,7 @@ class MacroTrend:
         # ``datetime`` IS a ``date`` subclass, so the annotations alone let one
         # through — and it renders as a full ISO timestamp on a line labelled a
         # date. ``as_of_date`` is checked unconditionally, NOT inside the
-        # ``last_change_date is not None`` block below: on a capped run that
+        # ``run_started_date is not None`` block below: on a capped run that
         # block never runs, so a missing as-of would reach the renderer and
         # fail there, on the one branch that has no date of its own to print.
         if type(self.as_of_date) is not date:
@@ -1106,38 +1106,38 @@ class MacroTrend:
                 f"MacroTrend.as_of_date must be a plain date, got "
                 f"{type(self.as_of_date).__name__} ({self.as_of_date!r})"
             )
-        if self.last_change_date is not None and type(self.last_change_date) is not date:
+        if self.run_started_date is not None and type(self.run_started_date) is not date:
             raise ValueError(
-                f"MacroTrend.last_change_date must be a plain date, got "
-                f"{type(self.last_change_date).__name__} ({self.last_change_date!r})"
+                f"MacroTrend.run_started_date must be a plain date, got "
+                f"{type(self.run_started_date).__name__} ({self.run_started_date!r})"
             )
-        if self.state_age_capped != (self.last_change_date is None):
+        if self.state_age_capped != (self.run_started_date is None):
             raise ValueError(
                 f"MacroTrend.state_age_capped ({self.state_age_capped}) must say exactly "
-                f"what last_change_date ({self.last_change_date}) does: the flag means the "
+                f"what run_started_date ({self.run_started_date}) does: the flag means the "
                 f"window could not date the change, which is the same statement as having "
                 f"no date"
             )
-        if self.last_change_date is not None:
+        if self.run_started_date is not None:
             # The two date facts that survive an unchecked gap in the series
-            # (see the class docstring). A change dated AFTER the newest bar
-            # is impossible however the bars are spaced...
-            if self.last_change_date > self.as_of_date:
+            # (see the class docstring). A run cannot START after the newest
+            # bar, however the bars are spaced...
+            if self.run_started_date > self.as_of_date:
                 raise ValueError(
-                    f"MacroTrend.last_change_date ({self.last_change_date}) is after "
-                    f"as_of_date ({self.as_of_date}) — the alignment cannot have changed "
-                    f"on a bar the window does not reach"
+                    f"MacroTrend.run_started_date ({self.run_started_date}) is after "
+                    f"as_of_date ({self.as_of_date}) — a run cannot begin on a bar the "
+                    f"window does not reach"
                 )
-            # ...and a run of ONE is the newest bar itself, so the change is
-            # dated to that bar. Any longer run says nothing checkable here:
-            # with bars possibly missing, the calendar distance between the two
-            # dates is only bounded below, and this DTO does not know whether a
-            # bar is missing.
-            if self.bars_in_state == 1 and self.last_change_date != self.as_of_date:
+            # ...and a run of ONE is the newest bar itself, so that is the bar
+            # it began on. Any longer run says nothing checkable here: with
+            # bars possibly missing, the calendar distance between the two
+            # dates is only bounded below, and this DTO does not know whether
+            # a bar is missing.
+            if self.bars_in_state == 1 and self.run_started_date != self.as_of_date:
                 raise ValueError(
-                    f"MacroTrend.bars_in_state is 1, so the alignment changed on the newest "
-                    f"bar ({self.as_of_date}), but last_change_date says "
-                    f"{self.last_change_date}"
+                    f"MacroTrend.bars_in_state is 1, so the run began on the newest bar "
+                    f"({self.as_of_date}), but run_started_date says "
+                    f"{self.run_started_date}"
                 )
 
 
@@ -1665,26 +1665,6 @@ class PerpMarketContext:
                 f"PerpMarketContext.research_signal is for {self.research_signal.coin!r}, but "
                 f"the context is for {self.coin!r}; a prompt must not print another market's rule"
             )
-        if self.macro_trend is not None and self.macro_trend.as_of_date > self.as_of.date():
-            # The one relational fact about the macro trend that needs no
-            # clock, checked here for the reason the research signal's coin
-            # identity is (see above): the reader is not the only way a
-            # context is built. The producer's full freshness rule needs
-            # ``as_of_ms`` and the series and stays there; this half does not,
-            # and without it a fixture-built context prints "newest daily bar
-            # dated 2027-01-01" under an "As of: 2026-09-21" header, with
-            # every bounds check green and a basis line promising the block is
-            # at most a day behind.
-            #
-            # One-sided on purpose. The other side — how far BEHIND the daily
-            # bar may be — is the producer's 24h bound, and it is measured
-            # against the newest bar's CLOSE, which this type does not carry;
-            # re-deriving it from the date alone would refuse legal contexts.
-            raise ValueError(
-                f"PerpMarketContext.macro_trend is dated {self.macro_trend.as_of_date}, "
-                f"after the context's own as_of ({self.as_of.date()}); a daily bar cannot "
-                f"close after the bar this context is dated to"
-            )
         if self.candle_count < 0:
             raise ValueError(
                 f"PerpMarketContext.candle_count must be >= 0, got {self.candle_count}"
@@ -1710,6 +1690,35 @@ class PerpMarketContext:
         # construction.
         if self.as_of.tzinfo is None:
             raise ValueError("PerpMarketContext.as_of must be timezone-aware (UTC)")
+        # The one relational fact about the macro trend that needs no clock,
+        # checked here for the reason the research signal's coin identity is
+        # (see above): the reader is not the only way a context is built. The
+        # producer's full freshness rule needs ``as_of_ms`` and the series and
+        # stays there; this half does not, and without it a fixture-built
+        # context prints "newest daily bar dated 2027-01-01" under an "As of:
+        # 2026-09-21" header, with every bounds check green and a basis line
+        # promising the block is at most a day behind.
+        #
+        # AFTER the tz check above, and converted, because both matter: a
+        # naive ``as_of`` must get the tz sentence rather than this one, and a
+        # tz-AWARE non-UTC ``as_of`` (awareness is required here, UTC is not)
+        # names a different calendar day than the instant it represents —
+        # 2024-01-01 22:00-05:00 is 2024-01-02 03:00Z, and comparing local
+        # dates would refuse a legal context. Hand-built contexts are this
+        # guard's only audience, so that is precisely the case to get right.
+        #
+        # One-sided on purpose. The other side — how far BEHIND the daily bar
+        # may be — is the producer's 24h bound, measured against the newest
+        # bar's CLOSE, which this type does not carry; re-deriving it from the
+        # date alone would refuse legal contexts.
+        if self.macro_trend is not None:
+            as_of_utc = self.as_of.astimezone(timezone.utc).date()
+            if self.macro_trend.as_of_date > as_of_utc:
+                raise ValueError(
+                    f"PerpMarketContext.macro_trend is dated {self.macro_trend.as_of_date}, "
+                    f"after the context's own as_of ({as_of_utc} UTC); a daily bar cannot "
+                    f"close after the bar this context is dated to"
+                )
         # Same rule for the exchange clock: the guard subtracts the two, and a
         # naive/aware pair raises deep inside the freshness check instead of here.
         if self.exchange_time is not None and self.exchange_time.tzinfo is None:

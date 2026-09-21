@@ -152,9 +152,10 @@ class MarketDataConfig:
         if lookback > MAX_MACRO_TREND_LOOKBACK:
             raise ValueError(
                 f"'market_data.macro_trend_daily_lookback' must be at most "
-                f"{MAX_MACRO_TREND_LOOKBACK}, got {lookback}; beyond that the per-cycle "
-                f"cost of the averages grows without buying any more history the section "
-                f"can report"
+                f"{MAX_MACRO_TREND_LOOKBACK} (~5.5 years of daily bars), got {lookback}; "
+                f"a wider window would see further back, but the per-cycle cost of the "
+                f"averages lands on the live tick and nothing this section reports needs "
+                f"that much alignment history"
             )
         # Same rule as the window above, for the same reason: every way of
         # getting this key wrong fails SILENTLY at runtime — the prompt simply

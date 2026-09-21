@@ -2489,8 +2489,13 @@ def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monk
     config = {"market_data": {"macro_trend_daily_lookback": 260}}
 
     # Both shapes the 1d read really fails as: the venue refusing to serve it,
-    # and the venue answering with something the mapper cannot use.
-    for failure in (ExchangeThrottledError("429"), MalformedResponseError("bad candles")):
+    # and the venue answering with something the mapper cannot use. They are
+    # NOT the same news — a throttle heals by itself, a misrouted or drifted
+    # response recurs every cycle until a human acts — so the line has to tell
+    # them apart. Collapsing them is the defect cli/_provider exists to avoid
+    # (issue #47), and this cycle no longer passes through that classifier.
+    seen = []
+    for failure in (ExchangeThrottledError("429 slow down"), MalformedResponseError("bad echo")):
         boom[:] = [failure]
         handed.clear()
         caplog.clear()
@@ -2498,13 +2503,22 @@ def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monk
             ctx, _ = bridge_mod._build_context(config, "BTC", position=None)
         # The cycle produced a context — it did not raise.
         assert ctx is not None
-        # ...with the section absent, exactly as the three compute refusals
-        # leave it, and one WARNING naming which read it was.
+        # ...with the section absent, exactly as the compute refusals leave
+        # it, and one WARNING naming which read it was.
         assert handed["daily_candles"] is None
         logged = [r.getMessage() for r in caplog.records if "macro-trend" in r.getMessage()]
         assert len(logged) == 1, logged
         assert "1d" in logged[0]
         assert "the decision proceeds without it" in logged[0]
+        # The state it leaves behind is the same one "switch off" leaves, and
+        # nothing downstream can tell them apart — so the line says so.
+        assert "NOT the switch being off" in logged[0]
+        assert type(failure).__name__ in logged[0]
+        assert str(failure) in logged[0]
+        seen.append(logged[0])
+    # And the two lines really are different text, not one template that
+    # happens to mention a type.
+    assert seen[0] != seen[1]
 
 
 def test_no_candles_means_no_daily_read_at_all(monkeypatch):

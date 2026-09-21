@@ -23,7 +23,7 @@ import contextlib
 import dataclasses
 import json
 from collections.abc import Callable
-from datetime import date
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -285,10 +285,15 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
         lambda d: ("BTC", d["curr_date"], 90),
         "BTC treasury holdings",
     ),
+    # live_only: both endpoints serve only the present, so a past analysis date
+    # is answered with the withheld notice before the vendor is asked at all
+    # (date_window.is_past_analysis_date) - the same lane the fundamentals
+    # profile rows take.
     ("get_whale_positions", "hyperliquid_stats"): _point(
         hyperliquid_whales.get_whale_positions_data,
         lambda d: ("BTC", d["curr_date"]),
         "whale positioning",
+        live_only=True,
     ),
 }
 
@@ -396,8 +401,21 @@ def not_refused(monkeypatch, reached, row, **dates):
         # One reading of the clock for both sides: the dates handed to the
         # getter and the today the withhold guard compares them with, so a
         # run crossing midnight cannot withhold a date computed as today.
-        today = date.today()
+        #
+        # UTC, and EVERY clock the withholding lanes read. ``date.today()`` is
+        # local, while the whale vendor derives its today from its own
+        # ``_utc_now``: west of UTC the two name different days, so the lane
+        # would hand the getter a local "today" that guard reads as past and
+        # withhold it - green in a UTC or UTC+n runner, red further west.
+        # Patching one clock and computing the dates from another is the bug
+        # this comment exists to prevent, so both are pinned to one value.
+        today = datetime.now(timezone.utc).date()
         monkeypatch.setattr(date_window, "get_current_date", today.isoformat)
+        monkeypatch.setattr(
+            hyperliquid_whales,
+            "_utc_now",
+            lambda: datetime(today.year, today.month, today.day, 12, tzinfo=timezone.utc),
+        )
         dates = {name: _as_live_date(value, today) for name, value in dates.items()}
     if row.judged_after_fetch:
         served = row.serve(monkeypatch)

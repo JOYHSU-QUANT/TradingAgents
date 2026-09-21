@@ -10,6 +10,50 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Live-only data is WITHHELD on a past analysis date, by one shared rule
+  (`date_window.is_past_analysis_date`)** - previously the codebase gave two
+  answers to one question. The Deribit chain withheld its figures for any
+  `curr_date` before today, arguing in its docstring that "a prose warning is
+  not an auditable guard"; the whale-positioning vendor rendered its figures
+  with a warning beside them. Both serve pure present state (an options chain,
+  open positions), so there was no principled difference - only two authors.
+
+  The withholding rule now has one home, which also documents WHY the test is
+  "earlier than the clock" rather than "different from it" (callers deriving
+  `curr_date` from a local clock sit a few hours ahead of UTC east of Greenwich;
+  a live figure is then no later than the analysis date, which is not lookahead,
+  and refusing it would withhold these vendors' main signal for the first hours
+  of every local day). The clock stays the CALLER's - passed in rather than read
+  inside - so a vendor that took `now` once for its own windowing cannot
+  straddle midnight and disagree with itself. `withhold_live_profile` (the
+  fundamentals lane) and Deribit both now read the shared rule; each keeps its
+  own notice, since what is missing and what the reader can do about it differ.
+
+  Behaviour change: `get_whale_positions` for a date before today returns a
+  withheld notice with no figures, where it previously returned the full report
+  plus a disclosure line. The paper deployment always runs with today's date, so
+  this changes nothing there; it bites backtests, which is the point. The sweep
+  is skipped entirely on that path rather than spent to produce a notice.
+
+- **The shipped-off declaration moved to the suite that owns shipped defaults**
+  and now sweeps EVERY registered category rather than only the ones taking a
+  date, and reads the config through `is_category_disabled` so a tool-level
+  `tool_vendors` entry of "none" is visible too (the previous reading saw only
+  the category level; `tool_vendors` ships empty, which is exactly when a
+  narrower reading goes unnoticed). Measured, both sweeps cover the same twelve
+  categories today, so this is future-proofing plus the tool-level axis rather
+  than a gap being closed.
+
+  It keeps its two-way self-expiry (an undeclared category switched off fails;
+  a declared one whose cutover flipped it on fails until the name is removed)
+  and gains two locks: no category may ship half-disabled, and every declared
+  category must never reach its vendor. That last one had to be written twice:
+  the first version asserted only that the router answered `DATA_UNAVAILABLE`,
+  which these categories being OPTIONAL means is also what a vendor that ran
+  and raised produces - it passed with the vendor flipped on and the raiser
+  demonstrably running. Asserting the impl was never called is what
+  discriminates.
+
 - **Synced upstream TauricResearch/TradingAgents v0.3.0 -> v0.4.2** (47 commits,
   `85946c2`..`be952b8`; the first sync since the fork). `main` was
   fast-forwarded to upstream; this merge carries upstream's `tradingagents/`

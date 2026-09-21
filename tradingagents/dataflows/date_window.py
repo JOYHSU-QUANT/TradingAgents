@@ -32,6 +32,42 @@ def in_window(pub_dt: datetime | None, start_dt: datetime, end_dt: datetime) -> 
     return end >= datetime.now(timezone.utc) - timedelta(days=1)
 
 
+def is_past_analysis_date(curr_date: str | None, today: str) -> bool:
+    """Whether ``curr_date`` names a date BEFORE ``today``: the backtest lane.
+
+    THE FAMILY POLICY for a live-only figure — one a vendor can only serve as
+    of the present, because its endpoint takes no date: an options chain, an
+    open-position snapshot, a company profile. On a past analysis date such a
+    figure is future information, and it is WITHHELD rather than served with a
+    warning beside it. A warning is not a guard: whether it holds depends on
+    the model choosing to obey it, nothing in the run records whether it did,
+    and a downstream summary can drop the sentence while keeping the number.
+    Each vendor writes its own notice — what is missing and why differs — but
+    none of them decides the rule.
+
+    The test is "earlier than the clock", not "different from it". Callers
+    derive ``curr_date`` from a local clock (``cli/main.py`` does), so east of
+    UTC a run routinely sits a few hours AHEAD of the UTC date; the live figure
+    is then no later than the analysis date, which is not lookahead at all, and
+    refusing it would withhold these vendors' main signal for the first hours
+    of every local day. A date far enough ahead to be implausible is a
+    different question, and one each vendor answers for itself.
+
+    ``today`` is passed in rather than read here so the vendor keeps ONE clock:
+    a boundary that took ``now`` for its own windowing and then let this read a
+    second one could straddle midnight and disagree with itself. A ``curr_date``
+    that is not a usable date is not this guard's to answer — the getter's own
+    date refusal names it — so it reads as "not past" and the call proceeds.
+    """
+    if not curr_date:
+        return False
+    # Judged as a DATE, not as a string: compared raw, a non-zero-padded
+    # "2026-6-5" sorts after "2026-09-15", and a June backtest would be served
+    # today's figures.
+    as_of = normalize_iso_date(curr_date)
+    return as_of is not None and as_of < today
+
+
 def withhold_live_profile(curr_date: str | None, label: str) -> str | None:
     """Notice to serve instead of a live-only company profile, or None to serve it.
 
@@ -41,20 +77,16 @@ def withhold_live_profile(curr_date: str | None, label: str) -> str | None:
     one into a run dated in the past leaks post-decision information (#1300).
     Every fundamentals vendor withholds on this rule, so switching between them
     cannot reintroduce the leak.
+
+    The rule itself is :func:`is_past_analysis_date` above, shared with the
+    other live-only vendors; what is specific here is the notice, which names
+    the fields that move and where point-in-time ones can be had instead.
     """
-    if not curr_date:
-        return None
-    # Judged as a DATE, not as a string: compared raw, a non-zero-padded
-    # "2026-6-5" sorts after "2026-09-15" and a June backtest would be served
-    # today's profile. A value that is not a date at all is not this guard's
-    # to answer - the getter's own date refusal names it.
-    as_of = normalize_iso_date(curr_date)
-    if as_of is None:
-        return None
     today = get_current_date()
-    if as_of >= today:
+    if not is_past_analysis_date(curr_date, today):
         return None
-    curr_date = as_of
+    # Non-None because the guard above answers True only for a usable date.
+    curr_date = normalize_iso_date(curr_date)
     return (
         # The label is the caller's own argument coming back into text the
         # model reads, so it takes the argument guard like every other

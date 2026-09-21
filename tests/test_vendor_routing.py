@@ -1452,3 +1452,97 @@ def test_both_fundamentals_vendors_end_a_library_bug_the_same_way(vendor):
     with _chain("get_fundamentals", {vendor: _raises(KeyError("Close"))}):
         out = interface.route_to_vendor("get_fundamentals", "AAPL", "2026-06-01")
     assert out == "Error retrieving fundamentals for AAPL: 'Close'"
+
+
+# Categories whose vendor ships deliberately as ``none``, awaiting the dated
+# server-side flip that turns them on - the pattern ``options_data``
+# (2026-08-12) and the two SoSoValue categories (2026-09-02) each went through.
+# A keyless vendor merged ON changes a running deployment's analyst input
+# surface the moment the code lands, with no server-side action to attribute
+# the change to; shipping off and flipping on a named date is that action.
+#
+# Declared rather than derived. "Exempt whatever is currently off" would make
+# the lock below pass VACUOUSLY for a category someone switched off by
+# accident, which is the accident it exists for.
+SHIPPED_OFF_CATEGORIES = {"whale_positioning"}
+
+
+def _shipped_off_categories():
+    """Categories the shipped config disables, read the way the binder reads it.
+
+    Through ``is_category_disabled``, not ``get_vendor(category)``: the gate the
+    analysts actually consult takes BOTH axes, and a tool-level ``tool_vendors``
+    entry of "none" disables a tool while the category-level lookup still names
+    a vendor. ``tool_vendors`` ships empty today, so the two agree - which is
+    exactly when a narrower reading goes unnoticed.
+
+    A category counts as off only when EVERY tool of it is: one tool disabled
+    out of two is a shape nobody has declared, and the sibling test refuses it
+    rather than letting it round down to either answer.
+    """
+    return {
+        category
+        for category, info in interface.TOOLS_CATEGORIES.items()
+        if all(interface.is_category_disabled(category, m) for m in info["tools"])
+    }
+
+
+@pytest.mark.unit
+def test_exactly_the_declared_categories_ship_off():
+    """The shipped defaults match the declaration, in both directions.
+
+    Self-expiring: a category switched off without being declared grows the set
+    and fails, and a declared one whose dated cutover has since flipped it on
+    shrinks the set and fails until the name is removed - so the exemption
+    cannot outlive the reason for it.
+
+    Over EVERY registered category rather than only the ones taking a date.
+    Measured, the two sweeps cover the same twelve categories today - every
+    category currently has at least one dated tool - so this is future-proofing
+    against a category whose tools take no date, plus the tool-level axis
+    ``_shipped_off_categories`` reads, not a gap being closed.
+    """
+    assert _shipped_off_categories() == SHIPPED_OFF_CATEGORIES
+
+
+@pytest.mark.unit
+def test_no_category_ships_half_disabled():
+    """No category has some tools off and some on.
+
+    That shape would make "is this category shipped off" unanswerable, and the
+    declaration above would round it to whichever side the reading took.
+    """
+    for category, info in interface.TOOLS_CATEGORIES.items():
+        disabled = {m for m in info["tools"] if interface.is_category_disabled(category, m)}
+        assert disabled in (set(), set(info["tools"])), category
+
+
+@pytest.mark.unit
+def test_a_shipped_off_category_never_reaches_its_vendor():
+    """Every declared category is inert, not merely configured off.
+
+    The declaration's whole claim is that nothing of the vendor runs until the
+    dated flip; a category that still reached its impl would change a running
+    deployment's behaviour on merge, which is what shipping off exists to
+    prevent.
+
+    Asserting the sentinel is NOT enough, and an earlier version of this test
+    did only that: these categories are optional, so the router converts any
+    impl failure into the same ``DATA_UNAVAILABLE`` text - it passed with the
+    vendor flipped on and the raiser demonstrably running. What discriminates
+    is that the impl was never called.
+    """
+    for category in SHIPPED_OFF_CATEGORIES:
+        for method in interface.TOOLS_CATEGORIES[category]["tools"]:
+            calls = []
+            impls = dict.fromkeys(
+                interface.VENDOR_METHODS[method],
+                # Bound as a default: a bare closure over the loop variable
+                # would record into whichever list the LAST iteration made,
+                # so a vendor that ran in an earlier one would go unnoticed.
+                lambda *a, _calls=calls, **k: _calls.append(a),
+            )
+            with mock.patch.dict(interface.VENDOR_METHODS, {method: impls}):
+                out = interface.route_to_vendor(method, "BTC", "2026-06-05")
+            assert calls == [], f"{method} ran while {category} ships off"
+            assert "DATA_UNAVAILABLE" in out

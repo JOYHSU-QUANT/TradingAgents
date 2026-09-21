@@ -206,14 +206,14 @@ def _build_context(
 ) -> tuple[PerpMarketContext, HyperliquidClient]:
     """Fetch market data and assemble the :class:`PerpMarketContext` for ``coin``.
 
-    ``on_blocking_read`` is called between the network reads below. It exists for
-    ONE caller — the live loop, where this runs on the single-threaded tick and
-    the five reads here (constructing the client fetches perp meta, then
-    snapshot, the exchange clock, candles, funding — a sixth, the daily candle
-    series, only when ``market_data.macro_trend_daily_lookback`` is on) are the
-    longest run of
-    back-to-back REST calls in the system, each riding the full
-    ``network_timeout_s``. Left unrefreshed, this chain would set
+    ``on_blocking_read`` is called between the network reads below. It exists
+    for ONE caller — the live loop, where this runs on the single-threaded tick
+    and the reads here are the longest run of back-to-back REST calls in the
+    system, each riding the full ``network_timeout_s``. Five of them always
+    happen (constructing the client fetches perp meta, then snapshot, the
+    exchange clock, candles, funding); a sixth, the daily candle series, only
+    when ``market_data.macro_trend_daily_lookback`` is on.
+    Left unrefreshed, this chain would set
     ``kill_switch._MAX_UNREFRESHED_REST_CALLS`` to its own length — four when
     that constant was last argued, five since the exchange-clock read joined
     (issue #51) — which made the
@@ -311,14 +311,47 @@ def _build_context(
     # length, is what ``_MAX_UNREFRESHED_REST_CALLS`` is reasoned about.
     # Pinned by driving this function in tests/live/test_kill_switch.py, with
     # the switch ON as well as off, rather than claimed here.
+    #
+    # Only with candles in hand, for the reason the research-signal read below
+    # is gated the same way: the macro section's freshness is defined against
+    # a CLOSED BAR, and an empty window has none — ``context_as_of`` would
+    # fall back to the wall clock, against which a daily series cut at the
+    # exchange clock always looks current. The builder refuses that case
+    # outright; not fetching is just not paying for a read whose answer is
+    # already decided.
+    #
+    # Its failures do NOT fail the cycle. Everything else in this chain feeds
+    # the decision, so a read that dies rightly ends the cycle; this one is an
+    # analyst input the module itself documents as "Not a gate" and
+    # "fail-closed as a WHOLE", and honouring that has to include the
+    # transport. Left unguarded, a 429 or a malformed 1d response propagated
+    # out of here and ``cli/_provider`` filed it as ``connection`` /
+    # ``malformed_response`` — a whole 4h cycle reaching no decision, with an
+    # open position carried through unreassessed, because an optional backdrop
+    # could not be drawn. Worse, ``call_sdk``'s message names no endpoint, so
+    # the durable record could not tell that from the candle feed the decision
+    # is actually built on. Caught here rather than inside the adapter: the
+    # adapter cannot know its caller considers this read optional.
     daily_candles = None
-    if market_data.macro_trend_daily_lookback > 0:
-        daily_candles = market.get_candles(
-            coin,
-            MACRO_CANDLE_INTERVAL,
-            market_data.macro_trend_daily_lookback,
-            end=exchange_time,
-        )
+    if candles and market_data.macro_trend_daily_lookback > 0:
+        try:
+            daily_candles = market.get_candles(
+                coin,
+                MACRO_CANDLE_INTERVAL,
+                market_data.macro_trend_daily_lookback,
+                end=exchange_time,
+            )
+        except ExchangeError:
+            # WARNING, not exception-with-traceback: this is a degraded
+            # optional section, the same event class the module's own three
+            # refusals log, and it must read as one line an operator can count
+            # per cycle rather than as a fault.
+            logger.warning(
+                "the %s candle read for the macro-trend section failed; the section is "
+                "omitted for this cycle and the decision proceeds without it",
+                MACRO_CANDLE_INTERVAL,
+                exc_info=True,
+            )
         _between_reads()
 
     # The research radar's handoff document, read AFTER the market reads and

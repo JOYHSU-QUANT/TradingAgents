@@ -2,8 +2,9 @@
 
 Adds the one thing the ``4h`` context cannot express: a multi-month backdrop.
 ``context_builder.classify_regime`` already labels the trend, but it does so
-from EMA(20)/EMA(50) over the ``4h`` series — at this project's 200-candle
-lookback that is about 33 days, so the widest thing it can see is a swing.
+from EMA(20)/EMA(50) over the ``4h`` series — the slower of those two averages
+spans about eight days, so the widest thing it can see is a swing. (The 4h
+FETCH is 200 candles ≈ 33 days; the indicators cut from it see less than that.)
 Two daily averages over 200 bars see the segment that swing sits in.
 
 What is reported is a STATE, never an event. The ordering of the two averages,
@@ -59,7 +60,7 @@ from datetime import date
 from decimal import Decimal, localcontext
 from typing import Final
 
-from ...common.constants import MIN_MACRO_TREND_LOOKBACK
+from ...common.constants import MACRO_FAST_PERIOD, MIN_MACRO_TREND_LOOKBACK
 from ...common.decimal_context import DECIMAL_CONTEXT
 from ...common.instants import from_epoch_ms
 from .schema import Candle, CandleInterval, MacroTrend, derive_macro_alignment
@@ -67,7 +68,6 @@ from .schema import Candle, CandleInterval, MacroTrend, derive_macro_alignment
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "DEFAULT_DAILY_LOOKBACK",
     "MACRO_CANDLE_INTERVAL",
     "MACRO_FAST_PERIOD",
     "MACRO_SLOW_PERIOD",
@@ -75,16 +75,12 @@ __all__ = [
     "compute_macro_trend",
 ]
 
-# The two periods. Here rather than in ``common.constants`` because nothing
-# outside this module and the DTO it builds needs them — the config layer's
-# only rule is the FLOOR, which is the slow period under its config-facing
-# name.
-MACRO_FAST_PERIOD: Final = 50
-# Bound to the config floor rather than written out again: the floor exists
-# BECAUSE a window shorter than the slow period has no slow average at any
-# bar, so the two are one number. ``MacroTrend`` pins its ``slow_period``
-# against the same constant, which is what makes this binding checkable
-# instead of a claim in a comment.
+# The slow period, under this module's own name. Bound to the config floor
+# rather than written out again: the floor exists BECAUSE a window shorter
+# than the slow period has no slow average at any bar, so the two are one
+# number. ``MACRO_FAST_PERIOD`` is imported from the same place for the same
+# reason — ``MacroTrend`` pins BOTH period fields to those constants, which is
+# what makes the binding checkable instead of a claim in a comment.
 MACRO_SLOW_PERIOD: Final = MIN_MACRO_TREND_LOOKBACK
 
 # The interval the daily series is fetched at, derived from the vocabulary
@@ -93,16 +89,6 @@ MACRO_SLOW_PERIOD: Final = MIN_MACRO_TREND_LOOKBACK
 # would be a fetch failure rather than a wrong average, but the vocabulary is
 # still the one place the spelling is decided.
 MACRO_CANDLE_INTERVAL: Final[str] = CandleInterval.D1.value
-
-# The daily history an operator gets by writing
-# ``market_data.macro_trend_daily_lookback: 260``. Not applied as a default
-# anywhere — the *code* default is 0 (feature off); this is the documented
-# starting value for the config file and the tests. 260 = the 200 bars the
-# slow average needs before it exists at all, plus 60 bars over which a change
-# of ordering can actually be SEEN. At the floor (200) the section is still
-# legal and still correct, but there is exactly one bar with both averages, so
-# ``days_in_state`` is always 1 and always capped.
-DEFAULT_DAILY_LOOKBACK: Final = 260
 
 # How far behind the context's own as-of the newest daily bar may be. Daily
 # bars close at 00:00 UTC and so does every sixth 4h bar, so a healthy feed
@@ -144,11 +130,16 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
        than 200 days ago, so the warning then repeats every cycle: that is the
        signal to turn the switch off for that coin, not a fault to fix.
     2. the newest daily bar is more than :data:`MAX_DAILY_CANDLE_AGE_MS` old,
-       or closes AFTER ``as_of_ms``. One check with two bounds. The future
-       side is unreachable from a live fetch — both windows are cut at the
-       same exchange clock — and exists for the paths that do not fetch. A
-       series handed in newest-first also lands here, since its last element
-       is then the oldest bar.
+       or closes AFTER ``as_of_ms``. One check with two bounds, but they are
+       two different faults and the message says which: the first is a daily
+       feed that has stopped publishing, the SECOND is the ``4h`` series
+       lagging, because ``as_of_ms`` is the newest closed ``4h`` bar and not a
+       clock. Both windows being cut at the same exchange clock makes the
+       future side rare, NOT impossible — a tail gap in the ``4h`` series
+       pulls ``as_of_ms`` back below a current daily close while still
+       clearing the freshness guard's own 3-interval tolerance. A series
+       handed in newest-first also lands here, since its last element is then
+       the oldest bar.
     3. the two averages are EXACTLY equal at the newest bar: there is no
        ordering to report.
 
@@ -159,11 +150,16 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
     """
     count = len(daily_candles)
     if count < MACRO_SLOW_PERIOD:
+        # The fix that WORKS in the common case is named first. A coin listed
+        # less than 200 days ago can never satisfy this however high the
+        # lookback goes, and that is the case an operator meets most often —
+        # leading with "raise the lookback" sent them to a setting that cannot
+        # help. The adapter's own short-read WARNING names what was requested.
         logger.warning(
             "macro trend needs %d daily candles for SMA(%d) but only %d are available; "
-            "skipping the macro-trend section for this cycle (raise "
-            "market_data.macro_trend_daily_lookback, or turn it off for a coin with less "
-            "than %d days of history)",
+            "skipping the macro-trend section for this cycle (a coin with less than %d "
+            "days of history can never fill it — turn "
+            "market_data.macro_trend_daily_lookback off for that coin; otherwise raise it)",
             MACRO_SLOW_PERIOD,
             MACRO_SLOW_PERIOD,
             count,
@@ -173,15 +169,33 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
 
     newest = daily_candles[-1]
     age_ms = as_of_ms - newest.close_time
-    if not 0 <= age_ms <= MAX_DAILY_CANDLE_AGE_MS:
+    if age_ms > MAX_DAILY_CANDLE_AGE_MS:
+        # Hours, not raw epoch-ms: this repeats every cycle while a feed is
+        # down, and an operator should not have to convert two 13-digit
+        # integers to learn that it is two days stale. The date is printed for
+        # the same reason.
         logger.warning(
-            "the newest daily candle closed at %d, which is %d ms from the context's as-of "
-            "%d — outside the [0, %d] ms a healthy daily feed sits in; skipping the "
-            "macro-trend section for this cycle",
-            newest.close_time,
-            age_ms,
-            as_of_ms,
-            MAX_DAILY_CANDLE_AGE_MS,
+            "the newest daily candle is dated %s and closed %.1fh before this context's "
+            "as-of, past the %.0fh a healthy daily feed stays within; the daily feed has "
+            "stopped publishing — skipping the macro-trend section for this cycle (turn "
+            "market_data.macro_trend_daily_lookback off if it stays down)",
+            _bar_date(newest).isoformat(),
+            age_ms / 3_600_000,
+            MAX_DAILY_CANDLE_AGE_MS / 3_600_000,
+        )
+        return None
+    if age_ms < 0:
+        # The OTHER fault, and it is not the daily feed's: ``as_of_ms`` is the
+        # newest CLOSED 4h bar, so a negative age means the short series is
+        # behind the daily one. Saying "the daily feed is stale" here would
+        # send an operator to inspect the healthy feed.
+        logger.warning(
+            "the newest daily candle (dated %s) closes %.1fh AFTER this context's as-of — "
+            "and that as-of is the newest CLOSED bar of the context's own shorter series, "
+            "not a clock, so it is that series lagging rather than the daily one; "
+            "skipping the macro-trend section for this cycle",
+            _bar_date(newest).isoformat(),
+            -age_ms / 3_600_000,
         )
         return None
 
@@ -217,10 +231,21 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
         run_start = len(alignments) - 1
         while run_start > 0 and alignments[run_start - 1] is alignment:
             run_start -= 1
-        days_in_state = len(alignments) - run_start
-        # A run reaching the oldest comparable bar means no change of ordering
-        # is visible inside the window: the true age is at least this, and the
-        # bar it started on is not in the window at all.
+        bars_in_state = len(alignments) - run_start
+        # A run reaching the oldest comparable bar has nothing before it to
+        # have begun from, so the window cannot date its start: the length is
+        # then a lower bound and the date is withheld. That is the ONLY cause,
+        # which is what lets ``MacroTrend`` check the flag as an exact
+        # equivalence against the run length.
+        #
+        # The date names the bar the run BEGAN on, and that is all it is
+        # allowed to name. It is the first bar carrying the current alignment,
+        # so the bar before it carried something else — the opposite
+        # alignment, or (rarely, and only on constructed flat prices) an exact
+        # tie. Calling it "the bar the alignment changed on" would read as a
+        # turn in both cases, and in the tie case nothing turned: the pair
+        # merely touched equality between two stretches of the same ordering.
+        # The renderer says "began", which is true of both.
         capped = run_start == 0
         last_change_date = (
             None if capped else _bar_date(daily_candles[oldest_comparable + run_start])
@@ -235,18 +260,22 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
         separation_pct = float((sma_fast - sma_slow) / sma_slow * 100)
         close_vs_slow_pct = float((latest_close - sma_slow) / sma_slow * 100)
 
-    return MacroTrend(
-        sma_fast=sma_fast,
-        sma_slow=sma_slow,
-        alignment=alignment,
-        separation_pct=separation_pct,
-        days_in_state=days_in_state,
-        state_age_capped=capped,
-        last_change_date=last_change_date,
-        as_of_date=_bar_date(newest),
-        latest_close=latest_close,
-        close_vs_slow_pct=close_vs_slow_pct,
-        candle_count=count,
-        fast_period=MACRO_FAST_PERIOD,
-        slow_period=MACRO_SLOW_PERIOD,
-    )
+        # Constructed INSIDE the pinned context: ``MacroTrend`` re-derives both
+        # percentages to check them, and doing that under whatever precision
+        # the thread happens to carry can disagree with what was computed here
+        # — a pure function raising ValueError mid-cycle.
+        return MacroTrend(
+            sma_fast=sma_fast,
+            sma_slow=sma_slow,
+            alignment=alignment,
+            separation_pct=separation_pct,
+            bars_in_state=bars_in_state,
+            state_age_capped=capped,
+            last_change_date=last_change_date,
+            as_of_date=_bar_date(newest),
+            latest_close=latest_close,
+            close_vs_slow_pct=close_vs_slow_pct,
+            candle_count=count,
+            fast_period=MACRO_FAST_PERIOD,
+            slow_period=MACRO_SLOW_PERIOD,
+        )

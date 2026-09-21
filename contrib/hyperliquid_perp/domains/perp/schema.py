@@ -21,6 +21,7 @@ from typing import Final
 
 from ...common.constants import (
     HOLDING_COST_HOURS,
+    MACRO_FAST_PERIOD,
     MAX_EPOCH_MS,
     MIN_EPOCH_MS,
     MIN_MACRO_TREND_LOOKBACK,
@@ -947,23 +948,34 @@ class MacroTrend:
     — never money. Neither is bounded: a young coin's fast average can sit
     multiples above its slow one.
 
-    ``days_in_state`` counts the run of consecutive daily bars, ending at the
+    ``bars_in_state`` counts the run of consecutive daily bars, ending at the
     newest, that carry the CURRENT alignment. It is at least 1 (the newest bar
-    always carries it). ``state_age_capped`` says that run reaches the oldest
-    bar where both averages exist, so the true age is unknown and at least
-    this figure; ``last_change_date`` is then ``None``. The two are equivalent
-    by construction and checked to be.
+    always carries it). It is named in BARS, not days, because the two are not
+    the same here: the producer does not check that the series has no missing
+    bars, so a run of 40 bars can span more than 40 days.
+
+    ``state_age_capped`` says the run fills every bar of the window that has
+    both averages, so there is nothing before it to have begun from: the run
+    length is then a lower bound on its true age and ``last_change_date`` is
+    ``None``. All three statements are the same statement, and all three are
+    checked against each other below.
+
+    ``last_change_date`` names the bar the run BEGAN on — the first bar
+    carrying the current alignment — and nothing more. The bar before it
+    carried something else, which is usually the opposite alignment and
+    occasionally an exact tie; those are not the same event, so the renderer
+    says "began" rather than "changed".
 
     What this type deliberately does NOT carry, and no consumer may infer:
 
     - **any crossing EVENT.** The pair's ordering is a state sampled at the
-      newest bar. ``days_in_state == 1`` is the closest thing to "it changed
+      newest bar. ``bars_in_state == 1`` is the closest thing to "it changed
       on this bar", and it is exactly that — a run length of one — not a
       confirmed signal.
     - **bar continuity.** The producer does not check that the daily series
       has no missing bars (:mod:`.macro_trend` says so in the prompt as well
       as in its docstring), so ``as_of_date - last_change_date`` is NOT
-      ``days_in_state - 1`` days in general and is not checked to be. Only
+      ``bars_in_state - 1`` days in general and is not checked to be. Only
       the two facts that survive a gap are checked below.
     """
 
@@ -971,7 +983,7 @@ class MacroTrend:
     sma_slow: Decimal
     alignment: MacroAlignment
     separation_pct: float
-    days_in_state: int
+    bars_in_state: int
     state_age_capped: bool
     last_change_date: date | None
     as_of_date: date
@@ -993,23 +1005,24 @@ class MacroTrend:
         # percentages against those same averages, the run length against the
         # number of bars that could hold it, and the two date facts a gap in
         # the series cannot break.
-        if self.fast_period <= 0:
-            raise ValueError(f"MacroTrend.fast_period must be > 0, got {self.fast_period}")
-        if self.fast_period >= self.slow_period:
-            raise ValueError(
-                f"MacroTrend.fast_period ({self.fast_period}) must be < slow_period "
-                f"({self.slow_period}) — the fast average is the shorter one"
-            )
-        # Pinned to the producer's own period, the way ``VolumeProfile``
-        # pins its ``bucket_count`` to the producer's grid. The constant is
-        # BOTH the slow period and the config floor (see its definition), so
-        # this check is what keeps those two readings one number rather than
-        # two that could drift apart silently.
-        if self.slow_period != MIN_MACRO_TREND_LOOKBACK:
-            raise ValueError(
-                f"MacroTrend.slow_period must be {MIN_MACRO_TREND_LOOKBACK} "
-                f"(the producer's slow period), got {self.slow_period}"
-            )
+        # BOTH periods pinned to the producer's own, the way ``VolumeProfile``
+        # pins its ``bucket_count`` to the producer's grid — and for a sharper
+        # reason here: these two numbers are printed as LABELS on the averages
+        # ("SMA(50)", "SMA(200)", five times in the block), and nothing else
+        # stored on this type could contradict a wrong one. A ``fast_period``
+        # of 7 beside a genuine 50-bar average renders five references to a
+        # period that was never computed, with every other guard green.
+        # Checking only ``fast_period < slow_period`` admitted exactly that.
+        for name, expected in (
+            ("fast_period", MACRO_FAST_PERIOD),
+            ("slow_period", MIN_MACRO_TREND_LOOKBACK),
+        ):
+            value = getattr(self, name)
+            if value != expected:
+                raise ValueError(
+                    f"MacroTrend.{name} must be {expected} (the producer's period, which "
+                    f"this type's labels are printed from), got {value}"
+                )
         if self.candle_count < self.slow_period:
             raise ValueError(
                 f"MacroTrend.candle_count ({self.candle_count}) must be >= slow_period "
@@ -1054,20 +1067,33 @@ class MacroTrend:
                 f"the values it is derived from (sma_slow {self.sma_slow})",
             )
             object.__setattr__(self, name, claimed)
-        if self.days_in_state < 1:
+        if self.bars_in_state < 1:
             raise ValueError(
-                f"MacroTrend.days_in_state must be >= 1 (the newest bar always carries the "
-                f"alignment), got {self.days_in_state}"
+                f"MacroTrend.bars_in_state must be >= 1 (the newest bar always carries the "
+                f"alignment), got {self.bars_in_state}"
             )
         # The run cannot be longer than the number of bars that HAVE both
         # averages: the slow one needs ``slow_period`` bars to exist at all, so
         # a window of ``candle_count`` bars offers exactly this many positions.
         max_run = self.candle_count - self.slow_period + 1
-        if self.days_in_state > max_run:
+        if self.bars_in_state > max_run:
             raise ValueError(
-                f"MacroTrend.days_in_state ({self.days_in_state}) exceeds the "
+                f"MacroTrend.bars_in_state ({self.bars_in_state}) exceeds the "
                 f"{max_run} bar(s) of this window where both averages exist "
                 f"(candle_count {self.candle_count} - slow_period {self.slow_period} + 1)"
+            )
+        # The flag IS "the run fills the window", so it is fully derivable
+        # from two fields stored right here and is checked as an exact
+        # equivalence rather than a bound. Checking only ``<= max_run`` let
+        # both halves through: a capped run shorter than the window (whose
+        # rendered line claims the alignment holds on every bar of it), and an
+        # uncapped full-window run (which claims a dated start on a bar with
+        # nothing before it).
+        if self.state_age_capped != (self.bars_in_state == max_run):
+            raise ValueError(
+                f"MacroTrend.state_age_capped ({self.state_age_capped}) must be True exactly "
+                f"when the run fills the window: bars_in_state {self.bars_in_state} against "
+                f"the {max_run} bar(s) here with both averages"
             )
         # ``datetime`` IS a ``date`` subclass, so the annotations alone let one
         # through — and it renders as a full ISO timestamp on a line labelled a
@@ -1088,8 +1114,9 @@ class MacroTrend:
         if self.state_age_capped != (self.last_change_date is None):
             raise ValueError(
                 f"MacroTrend.state_age_capped ({self.state_age_capped}) must say exactly "
-                f"what last_change_date ({self.last_change_date}) does: the run reaches the "
-                f"oldest bar with both averages, so no change is visible to date"
+                f"what last_change_date ({self.last_change_date}) does: the flag means the "
+                f"window could not date the change, which is the same statement as having "
+                f"no date"
             )
         if self.last_change_date is not None:
             # The two date facts that survive an unchecked gap in the series
@@ -1106,9 +1133,9 @@ class MacroTrend:
             # with bars possibly missing, the calendar distance between the two
             # dates is only bounded below, and this DTO does not know whether a
             # bar is missing.
-            if self.days_in_state == 1 and self.last_change_date != self.as_of_date:
+            if self.bars_in_state == 1 and self.last_change_date != self.as_of_date:
                 raise ValueError(
-                    f"MacroTrend.days_in_state is 1, so the alignment changed on the newest "
+                    f"MacroTrend.bars_in_state is 1, so the alignment changed on the newest "
                     f"bar ({self.as_of_date}), but last_change_date says "
                     f"{self.last_change_date}"
                 )
@@ -1637,6 +1664,26 @@ class PerpMarketContext:
             raise ValueError(
                 f"PerpMarketContext.research_signal is for {self.research_signal.coin!r}, but "
                 f"the context is for {self.coin!r}; a prompt must not print another market's rule"
+            )
+        if self.macro_trend is not None and self.macro_trend.as_of_date > self.as_of.date():
+            # The one relational fact about the macro trend that needs no
+            # clock, checked here for the reason the research signal's coin
+            # identity is (see above): the reader is not the only way a
+            # context is built. The producer's full freshness rule needs
+            # ``as_of_ms`` and the series and stays there; this half does not,
+            # and without it a fixture-built context prints "newest daily bar
+            # dated 2027-01-01" under an "As of: 2026-09-21" header, with
+            # every bounds check green and a basis line promising the block is
+            # at most a day behind.
+            #
+            # One-sided on purpose. The other side — how far BEHIND the daily
+            # bar may be — is the producer's 24h bound, and it is measured
+            # against the newest bar's CLOSE, which this type does not carry;
+            # re-deriving it from the date alone would refuse legal contexts.
+            raise ValueError(
+                f"PerpMarketContext.macro_trend is dated {self.macro_trend.as_of_date}, "
+                f"after the context's own as_of ({self.as_of.date()}); a daily bar cannot "
+                f"close after the bar this context is dated to"
             )
         if self.candle_count < 0:
             raise ValueError(

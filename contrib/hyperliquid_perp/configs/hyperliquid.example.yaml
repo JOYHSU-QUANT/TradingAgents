@@ -27,17 +27,23 @@ market_data:
                                    # as a second series for the macro-trend block (daily SMA(50) vs
                                    # SMA(200): which way round they sit, how far apart, how many
                                    # daily bars have carried that, and the latest daily close
-                                   # against SMA(200)). Must be 0 or >= 200 — the slow average does
-                                   # not exist at all below that — rejected at config load, because
-                                   # a bad value would just make the prompt section silently never
-                                   # appear. 260 is the suggested starting value: 200 bars of
-                                   # warm-up plus 60 over which a change of alignment can be SEEN
-                                   # (at exactly 200 the block still renders, but always as "held
-                                   # for at least 1 daily bar"). NOT cross-checked against
+                                   # against SMA(200)). Must be 0, or between 200 and 2000 — below
+                                   # 200 the slow average does not exist at all, above 2000 the
+                                   # per-cycle cost grows without buying history the block can
+                                   # report. Both ends are rejected at config load, because a bad
+                                   # value fails SILENTLY at runtime (the section just never
+                                   # appears, or the tick quietly gets slower).
+                                   # 400 is the suggested starting value: 200 bars of warm-up plus
+                                   # 200 over which the start of the current alignment can be SEEN.
+                                   # Go lower and the block usually cannot date that start at all —
+                                   # BTC's daily 50/200 alignment typically holds for months — and
+                                   # at exactly 200 it never can. NOT cross-checked against
                                    # candle_lookback — that one counts 4h bars of a different
-                                   # series. Costs one extra REST read per cycle while on, and
-                                   # needs the coin to have >= 200 days of history (below that
-                                   # every cycle logs a WARNING and the section is absent).
+                                   # series. Costs one extra REST read per cycle while on; if that
+                                   # read fails the section is dropped for the cycle and the
+                                   # decision still happens (it is an analyst input, not a gate).
+                                   # Needs the coin to have >= 200 days of history — below that
+                                   # every cycle logs a WARNING and the section is absent.
                                    # Analyst input only: it feeds no gate and no sizing. Turning it
                                    # on CHANGES THE PROMPT, so on a paper run treat the flip as a
                                    # new input-side measurement point.

@@ -19,7 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ...common.config_coercion import config_overrides, int_from_yaml, str_from_yaml
-from ...common.constants import MIN_MACRO_TREND_LOOKBACK, MIN_VOLUME_PROFILE_WINDOW
+from ...common.constants import (
+    MAX_MACRO_TREND_LOOKBACK,
+    MIN_MACRO_TREND_LOOKBACK,
+    MIN_VOLUME_PROFILE_WINDOW,
+)
 from .schema import interval_to_ms
 
 __all__ = ["MarketDataConfig"]
@@ -138,6 +142,19 @@ class MarketDataConfig:
                 f"{MIN_MACRO_TREND_LOOKBACK}; {lookback} daily candle(s) is fewer than the "
                 f"SMA({MIN_MACRO_TREND_LOOKBACK}) needs to exist at all, so the section "
                 f"would be skipped on every cycle"
+            )
+        # A ceiling too, unlike the profile window — because the two ways this
+        # one goes wrong at the top end BOTH degrade silently rather than
+        # fail: the per-bar averages cost measurable Decimal time on the
+        # single-threaded live tick, and past ~20,700 the fetch's computed
+        # ``startTime`` goes negative. Neither raises, so an operator would
+        # never learn of either.
+        if lookback > MAX_MACRO_TREND_LOOKBACK:
+            raise ValueError(
+                f"'market_data.macro_trend_daily_lookback' must be at most "
+                f"{MAX_MACRO_TREND_LOOKBACK}, got {lookback}; beyond that the per-cycle "
+                f"cost of the averages grows without buying any more history the section "
+                f"can report"
             )
         # Same rule as the window above, for the same reason: every way of
         # getting this key wrong fails SILENTLY at runtime — the prompt simply

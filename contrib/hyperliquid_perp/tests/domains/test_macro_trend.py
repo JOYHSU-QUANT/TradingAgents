@@ -23,9 +23,11 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.common.constants import MIN_MACRO_TREND_LOOKBACK
+from contrib.hyperliquid_perp.common.constants import (
+    MACRO_FAST_PERIOD as CONFIG_LAYER_FAST_PERIOD,
+    MIN_MACRO_TREND_LOOKBACK,
+)
 from contrib.hyperliquid_perp.domains.perp.macro_trend import (
-    DEFAULT_DAILY_LOOKBACK,
     MACRO_CANDLE_INTERVAL,
     MACRO_FAST_PERIOD,
     MACRO_SLOW_PERIOD,
@@ -44,16 +46,21 @@ _DAY_MS = 24 * 60 * 60_000
 _DAY0_MS = 1_704_067_200_000
 
 
-def _daily(index: int, close) -> Candle:
-    """One daily bar at ``close``, flat OHLC, on the ``_DAY0_MS`` grid.
+def _daily(index: int, close, *, day0: int = _DAY0_MS) -> Candle:
+    """One daily bar at ``close``, flat OHLC, on the ``day0`` grid.
 
     ``close_time`` is the next bar's open minus a millisecond, which is how
     Hyperliquid stamps a closed candle (measured in PR #258). The producer
     dates a bar by its OPEN, so this convention is the one that would hide an
     off-by-one-day if it ever read the close instead.
+
+    ``day0`` moves the whole series; every test in THIS file leaves it at the
+    default, so its dates stay hand-checkable. It exists for the renderer's
+    tests, whose context carries its own ``as_of`` that the series has to sit
+    behind.
     """
     price = close if isinstance(close, Decimal) else Decimal(str(close))
-    open_time = _DAY0_MS + index * _DAY_MS
+    open_time = day0 + index * _DAY_MS
     return Candle(
         open_time=open_time,
         close_time=open_time + _DAY_MS - 1,
@@ -65,8 +72,8 @@ def _daily(index: int, close) -> Candle:
     )
 
 
-def _series(closes) -> list[Candle]:
-    return [_daily(i, c) for i, c in enumerate(closes)]
+def _series(closes, *, day0: int = _DAY0_MS) -> list[Candle]:
+    return [_daily(i, c, day0=day0) for i, c in enumerate(closes)]
 
 
 def _as_of(candles) -> int:
@@ -74,7 +81,7 @@ def _as_of(candles) -> int:
     return candles[-1].close_time
 
 
-def _stepped(n: int, base, steps: dict[int, str]) -> list[Candle]:
+def _stepped(n: int, base, steps: dict[int, str], *, day0: int = _DAY0_MS) -> list[Candle]:
     """``n`` bars at ``base``, with each ``{bar: delta}`` applied from that bar on."""
     closes = []
     for i in range(n):
@@ -83,7 +90,7 @@ def _stepped(n: int, base, steps: dict[int, str]) -> list[Candle]:
             if i >= at:
                 price += Decimal(delta)
         closes.append(price)
-    return _series(closes)
+    return _series(closes, day0=day0)
 
 
 # --------------------------------------------------------------------------
@@ -91,12 +98,16 @@ def _stepped(n: int, base, steps: dict[int, str]) -> list[Candle]:
 # --------------------------------------------------------------------------
 
 
-def test_the_slow_period_is_the_config_floor_itself_not_a_second_number():
-    # The floor exists BECAUSE a window shorter than the slow period has no
-    # slow average at any bar, so the two are one number. Written out twice
-    # they could drift, and the drift would be invisible: the config would
-    # accept a lookback the compute module then always refuses.
+def test_both_periods_are_the_shared_constants_not_second_copies():
+    # The slow period and the config floor are one number: the floor exists
+    # BECAUSE a window shorter than the slow period has no slow average at any
+    # bar. Written out twice they could drift, and the drift would be
+    # invisible — the config would accept a lookback the compute module then
+    # always refuses. The fast period is shared for a different reason: the
+    # DTO pins its label-bearing period fields to these constants and cannot
+    # import this module (this module imports it).
     assert MACRO_SLOW_PERIOD == MIN_MACRO_TREND_LOOKBACK
+    assert MACRO_FAST_PERIOD == CONFIG_LAYER_FAST_PERIOD
     assert MACRO_FAST_PERIOD < MACRO_SLOW_PERIOD
 
 
@@ -105,12 +116,6 @@ def test_the_fetch_interval_comes_from_the_candle_vocabulary():
     # has to be the vocabulary's own rather than a literal at the call site.
     assert CandleInterval.D1.value == MACRO_CANDLE_INTERVAL
     assert CandleInterval(MACRO_CANDLE_INTERVAL) is CandleInterval.D1
-
-
-def test_the_suggested_lookback_leaves_room_to_see_a_change():
-    # 260 = 200 warm-up + 60 observable. At exactly the floor the section is
-    # still legal but can only ever say "at least 1 daily bar".
-    assert DEFAULT_DAILY_LOOKBACK > MACRO_SLOW_PERIOD
 
 
 # --------------------------------------------------------------------------
@@ -130,7 +135,7 @@ def test_a_step_up_puts_the_fast_average_above_and_dates_the_change():
 
     assert macro is not None
     assert macro.alignment is MacroAlignment.ABOVE
-    assert macro.days_in_state == 55
+    assert macro.bars_in_state == 55
     assert macro.state_age_capped is False
     assert macro.last_change_date is not None
     assert macro.last_change_date.isoformat() == "2024-07-24"
@@ -143,20 +148,24 @@ def test_a_step_up_puts_the_fast_average_above_and_dates_the_change():
 
 def test_a_bar_where_the_averages_are_equal_ends_the_run_rather_than_extending_it():
     # The mutation this exists for: treat an equal bar as CONTINUING the run
-    # and the same series reports 61 bars capped (every comparable bar in the
-    # window) instead of 55 dated — a six-fold overstatement of how long the
-    # ordering has held, with the date silently dropped.
+    # and this series reports the full 61 bars, capped, with the date dropped
+    # — an alignment six bars old read as one at least ten times older, and
+    # the one fact the block exists to give up entirely.
     #
-    # Same series as above. Bars 199..204 are flat-at-100 on both averages, so
-    # they are exactly equal; the run of "above" must stop at bar 205.
-    candles = _stepped(260, 100, {205: "1"})
+    # The equal bars have to sit INSIDE the comparable window to bite, which
+    # is why this series is not the one above: the step is at bar 250, so bars
+    # 199..249 are flat-at-100 on both averages (exactly equal) and the run of
+    # "above" is bars 250..259 = 10, well short of the 61 available.
+    candles = _stepped(260, 100, {250: "1"})
     macro = compute_macro_trend(candles, as_of_ms=_as_of(candles))
     assert macro is not None
 
     comparable = 260 - MACRO_SLOW_PERIOD + 1  # 61 bars have both averages
-    assert macro.days_in_state == 55
-    assert macro.days_in_state < comparable
+    assert macro.bars_in_state == 10
+    assert macro.bars_in_state < comparable
     assert macro.state_age_capped is False
+    assert macro.last_change_date is not None
+    assert macro.last_change_date.isoformat() == "2024-09-07"  # bar 250
 
 
 def test_a_step_down_puts_the_fast_average_below():
@@ -166,7 +175,7 @@ def test_a_step_down_puts_the_fast_average_below():
     assert macro is not None
     assert macro.alignment is MacroAlignment.BELOW
     assert macro.separation_pct < 0
-    assert macro.days_in_state == 55
+    assert macro.bars_in_state == 55
     assert macro.last_change_date is not None
     assert macro.last_change_date.isoformat() == "2024-07-24"
 
@@ -182,7 +191,7 @@ def test_a_run_reaching_the_oldest_comparable_bar_is_reported_as_capped():
     assert macro.alignment is MacroAlignment.ABOVE
     assert macro.state_age_capped is True
     assert macro.last_change_date is None
-    assert macro.days_in_state == 260 - MACRO_SLOW_PERIOD + 1
+    assert macro.bars_in_state == 260 - MACRO_SLOW_PERIOD + 1
 
 
 def test_a_genuine_flip_with_no_equal_bar_is_dated_to_the_bar_it_flipped_on():
@@ -197,7 +206,7 @@ def test_a_genuine_flip_with_no_equal_bar_is_dated_to_the_bar_it_flipped_on():
 
     assert macro is not None
     assert macro.alignment is MacroAlignment.ABOVE
-    assert macro.days_in_state == 43
+    assert macro.bars_in_state == 43
     assert macro.last_change_date is not None
     assert macro.last_change_date.isoformat() == "2024-08-05"  # bar 217
 
@@ -211,14 +220,9 @@ def test_exactly_the_floor_of_history_renders_but_can_only_say_one_bar():
 
     assert macro is not None
     assert macro.candle_count == MACRO_SLOW_PERIOD
-    assert macro.days_in_state == 1
+    assert macro.bars_in_state == 1
     assert macro.state_age_capped is True
     assert macro.last_change_date is None
-
-
-# --------------------------------------------------------------------------
-# The three refusals — each drops the WHOLE section and says which it was
-# --------------------------------------------------------------------------
 
 
 def test_a_bar_is_dated_by_its_own_day_under_either_close_stamp_convention():
@@ -247,6 +251,11 @@ def test_a_bar_is_dated_by_its_own_day_under_either_close_stamp_convention():
     assert macro.as_of_date.isoformat() == "2024-09-16"
     assert macro.last_change_date is not None
     assert macro.last_change_date.isoformat() == "2024-07-24"
+
+
+# --------------------------------------------------------------------------
+# The three refusals — each drops the WHOLE section and says which it was
+# --------------------------------------------------------------------------
 
 
 def test_one_bar_short_of_the_floor_is_refused_naming_both_counts(caplog):
@@ -288,15 +297,32 @@ def test_the_daily_feed_is_admitted_up_to_one_day_behind_and_never_ahead(lag_ms,
     assert (macro is not None) is expected
 
 
-def test_a_stale_daily_feed_is_refused_with_both_stamps(caplog):
+def test_a_stale_daily_feed_is_refused_in_hours_and_blames_the_daily_feed(caplog):
+    # Two days behind. An operator reads this line every cycle while the feed
+    # is down, so it says the date and the lag in hours rather than handing
+    # over two 13-digit epoch stamps to subtract.
     candles = _stepped(260, 100, {205: "1"})
-    as_of = _as_of(candles) + MAX_DAILY_CANDLE_AGE_MS + 1
+    as_of = _as_of(candles) + 2 * MAX_DAILY_CANDLE_AGE_MS
     with caplog.at_level(logging.WARNING):
         assert compute_macro_trend(candles, as_of_ms=as_of) is None
-    # Both stamps, so an operator can tell a stalled daily feed from a context
-    # dated wrong without re-running anything.
-    assert str(candles[-1].close_time) in caplog.text
-    assert str(as_of) in caplog.text
+    assert "2024-09-16" in caplog.text  # the newest bar's own date
+    assert "48.0h" in caplog.text
+    assert "stopped publishing" in caplog.text
+    assert str(as_of) not in caplog.text  # no raw epoch stamps
+
+
+def test_a_daily_bar_ahead_of_the_context_blames_the_short_series_not_the_daily_feed(caplog):
+    # The mirror fault, and the one an earlier message got backwards:
+    # ``as_of_ms`` is the newest CLOSED bar of the 4h series, not a clock, so
+    # a daily bar sitting ahead of it means THAT series is lagging. Pointing
+    # the operator at the daily feed would send them to inspect the healthy
+    # one.
+    candles = _stepped(260, 100, {205: "1"})
+    with caplog.at_level(logging.WARNING):
+        assert compute_macro_trend(candles, as_of_ms=_as_of(candles) - 3_600_000) is None
+    assert "1.0h AFTER" in caplog.text
+    assert "shorter series" in caplog.text
+    assert "stopped publishing" not in caplog.text
 
 
 def test_a_series_handed_over_newest_first_is_refused_rather_than_averaged():

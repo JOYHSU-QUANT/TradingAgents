@@ -688,7 +688,8 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # v10: the prompt's section structure beside its version stamp (issue
     # #97). ``prompt_version`` is bumped by hand when the contract changes
     # shape in CODE; a config-only edit (``market_data.
-    # volume_profile_window_candles``, ``indicators``) changes the shape with
+    # volume_profile_window_candles``, ``market_data.macro_trend_daily_lookback``,
+    # ``indicators``) changes the shape with
     # no deploy and nothing to bump, so ``GROUP BY prompt_version`` merged two
     # prompt regimes into one bucket. Written by every ai_inputs writer from
     # ``prompt_context.context_shape``; exported (schema-augmentation column).

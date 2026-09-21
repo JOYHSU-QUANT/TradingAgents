@@ -207,11 +207,11 @@ def build_market_context(
     by the caller — from which the macro-trend section is computed
     (:mod:`.macro_trend`). ``None`` means the feature is off and the section
     is absent with no log line; a sequence means it is on, and the module's
-    own refusals then apply (and log). REQUIRED with no default, for the
-    fourth time in this signature and the same reason as the three above:
-    forgetting it would silently produce a context with no macro section and
-    a ``context_shape`` quietly missing its token, with nothing raising —
-    indistinguishable from an operator having left the switch off.
+    own refusals then apply (and log). REQUIRED with no default, the last of
+    the four kwargs on that rule in this signature and for the same reason as
+    the others: forgetting it would silently produce a context with no macro
+    section and a ``context_shape`` quietly missing its token, with nothing
+    raising — indistinguishable from an operator having left the switch off.
 
     It is a separate argument rather than something built from ``candles``
     because it is a separate FETCH: taking the daily bars from the ``4h``
@@ -219,8 +219,7 @@ def build_market_context(
     indicator (see :mod:`.macro_trend`). ``market_data`` is what decides
     whether the caller fetches it at all; this function is handed the result.
 
-    ``research_signal`` is REQUIRED with no default too, for the third time
-    and the same reason: forgetting it would cost a prompt quietly missing a
+    ``research_signal`` is REQUIRED with no default too, for the same reason: forgetting it would cost a prompt quietly missing a
     section and a ``context_shape`` quietly missing its token, with nothing
     raising — exactly the failure the position kwarg's rule exists for. It is
     carried through untouched. Unlike the profile and the position section,
@@ -250,8 +249,18 @@ def build_market_context(
     # :func:`.macro_trend.compute_macro_trend`). ``None`` in means the switch
     # is off, and nothing is logged; anything else is the module's own
     # fail-closed decision, with its WARNING.
+    #
+    # Not computed at all without ``candles``. ``as_of_ms`` is then the WALL
+    # CLOCK (``context_as_of``'s no-bar fallback), and the freshness rule this
+    # section is judged by is defined against a closed bar — measured against
+    # the wall clock a daily series cut at the exchange clock always passes,
+    # so the one degraded context where every other number is missing would
+    # carry a full, confident, internally consistent macro block. Same rule
+    # the research signal follows, for the same reason.
     macro_trend = (
-        None if daily_candles is None else compute_macro_trend(daily_candles, as_of_ms=as_of_ms)
+        None
+        if daily_candles is None or not candles
+        else compute_macro_trend(daily_candles, as_of_ms=as_of_ms)
     )
     # Priced at the snapshot's own mark and funding — the same two values the
     # ``Mark:`` and ``Funding:`` lines print — so the section cannot quote a

@@ -552,6 +552,41 @@ def test_the_macro_trend_is_built_from_the_daily_series_against_this_contexts_as
     )
 
 
+def test_a_daily_series_is_refused_when_there_is_no_bar_to_date_the_context_to(
+    meta_and_asset_ctxs, funding_history
+):
+    # With no candles ``context_as_of`` falls back to the WALL CLOCK, and the
+    # macro section's freshness is defined against a closed bar. Measured
+    # against the wall clock a daily series cut at the exchange clock always
+    # passes — so the one degraded context where every other number is missing
+    # (indicators n/a, regime defaulted) would carry a full, confident,
+    # internally consistent macro block, which is the most convincing thing on
+    # the page. Same rule the research signal follows.
+    from datetime import datetime
+
+    from contrib.hyperliquid_perp.domains.perp.macro_trend import compute_macro_trend
+
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    now_ms = epoch_ms(datetime.now(tz=timezone.utc), what="test")
+    fresh_daily = _daily_ending_at(now_ms)
+    ctx = build_market_context(
+        "BTC",
+        snapshot,
+        [],  # the empty window
+        mapper.map_funding_history(funding_history),
+        market_data=_MD,
+        indicator_names=["rsi_14"],
+        exchange_time=None,
+        position=None,
+        research_signal=None,
+        daily_candles=fresh_daily,
+    )
+    assert ctx.macro_trend is None
+    # The premise: that very series IS accepted against a real bar's close, so
+    # the refusal above is the empty window and not a stale fixture.
+    assert compute_macro_trend(fresh_daily, as_of_ms=now_ms) is not None
+
+
 def test_volume_profile_is_cut_from_the_same_candles_as_the_indicators(
     meta_and_asset_ctxs, candle_snapshot, funding_history
 ):

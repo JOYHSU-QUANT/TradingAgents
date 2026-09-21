@@ -1028,7 +1028,7 @@ def test_context_only_renders_the_macro_block_end_to_end_when_the_switch_is_on(
     assert main_mod.run_context_only(config, "BTC") == 0
     out = capsys.readouterr().out
 
-    assert "Macro trend (its own daily candle series, SMA(50) vs SMA(200)" in out
+    assert "Macro trend (its own series of 260 daily candles, SMA(50) vs SMA(200)" in out
     assert "  SMA(50): 110.00   SMA(200): 102.50" in out
     assert "Alignment: SMA(50) above SMA(200)" in out
     # And the segmentation bucket an operator is running this command to see:
@@ -2343,10 +2343,27 @@ def test_build_context_reads_the_daily_series_last_and_only_when_the_switch_is_o
     # 3. It is LAST. Everything above it is argued from adjacency (the clock
     #    read sits immediately before the two windows it bounds, issue #51),
     #    so a read landing in the middle would quietly invalidate that.
+    from decimal import Decimal
+
+    from contrib.hyperliquid_perp.domains.perp.schema import Candle
+
     order = []
     daily_calls = []
     daily_result = [object()]
     clock = datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+    # A real 4h bar, because the daily read is gated on having one: the macro
+    # section's freshness is measured against a CLOSED bar, and an empty 4h
+    # window leaves ``context_as_of`` on the wall clock. A fake returning
+    # nothing would take the daily read out of the chain for the wrong reason.
+    bar = Candle(
+        open_time=1_700_000_000_000,
+        close_time=1_700_000_001_000,
+        open=Decimal(1),
+        high=Decimal(1),
+        low=Decimal(1),
+        close=Decimal(1),
+        volume=Decimal(0),
+    )
 
     class _Market:
         def __init__(self, _client):
@@ -2361,7 +2378,7 @@ def test_build_context_reads_the_daily_series_last_and_only_when_the_switch_is_o
             if interval != "4h":
                 daily_calls.append((interval, lookback, end))
                 return daily_result
-            return []
+            return [bar]
 
         def get_funding_history(self, coin, window_days, *, end):
             order.append("funding")
@@ -2402,6 +2419,141 @@ def test_build_context_reads_the_daily_series_last_and_only_when_the_switch_is_o
     assert order == ["snapshot", "clock", "candles:4h", "funding", "candles:1d"]
     assert daily_calls == [("1d", 260, clock)]
     assert handed["daily_candles"] is daily_result
+
+
+def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monkeypatch, caplog):
+    """The optional section's fail-closed contract has to cover the TRANSPORT.
+
+    ``macro_trend`` documents itself as "Not a gate" and "fail-closed as a
+    WHOLE", which held for its three compute refusals and not for the read
+    that feeds them: unguarded, a 429 or a malformed 1d response propagated
+    out of ``_build_context``, ``cli/_provider`` filed it as
+    ``connection`` / ``malformed_response``, and a whole 4h cycle reached no
+    decision — carrying an open position through unreassessed — because an
+    optional backdrop could not be drawn. ``call_sdk``'s message names no
+    endpoint, so the durable record could not tell that from the candle feed
+    the decision is actually built on.
+    """
+    from decimal import Decimal
+
+    from contrib.hyperliquid_perp.domains.perp.schema import Candle
+    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
+        ExchangeThrottledError,
+        MalformedResponseError,
+    )
+
+    bar = Candle(
+        open_time=1_700_000_000_000,
+        close_time=1_700_000_001_000,
+        open=Decimal(1),
+        high=Decimal(1),
+        low=Decimal(1),
+        close=Decimal(1),
+        volume=Decimal(0),
+    )
+    handed = {}
+    boom: list[Exception] = []
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            if interval == "1d":
+                raise boom[0]
+            return [bar]
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    def _builder(*args, **kwargs):
+        handed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+    config = {"market_data": {"macro_trend_daily_lookback": 260}}
+
+    # Both shapes the 1d read really fails as: the venue refusing to serve it,
+    # and the venue answering with something the mapper cannot use.
+    for failure in (ExchangeThrottledError("429"), MalformedResponseError("bad candles")):
+        boom[:] = [failure]
+        handed.clear()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=bridge_mod.__name__):
+            ctx, _ = bridge_mod._build_context(config, "BTC", position=None)
+        # The cycle produced a context — it did not raise.
+        assert ctx is not None
+        # ...with the section absent, exactly as the three compute refusals
+        # leave it, and one WARNING naming which read it was.
+        assert handed["daily_candles"] is None
+        logged = [r.getMessage() for r in caplog.records if "macro-trend" in r.getMessage()]
+        assert len(logged) == 1, logged
+        assert "1d" in logged[0]
+        assert "the decision proceeds without it" in logged[0]
+
+
+def test_no_candles_means_no_daily_read_at_all(monkeypatch):
+    # The macro section's freshness is defined against a CLOSED bar, and an
+    # empty 4h window has none — ``context_as_of`` falls back to the wall
+    # clock, against which a daily series cut at the exchange clock always
+    # looks current. The builder refuses that case outright, so fetching would
+    # be paying for a read whose answer is already decided. Same gate, and the
+    # same reason, as the research-signal read beside it.
+    reads = []
+
+    class _Market:
+        def __init__(self, _client):
+            pass
+
+        def get_market_snapshot(self, coin):
+            return object()
+
+        def get_candles(self, coin, interval, lookback, *, end):
+            reads.append(interval)
+            return []
+
+        def get_funding_history(self, coin, window_days, *, end):
+            return []
+
+        def get_exchange_time(self, coin):
+            return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
+
+    class _Client:
+        network = "testnet"
+
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    handed = {}
+
+    def _builder(*args, **kwargs):
+        handed.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
+    monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
+    bridge_mod._build_context(
+        {"market_data": {"macro_trend_daily_lookback": 260}}, "BTC", position=None
+    )
+    assert reads == ["4h"]
+    assert handed["daily_candles"] is None
 
 
 def test_build_context_forwards_the_position_inputs_to_the_builder_verbatim(monkeypatch):

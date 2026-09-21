@@ -768,7 +768,7 @@ def _macro(**overrides) -> dict:
         # overriding one of these on its own now fails construction, which is
         # the guard doing its job.
         "separation_pct": float(Decimal("7.5") / Decimal("102.5") * 100),
-        "days_in_state": 50,
+        "bars_in_state": 50,
         "state_age_capped": False,
         "last_change_date": date(2024, 7, 29),
         "as_of_date": date(2024, 9, 16),
@@ -791,12 +791,13 @@ def test_macro_trend_builds_from_consistent_values():
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
-        ({"fast_period": 0}, "fast_period must be > 0"),
-        ({"fast_period": MIN_MACRO_TREND_LOOKBACK}, "must be < slow_period"),
-        # Pinned to the producer's slow period, which is also the config
-        # floor: the two are one number and a DTO carrying another did not
-        # come from this producer.
-        ({"slow_period": MIN_MACRO_TREND_LOOKBACK + 1}, "must be 200"),
+        # BOTH periods pinned to the producer's constants, because both are
+        # printed as labels on the averages and nothing else stored here could
+        # contradict a wrong one. `fast_period=7` beside a genuine 50-bar
+        # average renders five references to a period never computed.
+        ({"fast_period": 0}, "fast_period must be 50"),
+        ({"fast_period": 7}, "fast_period must be 50"),
+        ({"slow_period": MIN_MACRO_TREND_LOOKBACK + 1}, "slow_period must be 200"),
         ({"candle_count": MIN_MACRO_TREND_LOOKBACK - 1}, "must be >= slow_period"),
         ({"sma_fast": Decimal(0)}, "sma_fast must be > 0"),
         ({"sma_slow": Decimal(0)}, "sma_slow must be > 0"),
@@ -815,15 +816,28 @@ def test_macro_trend_builds_from_consistent_values():
         # guard; only the cross-check catches it.
         ({"separation_pct": 1.0}, "separation_pct .* contradicts"),
         ({"close_vs_slow_pct": 1.0}, "close_vs_slow_pct .* contradicts"),
-        ({"days_in_state": 0}, "days_in_state must be >= 1"),
+        ({"bars_in_state": 0}, "bars_in_state must be >= 1"),
         # 260 bars hold 61 positions with both averages, so a longer run did
         # not come from this window.
-        ({"days_in_state": 62}, "exceeds the 61 bar"),
-        # The flag and the date must say the same thing. Each direction is a
-        # separate contradiction: a capped run with a date claims to know when
-        # a run it cannot see started, and an uncapped run without one drops
-        # the date the renderer would have printed.
-        ({"state_age_capped": True}, "must say exactly what last_change_date"),
+        ({"bars_in_state": 62}, "exceeds the 61 bar"),
+        # The flag IS "the run fills the window", so it is checked as an exact
+        # equivalence against the run length. Both halves were reachable under
+        # the old ``<= max_run`` bound: a capped run shorter than the window
+        # (whose rendered line claims the alignment holds on every bar of it),
+        # and an uncapped full-window run (a dated start on a bar with nothing
+        # before it).
+        ({"state_age_capped": True}, "must be True exactly when the run fills"),
+        (
+            {"bars_in_state": 61, "state_age_capped": False},
+            "must be True exactly when the run fills",
+        ),
+        # And the flag must still agree with the date, which is a separate
+        # statement: this one is a full-window run, correctly capped, that
+        # keeps a date anyway.
+        (
+            {"bars_in_state": 61, "state_age_capped": True},
+            "must say exactly what last_change_date",
+        ),
         ({"last_change_date": None}, "must say exactly what last_change_date"),
         # A datetime IS a date subclass, so the annotation alone lets one
         # through — and it renders as a full ISO timestamp on a line labelled
@@ -837,7 +851,12 @@ def test_macro_trend_builds_from_consistent_values():
         # capped run skips every other date rule, so a missing as-of would
         # otherwise surface as an AttributeError inside the renderer.
         (
-            {"as_of_date": None, "state_age_capped": True, "last_change_date": None},
+            {
+                "as_of_date": None,
+                "bars_in_state": 61,
+                "state_age_capped": True,
+                "last_change_date": None,
+            },
             "as_of_date must be a plain date",
         ),
         # The alignment cannot have changed on a bar the window does not reach.
@@ -867,14 +886,14 @@ def test_a_run_of_one_must_be_dated_to_the_newest_bar():
     # the newest bar, whatever the spacing. Longer runs say nothing checkable
     # here, because bar continuity is deliberately not checked — so this is
     # the only equality the DTO may assert between the two dates.
-    one = _macro(days_in_state=1, last_change_date=date(2024, 9, 16))
-    assert MacroTrend(**one).days_in_state == 1
-    with pytest.raises(ValueError, match="days_in_state is 1"):
-        MacroTrend(**_macro(days_in_state=1, last_change_date=date(2024, 9, 15)))
+    one = _macro(bars_in_state=1, last_change_date=date(2024, 9, 16))
+    assert MacroTrend(**one).bars_in_state == 1
+    with pytest.raises(ValueError, match="bars_in_state is 1"):
+        MacroTrend(**_macro(bars_in_state=1, last_change_date=date(2024, 9, 15)))
     # And a longer run with a date far older than the run length is ACCEPTED:
     # that is what a daily series with missing bars looks like, and refusing
     # it would crash a cycle on data this module never promised to check.
-    gapped = _macro(days_in_state=50, last_change_date=date(2023, 1, 1))
+    gapped = _macro(bars_in_state=50, last_change_date=date(2023, 1, 1))
     assert MacroTrend(**gapped).last_change_date == date(2023, 1, 1)
 
 

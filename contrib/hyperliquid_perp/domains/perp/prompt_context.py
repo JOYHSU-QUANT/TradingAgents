@@ -121,7 +121,9 @@ _SHAPE_NOTE = {
 def _num(value, places: int = 2, *, sign: bool = False) -> str:
     """Format a number to ``places`` decimals; ``None`` -> ``n/a``.
 
-    ``sign`` forces an explicit ``+``/``-`` (a PnL, never a price).
+    ``sign`` forces an explicit ``+``/``-`` — for a value whose direction is
+    part of the reading (a PnL, a percentage against a reference), never for a
+    price.
     """
     if value is None:
         return "n/a"
@@ -212,45 +214,78 @@ _MACRO_ALIGNMENT_WORD = {
 }
 
 
+def _signed_pct(value: float) -> str:
+    """A signed percentage, never rounded into a bare ``0.00``.
+
+    ``_num``'s two decimals are right for the usual case and wrong for the one
+    this section exists to surface: at a crossing the separation passes through
+    zero, so anything inside half a hundredth renders as ``+0.00%`` — a figure
+    that reads as "no gap" on the same line as a word asserting a strict
+    ordering. The DTO refuses only a BIT-EXACT tie, so that window is reachable
+    on any cycle near a crossing. Below the threshold the magnitude is stated
+    as the bound it is; the sign still comes from the value, so it cannot
+    disagree with the direction word beside it.
+    """
+    if 0 < abs(value) < 0.005:
+        # Two significant figures rather than two decimal places, so the value
+        # keeps its magnitude however small it is (``+1.2e-05``) instead of
+        # collapsing to a zero it is not.
+        return f"{value:+.2g}"
+    return _num(value, sign=True)
+
+
 def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
     """The macro-trend block. Only called when a macro trend exists.
 
-    ``candle_interval`` is the OTHER series' interval — the one every line
-    above this block is cut from — named in the basis note so "its own daily
-    series" is a contrast a reader can check rather than a claim. Taken from
-    the context, never written out as ``4h``: the interval is configurable,
-    and a literal here would go on asserting today's value after it moved.
+    ``candle_interval`` is the interval the CANDLE-derived lines above this
+    block are cut from — the indicators and the regime label, not the
+    snapshot-derived price and funding lines — named in the basis note so "its
+    own daily series" is a contrast a reader can check rather than a claim.
+    Taken from the context, never written out as ``4h``: the interval is
+    configurable, and a literal here would go on asserting today's value after
+    it moved.
     """
     fast, slow = macro.fast_period, macro.slow_period
+    bars = macro.bars_in_state
+    unit = "bar" if bars == 1 else "bars"
     if macro.state_age_capped:
-        # "At least", because the run reaches the oldest bar that HAS both
-        # averages: the window cannot see when it started. Saying the plain
-        # number here would report a window width as a measured age, and the
-        # figure would then change if an operator widened the lookback while
-        # nothing about the market had moved.
+        # No NUMBER on this branch. The run length here is bounded by the
+        # window, not by the market: at the configured floor it is always 1,
+        # and when the venue short-reads 203 of a requested 400 it comes out
+        # as "4" for an alignment that may be two years old — a feed artefact
+        # rendered as a freshly turned trend. The window itself is stated in
+        # the header, which is where a reader can see what bounded it.
         held = (
-            f"  Held for: at least {macro.days_in_state} daily bars — that is every bar in "
-            f"this window with both averages, so no earlier change is visible from here"
+            "  Held for: longer than this window can date — the alignment holds on every "
+            "bar of it that has both averages, so no change is visible from here"
         )
     else:
         # ``state_age_capped`` is False exactly when this date exists
         # (``MacroTrend`` enforces the equivalence), so the narrowing is the
         # DTO's guarantee rather than an assumption of this branch.
         assert macro.last_change_date is not None
+        # "Began on", not "changed on". The bar before this run carried
+        # something else — usually the opposite alignment, occasionally an
+        # exact tie between the two averages — and "changed" would read as a
+        # turn in both cases while only the first is one. What the rule
+        # measured is where this run starts.
         held = (
-            f"  Held for: {macro.days_in_state} daily bars (the alignment last changed on "
-            f"the bar dated {macro.last_change_date.isoformat()})"
+            f"  Held for: {bars} daily {unit} (this run began on the bar dated "
+            f"{macro.last_change_date.isoformat()})"
         )
     return [
-        # Dated to the newest CLOSED daily bar, like the volume profile's "as
-        # of the last closed candle" and for a stronger version of the same
-        # reason: a daily bar closes once a day, so this block can be a whole
-        # day behind the Mark printed further up, and it is cut from a
-        # different fetch than everything above it. The date is printed rather
-        # than described so the reader can measure that lag instead of
-        # assuming it.
-        f"Macro trend (its own daily candle series, SMA({fast}) vs SMA({slow}), newest "
-        f"daily bar dated {macro.as_of_date.isoformat()}):",
+        # Two facts in the header. The WINDOW, because every "held for" reading
+        # is relative to it and because both sibling blocks state theirs
+        # (``Volume profile (rolling window of N x 4h candles…)``, ``Candles:
+        # N x 4h``) — without it the capped line above is an unmeasurable
+        # claim. And the DATE of the newest closed daily bar, like the volume
+        # profile's "as of the last closed candle" but for a stronger version
+        # of the same reason: a daily bar closes once a day, so this block can
+        # be a whole day behind the Mark printed further up, and it is cut
+        # from a different fetch than everything above it. Printed rather than
+        # described, so the reader can measure that lag instead of assuming it.
+        f"Macro trend (its own series of {macro.candle_count} daily candles, SMA({fast}) "
+        f"vs SMA({slow}), newest daily bar dated {macro.as_of_date.isoformat()}):",
         f"  SMA({fast}): {_num(macro.sma_fast)}   SMA({slow}): {_num(macro.sma_slow)}",
         # The separation is printed as the SIGNED difference over the slow
         # average, spelled as the subtraction it is. Writing it unsigned under
@@ -258,26 +293,36 @@ def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
         # to reconstruct from the word, and the two could then disagree
         # without either line being wrong on its own.
         f"  Alignment: SMA({fast}) {_MACRO_ALIGNMENT_WORD[macro.alignment]} SMA({slow}); "
-        f"SMA({fast}) - SMA({slow}) is {_num(macro.separation_pct, sign=True)}% of "
-        f"SMA({slow})",
+        f"SMA({fast}) - SMA({slow}) is {_signed_pct(macro.separation_pct)}% of SMA({slow})",
         held,
-        f"  Latest daily close: {_num(macro.latest_close)}; close - SMA({slow}) is "
-        f"{_num(macro.close_vs_slow_pct, sign=True)}% of SMA({slow})",
-        # Five disclosures, each of which a reader would otherwise have to
-        # assume: which candles these came from, that the measure lags by
+        # The percentage only. The absolute close is deliberately NOT printed:
+        # it would be a third price level entering the prompt from this block,
+        # up to 24h stale, a dozen lines under the live ``Mark:`` with nothing
+        # reconciling the two — and the standing reason is in
+        # ``_research_signal_lines``, which withholds its own figures because
+        # this prompt's history is that the model anchors on the numbers it is
+        # shown (paper-BTC-2: 27 of 48 decisions at exactly the advertised bar).
+        f"  Latest daily close vs SMA({slow}): {_signed_pct(macro.close_vs_slow_pct)}%",
+        # Six disclosures, each of which a reader would otherwise have to
+        # assume: which candles these came from, what the short-window
+        # counterpart in this same prompt is, that the measure lags by
         # construction, how far behind the mark it can be, that gaps in the
         # daily series are not checked (the producer says the same in its
-        # docstring), and that nothing here is wired to a decision.
+        # docstring), and that nothing here is wired to a decision — closing
+        # with how to weigh it, which is the one thing the model has to decide
+        # and the one thing the other five sentences do not answer.
         f"  Basis: two simple moving averages over closed daily candles, fetched as their "
         f"own series — the candles and indicators above are {candle_interval} bars and are "
-        f"not affected by this section. A lagging measure by construction: "
-        f"it describes an alignment that has already formed, not one that is starting, and "
-        f"in a sideways market the alignment can flip from one bar to the next and back. "
-        f"The figures date to the newest closed daily bar, so this whole block can be up to "
-        f"a day behind the Mark above. Gaps in the daily series are not checked, so a "
-        f"window missing bars still averages the {slow} most recent bars it has and still "
-        f"calls that SMA({slow}). Nothing in this section feeds the risk checks, the sizing "
-        f"or any order — it is one more input to weigh.",
+        f"not affected by this section. The computed regime near the top of this context is "
+        f"the short-window counterpart of this block, built from those {candle_interval} "
+        f"bars; the two describe different spans and can disagree. A lagging measure by "
+        f"construction: it describes an alignment that has already formed, not one that is "
+        f"starting. The figures date to the newest closed daily bar, so this whole block "
+        f"can be up to a day behind the Mark above. Gaps in the daily series are not "
+        f"checked, so a window missing bars still averages the {slow} most recent bars it "
+        f"has and still calls that SMA({slow}). Nothing in this section feeds the risk "
+        f"checks, the sizing or any order. Treat it as trend context, not as an entry or "
+        f"exit signal.",
     ]
 
 

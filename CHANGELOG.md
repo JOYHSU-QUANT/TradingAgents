@@ -13,17 +13,20 @@ Breaking changes within the 0.x line are called out explicitly.
 - **A daily macro-trend backdrop for the perp prompt, off by default**
   (`contrib/hyperliquid_perp/domains/perp/macro_trend.py`). The context's only
   trend reading was `classify_regime`, built from EMA(20)/EMA(50) over the
-  `4h` series — about 33 days at the project's lookback, so the widest thing
-  it could see was a swing. The new section reports the daily SMA(50)/SMA(200)
+  `4h` series — the slower of those two averages spans about eight days, so
+  the widest thing it could see was a swing. The new section reports the daily SMA(50)/SMA(200)
   pair: which way round they sit, how far apart as a percentage of the slow
   one, how many daily bars have carried that alignment (with the date it
   changed, when the window can see it), and where the latest daily close sits
   against SMA(200).
 
   **A state, never an event.** No "a crossing happened" flag and none of the
-  vocabulary that usually travels with one — the enum members are
+  vocabulary that usually travels with one — the enum's two values are
   `fast_above_slow` / `fast_below_slow`, and a test renders the block and
-  fails on `golden`, `death`, `bull`, `bear` or `cross`. A crossing is one
+  fails on `golden`, `death`, `bull`, `bear` or `cross`. The dated line says
+  the run "began" on a bar rather than that the alignment "changed" there:
+  the bar before a run carries the opposite alignment or, rarely, an exact
+  tie, and only the first of those is a turn. A crossing is one
   bar's worth of change and happens once or twice a year on BTC, so a `4h`
   cycle asking about it would read false essentially forever; a run length of
   one says the same thing and says it every cycle.
@@ -36,7 +39,10 @@ Breaking changes within the 0.x line are called out explicitly.
   every other line of the prompt.
 
   Switched on with `market_data.macro_trend_daily_lookback` (`0` = off, else
-  `>= 200`; 260 suggested). With it off, not one byte of an existing prompt
+  `200`–`2000`; 400 suggested — below that the block usually cannot date when
+  the current alignment began, because BTC's daily 50/200 alignment typically
+  holds for months). Both ends are refused at config load, since both failure
+  modes past them are silent. With it off, not one byte of an existing prompt
   moves and `context_shape` is unchanged; turning it on adds a `macro_trend`
   token after `indicators(...)`, which is what segments a paper run at the
   flip. Analyst input only — it feeds no gate and no sizing, and its value to
@@ -50,6 +56,15 @@ Breaking changes within the 0.x line are called out explicitly.
   daily series with a hole still averages the 200 most recent bars it has and
   still calls that SMA(200) — and the prompt's own Basis line says so rather
   than leaving it to be discovered.
+
+  The fail-closed contract covers the TRANSPORT too, which is the part that is
+  easy to miss: a 429 or a malformed `1d` response drops the section for that
+  cycle with a WARNING naming the read, rather than propagating out and ending
+  a 4h decision cycle as `api_failed` — an analyst input must not be able to
+  stop the account from reassessing an open position. And the section is not
+  computed at all on a cycle with no `4h` candles, where the context's as-of
+  falls back to the wall clock and a stale daily series would measure as
+  current.
 
 ### Changed
 

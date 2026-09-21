@@ -123,7 +123,7 @@ def test_example_yaml_ships_the_macro_trend_switched_off():
     assert config["market_data"]["macro_trend_daily_lookback"] == 0
 
 
-@pytest.mark.parametrize("lookback", [0, 200, 260, 1000])
+@pytest.mark.parametrize("lookback", [0, 200, 400, 2000])
 def test_load_config_accepts_a_legal_macro_trend_lookback(tmp_path, lookback):
     good = tmp_path / "macro.yaml"
     good.write_text(
@@ -144,6 +144,11 @@ def test_load_config_accepts_a_legal_macro_trend_lookback(tmp_path, lookback):
         ("-1", "must be >= 0"),
         ("1", "must be 0 .off. or at least 200"),
         ("199", "must be 0 .off. or at least 200"),
+        # The ceiling. Above it the two failure modes are silent — Decimal
+        # time on the live tick, and a negative computed startTime past
+        # ~20,700 — so the refusal has to be at load.
+        ("2001", "must be at most 2000"),
+        ("20800", "must be at most 2000"),
     ],
 )
 def test_load_config_rejects_a_bad_macro_trend_lookback(tmp_path, value, match):
@@ -158,15 +163,15 @@ def test_load_config_rejects_a_bad_macro_trend_lookback(tmp_path, value, match):
 
 def test_a_daily_lookback_wider_than_the_candle_lookback_is_legal(tmp_path):
     # The recommended pairing, and the one a profile-style cross-check would
-    # have refused: 200 4h candles for the indicators, 260 DAILY ones for the
+    # have refused: 200 4h candles for the indicators, 400 DAILY ones for the
     # macro trend. Pinned at the loader, not only on the dataclass, because
     # the loader is where an operator meets the refusal.
     path = tmp_path / "macro-wide.yaml"
     path.write_text(
-        "market_data:\n  candle_lookback: 200\n  macro_trend_daily_lookback: 260\n",
+        "market_data:\n  candle_lookback: 200\n  macro_trend_daily_lookback: 400\n",
         encoding="utf-8",
     )
-    assert load_config(path)["market_data"]["macro_trend_daily_lookback"] == 260
+    assert load_config(path)["market_data"]["macro_trend_daily_lookback"] == 400
 
 
 def test_market_data_integers_share_one_coercion(tmp_path):

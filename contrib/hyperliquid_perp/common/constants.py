@@ -16,7 +16,9 @@ __all__ = [
     "EXCHANGE_MIN_ORDER_NOTIONAL_USDC",
     "HOLDING_COST_HOURS",
     "LEGAL_NETWORKS",
+    "MACRO_FAST_PERIOD",
     "MAX_EPOCH_MS",
+    "MAX_MACRO_TREND_LOOKBACK",
     "MIN_EPOCH_MS",
     "MIN_MACRO_TREND_LOOKBACK",
     "MIN_VOLUME_PROFILE_WINDOW",
@@ -49,20 +51,34 @@ __all__ = [
 # See that module for WHY the floor is twelve rather than some other number.
 MIN_VOLUME_PROFILE_WINDOW = 12
 
-# The smallest legal ``market_data.macro_trend_daily_lookback``, for the same
-# two-layer readership as the floor above: ``market_data_config`` enforces it at
-# config load without importing a compute module, and
-# ``domains/perp/macro_trend`` reads it as the slow average's own period.
+# The macro trend's two periods and the config band around them. Here, not in
+# ``domains/perp/macro_trend.py``, for the reason the volume profile's
+# vocabulary is: THREE layers read these and none may import another's module —
+# ``market_data_config`` enforces the band at config load without importing a
+# compute module, ``domains/perp/macro_trend`` computes the averages, and
+# ``domains/perp/schema`` pins ``MacroTrend``'s two period fields to them at
+# construction (that module sits below the producer, which imports it).
 #
-# It is not an independent tuning choice — it IS the slow period, because a
-# window holding fewer bars than that has no SMA(200) at any position and the
-# section would be skipped on every cycle. The two names are one number stated
-# once here: ``macro_trend.MACRO_SLOW_PERIOD`` is bound to it rather than
-# written out again, and ``MacroTrend`` re-checks its ``slow_period`` against
-# what it was handed. 200 is the period the 50/200 pair is defined by, not a
-# figure this project picked (see ``macro_trend`` for why neither period is
-# configurable).
+# The floor is not an independent tuning choice — it IS the slow period,
+# because a window holding fewer bars than that has no SMA(200) at any position
+# and the section would be skipped on every cycle. The two names are one number
+# stated once: ``macro_trend.MACRO_SLOW_PERIOD`` is bound to this rather than
+# written out again, and ``MacroTrend`` checks its own ``slow_period`` against
+# it. 50 and 200 are the periods the pair is defined by, not figures this
+# project picked (see ``macro_trend`` for why neither is configurable).
+MACRO_FAST_PERIOD = 50
 MIN_MACRO_TREND_LOOKBACK = 200
+
+# The largest legal ``market_data.macro_trend_daily_lookback``. A ceiling
+# rather than an open range, for two reasons that only appear at the top end:
+# the averages are recomputed per bar over the whole window, which at 5000 bars
+# measures 0.28s of Decimal work on the single-threaded live tick — and it
+# lands in the unrefreshed window after the last kill-switch refresh; and above
+# roughly 20,700 the adapter's ``start = end_ms - (lookback + 1) * 86_400_000``
+# goes negative and sends a nonsensical ``startTime`` to ``candleSnapshot``.
+# Neither crashes, which is exactly why an operator would never find out. 2000
+# is ~5.5 years of daily bars — far past any use this section has.
+MAX_MACRO_TREND_LOOKBACK = 2000
 
 # The rest of the volume profile's vocabulary — the bucket resolution, the
 # value-area convention, and the shape thresholds. Here for the same reason as

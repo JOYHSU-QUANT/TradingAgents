@@ -10,6 +10,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The rolling-snapshot cache skeleton is the family's, not SoSoValue's**
+  (issue #279, last item). `load_rolling_snapshot` was unusable by any vendor
+  whose honest staleness cap is SHORTER than a day, by units alone: its bound
+  was `max_stale_days: int`. It also called `get_api_key` directly and spelled
+  "SoSoValue" into every message, so a keyless vendor could not borrow it
+  without being told it needed an API key. Now `max_stale_hours`, plus a
+  `precheck` hook and a `vendor` name; the three SoSoValue feeds pass
+  `MAX_STALE_DAYS * 24` and keep identical behaviour.
+
+  One more thing was SoSoValue-specific and is now not: the skeleton decided a
+  failure was "structural" (ERROR with a traceback) by `isinstance(e,
+  SoSoValueError)`. That is exactly right for that family - its outage and
+  rate-limit types deliberately sit outside that base - but it reads as a rule
+  about one vendor, and a second vendor adopting the skeleton would have gone
+  silently down the warning lane with a broken parser. It is now judged by
+  exclusion: neither the vendor being down nor the vendor throttling us.
+
+  **Neither hand-rolled copy adopts it, and the reasons are recorded in the
+  docstring rather than left to be rediscovered.** Farside was attempted and
+  reverted: the skeleton's freshness decisions would read THIS module's clock
+  while Farside's rendered age keeps reading its own `_utc_now` - identical in
+  production, but two seams where the vendor had one, which is the split its
+  own STALE caveat takes a `humanize` hook to avoid. Closing it means
+  threading a clock hook through three shared time helpers, and so through the
+  three feeds already using them. The whale vendor keeps `fetched_at` inside
+  its `current` block while the skeleton stamps and reads it at the top level,
+  so adopting means either a cache-schema change for a vendor that ships
+  disabled, or a second pair of hooks on a function that already takes eight
+  arguments. The generalisation stands on its own: it is what a future vendor
+  with a sub-day cap needs, and it removed a rule that only looked general.
+
 - **`raise_for_http_status` now owns the ORDER of the 429 check, and declining
   to give it one is declared rather than implicit** (issue #279). The helper
   types only a 5xx and `is_unreached` excludes `requests.HTTPError`, so a 429

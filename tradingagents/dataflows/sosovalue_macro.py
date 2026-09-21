@@ -112,6 +112,7 @@ from .sosovalue_common import (
     _stale_caveat,
     _valid_dated_rows,
     fetch_each,
+    get_api_key,
     load_rolling_snapshot,
     raise_all_failed,
 )
@@ -926,8 +927,9 @@ def _load_snapshot() -> _MacroSnapshot:
         ttl_hours=_cache_ttl_hours,
         label="macro",
         cache_name="SoSoValue macro cache",
-        max_stale_days=MAX_STALE_DAYS,
+        max_stale_hours=MAX_STALE_DAYS * 24,
         log=logger,
+        precheck=get_api_key,
     )
     return _snapshot_from(payload, fetched_at, stale)
 

@@ -646,6 +646,15 @@ def _days_unobserved(fetched_at: str, curr_dt: datetime) -> int | None:
     return (curr_dt - datetime.strptime(fetched_day, "%Y-%m-%d")).days
 
 
+def _humanize_span(hours: float) -> str:
+    """A cap in its own units: hours under a day, days beyond.
+
+    The stale cap used to be a whole number of days and could say so; now that
+    it is hours, "0.25-day" would be a worse way to write six.
+    """
+    return f"{hours:g}-hour" if hours < 24 else f"{hours / 24:g}-day"
+
+
 def _humanize_age(fetched_at: str) -> str:
     """Human-readable snapshot age for the STALE caveat.
 
@@ -1104,8 +1113,10 @@ def load_rolling_snapshot(
     ttl_hours: Callable[[dict], float],
     label: str,
     cache_name: str,
-    max_stale_days: int,
+    max_stale_hours: float,
     log: logging.Logger,
+    vendor: str = "SoSoValue",
+    precheck: Callable[[], object] | None = None,
 ) -> tuple[dict, str, bool, bool]:
     """The family's cache/TTL/stale discipline; returns (payload, fetched_at, stale, refetched).
 
@@ -1120,9 +1131,39 @@ def load_rolling_snapshot(
     errors keep their per-module attribution, so operators (and the tests)
     can keep filtering by the vendor's name.
 
-    Key first: an unset key must raise even when a fresh cache could serve
-    the call, or the emergency-disable flip (unset the key on the server)
-    would be delayed by up to the cache TTL. Then the Farside pattern: a
+    ``vendor`` and ``precheck`` are what make this the FAMILY's skeleton
+    rather than SoSoValue's. ``vendor`` names the vendor in every message and
+    log line; ``precheck``, when given, runs before anything else and may
+    raise. For the SoSoValue modules it is ``get_api_key``: an unset key must
+    raise even when a fresh cache could serve the call, or the
+    emergency-disable flip (unset the key on the server) would be delayed by
+    up to the cache TTL. A keyless vendor passes none.
+
+    ``max_stale_hours``, not days. The bound used to be a whole number of days
+    because the three SoSoValue feeds publish daily, which made a vendor whose
+    honest cap is SHORTER than a day unable to use this at all: the
+    whale-positioning module argues that a report headed "live snapshot" must
+    not serve a quarter-day-old book, and a day-granular bound cannot express
+    six hours. Hours cost the existing callers a ``* 24`` and let the skeleton
+    hold vendors its units previously excluded.
+
+    What still keeps the two hand-rolled copies out, measured rather than
+    assumed, so the next attempt does not rediscover it:
+
+    * ``farside._load_flows`` would inherit THIS module's clock for its TTL and
+      staleness decisions while its rendered age keeps reading its own
+      ``_utc_now``. Identical in production (both are the UTC wall clock) but
+      two seams where the vendor had one, which is the split its own STALE
+      caveat takes a ``humanize`` hook to avoid. A clock hook here would close
+      it, at the cost of threading one through this module's three time
+      helpers - and so through the three feeds already using them.
+    * ``hyperliquid_whales._load_snapshot`` keeps ``fetched_at`` inside its
+      ``current`` block, while this function stamps and reads it at the top
+      level. Adopting means either a cache-schema change for a vendor that
+      ships disabled, or a second pair of hooks to read and write the stamp -
+      on a function that already takes eight arguments.
+
+    Then the Farside pattern: a
     cache younger than its TTL is served as-is — the TTL is the module's
     policy call (``ttl_hours(cached)``), where each degradation bucket's
     shortened-or-not argument lives — otherwise ``fetch_all(cached)`` runs
@@ -1151,7 +1192,8 @@ def load_rolling_snapshot(
     there is no counter to reset on a restart and no per-process view of
     it (#217). A throttle is never escalated: it is the vendor answering.
     """
-    get_api_key()
+    if precheck is not None:
+        precheck()
 
     cached = read_cache(path)
     if cached:
@@ -1170,47 +1212,62 @@ def load_rolling_snapshot(
         wrap_cls = type(e)
         if cached:
             fetched_at = cached["fetched_at"]
-            age = _days_stale(fetched_at)
-            # Unknown age (unparseable or future-dated stamp) is treated as
-            # beyond the cap — the case where an unbounded-age serve is most
-            # likely — rather than served with a nonsense age caveat.
-            if age is None or age > max_stale_days:
+            age = _cache_age_hours(fetched_at)
+            # Unknown age (unparseable stamp) or a future-dated one is treated
+            # as beyond the cap — the case where an unbounded-age serve is most
+            # likely — rather than served with a nonsense age caveat. Hours
+            # rather than whole days now, so a cap under a day is expressible;
+            # ``_days_stale`` folded the future-dated case into None, which the
+            # sign test below now does explicitly.
+            if age is None or age < 0 or age > max_stale_hours:
                 stale_desc = (
                     "has an unparseable or future-dated fetch date"
-                    if age is None
-                    else f"is {age} days stale"
+                    if age is None or age < 0
+                    else f"is {_humanize_age(fetched_at)} stale"
                 )
                 raise wrap_cls(
-                    f"SoSoValue {label} fetch failed and the newest cache {stale_desc} "
-                    f"(> {max_stale_days}-day cap): {failure_account(e, limit=None)}"
+                    f"{vendor} {label} fetch failed and the newest cache {stale_desc} "
+                    f"(> {_humanize_span(max_stale_hours)} cap): "
+                    f"{failure_account(e, limit=None)}"
                 ) from e
             # A SoSoValueError here is a contract/parse break (a code fix is
             # likely needed) and must not hide among network-blip warnings for
             # up to the stale cap; a rate limit stays a warning, and so does
             # an outage until the snapshot has aged past half the cap.
             age_str = _humanize_age(fetched_at)
-            if isinstance(e, SoSoValueError):
+            # "Structural" by EXCLUSION rather than by this family's own type:
+            # a failure that is neither the vendor being down nor the vendor
+            # throttling us is the client or the contract breaking, whoever
+            # raised it. ``isinstance(e, SoSoValueError)`` said exactly that
+            # for one family - its outage and rate-limit types deliberately
+            # sit outside that base - but it read as a rule about SoSoValue,
+            # and a second vendor adopting this skeleton would have gone
+            # silently down the warning lane with a broken parser.
+            if not isinstance(e, (VendorUnavailableError, VendorRateLimitError)):
                 log.error(
-                    "SoSoValue %s refresh failed structurally (%s); serving stale "
+                    "%s %s refresh failed structurally (%s); serving stale "
                     "cache (%s old) — the client likely needs a fix, or the vendor "
                     "is refusing it",
+                    vendor,
                     label,
                     e,
                     age_str,
                     exc_info=True,
                 )
-            elif isinstance(e, VendorUnavailableError) and age * 2 > max_stale_days:
+            elif isinstance(e, VendorUnavailableError) and age * 2 > max_stale_hours:
                 log.error(
-                    "SoSoValue %s refresh failed (%s); serving stale cache %s old, past "
-                    "half the %d-day stale cap — a persistent failure, not a brownout",
+                    "%s %s refresh failed (%s); serving stale cache %s old, past "
+                    "half the %s stale cap — a persistent failure, not a brownout",
+                    vendor,
                     label,
                     e,
                     age_str,
-                    max_stale_days,
+                    _humanize_span(max_stale_hours),
                 )
             else:
                 log.warning(
-                    "SoSoValue %s refresh failed (%s); using stale cache (%s old)",
+                    "%s %s refresh failed (%s); using stale cache (%s old)",
+                    vendor,
                     label,
                     e,
                     age_str,
@@ -1224,7 +1281,7 @@ def load_rolling_snapshot(
         # by class at _request (#217): never the requests message, which
         # quotes the request URL, and this line is LLM-visible (#203).
         raise wrap_cls(
-            f"SoSoValue {label} unavailable and no usable cache exists: "
+            f"{vendor} {label} unavailable and no usable cache exists: "
             f"{failure_account(e, limit=None)}"
         ) from e
 

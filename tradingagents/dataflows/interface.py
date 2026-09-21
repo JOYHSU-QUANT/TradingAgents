@@ -13,6 +13,7 @@ from .alpha_vantage import (
     get_news as get_alpha_vantage_news,
     get_stock as get_alpha_vantage_stock,
 )
+from .cme_basis import get_futures_basis as get_yfinance_futures_basis
 from .config import get_config
 from .deribit import get_options_market_data as get_deribit_options_market
 from .errors import (
@@ -122,6 +123,12 @@ TOOLS_CATEGORIES = {
             "get_whale_positions",
         ],
     },
+    "futures_basis": {
+        "description": "CME Bitcoin front-month futures basis over spot, nominal and annualized (crypto)",
+        "tools": [
+            "get_futures_basis",
+        ],
+    },
 }
 
 # Configuring a category (or tool) to this sentinel switches it off entirely.
@@ -165,6 +172,7 @@ OPTIONAL_CATEGORIES = {
     "economic_calendar",
     "btc_treasuries",
     "whale_positioning",
+    "futures_basis",
 }
 
 # Categories whose vendor's own library failing is never rendered as the
@@ -287,6 +295,10 @@ VENDOR_METHODS = {
     "get_whale_positions": {
         "hyperliquid_stats": get_hyperliquid_whale_positions,
     },
+    # futures_basis
+    "get_futures_basis": {
+        "yfinance": get_yfinance_futures_basis,
+    },
 }
 
 
@@ -324,6 +336,7 @@ _LIBRARY_SUBJECTS = {
     "get_economic_calendar": "economic calendar",
     "get_btc_treasuries": "BTC treasuries for {0}",
     "get_whale_positions": "whale positioning for {0}",
+    "get_futures_basis": "futures basis for {0}",
 }
 
 

@@ -32,6 +32,7 @@ import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.alpha_vantage_stock as avs
+import tradingagents.dataflows.cme_basis as cme_basis
 import tradingagents.dataflows.deribit as deribit
 import tradingagents.dataflows.farside as farside
 import tradingagents.dataflows.fear_greed as fear_greed
@@ -295,6 +296,13 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
         "whale positioning",
         live_only=True,
     ),
+    # Served for a past date (hourly history IS dated), so not live_only;
+    # ``no_network`` pins this module's clock beside GOOD for that reason.
+    ("get_futures_basis", "yfinance"): _point(
+        cme_basis.get_futures_basis,
+        lambda d: ("BTC", d["curr_date"]),
+        "futures basis",
+    ),
 }
 
 
@@ -363,6 +371,14 @@ def no_network(monkeypatch):
     monkeypatch.setattr(sosovalue_treasuries, "_load_snapshot", _reached)
     monkeypatch.setattr(deribit, "_request", _reached)
     monkeypatch.setattr(hyperliquid_whales, "_load_snapshot", _reached)
+    monkeypatch.setattr(cme_basis, "_fetch_hourly", _reached)
+    # The basis getter withholds a date older than Yahoo's hourly reach BEFORE
+    # its seam, so against the wall clock GOOD would age out of reach and
+    # these rows would turn red on a calendar date, with no change to the
+    # code. Pinned a day after GOOD instead.
+    monkeypatch.setattr(
+        cme_basis, "_utc_now", lambda: datetime(2026, 6, 6, 12, tzinfo=timezone.utc)
+    )
     monkeypatch.setattr(fred, "_request", _reached)
     monkeypatch.setattr(polymarket, "_request", _reached)
     return reached

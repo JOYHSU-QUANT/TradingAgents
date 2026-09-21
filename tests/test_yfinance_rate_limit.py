@@ -19,6 +19,7 @@ import requests
 from curl_cffi.requests import exceptions as curl_exceptions
 from yfinance.exceptions import YFRateLimitError
 
+import tradingagents.dataflows.cme_basis as cme
 import tradingagents.dataflows.y_finance as yfin
 import tradingagents.dataflows.yfinance_common as su
 import tradingagents.dataflows.yfinance_news as ynews
@@ -871,6 +872,11 @@ _YFINANCE_LEAF_CALLS = {
     "get_news": ((ynews, "yf_fetch_unhidden"), ("AAPL", "2026-06-01", "2026-06-05")),
     "get_global_news": ((ynews, "yf_fetch_unhidden"), ("2026-06-01",)),
     "get_insider_transactions": ((yfin, "yf_fetch_unhidden"), ("AAPL",)),
+    # Today, for the fundamentals row's reason: a date older than Yahoo's
+    # hourly reach is withheld before the seam. The first yfinance leaf in an
+    # OPTIONAL category, which is why the prose table below is not simply
+    # "every leaf but the loud ones" any more.
+    "get_futures_basis": ((cme, "yf_fetch_unhidden"), ("BTC", _TODAY)),
 }
 
 
@@ -1018,9 +1024,29 @@ def _propagating_leaves() -> frozenset[str]:
 _PROPAGATING_LEAVES = _propagating_leaves()
 
 
+# The leaves whose library failure ends as the optional category's sentinel
+# rather than as one of the lines above: the router keeps an optional chain's
+# own endings (no-data first, then ``DATA_UNAVAILABLE``) and never renders the
+# report line for one. Read off the router's declaration, like the loud set.
+def _optional_leaves() -> frozenset[str]:
+    return frozenset(
+        method
+        for method in _YFINANCE_LEAF_CALLS
+        if interface.get_category_for_method(method) in interface.OPTIONAL_CATEGORIES
+    )
+
+
+_OPTIONAL_LEAVES = _optional_leaves()
+
+
 @pytest.mark.unit
-def test_the_prose_table_covers_every_leaf_but_the_loud_ones():
-    assert set(_PROSE_LEAF_PREFIXES) == set(_YFINANCE_LEAF_CALLS) - _PROPAGATING_LEAVES
+def test_the_prose_table_covers_every_leaf_but_the_loud_and_the_optional_ones():
+    assert (
+        set(_PROSE_LEAF_PREFIXES)
+        == set(_YFINANCE_LEAF_CALLS) - _PROPAGATING_LEAVES - _OPTIONAL_LEAVES
+    )
+    # Pinned as a fact too, so the third class cannot empty or grow unnoticed.
+    assert {"get_futures_basis"} == _OPTIONAL_LEAVES
 
 
 @pytest.mark.unit
@@ -1038,12 +1064,12 @@ def test_the_loud_category_is_ohlcv_and_the_mirror_follows_it():
         # The partition the test above asserts stops holding: the leaf the
         # second declaration claims is still in the prose table, so a
         # category added without revisiting that table fails there.
-        assert set(_PROSE_LEAF_PREFIXES) != set(_YFINANCE_LEAF_CALLS) - loud
+        assert set(_PROSE_LEAF_PREFIXES) != set(_YFINANCE_LEAF_CALLS) - loud - _OPTIONAL_LEAVES
     assert "get_news" in loud
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("method", sorted(_PROSE_LEAF_PREFIXES))
+@pytest.mark.parametrize("method", sorted(set(_PROSE_LEAF_PREFIXES) | _OPTIONAL_LEAVES))
 def test_every_prose_leaf_leaves_its_untyped_failure_for_the_router(
     monkeypatch, tmp_path, caplog, method
 ):
@@ -1093,6 +1119,24 @@ def test_every_prose_leaf_ends_as_one_capped_line_when_it_is_the_only_vendor(
     _assert_one_capped_line(out, prefix)
     [record] = [r for r in caplog.records if r.exc_info is not None]
     assert _FORGED_MESSAGE in record.getMessage()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", sorted(_OPTIONAL_LEAVES))
+def test_every_optional_leaf_ends_as_the_optional_sentinel_when_its_library_fails(
+    monkeypatch, tmp_path, method
+):
+    # The other half of the partition: an optional category never gets the
+    # report line, so the same forged library message ends as the sentinel
+    # that names the vendor — one line, with none of the message's markdown.
+    seam, args = _YFINANCE_LEAF_CALLS[method]
+    category = interface.get_category_for_method(method)
+    set_config({"data_cache_dir": str(tmp_path), "data_vendors": {category: "yfinance"}})
+    monkeypatch.setattr(*seam, mock.Mock(side_effect=RuntimeError(_FORGED_MESSAGE)))
+    out = interface.route_to_vendor(method, *args)
+    assert out.startswith(f"DATA_UNAVAILABLE: optional {category} could not be retrieved (yfinance: ")
+    assert out.endswith("Proceed without it; do not fabricate values.")
+    assert "\n" not in out and "|" not in out and "#" not in out
 
 
 @pytest.mark.unit

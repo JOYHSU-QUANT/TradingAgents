@@ -10,6 +10,73 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **CME Bitcoin futures basis as a crypto market-analyst tool, off by default**
+  (`tradingagents/dataflows/cme_basis.py`, routed tool `get_futures_basis`,
+  optional category `futures_basis`, vendor `yfinance`, BTC only). What the
+  regulated front-month future (Yahoo `BTC=F`) trades at over spot
+  (`BTC-USD`): a nominal percentage, the same annualized by the contract's days
+  to expiry, a 7-day annualized median, and the change against the reading 7
+  days earlier. Bound crypto-only beside `get_options_market`, each gated on
+  its own category; the stock path's tools and prompt are unchanged, and
+  nothing under `contrib/` is touched.
+
+  **Hourly bars matched on their stamp, not the two daily closes.** The plan
+  was to subtract the daily closes the OHLCV cache already holds. Measured
+  first (2026-09-21, one year): that same-date difference averaged +0.22% with
+  a standard deviation of 0.78%, was negative on 37.5% of days and ranged from
+  −3.9% to +3.3% — `BTC-USD` closes its day at 00:00 UTC and `BTC=F` at the end
+  of the CME session, so the figure is clock mismatch several times the size of
+  the carry it was meant to show. Hourly closes matched on the same UTC hour
+  were negative on 2.4% of days over 730 days, moved 0.07% within a typical
+  day, and traced the sawtooth a front-month basis must. A regression of that
+  series on days to expiry gives a carry of about 5.9% a year.
+
+  **Session hours that traded, and a median.** While CME is closed Yahoo still
+  emits hourly `BTC=F` bars whose close is pinned to the previous settlement;
+  against a spot price that kept moving they read as a basis of −1% to −2%.
+  Only hours inside the CME week are used — closed from Friday 21:00 to Sunday
+  23:00 UTC, the intersection of the daylight- and standard-time sessions, so
+  the rule needs no timezone database — and only bars with volume. A few pinned
+  closes survive into the hours after a reopen (0.4% of what the filters keep),
+  so a reading is the median of its 24 hours, never a mean or a single print.
+
+  **Annualized by real days to expiry, withheld near it.** The nominal level
+  is set mostly by how far away expiry is, so a fixed multiple would leave
+  every month-end convergence looking like weakening demand. The expiry is the
+  last Friday of the month (it can be a day late around an exchange holiday;
+  the report calls the figure approximate). The annualized figure is withheld
+  within 5 days of expiry — the quotient blows up, Yahoo rolls the continuous
+  symbol on an unannounced day of that week, and the fixed offset between
+  Yahoo's aggregate spot and the contract's reference rate (about +0.05% to
+  +0.1%) is multiplied by 365/days — and for the first hours after a roll,
+  while the window still holds the old contract's hours. The withholding is
+  said in the figure's own line, in the change line, and in the closing
+  `_Reading:_` sentence a downstream summary keeps.
+
+  **All or nothing.** The vendors that fetch two halves independently each
+  have a figure that needs only one; this tool has none, and a lone futures
+  price would invite exactly the asynchronous subtraction it exists to
+  replace. The first failure leaves with its own type, so a throttle stays in
+  the rate-limit lane and the client-wide latch spares the second request.
+
+  Hours after `curr_date` are never read (the bound is the midnight ending it,
+  or the clock); the whole report is withheld with no figures for a date more
+  than a day ahead of the UTC clock or older than the 729 days of hourly
+  history Yahoo serves; a newest synchronous hour more than 7 days old is
+  refused as stale. The cost of the hourly method is that it cannot use
+  `load_ohlcv`'s disk cache: two Yahoo requests per call, through
+  `yf_fetch_unhidden` like every other yfinance leaf.
+
+  **Ships disabled** (`data_vendors["futures_basis"] = "none"`), as
+  `whale_positioning` did: keyless, so merging it on would change a running
+  deployment's analyst input surface with no server-side action to date the
+  change from. The flip to `"yfinance"` is a separate, dated commit.
+
+  It is the first yfinance leaf in an OPTIONAL category, so the leaf table in
+  `tests/test_yfinance_rate_limit.py` is now partitioned three ways — loud,
+  report-line, and optional-sentinel — each set read off the router's own
+  declarations.
+
 - **A daily macro-trend backdrop for the perp prompt, off by default**
   (`contrib/hyperliquid_perp/domains/perp/macro_trend.py`). The context's only
   trend reading was `classify_regime`, built from EMA(20)/EMA(50) over the

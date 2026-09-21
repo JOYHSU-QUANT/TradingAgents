@@ -178,7 +178,9 @@ vendor），這一段量測作廢、bump 到下一個版本戳重來。`paper-BT
 **第三種情況：改 YAML 就會改 context 形狀——由 `context_shape` 自動切段。** 上面兩條規則都
 預設「改形狀 = 改 code = 會部署 = 有機會 bump `PROMPT_VERSION`」。有些 key 不需要部署就會
 改 prompt 的**結構**：`market_data.volume_profile_window_candles` 從 `0` 調到 `>= 12`，
-`render_market_context` 多出一整段 `Volume profile (...)`；`market_data.autoresearch_signal`
+`render_market_context` 多出一整段 `Volume profile (...)`；`market_data.macro_trend_daily_lookback`
+從 `0` 調到 `>= 200`，多出一整段 `Macro trend (...)`（位置在 `Indicators:` 之後、`Volume profile`
+之前，而且每個 cycle 會多讀一條日線序列）；`market_data.autoresearch_signal`
 從 `""` 填上一個路徑，多出一整段 `Research signal (...)`；改 `indicators` 清單，
 `Indicators:` 底下多一列或少一列。沒有 commit、沒有 bump，釘在 `decision_format_instructions`
 指紋上的那個測試也看不到。所以 schema v10 起 `ai_inputs` 多一欄 **`context_shape`**（同時寫進
@@ -240,7 +242,8 @@ cycle 數（`prompt_regime:` 行，見 §6），一眼看出 run 有沒有跨段
 改名、加段）等同改 prompt 契約，同一個 commit 要 bump `PROMPT_VERSION`，否則新舊文法的
 字串會在同一欄裡互相撞桶。**一個預設關閉、因此預設不出現的 token 不算**——`volume_profile`
 與 `autoresearch` 都是這樣進來的：開關關著時渲染出來的字串跟上一版逐字相同，同一欄裡沒有
-兩套文法可以撞，分段點是「你打開它那一刻」，而那一刻 `context_shape` 自己會標出來。`volume_profile_window_candles` 預設 `0` 的理由不變：
+兩套文法可以撞，分段點是「你打開它那一刻」，而那一刻 `context_shape` 自己會標出來。`macro_trend_daily_lookback`
+預設 `0` 也是同一條路進來的。`volume_profile_window_candles` 預設 `0` 的理由不變：
 merge 進來不動任何既有 prompt，分段點是「你改 config 那一刻」，由你選。`autoresearch_signal`
 預設 `""` 同理——而且它多一層前提：計畫 §7 說 run 5 換 maker 之後，promoted 的規則要先在
 maker 成本下重跑通過才可以翻這個開關。這條有程式擋著：`signal` 遇到 taker 成本的 experiment
@@ -259,6 +262,8 @@ drift。任一側 parser 讀不了（例如 genesis 帶著已改名的舊 key）
 另注意 `context_shape` 描述的是**模型實際看到的 prompt**：視窗開著但該 cycle 的 profile 被
 執行期跳過（歷史不夠、零寬度、零成交量，各有一行 WARNING），那個 cycle 會落在「沒有 volume
 profile 段」的 shape——這是真的少了一段，不是假訊號；判讀時對照 WARNING 把它們併回去。
+`macro_trend` token 讀法一樣：開關開著但該 cycle 的日線序列不足 200 根／過期或超前／兩條均線
+完全相等（各有一行 WARNING），那個 cycle 一樣落在「沒有 `macro_trend` 段」的桶。
 （伺服器上跑著的 run 不受影響：`local.yaml` 整檔優先且不進版控，不會自動拿到這個 key。）
 
 **`context_shape` 只回答「那一段在不在」，回答不了「模型有沒有跟著它走」。** 這是 shape 的設計，

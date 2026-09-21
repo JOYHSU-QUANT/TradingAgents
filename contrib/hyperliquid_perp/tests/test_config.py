@@ -114,6 +114,61 @@ def test_load_config_rejects_a_bad_volume_profile_window(tmp_path, value, match)
         load_config(bad)
 
 
+def test_example_yaml_ships_the_macro_trend_switched_off():
+    # Same rule as the volume profile above: the switch ships OFF so pulling
+    # the feature into a branch (or onto the paper box) changes no prompt
+    # until an operator writes a lookback. If this ever flips to a non-zero
+    # default, the flip — not the merge — is the measurement point.
+    config = load_config(_EXAMPLE)
+    assert config["market_data"]["macro_trend_daily_lookback"] == 0
+
+
+@pytest.mark.parametrize("lookback", [0, 200, 260, 1000])
+def test_load_config_accepts_a_legal_macro_trend_lookback(tmp_path, lookback):
+    good = tmp_path / "macro.yaml"
+    good.write_text(
+        f"market_data:\n  candle_lookback: 200\n  macro_trend_daily_lookback: {lookback}\n",
+        encoding="utf-8",
+    )
+    assert load_config(good)["market_data"]["macro_trend_daily_lookback"] == lookback
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        # Every one of these fails SILENTLY without the load-time check: the
+        # prompt section just never appears, which looks exactly like the
+        # feature being off on purpose.
+        ("260.5", "expected an integer"),
+        ("true", "expected an integer, got a YAML boolean"),
+        ("-1", "must be >= 0"),
+        ("1", "must be 0 .off. or at least 200"),
+        ("199", "must be 0 .off. or at least 200"),
+    ],
+)
+def test_load_config_rejects_a_bad_macro_trend_lookback(tmp_path, value, match):
+    bad = tmp_path / "macro-bad.yaml"
+    bad.write_text(
+        f"market_data:\n  candle_lookback: 200\n  macro_trend_daily_lookback: {value}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=match):
+        load_config(bad)
+
+
+def test_a_daily_lookback_wider_than_the_candle_lookback_is_legal(tmp_path):
+    # The recommended pairing, and the one a profile-style cross-check would
+    # have refused: 200 4h candles for the indicators, 260 DAILY ones for the
+    # macro trend. Pinned at the loader, not only on the dataclass, because
+    # the loader is where an operator meets the refusal.
+    path = tmp_path / "macro-wide.yaml"
+    path.write_text(
+        "market_data:\n  candle_lookback: 200\n  macro_trend_daily_lookback: 260\n",
+        encoding="utf-8",
+    )
+    assert load_config(path)["market_data"]["macro_trend_daily_lookback"] == 260
+
+
 def test_market_data_integers_share_one_coercion(tmp_path):
     # Every integer key in the block goes through the same int_from_yaml, so
     # a quoted "30" reads as 30 for the profile window exactly as it always

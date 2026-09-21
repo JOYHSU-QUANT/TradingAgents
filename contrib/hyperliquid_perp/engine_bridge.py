@@ -47,6 +47,7 @@ from .config import CONFIG_LOAD_ERRORS, DOTENV_READ_ERRORS, ENGINE_KEYS, load_co
 from .domains.perp import risk_gate
 from .domains.perp.context_builder import build_market_context, context_as_of
 from .domains.perp.indicator_vocab import indicator_names
+from .domains.perp.macro_trend import MACRO_CANDLE_INTERVAL
 from .domains.perp.marginal_cost import PositionInputs
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.research_signal import load_research_signal
@@ -208,7 +209,9 @@ def _build_context(
     ``on_blocking_read`` is called between the network reads below. It exists for
     ONE caller — the live loop, where this runs on the single-threaded tick and
     the five reads here (constructing the client fetches perp meta, then
-    snapshot, the exchange clock, candles, funding) are the longest run of
+    snapshot, the exchange clock, candles, funding — a sixth, the daily candle
+    series, only when ``market_data.macro_trend_daily_lookback`` is on) are the
+    longest run of
     back-to-back REST calls in the system, each riding the full
     ``network_timeout_s``. Left unrefreshed, this chain would set
     ``kill_switch._MAX_UNREFRESHED_REST_CALLS`` to its own length — four when
@@ -292,6 +295,31 @@ def _build_context(
         coin, market_data.funding_zscore_window_days, end=exchange_time
     )
     _between_reads()
+    # The daily series the macro-trend section is built from — LAST among the
+    # market reads, and conditional on the switch.
+    #
+    # Last, because every timing argument above it is about ADJACENCY and
+    # would have to be re-made if this landed in the middle: the clock read is
+    # argued from sitting immediately before the two windows it cuts (issue
+    # #51), and both of those windows are then cut at that one reading. This
+    # read is cut at the same reading and changes none of that.
+    #
+    # Conditional, so a run with the feature off pays nothing: no extra REST
+    # call, no extra latency on the single-threaded live tick. With the
+    # feature on it is one more read with a refresh on either side, so the
+    # longest UNREFRESHED run is unchanged — and that, not the chain's total
+    # length, is what ``_MAX_UNREFRESHED_REST_CALLS`` is reasoned about.
+    # Pinned by driving this function in tests/live/test_kill_switch.py, with
+    # the switch ON as well as off, rather than claimed here.
+    daily_candles = None
+    if market_data.macro_trend_daily_lookback > 0:
+        daily_candles = market.get_candles(
+            coin,
+            MACRO_CANDLE_INTERVAL,
+            market_data.macro_trend_daily_lookback,
+            end=exchange_time,
+        )
+        _between_reads()
 
     # The research radar's handoff document, read AFTER the market reads and
     # judged against the very bar the context will be dated to — which is why
@@ -338,6 +366,7 @@ def _build_context(
         exchange_time=exchange_time,
         position=position,
         research_signal=research_signal,
+        daily_candles=daily_candles,
         host_time_at_exchange_read=host_time_at_exchange_read,
     )
     return ctx, client

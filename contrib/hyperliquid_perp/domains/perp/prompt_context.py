@@ -15,6 +15,8 @@ from decimal import Decimal
 
 from ...common.instants import from_epoch_ms
 from .schema import (
+    MacroAlignment,
+    MacroTrend,
     MarketRegime,
     PerpMarketContext,
     PositionContext,
@@ -191,6 +193,91 @@ def _volume_profile_lines(profile: VolumeProfile, candle_interval: str) -> list[
         f"This is a coarse approximation of intra-candle volume, not tick data — "
         f"treat these levels as approximate reference, not precise support or "
         f"resistance.",
+    ]
+
+
+# Which way round the two daily averages are, as one word. Exhaustive over
+# MacroAlignment — a new member fails loud at render time rather than silently
+# inheriting the other's word.
+#
+# One word each, and no second clause: this is the whole vocabulary the
+# section is allowed for the ordering. "golden"/"death", "bullish"/"bearish"
+# and "confirmed" are the words a reader supplies for themselves and that this
+# rule never measured — it measured which of two averages is the larger. Same
+# restraint as ``_SHAPE_NOTE`` above, and pinned by a test that renders the
+# block and looks for those words.
+_MACRO_ALIGNMENT_WORD = {
+    MacroAlignment.ABOVE: "above",
+    MacroAlignment.BELOW: "below",
+}
+
+
+def _macro_trend_lines(macro: MacroTrend, candle_interval: str) -> list[str]:
+    """The macro-trend block. Only called when a macro trend exists.
+
+    ``candle_interval`` is the OTHER series' interval — the one every line
+    above this block is cut from — named in the basis note so "its own daily
+    series" is a contrast a reader can check rather than a claim. Taken from
+    the context, never written out as ``4h``: the interval is configurable,
+    and a literal here would go on asserting today's value after it moved.
+    """
+    fast, slow = macro.fast_period, macro.slow_period
+    if macro.state_age_capped:
+        # "At least", because the run reaches the oldest bar that HAS both
+        # averages: the window cannot see when it started. Saying the plain
+        # number here would report a window width as a measured age, and the
+        # figure would then change if an operator widened the lookback while
+        # nothing about the market had moved.
+        held = (
+            f"  Held for: at least {macro.days_in_state} daily bars — that is every bar in "
+            f"this window with both averages, so no earlier change is visible from here"
+        )
+    else:
+        # ``state_age_capped`` is False exactly when this date exists
+        # (``MacroTrend`` enforces the equivalence), so the narrowing is the
+        # DTO's guarantee rather than an assumption of this branch.
+        assert macro.last_change_date is not None
+        held = (
+            f"  Held for: {macro.days_in_state} daily bars (the alignment last changed on "
+            f"the bar dated {macro.last_change_date.isoformat()})"
+        )
+    return [
+        # Dated to the newest CLOSED daily bar, like the volume profile's "as
+        # of the last closed candle" and for a stronger version of the same
+        # reason: a daily bar closes once a day, so this block can be a whole
+        # day behind the Mark printed further up, and it is cut from a
+        # different fetch than everything above it. The date is printed rather
+        # than described so the reader can measure that lag instead of
+        # assuming it.
+        f"Macro trend (its own daily candle series, SMA({fast}) vs SMA({slow}), newest "
+        f"daily bar dated {macro.as_of_date.isoformat()}):",
+        f"  SMA({fast}): {_num(macro.sma_fast)}   SMA({slow}): {_num(macro.sma_slow)}",
+        # The separation is printed as the SIGNED difference over the slow
+        # average, spelled as the subtraction it is. Writing it unsigned under
+        # the word "below" would read as a magnitude whose sign the reader has
+        # to reconstruct from the word, and the two could then disagree
+        # without either line being wrong on its own.
+        f"  Alignment: SMA({fast}) {_MACRO_ALIGNMENT_WORD[macro.alignment]} SMA({slow}); "
+        f"SMA({fast}) - SMA({slow}) is {_num(macro.separation_pct, sign=True)}% of "
+        f"SMA({slow})",
+        held,
+        f"  Latest daily close: {_num(macro.latest_close)}; close - SMA({slow}) is "
+        f"{_num(macro.close_vs_slow_pct, sign=True)}% of SMA({slow})",
+        # Five disclosures, each of which a reader would otherwise have to
+        # assume: which candles these came from, that the measure lags by
+        # construction, how far behind the mark it can be, that gaps in the
+        # daily series are not checked (the producer says the same in its
+        # docstring), and that nothing here is wired to a decision.
+        f"  Basis: two simple moving averages over closed daily candles, fetched as their "
+        f"own series — the candles and indicators above are {candle_interval} bars and are "
+        f"not affected by this section. A lagging measure by construction: "
+        f"it describes an alignment that has already formed, not one that is starting, and "
+        f"in a sideways market the alignment can flip from one bar to the next and back. "
+        f"The figures date to the newest closed daily bar, so this whole block can be up to "
+        f"a day behind the Mark above. Gaps in the daily series are not checked, so a "
+        f"window missing bars still averages the {slow} most recent bars it has and still "
+        f"calls that SMA({slow}). Nothing in this section feeds the risk checks, the sizing "
+        f"or any order — it is one more input to weigh.",
     ]
 
 
@@ -393,6 +480,16 @@ def render_market_context(ctx: PerpMarketContext) -> str:
         label = _INDICATOR_LABEL.get(name, name)
         lines.append(f"  {label}: {_num(value, 4)}")
 
+    # The widest backdrop, directly under the indicators it widens: those are
+    # cut from ~33 days of 4h bars, this from 200 daily ones, so the context
+    # reads outward-in from here (macro trend, then the profile's window of
+    # ~5 days, then the radar, then the account). Optional and absent
+    # whenever the switch is off or the daily series was unusable — the WHOLE
+    # block drops out, for the reason spelled out on the profile below.
+    if ctx.macro_trend is not None:
+        lines.append("")
+        lines.extend(_macro_trend_lines(ctx.macro_trend, ctx.candle_interval))
+
     # Optional and last: absent whenever the feature is off or the window was
     # unusable. The WHOLE block drops out — there is no "Volume profile: n/a"
     # form, because a header with nothing under it reads as a measurement that
@@ -432,14 +529,16 @@ def context_shape(ctx: PerpMarketContext) -> str:
     ``price|market|funding|indicators(rsi_14,ema_20,macd)|volume_profile``:
     the fixed sections in render order, the indicator rows by configured name
     (in render order — a reorder is a different prompt), and each optional
-    section when it is present: the volume profile, the research radar's
-    signal (``autoresearch``) and the position. It is stored beside
+    section when it is present: the daily macro trend, the volume profile,
+    the research radar's signal (``autoresearch``) and the position. It is
+    stored beside
     ``prompt_version`` on every ``ai_inputs`` row (issue #97) — and beside
     ``format_fingerprint``, the format block's content digest, since v11
     (issue #129; ``target_decision.format_fingerprint``) — so the paper
     review can segment on all three keys and a
     config-only change that adds or removes a section — flipping
-    ``market_data.volume_profile_window_candles``, editing ``indicators`` —
+    ``market_data.volume_profile_window_candles`` or
+    ``market_data.macro_trend_daily_lookback``, editing ``indicators`` —
     lands in the data by itself, with no code deploy and nobody remembering
     to bump anything.
 
@@ -464,6 +563,12 @@ def context_shape(ctx: PerpMarketContext) -> str:
     prompt the model was shown, not the configuration. A run with the window
     on and an occasional skip will show those cycles as a small second bucket
     next to the WARNING that explains them.
+
+    The ``macro_trend`` token reads the same way: the builder leaves the
+    field ``None`` both when the lookback is configured off and on a cycle
+    whose daily series was unusable (too short, stale, or two exactly equal
+    averages — each logged as a WARNING by ``macro_trend``), and that cycle's
+    prompt really had no such section.
 
     The ``autoresearch`` token reads the same way, and it is the reason the
     research signal fails closed by section rather than by row: a cycle whose
@@ -493,6 +598,8 @@ def context_shape(ctx: PerpMarketContext) -> str:
         "funding",
         f"indicators({','.join(ctx.indicators)})",
     ]
+    if ctx.macro_trend is not None:
+        parts.append("macro_trend")
     if ctx.volume_profile is not None:
         parts.append("volume_profile")
     if ctx.research_signal is not None:

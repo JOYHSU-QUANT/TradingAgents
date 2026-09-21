@@ -221,6 +221,7 @@ def test_build_market_context_end_to_end(meta_and_asset_ctxs, candle_snapshot, f
         exchange_time=None,
         position=None,
         research_signal=None,
+        daily_candles=None,
     )
 
     assert ctx.coin == "BTC"
@@ -253,6 +254,7 @@ def test_build_market_context_carries_the_exchange_clock_through(
         "indicator_names": ["rsi_14"],
         "position": None,
         "research_signal": None,
+        "daily_candles": None,
     }
     stamp = datetime(2026, 8, 22, 4, 0, tzinfo=timezone.utc)
     with_clock = build_market_context(
@@ -328,6 +330,7 @@ def test_the_position_section_is_priced_onto_the_context_at_its_own_snapshot(
         exchange_time=None,
         position=_long_at_50k(),
         research_signal=None,
+        daily_candles=None,
     )
     pos = ctx.position
     assert pos is not None
@@ -361,6 +364,7 @@ def test_a_position_the_books_cannot_price_leaves_the_context_position_blind(
         exchange_time=None,
         position=broke,
         research_signal=None,
+        daily_candles=None,
     )
     assert ctx.position is None
 
@@ -399,6 +403,7 @@ def test_volume_profile_is_absent_unless_a_window_is_configured(
         "exchange_time": None,
         "position": None,
         "research_signal": None,
+        "daily_candles": None,
     }
     assert (
         build_market_context(
@@ -415,6 +420,134 @@ def test_volume_profile_is_absent_unless_a_window_is_configured(
             market_data=MarketDataConfig(volume_profile_window_candles=0),
             **kwargs,
         ).volume_profile
+        is None
+    )
+
+
+def _daily_ending_at(close_time: int, n: int = 260):
+    """``n`` synthetic daily bars whose newest closes exactly at ``close_time``.
+
+    Aligned to the 4h fixture's own as-of rather than to a calendar grid,
+    because the producer measures the daily feed's freshness against THAT —
+    a daily series built on its own grid would be refused as stale and the
+    test would pass for the wrong reason.
+    """
+    from contrib.hyperliquid_perp.domains.perp.schema import Candle
+
+    day_ms = 24 * 60 * 60_000
+    bars = []
+    for i in range(n):
+        end = close_time - (n - 1 - i) * day_ms
+        # A step up 50 bars from the end, so the pair is strictly ordered and
+        # the run has a visible start (see tests/domains/test_macro_trend).
+        price = Decimal(110) if i >= n - 50 else Decimal(100)
+        bars.append(
+            Candle(
+                open_time=end - day_ms + 1,
+                close_time=end,
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                volume=Decimal(1),
+            )
+        )
+    return bars
+
+
+def test_the_daily_candles_argument_has_no_default(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # The fourth kwarg on this rule, after exchange_time, position and
+    # research_signal, and for the same reason: forgetting it costs a prompt
+    # quietly missing a section and a context_shape quietly missing its token,
+    # with nothing raising — indistinguishable from the switch being off.
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    with pytest.raises(TypeError, match="daily_candles"):
+        build_market_context(
+            "BTC",
+            snapshot,
+            mapper.map_candles(candle_snapshot),
+            mapper.map_funding_history(funding_history),
+            market_data=_MD,
+            indicator_names=["rsi_14"],
+            exchange_time=None,
+            position=None,
+            research_signal=None,
+        )
+
+
+def test_no_daily_candles_means_no_macro_trend_and_no_log(
+    meta_and_asset_ctxs, candle_snapshot, funding_history, caplog
+):
+    # ``None`` is the configured OFF state, not a degradation: the section is
+    # absent and nothing is logged. Every refusal the producer makes DOES log,
+    # so a silent absence here is what tells the two apart in a run's journal.
+    import logging
+
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    with caplog.at_level(logging.WARNING):
+        ctx = build_market_context(
+            "BTC",
+            snapshot,
+            mapper.map_candles(candle_snapshot),
+            mapper.map_funding_history(funding_history),
+            market_data=_MD,
+            indicator_names=["rsi_14"],
+            exchange_time=None,
+            position=None,
+            research_signal=None,
+            daily_candles=None,
+        )
+    assert ctx.macro_trend is None
+    assert "macro" not in caplog.text.lower()
+
+
+def test_the_macro_trend_is_built_from_the_daily_series_against_this_contexts_as_of(
+    meta_and_asset_ctxs, candle_snapshot, funding_history
+):
+    # Two things at once, and the second is the one worth pinning: the section
+    # comes from the DAILY series (not the 4h one the indicators use), and its
+    # freshness is judged against the 4h series' own as-of — the instant the
+    # whole context is dated to. Judged against the daily series' own newest
+    # bar instead, the staleness check would compare a value with itself and
+    # pass on any feed at all.
+    from contrib.hyperliquid_perp.domains.perp.macro_trend import compute_macro_trend
+
+    snapshot = mapper.map_market_snapshot(meta_and_asset_ctxs, "BTC")
+    candles = mapper.map_candles(candle_snapshot)
+    _, as_of_ms = context_as_of(candles)
+    daily = _daily_ending_at(as_of_ms)
+    ctx = build_market_context(
+        "BTC",
+        snapshot,
+        candles,
+        mapper.map_funding_history(funding_history),
+        market_data=_MD,
+        indicator_names=["rsi_14"],
+        exchange_time=None,
+        position=None,
+        research_signal=None,
+        daily_candles=daily,
+    )
+    assert ctx.macro_trend is not None
+    assert ctx.macro_trend == compute_macro_trend(daily, as_of_ms=as_of_ms)
+    # A daily feed a day and a millisecond behind that as-of is refused all
+    # the way to the context, rather than averaged into a stale section.
+    stale = _daily_ending_at(as_of_ms - 24 * 60 * 60_000 - 1)
+    assert (
+        build_market_context(
+            "BTC",
+            snapshot,
+            candles,
+            mapper.map_funding_history(funding_history),
+            market_data=_MD,
+            indicator_names=["rsi_14"],
+            exchange_time=None,
+            position=None,
+            research_signal=None,
+            daily_candles=stale,
+        ).macro_trend
         is None
     )
 
@@ -440,6 +573,7 @@ def test_volume_profile_is_cut_from_the_same_candles_as_the_indicators(
         exchange_time=None,
         position=None,
         research_signal=None,
+        daily_candles=None,
     )
     assert ctx.volume_profile is not None
     assert ctx.volume_profile == compute_volume_profile(candles, 30)
@@ -464,6 +598,7 @@ def test_volume_profile_stays_none_when_the_window_cannot_be_filled(
         exchange_time=None,
         position=None,
         research_signal=None,
+        daily_candles=None,
     )
     assert ctx.volume_profile is None
 
@@ -485,6 +620,7 @@ def test_build_market_context_with_zero_candles(meta_and_asset_ctxs, funding_his
         exchange_time=None,
         position=None,
         research_signal=None,
+        daily_candles=None,
     )
 
     assert ctx.candle_count == 0
@@ -520,6 +656,7 @@ def test_build_market_context_funding_window_days_plumbs_to_zscore(
             exchange_time=None,
             position=None,
             research_signal=None,
+            daily_candles=None,
         )
 
     wide = _ctx_with_window(30)
@@ -548,6 +685,7 @@ def test_context_indicators_are_read_only(meta_and_asset_ctxs, candle_snapshot, 
         exchange_time=None,
         position=None,
         research_signal=None,
+        daily_candles=None,
     )
     with pytest.raises(TypeError):
         ctx.indicators["rsi_14"] = 99.9
@@ -611,6 +749,7 @@ def test_the_research_signal_argument_has_no_default(
             indicator_names=["rsi_14"],
             exchange_time=None,
             position=None,
+            daily_candles=None,
         )
 
 
@@ -627,6 +766,7 @@ def test_the_research_signal_is_carried_through_untouched(
         "indicator_names": ["rsi_14"],
         "exchange_time": None,
         "position": None,
+        "daily_candles": None,
     }
     candles = mapper.map_candles(candle_snapshot)
     funding = mapper.map_funding_history(funding_history)

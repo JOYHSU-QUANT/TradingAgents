@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Final
@@ -23,6 +23,7 @@ from ...common.constants import (
     HOLDING_COST_HOURS,
     MAX_EPOCH_MS,
     MIN_EPOCH_MS,
+    MIN_MACRO_TREND_LOOKBACK,
     MIN_VOLUME_PROFILE_WINDOW,
     POC_LOWER_BAND,
     POC_UPPER_BAND,
@@ -62,6 +63,24 @@ class ProfileShape(VocabEnum, noun="volume profile shape"):
     P = "P"
     B = "b"
     THIN = "thin"
+
+
+class MacroAlignment(VocabEnum, noun="macro trend alignment"):
+    """Which way the daily SMA pair is ordered (:mod:`.macro_trend`).
+
+    Two members, not three: an EXACT tie between the two averages is refused
+    by the producer — there is no ordering to report — and has no member here,
+    so a context carrying an alignment carries a strict one.
+
+    The values name the two averages by role rather than by any reading of
+    them: ``"fast_above_slow"``, never ``"bullish"`` or ``"golden"``. The
+    standing rule for this feature is that no label may claim more than its
+    rule measured, and this rule measured an ordering of two moving averages
+    and nothing else.
+    """
+
+    ABOVE = "fast_above_slow"
+    BELOW = "fast_below_slow"
 
 
 class PositionSide(VocabEnum, noun="position side"):
@@ -889,6 +908,212 @@ class VolumeProfile:
         object.__setattr__(self, "shape", shape)
 
 
+def derive_macro_alignment(sma_fast: Decimal, sma_slow: Decimal) -> MacroAlignment | None:
+    """The ordering of the two daily averages, or ``None`` when they are EQUAL.
+
+    THE rule for :attr:`MacroTrend.alignment`: :mod:`.macro_trend` calls it to
+    label a freshly computed pair and :class:`MacroTrend` calls it again at
+    construction to check the label it was handed — one definition, as
+    :func:`derive_profile_shape` is for the profile's letter.
+
+    ``None`` is not a third state to carry: an exact tie is the producer's
+    refusal case (the whole section is then omitted), and the DTO refuses a
+    tie for the same reason. Returning it here rather than raising keeps the
+    one rule usable by both — the producer needs to ASK, the DTO needs to
+    CHECK.
+    """
+    if sma_fast > sma_slow:
+        return MacroAlignment.ABOVE
+    if sma_fast < sma_slow:
+        return MacroAlignment.BELOW
+    return None
+
+
+@dataclass(frozen=True)
+class MacroTrend:
+    """How the daily SMA(50)/SMA(200) pair is ordered, and for how long.
+
+    Built by :mod:`.macro_trend` from a SEPARATE daily candle series — not
+    from the ``4h`` candles the rest of the context is cut from (see that
+    module for why). Carried on :class:`PerpMarketContext` as an OPTIONAL
+    analyst input, with the same rule as :class:`VolumeProfile`: ``None``
+    means the prompt omits the section entirely, and there is no
+    half-populated form.
+
+    The two averages and the close are :class:`~decimal.Decimal` like every
+    other price here. ``separation_pct`` and ``close_vs_slow_pct`` are
+    percentages OF ``sma_slow``, signed fast-minus-slow and close-minus-slow
+    respectively, and are ``float`` because they are ratios the prompt prints
+    — never money. Neither is bounded: a young coin's fast average can sit
+    multiples above its slow one.
+
+    ``days_in_state`` counts the run of consecutive daily bars, ending at the
+    newest, that carry the CURRENT alignment. It is at least 1 (the newest bar
+    always carries it). ``state_age_capped`` says that run reaches the oldest
+    bar where both averages exist, so the true age is unknown and at least
+    this figure; ``last_change_date`` is then ``None``. The two are equivalent
+    by construction and checked to be.
+
+    What this type deliberately does NOT carry, and no consumer may infer:
+
+    - **any crossing EVENT.** The pair's ordering is a state sampled at the
+      newest bar. ``days_in_state == 1`` is the closest thing to "it changed
+      on this bar", and it is exactly that — a run length of one — not a
+      confirmed signal.
+    - **bar continuity.** The producer does not check that the daily series
+      has no missing bars (:mod:`.macro_trend` says so in the prompt as well
+      as in its docstring), so ``as_of_date - last_change_date`` is NOT
+      ``days_in_state - 1`` days in general and is not checked to be. Only
+      the two facts that survive a gap are checked below.
+    """
+
+    sma_fast: Decimal
+    sma_slow: Decimal
+    alignment: MacroAlignment
+    separation_pct: float
+    days_in_state: int
+    state_age_capped: bool
+    last_change_date: date | None
+    as_of_date: date
+    latest_close: Decimal
+    close_vs_slow_pct: float
+    candle_count: int
+    fast_period: int
+    slow_period: int
+
+    def __post_init__(self) -> None:
+        # Self-guarding like ``VolumeProfile``, and for the same reason: the
+        # producer always emits consistent values, so every check here is about
+        # what some OTHER path (a fixture, a future caller) could hand the
+        # renderer — a set of fields that passes every bounds check while
+        # contradicting itself, printing as a confident, nonsensical block.
+        #
+        # In order: the periods and the count they need, the prices, the
+        # alignment against the two averages it claims to describe, the two
+        # percentages against those same averages, the run length against the
+        # number of bars that could hold it, and the two date facts a gap in
+        # the series cannot break.
+        if self.fast_period <= 0:
+            raise ValueError(f"MacroTrend.fast_period must be > 0, got {self.fast_period}")
+        if self.fast_period >= self.slow_period:
+            raise ValueError(
+                f"MacroTrend.fast_period ({self.fast_period}) must be < slow_period "
+                f"({self.slow_period}) — the fast average is the shorter one"
+            )
+        # Pinned to the producer's own period, the way ``VolumeProfile``
+        # pins its ``bucket_count`` to the producer's grid. The constant is
+        # BOTH the slow period and the config floor (see its definition), so
+        # this check is what keeps those two readings one number rather than
+        # two that could drift apart silently.
+        if self.slow_period != MIN_MACRO_TREND_LOOKBACK:
+            raise ValueError(
+                f"MacroTrend.slow_period must be {MIN_MACRO_TREND_LOOKBACK} "
+                f"(the producer's slow period), got {self.slow_period}"
+            )
+        if self.candle_count < self.slow_period:
+            raise ValueError(
+                f"MacroTrend.candle_count ({self.candle_count}) must be >= slow_period "
+                f"({self.slow_period}) — a shorter window has no slow average at any bar"
+            )
+        for name in ("sma_fast", "sma_slow", "latest_close"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ValueError(f"MacroTrend.{name} must be > 0, got {value}")
+        # Coerce like ``market_regime`` / ``shape``: a plain string (fixture,
+        # recorded row) is accepted, an unknown one raises here rather than at
+        # render time.
+        alignment = MacroAlignment(self.alignment)
+        derived = derive_macro_alignment(self.sma_fast, self.sma_slow)
+        if derived is None:
+            raise ValueError(
+                f"MacroTrend.sma_fast and sma_slow are equal ({self.sma_fast}) — there is "
+                f"no ordering to report, and the producer omits the whole section instead"
+            )
+        if alignment is not derived:
+            raise ValueError(
+                f"MacroTrend.alignment ({alignment.value}) contradicts the averages it is "
+                f"derived from — sma_fast={self.sma_fast}, sma_slow={self.sma_slow} give "
+                f"{derived.value}"
+            )
+        object.__setattr__(self, "alignment", alignment)
+        # Both percentages are OF ``sma_slow``, which the check above proved
+        # non-zero. Coerced to float first for the reason ``day_change_pct``
+        # is: a hand-built value naturally reaches for Decimal for anything
+        # named ``*_pct``, and ``Decimal - float`` is a TypeError rather than
+        # the contradiction message. The shared RELATIVE tolerance fits both —
+        # neither ratio is bounded.
+        for name, numerator in (
+            ("separation_pct", self.sma_fast - self.sma_slow),
+            ("close_vs_slow_pct", self.latest_close - self.sma_slow),
+        ):
+            claimed = float(getattr(self, name))
+            _check_derived(
+                f"MacroTrend.{name}",
+                claimed,
+                float(numerator / self.sma_slow * 100),
+                f"the values it is derived from (sma_slow {self.sma_slow})",
+            )
+            object.__setattr__(self, name, claimed)
+        if self.days_in_state < 1:
+            raise ValueError(
+                f"MacroTrend.days_in_state must be >= 1 (the newest bar always carries the "
+                f"alignment), got {self.days_in_state}"
+            )
+        # The run cannot be longer than the number of bars that HAVE both
+        # averages: the slow one needs ``slow_period`` bars to exist at all, so
+        # a window of ``candle_count`` bars offers exactly this many positions.
+        max_run = self.candle_count - self.slow_period + 1
+        if self.days_in_state > max_run:
+            raise ValueError(
+                f"MacroTrend.days_in_state ({self.days_in_state}) exceeds the "
+                f"{max_run} bar(s) of this window where both averages exist "
+                f"(candle_count {self.candle_count} - slow_period {self.slow_period} + 1)"
+            )
+        # ``datetime`` IS a ``date`` subclass, so the annotations alone let one
+        # through — and it renders as a full ISO timestamp on a line labelled a
+        # date. ``as_of_date`` is checked unconditionally, NOT inside the
+        # ``last_change_date is not None`` block below: on a capped run that
+        # block never runs, so a missing as-of would reach the renderer and
+        # fail there, on the one branch that has no date of its own to print.
+        if type(self.as_of_date) is not date:
+            raise ValueError(
+                f"MacroTrend.as_of_date must be a plain date, got "
+                f"{type(self.as_of_date).__name__} ({self.as_of_date!r})"
+            )
+        if self.last_change_date is not None and type(self.last_change_date) is not date:
+            raise ValueError(
+                f"MacroTrend.last_change_date must be a plain date, got "
+                f"{type(self.last_change_date).__name__} ({self.last_change_date!r})"
+            )
+        if self.state_age_capped != (self.last_change_date is None):
+            raise ValueError(
+                f"MacroTrend.state_age_capped ({self.state_age_capped}) must say exactly "
+                f"what last_change_date ({self.last_change_date}) does: the run reaches the "
+                f"oldest bar with both averages, so no change is visible to date"
+            )
+        if self.last_change_date is not None:
+            # The two date facts that survive an unchecked gap in the series
+            # (see the class docstring). A change dated AFTER the newest bar
+            # is impossible however the bars are spaced...
+            if self.last_change_date > self.as_of_date:
+                raise ValueError(
+                    f"MacroTrend.last_change_date ({self.last_change_date}) is after "
+                    f"as_of_date ({self.as_of_date}) — the alignment cannot have changed "
+                    f"on a bar the window does not reach"
+                )
+            # ...and a run of ONE is the newest bar itself, so the change is
+            # dated to that bar. Any longer run says nothing checkable here:
+            # with bars possibly missing, the calendar distance between the two
+            # dates is only bounded below, and this DTO does not know whether a
+            # bar is missing.
+            if self.days_in_state == 1 and self.last_change_date != self.as_of_date:
+                raise ValueError(
+                    f"MacroTrend.days_in_state is 1, so the alignment changed on the newest "
+                    f"bar ({self.as_of_date}), but last_change_date says "
+                    f"{self.last_change_date}"
+                )
+
+
 def derive_round_trip_rate(taker_fee_rate: Decimal, slippage_bps: Decimal) -> Decimal:
     """The cost of a round trip as a FRACTION of the notional traded.
 
@@ -1304,6 +1529,17 @@ class PerpMarketContext:
     # hand-built context may carry an exchange clock and no pairing, and the
     # guard then reports no skew rather than inventing one.
     host_time_at_exchange_read: datetime | None = None
+    # How the daily SMA(50)/SMA(200) pair is ordered, and for how long
+    # (:mod:`.macro_trend`). Optional and OFF by default, exactly like the
+    # profile below: populated only when ``market_data.macro_trend_daily_lookback``
+    # is configured above zero, which is also what makes the daily candles it
+    # is built from get fetched at all. ``None`` means the prompt omits the
+    # section entirely — never a half-filled block (see :class:`MacroTrend`).
+    #
+    # First among the three optional market sections because it is the widest
+    # backdrop: the render puts it directly under the ``4h`` indicators and
+    # above the profile, so the context reads outward-in.
+    macro_trend: MacroTrend | None = None
     # Where volume sat in the price range over a rolling window of candles
     # (:mod:`.volume_profile`). Optional and OFF by default: it is populated
     # only when ``market_data.volume_profile_window_candles`` is configured

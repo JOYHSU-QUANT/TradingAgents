@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import pytest
 
-from contrib.hyperliquid_perp.common.constants import MIN_VOLUME_PROFILE_WINDOW
+from contrib.hyperliquid_perp.common.constants import (
+    MIN_MACRO_TREND_LOOKBACK,
+    MIN_VOLUME_PROFILE_WINDOW,
+)
 from contrib.hyperliquid_perp.domains.perp.market_data_config import MarketDataConfig
 from contrib.hyperliquid_perp.domains.perp.schema import CandleInterval
 
@@ -40,6 +43,29 @@ def test_the_profile_floor_is_the_shared_constant():
     MarketDataConfig(volume_profile_window_candles=MIN_VOLUME_PROFILE_WINDOW)
     with pytest.raises(ValueError, match=f"at least {MIN_VOLUME_PROFILE_WINDOW}"):
         MarketDataConfig(volume_profile_window_candles=MIN_VOLUME_PROFILE_WINDOW - 1)
+
+
+def test_the_macro_trend_floor_is_the_shared_constant():
+    # Same two-layer rule as the profile floor above: the loader enforces it
+    # without importing the compute module that also reads it. Pin that the
+    # refusal band is exactly [1, floor) and not a retyped number.
+    MarketDataConfig(macro_trend_daily_lookback=MIN_MACRO_TREND_LOOKBACK)
+    MarketDataConfig(macro_trend_daily_lookback=0)  # the off switch
+    with pytest.raises(ValueError, match=f"at least {MIN_MACRO_TREND_LOOKBACK}"):
+        MarketDataConfig(macro_trend_daily_lookback=MIN_MACRO_TREND_LOOKBACK - 1)
+    with pytest.raises(ValueError, match="must be >= 0"):
+        MarketDataConfig(macro_trend_daily_lookback=-1)
+
+
+def test_the_macro_trend_lookback_is_not_cross_checked_against_the_candle_lookback():
+    # The volume profile's window is cut from the SAME series candle_lookback
+    # fetches, so a window wider than it can never be filled. The macro trend
+    # fetches its own daily series, and the two count bars of different
+    # lengths — so the recommended pairing (200 4h candles, 260 daily ones)
+    # must be legal. A cross-check copied over from the profile would refuse
+    # exactly the configuration the docs tell an operator to write.
+    config = MarketDataConfig(candle_lookback=200, macro_trend_daily_lookback=260)
+    assert config.macro_trend_daily_lookback == 260
 
 
 @pytest.mark.parametrize("interval", [i.value for i in CandleInterval])

@@ -23,6 +23,24 @@ market_data:
                                    # section silently never appear. Analyst input only: it feeds no
                                    # gate and no sizing. Turning it on CHANGES THE PROMPT, so on a
                                    # paper run treat the flip as a new input-side measurement point.
+  macro_trend_daily_lookback: 0    # 0 = OFF (default). Set to the number of DAILY candles to fetch
+                                   # as a second series for the macro-trend block (daily SMA(50) vs
+                                   # SMA(200): which way round they sit, how far apart, how many
+                                   # daily bars have carried that, and the latest daily close
+                                   # against SMA(200)). Must be 0 or >= 200 — the slow average does
+                                   # not exist at all below that — rejected at config load, because
+                                   # a bad value would just make the prompt section silently never
+                                   # appear. 260 is the suggested starting value: 200 bars of
+                                   # warm-up plus 60 over which a change of alignment can be SEEN
+                                   # (at exactly 200 the block still renders, but always as "held
+                                   # for at least 1 daily bar"). NOT cross-checked against
+                                   # candle_lookback — that one counts 4h bars of a different
+                                   # series. Costs one extra REST read per cycle while on, and
+                                   # needs the coin to have >= 200 days of history (below that
+                                   # every cycle logs a WARNING and the section is absent).
+                                   # Analyst input only: it feeds no gate and no sizing. Turning it
+                                   # on CHANGES THE PROMPT, so on a paper run treat the flip as a
+                                   # new input-side measurement point.
   autoresearch_signal: ""          # "" = OFF (default). Set to the path of the research radar's
                                    # handoff document (contrib/autoresearch: `signal --out <path>`)
                                    # to add ONE qualitative block to the prompt: the promoted

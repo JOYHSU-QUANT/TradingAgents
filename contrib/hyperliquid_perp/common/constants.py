@@ -18,6 +18,7 @@ __all__ = [
     "LEGAL_NETWORKS",
     "MAX_EPOCH_MS",
     "MIN_EPOCH_MS",
+    "MIN_MACRO_TREND_LOOKBACK",
     "MIN_VOLUME_PROFILE_WINDOW",
     "POC_LOWER_BAND",
     "POC_UPPER_BAND",
@@ -47,6 +48,21 @@ __all__ = [
 #
 # See that module for WHY the floor is twelve rather than some other number.
 MIN_VOLUME_PROFILE_WINDOW = 12
+
+# The smallest legal ``market_data.macro_trend_daily_lookback``, for the same
+# two-layer readership as the floor above: ``market_data_config`` enforces it at
+# config load without importing a compute module, and
+# ``domains/perp/macro_trend`` reads it as the slow average's own period.
+#
+# It is not an independent tuning choice — it IS the slow period, because a
+# window holding fewer bars than that has no SMA(200) at any position and the
+# section would be skipped on every cycle. The two names are one number stated
+# once here: ``macro_trend.MACRO_SLOW_PERIOD`` is bound to it rather than
+# written out again, and ``MacroTrend`` re-checks its ``slow_period`` against
+# what it was handed. 200 is the period the 50/200 pair is defined by, not a
+# figure this project picked (see ``macro_trend`` for why neither period is
+# configurable).
+MIN_MACRO_TREND_LOOKBACK = 200
 
 # The rest of the volume profile's vocabulary — the bucket resolution, the
 # value-area convention, and the shape thresholds. Here for the same reason as

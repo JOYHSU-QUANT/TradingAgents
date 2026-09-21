@@ -22,6 +22,7 @@ from decimal import Decimal
 
 from ...common.instants import epoch_ms, from_epoch_ms
 from .indicators import compute_indicators
+from .macro_trend import compute_macro_trend
 from .marginal_cost import PositionInputs, build_position_context
 from .market_data_config import MarketDataConfig
 from .schema import (
@@ -161,6 +162,7 @@ def build_market_context(
     exchange_time: datetime | None,
     position: PositionInputs | None,
     research_signal: ResearchSignal | None,
+    daily_candles: Sequence[Candle] | None,
     host_time_at_exchange_read: datetime | None = None,
 ) -> PerpMarketContext:
     """Build the full :class:`PerpMarketContext` from raw domain inputs.
@@ -169,7 +171,10 @@ def build_market_context(
     are read here: the interval the candles were fetched at (recorded on the
     context), the funding z-score window, and the volume-profile window —
     ``0`` leaves the profile off and the context's ``volume_profile`` ``None``.
-    ``candle_lookback`` is the fetch's concern, not this function's. Passing
+    ``candle_lookback`` is the fetch's concern, not this function's, and so is
+    ``macro_trend_daily_lookback`` — that switch decides whether the caller
+    fetches a daily series at all, which reaches this function as
+    ``daily_candles`` being a sequence rather than ``None``. Passing
     the parsed block rather than its fields one by one keeps the defaults
     declared once (on :class:`MarketDataConfig`), so a caller cannot build a
     context from a different default than the config loader validated.
@@ -198,6 +203,22 @@ def build_market_context(
     context is built from, so the ``Mark:`` line and the notional under it are
     the same reading by construction, not by a later cross-check.
 
+    ``daily_candles`` is the SECOND candle series — a ``1d`` window fetched
+    by the caller — from which the macro-trend section is computed
+    (:mod:`.macro_trend`). ``None`` means the feature is off and the section
+    is absent with no log line; a sequence means it is on, and the module's
+    own refusals then apply (and log). REQUIRED with no default, for the
+    fourth time in this signature and the same reason as the three above:
+    forgetting it would silently produce a context with no macro section and
+    a ``context_shape`` quietly missing its token, with nothing raising —
+    indistinguishable from an operator having left the switch off.
+
+    It is a separate argument rather than something built from ``candles``
+    because it is a separate FETCH: taking the daily bars from the ``4h``
+    series would mean widening that series, which would move every existing
+    indicator (see :mod:`.macro_trend`). ``market_data`` is what decides
+    whether the caller fetches it at all; this function is handed the result.
+
     ``research_signal`` is REQUIRED with no default too, for the third time
     and the same reason: forgetting it would cost a prompt quietly missing a
     section and a ``context_shape`` quietly missing its token, with nothing
@@ -223,6 +244,15 @@ def build_market_context(
     # regime describe the same window of history. ``None`` whenever the feature
     # is off or the window is unusable — the renderer then omits the section.
     volume_profile = compute_volume_profile(candles, market_data.volume_profile_window_candles)
+    # The one section cut from a DIFFERENT series. Judged against this
+    # context's own ``as_of_ms`` — the newest 4h bar's close — so a daily feed
+    # that has stopped publishing is refused rather than averaged (see
+    # :func:`.macro_trend.compute_macro_trend`). ``None`` in means the switch
+    # is off, and nothing is logged; anything else is the module's own
+    # fail-closed decision, with its WARNING.
+    macro_trend = (
+        None if daily_candles is None else compute_macro_trend(daily_candles, as_of_ms=as_of_ms)
+    )
     # Priced at the snapshot's own mark and funding — the same two values the
     # ``Mark:`` and ``Funding:`` lines print — so the section cannot quote a
     # notional or a holding cost against a different reading of the market.
@@ -255,6 +285,7 @@ def build_market_context(
         market_regime=regime,
         exchange_time=exchange_time,
         host_time_at_exchange_read=host_time_at_exchange_read,
+        macro_trend=macro_trend,
         volume_profile=volume_profile,
         research_signal=research_signal,
         position=position_context,

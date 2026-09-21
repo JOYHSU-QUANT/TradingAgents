@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -11,6 +11,7 @@ import pytest
 from contrib.hyperliquid_perp.common.constants import (
     MAX_EPOCH_MS,
     MIN_EPOCH_MS,
+    MIN_MACRO_TREND_LOOKBACK,
     MIN_VOLUME_PROFILE_WINDOW,
     VOLUME_PROFILE_BUCKET_COUNT,
 )
@@ -19,6 +20,8 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     Candle,
     CandleInterval,
     FundingPoint,
+    MacroAlignment,
+    MacroTrend,
     MarginalCostRow,
     MarketRegime,
     MarketSnapshot,
@@ -29,6 +32,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import (
     ProfileShape,
     VolumeProfile,
     derive_day_change_pct,
+    derive_macro_alignment,
     derive_profile_shape,
     derive_round_trip_rate,
     epoch_ms_out_of_range,
@@ -742,6 +746,161 @@ def test_perp_market_context_carries_a_volume_profile_when_given_one():
     profile = VolumeProfile(**_profile())
     ctx = PerpMarketContext(**_context(), volume_profile=profile)
     assert ctx.volume_profile is profile
+
+
+# --------------------------------------------------------------------------
+# MacroTrend — the daily SMA(50)/SMA(200) backdrop's DTO
+# --------------------------------------------------------------------------
+
+
+def _macro(**overrides) -> dict:
+    """A consistent macro trend: 260 daily bars, fast above slow by 7.5/102.5.
+
+    The numbers are the producer's own for a flat-100 series stepping to 110
+    fifty bars before the end (see test_macro_trend) — so every derived field
+    here is one the producer really emits, not a shape invented for the guards.
+    """
+    base = {
+        "sma_fast": Decimal("110"),
+        "sma_slow": Decimal("102.5"),
+        "alignment": MacroAlignment.ABOVE,
+        # (110 - 102.5) / 102.5 * 100, which MacroTrend cross-checks — so
+        # overriding one of these on its own now fails construction, which is
+        # the guard doing its job.
+        "separation_pct": float(Decimal("7.5") / Decimal("102.5") * 100),
+        "days_in_state": 50,
+        "state_age_capped": False,
+        "last_change_date": date(2024, 7, 29),
+        "as_of_date": date(2024, 9, 16),
+        "latest_close": Decimal("110"),
+        "close_vs_slow_pct": float(Decimal("7.5") / Decimal("102.5") * 100),
+        "candle_count": 260,
+        "fast_period": 50,
+        "slow_period": MIN_MACRO_TREND_LOOKBACK,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_macro_trend_builds_from_consistent_values():
+    macro = MacroTrend(**_macro())
+    assert macro.alignment is MacroAlignment.ABOVE
+    assert macro.sma_fast == Decimal("110")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"fast_period": 0}, "fast_period must be > 0"),
+        ({"fast_period": MIN_MACRO_TREND_LOOKBACK}, "must be < slow_period"),
+        # Pinned to the producer's slow period, which is also the config
+        # floor: the two are one number and a DTO carrying another did not
+        # come from this producer.
+        ({"slow_period": MIN_MACRO_TREND_LOOKBACK + 1}, "must be 200"),
+        ({"candle_count": MIN_MACRO_TREND_LOOKBACK - 1}, "must be >= slow_period"),
+        ({"sma_fast": Decimal(0)}, "sma_fast must be > 0"),
+        ({"sma_slow": Decimal(0)}, "sma_slow must be > 0"),
+        ({"latest_close": Decimal("-1")}, "latest_close must be > 0"),
+        # The ordering is re-derived from the two averages, so a DTO calling
+        # itself "below" while its fast average is the larger cannot exist —
+        # it would render a sentence contradicting the line above it.
+        ({"alignment": MacroAlignment.BELOW}, "contradicts the averages"),
+        ({"alignment": "fast_below_slow"}, "contradicts the averages"),
+        ({"alignment": "nonsense"}, "unsupported macro trend alignment"),
+        # Two equal averages have no ordering at all: the producer omits the
+        # whole section, and so this cannot be constructed either.
+        ({"sma_fast": Decimal("102.5")}, "there is no ordering to report"),
+        # Both percentages are checked against the prices they claim to come
+        # from. Each is individually a plausible number and passes every other
+        # guard; only the cross-check catches it.
+        ({"separation_pct": 1.0}, "separation_pct .* contradicts"),
+        ({"close_vs_slow_pct": 1.0}, "close_vs_slow_pct .* contradicts"),
+        ({"days_in_state": 0}, "days_in_state must be >= 1"),
+        # 260 bars hold 61 positions with both averages, so a longer run did
+        # not come from this window.
+        ({"days_in_state": 62}, "exceeds the 61 bar"),
+        # The flag and the date must say the same thing. Each direction is a
+        # separate contradiction: a capped run with a date claims to know when
+        # a run it cannot see started, and an uncapped run without one drops
+        # the date the renderer would have printed.
+        ({"state_age_capped": True}, "must say exactly what last_change_date"),
+        ({"last_change_date": None}, "must say exactly what last_change_date"),
+        # A datetime IS a date subclass, so the annotation alone lets one
+        # through — and it renders as a full ISO timestamp on a line labelled
+        # a date.
+        (
+            {"last_change_date": datetime(2024, 7, 29, tzinfo=timezone.utc)},
+            "must be a plain date",
+        ),
+        ({"as_of_date": datetime(2024, 9, 16, tzinfo=timezone.utc)}, "must be a plain date"),
+        # Checked even on the branch that has no change date of its own: a
+        # capped run skips every other date rule, so a missing as-of would
+        # otherwise surface as an AttributeError inside the renderer.
+        (
+            {"as_of_date": None, "state_age_capped": True, "last_change_date": None},
+            "as_of_date must be a plain date",
+        ),
+        # The alignment cannot have changed on a bar the window does not reach.
+        ({"last_change_date": date(2024, 9, 17)}, "is after as_of_date"),
+    ],
+)
+def test_macro_trend_rejects_self_contradictory_values(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        MacroTrend(**_macro(**overrides))
+
+
+def test_macro_trend_coerces_a_plain_alignment_string():
+    # A fixture or a recorded row writes the value, not the member.
+    assert MacroTrend(**_macro(alignment="fast_above_slow")).alignment is MacroAlignment.ABOVE
+    below = _macro(
+        sma_fast=Decimal("95"),
+        alignment="fast_below_slow",
+        separation_pct=float(Decimal("-7.5") / Decimal("102.5") * 100),
+        latest_close=Decimal("95"),
+        close_vs_slow_pct=float(Decimal("-7.5") / Decimal("102.5") * 100),
+    )
+    assert MacroTrend(**below).alignment is MacroAlignment.BELOW
+
+
+def test_a_run_of_one_must_be_dated_to_the_newest_bar():
+    # The one date fact that survives a gap in the series: a run of one bar IS
+    # the newest bar, whatever the spacing. Longer runs say nothing checkable
+    # here, because bar continuity is deliberately not checked — so this is
+    # the only equality the DTO may assert between the two dates.
+    one = _macro(days_in_state=1, last_change_date=date(2024, 9, 16))
+    assert MacroTrend(**one).days_in_state == 1
+    with pytest.raises(ValueError, match="days_in_state is 1"):
+        MacroTrend(**_macro(days_in_state=1, last_change_date=date(2024, 9, 15)))
+    # And a longer run with a date far older than the run length is ACCEPTED:
+    # that is what a daily series with missing bars looks like, and refusing
+    # it would crash a cycle on data this module never promised to check.
+    gapped = _macro(days_in_state=50, last_change_date=date(2023, 1, 1))
+    assert MacroTrend(**gapped).last_change_date == date(2023, 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("fast", "slow", "expected"),
+    [
+        (Decimal("110"), Decimal("100"), MacroAlignment.ABOVE),
+        (Decimal("100"), Decimal("110"), MacroAlignment.BELOW),
+        (Decimal("100"), Decimal("100"), None),
+        # Strict on both sides: the tie is the refusal, not a rounding zone.
+        (Decimal("100.0000000000000001"), Decimal("100"), MacroAlignment.ABOVE),
+    ],
+)
+def test_derive_macro_alignment_is_the_one_rule_and_answers_none_on_a_tie(fast, slow, expected):
+    assert derive_macro_alignment(fast, slow) is expected
+
+
+def test_perp_market_context_macro_trend_defaults_to_absent():
+    # Off by default: merging the feature must not change any existing prompt.
+    assert PerpMarketContext(**_context()).macro_trend is None
+
+
+def test_perp_market_context_carries_a_macro_trend_when_given_one():
+    macro = MacroTrend(**_macro())
+    ctx = PerpMarketContext(**_context(), macro_trend=macro)
+    assert ctx.macro_trend is macro
 
 
 # --------------------------------------------------------------------------

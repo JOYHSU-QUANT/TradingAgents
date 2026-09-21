@@ -51,7 +51,10 @@ Breaking changes within the 0.x line are called out explicitly.
   Sharing closed a divergence that was already there: deribit and
   sosovalue_common both guard the `OverflowError` `math.isfinite` raises on an
   int too large to convert to a float (a JSON integer literal has no bound),
-  and farside's copy did not. `allow_str` stays opt-in because it is a property
+  and TWO copies did not - farside's, and the whale vendor's, where the
+  exception would have escaped a per-address loop that is supposed to cost one
+  account at most. Both now answer None and skip the value. Neither was
+  reachable in practice, which is why neither was noticed. `allow_str` stays opt-in because it is a property
   of the vendor, not the question - Hyperliquid sends every number as a string,
   while a string reaching the others means the payload is not the shape they
   parsed.

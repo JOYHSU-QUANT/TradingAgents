@@ -29,7 +29,7 @@ from tradingagents.dataflows.errors import (
     WiringGapError,
 )
 from tradingagents.dataflows.fred import FredNotConfiguredError
-from tradingagents.dataflows.utils import raise_for_http_status
+from tradingagents.dataflows.utils import finite_float, raise_for_http_status
 
 
 @pytest.mark.unit
@@ -186,3 +186,57 @@ class TestRateLimitPolicyOrdering:
         # raise - the exact misclassification the parameter prevents.
         with pytest.raises(WiringGapError, match="returned instead of raising"):
             raise_for_http_status(self._response(429), "Vendor", rate_limit=lambda r: None)
+
+
+@pytest.mark.unit
+class TestFiniteFloat:
+    """The bool-rejecting numeric rule the vendor modules share.
+
+    A different question from ``is_finite_number``: these values are about to
+    be summed, compared or weighted, so a JSON ``true`` passing as 1 would be a
+    figure nobody sent.
+    """
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (1, 1.0),
+            (-2.5, -2.5),
+            (0, 0.0),
+            (True, None),
+            (False, None),
+            (float("nan"), None),
+            (float("inf"), None),
+            (float("-inf"), None),
+            (None, None),
+            (object(), None),
+            ([1], None),
+        ],
+        ids=["int", "float", "zero", "true", "false", "nan", "inf", "neg_inf", "none", "object", "list"],
+    )
+    def test_the_value_classes(self, value, expected):
+        assert finite_float(value) == expected or (
+            expected is None and finite_float(value) is None
+        )
+
+    def test_a_huge_int_answers_rather_than_raising(self):
+        # ``math.isfinite`` RAISES on an int too large to convert to a float,
+        # and a JSON integer literal has no bound, so json.loads can hand one
+        # back. A predicate that throws at an input class it exists to turn
+        # away inverts its own contract - and two of the four copies this
+        # replaced guarded it while the others did not.
+        assert finite_float(10**400) is None
+        assert finite_float(-(10**400)) is None
+
+    def test_strings_are_refused_unless_the_vendor_sends_them(self):
+        # Opt-in because it is a property of the VENDOR, not the question: a
+        # string reaching the vendors that do not set it means the payload is
+        # not the shape they parsed.
+        assert finite_float("1.5") is None
+        assert finite_float("1.5", allow_str=True) == 1.5
+        assert finite_float("nope", allow_str=True) is None
+        assert finite_float("nan", allow_str=True) is None
+        assert finite_float("inf", allow_str=True) is None
+
+    def test_a_bool_is_refused_even_when_strings_are_allowed(self):
+        assert finite_float(True, allow_str=True) is None

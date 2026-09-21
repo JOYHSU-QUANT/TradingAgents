@@ -482,6 +482,14 @@ def _finite_float(value: object) -> float | None:
     ``allow_str`` is this vendor's own answer to a shared question: every
     figure here arrives as ``"-2110.66337"``, where a string reaching the
     other vendors would mean the payload is not the shape they parsed.
+
+    Adopting the shared rule also brought the huge-int guard this copy lacked,
+    the same one Farside gained: a bare JSON integer too large to convert to a
+    float made ``float()`` raise ``OverflowError`` here, uncaught, out of the
+    per-address loop that is supposed to cost one account at most. It now
+    answers None and the entry is skipped and counted like any other
+    unreadable one. Not reachable while the venue sends strings - which is
+    why it was never noticed - and not something to rely on it continuing to.
     """
     return finite_float(value, allow_str=True)
 

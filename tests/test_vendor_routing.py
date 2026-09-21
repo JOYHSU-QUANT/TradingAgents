@@ -1576,18 +1576,74 @@ _NO_RATE_LIMIT_POLICY = {
 }
 
 
+_STATUS_HELPER = "raise_for_http_status"
+
+
 def _status_boundary_calls():
     """Every ``raise_for_http_status`` call in the package, by module, with
-    whether it was handed a ``rate_limit`` policy."""
-    calls = {}
-    for source, tree in dataflows_module_trees(containing="raise_for_http_status"):
+    whether it was handed a ``rate_limit`` policy.
+
+    Matches the direct name and attribute access (``utils.raise_for_http_status``).
+    An ALIASED import would still be invisible, so the sibling test refuses one
+    outright rather than letting the scan quietly under-report.
+    """
+    return {
+        source.name: _policies_given(tree)
+        for source, tree in dataflows_module_trees(containing=_STATUS_HELPER)
+        if _policies_given(tree)
+    }
+
+
+def _policies_given(tree):
+    """Whether each ``raise_for_http_status`` call in ``tree`` was given a policy.
+
+    Split out so the matching itself is testable: the attribute form is a
+    spelling no boundary uses today, so a scan that stopped reading it would
+    pass every real file unchanged.
+    """
+    given = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        named = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if named == _STATUS_HELPER:
+            given.add(any(kw.arg == "rate_limit" for kw in node.keywords))
+    return given
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "call,expected",
+    [
+        ("raise_for_http_status(r, 'V')", {False}),
+        ("raise_for_http_status(r, 'V', rate_limit=p)", {True}),
+        ("utils.raise_for_http_status(r, 'V')", {False}),
+        ("utils.raise_for_http_status(r, 'V', rate_limit=p)", {True}),
+        ("something_else(r, 'V')", set()),
+    ],
+    ids=["direct", "direct_policy", "attribute", "attribute_policy", "unrelated"],
+)
+def test_the_scan_reads_both_spellings_of_the_call(call, expected):
+    # The attribute form appears in no boundary today, so nothing in the
+    # package would notice the scan losing it.
+    assert _policies_given(ast.parse(call)) == expected
+
+
+@pytest.mark.unit
+def test_no_boundary_aliases_the_status_helper():
+    """The scan above reads calls by name, so an alias would hide one.
+
+    Refused rather than solved: resolving aliases means following imports, and
+    a lock that silently under-reports is worse than one that forbids the
+    spelling it cannot read.
+    """
+    for source, tree in dataflows_module_trees(containing=_STATUS_HELPER):
         for node in ast.walk(tree):
-            func = getattr(node, "func", None)
-            if not isinstance(node, ast.Call) or getattr(func, "id", None) != "raise_for_http_status":
+            if not isinstance(node, ast.ImportFrom):
                 continue
-            given = any(kw.arg == "rate_limit" for kw in node.keywords)
-            calls.setdefault(source.name, set()).add(given)
-    return calls
+            for name in node.names:
+                if name.name == _STATUS_HELPER:
+                    assert name.asname is None, f"{source.name} aliases {_STATUS_HELPER}"
 
 
 @pytest.mark.unit

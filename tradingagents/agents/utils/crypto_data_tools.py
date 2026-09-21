@@ -283,9 +283,12 @@ def get_futures_basis(
     and for the first hours after a roll; the expiry date follows the
     last-Friday rule and can be a day late around an exchange holiday, so the
     annualized figure is approximate. Hours after curr_date are never read.
-    The whole report is withheld, with no figures, for a curr_date more than a
-    day ahead of the UTC clock or older than the 729 days of hourly history
-    Yahoo serves. A positive basis is the usual state and mostly reflects the
+    CME closes for the weekend: a reading whose newest hour ended more than 3
+    hours earlier is labelled as not live. The whole report is withheld, with
+    no figures, for a curr_date more than a day ahead of the UTC clock or more
+    than 709 days behind it (Yahoo's hourly history reaches no further), and
+    when Yahoo served too few synchronous hours or none newer than 7 days. A
+    positive basis is the usual state and mostly reflects the
     cost of carry: a positioning-and-carry input, not a standalone directional
     signal. Uses the configured futures_basis vendor.
 

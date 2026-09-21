@@ -7,7 +7,7 @@ gives options-implied vol, Hyperliquid gives perp funding, and neither says
 what regulated futures pay over spot.
 
 Why HOURLY bars matched on their timestamp, and not the two daily closes the
-OHLCV cache already holds. Measured 2026-09-21 over Yahoo's full reach:
+OHLCV cache already holds. Measured 2026-09-21, each over the window named:
 
 * Daily closes are not synchronous. ``BTC-USD`` closes its day at 00:00 UTC,
   ``BTC=F`` at the end of the CME session, and BTC moves more in the hours
@@ -49,6 +49,7 @@ request once the first has been refused.
 from __future__ import annotations
 
 import calendar
+import logging
 import math
 from datetime import date, datetime, timedelta, timezone
 from typing import NamedTuple
@@ -56,10 +57,12 @@ from typing import NamedTuple
 import pandas as pd
 import yfinance as yf
 
-from .errors import NoMarketDataError, VendorError
+from .errors import VendorError
 from .symbol_utils import classify_crypto_asset
 from .utils import data_lag_note, date_refusal, echo_argument, quote_argument
 from .yfinance_common import yf_fetch_unhidden
+
+logger = logging.getLogger(__name__)
 
 FUTURES_SYMBOL = "BTC=F"
 SPOT_SYMBOL = "BTC-USD"
@@ -81,8 +84,9 @@ HOURLY_HISTORY_DAYS = 729
 # A CME day holds 23 trading hours, so this is about one session.
 WINDOW_HOURS = 24
 
-# Fewer synchronous hours than this is not a reading. Half a window: enough
-# that the pinned closes described above cannot be the median.
+# Fewer synchronous hours than this is not a reading. Half a window: at the
+# measured rate of pinned closes, and with them clustered in the first hours
+# after a reopen, very unlikely to be outvoted at the median — not impossible.
 MIN_MATCHED_HOURS = 12
 
 # The hours of one reading may not reach further back than this from its
@@ -96,9 +100,26 @@ MAX_WINDOW_SPAN_DAYS = 5
 # positioning report this tool is read beside.
 LOOKBACK_DAYS = 7
 
-# How much history one call asks Yahoo for: the lookback, a full window before
-# it, and the closed days a holiday weekend can put in front of either.
-FETCH_WINDOW_DAYS = 14
+# Past this the feed has stalled and the reading is withheld rather than
+# captioned: a caption has to survive every downstream summary, and the number
+# does not need to.
+MAX_STALENESS_DAYS = 7
+
+# How much history one call asks Yahoo for, counted back from the analysis
+# date — NOT from the newest hour, which is only known after the fetch and may
+# itself trail by ``MAX_STALENESS_DAYS``. The earlier reading then ends
+# ``LOOKBACK_DAYS`` before that and reaches ``MAX_WINDOW_SPAN_DAYS`` further.
+# The three add up to 19; at 14, a feed a week behind reported "no earlier
+# reading" for a reading that existed and had simply not been asked for.
+FETCH_WINDOW_DAYS = 21
+
+# The oldest analysis date served. A past date's fetch starts
+# ``FETCH_WINDOW_DAYS - 1`` days before it (the window is counted back from the
+# midnight that ENDS the date), and that start has to be inside Yahoo's reach.
+# Named because it is the number a reader needs — "how old a date can I ask
+# about" — and it is not ``HOURLY_HISTORY_DAYS``: three descriptions of this
+# tool said 729 where the guard's arithmetic said 716.
+MAX_DATE_AGE_DAYS = HOURLY_HISTORY_DAYS - FETCH_WINDOW_DAYS + 1
 
 # The annualized figure divides by days to expiry, so it is withheld inside
 # this many days: the quotient blows up as the contract converges, and Yahoo
@@ -124,10 +145,21 @@ ANNUALIZATION_DAYS = 365
 # three. Past it the report says so.
 MAX_DATA_LAG_DAYS = 3
 
-# Past this the feed has stalled and the reading is refused rather than
-# captioned: a caption has to survive every downstream summary, and the number
-# does not need to.
-MAX_STALENESS_DAYS = 7
+# A reading whose newest hour ended more than this many hours before the
+# instant it is read at is not a live one: CME was closed, or Yahoo had no
+# traded bar. The paper loop runs around the clock and CME does not, so
+# between a quarter and a third of its cycles read Friday's basis. Three
+# hours: more than the daily maintenance hour plus a bar Yahoo is late with.
+NOT_LIVE_HOURS = 3
+
+# What size of difference is ordinary, in annualized points. Measured
+# 2026-09-21 over 492 days of daily readings: on three days in four the 7-day
+# change was under 2.8 points and the reading sat within 1.4 points of its own
+# 7-day median. Rounded, and said in the report, because adjacent 4-hour
+# cycles share 20 of a window's 24 hours — without a scale a model narrates
+# the same point of noise six times a day.
+ORDINARY_CHANGE_POINTS = 3
+ORDINARY_GAP_POINTS = 1.5
 
 # How far ahead of the UTC clock ``curr_date`` may run and still be served.
 # Callers derive it from a local clock, which east of UTC runs a few hours
@@ -145,6 +177,16 @@ SAWTOOTH_NOTE = (
 CARRY_NOTE = (
     "A positive basis is the usual state and mostly reflects the cost of carry; this is a "
     "positioning-and-carry input, not a standalone directional signal"
+)
+# The scale, and the one artifact in it (the MIN_DAYS_TO_EXPIRY comment has
+# the measurement). In the report's Method line, where a summary can keep it.
+SCALE_NOTE = (
+    f"On three days in four the {LOOKBACK_DAYS}-day change is under about "
+    f"{ORDINARY_CHANGE_POINTS} annualized points and a reading sits within about "
+    f"{ORDINARY_GAP_POINTS} points of its own {LOOKBACK_DAYS}-day median, so treat differences "
+    f"of that size as ordinary variation. The annualized figure also runs about a point high "
+    f"in the week before it is withheld and steps back down after the roll, because Yahoo's "
+    f"spot is an aggregate rather than the rate the contract settles to"
 )
 
 
@@ -220,7 +262,7 @@ def _in_session(index: pd.DatetimeIndex) -> pd.Series:
     return pd.Series(~closed, index=index)
 
 
-def _fetch_hourly(symbol: str, asked: str, start: date, end: date) -> pd.DataFrame:
+def _fetch_hourly(symbol: str, start: date, end: date) -> pd.DataFrame:
     """Hourly bars for ``symbol`` over ``[start, end)``, indexed by UTC hour.
 
     Through ``Ticker.history`` and ``yf_fetch_unhidden``, as ``load_ohlcv``
@@ -240,7 +282,14 @@ def _fetch_hourly(symbol: str, asked: str, start: date, end: date) -> pd.DataFra
         hidden_answer=pd.DataFrame,
     )
     if frame is None or frame.empty or "Close" not in frame.columns:
-        raise NoMarketDataError(asked, symbol, "Yahoo Finance returned no hourly rows")
+        # Not raised: an empty answer is one more way of having too few hours,
+        # and ``get_futures_basis`` answers that with a notice naming the
+        # series that fell short. The no-data sentinel would say "BTC ... may
+        # be invalid, delisted" to the analyst that also reads BTC's prices.
+        logger.warning("Yahoo Finance returned no hourly rows for %s", symbol)
+        return pd.DataFrame(
+            {"Close": [], "Volume": []}, index=pd.DatetimeIndex([], tz="UTC"), dtype="float64"
+        )
     if not isinstance(frame.index, pd.DatetimeIndex):
         raise CmeBasisError(
             f"hourly {symbol} rows are not indexed by time ({type(frame.index).__name__})"
@@ -258,6 +307,23 @@ def _usable(prices: pd.Series) -> pd.Series:
     return prices[prices.map(math.isfinite) & (prices > 0)]
 
 
+def usable_legs(
+    futures: pd.DataFrame, spot: pd.DataFrame, bound: datetime
+) -> tuple[pd.Series, pd.Series]:
+    """Each series' usable hourly closes before ``bound``, before they are matched.
+
+    Kept apart from the match so that a report with too few synchronous hours
+    can say which series fell short, instead of naming one of them by habit.
+    """
+    if "Volume" not in futures.columns:
+        raise CmeBasisError(f"hourly {FUTURES_SYMBOL} rows carry no Volume column")
+    traded = pd.to_numeric(futures["Volume"], errors="coerce").fillna(0) > 0
+    kept = futures[traded & _in_session(futures.index)]
+    cut = pd.Timestamp(bound)
+    futures_leg, spot_leg = _usable(kept["Close"]), _usable(spot["Close"])
+    return futures_leg[futures_leg.index < cut], spot_leg[spot_leg.index < cut]
+
+
 def matched_basis(futures: pd.DataFrame, spot: pd.DataFrame, bound: datetime) -> pd.Series:
     """Per-hour basis in percent, over the hours both series share before ``bound``.
 
@@ -265,16 +331,8 @@ def matched_basis(futures: pd.DataFrame, spot: pd.DataFrame, bound: datetime) ->
     bars stamped strictly before it are kept. For a past analysis date it is
     the midnight that ends that date; for a live one it is the clock.
     """
-    if "Volume" not in futures.columns:
-        raise CmeBasisError(f"hourly {FUTURES_SYMBOL} rows carry no Volume column")
-    traded = pd.to_numeric(futures["Volume"], errors="coerce").fillna(0) > 0
-    kept = futures[traded & _in_session(futures.index)]
-    pair = pd.concat(
-        {"futures": _usable(kept["Close"]), "spot": _usable(spot["Close"])},
-        axis=1,
-        join="inner",
-    )
-    pair = pair[pair.index < pd.Timestamp(bound)]
+    futures_leg, spot_leg = usable_legs(futures, spot, bound)
+    pair = pd.concat({"futures": futures_leg, "spot": spot_leg}, axis=1, join="inner")
     return (pair["futures"] / pair["spot"] - 1.0) * 100.0
 
 
@@ -362,9 +420,10 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
             not a proxy for another underlying's.
         curr_date: The analysis date (yyyy-mm-dd). Hourly bars stamped after
             it are never read. A date more than ``MAX_FUTURE_DAYS`` ahead of
-            the UTC clock, or too old for Yahoo's hourly history, is answered
-            with a withheld notice carrying no figures; an unusable one is
-            refused up front with the shared ``INVALID_CURR_DATE`` sentinel.
+            the UTC clock, or more than ``MAX_DATE_AGE_DAYS`` behind it, is
+            answered with a withheld notice carrying no figures; an unusable
+            one is refused up front with the shared ``INVALID_CURR_DATE``
+            sentinel.
 
     Returns:
         A markdown report: the nominal basis (median of the latest synchronous
@@ -372,10 +431,16 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
         or the reason that figure is withheld — the trailing annualized
         median, and the change against the reading ``LOOKBACK_DAYS`` earlier.
 
+        When Yahoo served too few synchronous hours for a reading, or the
+        newest one is more than ``MAX_STALENESS_DAYS`` old, the same withheld
+        notice instead, saying what each series had. Returned rather than
+        raised as no-data: the router's no-data sentence says the SYMBOL "may
+        be invalid, delisted" — about BTC, to the analyst that also reads
+        BTC's prices — and could only ever name one of the two series.
+
     Raises:
-        NoMarketDataError: Yahoo served too little to build a reading, or the
-            newest synchronous hour is more than ``MAX_STALENESS_DAYS`` old.
-        VendorError: a throttle or an outage, typed by the yfinance boundary.
+        VendorError: a throttle or an outage, typed by the yfinance boundary,
+            or ``CmeBasisError`` for rows this module cannot read.
     """
     refusal = date_refusal(curr_date, what="futures basis", kind="point")
     if refusal is not None:
@@ -411,43 +476,53 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     bound = min(
         datetime.combine(curr_day + timedelta(days=1), datetime.min.time(), timezone.utc), now
     )
-    start = bound.date() - timedelta(days=FETCH_WINDOW_DAYS)
-    if (today - start).days > HOURLY_HISTORY_DAYS:
+    if (today - curr_day).days > MAX_DATE_AGE_DAYS:
         return _withheld(
             coin,
             curr_date,
-            f"It needs synchronous hourly prices, and Yahoo serves hourly bars for only the "
-            f"trailing {HOURLY_HISTORY_DAYS} days; daily closes are not a substitute, because "
-            f"the futures and spot days close hours apart.",
+            f"It is more than {MAX_DATE_AGE_DAYS} days before the UTC clock "
+            f"({today.isoformat()}): a reading needs {FETCH_WINDOW_DAYS} days of synchronous "
+            f"hourly prices and Yahoo serves hourly bars for only the trailing "
+            f"{HOURLY_HISTORY_DAYS}. Daily closes are not a substitute, because the futures and "
+            f"spot days close hours apart.",
         )
+    start = bound.date() - timedelta(days=FETCH_WINDOW_DAYS)
 
     # All or nothing, unlike the vendors that fetch two halves independently:
     # there is no figure here that needs only one series, and one price alone
     # would invite exactly the asynchronous subtraction this tool exists to
     # replace. The first failure therefore leaves with its own type.
     end = bound.date() + timedelta(days=1)
-    futures = _fetch_hourly(FUTURES_SYMBOL, asset, start, end)
-    spot = _fetch_hourly(SPOT_SYMBOL, asset, start, end)
+    futures = _fetch_hourly(FUTURES_SYMBOL, start, end)
+    spot = _fetch_hourly(SPOT_SYMBOL, start, end)
     basis = matched_basis(futures, spot, bound)
 
     current = reading_at(basis, pd.Timestamp(bound)) if not basis.empty else None
-    if current is None:
-        raise NoMarketDataError(
-            asset,
-            FUTURES_SYMBOL,
-            f"fewer than {MIN_MATCHED_HOURS} synchronous in-session hours of {FUTURES_SYMBOL} "
-            f"and {SPOT_SYMBOL} before {_stamp(pd.Timestamp(bound))} UTC ({len(basis)} in the "
-            f"{FETCH_WINDOW_DAYS} days fetched)",
-        )
     reference = min(curr_day, today)
-    stale_days = (reference - current.last.date()).days
-    if stale_days > MAX_STALENESS_DAYS:
-        raise NoMarketDataError(
-            asset,
-            FUTURES_SYMBOL,
-            f"newest synchronous hour is {_stamp(current.last)} UTC, {stale_days} days before "
-            f"{reference.isoformat()} (stale) — refusing to use it",
+    stale_days = None if current is None else (reference - current.last.date()).days
+    if current is None or stale_days > MAX_STALENESS_DAYS:
+        # Both series are described, whichever fell short: they are fetched
+        # and filtered apart, and only the match between them is one thing.
+        legs = "; ".join(
+            f"{symbol} had {len(leg)} usable hours, the newest "
+            f"{_stamp(leg.index[-1]) + ' UTC' if len(leg) else 'none'}"
+            for symbol, leg in zip(
+                (FUTURES_SYMBOL, SPOT_SYMBOL), usable_legs(futures, spot, bound), strict=True
+            )
         )
+        if current is None:
+            shortfall = (
+                f"Yahoo served fewer than {MIN_MATCHED_HOURS} synchronous hours of the two "
+                f"series before {_stamp(pd.Timestamp(bound))} UTC"
+            )
+        else:
+            shortfall = (
+                f"The newest synchronous hour Yahoo served is {_stamp(current.last)} UTC, "
+                f"{stale_days} days before {reference.isoformat()}, and a reading that old is "
+                f"not served"
+            )
+        logger.warning("Futures basis withheld for %s: %s (%s)", curr_date, shortfall, legs)
+        return _withheld(coin, curr_date, f"{shortfall} ({legs}).")
 
     lookback = pd.Timedelta(days=LOOKBACK_DAYS)
     prior = reading_at(basis, current.last - lookback)
@@ -474,6 +549,17 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     )
     if lag:
         lines.append(lag)
+    # The newest bar ENDS an hour after its stamp: a past date's last bar ends
+    # at the bound exactly, and the hour in progress ends after it.
+    idle_hours = int((pd.Timestamp(bound) - current.last) / pd.Timedelta(hours=1)) - 1
+    not_live = idle_hours > NOT_LIVE_HOURS
+    if not_live:
+        lines.append(
+            f"_Not a live reading: the newest synchronous hour ended {idle_hours} hours before "
+            f"{_stamp(pd.Timestamp(bound))} UTC — CME was closed, or Yahoo has no traded bar "
+            f"since. Spot has traded in that time, and this reading says nothing about that "
+            f"move._"
+        )
     lines.append("")
     lines.append(
         f"**Basis:** {_pct(current.basis_pct)} nominal — {sign}; the median of "
@@ -524,7 +610,8 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
         f"_Method: only hours inside the CME session in which the future traded are used, and "
         f"each figure is a median, because Yahoo's hourly {FUTURES_SYMBOL} closes are unreliable "
         f"around session breaks. The expiry date follows the last-Friday rule and can be a day "
-        f"late around an exchange holiday, so read the annualized figure as approximate._"
+        f"late around an exchange holiday, so read the annualized figure as approximate. "
+        f"{SCALE_NOTE}._"
     )
     headline = (
         f"annualized {_pct(current.annualized_pct)}"
@@ -533,6 +620,8 @@ def get_futures_basis(asset: str, curr_date: str) -> str:
     )
     lines.append(
         f"_Reading: {coin} CME front-month basis {_pct(current.basis_pct)} nominal as of "
-        f"{_stamp(current.last)} UTC, {headline}. {SAWTOOTH_NOTE}. {CARRY_NOTE}._"
+        f"{_stamp(current.last)} UTC"
+        f"{f' ({idle_hours} hours old, not a live reading)' if not_live else ''}, {headline}. "
+        f"{SAWTOOTH_NOTE}. {CARRY_NOTE}._"
     )
     return "\n".join(lines) + "\n"

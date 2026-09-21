@@ -23,7 +23,7 @@ from tradingagents.agents.analysts.market_analyst import create_market_analyst
 from tradingagents.agents.utils import crypto_data_tools
 from tradingagents.dataflows import cme_basis, interface
 from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.errors import NoMarketDataError, VendorRateLimitError
+from tradingagents.dataflows.errors import VendorRateLimitError
 from tradingagents.default_config import DEFAULT_CONFIG
 
 SPOT = 80_000.0
@@ -236,6 +236,21 @@ class TestReadingAt:
         series = _series(old.append(fresh), [0.3] * 24)
         assert cme_basis.reading_at(series, self.ANCHOR) is None
 
+    def test_the_span_is_exactly_the_constant(self):
+        # Twelve hours, the oldest exactly MAX_WINDOW_SPAN_DAYS before the
+        # newest: outside (the span is open at that end), so eleven remain and
+        # there is no reading. One hour later it is inside and there is.
+        # Literal stamps, five days apart: a test that derived them from the
+        # constant would follow it wherever it moved.
+        newest = pd.Timestamp("2026-09-16 12:00", tz="UTC")
+        recent = pd.date_range(end=newest, periods=11, freq="1h")
+        for stamp, served in (("2026-09-11 12:00", False), ("2026-09-11 13:00", True)):
+            oldest = pd.Timestamp(stamp, tz="UTC")
+            series = _series(pd.DatetimeIndex([oldest]).append(recent), [0.3] * 12)
+            reading = cme_basis.reading_at(series, newest)
+            assert (reading is not None) is served
+        assert reading.first == oldest and reading.hours == 12
+
     def test_the_annualized_figure_is_simple_over_days_to_expiry(self):
         index = _hours("2026-09-15", "2026-09-16")  # one UTC day: 10 days to the 25th
         reading = cme_basis.reading_at(_series(index, [0.30] * 24), index[-1])
@@ -321,7 +336,7 @@ class TestReport:
         assert [symbol for symbol, _ in yahoo.calls] == ["BTC=F", "BTC-USD"]
         for _symbol, kwargs in yahoo.calls:
             assert kwargs == {
-                "start": "2026-09-02",  # NOW's date less FETCH_WINDOW_DAYS
+                "start": "2026-08-26",  # NOW's date less FETCH_WINDOW_DAYS
                 "end": "2026-09-17",
                 "interval": "1h",
                 "auto_adjust": False,
@@ -331,6 +346,81 @@ class TestReport:
     def test_a_negative_basis_is_called_backwardation(self, monkeypatch, clock):
         out = _report(monkeypatch, FORTNIGHT, -0.12)
         assert "-0.12% nominal — futures below spot (backwardation)" in out
+
+    def test_a_zero_basis_is_neither(self, monkeypatch, clock):
+        out = _report(monkeypatch, FORTNIGHT, 0.0)
+        assert "**Basis:** +0.00% nominal — futures level with spot; the median" in out
+        assert "contango" not in out and "backwardation" not in out
+
+    def test_a_weekend_reading_says_it_is_not_live(self, monkeypatch):
+        # Sunday noon. The newest hour is Friday 20:00, which ENDED at 21:00:
+        # 39 hours before the clock's 12:30.
+        monkeypatch.setattr(
+            cme_basis, "_utc_now", lambda: datetime(2026, 9, 13, 12, 30, tzinfo=timezone.utc)
+        )
+        out = _report(monkeypatch, _hours("2026-08-20", "2026-09-14"), curr_date="2026-09-13")
+        assert (
+            "_Not a live reading: the newest synchronous hour ended 39 hours before "
+            "2026-09-13 12:30 UTC"
+        ) in out
+        assert "as of 2026-09-11 20:00 UTC (39 hours old, not a live reading), annualized" in out
+        assert "_Data lag" not in out  # two days: an ordinary weekend
+
+    def test_the_not_live_threshold_is_the_constant(self, monkeypatch):
+        # Newest hour 08:00, ended 09:00. At 12:30 that is 3 hours ago
+        # (NOT_LIVE_HOURS, silent); at 13:30 it is 4.
+        index = _hours("2026-08-20", "2026-09-16 09:00")
+        for hour, noted in ((12, False), (13, True)):
+            monkeypatch.setattr(
+                cme_basis,
+                "_utc_now",
+                lambda h=hour: datetime(2026, 9, 16, h, 30, tzinfo=timezone.utc),
+            )
+            out = _report(monkeypatch, index)
+            assert ("_Not a live reading" in out) is noted
+            assert ("not a live reading)" in out) is noted
+
+    def test_a_past_date_and_the_hour_in_progress_are_live(self, monkeypatch, clock):
+        assert "Not a live reading" not in _report(monkeypatch, FORTNIGHT)
+        assert "Not a live reading" not in _report(monkeypatch, FORTNIGHT, curr_date="2026-09-10")
+
+    def test_a_feed_a_week_behind_still_finds_its_earlier_reading(self, monkeypatch):
+        # The earlier reading ends LOOKBACK_DAYS before the NEWEST HOUR, which
+        # may itself trail the date by MAX_STALENESS_DAYS — and its window
+        # reaches back across a long closure. This Yahoo honours start/end, as
+        # the real one does: at a 14-day fetch it answered "no earlier
+        # reading" for one that existed and had not been asked for.
+        monkeypatch.setattr(
+            cme_basis, "_utc_now", lambda: datetime(2026, 9, 22, 12, tzinfo=timezone.utc)
+        )
+        futures, spot = _frames(_hours("2026-08-01", "2026-09-16"))
+        closed = (futures.index >= "2026-09-05") & (futures.index < "2026-09-09")
+        futures.loc[closed, "Volume"] = 0
+        yahoo = _serve(monkeypatch, futures, spot)
+
+        def bounded(symbol):
+            ticker = _Yahoo.__call__(yahoo, symbol)
+            whole = ticker.history
+
+            def history(**kwargs):
+                frame = whole(**kwargs)
+                stamps = frame.index.tz_convert("UTC")
+                keep = (stamps >= pd.Timestamp(kwargs["start"], tz="UTC")) & (
+                    stamps < pd.Timestamp(kwargs["end"], tz="UTC")
+                )
+                return frame[keep]
+
+            ticker.history = history
+            return ticker
+
+        monkeypatch.setattr(cme_basis.yf, "Ticker", bounded)
+        out = cme_basis.get_futures_basis("BTC", "2026-09-22")
+        assert "newest hour 2026-09-15 23:00 UTC" in out and "_Data lag" in out
+        assert "on the reading ending 2026-09-04 20:00 UTC" in out
+
+    def test_the_method_line_carries_the_scale(self, monkeypatch, clock):
+        method = _report(monkeypatch, FORTNIGHT).split("_Method:")[1].split("_Reading:")[0]
+        assert cme_basis.SCALE_NOTE in method
 
     def test_the_change_is_in_annualized_points(self, monkeypatch, clock):
         week_ago = pd.Timestamp("2026-09-09 12:00", tz="UTC")
@@ -396,29 +486,43 @@ class TestReport:
             lag = "_Data lag: the newest synchronous futures/spot hour is 2026-09-11"
             assert (lag in out) is noted
 
-    def test_a_stalled_feed_is_refused_rather_than_captioned(self, monkeypatch):
+    def test_a_stalled_feed_is_withheld_rather_than_captioned(self, monkeypatch, caplog):
         index = _hours("2026-09-01", "2026-09-08 21:00")
-        for day, refused in ((15, False), (16, True)):  # 7 days is served, 8 is not
+        for day, withheld in ((15, False), (16, True)):  # 7 days is served, 8 is not
             monkeypatch.setattr(
                 cme_basis, "_utc_now", lambda d=day: datetime(2026, 9, d, 6, tzinfo=timezone.utc)
             )
-            _serve(monkeypatch, *_frames(index))
-            if refused:
-                with pytest.raises(NoMarketDataError, match=r"8 days before 2026-09-16 \(stale\)"):
-                    cme_basis.get_futures_basis("BTC", f"2026-09-{day}")
-            else:
-                assert "_Data lag" in cme_basis.get_futures_basis("BTC", f"2026-09-{day}")
+            out = _report(monkeypatch, index, curr_date=f"2026-09-{day}")
+            assert ("- Withheld for 2026-09-16" in out) is withheld
+            assert ("_Data lag" in out) is not withheld
+        assert "2026-09-08 20:00 UTC, 8 days before 2026-09-16" in out and "%" not in out
+        assert "Futures basis withheld for 2026-09-16" in caplog.text
 
-    def test_too_few_synchronous_hours_is_no_data(self, monkeypatch, clock):
-        _serve(monkeypatch, *_frames(_hours("2026-09-16 04:00", "2026-09-16 12:00")))
-        with pytest.raises(NoMarketDataError, match="fewer than 12 synchronous in-session hours"):
-            cme_basis.get_futures_basis("BTC", TODAY)
+    def test_too_few_synchronous_hours_is_withheld(self, monkeypatch, clock):
+        out = _report(monkeypatch, _hours("2026-09-16 02:00", "2026-09-16 13:00"))
+        assert "- Withheld for 2026-09-16" in out and "%" not in out
+        assert "fewer than 12 synchronous hours of the two series before 2026-09-16 12:30" in out
+        assert "do not compute one from the futures and spot prices in other reports" in out
 
-    def test_an_empty_answer_is_no_data_naming_the_symbol(self, monkeypatch, clock):
+    def test_the_notice_says_which_series_fell_short(self, monkeypatch, clock, caplog):
+        # The futures feed is whole; spot stops twelve days ago. The old no-data
+        # raise named BTC=F here, the one series with nothing wrong with it.
+        futures, _ = _frames(FORTNIGHT)
+        _, spot = _frames(_hours("2026-08-25", "2026-09-05"))
+        _serve(monkeypatch, futures, spot)
+        out = cme_basis.get_futures_basis("BTC", TODAY)
+        legs = (
+            "BTC=F had 273 usable hours, the newest 2026-09-16 12:00 UTC; "
+            "BTC-USD had 264 usable hours, the newest 2026-09-04 23:00 UTC"
+        )
+        assert legs in out and legs in caplog.text
+        assert "12 days before 2026-09-16, and a reading that old is not served" in out
+
+    def test_an_empty_answer_is_a_series_with_no_hours(self, monkeypatch, clock, caplog):
         _serve(monkeypatch, pd.DataFrame(), _frames(FORTNIGHT)[1])
-        with pytest.raises(NoMarketDataError) as info:
-            cme_basis.get_futures_basis("BTC", TODAY)
-        assert (info.value.symbol, info.value.canonical) == ("BTC", "BTC=F")
+        out = cme_basis.get_futures_basis("BTC", TODAY)
+        assert "BTC=F had 0 usable hours, the newest none; BTC-USD had 373 usable hours" in out
+        assert "Yahoo Finance returned no hourly rows for BTC=F" in caplog.text
 
     def test_a_throttle_leaves_typed_and_the_second_series_is_never_asked_for(
         self, monkeypatch, clock
@@ -511,16 +615,17 @@ class TestAnsweredWithoutAFetch:
         assert "%" not in out
 
     def test_a_date_beyond_yahoos_hourly_reach_is_withheld(self):
-        # start = the date's closing midnight less FETCH_WINDOW_DAYS; the last
-        # date served is the one whose start is exactly HOURLY_HISTORY_DAYS back.
-        edge = NOW.date() - pd.Timedelta(
-            days=cme_basis.HOURLY_HISTORY_DAYS - cme_basis.FETCH_WINDOW_DAYS + 1
-        )
+        edge = NOW.date() - pd.Timedelta(days=cme_basis.MAX_DATE_AGE_DAYS)
         out = cme_basis.get_futures_basis("BTC", (edge - pd.Timedelta(days=1)).isoformat())
-        assert "- Withheld for " in out and "trailing 729 days" in out and "%" not in out
+        assert "- Withheld for " in out and "%" not in out
+        assert "more than 709 days before the UTC clock (2026-09-16)" in out
         self.fetch.assert_not_called()
         with pytest.raises(AssertionError, match="the vendor was asked"):
             cme_basis.get_futures_basis("BTC", edge.isoformat())
+        # The oldest date served asks Yahoo for a start exactly at its reach:
+        # the named age and the fetch arithmetic are one fact, not two.
+        start = self.fetch.call_args.args[1]
+        assert (NOW.date() - start).days == cme_basis.HOURLY_HISTORY_DAYS
 
 
 @contextmanager
@@ -555,12 +660,13 @@ class TestRouting:
             "yfinance": cme_basis.get_futures_basis
         }
 
-    def test_no_data_degrades_to_the_no_data_sentinel(self, monkeypatch, clock, basis_enabled):
+    def test_no_rows_reaches_the_analyst_as_the_notice_not_a_verdict_on_btc(
+        self, monkeypatch, clock, basis_enabled
+    ):
         _serve(monkeypatch, pd.DataFrame(), pd.DataFrame())
         out = interface.route_to_vendor("get_futures_basis", "BTC", TODAY)
-        assert out.startswith(
-            "NO_DATA_AVAILABLE: No usable market data for 'BTC' (resolved to 'BTC=F')"
-        )
+        assert out.startswith("## CME Bitcoin Futures Basis — BTC\n- Withheld for 2026-09-16")
+        assert "NO_DATA_AVAILABLE" not in out and "invalid" not in out
 
     def test_a_throttle_degrades_to_the_optional_sentinel(self, monkeypatch, clock, basis_enabled):
         _serve(monkeypatch, YFRateLimitError(), YFRateLimitError())
@@ -682,6 +788,20 @@ class TestProseFollowsTheConstants:
         assert f"{cme_basis.LOOKBACK_DAYS}-day annualized median" in text
         assert f"its change over {cme_basis.LOOKBACK_DAYS} days" in text
         assert f"withheld within {cme_basis.MIN_DAYS_TO_EXPIRY} days of expiry" in text
+        assert cme_basis.SCALE_NOTE in text
+        # Every way the report can come back without a figure is named.
+        assert "when there is no earlier reading to compare with" in text
+        assert "when either of the two readings has no annualized figure" in text
+        assert "when Yahoo served too little to build a reading" in text
+        assert "when the report says it is not a live reading" in text
+
+    def test_the_scale_note_states_the_constants(self):
+        assert (
+            f"under about {cme_basis.ORDINARY_CHANGE_POINTS} annualized points"
+            in cme_basis.SCALE_NOTE
+        )
+        assert f"within about {cme_basis.ORDINARY_GAP_POINTS} points" in cme_basis.SCALE_NOTE
+        assert cme_basis.SCALE_NOTE.count(f"{cme_basis.LOOKBACK_DAYS}-day") == 2
 
     def test_the_tool_description(self):
         text = " ".join(crypto_data_tools.get_futures_basis.description.split())
@@ -689,7 +809,9 @@ class TestProseFollowsTheConstants:
         assert f"a {cme_basis.LOOKBACK_DAYS}-day annualized median" in text
         assert f"the reading {cme_basis.LOOKBACK_DAYS} days earlier" in text
         assert f"withheld within {cme_basis.MIN_DAYS_TO_EXPIRY} days of expiry" in text
-        assert f"the {cme_basis.HOURLY_HISTORY_DAYS} days of hourly history" in text
+        assert f"more than {cme_basis.MAX_DATE_AGE_DAYS} days behind it" in text
+        assert f"ended more than {cme_basis.NOT_LIVE_HOURS} hours earlier" in text
+        assert f"none newer than {cme_basis.MAX_STALENESS_DAYS} days" in text
         assert "more than a day ahead" in text and cme_basis.MAX_FUTURE_DAYS == 1
         assert f"Yahoo {cme_basis.FUTURES_SYMBOL}" in text
         assert f"Yahoo {cme_basis.SPOT_SYMBOL}" in text
@@ -701,8 +823,15 @@ class TestProseFollowsTheConstants:
         assert f"at least {cme_basis.MIN_DAYS_TO_EXPIRY} days from expiry" in out
 
     def test_the_fetch_window_covers_what_the_report_needs(self):
-        # The lookback reading needs a full window before it, and either can
-        # have a holiday weekend's closed days in front of it.
-        needed = cme_basis.LOOKBACK_DAYS + cme_basis.MAX_WINDOW_SPAN_DAYS
+        # Counted back from the analysis date: the newest hour may trail it by
+        # MAX_STALENESS_DAYS, the earlier reading ends LOOKBACK_DAYS before
+        # that, and its window may reach MAX_WINDOW_SPAN_DAYS further.
+        needed = (
+            cme_basis.MAX_STALENESS_DAYS + cme_basis.LOOKBACK_DAYS + cme_basis.MAX_WINDOW_SPAN_DAYS
+        )
         assert needed <= cme_basis.FETCH_WINDOW_DAYS
+        assert (
+            cme_basis.MAX_DATE_AGE_DAYS
+            == cme_basis.HOURLY_HISTORY_DAYS - cme_basis.FETCH_WINDOW_DAYS + 1
+        )
         assert cme_basis.MAX_STALENESS_DAYS > cme_basis.MAX_DATA_LAG_DAYS

@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -187,6 +187,52 @@ INDICATOR_DESCRIPTIONS = {
     ),
 }
 
+def finite_float(value: object, *, allow_str: bool = False) -> float | None:
+    """A figure about to be used in ARITHMETIC, as a finite float, or None.
+
+    The bool-rejecting question four vendor modules each used to ask with
+    their own copy. It is not :func:`is_finite_number` below, which asks
+    whether a vendor's raw report CELL is a number before it is rendered and
+    deliberately lets ``True`` through as 1.0; here the value is about to be
+    summed, compared or weighted, so a JSON ``true`` passing as 1 would be a
+    figure nobody sent.
+
+    Returns the value rather than a verdict, because half the callers need it:
+    a predicate forces every one of them to convert again, and a second
+    conversion is a second place for the rule to differ.
+
+    ``NaN``/``Infinity`` are refused along with the unparseable: ``json``
+    decodes both, every comparison with NaN is False (which silently defeats a
+    cross-check), and either renders as a literal "nan"/"inf" figure.
+
+    ``math.isfinite`` RAISES on an int too large to convert to a float, and a
+    JSON integer literal has no bound, so ``json.loads`` can hand back an
+    arbitrary-precision int that makes a naive predicate throw rather than
+    answer - inverting its contract at one of the input classes it exists to
+    turn away. Two of the four copies caught that; the Farside one did not,
+    which is the kind of divergence sharing this removes.
+
+    ``allow_str`` is opt-in because it is a property of the VENDOR, not of the
+    question: Hyperliquid sends every number as a string, so its figures
+    arrive as ``"-2110.66337"``, while a string reaching the others means the
+    payload is not the shape they parsed. Off by default so adopting this
+    cannot silently widen what a caller accepts.
+    """
+    if isinstance(value, str):
+        if not allow_str:
+            return None
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return float(value) if math.isfinite(value) else None
+    except OverflowError:
+        return None
+
+
 def is_finite_number(value) -> bool:
     """Whether a vendor's raw report cell IS a number, before any flattening.
 
@@ -199,17 +245,10 @@ def is_finite_number(value) -> bool:
     series.
 
     One definition because ``fred`` and the Alpha Vantage indicator getter ask
-    the same question about the same kind of value. The vendor-local helpers in
-    ``deribit`` / ``farside`` / ``sosovalue_common`` (``_is_finite_number``) and
-    ``hyperliquid_whales`` (``_finite_float``, which returns the value rather
-    than a verdict, its vendor sending every number as a string) ask a
-    DIFFERENT one — they also reject ``bool``, because there the value is about
-    to be arithmetic rather than rendered — and stay where they are. Named as
-    examples rather than as a closed list: the point is which QUESTION is
-    theirs, so another of them is not a defect — promoting one shared
-    ``finite_float`` would have to reconcile their edge handling
-    (``OverflowError`` on a huge int literal; whether a numeric string counts),
-    which is a reconciliation rather than a move.
+    the same question about the same kind of value. :func:`finite_float` above
+    asks the DIFFERENT one the vendor modules ask - it rejects ``bool``,
+    because there the value is about to be arithmetic rather than rendered -
+    and every one of them now reads it rather than keeping a copy.
     """
     try:
         return math.isfinite(float(value))
@@ -1058,8 +1097,25 @@ def wiring_gap(what: str) -> Iterator[None]:
         raise WiringGapError(f"{what}: {e}") from e
 
 
-def raise_for_http_status(response, vendor: str) -> None:
+def raise_for_http_status(response, vendor: str, *, rate_limit: Callable | None = None) -> None:
     """Raise ``VendorUnavailableError`` for a 5xx; otherwise ``response.raise_for_status()``.
+
+    ``rate_limit``, when given, is the boundary's own 429 policy: a callable
+    taking the response and RAISING its vendor's rate-limit type. It is
+    consulted first, which is the whole point of passing it here rather than
+    writing the check above the call - this function types only a 5xx, and
+    ``is_unreached`` excludes ``requests.HTTPError``, so a 429 left to the
+    ``raise_for_status()`` below reaches a boundary's generic lane and is filed
+    as that module's own breakage: an ERROR with a traceback saying the parser
+    changed, and a router verdict of "the client needs a fix" for a routine
+    throttle no code change heals (#278 shipped exactly that).
+
+    A boundary passing NOTHING keeps today's behaviour exactly, and that is
+    deliberate rather than an oversight: several vendors absorb a throttle in
+    their own retry or stale-cache lane, and a typed raise from here would walk
+    straight past it - the same shape as the bug above, in the other direction.
+    Which boundaries decline, and why, is declared and locked in
+    ``tests/test_vendor_routing.py`` rather than left to be rediscovered.
 
     The one status decision at a vendor's request boundary — the 5xx check
     and the library's own raise in one call, in a fixed order, so a boundary
@@ -1086,6 +1142,14 @@ def raise_for_http_status(response, vendor: str) -> None:
     model reads.
     """
     status = response.status_code
+    if status == 429 and rate_limit is not None:
+        rate_limit(response)
+        # A policy that returns instead of raising would leave the throttle to
+        # fall through to ``raise_for_status()`` below - the exact
+        # misclassification the parameter exists to prevent, and silently.
+        raise WiringGapError(
+            f"the {vendor} rate-limit policy returned instead of raising on HTTP 429"
+        )
     if status >= 500:
         raise VendorUnavailableError(f"{vendor} answered HTTP {status} without data")
     response.raise_for_status()

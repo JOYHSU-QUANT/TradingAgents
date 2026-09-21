@@ -74,10 +74,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import NamedTuple
 
@@ -98,6 +98,7 @@ from .utils import (
     date_refusal,
     echo_argument,
     failure_account,
+    finite_float,
     is_unreached,
     json_body_or_outage,
     json_bytes_or_outage,
@@ -478,16 +479,19 @@ def _amount_ok(value: object) -> bool:
 def _finite_float(value: object) -> float | None:
     """``value`` as a finite float, or None. The venue sends numbers as strings.
 
-    bool is rejected along with the rest: it is an ``int`` subclass, so a JSON
-    ``true`` would otherwise become a position size of 1.
+    ``allow_str`` is this vendor's own answer to a shared question: every
+    figure here arrives as ``"-2110.66337"``, where a string reaching the
+    other vendors would mean the payload is not the shape they parsed.
+
+    Adopting the shared rule also brought the huge-int guard this copy lacked,
+    the same one Farside gained: a bare JSON integer too large to convert to a
+    float made ``float()`` raise ``OverflowError`` here, uncaught, out of the
+    per-address loop that is supposed to cost one account at most. It now
+    answers None and the entry is skipped and counted like any other
+    unreadable one. Not reachable while the venue sends strings - which is
+    why it was never noticed - and not something to rely on it continuing to.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
+    return finite_float(value, allow_str=True)
 
 
 def _failure_class(e: Exception) -> type[HyperliquidWhalesError]:
@@ -503,21 +507,25 @@ def _failure_class(e: Exception) -> type[HyperliquidWhalesError]:
     return HyperliquidWhalesUnavailableError if down else HyperliquidWhalesError
 
 
-def _raise_for_rate_limit(response, vendor: str) -> None:
-    """Raise the rate-limit type for a 429, before any other status reading.
+def _rate_limited(vendor: str) -> Callable[[object], None]:
+    """This module's 429 policy for ``vendor``, handed to the status helper.
 
-    Ahead of ``raise_for_http_status`` because that helper types only a 5xx and
-    hands everything else to ``requests.raise_for_status()``, whose
-    ``HTTPError`` this module's boundaries would then file as structural. The
-    message carries the status only, never the body: it travels into a sentinel
-    the model reads.
+    Passed there rather than checked above the call so the ORDER belongs to one
+    place: the helper types only a 5xx, so a 429 read after it is already an
+    ``HTTPError`` and lands in this module's structural lane - the bug this
+    vendor shipped once.
+
+    Worded distinctly, as the Deribit / Alpha Vantage / SoSoValue boundaries
+    word theirs: "answered HTTP N" belongs to ``utils.generic_failure_words``,
+    and a hand-spelled copy of a shared phrase drifts the moment that one is
+    reworded. The message carries the status only, never the body: it travels
+    into a sentinel the model reads.
     """
-    if response.status_code == 429:
-        # Worded distinctly, as the Deribit / Alpha Vantage / SoSoValue
-        # boundaries word theirs: "answered HTTP N" belongs to
-        # ``utils.generic_failure_words``, and a hand-spelled copy of a shared
-        # phrase drifts the moment that one is reworded.
+
+    def _raise(_response) -> None:
         raise HyperliquidWhalesRateLimitError(f"{vendor} is rate limiting this client (HTTP 429)")
+
+    return _raise
 
 
 def _request_leaderboard() -> dict:
@@ -540,8 +548,9 @@ def _request_leaderboard() -> dict:
     response = None
     try:
         response = requests.get(LEADERBOARD_URL, timeout=LEADERBOARD_TIMEOUT, stream=True)
-        _raise_for_rate_limit(response, "Hyperliquid stats")
-        raise_for_http_status(response, "Hyperliquid stats")
+        raise_for_http_status(
+            response, "Hyperliquid stats", rate_limit=_rate_limited("Hyperliquid stats")
+        )
         body = bytearray()
         for chunk in response.iter_content(chunk_size=_LEADERBOARD_CHUNK_BYTES):
             body.extend(chunk)
@@ -637,8 +646,9 @@ def _request_state(address: str) -> dict:
             json={"type": "clearinghouseState", "user": address},
             timeout=POSITION_TIMEOUT,
         )
-        _raise_for_rate_limit(response, "Hyperliquid info")
-        raise_for_http_status(response, "Hyperliquid info")
+        raise_for_http_status(
+            response, "Hyperliquid info", rate_limit=_rate_limited("Hyperliquid info")
+        )
         payload = json_body_or_outage(response, "Hyperliquid info")
     except (requests.RequestException, VendorUnavailableError) as e:
         raise _failure_class(e)(

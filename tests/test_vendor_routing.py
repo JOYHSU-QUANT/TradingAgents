@@ -1546,3 +1546,127 @@ def test_a_shipped_off_category_never_reaches_its_vendor():
                 out = interface.route_to_vendor(method, "BTC", "2026-06-05")
             assert calls == [], f"{method} ran while {category} ships off"
             assert "DATA_UNAVAILABLE" in out
+
+
+# Which request boundaries hand `raise_for_http_status` a 429 policy, and which
+# deliberately do not. A boundary that passes none keeps the library's
+# `HTTPError`, which its own lane then absorbs - correct for the modules below,
+# and wrong for the ones that pass one, where it meant a routine throttle was
+# filed as the module's own breakage (#278).
+#
+# Declared rather than inferred: "whatever does not pass one is exempt" would
+# make the lock vacuous for the next boundary that simply forgot, which is the
+# omission it exists to catch.
+_NO_RATE_LIMIT_POLICY = {
+    # Reads the whole 4xx range itself, ahead of this helper: at that boundary
+    # a 4xx is the vendor answering whatever the body carries, and the key
+    # verdict, the throttle and the error envelope are all read from it.
+    "sosovalue_common.py": "handles 4xx before the helper is reached",
+    # Checks 429 itself BEFORE reading the body, which this helper cannot do
+    # for it: a throttle's body is not JSON, so the body read would return an
+    # outage verdict for what is a throttle.
+    "deribit.py": "orders its own 429 ahead of the body read",
+    # No 429 policy at all, on purpose. Each absorbs a throttle in its own
+    # retry or stale-cache lane, and a typed raise from the helper would walk
+    # straight past that lane - the mirror of the bug the parameter prevents.
+    "farside.py": "absorbs a throttle in its stale-cache lane",
+    "fear_greed.py": "absorbs a throttle in its retry lane",
+    "fred.py": "no throttle policy; the router's generic lane answers",
+    "polymarket.py": "degrades to prose rather than raising",
+}
+
+
+_STATUS_HELPER = "raise_for_http_status"
+
+
+def _status_boundary_calls():
+    """Every ``raise_for_http_status`` call in the package, by module, with
+    whether it was handed a ``rate_limit`` policy.
+
+    Matches the direct name and attribute access (``utils.raise_for_http_status``).
+    An ALIASED import would still be invisible, so the sibling test refuses one
+    outright rather than letting the scan quietly under-report.
+    """
+    return {
+        source.name: _policies_given(tree)
+        for source, tree in dataflows_module_trees(containing=_STATUS_HELPER)
+        if _policies_given(tree)
+    }
+
+
+def _policies_given(tree):
+    """Whether each ``raise_for_http_status`` call in ``tree`` was given a policy.
+
+    Split out so the matching itself is testable: the attribute form is a
+    spelling no boundary uses today, so a scan that stopped reading it would
+    pass every real file unchanged.
+    """
+    given = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        named = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if named == _STATUS_HELPER:
+            given.add(any(kw.arg == "rate_limit" for kw in node.keywords))
+    return given
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "call,expected",
+    [
+        ("raise_for_http_status(r, 'V')", {False}),
+        ("raise_for_http_status(r, 'V', rate_limit=p)", {True}),
+        ("utils.raise_for_http_status(r, 'V')", {False}),
+        ("utils.raise_for_http_status(r, 'V', rate_limit=p)", {True}),
+        ("something_else(r, 'V')", set()),
+    ],
+    ids=["direct", "direct_policy", "attribute", "attribute_policy", "unrelated"],
+)
+def test_the_scan_reads_both_spellings_of_the_call(call, expected):
+    # The attribute form appears in no boundary today, so nothing in the
+    # package would notice the scan losing it.
+    assert _policies_given(ast.parse(call)) == expected
+
+
+@pytest.mark.unit
+def test_no_boundary_aliases_the_status_helper():
+    """The scan above reads calls by name, so an alias would hide one.
+
+    Refused rather than solved: resolving aliases means following imports, and
+    a lock that silently under-reports is worse than one that forbids the
+    spelling it cannot read.
+    """
+    for source, tree in dataflows_module_trees(containing=_STATUS_HELPER):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            for name in node.names:
+                if name.name == _STATUS_HELPER:
+                    assert name.asname is None, f"{source.name} aliases {_STATUS_HELPER}"
+
+
+@pytest.mark.unit
+def test_every_status_boundary_declares_its_429_policy():
+    """A boundary either hands the helper a 429 policy or is declared exempt.
+
+    The helper types only a 5xx and `is_unreached` excludes `HTTPError`, so a
+    429 nobody claimed becomes the module's own structural error - an ERROR
+    with a traceback blaming the parser, for a throttle no code change heals.
+    Passing the policy to the helper rather than checking above the call is
+    what makes the ORDER one place's business; this lock is what makes the
+    decision NOT to pass one visible.
+    """
+    calls = _status_boundary_calls()
+    assert calls, "no raise_for_http_status calls found - the AST scan is broken"
+    for module, given in calls.items():
+        if module in _NO_RATE_LIMIT_POLICY:
+            assert given == {False}, f"{module} is declared exempt but passes rate_limit"
+        else:
+            assert given == {True}, f"{module} passes no rate_limit policy and is not declared"
+
+
+@pytest.mark.unit
+def test_the_exemptions_name_boundaries_that_exist():
+    """A declared exemption that no longer calls the helper is stale."""
+    assert set(_NO_RATE_LIMIT_POLICY) <= set(_status_boundary_calls())

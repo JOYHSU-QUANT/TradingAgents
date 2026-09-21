@@ -2,11 +2,13 @@
 condition derives from VendorError, so the router catches base types and any
 vendor slots in without new handling.
 """
+import contextlib
 import copy
 import unittest
 from unittest import mock
 
 import pytest
+import requests
 
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
@@ -24,8 +26,10 @@ from tradingagents.dataflows.errors import (
     VendorNotConfiguredError,
     VendorRateLimitError,
     VendorUnavailableError,
+    WiringGapError,
 )
 from tradingagents.dataflows.fred import FredNotConfiguredError
+from tradingagents.dataflows.utils import finite_float, raise_for_http_status
 
 
 @pytest.mark.unit
@@ -125,3 +129,114 @@ class RouterHandlesBaseTypesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.unit
+class TestRateLimitPolicyOrdering:
+    """``raise_for_http_status`` consults the boundary's 429 policy FIRST.
+
+    The parameter exists because the helper types only a 5xx: a 429 left to
+    ``raise_for_status()`` becomes an ``HTTPError``, which ``is_unreached``
+    excludes, so the boundary files a routine throttle as its own structural
+    breakage (#278 shipped that).
+    """
+
+    def _response(self, status):
+        response = mock.Mock(spec=["status_code", "raise_for_status", "headers"])
+        response.status_code = status
+        response.headers = {}
+        response.raise_for_status.side_effect = (
+            requests.HTTPError(f"HTTP {status}", response=response) if status >= 400 else None
+        )
+        return response
+
+    def test_the_policy_is_consulted_before_the_library_raise(self):
+        class _Throttled(VendorRateLimitError):
+            pass
+
+        def _policy(_response):
+            raise _Throttled("this vendor is throttling us")
+
+        response = self._response(429)
+        with pytest.raises(_Throttled):
+            raise_for_http_status(response, "Vendor", rate_limit=_policy)
+        # The library's raise never ran: reaching it is the misfiling.
+        response.raise_for_status.assert_not_called()
+
+    def test_without_a_policy_a_429_keeps_the_library_behaviour(self):
+        # Deliberate: several boundaries absorb a throttle in their own retry
+        # or stale-cache lane, and a typed raise from here would bypass it.
+        with pytest.raises(requests.HTTPError):
+            raise_for_http_status(self._response(429), "Vendor")
+
+    def test_the_policy_is_not_consulted_for_any_other_status(self):
+        seen = []
+        for status in (200, 403, 500):
+            response = self._response(status)
+            with contextlib.suppress(requests.HTTPError, VendorUnavailableError):
+                raise_for_http_status(response, "Vendor", rate_limit=lambda r: seen.append(r))
+        assert seen == []
+
+    def test_a_5xx_still_outranks_the_library_raise_with_a_policy_given(self):
+        with pytest.raises(VendorUnavailableError):
+            raise_for_http_status(self._response(503), "Vendor", rate_limit=lambda r: None)
+
+    def test_a_policy_that_returns_is_our_bug_not_a_silent_fallthrough(self):
+        # Returning would leave the throttle to fall through to the library
+        # raise - the exact misclassification the parameter prevents.
+        with pytest.raises(WiringGapError, match="returned instead of raising"):
+            raise_for_http_status(self._response(429), "Vendor", rate_limit=lambda r: None)
+
+
+@pytest.mark.unit
+class TestFiniteFloat:
+    """The bool-rejecting numeric rule the vendor modules share.
+
+    A different question from ``is_finite_number``: these values are about to
+    be summed, compared or weighted, so a JSON ``true`` passing as 1 would be a
+    figure nobody sent.
+    """
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (1, 1.0),
+            (-2.5, -2.5),
+            (0, 0.0),
+            (True, None),
+            (False, None),
+            (float("nan"), None),
+            (float("inf"), None),
+            (float("-inf"), None),
+            (None, None),
+            (object(), None),
+            ([1], None),
+        ],
+        ids=["int", "float", "zero", "true", "false", "nan", "inf", "neg_inf", "none", "object", "list"],
+    )
+    def test_the_value_classes(self, value, expected):
+        assert finite_float(value) == expected or (
+            expected is None and finite_float(value) is None
+        )
+
+    def test_a_huge_int_answers_rather_than_raising(self):
+        # ``math.isfinite`` RAISES on an int too large to convert to a float,
+        # and a JSON integer literal has no bound, so json.loads can hand one
+        # back. A predicate that throws at an input class it exists to turn
+        # away inverts its own contract - and two of the four copies this
+        # replaced guarded it while the others did not.
+        assert finite_float(10**400) is None
+        assert finite_float(-(10**400)) is None
+
+    def test_strings_are_refused_unless_the_vendor_sends_them(self):
+        # Opt-in because it is a property of the VENDOR, not the question: a
+        # string reaching the vendors that do not set it means the payload is
+        # not the shape they parsed.
+        assert finite_float("1.5") is None
+        assert finite_float("1.5", allow_str=True) == 1.5
+        assert finite_float("nope", allow_str=True) is None
+        assert finite_float("nan", allow_str=True) is None
+        assert finite_float("inf", allow_str=True) is None
+
+    def test_a_bool_is_refused_even_when_strings_are_allowed(self):
+        assert finite_float(True, allow_str=True) is None

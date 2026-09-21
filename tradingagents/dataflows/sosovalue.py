@@ -865,8 +865,9 @@ def _load_snapshot(asset: str) -> _FlowSnapshot:
         ttl_hours=_cache_ttl_hours,
         label=asset,
         cache_name="SoSoValue cache",
-        max_stale_days=MAX_STALE_DAYS,
+        max_stale_hours=MAX_STALE_DAYS * 24,
         log=logger,
+        precheck=get_api_key,
     )
     return _snapshot_from(payload, fetched_at, stale, refetched)
 

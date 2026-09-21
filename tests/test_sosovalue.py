@@ -21,7 +21,7 @@ import pytest
 import requests
 
 import tradingagents.default_config as default_config
-from tradingagents.dataflows import farside, interface, sosovalue, sosovalue_common
+from tradingagents.dataflows import errors, farside, interface, sosovalue, sosovalue_common
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.utils import MAX_UNTRUSTED_CHARS, sanitize_untrusted
 
@@ -3021,3 +3021,97 @@ class TestRaisedMessagesAreFlattened:
             sosovalue._parse_fund_rows([{"nope": self.POISON}], "AAAA")
         assert "#" not in str(exc.value)
         assert "|" not in str(exc.value)
+
+
+@pytest.mark.unit
+class TestRollingSnapshotIsTheFamilysNotSoSoValues:
+    """The skeleton's two hooks and its hour-granular cap.
+
+    It was SoSoValue's by three accidents: it called ``get_api_key`` directly,
+    it spelled "SoSoValue" into every message, and its staleness bound was a
+    whole number of days - which excluded any vendor whose honest cap is
+    shorter than a day, by units alone.
+    """
+
+    def _load(self, tmp_path, **kwargs):
+        set_config({"data_cache_dir": str(tmp_path)})
+        defaults = {
+            "path": str(tmp_path / "snap.json"),
+            "read_cache": lambda _path: None,
+            "fetch_all": lambda _cached: {"rows": [1]},
+            "ttl_hours": lambda _cached: 6,
+            "label": "thing",
+            "cache_name": "Test cache",
+            "max_stale_hours": 6,
+            "log": logging.getLogger("test"),
+        }
+        return sosovalue_common.load_rolling_snapshot(**(defaults | kwargs))
+
+    def test_no_precheck_means_no_key_is_required(self, tmp_path, monkeypatch):
+        # A keyless vendor must not be made to have an API key by the skeleton
+        # it borrows. Without the hook this raised before the fetch.
+        monkeypatch.setattr(
+            sosovalue_common, "get_api_key", mock.Mock(side_effect=AssertionError("asked"))
+        )
+        payload, _fetched_at, stale, refetched = self._load(tmp_path)
+        assert payload["rows"] == [1] and not stale and refetched
+
+    def test_the_precheck_runs_before_anything_else(self, tmp_path):
+        order = []
+        with pytest.raises(RuntimeError, match="no key"):
+            self._load(
+                tmp_path,
+                precheck=lambda: (_ for _ in ()).throw(RuntimeError("no key")),
+                read_cache=lambda _p: order.append("read"),
+            )
+        # An unset key must surface even when a cache could have served, or the
+        # emergency-disable flip is delayed by up to the TTL.
+        assert order == []
+
+    def test_a_sub_day_cap_is_expressible_and_enforced(self, tmp_path, monkeypatch):
+        # The whole reason for hours: a day-granular bound could not say six.
+        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-09-21T12:00:00Z"))
+        cached = {"fetched_at": "2026-09-21T00:00:00Z", "rows": [0]}
+
+        def _fail(_cached):
+            raise sosovalue_common.SoSoValueUnavailableError("down")
+
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="6-hour cap"):
+            self._load(
+                tmp_path, read_cache=lambda _p: cached, fetch_all=_fail, max_stale_hours=6
+            )
+        # Inside the cap the same snapshot is served stale rather than refused.
+        payload, _fetched, stale, _refetched = self._load(
+            tmp_path, read_cache=lambda _p: cached, fetch_all=_fail, max_stale_hours=24
+        )
+        assert stale and payload["rows"] == [0]
+
+    def test_the_vendor_name_reaches_the_message(self, tmp_path):
+        def _fail(_cached):
+            raise sosovalue_common.SoSoValueUnavailableError("down")
+
+        with pytest.raises(sosovalue_common.SoSoValueUnavailableError, match="Farside thing unavailable"):
+            self._load(tmp_path, fetch_all=_fail, vendor="Farside")
+
+    def test_structural_is_judged_by_exclusion_not_by_this_familys_type(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # A vendor adopting this must not go down the warning lane with a
+        # broken parser just because its error is not a SoSoValueError.
+        # Past the 6-hour TTL so a refresh is attempted, inside the 24-hour
+        # cap so the stale serve is reached - the branch that logs.
+        monkeypatch.setattr(sosovalue_common, "_utc_now", lambda: _at("2026-09-21T08:00:00Z"))
+        cached = {"fetched_at": "2026-09-21T00:00:00Z", "rows": [0]}
+
+        class _OtherVendorError(errors.VendorError):
+            pass
+
+        def _fail(_cached):
+            raise _OtherVendorError("its parser broke")
+
+        with caplog.at_level(logging.DEBUG, logger="test"):
+            _payload, _fetched, stale, _refetched = self._load(
+                tmp_path, read_cache=lambda _p: cached, fetch_all=_fail, max_stale_hours=24
+            )
+        assert stale
+        assert [r.levelname for r in caplog.records if "structurally" in r.message] == ["ERROR"]

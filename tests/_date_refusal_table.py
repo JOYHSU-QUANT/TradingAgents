@@ -36,6 +36,7 @@ import tradingagents.dataflows.deribit as deribit
 import tradingagents.dataflows.farside as farside
 import tradingagents.dataflows.fear_greed as fear_greed
 import tradingagents.dataflows.fred as fred
+import tradingagents.dataflows.hyperliquid_whales as hyperliquid_whales
 import tradingagents.dataflows.polymarket as polymarket
 import tradingagents.dataflows.sosovalue as sosovalue
 import tradingagents.dataflows.sosovalue_macro as sosovalue_macro
@@ -284,6 +285,11 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
         lambda d: ("BTC", d["curr_date"], 90),
         "BTC treasury holdings",
     ),
+    ("get_whale_positions", "hyperliquid_stats"): _point(
+        hyperliquid_whales.get_whale_positions_data,
+        lambda d: ("BTC", d["curr_date"]),
+        "whale positioning",
+    ),
 }
 
 
@@ -351,6 +357,7 @@ def no_network(monkeypatch):
     monkeypatch.setattr(sosovalue_macro, "_load_snapshot", _reached)
     monkeypatch.setattr(sosovalue_treasuries, "_load_snapshot", _reached)
     monkeypatch.setattr(deribit, "_request", _reached)
+    monkeypatch.setattr(hyperliquid_whales, "_load_snapshot", _reached)
     monkeypatch.setattr(fred, "_request", _reached)
     monkeypatch.setattr(polymarket, "_request", _reached)
     return reached

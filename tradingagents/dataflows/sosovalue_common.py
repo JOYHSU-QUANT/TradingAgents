@@ -755,6 +755,44 @@ def _read_cache_preamble(path: str, *, reject: Callable[[str], None]) -> dict | 
     return payload
 
 
+# One place for the US$m rendering every vendor that reports notionals uses.
+# The dust branch is the whole reason it is shared: a figure that rounds to
+# "0.0" beside a line asserting the thing is non-zero is two cells the reader
+# is told cannot both be true, and that rule took real thought to get right
+# once (see the treasuries Cost column). A second hand-copy is how it starts
+# drifting.
+USD_PER_MILLION = 1e6
+
+
+def fmt_usd_m(value: float) -> str:
+    """A notional in US$m, tenth-of-a-million granularity.
+
+    A non-zero figure that would round to zero keeps three decimals instead, so
+    a dust position never prints as "0.0" beside a line saying it is held.
+    """
+    millions = value / USD_PER_MILLION
+    rounded = round(millions, 1)
+    if rounded == 0 and millions != 0:
+        return f"{millions:,.3f}"
+    return f"{rounded + 0.0:,.1f}"
+
+
+def fmt_signed_usd_m(value: float) -> str:
+    """The signed twin of :func:`fmt_usd_m`, for a change or a filed cost.
+
+    ``+ 0.0`` normalizes a negative zero on the coarse path, which a sub-tick
+    move would otherwise render as "-0.0". The residual: a value under $500
+    renders "+0.000"/"-0.000" — not reachable at the universes these callers
+    report on, and an unbounded precision escape would make a column
+    unreadable.
+    """
+    millions = value / USD_PER_MILLION
+    rounded = round(millions, 1)
+    if rounded == 0 and millions != 0:
+        return f"{millions:+,.3f}"
+    return f"{rounded + 0.0:+,.1f}"
+
+
 def _concentration_share_str(share: float) -> str:
     """Render a concentration share where "100" may only mean "the whole".
 

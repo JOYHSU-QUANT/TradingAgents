@@ -1,0 +1,88 @@
+{
+ "marginSummary": {
+  "accountValue": "89260215.373081997",
+  "totalNtlPos": "647100248.2375069857",
+  "totalRawUsd": "736360463.6105890274",
+  "totalMarginUsed": "123659500.126996994"
+ },
+ "crossMarginSummary": {
+  "accountValue": "89260215.373081997",
+  "totalNtlPos": "647100248.2375069857",
+  "totalRawUsd": "736360463.6105890274",
+  "totalMarginUsed": "123659500.126996994"
+ },
+ "crossMaintenanceMarginUsed": "20125114.3992649987",
+ "withdrawable": "0.0",
+ "assetPositions": [
+  {
+   "type": "oneWay",
+   "position": {
+    "coin": "BTC",
+    "szi": "-2110.66337",
+    "leverage": {
+     "type": "cross",
+     "value": 5
+    },
+    "entryPx": "72730.6",
+    "positionValue": "172003867.8787359893",
+    "unrealizedPnl": "-18493980.6440959983",
+    "returnOnEquity": "-0.6023709931",
+    "liquidationPx": "117632.8442441016",
+    "marginUsed": "34400773.5757469982",
+    "maxLeverage": 20,
+    "cumFunding": {
+     "allTime": "-17253454.4783490002",
+     "sinceOpen": "-1187659.8824710001",
+     "sinceChange": "-175696.158306"
+    }
+   }
+  },
+  {
+   "type": "oneWay",
+   "position": {
+    "coin": "ETH",
+    "szi": "-102911.9699",
+    "leverage": {
+     "type": "cross",
+     "value": 5
+    },
+    "entryPx": "2297.25",
+    "positionValue": "274538262.1022300124",
+    "unrealizedPnl": "-38123314.4642919973",
+    "returnOnEquity": "-0.8062796969",
+    "liquidationPx": "3402.9333324602",
+    "marginUsed": "54907652.420446001",
+    "maxLeverage": 15,
+    "cumFunding": {
+     "allTime": "-16130512.1718550008",
+     "sinceOpen": "-1926382.170284",
+     "sinceChange": "-297803.659086"
+    }
+   }
+  },
+  {
+   "type": "oneWay",
+   "position": {
+    "coin": "SOL",
+    "szi": "-736071.3",
+    "leverage": {
+     "type": "cross",
+     "value": 10
+    },
+    "entryPx": "94.0205",
+    "positionValue": "82314853.4790000021",
+    "unrealizedPnl": "-13109045.920589",
+    "returnOnEquity": "-1.8942118275",
+    "liquidationPx": "212.9931478863",
+    "marginUsed": "8231485.3479000004",
+    "maxLeverage": 10,
+    "cumFunding": {
+     "allTime": "-3202899.9377020001",
+     "sinceOpen": "-3202899.9377020001",
+     "sinceChange": "-125345.845662"
+    }
+   }
+  }
+ ],
+ "time": 1789957687337
+}

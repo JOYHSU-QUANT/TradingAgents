@@ -5,10 +5,9 @@ the analysts only when ``asset_type == "crypto"``. Each routes through
 ``route_to_vendor`` so the configured vendor and the optional-category
 degradation behaviour apply, exactly like the stock/macro tools.
 
-The flows/sentiment/calendar/treasury tools go to the news analyst; the
-options-volatility tool goes to the market analyst, where vol regime belongs
-alongside the technical indicators. A later data-source PR adds whale
-positioning here too.
+The flows/sentiment/calendar/treasury/positioning tools go to the news
+analyst; the options-volatility tool goes to the market analyst, where vol
+regime belongs alongside the technical indicators.
 
 The economic calendar is not crypto-specific data — FOMC-week risk moves
 equities too — but it is bound crypto-only for now so the stock path's tools
@@ -215,3 +214,44 @@ def get_btc_treasuries(
         str: A formatted markdown report of treasury holdings and activity
     """
     return route_to_vendor("get_btc_treasuries", asset, curr_date, look_back_days)
+
+
+@notes_date_sentinel("curr_date")
+@tool
+def get_whale_positions(
+    asset: Annotated[
+        str,
+        "Crypto asset whose large-account positioning to read: 'BTC', 'ETH', "
+        "'SOL', ... (pair forms like 'BTC-USD' are accepted). A stablecoin or "
+        "an unrecognized symbol returns a no-signal note — no other coin's "
+        "positioning stands in for it.",
+    ],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+) -> str:
+    """
+    Retrieve how the largest Hyperliquid accounts are positioned in one
+    perpetual market: how many of the sampled accounts are long vs short, the
+    notional on each side with the long/short ratio, the notional-weighted
+    leverage, the largest individual positions, and the change since a snapshot
+    about a day earlier when one exists. The sample is the top accounts of
+    Hyperliquid's public leaderboard, ranked by ITS account value, which is not
+    the same as perp equity — many of those accounts hold no perp position at
+    all, and the ones that do are often market makers or vaults hedging
+    exposure held elsewhere. So read the split as venue-level positioning of
+    large accounts, not as crowd sentiment, and never as a standalone
+    directional signal; the report states the same and prints how many sampled
+    accounts actually held the coin. Both endpoints are live-only, so the
+    report is a snapshot labelled with the UTC instant it was fetched rather
+    than a state as of curr_date, and a report for a past date says so. A coin
+    no sampled account holds yields an explicit "no position in this sample"
+    statement, which is not the same as no open interest. Uses the configured
+    whale_positioning vendor.
+
+    Args:
+        asset (str): 'BTC', 'ETH', or another recognized crypto risk asset
+        curr_date (str): Current date in yyyy-mm-dd format
+
+    Returns:
+        str: A formatted markdown report of large-account positioning
+    """
+    return route_to_vendor("get_whale_positions", asset, curr_date)

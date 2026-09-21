@@ -96,6 +96,7 @@ from .sosovalue_common import (
     _stale_caveat,
     _valid_dated_rows,
     fetch_each,
+    fmt_signed_usd_m,
     load_rolling_snapshot,
     raise_all_failed,
 )
@@ -177,8 +178,6 @@ MAX_CONSECUTIVE_NETWORK_FAILURES = 3
 # validator then rejects forever (a silent perpetual-refetch loop).
 _AMOUNT_RE = re.compile(r"^-?(?:\d{1,3}(?:,\d{3}){1,4}|\d{1,15})(?:\.\d{1,8})?$")
 
-# The report renders costs in US$m, unit-consistent with the ETF module.
-_USD_PER_MILLION = 1e6
 
 
 def _parse_amount(x: object) -> float | None:
@@ -792,26 +791,13 @@ def _fmt_signed_btc(value: float) -> str:
     return f"{rounded + 0.0:+,.0f}"
 
 
-def _fmt_signed_usd_m(value: float) -> str:
-    """A signed filed cost in US$m, tenth-of-a-million granularity.
-
-    The Cost column's twin of ``_fmt_signed_btc`` and for the same reason: a
-    filing under $50k rounds to "+0.0" here while the Implied US$/BTC cell on
-    the same row still prints a price computed from the unrounded figure, and
-    the legend says Implied is blank on a cost of zero — two cells the reader
-    is told cannot both be true. Drop a granularity step instead. ``+ 0.0``
-    normalizes a negative zero on the coarse path, which a sub-tick disposal
-    would otherwise render as "-0.0"; the fine path needs no such guard for
-    the values it is reached with, but shares the residual below: a filing
-    under $500 renders "+0.000"/"-0.000". At this universe (top-15 corporate
-    holders) that is not a reachable disclosure, and an unbounded precision
-    escape would make the column unreadable.
-    """
-    millions = value / _USD_PER_MILLION
-    rounded = round(millions, 1)
-    if rounded == 0 and millions != 0:
-        return f"{millions:+,.3f}"
-    return f"{rounded + 0.0:+,.1f}"
+# The Cost column's twin of ``_fmt_signed_btc`` and for the same reason: a
+# filing under $50k rounding to "+0.0" while the Implied US$/BTC cell on the
+# same row prints a price computed from the unrounded figure would be two cells
+# the reader is told cannot both be true. The rule now lives in
+# ``sosovalue_common`` so the whale-positioning module renders notionals by the
+# same one rather than by a second copy of it.
+_fmt_signed_usd_m = fmt_signed_usd_m
 
 
 def _fmt_btc(value: float) -> str:

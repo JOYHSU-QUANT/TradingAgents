@@ -207,6 +207,16 @@ def _vendors_of(method):
 
 _DATED_METHODS = sorted({m for (m, _v), row in DATE_CALLS.items() if row})
 
+# Categories whose vendor ships deliberately as ``none``, awaiting the dated
+# server-side flip that turns them on — the pattern ``options_data``
+# (2026-08-12) and the two SoSoValue categories (2026-09-02) each went
+# through. A keyless vendor merged ON changes a running deployment's analyst
+# input surface the moment the code lands, with no server-side action to
+# attribute the change to; shipping off and flipping on a named date is that
+# action. Named here rather than exempted silently, and held to being
+# genuinely off by the test below.
+SHIPPED_OFF_CATEGORIES = {"whale_positioning"}
+
 
 @pytest.mark.unit
 class TestEveryRowRefusesThroughTheRouter:
@@ -247,12 +257,27 @@ class TestEveryRowRefusesThroughTheRouter:
         _assert_routed_refusal(monkeypatch, first, DATE_CALLS[first])
 
     def test_the_shipped_default_chain_starts_at_a_registered_vendor(self):
-        # With the configuration as shipped: no dated category is off, and
-        # the vendor each chain tries first has a row — so the per-vendor
-        # pins above cover the vendor that actually answers by default. A
-        # default flipped to "none" would fail here while they stayed green.
+        # With the configuration as shipped: the vendor each live chain tries
+        # first has a row — so the per-vendor pins above cover the vendor that
+        # actually answers by default. A default flipped to "none" would fail
+        # here (or in the sibling below) while they stayed green.
         first_by_default = {
             (m, interface.get_vendor(interface.get_category_for_method(m), m).split(",")[0])
             for m in _DATED_METHODS
+            if interface.get_category_for_method(m) not in SHIPPED_OFF_CATEGORIES
         }
         assert first_by_default <= set(DATE_CALLS)
+
+    def test_exactly_the_declared_categories_ship_off(self):
+        # The declaration is self-expiring in both directions: a category
+        # switched off without being declared fails here (the accident the
+        # lock above was written for), and a declared one whose dated cutover
+        # has since flipped it on fails until the name is removed — so the
+        # exemption cannot outlive the reason for it.
+        off = {
+            category
+            for m in _DATED_METHODS
+            if (category := interface.get_category_for_method(m))
+            and interface.get_vendor(category, m) == interface.DISABLED_VENDOR
+        }
+        assert off == SHIPPED_OFF_CATEGORIES

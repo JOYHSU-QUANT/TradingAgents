@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import math
 import re
@@ -191,11 +192,17 @@ def is_finite_number(value) -> bool:
     series.
 
     One definition because ``fred`` and the Alpha Vantage indicator getter ask
-    the same question about the same kind of value. The vendor-local
-    ``_is_finite_number`` helpers in ``deribit`` / ``farside`` /
-    ``sosovalue_common`` ask a DIFFERENT one — they also reject ``bool``,
-    because there the value is about to be arithmetic rather than rendered —
-    and stay where they are.
+    the same question about the same kind of value. The vendor-local helpers in
+    ``deribit`` / ``farside`` / ``sosovalue_common`` (``_is_finite_number``) and
+    ``hyperliquid_whales`` (``_finite_float``, which returns the value rather
+    than a verdict, its vendor sending every number as a string) ask a
+    DIFFERENT one — they also reject ``bool``, because there the value is about
+    to be arithmetic rather than rendered — and stay where they are. Named as
+    examples rather than as a closed list: the point is which QUESTION is
+    theirs, so another of them is not a defect — promoting one shared
+    ``finite_float`` would have to reconcile their edge handling
+    (``OverflowError`` on a huge int literal; whether a numeric string counts),
+    which is a reconciliation rather than a move.
     """
     try:
         return math.isfinite(float(value))
@@ -1088,13 +1095,42 @@ def json_body_or_outage(response, vendor: str):
     below the decoder — ``requests``' ``ContentDecodingError`` on a broken
     gzip stream — is a transport failure by the library's own taxonomy and
     is left to the caller's transport handling.
+
+    :func:`json_bytes_or_outage` is the twin for a boundary that has already
+    read the body itself; both raise through :func:`_not_json_outage`, so the
+    sentence cannot drift between them.
     """
     try:
         return response.json()
     except ValueError as e:  # json.JSONDecodeError is a ValueError
-        raise VendorUnavailableError(
-            f"{vendor} answered HTTP {response.status_code} with a body that is not JSON"
-        ) from e
+        raise _not_json_outage(vendor, response.status_code) from e
+
+
+def json_bytes_or_outage(body: bytes | bytearray, vendor: str, status: int):
+    """The streamed twin of :func:`json_body_or_outage`, for a body read by hand.
+
+    A vendor whose body is too large to hand to ``response.json()`` unbounded
+    (the Hyperliquid leaderboard is tens of megabytes) reads it in chunks under
+    a cap and decodes the bytes itself — but the EVENT is the same one, so the
+    verdict and the sentence must be too. A ``bytearray`` is accepted as well as
+    ``bytes``: that is what a chunked read accumulates into, and ``json.loads``
+    takes it directly, so the caller need not copy the whole buffer to hand it
+    over. Split out rather than copied: the
+    "answered HTTP N with a body that is not JSON" wording is authored in this
+    module alone, and a boundary that hand-copies it drifts on its own (#172
+    found the copies, #217-4 locked it).
+    """
+    try:
+        return json.loads(body)
+    except ValueError as e:  # json.JSONDecodeError is a ValueError
+        raise _not_json_outage(vendor, status) from e
+
+
+def _not_json_outage(vendor: str, status: int) -> VendorUnavailableError:
+    """The one authoring of the not-JSON outage, shared by the two decoders above."""
+    return VendorUnavailableError(
+        f"{vendor} answered HTTP {status} with a body that is not JSON"
+    )
 
 
 def save_output(data: pd.DataFrame, tag: str, save_path: SavePathType = None) -> None:

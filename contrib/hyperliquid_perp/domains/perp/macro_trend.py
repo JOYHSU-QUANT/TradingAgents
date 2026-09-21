@@ -110,19 +110,26 @@ def _gap(ms: int) -> str:
     A fixed unit makes a small gap vanish: at hours to one decimal, a bar one
     millisecond early prints as ``0.0h`` — no gap, in a sentence about a gap.
     So the unit is the LARGEST whose figure is at least 1.0, and milliseconds
-    are printed as an integer when even seconds would not reach that. (``value
-    >= 1.0`` is the same test as ``ms >= scale``; either spelling is fine. The
-    rule that had the defect offered no unit between milliseconds and hours at
-    all, so 1.5 s had nowhere to go but ``0.0h``.)
+    are printed as an integer when even seconds would not reach that.
+    (``value >= 1.0`` is the same test as ``ms >= scale``; either spelling is
+    fine.)
 
-    The comparison is against the unrounded figure deliberately. Rounding
-    first (``round(value, 1) >= 1.0``) promotes from 0.95 of a unit upward, so
-    a stalled feed just under an hour prints as ``1.0h`` — up to a 5%
-    overstatement of the one number that sizes the outage. The cost of not
-    rounding is that the top of a unit is not normalised: 59.999 s prints as
-    ``60.0 s`` rather than ``1.0 min``. That is unidiomatic, and it still
-    rounds (to 1 ms here) — what it does not do is promote a figure into a
-    unit it has not reached, which is the error that misleads.
+    Both halves of that are load-bearing, and this helper got each of them
+    wrong once before settling here:
+
+    - **The SECONDS tier.** The first version went milliseconds, minutes,
+      hours, so 1.5 s landed in minutes and printed ``0.0 min`` — the same
+      vanishing gap one unit down from where it was first found.
+    - **The unrounded comparison.** The second version selected on
+      ``round(value, 1) >= 1.0``, which promotes from 0.95 of a unit upward,
+      so a stalled feed at 57 minutes printed ``1.0h`` — overstating the one
+      number that sizes the outage by about 5%.
+
+    The cost of not rounding is that the top of a unit is not normalised:
+    59.999 s prints as ``60.0 s`` rather than ``1.0 min``. That is
+    unidiomatic, and the figure is still rounded to the printed grid (a tenth
+    of a second here). What it does not do is promote a figure into a unit it
+    has not reached, which is the error that misleads.
 
     What this does NOT fix, because no choice of unit can: a value just past a
     bound still prints as that bound. 24h + 1 ms is ``24.0h`` at any sane

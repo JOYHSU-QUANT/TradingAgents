@@ -332,7 +332,7 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
         (60_000, "1.0 min"),
         # Rounding BEFORE the comparison promotes from 0.95 of a unit up, so
         # it would render these two as "1.0 min" and "1.0h" — overstating a
-        # stalled feed's age by up to 5% in the WARNING that sizes it. (The
+        # stalled feed's age by about 5% in the WARNING that sizes it. (The
         # promotion starts at 57_001 ms and 3_420_001 ms, not at a round 57
         # seconds or 57 minutes: round(0.95, 1) is 0.9.)
         (57_001, "57.0 s"),
@@ -343,10 +343,10 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
     ],
 )
 def test_a_gap_is_rendered_in_the_largest_unit_that_reaches_one(ms, expected):
-    # Exact strings, not a property: the property this helper exists for
-    # ("never prints as 0.0 of a unit") is satisfied by several rules,
-    # including the two wrong ones this branch shipped, so asserting it alone
-    # is what let the second of them through.
+    # Exact strings, not a property. The property this helper exists for
+    # ("never prints as 0.0 of a unit") is satisfied by the SECOND wrong rule
+    # this branch shipped — the one that selected on the rounded figure — so
+    # asserting the property alone is exactly what let that rule through.
     assert _gap(ms) == expected
 
 

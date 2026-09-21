@@ -229,14 +229,13 @@ _PCT_ROUNDS_TO_ZERO_BELOW = 10 ** -_DEFAULT_PLACES / 2
 
 
 def _signed_pct(value: float) -> str:
-    """A signed percentage, never rounded into a bare ``0.00``.
+    """A signed percentage, never rounded into a bare signed zero.
 
     ``_num``'s default precision is right for the usual case and wrong for the
     one this section exists to surface: at a crossing the separation passes
     through zero, so anything inside half of its last place renders as a bare
-    signed zero — a figure
-    that reads as "no gap" on the same line as a word asserting a strict
-    ordering. The DTO refuses only a BIT-EXACT tie, so that window is reachable
+    signed zero — a figure that reads as "no gap" on the same line as a word
+    asserting a strict ordering. The DTO refuses only a BIT-EXACT tie, so that window is reachable
     on any cycle near a crossing. The sign always comes from the value, so it
     cannot disagree with the direction word beside it.
     """
@@ -577,9 +576,10 @@ def render_market_context(ctx: PerpMarketContext) -> str:
         lines.extend(_macro_trend_lines(ctx.macro_trend, ctx.candle_interval))
 
     # Optional, and the second of the market sections that can drop out:
-    # absent whenever the feature is off or the window was unusable. The WHOLE block drops out — there is no "Volume profile: n/a"
-    # form, because a header with nothing under it reads as a measurement that
-    # came back empty rather than one that was never taken.
+    # absent whenever the feature is off or the window was unusable. The
+    # WHOLE block drops out — there is no "Volume profile: n/a" form, because
+    # a header with nothing under it reads as a measurement that came back
+    # empty rather than one that was never taken.
     if ctx.volume_profile is not None:
         lines.append("")
         lines.extend(_volume_profile_lines(ctx.volume_profile, ctx.candle_interval))

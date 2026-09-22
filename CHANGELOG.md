@@ -75,9 +75,9 @@ Breaking changes within the 0.x line are called out explicitly.
   unit and the RUNBOOK's threshold list reads it as seconds, so the figure is
   left whole and the episode count beside it is what says a lapse happened.
 
-  Test-side, from the same issue: 48 digit-first substring assertions across
-  eleven test modules are anchored on the text the renderer prints before the
-  figure (§2 — "1 consecutive" was a substring of "11 consecutive", "2.5" of
+  Test-side, from the same issue: the 52 digit-first substring assertion lines
+  across eleven test modules are anchored on the text the renderer prints
+  before the figure (§2 — "1 consecutive" was a substring of "11 consecutive", "2.5" of
   "-2.5"; six mutation classes now fail that passed before), and the two
   macro `Basis:` sentences the #284 entry below records as unpinned have a
   test (§3).

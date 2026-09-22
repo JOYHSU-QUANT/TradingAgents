@@ -646,31 +646,49 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
     """``<module>.<name>`` for every name ``source`` takes from the package ``pkg``.
 
     The whole tree, not the load-time closure: a lazy or ``TYPE_CHECKING``
-    import is the same dependency for this purpose. A MODULE imported as a
-    name (``from ..paper import accounting``) is expanded into the attributes
-    read off it (``paper.accounting.replay_within``), so a symbol reached
-    that way counts like one imported by name; a module bound but never read
-    stays its bare tail, as does a plain ``import`` of one.
+    import is the same dependency for this purpose. A MODULE or PACKAGE bound
+    as a name (``from ..paper import accounting``, ``from .. import paper``)
+    is expanded into the attribute chains read off it
+    (``paper.accounting.replay_within``), so a symbol reached that way counts
+    like one imported by name. A module tail with no read below it — bound
+    but never read, or plainly ``import``ed — stays as the bare tail.
     """
     tree = ast.parse(source.read_text(encoding="utf-8"))
     found: set[str] = set()
     modules: dict[str, str] = {}  # bound name -> module tail
     for base, alias, from_import in _imports(ast.walk(tree), _own_package(source, root)):
-        if base is None or not _within(base, pkg):
+        if base is None:
             continue
-        if not from_import:
-            found.add(base)
-        elif _module_file(f"{base}.{alias.name}", root) is None:
-            found.add(f"{base}.{alias.name}")
+        target = base
+        if from_import:
+            target = f"{base}.{alias.name}" if base else alias.name
+        if not _within(target, pkg):
+            continue
+        if from_import and _module_file(target, root) is not None:
+            modules[alias.asname or alias.name] = target
         else:
-            modules[alias.asname or alias.name] = f"{base}.{alias.name}"
+            found.add(target)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            module = modules.get(node.value.id)
-            if module is not None:
-                found.add(f"{module}.{node.attr}")
-    found.update(m for m in modules.values() if not any(s.startswith(m + ".") for s in found))
-    return found
+        read = _module_read(node, modules)
+        if read is not None:
+            found.add(read)
+    found.update(modules.values())
+    return {
+        s
+        for s in found
+        if not (_module_file(s, root) is not None and any(o.startswith(s + ".") for o in found))
+    }
+
+
+def _module_read(node: ast.AST, modules: dict[str, str]) -> str | None:
+    """``paper.accounting.x`` for an attribute chain rooted at a name ``modules`` binds, else ``None``."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name) and node.id in modules:
+        return ".".join([modules[node.id], *reversed(parts)])
+    return None
 
 
 @pytest.mark.parametrize(
@@ -689,13 +707,14 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
     for pkg in ("paper", "live"):
         (tmp_path / pkg).mkdir()
         (tmp_path / pkg / "__init__.py").write_text("", encoding="utf-8")
-    (tmp_path / "paper" / "accounting.py").write_text("", encoding="utf-8")
-    (tmp_path / "paper" / "twap.py").write_text("", encoding="utf-8")
+    for module in ("accounting", "twap", "engine"):
+        (tmp_path / "paper" / f"{module}.py").write_text("", encoding="utf-8")
     (tmp_path / "live" / "x.py").write_text(
         "from typing import TYPE_CHECKING\n"
         "import sqlite3\n"
         "from ..paper.clock import Clock, WallClock\n"
         "from ..paper import accounting, twap as tw\n"
+        "from .. import paper, common\n"
         "from ..persistence import db\n"
         "from contrib.hyperliquid_perp.paper.stops import round_to_tick\n"
         "import contrib.hyperliquid_perp.paper.market_feed\n"
@@ -703,6 +722,7 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
         "    from ..paper.engine import AssetSpec\n"
         "def f():\n"
         "    from ..paper.position_facts import read_books\n"
+        "    paper.engine.FundingSource\n"
         "    return accounting.replay_within(accounting.summarize_account(db.x))\n",
         encoding="utf-8",
     )
@@ -715,6 +735,7 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
         "paper.stops.round_to_tick",
         "paper.market_feed",
         "paper.engine.AssetSpec",
+        "paper.engine.FundingSource",  # read through the package binding
         "paper.position_facts.read_books",
     }
 
@@ -731,7 +752,7 @@ _SQL_SITES_OUTSIDE_PERSISTENCE = {
 # ``repository`` moves it back.
 _SQL_STATEMENT = re.compile(
     r"\s*(SELECT\b|INSERT INTO\b|UPDATE \S+ SET\b|DELETE FROM\b"
-    r"|CREATE (TABLE|INDEX|UNIQUE)\b|PRAGMA \w|WITH \w+ AS\b)"
+    r"|CREATE (TABLE|INDEX|UNIQUE)\b|ALTER TABLE\b|PRAGMA \w|WITH \w+ AS\b)"
 )
 _CURSOR_CALLS = frozenset({"execute", "executemany", "executescript"})
 
@@ -774,6 +795,7 @@ def test_sql_sites_outside_persistence_count_exactly_what_they_did_on_2026_09_22
         ('q = "SELECT 1"\n', 1),
         ('q = f"SELECT * FROM {table}"\n', 1),
         ('q = "  WITH t AS (SELECT 1) SELECT * FROM t"\n', 1),
+        ('q = "ALTER TABLE t ADD COLUMN c"\n', 1),
         ('conn.execute("UPDATE t SET a = 1")\n', 2),  # the call and its literal
     ],
 )
@@ -850,8 +872,8 @@ def _private_import_bindings(source: Path, root: Path = _SOURCE_ROOT) -> set[str
 
 
 def test_the_cli_package_reexports_exactly_the_private_names_frozen_on_2026_09_22():
-    # Each of these is imported by ``cli/__init__`` so a test can monkeypatch
-    # it through the package; no production module reads them there.
+    # The ``_cmd_*`` targets are read by ``main()`` in the same file; every
+    # other name is imported so a test can monkeypatch it through the package.
     found = _private_import_bindings(_SOURCE_ROOT / "cli" / "__init__.py")
     assert found == _CLI_PRIVATE_REEXPORTS, _ratchet_message(
         "cli/__init__'s private re-exports", found, _CLI_PRIVATE_REEXPORTS

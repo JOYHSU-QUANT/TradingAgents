@@ -49,8 +49,9 @@ Breaking changes within the 0.x line are called out explicitly.
   a fixed one fails the job until its pin is removed. The three registry
   checks `live/smoke.py` ran at import (unique keys, policy sets drawn from
   the keys, a `SmokeTestRunner._test_<key>` method per key) are tests in
-  `tests/live/test_smoke.py` now; the vocabulary pin against `repository`
-  stays where it is. No behaviour changes.
+  `tests/live/test_smoke.py` now, so a drifted registry fails the suite
+  rather than the module import; the vocabulary pin against `repository`
+  stays where it is. No behaviour changes for a consistent registry.
 - **Four more operator-facing spans stop printing as zero** (issue #290 §1).
   The same fixed-unit collapse `gap_label` was introduced for (#284) sat in
   four other messages, and each now renders through it or is pinned so it

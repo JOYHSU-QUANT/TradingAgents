@@ -31,13 +31,12 @@ import json
 import logging
 from pathlib import Path
 
+from ...common.instants import gap_label
 from .schema import ResearchSignal, interval_to_ms
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["MAX_SIGNAL_AGE_INTERVALS", "load_research_signal"]
-
-_MS_PER_HOUR = 3_600_000
 
 # How many of the DOCUMENT's own bars old the signal may be before it is
 # refused.
@@ -142,23 +141,38 @@ def load_research_signal(
     age_ms = as_of_ms - signal.as_of_ms
     max_age_ms = MAX_SIGNAL_AGE_INTERVALS * interval_to_ms(signal.interval)
     if age_ms > max_age_ms:
+        # This sentence names a bound, so it prints the EXCESS as a second
+        # figure; that rule is argued on :func:`.gap_label`. What is local
+        # here is WHICH of the two faults this change fixed were reachable at
+        # this project's cadence (issue #284). The bound-contradiction was: the
+        # first refusable age is ``2 x interval + 1``, which at 4h rendered
+        # "decided 8.0h ... past the 2 x 4h bound". The vanishing scale was
+        # not — the old ``%.1fh`` could only collapse to "0.0h" for a 1m
+        # document (2m + 1 ms), since at 5m the first refusable age already
+        # prints 0.2h.
         logger.warning(
-            "research signal at %s was decided %.1fh before this context's own bar, past the "
+            "research signal at %s was decided %s before this context's own bar, %s past the "
             "%d x %s bound, so the prompt omits the section — re-run the research radar's "
             "`signal` command",
             resolved,
-            age_ms / _MS_PER_HOUR,
+            gap_label(age_ms),
+            gap_label(age_ms - max_age_ms),
             MAX_SIGNAL_AGE_INTERVALS,
             signal.interval,
         )
         return None
     if -age_ms >= candle_interval_ms:
+        # ONE figure here: this sentence names no bound — it says no closed
+        # bar of the same market can sit ahead at all — so it is the other
+        # side of the pairing rule on :func:`.gap_label`. The scale is still
+        # the helper's, on the same terms as above: a 1m run's first
+        # refusable lead printed "0.0h AFTER" under the old fixed unit.
         logger.warning(
-            "research signal at %s is stamped %.1fh AFTER this context's own bar, which no "
+            "research signal at %s is stamped %s AFTER this context's own bar, which no "
             "closed bar of the same market can be, so the prompt omits the section — check the "
             "clock on the host that wrote it",
             resolved,
-            -age_ms / _MS_PER_HOUR,
+            gap_label(-age_ms),
         )
         return None
     return signal

@@ -62,7 +62,7 @@ from typing import Final
 
 from ...common.constants import MACRO_FAST_PERIOD, MIN_MACRO_TREND_LOOKBACK
 from ...common.decimal_context import DECIMAL_CONTEXT
-from ...common.instants import from_epoch_ms
+from ...common.instants import from_epoch_ms, gap_label
 from .schema import Candle, CandleInterval, MacroTrend, derive_macro_alignment
 
 logger = logging.getLogger(__name__)
@@ -102,49 +102,6 @@ MACRO_CANDLE_INTERVAL: Final[str] = CandleInterval.D1.value
 # whole bar, and a section that quietly averages a stale series is worse than
 # no section.
 MAX_DAILY_CANDLE_AGE_MS: Final = 24 * 60 * 60_000
-
-
-def _gap(ms: int) -> str:
-    """A duration rendered at a scale that never reads as no duration at all.
-
-    A fixed unit makes a small gap vanish: at hours to one decimal, a bar one
-    millisecond early prints as ``0.0h`` — no gap, in a sentence about a gap.
-    So the unit is the LARGEST whose figure is at least 1.0, and milliseconds
-    are printed as an integer when even seconds would not reach that.
-    (``value >= 1.0`` is the same test as ``ms >= scale``; either spelling is
-    fine.)
-
-    Both halves of that are load-bearing, and this helper got each of them
-    wrong once before settling here:
-
-    - **The SECONDS tier.** The first version went milliseconds, minutes,
-      hours, so 1.5 s landed in minutes and printed ``0.0 min`` — the same
-      vanishing gap one unit down from where it was first found.
-    - **The unrounded comparison.** The second version selected on
-      ``round(value, 1) >= 1.0``, which promotes from 0.95 of a unit upward,
-      so a stalled feed anywhere from just past 57 minutes to just under an
-      hour printed ``1.0h`` — overstating the one number that sizes the
-      outage by up to about 5%. (Just PAST: ``round(0.95, 1)`` is 0.9, so
-      exactly 57 minutes still printed ``57.0 min``.)
-
-    The cost of not rounding is that the top of a unit is not normalised:
-    59.999 s prints as ``60.0 s`` rather than ``1.0 min``. That is
-    unidiomatic, and the figure is still rounded to the printed grid (a tenth
-    of a second here). What it does not do is promote a figure into a unit it
-    has not reached, which is the error that misleads.
-
-    What this does NOT fix, because no choice of unit can: a value just past a
-    bound still prints as that bound. 24h + 1 ms is ``24.0h`` at any sane
-    precision, and in a sentence saying the 24h limit was exceeded that reads
-    as a contradiction. The caller closes that by printing the EXCESS as a
-    second figure — ``24.0h ... 1 ms past the 24h`` — which this helper only
-    supplies the formatting for.
-    """
-    for scale, unit in ((3_600_000, "h"), (60_000, " min"), (1000, " s")):
-        value = ms / scale
-        if value >= 1.0:
-            return f"{value:.1f}{unit}"
-    return f"{ms} ms"
 
 
 def _bar_date(candle: Candle) -> date:
@@ -219,19 +176,19 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
     if age_ms > MAX_DAILY_CANDLE_AGE_MS:
         # A readable scale, not raw epoch-ms: this repeats every cycle while
         # a feed is down, and an operator should not have to subtract two
-        # 13-digit integers to learn that it is two days stale. Two figures,
-        # because the age alone cannot say the bound was passed when it
-        # rounds to the bound (``24.0h`` against a 24h limit) — the second
-        # is the excess, and it can be milliseconds. The date is printed
-        # for the same readability reason.
+        # 13-digit integers to learn that it is two days stale. The date is
+        # printed for the same reason. TWO figures because this sentence
+        # names its bound — the second is the excess past it, and it can be
+        # milliseconds; why a sentence that names a bound needs that second
+        # figure is argued on :func:`.gap_label`.
         logger.warning(
             "the newest daily candle is dated %s and closed %s before this context's "
             "as-of — %s past the %.0fh a healthy daily feed stays within; the daily feed "
             "has stopped publishing, so the macro-trend section is skipped for this cycle "
             "(turn market_data.macro_trend_daily_lookback off if it stays down)",
             _bar_date(newest).isoformat(),
-            _gap(age_ms),
-            _gap(age_ms - MAX_DAILY_CANDLE_AGE_MS),
+            gap_label(age_ms),
+            gap_label(age_ms - MAX_DAILY_CANDLE_AGE_MS),
             MAX_DAILY_CANDLE_AGE_MS / 3_600_000,
         )
         return None
@@ -246,7 +203,7 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
             "not a clock, so it is that series lagging rather than the daily one; "
             "skipping the macro-trend section for this cycle",
             _bar_date(newest).isoformat(),
-            _gap(-age_ms),
+            gap_label(-age_ms),
         )
         return None
 

@@ -10,6 +10,59 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **A shared rendering for a measured gap**
+  (`contrib/hyperliquid_perp/common/instants.py`, issue #284 item 1).
+  `_gap` — the rule that renders a duration in the LARGEST unit whose figure
+  reaches 1.0, so a real gap never prints as `0.0h` and a figure is never
+  promoted into a unit it has not reached — moves out of
+  `domains/perp/macro_trend.py` to the bottom layer as `gap_label`, beside
+  `whole_hours_label`, and `domains/perp/research_signal.py` now renders its
+  two age refusals through it instead of a fixed `%.1fh`. Two different faults
+  sat behind that `%.1fh`, and only the second is reachable at the cadences
+  this project runs: the vanishing `0.0h` needs a 1m research document (or a
+  1m run, on the future side), since at 5m the first refusable age already
+  prints `0.2h` — but an age landing just past its bound rounds to the bound
+  at EVERY cadence, so "decided 8.0h before this context's own bar, past the
+  2 x 4h bound" contradicted itself on the 4h documents the radar actually
+  writes. Hence the stale refusal also gains the second figure the sibling
+  module already printed, the EXCESS past the bound ("8.0h ... 1 ms past the
+  2 x 4h bound"); the future-side refusal keeps one figure, because its
+  sentence names no bound to be contradicted. What does NOT change: every
+  refusal CONDITION on both sides, and `macro_trend`'s messages, which are
+  byte-identical — `research_signal`'s two WARNING texts do change, so a log
+  filter keyed on the old wording needs updating. The boundary table that pins
+  the unit rule moves with the helper to `tests/common/test_instants.py`.
+
+  Two other renderings are named in `instants.py`'s MODULE docstring because
+  they were weighed against it and left alone — not as a survey of what the
+  package prints.
+  `domains/perp/freshness.py` keeps its own compound `14h 12m 30s` renderer on
+  purpose — it prints an age and the limit it is read against in one shape,
+  which answers a related question rather than restating this one.
+  `domains/perp/prompt_context.py`'s last-fill line has the identical fixed
+  `%.1f` hours and does print `0.0 hours` for a fill under three minutes old;
+  that is a defect, opened as #288 rather than fixed here, because the line is
+  PROMPT text and moving a prompt byte is a paper-run segmentation point.
+
+  Issue #284's item 2 — the macro `Basis:` line being long — is deliberately
+  NOT acted on, and the umbrella issue is closed with this entry as its
+  record. Re-measured while closing it, because the issue's own figures were
+  not: the line is 948 characters of literal source (927 once its three
+  placeholders render at this run's `4h`/`200`), against 292 for the volume
+  profile's and 586 for the research signal's, measured the same way, so it
+  is about 3.2 times the first — not the "1,050 characters, four times" the
+  issue states, on either reading. It is still longer than the four rows it
+  qualifies, and each of its seven sentences has a reason (six disclosures
+  plus one on weighting), so this is a question of whether the caveats earn
+  their length and not a defect —
+  which is a question for after run 6 has shown how the model actually uses
+  the section, not one to answer by feel now. (Not every sentence is pinned
+  by a test, which is what one would want before shortening any of them:
+  deleting either of two — the "lagging measure by construction" disclosure
+  and the one dating the figures to the newest closed daily bar — leaves the
+  whole suite green. That is recorded as test debt in #290 §3 rather than
+  closed here.)
+
 - **`futures_basis` and `futures_positioning` cut over on 2026-09-22**
   (`tradingagents/default_config.py`): the CME futures basis (#285) flips
   from `"none"` to `"yfinance"` and the CFTC positioning report (#286) from

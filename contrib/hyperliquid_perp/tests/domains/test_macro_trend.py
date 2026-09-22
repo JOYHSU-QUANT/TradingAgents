@@ -29,7 +29,6 @@ from contrib.hyperliquid_perp.domains.perp.macro_trend import (
     MACRO_FAST_PERIOD,
     MACRO_SLOW_PERIOD,
     MAX_DAILY_CANDLE_AGE_MS,
-    _gap,
     compute_macro_trend,
 )
 from contrib.hyperliquid_perp.domains.perp.schema import (
@@ -267,7 +266,7 @@ def test_one_bar_short_of_the_floor_is_refused_naming_both_counts(caplog):
         assert compute_macro_trend(candles, as_of_ms=_as_of(candles)) is None
     # Both numbers, because "not enough history" without them cannot tell a
     # newly listed coin from a lookback set too low.
-    assert "199" in caplog.text
+    assert "only 199 are available" in caplog.text  # anchored, not a bare "199"
     assert str(MACRO_SLOW_PERIOD) in caplog.text
 
 
@@ -309,51 +308,24 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
     with caplog.at_level(logging.WARNING):
         assert compute_macro_trend(candles, as_of_ms=as_of) is None
     assert "2024-09-16" in caplog.text  # the newest bar's own date
-    assert "48.0h" in caplog.text
+    # Anchored on the word before the figure: "48.0h" alone is also a
+    # substring of "148.0h", so a rendering off by a leading digit would
+    # still satisfy it.
+    assert "closed 48.0h before" in caplog.text
+    # The EXCESS, at a value far from the bound. The 1 ms case below cannot
+    # tell a computed excess from a hard-coded one — at the bound + 1 ms the
+    # right answer IS 1 ms — and this one can.
+    assert "as-of — 24.0h past the 24h" in caplog.text
     assert "stopped publishing" in caplog.text
     assert str(as_of) not in caplog.text  # no raw epoch stamps
 
 
-@pytest.mark.parametrize(
-    ("ms", "expected"),
-    [
-        # Both sides of every unit boundary. The boundaries ARE 1000 / 60_000
-        # / 3_600_000 because the rule compares the unrounded figure; each
-        # pair below is the last value that keeps the smaller unit and the
-        # first that earns the larger one.
-        (1, "1 ms"),
-        (999, "999 ms"),
-        (1_000, "1.0 s"),
-        # 0.025 minutes. A threshold on the raw value rendered this "0.0 min"
-        # — the defect the helper exists to prevent, one unit down from where
-        # it was first found.
-        (1_500, "1.5 s"),
-        (59_999, "60.0 s"),
-        (60_000, "1.0 min"),
-        # Rounding BEFORE the comparison promotes from 0.95 of a unit up, so
-        # it would render these two as "1.0 min" and "1.0h" — overstating a
-        # stalled feed's age by about 5% in the WARNING that sizes it. (The
-        # promotion starts at 57_001 ms and 3_420_001 ms, not at a round 57
-        # seconds or 57 minutes: round(0.95, 1) is 0.9.)
-        (57_001, "57.0 s"),
-        (3_421_000, "57.0 min"),
-        (3_599_999, "60.0 min"),
-        (3_600_000, "1.0h"),
-        (86_400_001, "24.0h"),
-    ],
-)
-def test_a_gap_is_rendered_in_the_largest_unit_that_reaches_one(ms, expected):
-    # Exact strings, not a property. The property this helper exists for
-    # ("never prints as 0.0 of a unit") is satisfied by the SECOND wrong rule
-    # this branch shipped — the one that selected on the rounded figure — so
-    # asserting the property alone is exactly what let that rule through.
-    assert _gap(ms) == expected
-
-
 def test_the_gap_is_reported_at_a_scale_that_cannot_contradict_the_sentence(caplog):
-    # The FIRST illegal lag — one millisecond past the bound, the value the
-    # boundary table above pins as refused. At one decimal place of hours it
-    # read "closed 24.0h before this context's as-of, past the 24h a healthy
+    # The FIRST illegal lag — one millisecond past the bound. What the shared
+    # renderer makes of that millisecond is pinned separately, by the boundary
+    # table in ``tests/common/test_instants``; the refusal is this file's.
+    # At one decimal place of hours the message read
+    # "closed 24.0h before this context's as-of, past the 24h a healthy
     # daily feed stays within": a figure equal to the limit in a sentence
     # saying the limit was exceeded. The mirror case, a bar 1 ms AHEAD, read
     # "0.0h AFTER" — no gap at all, in a sentence about a gap.
@@ -361,7 +333,11 @@ def test_the_gap_is_reported_at_a_scale_that_cannot_contradict_the_sentence(capl
     first_illegal = _as_of(candles) + MAX_DAILY_CANDLE_AGE_MS + 1
     with caplog.at_level(logging.WARNING):
         assert compute_macro_trend(candles, as_of_ms=first_illegal) is None
-    assert "1 ms past the 24h" in caplog.text
+    # Anchored on the em dash that precedes the excess, so that a subtraction
+    # taken the other way round — "-1 ms past the 24h", a NEGATIVE excess in
+    # the sentence claiming the bound was passed — fails here instead of
+    # passing on containment.
+    assert "as-of — 1 ms past the 24h" in caplog.text
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
@@ -378,7 +354,7 @@ def test_a_daily_bar_ahead_of_the_context_blames_the_short_series_not_the_daily_
     candles = _stepped(260, 100, {205: "1"})
     with caplog.at_level(logging.WARNING):
         assert compute_macro_trend(candles, as_of_ms=_as_of(candles) - 3_600_000) is None
-    assert "1.0h AFTER" in caplog.text
+    assert "closes 1.0h AFTER" in caplog.text  # anchored: "21.0h AFTER" contains "1.0h AFTER"
     assert "shorter series" in caplog.text
     assert "stopped publishing" not in caplog.text
 

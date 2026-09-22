@@ -19,6 +19,37 @@ and each had grown its own copy of the same guard: a span that is not whole
 hours must refuse at import rather than render truncated, because "5h" over a
 5h30m window understates the bound the message is describing.
 
+:func:`gap_label` renders the OTHER operator-facing span: not a bound stated
+in a message, but the measured distance between two venue stamps — how stale a
+feed is, how far a handoff document sits from the bar it is read against. It
+lives beside :func:`whole_hours_label` for the same reason. Its callers are
+the two age refusals in ``domains.perp.macro_trend`` and the two in
+``domains.perp.research_signal`` — siblings by design,
+which had nonetheless arrived at two different answers to the one question: a
+fixed ``%.1fh``, which prints a real gap as ``0.0h``, and the unit-picking
+rule below, which does not (issue #284).
+
+Two OTHER renderings are named below because they were weighed against this
+one and left where they are. That is all this list is. It is not a survey of
+every duration the package prints — several modules render a span in a shape
+of their own, and nothing here has counted them, so a sweep for a rendering
+defect starts from a grep, not from this paragraph:
+
+- ``domains.perp.freshness``'s ``_format_duration_ms`` prints a compound
+  ``14h 12m 30s`` and is deliberately NOT converged onto this: its sentences
+  carry an age and the limit it is read against side by side and want the two
+  in ONE shape, which answers "how do I state an age next to its limit?"
+  rather than "what single figure do I state a gap as?". Converging them
+  would rewrite live freshness refusal text to settle a question it has not
+  got.
+- ``domains.perp.prompt_context``'s last-fill line renders exactly the gap
+  this helper is for, with exactly the fixed ``%.1f`` hours this helper
+  replaces — and so prints ``0.0 hours`` for a fill under three minutes old.
+  That is a defect, tracked as issue #288 and NOT fixed here for one reason
+  only: it is prompt text, so changing it moves a prompt byte, which is a
+  segmentation point for a paper run and cannot ride along inside an internal
+  refactor.
+
 :func:`seconds_span` is the ONE convergence of a ``*_seconds`` constructor
 argument onto a span. Four live constructors take one (the backfill lookback,
 the stream's stale and silent thresholds, the kill switch's tick-gap
@@ -59,6 +90,7 @@ __all__ = [
     "delta_ms",
     "epoch_ms",
     "from_epoch_ms",
+    "gap_label",
     "parse_instant",
     "seconds_span",
     "whole_hours_label",
@@ -97,6 +129,76 @@ def whole_hours_label(span: timedelta, *, what: str) -> str:
             f"renders it as hours (got {span})"
         )
     return f"{span // _HOUR}h"
+
+
+def gap_label(ms: int) -> str:
+    """A duration rendered at a scale that never reads as no duration at all.
+
+    A fixed unit makes a small gap vanish: at hours to one decimal, a bar one
+    millisecond early prints as ``0.0h`` — no gap, in a sentence about a gap.
+    So the unit is the LARGEST whose figure is at least 1.0, and milliseconds
+    are printed as an integer when even seconds would not reach that.
+    (``value >= 1.0`` is the same test as ``ms >= scale``; either spelling is
+    fine.)
+
+    Both halves of that are load-bearing, and this helper got each of them
+    wrong once before settling here:
+
+    - **The SECONDS tier.** The first version went milliseconds, minutes,
+      hours, so 1.5 s landed in minutes and printed ``0.0 min`` — the same
+      vanishing gap one unit down from where it was first found.
+    - **The unrounded comparison.** The second version selected on
+      ``round(value, 1) >= 1.0``, which promotes from 0.95 of a unit upward,
+      so a stalled feed anywhere from just past 57 minutes to just under an
+      hour printed ``1.0h`` — overstating the one number that sizes the
+      outage by up to about 5%. (Just PAST: ``round(0.95, 1)`` is 0.9, so
+      exactly 57 minutes still printed ``57.0 min``.)
+
+    The cost of not rounding is that the top of a unit is not normalised:
+    59.999 s prints as ``60.0 s`` rather than ``1.0 min``. That is
+    unidiomatic, and the figure is still rounded to the printed grid (a tenth
+    of a second here). What it does not do is promote a figure into a unit it
+    has not reached, which is the error that misleads.
+
+    What this does NOT fix, because no choice of unit can: a value just past a
+    bound still prints as that bound. 24h + 1 ms is ``24.0h`` at any sane
+    precision, and in a sentence saying the 24h limit was exceeded that reads
+    as a contradiction. A caller whose sentence names the bound closes that by
+    printing the EXCESS as a second figure — ``24.0h ... 1 ms past the 24h`` —
+    which this helper only supplies the formatting for. A caller whose
+    sentence names no bound (``research_signal``'s future-side refusal says
+    only that no closed bar can sit there) has nothing to contradict and
+    prints one figure.
+
+    The ladder stops at hours on purpose, with no day tier, and NOT because
+    the figures stay small: a ``1d`` research document is a supported shape,
+    and the first age its bound refuses already renders ``48.0h``. It stops
+    there because the module that does print days
+    (``freshness._format_duration_ms``, above) opens that band at 48h for a
+    reason of its own, and two ladders in one package disagreeing about where
+    a day begins is worse than one of them counting hours past 24. ``48.0h``
+    is legible; ``2d 0h`` beside a ``30h 0m 0s`` from the other renderer is
+    not.
+
+    Takes a duration in milliseconds because that is the form both callers
+    hold one in: each subtracts one venue stamp from another — a candle's
+    ``close_time``, a handoff document's ``as_of_ms`` — and those are integer
+    milliseconds the whole way, never a float of seconds.
+    Negative input is the caller's to flip — the two directions are separate
+    sentences with separate causes, so which one is being told is decided
+    where the sign is read, not here. That precondition is NOT enforced by a
+    raise, and deliberately: every call site is an argument to a WARNING on a
+    path that is already refusing something, and those refusals cost their
+    caller a prompt SECTION while an exception escaping there would cost the
+    whole decision cycle. A forgotten flip therefore prints a raw millisecond
+    count — ugly, and caught by a test at each live call site — rather than
+    ending a run over a log line.
+    """
+    for scale, unit in ((3_600_000, "h"), (60_000, " min"), (1000, " s")):
+        value = ms / scale
+        if value >= 1.0:
+            return f"{value:.1f}{unit}"
+    return f"{ms} ms"
 
 
 def seconds_span(name: str, value: object) -> timedelta:

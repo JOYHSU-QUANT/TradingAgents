@@ -312,6 +312,49 @@ def test_a_document_from_ahead_of_this_runs_own_bar_is_refused(tmp_path, caplog)
     assert "AFTER this context's own bar" in caplog.text
 
 
+def test_the_stale_refusal_states_a_gap_that_cannot_read_as_no_gap(tmp_path, caplog):
+    # The FIRST illegal age, at the finest cadence a document can declare:
+    # one millisecond past two 1m bars. A fixed ``%.1fh`` — what this message
+    # rendered before the scale became the shared helper's (issue #284) —
+    # printed that as "decided 0.0h before this context's own bar", no gap at
+    # all in the sentence saying the bound was passed. The second figure is
+    # the EXCESS, and it is what keeps the sentence from contradicting itself
+    # when the age rounds to the bound it just passed: "2.0 min ... 1 ms past
+    # the 2 x 1m bound", never "2.0 min ... past the 2 x 1m bound".
+    path = _write(tmp_path, _document(interval="1m"))
+    bound = MAX_SIGNAL_AGE_INTERVALS * 60_000
+    assert _load(path, caplog, as_of_ms=_AS_OF_MS + bound + 1) is None
+    # Both anchored on the words BEFORE the figure. "1 ms past the 2 x 1m
+    # bound" on its own is a substring of "-1 ms past the 2 x 1m bound", so a
+    # subtraction taken the other way round — a negative excess inside the
+    # sentence claiming the bound was passed, which is the contradiction this
+    # second figure exists to remove — would satisfy a bare containment.
+    assert "decided 2.0 min before" in caplog.text
+    assert f"own bar, 1 ms past the {MAX_SIGNAL_AGE_INTERVALS} x 1m bound" in caplog.text
+
+    # A second, much later age, because the boundary case alone cannot say
+    # the excess TRACKS how far past the bound this is: at ``bound + 1`` the
+    # figure is 1 ms whether it is computed or hard-coded, so a constant
+    # passes the assertion above. Ninety seconds past pins that it is
+    # derived. (What the 1 ms case pins, and this one cannot, is that the
+    # two figures choose their units apart: there it is "2.0 min ... 1 ms".)
+    assert _load(path, caplog, as_of_ms=_AS_OF_MS + bound + 90_000) is None
+    assert "decided 3.5 min before" in caplog.text
+    assert f"own bar, 1.5 min past the {MAX_SIGNAL_AGE_INTERVALS} x 1m bound" in caplog.text
+
+
+def test_the_from_ahead_refusal_states_a_gap_that_cannot_read_as_no_gap(tmp_path, caplog):
+    # The mirror, at the finest interval a RUN can have — the future bound is
+    # this run's, so a 1m run is what makes the first illegal value small.
+    # One figure, not two: the sentence names no bound to be read against, so
+    # there is nothing for a rounded figure to contradict; what it does need
+    # is a scale, since "stamped 0.0h AFTER this context's own bar" reads as
+    # no gap in the one sentence whose point is that there is one.
+    path = _write(tmp_path, _document())
+    assert _load(path, caplog, as_of_ms=_AS_OF_MS - 60_000, candle_interval_ms=60_000) is None
+    assert "stamped 1.0 min AFTER" in caplog.text
+
+
 def test_a_tilde_in_the_path_is_expanded_and_the_warning_names_where_it_looked(
     tmp_path, caplog, monkeypatch
 ):

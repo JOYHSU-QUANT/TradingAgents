@@ -1,4 +1,5 @@
-"""``common.instants`` — the store's timestamp decoder, the span guards, epoch ms."""
+"""``common.instants`` — the store's timestamp decoder, the span renderings, the span
+guards, epoch ms."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from contrib.hyperliquid_perp.common.instants import (
     delta_ms,
     epoch_ms,
     from_epoch_ms,
+    gap_label,
     parse_instant,
     seconds_span,
     whole_hours_label,
@@ -47,6 +49,57 @@ def test_whole_hours_label_refuses_a_fractional_hour_naming_the_constant():
     # refuses — and names WHICH constant, since the raise lands at import.
     with pytest.raises(ValueError, match="my.CONSTANT must be a whole number of hours"):
         whole_hours_label(timedelta(hours=5, minutes=30), what="my.CONSTANT")
+
+
+@pytest.mark.parametrize(
+    ("ms", "expected"),
+    [
+        # Both sides of every unit boundary. The boundaries ARE 1000 / 60_000
+        # / 3_600_000 because the rule compares the unrounded figure; each
+        # pair below is the last value that keeps the smaller unit and the
+        # first that earns the larger one.
+        (1, "1 ms"),
+        (999, "999 ms"),
+        (1_000, "1.0 s"),
+        # 0.025 minutes. A threshold on the raw value rendered this "0.0 min"
+        # — the defect the helper exists to prevent, one unit down from where
+        # it was first found.
+        (1_500, "1.5 s"),
+        (59_999, "60.0 s"),
+        (60_000, "1.0 min"),
+        # Rounding BEFORE the comparison promotes from 0.95 of a unit up, so
+        # it would render these two as "1.0 min" and "1.0h" — overstating a
+        # stalled feed's age by about 5% in the WARNING that sizes it. (The
+        # promotion starts at 57_001 ms and 3_420_001 ms, not at a round 57
+        # seconds or 57 minutes: round(0.95, 1) is 0.9.)
+        (57_001, "57.0 s"),
+        (3_421_000, "57.0 min"),
+        (3_599_999, "60.0 min"),
+        (3_600_000, "1.0h"),
+        (86_400_001, "24.0h"),
+    ],
+)
+def test_a_gap_is_rendered_in_the_largest_unit_that_reaches_one(ms, expected):
+    # Exact strings, not a property. The property this helper exists for
+    # ("never prints as 0.0 of a unit") is satisfied by the second rule this
+    # helper was written with — the one that selected on the rounded figure,
+    # caught in review before it shipped — so asserting the property alone is
+    # exactly what would have let that rule through.
+    assert gap_label(ms) == expected
+
+
+def test_a_value_this_helper_has_no_unit_for_is_rendered_rather_than_refused():
+    # A precondition this helper deliberately does NOT enforce by a raise,
+    # pinned here so a later consistency pass cannot quietly add the guard.
+    # Every call site is an argument to a WARNING on a path that is already
+    # refusing something, and those refusals cost a prompt SECTION — an
+    # exception escaping there would cost the whole decision cycle instead.
+    # So a caller that forgot to flip its sign gets an ugly millisecond count
+    # in a log line, which a test at each live call site catches, rather than
+    # a dead run.
+    assert gap_label(-1) == "-1 ms"
+    assert gap_label(-3_600_000) == "-3600000 ms"
+    assert gap_label(0) == "0 ms"
 
 
 def test_seconds_span_converges_a_number_of_seconds_onto_a_span():

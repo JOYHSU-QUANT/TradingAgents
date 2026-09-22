@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
 from .instants import parse_instant
@@ -172,16 +172,30 @@ def trailing_failure_streaks(conn: sqlite3.Connection, run_id: str) -> TrailingF
     return TrailingFailureStreaks(no_decision, stale_feed, latest_at)
 
 
-def _streak_hours(streak: int) -> int:
-    """``streak`` cycles as an approximate span, at the scheduler's cadence.
+_HOUR = timedelta(hours=1)
+# The wording below multiplies a cycle count into "~Nh", so the cadence has to
+# be whole hours for that product to be exact: at a 30-minute cadence the old
+# ``total_seconds() // 3600`` floored three cycles to "~0h with no decision"
+# (issue #290). Refused at import, the way ``domains.perp.freshness`` refuses
+# the same constant for its own label, rather than rendered truncated.
+if CYCLE_INTERVAL % _HOUR:
+    raise ValueError(
+        "common.constants.CYCLE_INTERVAL must be a whole number of hours; the "
+        f"no-decision wording renders a cycle count as hours (got {CYCLE_INTERVAL})"
+    )
+_CYCLE_HOURS = CYCLE_INTERVAL // _HOUR
 
-    Reads the module-level ``CYCLE_INTERVAL``, so a cadence change moves this
-    with it. It does NOT track a ``LiveDecisionDriver`` constructed with a
-    non-default ``cycle_interval`` — no production wiring passes one, and the
-    shortfall wording is shared with the live VALIDATOR, which reads a store
-    and has no driver to ask.
+
+def _streak_hours(streak: int) -> int:
+    """``streak`` cycles as a span in hours, at the scheduler's cadence.
+
+    Reads the module-level ``CYCLE_INTERVAL`` (pinned to whole hours above),
+    so a cadence change moves this with it. It does NOT track a
+    ``LiveDecisionDriver`` constructed with a non-default ``cycle_interval``
+    — no production wiring passes one, and the shortfall wording is shared
+    with the live VALIDATOR, which reads a store and has no driver to ask.
     """
-    return int(streak * CYCLE_INTERVAL.total_seconds() // 3600)
+    return streak * _CYCLE_HOURS
 
 
 def note_cycle_outcome(streak: int, status: str, error_type: str | None, *, run_id: str) -> int:

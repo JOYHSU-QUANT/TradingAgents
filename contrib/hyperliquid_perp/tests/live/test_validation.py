@@ -324,7 +324,9 @@ def test_a_long_stranded_cycle_is_a_shortfall_the_streak_cannot_see(tmp_path):
     assert report.failures == ()  # the store is sound; nothing here is permanent
     line = next(s for s in report.shortfalls if "stranded_decision_cycle" in s)
     assert attempt_id in line  # names the row, so the operator can go read it
-    assert "~13h" in line
+    # The measured span in gap_label's unit and the bound as whole hours; anchored
+    # on the words before each figure so "113.0h" or "~13h" could not pass.
+    assert "unchanged for 13.0h, past the 12h this gate allows" in line
     # The streak really is blind to it — the point of the new line. Matched on
     # the PREFIX: the new shortfall's own prose names no_decision_streak (to
     # tell the operator why the other line is silent), so a substring test here
@@ -2594,9 +2596,10 @@ def test_a_real_rate_failure_prints_counts_not_only_a_rounded_percent(tmp_path):
         report = validate_live_run(db, run_id="r", now=_T0)
     failure = next(f for f in report.failures if "refresh_success_rate" in f)
     # The duration is the fact the operator has to act on: "11 outages totalling
-    # 330s" says what happened to this run; a bare percentage does not.
-    assert "11 outage(s)" in failure
-    assert "330s unrefreshed" in failure
+    # 5.5 minutes" says what happened to this run; a bare percentage does not.
+    # Anchored on the opening parenthesis, the character before the figure, so a
+    # sign or an extra leading digit cannot pass as a superstring (issue #290).
+    assert "(5.5 min unrefreshed across 11 outage(s), of " in failure
 
 
 # -- stale covering stamps after a firing ----------------------------------

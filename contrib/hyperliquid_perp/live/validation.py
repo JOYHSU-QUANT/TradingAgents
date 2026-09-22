@@ -117,7 +117,7 @@ from typing import NamedTuple
 from ..common.config_coercion import int_from_yaml
 from ..common.constants import CYCLE_INTERVAL
 from ..common.decimal_context import DECIMAL_CONTEXT
-from ..common.instants import parse_instant
+from ..common.instants import delta_ms, gap_label, parse_instant, whole_hours_label
 from ..common.no_decision import (
     NO_DECISION_STREAK_THRESHOLD,
     TrailingFailureStreaks,
@@ -848,6 +848,11 @@ def _stated_deadline_seconds(detail: str | None) -> Decimal | None:
 # cadence, so a cycle whose LLM call is legitimately running cannot reach it.
 # The comparison is ``>=``, so exactly this long already counts as wedged.
 _ADOPTION_WEDGE_AFTER = NO_DECISION_STREAK_THRESHOLD * CYCLE_INTERVAL
+# The bound as the shortfall states it ("12h"); refused at import if the
+# cadence stops being whole hours, rather than rendered truncated.
+_ADOPTION_WEDGE_LABEL = whole_hours_label(
+    _ADOPTION_WEDGE_AFTER, what="live.validation._ADOPTION_WEDGE_AFTER"
+)
 
 
 @dataclass(frozen=True)
@@ -1077,6 +1082,11 @@ def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int
         windows += 1
         has_open = True
     return total, windows, has_open
+
+
+def _seconds_to_ms(seconds: Decimal) -> int:
+    """A tally's Decimal seconds as the whole milliseconds ``gap_label`` takes."""
+    return int(seconds * 1000)
 
 
 def _window_seconds(start: datetime, end: datetime) -> Decimal:
@@ -1728,11 +1738,15 @@ def validate_live_run(
     if stranded.count == 1 and stranded.oldest_at is not None:
         stuck_for = now - stranded.oldest_at
         if stuck_for >= _ADOPTION_WEDGE_AFTER:
-            hours = int(stuck_for.total_seconds() // 3600)
-            allowed = int(_ADOPTION_WEDGE_AFTER.total_seconds() // 3600)
+            # The measured span through ``gap_label`` (23h59m used to floor to
+            # "~23h") and the bound as its whole-hours label; the bound is
+            # named, so the pairing rule on ``gap_label`` would want the excess
+            # too, but every value here is at least the bound and a day-old
+            # wedge is not a figure the operator has to size to the minute.
             shortfalls.append(
                 f"stranded_decision_cycle = {stranded.oldest_id} (in_progress and "
-                f"unchanged for ~{hours}h, past the ~{allowed}h this gate allows): "
+                f"unchanged for {gap_label(delta_ms(now, stranded.oldest_at))}, past the "
+                f"{_ADOPTION_WEDGE_LABEL} this gate allows): "
                 "the daemon has written no terminal row for it, so no_decision_streak "
                 "cannot see it and the accumulated cycle counts describe a run that "
                 "may not have decided anything since. Either no daemon is driving "
@@ -1995,13 +2009,17 @@ def _apply_refresh_gate(
         # Report the TIME, not only the rounded percentage. At two decimals a
         # genuine 0.98998 renders as "99.00% (need >= 99%)" — a go/no-go line that
         # reads as a self-contradiction to the operator who has to act on it — and
-        # "17.9 minutes across 12 outages" is the sentence that tells them what
-        # actually happened to this run.
+        # "17.9 min unrefreshed across 12 outage(s)" is the sentence that tells
+        # them what actually happened to this run. Both spans go through
+        # ``gap_label`` so a run whose whole outage is sub-second cannot report
+        # "0s unrefreshed" beside a non-zero episode count (issue #290); the
+        # summary's ``kill_switch_outage_seconds:`` line keeps whole seconds
+        # because that key names its unit.
         failures.append(
             f"kill_switch_refresh_success_rate = {refresh_rate * 100:.2f}% "
-            f"({kill_switch.outage_seconds:.0f}s unrefreshed across "
+            f"({gap_label(_seconds_to_ms(kill_switch.outage_seconds))} unrefreshed across "
             f"{kill_switch.outage_episodes} outage(s), of "
-            f"{kill_switch.covered_seconds:.0f}s covered) "
+            f"{gap_label(_seconds_to_ms(kill_switch.covered_seconds))} covered) "
             f"(need >= {_REFRESH_BAR})"
         )
 

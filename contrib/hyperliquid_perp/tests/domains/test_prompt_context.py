@@ -728,6 +728,18 @@ def test_the_basis_line_closes_by_saying_how_to_weigh_the_section():
     assert "Treat it as trend context, not as an entry or exit signal." in basis
 
 
+def test_the_basis_line_discloses_its_lag_and_the_vintage_of_its_figures():
+    # The two disclosures that say how far behind this section can be. Neither
+    # was pinned before (deleting either left the suite green — PR #289's exit
+    # check, recorded in issue #290 §3), so a pass at shortening the line would
+    # have taken them first. The vintage clause is pinned at both ends, since
+    # the Mark comparison is the half a shortening would drop.
+    basis = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[5]
+    assert "A lagging measure by construction" in basis
+    assert "The figures date to the newest closed daily bar" in basis
+    assert "the Mark above is a live reading, so the gap to THAT can be larger" in basis
+
+
 def test_the_basis_line_names_the_regime_line_as_an_independent_reading():
     # The two can disagree in the same prompt — 4h EMA(20)/EMA(50) against
     # daily SMA(50)/SMA(200) — and that disagreement is arguably the point of

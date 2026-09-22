@@ -33,6 +33,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Four more operator-facing spans stop printing as zero** (issue #290 §1).
+  The same fixed-unit collapse `gap_label` was introduced for (#284) sat in
+  four other messages, and each now renders through it or is pinned so it
+  cannot truncate:
+  - The two run-lease refusals — `paper/run_lock.py`'s `RunLockError` and
+    `cli/_common.py`'s "this build needs to migrate the store" — printed the
+    holder's heartbeat age as `%.0fs`, and the common holder is a sibling
+    daemon heartbeating right now, whose lease is a few hundred milliseconds
+    old: "heartbeat 0s ago". Both now share `run_lock.lease_age_label`
+    ("heartbeat 400 ms ago", "2.5 min ago"), one helper so the two messages of
+    one family cannot drift; a stamp ahead of the reader's clock reads as
+    "0 ms ago" rather than as a negative age.
+  - `live/validation.py`'s refresh-rate failure sentence rendered the outage
+    and covered spans as `%.0fs`; both go through `gap_label` now ("5.5 min
+    unrefreshed across 11 outage(s)"). The summary's
+    `kill_switch_outage_seconds:` line keeps whole seconds on purpose: that
+    key names its unit.
+  - `common/no_decision.py` multiplied a cycle count into "~Nh" with
+    `total_seconds() // 3600`, which at any sub-hour cadence would have
+    floored three cycles to "~0h with no decision". The module now refuses a
+    `CYCLE_INTERVAL` that is not whole hours at import — the guard
+    `domains/perp/freshness.py` already puts on the same constant — and the
+    product is exact. At today's 4h cadence nothing renders differently.
+  - `live/validation.py`'s stranded-cycle shortfall truncated the measured
+    wedge ("unchanged for ~23h" at 23h59m) and the bound; it now prints the
+    span through `gap_label` and the bound through `whole_hours_label`
+    ("unchanged for 13.0h, past the 12h this gate allows").
+
+  Not converged, as the issue asked: `domains/perp/freshness.py`'s compound
+  `14h 12m 30s` renderer.
+
 - **A shared rendering for a measured gap**
   (`contrib/hyperliquid_perp/common/instants.py`, issue #284 item 1).
   `_gap` — the rule that renders a duration in the LARGEST unit whose figure

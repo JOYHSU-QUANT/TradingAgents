@@ -46,6 +46,22 @@ def test_second_process_with_fresh_heartbeat_is_refused(db):
     assert _state(db)["lock_pid"] == 101  # holder's lease untouched
 
 
+def test_the_refusal_states_the_heartbeat_age_in_a_unit_that_does_not_vanish(db):
+    # The common holder is a sibling daemon heartbeating right now, a few hundred
+    # milliseconds ago; a fixed "%.0fs" printed that as "heartbeat 0s ago"
+    # (issue #290). Anchored on "(heartbeat " so a sign or a stray leading digit
+    # cannot pass as a superstring.
+    acquire_run_lock(db, "r", pid=101, now=_T0)
+    with pytest.raises(RunLockError, match=r"\(heartbeat 400 ms ago\)"):
+        acquire_run_lock(db, "r", pid=202, now=_T0 + timedelta(milliseconds=400))
+    with pytest.raises(RunLockError, match=r"\(heartbeat 2\.5 min ago\)"):
+        acquire_run_lock(db, "r", pid=202, now=_T0 + timedelta(seconds=150))
+    # A heartbeat stamped AHEAD of now (the writer's clock ahead of this host's)
+    # is a fresh lease and reads as no age at all, never as a negative one.
+    with pytest.raises(RunLockError, match=r"\(heartbeat 0 ms ago\)"):
+        acquire_run_lock(db, "r", pid=202, now=_T0 - timedelta(seconds=3))
+
+
 def test_stale_heartbeat_is_taken_over(db):
     acquire_run_lock(db, "r", pid=101, now=_T0)
     # age == LOCK_STALE_SECONDS is the boundary: stale, takeable.

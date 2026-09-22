@@ -124,18 +124,19 @@ def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
     ``BEGIN IMMEDIATE`` step that only ADDs columns and tables.
     """
     from ..common.instants import parse_instant
-    from ..paper.run_lock import LOCK_STALE_SECONDS
+    from ..paper.run_lock import LOCK_STALE_SECONDS, lease_age_label
     from ..persistence import repository as repo
 
     if not db.migration_pending:
         return False
     for row in repo.iter_other_run_leases(db.conn, run_id):
-        age = (now - parse_instant(row["lock_heartbeat_at"])).total_seconds()
-        if age < LOCK_STALE_SECONDS:
+        heartbeat_at = parse_instant(row["lock_heartbeat_at"])
+        if (now - heartbeat_at).total_seconds() < LOCK_STALE_SECONDS:
             print(
                 f"error: this build needs to migrate the store, but run {row['run_id']!r} "
                 f"in it is being driven by pid {row['lock_pid']} right now (heartbeat "
-                f"{age:.0f}s ago) — upgrading the schema underneath that process would "
+                f"{lease_age_label(heartbeat_at, now=now)} ago) — upgrading the schema "
+                "underneath that process would "
                 "corrupt its state. Stop it (or wait for its lease to go stale), or run "
                 "the build it was started with.",
                 file=sys.stderr,

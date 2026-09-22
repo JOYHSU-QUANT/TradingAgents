@@ -71,7 +71,10 @@ def _futures_basis_message() -> str:
         "withheld, with no figures, for a date it cannot serve or when Yahoo served too "
         "little to build a reading. In each case say so, and never compute a basis yourself from the futures and "
         "spot prices in other tools: their daily closes are hours apart, and the difference "
-        "is mostly that gap."
+        "is mostly that gap. The news analyst's CFTC positioning report is the holder side "
+        "of this same market — the leveraged-fund short there is usually the futures leg "
+        "of the cash-and-carry trade whose carry this basis pays — so the two are one "
+        "picture, not two signals."
     )
 
 

@@ -332,6 +332,7 @@ def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeyp
     # of its own any more — it imports SoSoValue's — so the identity is what
     # keeps the two from drifting apart again, and there is one guard to
     # exercise rather than two.
+    import tradingagents.dataflows.cftc_cot as cftc
     import tradingagents.dataflows.farside as farside
     import tradingagents.dataflows.hyperliquid_whales as whales
     import tradingagents.dataflows.sosovalue_common as soso
@@ -342,6 +343,7 @@ def test_the_cache_directory_readers_name_the_gap_rather_than_the_vendor(monkeyp
     # keeping a copy, so a refactor that gave it one would drop out of
     # this guard silently.
     assert whales._cache_dir is soso._cache_dir
+    assert cftc._cache_dir is soso._cache_dir
 
     monkeypatch.setattr(soso, "get_config", dict)
     with pytest.raises(WiringGapError, match="cache configuration"):

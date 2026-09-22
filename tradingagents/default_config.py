@@ -349,6 +349,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # behaviour change to, and this default IS the perp deployment's
         # live value.
         "futures_basis": "none",             # Options: yfinance (keyless, BTC only), none
+        # CFTC Commitments of Traders positioning in CME Bitcoin futures, by
+        # trader category, from the CFTC's public Socrata API. Keyless, so
+        # it ships OFF for the same reason as the two above.
+        "futures_positioning": "none",       # Options: cftc (keyless, BTC only), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

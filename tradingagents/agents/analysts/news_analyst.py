@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_economic_calendar,
     get_etf_flows,
     get_fear_greed,
+    get_futures_positioning,
     get_global_news,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -15,6 +16,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_prediction_markets,
     get_whale_positions,
 )
+from tradingagents.dataflows import cftc_cot
 from tradingagents.dataflows.interface import (
     get_category_for_method,
     is_category_disabled,
@@ -145,6 +147,24 @@ OPTIONAL_NEWS_TOOLS = (
             "held elsewhere, so treat it as venue-level positioning of large "
             "accounts rather than crowd sentiment, and never as a standalone "
             "directional signal"
+        ),
+    ),
+    _OptionalNewsTool(
+        tool=get_futures_positioning,
+        category="futures_positioning",
+        scope="crypto",
+        hint=(
+            "get_futures_positioning(asset, curr_date) for the CFTC Commitments of "
+            "Traders report on CME Bitcoin futures — each trader category's long, "
+            "short and net positions against open interest, with the changes against "
+            "the previous report and the one four reports back (each labelled with its "
+            "comparison date) and a Scale line saying what size of weekly change is "
+            "ordinary; it is weekly, and the report served is the newest one whose "
+            "derived publication date the analysis date could already have seen, so a "
+            "mid-week date sees the previous week's report. "
+            f"{cftc_cot.CARRY_NOTE}: the market analyst's futures-basis report is the "
+            "price side of this same market, so read the two together rather than as "
+            "two signals. BTC only (another asset gets a no-signal note)"
         ),
     ),
 )

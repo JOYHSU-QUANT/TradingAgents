@@ -32,6 +32,7 @@ import tradingagents.dataflows.alpha_vantage_fundamentals as avf
 import tradingagents.dataflows.alpha_vantage_indicator as avi
 import tradingagents.dataflows.alpha_vantage_news as avn
 import tradingagents.dataflows.alpha_vantage_stock as avs
+import tradingagents.dataflows.cftc_cot as cftc_cot
 import tradingagents.dataflows.cme_basis as cme_basis
 import tradingagents.dataflows.deribit as deribit
 import tradingagents.dataflows.farside as farside
@@ -303,6 +304,11 @@ DATE_CALLS: dict[tuple[str, str], Row | None] = {
         lambda d: ("BTC", d["curr_date"]),
         "futures basis",
     ),
+    ("get_futures_positioning", "cftc"): _point(
+        cftc_cot.get_futures_positioning,
+        lambda d: ("BTC", d["curr_date"]),
+        "futures positioning",
+    ),
 }
 
 
@@ -372,6 +378,7 @@ def no_network(monkeypatch):
     monkeypatch.setattr(deribit, "_request", _reached)
     monkeypatch.setattr(hyperliquid_whales, "_load_snapshot", _reached)
     monkeypatch.setattr(cme_basis, "_fetch_hourly", _reached)
+    monkeypatch.setattr(cftc_cot, "_load_snapshot", _reached)
     # The basis getter withholds a date older than Yahoo's hourly reach BEFORE
     # its seam, so against the wall clock GOOD would age out of reach and
     # these rows would turn red on a calendar date, with no change to the

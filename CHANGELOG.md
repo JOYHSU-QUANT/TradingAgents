@@ -33,6 +33,24 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Layering ratchets, a mypy job, and no import-time registry checks in
+  `live/smoke.py`** (refactor plan v2, T0).
+  `contrib/hyperliquid_perp/tests/common/test_layering.py` freezes the
+  layering debt measured on 2026-09-22 by equality, so it can only shrink:
+  the 32 `paper` symbols `live/` reaches (a module imported as a name counts
+  by the attributes read off it) and the 2 `persistence/` reaches; the SQL
+  sites per module outside `persistence/` (`common/no_decision.py` 2,
+  `live/validation.py` 9, `paper/run_lock.py` 2, `paper/validation.py` 21);
+  and the 46 private names `cli/__init__.py` re-exports for its tests. CI
+  gains a `typecheck` job running mypy over the perp module's lower layers
+  (`common/`, `domains/`, `persistence/`, `ports.py`; config in
+  `pyproject.toml` `[tool.mypy]`). The 15 errors those layers had are pinned
+  on their lines with `# type: ignore[code]` under `warn_unused_ignores`, so
+  a fixed one fails the job until its pin is removed. The three registry
+  checks `live/smoke.py` ran at import (unique keys, policy sets drawn from
+  the keys, a `SmokeTestRunner._test_<key>` method per key) are tests in
+  `tests/live/test_smoke.py` now; the vocabulary pin against `repository`
+  stays where it is. No behaviour changes.
 - **Four more operator-facing spans stop printing as zero** (issue #290 §1).
   The same fixed-unit collapse `gap_label` was introduced for (#284) sat in
   four other messages, and each now renders through it or is pinned so it

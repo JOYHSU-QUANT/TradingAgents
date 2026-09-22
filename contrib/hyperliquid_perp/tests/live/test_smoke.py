@@ -51,6 +51,27 @@ def test_the_smoke_floor_and_the_daemon_default_keep_their_relationship():
     assert floor >= daemon_default
 
 
+def test_every_registered_smoke_test_has_a_runner_method():
+    # The dispatch is reflective (``getattr(self, f"_test_{key}")``), so a key
+    # whose method is missing or typo'd only breaks when it is SELECTED —
+    # mid-suite, on a real run.
+    missing = [
+        t.key for t in smoke.SMOKE_TESTS if not hasattr(smoke.SmokeTestRunner, f"_test_{t.key}")
+    ]
+    assert missing == []
+
+
+def test_the_registry_keys_are_unique_and_the_policy_sets_are_drawn_from_them():
+    # ``key`` is what the gate, the validator and ``--only`` key off: a
+    # copy-pasted duplicate would drop a test in the ``_BY_KEY`` fold, and a
+    # key renamed in SMOKE_TESTS but not in a policy set would drop that test
+    # from its bucket (no exit disarm, no pre-flight, a flat probe).
+    keys = [t.key for t in smoke.SMOKE_TESTS]
+    assert len(set(keys)) == len(keys)
+    for copied in (smoke._KILL_SWITCH_TESTS, smoke._ORDER_PLACING_TESTS, smoke._TRIGGER_PROBE_TESTS):
+        assert copied <= set(keys), sorted(copied - set(keys))
+
+
 @dataclass
 class _Ack:
     status: str = "filled"

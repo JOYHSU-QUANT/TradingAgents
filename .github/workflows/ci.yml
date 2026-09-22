@@ -60,6 +60,21 @@ jobs:
         # (generated results/ is excluded via pyproject extend-exclude).
         run: ruff check .
 
+  typecheck:
+    name: mypy (perp lower layers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install mypy
+        # Only mypy: the layers pyproject [tool.mypy] checks import stdlib
+        # plus pandas/stockstats, which its override lets mypy miss.
+        run: pip install "mypy>=2.0"
+      - name: Type-check the perp module's lower layers
+        run: mypy
+
   autoresearch:
     name: autoresearch tests (py3.12)
     runs-on: ubuntu-latest

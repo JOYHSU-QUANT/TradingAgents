@@ -9,7 +9,7 @@ when absent.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -915,9 +915,7 @@ def test_the_open_position_section_states_the_facts_and_the_priced_moves():
     # 300 / 1000 * 100 = 30%
     assert "Committed margin: 30.00% of account equity 1,000.00 USDC" in block
     assert "configured 1x leverage" in block
-    assert (
-        "Last fill: 2024-01-01T15:04:05+00:00 UTC (12.0 hours before the as-of time above)" in block
-    )
+    assert "Last fill: 2024-01-01T15:04:05+00:00 UTC (12.0h before the as-of time above)" in block
     # 0.0000125 * 8 * 300 = 0.03 USDC per 8h, paid by the long.
     assert "Holding cost at the current funding rate: pays 0.0300 USDC per 8h" in block
     # The rate as a total only — the fee and slippage parameters are NOT
@@ -991,6 +989,35 @@ def test_a_fill_after_the_as_of_is_said_not_shown_as_a_negative_age():
     )
     assert f"Last fill: {later.isoformat()} UTC (after the as-of time above)" in block
     assert "-" + "1." not in block  # no "-1.9 hours"
+
+
+@pytest.mark.parametrize(
+    ("before", "rendered"),
+    [
+        (timedelta(milliseconds=1), "(1 ms before"),
+        (timedelta(seconds=59), "(59.0 s before"),
+        (timedelta(minutes=2), "(2.0 min before"),
+        (timedelta(hours=3, minutes=30), "(3.5h before"),
+    ],
+)
+def test_a_recent_fill_states_its_age_in_a_unit_that_does_not_vanish(before, rendered):
+    """A fill under three minutes old is NOT "0.0 hours before" (issue #288).
+
+    Anchored on the opening parenthesis, the character before the figure, so
+    a sign or an extra leading digit cannot slip past as a superstring.
+    """
+    fill_at = _AS_OF - before
+    block = _position_block(
+        render_market_context(_ctx(position=_open_position(last_fill_at=fill_at)))
+    )
+    assert f"Last fill: {fill_at.isoformat()} UTC {rendered} the as-of time above)" in block
+
+
+def test_a_fill_stamped_exactly_at_the_as_of_is_on_the_before_side():
+    block = _position_block(
+        render_market_context(_ctx(position=_open_position(last_fill_at=_AS_OF)))
+    )
+    assert f"Last fill: {_AS_OF.isoformat()} UTC (0 ms before the as-of time above)" in block
 
 
 def test_a_position_with_no_recorded_fill_says_so():

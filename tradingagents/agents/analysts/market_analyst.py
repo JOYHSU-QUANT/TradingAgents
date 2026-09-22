@@ -1,6 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.agent_utils import (
+    get_futures_basis,
     get_indicators,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -9,6 +10,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
 )
 from tradingagents.agents.utils.indicator_menu import indicator_menu
+from tradingagents.dataflows import cme_basis
 from tradingagents.dataflows.interface import is_category_disabled
 
 
@@ -34,6 +36,42 @@ def _system_message_head() -> str:
 Before writing the final report, call get_verified_market_snapshot for this ticker and the current date, and treat it as the source of truth for any exact OHLCV, price-level, or indicator-value claim. If another tool's output conflicts with the verified snapshot, flag the discrepancy rather than inventing a reconciled number. Do not claim historical validation, support/resistance bounces, or exact percentage moves unless they are directly supported by tool output with concrete dates and prices.
 
 Write a very detailed and nuanced report of the trends you observe. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+    )
+
+
+def _futures_basis_message() -> str:
+    """How to read the futures-basis report, appended when that tool is bound.
+
+    Every figure in it is read from ``cme_basis``, and the two sentences the
+    report itself closes on are the module's own strings rather than a
+    paraphrase — an instruction that named a different window or threshold
+    from the one the report prints would have the analyst correcting a report
+    that was right.
+    """
+    return (
+        "\n\nSince this is a crypto asset, also call get_futures_basis(asset, curr_date) for "
+        "the CME Bitcoin front-month futures basis: what the regulated future trades at over "
+        "spot, as a nominal percentage and annualized by the contract's days to expiry. "
+        f"{cme_basis.SAWTOOTH_NOTE}: a nominal basis that falls late in the month is the "
+        f"calendar, not demand. {cme_basis.CARRY_NOTE}. So do not read the sign alone, and do "
+        "not state that a widening basis predicts a rise or a narrowing one a fall. What "
+        "carries information is the annualized level against the report's own "
+        f"{cme_basis.LOOKBACK_DAYS}-day annualized median, its change over "
+        f"{cme_basis.LOOKBACK_DAYS} days, and a negative basis (backwardation). "
+        f"{cme_basis.SCALE_NOTE}. Quote the "
+        "annualized figure with the as-of hour the report prints, and call it approximate, "
+        "as the report does. CME closes for the weekend and this analysis does not, and Yahoo "
+        "can simply be late with a bar: when the report says it is not a live reading, the "
+        "figures are as old as it states, so give that age and do not describe them as a "
+        "response to anything that happened since. "
+        "Respect the report's other caveats: the annualized figure is withheld "
+        f"within {cme_basis.MIN_DAYS_TO_EXPIRY} days of expiry and just after the contract "
+        "rolls, the change is withheld when there is no earlier reading to compare with or "
+        "when either of the two readings has no annualized figure, and the whole report is "
+        "withheld, with no figures, for a date it cannot serve or when Yahoo served too "
+        "little to build a reading. In each case say so, and never compute a basis yourself from the futures and "
+        "spot prices in other tools: their daily closes are hours apart, and the difference "
+        "is mostly that gap."
     )
 
 
@@ -107,6 +145,15 @@ def create_market_analyst(llm):
                 "as that asset's own; and the DVOL level carries an as-of date whenever it is "
                 "present, so cite that date wherever you cite the level."
             )
+
+        # Crypto-only futures basis, gated on its own category: the two tools
+        # are switched independently, so each paragraph stands alone and
+        # neither depends on the other being bound.
+        if asset_type == "crypto" and not is_category_disabled(
+            "futures_basis", "get_futures_basis"
+        ):
+            tools = tools + [get_futures_basis]
+            crypto_tools_message += _futures_basis_message()
 
         system_message = (
             _system_message_head()

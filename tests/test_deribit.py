@@ -3548,7 +3548,11 @@ class TestMarketAnalystWiring:
             market_analyst_module, "is_category_disabled", return_value=False
         ) as gate:
             _run_analyst("crypto")
-        gate.assert_called_once_with("options_data", "get_options_market")
+        # One gate call per crypto-only tool since the futures-basis tool
+        # joined this analyst, so "once" is per tool: exactly one call names
+        # this category, and it names the tool with it.
+        options_calls = [c for c in gate.call_args_list if c.args[:1] == ("options_data",)]
+        assert options_calls == [mock.call("options_data", "get_options_market")]
 
     def test_prompt_advertises_the_tool_only_when_it_is_bound(self, options_enabled):
         crypto_prompt = str(_run_analyst("crypto").prompt_value)

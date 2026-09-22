@@ -484,6 +484,57 @@ server-side action to attribute the change to.
 config["data_vendors"]["whale_positioning"] = "hyperliquid_stats"  # the dated cutover
 ```
 
+A second crypto-only market-analyst tool, beside the Deribit options one, is the
+**CME Bitcoin futures basis** (`futures_basis`, vendor `yfinance`, keyless, BTC
+only): what the regulated front-month future (Yahoo `BTC=F`) trades at over
+spot (`BTC-USD`), as a nominal percentage and annualized by the contract's days
+to expiry, with a 7-day annualized median and the change against the reading 7
+days earlier. It is the one USD-denominated, institution-facing price the other
+sources do not carry.
+
+It deliberately does **not** subtract the two daily closes the OHLCV cache
+already holds. `BTC-USD` closes its day at 00:00 UTC and `BTC=F` at the end of
+the CME session, and measured over a year (2026-09-21) that same-date
+difference averaged +0.22% with a standard deviation of 0.78% and was negative
+on 37.5% of days — clock mismatch, not carry. The tool instead matches
+**hourly** closes on the same UTC hour, keeps only hours inside the CME session
+in which the future actually traded (Yahoo emits closed-session bars whose
+close is pinned to the previous settlement, which read as a basis of −1% to
+−2%), and reports the **median** of the latest 24 such hours. Over 730 days
+that basis was negative on 2.4% of days and traced the sawtooth a front-month
+basis must: decaying toward zero into expiry and stepping back up at the roll.
+
+That sawtooth is why the headline figure is annualized with the contract's real
+days to expiry (last Friday of the month; the date can be a day late around an
+exchange holiday, so the report calls the figure approximate) rather than a
+fixed multiple, which would leave every month-end convergence looking like
+weakening demand. The annualized figure is withheld within 5 days of expiry —
+it divides by almost nothing there, and Yahoo rolls the continuous symbol on an
+unannounced day of that week — and for the first hours after a roll. Hours
+after `curr_date` are never read; the whole report is withheld, with no
+figures, for a date more than a day ahead of the UTC clock or more than 709
+days behind it (a reading needs 21 days of the 729 days of hourly history Yahoo
+serves), and when Yahoo served too few synchronous hours or none newer than 7
+days — a notice saying what each of the two series had, rather than the
+router's no-data sentence, which would tell the analyst that also reads BTC's
+prices that "BTC … may be invalid, delisted". CME closes for the weekend and a
+paper loop does not, so a reading whose newest hour ended more than 3 hours
+earlier says it is not a live one. The report also carries its own scale: on
+three days in four (measured over 492 days) the 7-day change was under about 3
+annualized points and a reading sat within about 1.5 points of its own 7-day
+median, and the annualized figure runs about a point high in the last days
+before it is withheld (5 to 7 days from expiry), because Yahoo's spot is an
+aggregate rather than the rate the contract settles to. The cost of the hourly
+method is two
+uncached Yahoo requests per call, through the same throttle latch as every
+other yfinance leaf.
+
+It **ships disabled**, for the reason above:
+
+```python
+config["data_vendors"]["futures_basis"] = "yfinance"  # the dated cutover
+```
+
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python

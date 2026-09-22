@@ -6,8 +6,9 @@ the analysts only when ``asset_type == "crypto"``. Each routes through
 degradation behaviour apply, exactly like the stock/macro tools.
 
 The flows/sentiment/calendar/treasury/positioning tools go to the news
-analyst; the options-volatility tool goes to the market analyst, where vol
-regime belongs alongside the technical indicators.
+analyst; the options-volatility and futures-basis tools go to the market
+analyst, where vol regime and the futures curve belong alongside the
+technical indicators.
 
 The economic calendar is not crypto-specific data — FOMC-week risk moves
 equities too — but it is bound crypto-only for now so the stock path's tools
@@ -255,3 +256,49 @@ def get_whale_positions(
         str: A formatted markdown report of large-account positioning
     """
     return route_to_vendor("get_whale_positions", asset, curr_date)
+
+
+@notes_date_sentinel("curr_date")
+@tool
+def get_futures_basis(
+    asset: Annotated[
+        str,
+        "Crypto asset whose CME futures basis to read: 'BTC' only (pair forms "
+        "like 'BTC-USD' are accepted). Any other symbol returns a no-signal "
+        "note — BTC's basis does not stand in for another asset's.",
+    ],
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format; no later hour is read"],
+) -> str:
+    """
+    Retrieve the CME Bitcoin front-month futures basis: what the regulated
+    future (Yahoo BTC=F) trades at over spot (Yahoo BTC-USD). Reported as a
+    nominal percentage — the median over the latest 24 hours in which both
+    traded, matched on the same UTC hour, because the two DAILY closes are
+    hours apart and their difference is mostly clock mismatch — and annualized
+    by the front contract's days to expiry, with a 7-day annualized median and
+    the change against the reading 7 days earlier. The nominal basis decays
+    toward zero as the contract nears expiry and steps back up at the monthly
+    roll, so annualized figures are the comparable ones. The annualized figure
+    is withheld within 5 days of expiry, where it divides by almost nothing,
+    and for the first hours after a roll; the expiry date follows the
+    last-Friday rule and can be a day late around an exchange holiday, so the
+    annualized figure is approximate. Hours after curr_date are never read.
+    CME closes for the weekend: a reading whose newest hour ended more than 3
+    hours earlier is labelled as not live. The whole report is withheld, with
+    no figures, for a curr_date more than a day ahead of the UTC clock or more
+    than 709 days behind it (Yahoo's hourly history reaches no further), and
+    when Yahoo served too few synchronous hours or none newer than 7 days. A
+    positive basis is the usual state and mostly reflects the
+    cost of carry: a positioning-and-carry input, not a standalone directional
+    signal. Uses the configured futures_basis vendor.
+
+    Args:
+        asset (str): 'BTC'
+        curr_date (str): Current date in yyyy-mm-dd format
+
+    Returns:
+        str: A markdown report of the nominal and annualized basis — or a
+            withheld notice carrying no figures, or for a symbol other than
+            BTC a plain no-signal sentence.
+    """
+    return route_to_vendor("get_futures_basis", asset, curr_date)

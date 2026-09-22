@@ -19,6 +19,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_balance_sheet,
     get_cashflow,
     get_fundamentals,
+    get_futures_basis,
     get_global_news,
     get_income_statement,
     get_indicators,
@@ -235,6 +236,8 @@ class TradingAgentsGraph:
                     # LLM only for crypto assets, but always registered here so
                     # the bound call is executable (a stock run never binds it).
                     get_options_market,
+                    # Crypto-only futures basis, on the same terms.
+                    get_futures_basis,
                 ]
             ),
             "social": ToolNode(

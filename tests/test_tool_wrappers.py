@@ -65,6 +65,7 @@ ALL_WRAPPERS = [
     (crypto_data_tools, "get_economic_calendar"),
     (crypto_data_tools, "get_etf_flows"),
     (crypto_data_tools, "get_fear_greed"),
+    (crypto_data_tools, "get_futures_basis"),
     (crypto_data_tools, "get_options_market"),
     (crypto_data_tools, "get_whale_positions"),
     (fundamental_data_tools, "get_balance_sheet"),
@@ -547,6 +548,11 @@ class TestCryptoWrappersAreCoveredToo:
             crypto_data_tools.get_whale_positions,
             {"asset": "BTC", "curr_date": DATE},
         ) == ("get_whale_positions", "BTC", DATE)
+        assert _forwarded(
+            crypto_data_tools,
+            crypto_data_tools.get_futures_basis,
+            {"asset": "BTC", "curr_date": DATE},
+        ) == ("get_futures_basis", "BTC", DATE)
 
     def test_the_crypto_lookback_defaults_reach_the_router_as_none(self):
         # Passing 30 explicitly above cannot see the declared default: the

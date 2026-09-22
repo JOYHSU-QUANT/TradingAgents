@@ -342,6 +342,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # is what a later paper review attributes a behaviour change to. Per
         # the note above, this default IS the perp deployment's live value.
         "whale_positioning": "none",         # Options: hyperliquid_stats (keyless), none
+        # CME Bitcoin front-month futures basis over spot, from hourly Yahoo
+        # bars the yfinance layer already reaches. Keyless, so it ships OFF
+        # for whale_positioning's reason above: the dated flip to "yfinance"
+        # is the server-side action a later paper review attributes a
+        # behaviour change to, and this default IS the perp deployment's
+        # live value.
+        "futures_basis": "none",             # Options: yfinance (keyless, BTC only), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

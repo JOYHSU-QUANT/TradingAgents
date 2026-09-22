@@ -98,26 +98,47 @@ def _report(monkeypatch, curr_date=TODAY, body=ROWS, asset="BTC") -> str:
 @pytest.mark.unit
 class TestParse:
     def test_the_fixture_parses_newest_first(self):
-        rows = cftc_cot._parse_rows(ROWS)
+        rows, dropped = cftc_cot._parse_rows(ROWS)
+        assert dropped == []
         assert [r["report_date"] for r in rows][:3] == ["2026-09-15", "2026-09-08", "2026-09-01"]
         assert rows[0]["oi"] == 20773
         assert rows[0]["cats"]["Leveraged funds"] == [5545, 11899, 1841]
         assert rows[0]["cats"]["Non-reportable"] == [1021, 832, None]
 
-    def test_a_row_missing_a_position_column_is_dropped_and_counted(self, caplog):
+    @pytest.mark.parametrize(
+        "column", ["asset_mgr_positions_short", "dealer_positions_spread_all", "open_interest_all"]
+    )
+    def test_a_row_missing_a_position_column_is_dropped_and_dated(self, caplog, column):
+        # Spreading included: rendered as "—" it would look like the one
+        # category that legitimately has none.
         rows = [dict(ROWS[0]), dict(ROWS[1])]
-        del rows[0]["asset_mgr_positions_short"]
+        del rows[0][column]
         with caplog.at_level(logging.WARNING):
-            parsed = cftc_cot._parse_rows(rows)
+            parsed, dropped = cftc_cot._parse_rows(rows)
         assert [r["report_date"] for r in parsed] == ["2026-09-08"]
-        assert "dropped 1 malformed row(s) of 2" in caplog.text
+        assert dropped == ["2026-09-15"]
+        assert "dropped 1 malformed row(s) of 2 (report dates: 2026-09-15)" in caplog.text
+
+    def test_a_row_whose_date_cannot_be_read_is_dropped_as_unknown(self):
+        rows = [dict(ROWS[0], report_date_as_yyyy_mm_dd="soon"), 7, dict(ROWS[1])]
+        parsed, dropped = cftc_cot._parse_rows(rows)
+        assert [r["report_date"] for r in parsed] == ["2026-09-08"]
+        assert dropped == ["?", "?"]
+
+    def test_an_extra_non_reportable_spreading_column_is_ignored(self):
+        # The column is not read for that category, so an extra one is ignored
+        # rather than refused: the dataset defines the category without it.
+        rows = [dict(ROWS[0], nonrept_positions_spread_all="5"), dict(ROWS[1])]
+        parsed, dropped = cftc_cot._parse_rows(rows)
+        assert len(parsed) == 2 and dropped == []
+        assert parsed[0]["cats"]["Non-reportable"] == [1021, 832, None]
 
     def test_a_repeated_report_date_keeps_the_first(self):
         twice = [dict(ROWS[0]), dict(ROWS[0], open_interest_all="1")]
-        assert cftc_cot._parse_rows(twice)[0]["oi"] == 20773
+        assert cftc_cot._parse_rows(twice)[0][0]["oi"] == 20773
 
     def test_out_of_order_rows_are_sorted(self):
-        assert cftc_cot._parse_rows(list(reversed(ROWS)))[0]["report_date"] == "2026-09-15"
+        assert cftc_cot._parse_rows(list(reversed(ROWS)))[0][0]["report_date"] == "2026-09-15"
 
     def test_nothing_readable_is_a_vendor_error(self):
         with pytest.raises(cftc_cot.CftcError, match="none was a readable report"):
@@ -165,7 +186,7 @@ class TestRequest:
         assert call["params"]["$where"] == "cftc_contract_market_code='133741'"
         assert call["params"]["$order"] == "report_date_as_yyyy_mm_dd DESC"
         assert call["params"]["$limit"] == "2000"
-        assert call["timeout"] == cftc_cot.REQUEST_TIMEOUT
+        assert call["timeout"] == 30
 
     def test_a_404_says_the_dataset_moved(self, monkeypatch):
         _serve(monkeypatch, status=404, body={"code": "dataset.missing"})
@@ -226,6 +247,16 @@ class TestCache:
         cftc_cot.get_futures_positioning("BTC", TODAY)
         assert len(fake.calls) == 1
 
+    def test_the_cache_is_fresh_for_a_day_and_refetched_after(self, monkeypatch, clock, cache):
+        fake = _serve(monkeypatch)
+        cftc_cot.get_futures_positioning("BTC", TODAY)
+        _freeze(monkeypatch, datetime(2026, 9, 23, 11, 59, tzinfo=timezone.utc))
+        cftc_cot.get_futures_positioning("BTC", "2026-09-23")
+        assert len(fake.calls) == 1
+        _freeze(monkeypatch, datetime(2026, 9, 23, 12, 1, tzinfo=timezone.utc))
+        cftc_cot.get_futures_positioning("BTC", "2026-09-23")
+        assert len(fake.calls) == 2
+
     def test_a_failed_fetch_serves_the_cache_stale_with_the_caveat(self, monkeypatch, clock, cache):
         _serve(monkeypatch)
         cftc_cot.get_futures_positioning("BTC", TODAY)
@@ -234,6 +265,26 @@ class TestCache:
         out = cftc_cot.get_futures_positioning("BTC", "2026-09-24")
         assert "STALE" in out and "2.0 days" in out
         assert "| Dealer |" in out
+        assert "a change in its shape" in out
+
+    def test_a_stale_cache_younger_than_two_days_is_aged_in_hours(self, monkeypatch, clock, cache):
+        _serve(monkeypatch)
+        cftc_cot.get_futures_positioning("BTC", TODAY)
+        # Past the 24h TTL (so a refresh is attempted) and under the 48h the
+        # age formatter switches to days at.
+        _freeze(monkeypatch, datetime(2026, 9, 23, 18, tzinfo=timezone.utc))
+        _serve(monkeypatch, status=503, text="down")
+        assert "STALE by 30 hours" in cftc_cot.get_futures_positioning("BTC", "2026-09-23")
+
+    def test_the_stale_cap_is_exactly_twenty_one_days(self, monkeypatch, clock, cache):
+        _serve(monkeypatch)
+        cftc_cot.get_futures_positioning("BTC", TODAY)
+        _serve(monkeypatch, status=503, text="down")
+        _freeze(monkeypatch, datetime(2026, 10, 13, 12, tzinfo=timezone.utc))
+        assert "STALE" in cftc_cot.get_futures_positioning("BTC", "2026-10-10")
+        _freeze(monkeypatch, datetime(2026, 10, 13, 12, 1, tzinfo=timezone.utc))
+        with pytest.raises(cftc_cot.CftcUnavailableError, match="stale"):
+            cftc_cot.get_futures_positioning("BTC", "2026-10-10")
 
     def test_a_failed_fetch_past_the_stale_cap_raises(self, monkeypatch, clock, cache):
         _serve(monkeypatch)
@@ -263,6 +314,10 @@ class TestCache:
             ),
             (lambda p: p["rows"].reverse(), "not unique and newest first"),
             (lambda p: p["rows"].append(dict(p["rows"][0])), "not unique and newest first"),
+            (lambda p: p["rows"][0].__setitem__("report_date", "2026-13-40"), "malformed report"),
+            (lambda p: p["rows"][0]["cats"].__setitem__("Dealer", [1, 2]), "malformed report"),
+            (lambda p: p["rows"][0]["cats"].__setitem__("Dealer", ["x", 2, 3]), "malformed report"),
+            (lambda p: p.__setitem__("dropped", "2026-09-15"), "'dropped' is missing"),
         ],
     )
     def test_a_bad_cache_is_rejected_with_its_reason(
@@ -307,7 +362,32 @@ class TestAsOf:
 
     def test_the_publication_date_is_printed_and_called_derived(self, monkeypatch, clock, cache):
         out = _report(monkeypatch)
-        assert "published about 2026-09-19 (derived: report date + 4 days)" in out
+        assert "- Report as of 2026-09-15 (Tuesday close), published about 2026-09-19 " in out
+        assert "(derived: the first Saturday after the report date)" in out
+
+    @pytest.mark.parametrize(
+        "report_date, published",
+        [
+            ("2026-09-15", "2026-09-19"),  # Tuesday -> Saturday, +4
+            ("2026-09-14", "2026-09-19"),  # a holiday-week Monday -> the same Saturday, +5
+            ("2026-09-18", "2026-09-19"),  # Friday -> the next day
+            ("2026-09-19", "2026-09-26"),  # a Saturday -> the NEXT Saturday, never itself
+        ],
+    )
+    def test_the_publication_date_is_the_first_saturday_after(self, report_date, published):
+        from datetime import date
+
+        assert cftc_cot.publication_date(date.fromisoformat(report_date)).isoformat() == published
+
+    def test_a_holiday_week_monday_report_is_not_served_on_its_friday(
+        self, monkeypatch, clock, cache
+    ):
+        # Anchored to the weekday: "+4" from a Monday report would be Friday.
+        monday = dict(ROWS[0], report_date_as_yyyy_mm_dd="2026-09-14T00:00:00.000")
+        out = _report(monkeypatch, "2026-09-18", body=[monday] + ROWS[1:])
+        assert "- Report as of 2026-09-08 (Tuesday close)" in out
+        out = _report(monkeypatch, "2026-09-19", body=[monday] + ROWS[1:])
+        assert "- Report as of 2026-09-14 (Monday close), published about 2026-09-19" in out
 
     def test_a_date_before_the_series_is_withheld(self, monkeypatch, clock, cache):
         out = _report(monkeypatch, "2026-07-31")  # the 07-28 report publishes 08-01
@@ -320,9 +400,13 @@ class TestAsOf:
         out = _report(monkeypatch, "2026-08-01")
         assert "- Report as of 2026-07-28" in out
         assert "**Open interest:** 20,019 contracts\n" in out
+        assert "| Δ net vs previous report | Δ net vs 4 reports back |" in out
         assert "| n/a | n/a |" in out
         assert "_No earlier published report in the series, so the change columns are n/a._" in out
-        assert "_Fewer than 5 published reports in the series, so the 4-week column is n/a._" in out
+        assert (
+            "_Fewer than 5 published reports in the series, so the second change column is n/a._"
+        ) in out
+        assert "_Scale: withheld — only 1 published reports are in the trailing window" in out
 
     def test_a_stale_series_is_withheld_past_the_bound(self, monkeypatch, clock, cache):
         # The newest report publishes 09-19: 21 days later is served, 22 is not.
@@ -346,7 +430,8 @@ class TestReport:
         out = _report(monkeypatch)
         assert out.startswith("## CFTC Commitments of Traders — CME Bitcoin futures (BTC)\n")
         assert "5 BTC standard contract only, code 133741; the Micro contract" in out
-        assert "**Open interest:** 20,773 contracts (-310 on the week)" in out
+        assert "**Open interest:** 20,773 contracts (-310 since the 2026-09-08 report)" in out
+        assert "| Δ net vs 2026-09-08 | Δ net vs 2026-08-18 |" in out
         assert "| Dealer | 6,587 | 3,168 | 620 | +3,419 | 16.5% | +476 | +448 |" in out
         assert "| Asset manager | 4,528 | 1,768 | 486 | +2,760 | 13.3% | -983 | +28 |" in out
         assert (
@@ -355,21 +440,108 @@ class TestReport:
         assert "| Non-reportable | 1,021 | 832 | — | +189 | 0.9% | -348 | +477 |" in out
         reading = out.split("_Reading:")[1]
         assert "as of 2026-09-15, 20,773 contracts of open interest" in reading
-        assert "dealer net +3,419 (16.5% of OI, +476 on the week)" in reading
-        assert "leveraged funds net -6,354 (-30.6% of OI, +1,538 on the week)" in reading
+        assert "dealer net +3,419 (16.5% of OI, +476 since 2026-09-08)" in reading
+        assert "leveraged funds net -6,354 (-30.6% of OI, +1,538 since 2026-09-08)" in reading
+        # Rows and headline clauses in the declared order, not merely present.
+        rows = [
+            line.split("|")[1].strip()
+            for line in out.splitlines()
+            if line.startswith("| ") and "---" not in line
+        ]
+        assert rows[1:] == [
+            "Dealer", "Asset manager", "Leveraged funds", "Other reportables", "Non-reportable"
+        ]  # fmt: skip
+        positions = [reading.index(f"{n.lower()} net") for n in cftc_cot.HEADLINE_CATEGORIES]
+        assert positions == sorted(positions)
         assert "never a single week's move as a standalone directional signal" in reading
         # The two non-headline categories stay out of the closing line.
         assert "other reportables" not in reading and "non-reportable" not in reading
 
-    def test_the_four_week_change_is_by_report_count(self, monkeypatch, clock, cache):
-        # 09-15 against 08-18 (four reports back): dealer net 3419 - 2971.
-        out = _report(monkeypatch)
-        assert "| Dealer | 6,587 | 3,168 | 620 | +3,419 | 16.5% | +476 | +448 |" in out
+    def test_a_gap_in_the_series_is_said_and_the_columns_are_dated(self, monkeypatch, clock, cache):
+        # The 09-08 row unreadable: the first change column now compares
+        # against 09-01, its header says so, and a line says the gap's length.
+        body = [ROWS[0], dict(ROWS[1], open_interest_all="")] + ROWS[2:]
+        out = _report(monkeypatch, body=body)
+        assert "**Open interest:** 20,773 contracts (+1,076 since the 2026-09-01 report)" in out
+        assert "| Δ net vs 2026-09-01 | Δ net vs 2026-08-11 |" in out
+        assert "| Dealer | 6,587 | 3,168 | 620 | +3,419 | 16.5% | +635 | +340 |" in out
+        assert "_The previous published report is 14 days before this one, not a week" in out
+        assert "dealer net +3,419 (16.5% of OI, +635 since 2026-09-01)" in out
+        assert "on the week" not in out
 
-    def test_the_method_line_explains_the_carry_short(self, monkeypatch, clock, cache):
+    def test_an_unreadable_newest_report_is_disclosed(self, monkeypatch, clock, cache, caplog):
+        # The newest row dropped: the previous week is served, and the report
+        # says a newer one exists, since nothing else would.
+        body = [dict(ROWS[0], asset_mgr_positions_short="")] + ROWS[1:]
+        with caplog.at_level(logging.WARNING):
+            out = _report(monkeypatch, body=body)
+        assert "- Report as of 2026-09-08 (Tuesday close)" in out
+        assert (
+            "_A newer report, as of 2026-09-15, is in the CFTC's series but could not be read "
+            "(a malformed row), so the report below is older than the newest the CFTC has "
+            "published._"
+        ) in out
+        assert "(report dates: 2026-09-15)" in caplog.text
+        # On a date that could not have seen the dropped report either, no notice.
+        assert "A newer report" not in cftc_cot.get_futures_positioning("BTC", "2026-09-17")
+
+    def test_the_method_line_carries_the_shared_carry_note(self, monkeypatch, clock, cache):
         method = _report(monkeypatch).split("_Method:")[1].split("_Reading:")[0]
-        assert "a large leveraged-fund short is not by itself a bearish view" in method
-        assert "can be later than shown around a US holiday" in method
+        assert f"{cftc_cot.CARRY_NOTE}." in method
+        assert "sell side" not in method  # dealers were net long in 52 of 52 reports
+        assert "can be later than shown when a US holiday delays the release" in method
+        assert "held at the report date's close" in method
+
+    def test_the_scale_is_measured_from_the_reports_the_date_could_see(
+        self, monkeypatch, clock, cache
+    ):
+        # Fourteen weekly reports with a known leveraged-fund net path: the
+        # window is the 13 changes, whose median and upper quartile are
+        # computed by hand below; the range is of net as a share of OI.
+        from datetime import date, timedelta
+
+        # Thirteen changes, skewed so that median, upper quartile, mean and
+        # max all differ: nine of 100, three of 300, one of 2,000.
+        deltas = [100] * 9 + [300] * 3 + [2000]
+        nets = [-1000]
+        for delta in deltas:
+            nets.append(nets[-1] - delta)  # newest first, growing more short
+        rows = []
+        for i, net in enumerate(nets):
+            day = date(2026, 9, 15) - timedelta(days=7 * i)
+            row = dict(ROWS[0], report_date_as_yyyy_mm_dd=f"{day.isoformat()}T00:00:00.000")
+            row["lev_money_positions_long"] = "1000"
+            row["lev_money_positions_short"] = str(1000 - net)
+            row["open_interest_all"] = "10000"
+            rows.append(row)
+        out = _report(monkeypatch, body=rows)
+        scale = out.split("_Scale, over the 13 report-to-report changes before this one — ")[1]
+        assert (
+            "leveraged funds: a weekly change under about 100 contracts is ordinary and under "
+            "300 unremarkable, and net has ranged -48.0% to -10.0% of OI"
+        ) in scale
+        # One fewer report and there is no scale (the clock moves past the
+        # cache TTL so the shorter series is actually fetched).
+        _freeze(monkeypatch, datetime(2026, 9, 23, 13, tzinfo=timezone.utc))
+        out = _report(monkeypatch, body=rows[:13])
+        assert (
+            "_Scale: withheld — only 13 published reports are in the trailing window, fewer "
+            "than the 14 a scale needs._"
+        ) in out
+
+    def test_the_scale_window_is_capped_at_a_year(self, monkeypatch, clock, cache):
+        from datetime import date, timedelta
+
+        rows = []
+        for i in range(60):
+            day = date(2026, 9, 15) - timedelta(days=7 * i)
+            row = dict(ROWS[0], report_date_as_yyyy_mm_dd=f"{day.isoformat()}T00:00:00.000")
+            # A huge change only in the 56th report back: outside the window.
+            row["lev_money_positions_short"] = "50000" if i == 56 else "11899"
+            rows.append(row)
+        out = _report(monkeypatch, body=rows)
+        assert "_Scale, over the 52 report-to-report changes before this one" in out
+        assert "under about 0 contracts is ordinary and under 0 unremarkable" in out
 
     def test_a_zero_open_interest_report_does_not_divide(self, monkeypatch, clock, cache):
         rows = [dict(ROWS[0], open_interest_all="0")] + ROWS[1:]
@@ -548,10 +720,13 @@ class TestNewsAnalystWiring:
 class TestProseFollowsTheConstants:
     def test_the_tool_description(self):
         text = " ".join(crypto_data_tools.get_futures_positioning.description.split())
-        assert f"report date plus {cftc_cot.PUBLICATION_LAG_DAYS} days" in text
-        assert f"more than {cftc_cot.MAX_STALENESS_DAYS} days old" in text
+        assert "the first Saturday after its report date" in text
+        assert "more than 21 days old" in text and cftc_cot.MAX_STALENESS_DAYS == 21
         assert "5-BTC standard contract" in text and cftc_cot.CONTRACT_UNITS == "5 BTC"
-        assert "one week and four weeks" in text and cftc_cot.TREND_WEEKS == 4
+        assert "the one four reports back" in text and cftc_cot.TREND_REPORTS == 4
+        assert "labelled with the date of the report it compares against" in text
+        assert "a Monday in a holiday week" in text
+        assert "the carry the futures basis pays" in text
 
     def test_the_analyst_hint(self):
         [row] = [
@@ -559,18 +734,26 @@ class TestProseFollowsTheConstants:
             for r in news_analyst_module.OPTIONAL_NEWS_TOOLS
             if r.category == "futures_positioning"
         ]
-        assert "four-week changes" in row.hint and cftc_cot.TREND_WEEKS == 4
-        assert "cash-and-carry" in row.hint
+        assert "the one four reports back" in row.hint and cftc_cot.TREND_REPORTS == 4
+        assert cftc_cot.CARRY_NOTE in row.hint
+        assert "the market analyst's futures-basis report is the price side" in row.hint
         assert "BTC only" in row.hint
+        assert not row.hint.startswith(" ") and not row.hint.endswith(".")
+
+    def test_the_basis_paragraph_points_back_here(self):
+        from tradingagents.agents.analysts import market_analyst
+
+        text = market_analyst._futures_basis_message()
+        assert "CFTC positioning report is the holder side of this same market" in text
 
     def test_the_report_and_the_constants_agree(self, monkeypatch, clock, cache):
         out = _report(monkeypatch)
-        assert f"(derived: report date + {cftc_cot.PUBLICATION_LAG_DAYS} days)" in out
-        assert f"| {cftc_cot.TREND_WEEKS}-week Δ net |" in out
+        assert "(derived: the first Saturday after the report date)" in out
         assert f"code {cftc_cot.CONTRACT_CODE};" in out
 
     def test_the_bounds_are_ordered(self):
         assert cftc_cot.MAX_DATA_LAG_DAYS < cftc_cot.MAX_STALENESS_DAYS
         assert cftc_cot.MAX_STALE_DAYS * 24 > cftc_cot.CACHE_TTL_HOURS
-        assert 3 < cftc_cot.PUBLICATION_LAG_DAYS <= 7  # after Friday, before the next report
+        assert cftc_cot.PUBLICATION_WEEKDAY == 5  # Saturday
+        assert cftc_cot.MIN_SCALE_REPORTS < cftc_cot.SCALE_REPORTS
         assert os.path.basename(cftc_cot.DATASET_URL).endswith(".json")

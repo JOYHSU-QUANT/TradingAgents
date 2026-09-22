@@ -17,22 +17,33 @@ Tuesday's close and is published on Friday afternoon (15:30 ET). A run on a
 Wednesday or Thursday therefore must serve the PREVIOUS week's report: the
 new one exists as a fact about Tuesday but nobody could have read it yet.
 Filtering on the report date would leak three days of the future into every
-mid-week backtest, so the filter is on the publication date the module
-derives (``PUBLICATION_LAG_DAYS`` after the report date) and the report
-prints both dates. Holidays push publication back a day or more; the
-derived date is then EARLY, which is the unsafe direction, so
-``PUBLICATION_LAG_DAYS`` includes a day of margin and the report says the
-date is derived.
+mid-week backtest, so the filter is on a publication date the module
+derives — the first Saturday after the report date (``publication_date``) —
+and the report prints both dates and says the second is derived. Saturday
+rather than Friday because the release is Friday evening in UTC and
+``curr_date`` has no hour: on Friday itself a report has to be withheld from
+the one cycle that could see it rather than served to the five that could
+not. Anchored to the weekday, not to "report date + 4", because in a
+holiday week the report itself is as of Monday, and +4 from a Monday is the
+Friday the fourth day exists to avoid. What the derived date does NOT cover
+is a release delayed past Saturday — a holiday Friday, or the weeks-late
+batch releases after the late-2025 US government shutdown — where the truth
+is later than the derived date and a backtest of that window sees a report
+a few days early; the dataset carries no release-date column to do better
+with, and the report's "derived" label is the disclosure.
 
 One contract only: the 5-BTC standard future (code 133741). The Micro
 contract is a separate series with a different holder mix and is not
 merged in; the report says so.
 
-The whole BTC series is small (a few hundred weekly rows), so one fetch
-serves every question: it is cached as a rolling JSON snapshot through the
-family's skeleton (``sosovalue_common.load_rolling_snapshot``), refreshed
-daily, served stale for up to ``MAX_STALE_DAYS`` when the fetch fails, and
-never written on a failed fetch.
+The whole BTC series is small (441 weekly rows on 2026-09-21, back to
+2018-04), so one fetch serves every question: it is cached as a rolling JSON
+snapshot through the family's skeleton
+(``sosovalue_common.load_rolling_snapshot``), refreshed daily, served stale
+for up to ``MAX_STALE_DAYS`` when the fetch fails, and never written on a
+failed fetch. Holding the series also pays for the scale: the report says
+what size of weekly change is ordinary and where each net level sits in its
+own trailing year, computed from the rows it already has.
 """
 
 from __future__ import annotations
@@ -83,12 +94,25 @@ REQUEST_TIMEOUT = 30
 # cap makes a runaway answer a contract break rather than a memory bill.
 MAX_ROWS = 2000
 
-# Reports are as of Tuesday and published Friday 15:30 ET, which is Friday
-# evening UTC. Three days would put the derived date on Friday itself; the
-# fourth covers the release hour and a one-day holiday delay, in the safe
-# direction — a derived date later than the truth withholds a report for a
-# day, an earlier one serves the future.
-PUBLICATION_LAG_DAYS = 4
+# Reports are published Friday 15:30 ET, Friday evening in UTC; the derived
+# publication date is the first Saturday after the report date (see the
+# module docstring for why a weekday and why Saturday). A normal Tuesday
+# report derives to +4 days; a holiday-week Monday report to +5.
+PUBLICATION_WEEKDAY = 5  # Saturday, in ``date.weekday()`` terms
+
+# The change columns compare against the reports this many places back in
+# the published series, and the columns are labelled with the comparison
+# report's date rather than with "weeks": the CFTC has never skipped a week
+# in 441 rows (it shifts the report day to Monday around holidays instead),
+# but a row this module could not read would leave a gap, and "1-week"
+# over a gap is a lie the label would tell on its own.
+TREND_REPORTS = 4
+
+# The trailing window the scale is measured over: a year of weekly reports.
+SCALE_REPORTS = 52
+# Fewer published reports than this and no scale is printed: a median over
+# a handful of changes is not a scale.
+MIN_SCALE_REPORTS = 13
 
 # The categories the report reasons about, with the dataset's column stems.
 # Order is display order. Non-reportables carry no spreading column.
@@ -116,8 +140,15 @@ CACHE_TTL_HOURS = 24
 MAX_STALE_DAYS = 21
 CACHE_SCHEMA = 1
 
-# The change columns: one week back, and this many weeks for the trend.
-TREND_WEEKS = 4
+# What the report says the leveraged-fund short usually is. In the report's
+# Method line and in the news analyst's hint, both read from here so the two
+# cannot drift apart. Supported by the series: leveraged funds were net short
+# in 52 of the last 52 reports to 2026-09-15 (dealers were net LONG in all
+# 52, which is why the report no longer calls them "the sell side").
+CARRY_NOTE = (
+    "A large leveraged-fund short is usually the futures leg of a cash-and-carry trade "
+    "against spot or ETF holdings — the carry the futures basis pays — not a bearish view"
+)
 
 # CME lists Bitcoin and Ether futures; only Bitcoin is wired, and another
 # asset's positioning is its own contract's, not a proxy of this one.
@@ -231,19 +262,23 @@ def _iso_day(value: object) -> str | None:
         return None
 
 
-def _parse_rows(payload: list) -> list[dict]:
-    """The rows the module keeps: one dict per report, every field validated.
+def _parse_rows(payload: list) -> tuple[list[dict], list[str]]:
+    """The rows the module keeps, and the report dates of the rows it could not.
 
-    A row missing any position column is dropped and counted, never zeroed:
-    a category rendered as flat because its column was absent would read as
-    a fact. Rows are sorted newest first and de-duplicated on the report
-    date, keeping the first (the dataset's own order).
+    A row missing any position column — spreading included, for the four
+    categories that carry one — is dropped, never zeroed: a category rendered
+    as flat because its column was absent would read as a fact. The dropped
+    rows' report dates (where that much could be read) are returned and
+    logged, because the one that matters is the NEWEST: dropped silently, the
+    previous week would become "the newest report" with nothing in the
+    report to say so. Rows are de-duplicated on the report date, keeping the
+    first the payload listed, then sorted newest first.
     """
     rows: dict[str, dict] = {}
-    dropped = 0
+    dropped: list[str] = []
     for raw in payload:
         if not isinstance(raw, dict):
-            dropped += 1
+            dropped.append("?")
             continue
         report_date = _iso_day(raw.get("report_date_as_yyyy_mm_dd"))
         open_interest = _int(raw.get("open_interest_all"))
@@ -254,21 +289,27 @@ def _parse_rows(payload: list) -> list[dict]:
             spreading = (
                 _int(raw.get(f"{stem}_spread{suffix}")) if name != "Non-reportable" else None
             )
-            if long is None or short is None:
+            if long is None or short is None or (spreading is None) != (name == "Non-reportable"):
                 cats = None
                 break
             cats[name] = [long, short, spreading]
         if report_date is None or open_interest is None or cats is None:
-            dropped += 1
+            dropped.append(report_date or "?")
             continue
         rows.setdefault(
             report_date, {"report_date": report_date, "oi": open_interest, "cats": cats}
         )
     if dropped:
-        logger.warning("%s: dropped %d malformed row(s) of %d", VENDOR, dropped, len(payload))
+        logger.warning(
+            "%s: dropped %d malformed row(s) of %d (report dates: %s)",
+            VENDOR,
+            len(dropped),
+            len(payload),
+            ", ".join(dropped),
+        )
     if not rows:
         raise CftcError(f"{VENDOR} returned {len(payload)} rows and none was a readable report")
-    return [rows[k] for k in sorted(rows, reverse=True)]
+    return [rows[k] for k in sorted(rows, reverse=True)], sorted(dropped, reverse=True)
 
 
 def _cache_path() -> str:
@@ -316,25 +357,37 @@ def _read_cache(path: str) -> dict | None:
     dates = [r["report_date"] for r in rows]
     if dates != sorted(set(dates), reverse=True):
         return reject("'rows' are not unique and newest first")
+    dropped = payload.get("dropped")
+    if not (isinstance(dropped, list) and all(isinstance(d, str) for d in dropped)):
+        return reject("'dropped' is missing or not a list of report dates")
     return payload
 
 
 def _fetch_all(_cached: dict | None) -> dict:
     # ``fetched_at`` is the skeleton's to stamp, on its own clock.
-    return {"schema": CACHE_SCHEMA, "rows": _parse_rows(_request())}
+    rows, dropped = _parse_rows(_request())
+    return {"schema": CACHE_SCHEMA, "rows": rows, "dropped": dropped}
 
 
 class _Snapshot(NamedTuple):
     reports: list[Report]
+    # Report dates of rows the parse could not read, newest first ("?" for a
+    # row whose date could not be read either).
+    dropped: list[str]
     fetched_at: str
     stale: bool
+
+
+def publication_date(report_date: date) -> date:
+    """The first Saturday after ``report_date``: the derived publication date."""
+    return report_date + timedelta(days=(PUBLICATION_WEEKDAY - report_date.weekday()) % 7 or 7)
 
 
 def _to_report(row: dict) -> Report:
     report_date = date.fromisoformat(row["report_date"])
     return Report(
         report_date=report_date,
-        published=report_date + timedelta(days=PUBLICATION_LAG_DAYS),
+        published=publication_date(report_date),
         open_interest=row["oi"],
         categories=tuple(
             Category(name, *row["cats"][name][:2], row["cats"][name][2])
@@ -355,7 +408,9 @@ def _load_snapshot() -> _Snapshot:
         log=logger,
         vendor=VENDOR,
     )
-    return _Snapshot([_to_report(r) for r in payload["rows"]], fetched_at, stale)
+    return _Snapshot(
+        [_to_report(r) for r in payload["rows"]], payload["dropped"], fetched_at, stale
+    )
 
 
 def _humanize_age(fetched_at: str) -> str:
@@ -387,6 +442,43 @@ def _as_of(reports: list[Report], curr_day: date) -> list[Report]:
     return [r for r in reports if r.published <= curr_day]
 
 
+def _scale_line(published: list[Report]) -> str:
+    """What size of change is ordinary, and where each headline net sits in its year.
+
+    Measured from the reports the analysis date could see, over the trailing
+    ``SCALE_REPORTS`` of them: the median and upper-quartile absolute change
+    in net between consecutive reports, and the range of net as a share of
+    open interest. Without it a model reads "+1,538" with only its priors to
+    say whether that is large — over the year to 2026-09-15 the leveraged-fund
+    median was about 660 contracts, so it was.
+    """
+    window = published[: SCALE_REPORTS + 1]
+    if len(window) < MIN_SCALE_REPORTS + 1:
+        return (
+            f"_Scale: withheld — only {len(window)} published reports are in the trailing "
+            f"window, fewer than the {MIN_SCALE_REPORTS + 1} a scale needs._"
+        )
+    parts = []
+    for name in HEADLINE_CATEGORIES:
+        nets = [r.category(name).net for r in window]
+        changes = sorted(abs(a - b) for a, b in zip(nets, nets[1:], strict=False))
+        shares = sorted(
+            r.category(name).net / r.open_interest * 100 for r in window if r.open_interest > 0
+        )
+        median = changes[len(changes) // 2]
+        upper = changes[(len(changes) * 3) // 4]
+        span = f"{shares[0]:+.1f}% to {shares[-1]:+.1f}%" if shares else "n/a"
+        parts.append(
+            f"{name.lower()}: a weekly change under about {median:,d} contracts is ordinary and "
+            f"under {upper:,d} unremarkable, and net has ranged {span} of OI"
+        )
+    return (
+        f"_Scale, over the {len(window) - 1} report-to-report changes before this one — "
+        + "; ".join(parts)
+        + "._"
+    )
+
+
 def get_futures_positioning(asset: str, curr_date: str) -> str:
     """Fetch CFTC COT positioning in CME Bitcoin futures as a markdown report.
 
@@ -395,24 +487,29 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
             no-signal sentence: the report covers one contract, and another
             asset's positioning is not a proxy of it.
         curr_date: The analysis date (yyyy-mm-dd). The report served is the
-            newest one whose derived publication date is on or before it —
-            the report date plus ``PUBLICATION_LAG_DAYS`` — so a mid-week
-            date sees the previous week's report, as a reader on that day
-            did. An unusable date is refused with the shared
-            ``INVALID_CURR_DATE`` sentinel.
+            newest one whose derived publication date — the first Saturday
+            after its report date — is on or before it, so a mid-week date
+            sees the previous week's report, as a reader on that day did. An
+            unusable date is refused with the shared ``INVALID_CURR_DATE``
+            sentinel.
 
     Returns:
         A markdown report: report and publication dates, open interest, each
         category's long, short, spreading and net with its share of open
-        interest and the change over one week and over ``TREND_WEEKS``
-        weeks, and a closing line on the three institutional categories.
-        Withheld, with no figures, when no report had been published by
-        ``curr_date`` or the newest one is more than ``MAX_STALENESS_DAYS``
-        old.
+        interest and the change against the previous published report and
+        against the one ``TREND_REPORTS`` back (each column labelled with the
+        comparison report's date), the scale of ordinary weekly changes and
+        the trailing-year range of each headline net, and a closing line on
+        the three institutional categories. Withheld, with no figures, when
+        no report had been published by ``curr_date`` or the newest one is
+        more than ``MAX_STALENESS_DAYS`` old.
 
     Raises:
         CftcError and its subclasses: a throttle, an outage, a moved dataset
-        or an unreadable answer, typed for the router.
+        or an unreadable answer, typed for the router. ``WiringGapError``
+        from the shared cache-directory guard when this deployment's
+        ``data_cache_dir`` is misconfigured: a project bug, not a vendor
+        failure, and it leaves as one.
     """
     refusal = date_refusal(curr_date, what="futures positioning", kind="point")
     if refusal is not None:
@@ -442,7 +539,7 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
         )
     current = published[0]
     prior = published[1] if len(published) > 1 else None
-    trend_base = published[TREND_WEEKS] if len(published) > TREND_WEEKS else None
+    trend_base = published[TREND_REPORTS] if len(published) > TREND_REPORTS else None
     stale_days = (curr_day - current.published).days
     if stale_days > MAX_STALENESS_DAYS:
         return _withheld(
@@ -453,14 +550,32 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
             f"{current.published.isoformat()}), {stale_days} days earlier; more than "
             f"{MAX_STALENESS_DAYS} days is not a description of the present.",
         )
+    # Rows the parse dropped that a reader on curr_date would have seen: the
+    # newest of them, if it is newer than the report served, is the one that
+    # makes this report older than the CFTC's — said, since nothing else
+    # would (the lag line needs two missed weeks to fire).
+    missed_newer = [
+        d
+        for d in snapshot.dropped
+        if d != "?"
+        and d > current.report_date.isoformat()
+        and publication_date(date.fromisoformat(d)) <= curr_day
+    ]
 
     lines = [
         f"## CFTC Commitments of Traders — CME Bitcoin futures ({coin})",
-        f"- Report as of {current.report_date.isoformat()} (Tuesday close), published about "
-        f"{current.published.isoformat()} (derived: report date + {PUBLICATION_LAG_DAYS} days) "
+        f"- Report as of {current.report_date.isoformat()} "
+        f"({current.report_date.strftime('%A')} close), published about "
+        f"{current.published.isoformat()} (derived: the first Saturday after the report date) "
         f"| analysis date {curr_date} | {CONTRACT_UNITS} standard contract only, code "
         f"{CONTRACT_CODE}; the Micro contract is a separate series and is not included",
     ]
+    if missed_newer:
+        lines.append(
+            f"_A newer report, as of {missed_newer[0]}, is in the CFTC's series but could not "
+            f"be read (a malformed row), so the report below is older than the newest the CFTC "
+            f"has published._"
+        )
     lag = data_lag_note(
         current.published.isoformat(), curr_date, MAX_DATA_LAG_DAYS, "published COT report"
     )
@@ -472,7 +587,7 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
                 snapshot.fetched_at,
                 "The series itself changes only weekly, so a stale cache is usually the same "
                 "series; the risk is a missed publication.",
-                causes="network error, a rate limit, or a moved dataset",
+                causes="network error, a rate limit, a moved dataset, or a change in its shape",
                 humanize=_humanize_age,
             )
         )
@@ -480,13 +595,23 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     oi_change = (
         ""
         if prior is None
-        else f" ({_signed(current.open_interest - prior.open_interest)} on the week)"
+        else (
+            f" ({_signed(current.open_interest - prior.open_interest)} since the "
+            f"{prior.report_date.isoformat()} report)"
+        )
     )
     lines.append(f"**Open interest:** {current.open_interest:,d} contracts{oi_change}")
     lines.append("")
+    week_head = (
+        "Δ net vs previous report" if prior is None else f"Δ net vs {prior.report_date.isoformat()}"
+    )
+    trend_head = (
+        f"Δ net vs {TREND_REPORTS} reports back"
+        if trend_base is None
+        else f"Δ net vs {trend_base.report_date.isoformat()}"
+    )
     lines.append(
-        f"| Category | Long | Short | Spreading | Net | Net % of OI | 1-week Δ net "
-        f"| {TREND_WEEKS}-week Δ net |"
+        f"| Category | Long | Short | Spreading | Net | Net % of OI | {week_head} | {trend_head} |"
     )
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for cat in current.categories:
@@ -502,29 +627,33 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     lines.append("")
     if prior is None:
         lines.append("_No earlier published report in the series, so the change columns are n/a._")
+    elif (current.report_date - prior.report_date).days != 7:
+        lines.append(
+            f"_The previous published report is {(current.report_date - prior.report_date).days} "
+            f"days before this one, not a week: a report is missing from the series between "
+            f"them, so the first change column spans more than one week._"
+        )
     if trend_base is None:
         lines.append(
-            f"_Fewer than {TREND_WEEKS + 1} published reports in the series, so the "
-            f"{TREND_WEEKS}-week column is n/a._"
+            f"_Fewer than {TREND_REPORTS + 1} published reports in the series, so the second "
+            f"change column is n/a._"
         )
+    lines.append(_scale_line(published))
 
     lines.append(
-        "_Method: positions are contracts held at Tuesday's close as reported to the CFTC; "
-        "net is long minus short, and spreading (offsetting long and short in different "
-        "months) is shown but not in net. Dealers are usually the sell side facilitating "
-        "client demand, asset managers the long-only institutions, leveraged funds the "
-        "hedge funds and CTAs whose short leg is often the futures side of a cash-and-carry "
-        "trade against spot or ETF holdings — a large leveraged-fund short is not by itself "
-        "a bearish view. The publication date is derived and can be later than shown around "
-        "a US holiday._"
+        f"_Method: positions are contracts held at the report date's close as reported to the "
+        f"CFTC; net is long minus short, and spreading (offsetting long and short in different "
+        f"months) is shown but not in net. {CARRY_NOTE}. The publication date is derived and "
+        f"can be later than shown when a US holiday delays the release._"
     )
+    since = "" if prior is None else f" since {prior.report_date.isoformat()}"
     headline = "; ".join(
         f"{name.lower()} net {_signed(current.category(name).net)} "
         f"({_pct(current.category(name).net, current.open_interest)} of OI"
         + (
             ""
             if prior is None
-            else f", {_signed(current.category(name).net - prior.category(name).net)} on the week"
+            else f", {_signed(current.category(name).net - prior.category(name).net)}{since}"
         )
         + ")"
         for name in HEADLINE_CATEGORIES
@@ -533,7 +662,7 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
         f"_Reading: CME Bitcoin futures as of {current.report_date.isoformat()}, "
         f"{current.open_interest:,d} contracts of open interest — {headline}. Positioning is "
         f"a slow-moving, weekly, institution-side input: read the direction of the changes "
-        f"and the net levels against open interest, and never a single week's move as a "
-        f"standalone directional signal._"
+        f"and the net levels against open interest and against their own trailing year, and "
+        f"never a single week's move as a standalone directional signal._"
     )
     return "\n".join(lines) + "\n"

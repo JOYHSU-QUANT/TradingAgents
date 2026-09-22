@@ -16,30 +16,59 @@ Breaking changes within the 0.x line are called out explicitly.
   `cftc`, BTC only). The Traders in Financial Futures report for the CME
   Bitcoin future from the CFTC's public Socrata API: open interest and each
   trader category's long, short, spreading and net positions with the net's
-  share of open interest and its change over one and four weeks. A row in the
-  news analyst's `OPTIONAL_NEWS_TOOLS` table, so the ToolNode registers it
-  from the same row; nothing under `contrib/` is touched.
+  share of open interest and its change against the previous published report
+  and the one four reports back — each column labelled with the date of the
+  report it compares against, because "1-week" over a gap in the series would
+  be a lie the label told on its own (the CFTC has not skipped a week in 441
+  rows; a row this module could not read would leave one, and the report then
+  says the gap's length). A row in the news analyst's `OPTIONAL_NEWS_TOOLS`
+  table, so the ToolNode registers it from the same row; nothing under
+  `contrib/` is touched.
 
   **The publication date is the as-of.** A report is as of Tuesday's close
   and published on Friday; the one served is the newest whose derived
-  publication date (report date + `PUBLICATION_LAG_DAYS`, 4) is on or before
-  `curr_date`. A mid-week date therefore sees the previous week's report, as
-  a reader on that day did — filtering on the report date would leak the
-  future into every Wednesday-to-Friday backtest. The lag includes a day of
-  margin in the safe direction (a derived date later than the truth withholds
-  a report for a day; an earlier one serves the future), and the report
-  prints both dates and calls the publication date derived.
+  publication date — the first Saturday after its report date — is on or
+  before `curr_date`. A mid-week date therefore sees the previous week's
+  report, as a reader on that day did; filtering on the report date would
+  leak the future into every Wednesday-to-Friday backtest. Saturday, not
+  Friday, because the release is Friday evening in UTC and `curr_date` has no
+  hour: Friday's cycles are withheld the report rather than five of six being
+  served it early. Anchored to the weekday rather than to "report date + 4":
+  in a holiday week the report is as of Monday, and +4 from a Monday is the
+  Friday the fourth day exists to avoid. A release delayed past Saturday (a
+  holiday Friday; the weeks-late batch releases after the late-2025 US
+  shutdown) is still served early in a backtest of that window — the dataset
+  carries no release-date column to do better with — and the report's
+  "derived" label is the disclosure. The report prints both dates and the
+  report date's actual weekday.
+
+  **A scale, from the series it holds.** Over the trailing 52 reports the
+  analysis date could see, the median and upper-quartile absolute weekly
+  change in each headline category's net, and the range of its net as a share
+  of open interest — measured on 2026-09-21, the leveraged-fund median was
+  about 660 contracts, so the fixture's "+1,538" is large, and its −30.6% of
+  OI was the least short of the year, which a model reading the raw figure
+  could not know. Withheld below 14 reports.
 
   One contract (the 5-BTC standard, code 133741; the Micro is a separate
-  series), five categories, and a Method line saying what they usually are —
-  a large leveraged-fund short is often the futures leg of a cash-and-carry
-  trade, not a view. Cached through the family's rolling snapshot
+  series), five categories, and one interpretive sentence, `CARRY_NOTE`, read
+  by the Method line and the news analyst's hint alike: a large leveraged-fund
+  short is usually the futures leg of a cash-and-carry trade — the carry the
+  futures basis pays — not a view. Supported by the series (net short in 52 of
+  the last 52 reports). The first draft also called dealers "usually the sell
+  side"; they were net LONG in all 52, so that sentence is gone. Both
+  analysts' instructions cross-reference the other's report as the other side
+  of this one market. Cached through the family's rolling snapshot
   (`sosovalue_common.load_rolling_snapshot`) on the family's clock — the
   module's own `_utc_now` delegates to it, so the cache's age and the decision
   to serve it are one clock (#279's farside split, avoided). A fetch that
   fails serves the cache for up to 21 days with the STALE caveat and never
   writes; no report published by `curr_date`, or a newest one more than 21
-  days old, is withheld with no figures. A 404 on the dataset says the
+  days old, is withheld with no figures. A row missing any position column,
+  spreading included, is dropped — never zeroed — and its report date is
+  logged; when a dropped row is newer than the report served, the report says
+  a newer report exists that could not be read, since nothing else would (the
+  lag line needs two missed weeks). A 404 on the dataset says the
   Socrata id has probably moved; a 429 is the rate-limit type; a 5xx, an
   unreachable host and a non-JSON body are the outage type; everything else
   the vendor answers is the module type.

@@ -320,19 +320,25 @@ def get_futures_positioning(
     report for the CME Bitcoin future: open interest and, for each trader
     category — dealers, asset managers, leveraged funds, other reportables,
     non-reportables — the long, short and spreading positions, the net, its
-    share of open interest, and the change over one week and four weeks.
-    The report is weekly, as of Tuesday's close, and published on Friday; the
-    one served is the newest whose derived publication date (report date plus
-    4 days) is on or before curr_date, so a mid-week date sees the previous
-    week's report, as a reader on that day did. The publication date is
-    derived and can be later than shown around a US holiday. Only the 5-BTC
-    standard contract is read; the Micro contract is a separate series. A
-    leveraged-fund short is often the futures leg of a cash-and-carry trade
-    against spot or ETF holdings, not a bearish view, and the report says so.
-    The whole report is withheld, with no figures, when no report had been
-    published by curr_date or the newest one is more than 21 days old. A
-    slow-moving, institution-side positioning input, not a standalone
-    directional signal. Uses the configured futures_positioning vendor.
+    share of open interest, and the change against the previous published
+    report and against the one four reports back, each change column
+    labelled with the date of the report it compares against. The report is
+    weekly, as of Tuesday's close (a Monday in a holiday week), and published
+    on Friday; the one served is the newest whose derived publication date —
+    the first Saturday after its report date — is on or before curr_date, so
+    a mid-week date sees the previous week's report, as a reader on that day
+    did. The publication date is derived and can be later than shown when a
+    US holiday delays the release. Only the 5-BTC standard contract is read;
+    the Micro contract is a separate series. A Scale line says what size of
+    weekly change is ordinary for each headline category and where its net
+    has ranged over the trailing year, computed from the series itself. A
+    leveraged-fund short is usually the futures leg of a cash-and-carry trade
+    against spot or ETF holdings — the carry the futures basis pays — not a
+    bearish view, and the report says so. The whole report is withheld, with
+    no figures, when no report had been published by curr_date or the newest
+    one is more than 21 days old. A slow-moving, institution-side positioning
+    input, not a standalone directional signal. Uses the configured
+    futures_positioning vendor.
 
     Args:
         asset (str): 'BTC'

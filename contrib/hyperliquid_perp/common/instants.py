@@ -22,16 +22,18 @@ hours must refuse at import rather than render truncated, because "5h" over a
 :func:`gap_label` renders the OTHER operator-facing span: not a bound stated
 in a message, but the measured distance between two venue stamps — how stale a
 feed is, how far a handoff document sits from the bar it is read against. It
-lives beside :func:`whole_hours_label` for the same reason, and it is shared
-because the two modules that render such a gap AS A BARE FIGURE
-(``domains.perp.macro_trend``'s daily-feed refusals,
-``domains.perp.research_signal``'s two age refusals) are siblings by design
-and had two different answers to it — a fixed ``%.1fh``, which prints a real
-gap as ``0.0h``, and the unit-picking rule below, which does not (issue #284).
+lives beside :func:`whole_hours_label` for the same reason. Its callers are
+``domains.perp.macro_trend``'s daily-feed refusals and
+``domains.perp.research_signal``'s two age refusals — siblings by design,
+which had nonetheless arrived at two different answers to the one question: a
+fixed ``%.1fh``, which prints a real gap as ``0.0h``, and the unit-picking
+rule below, which does not (issue #284).
 
-Those two are not the whole census of durations printed in this package, and
-the other two sites are named here so that the next reader does not have to
-re-derive that they were considered:
+Two OTHER renderings are named below because they were weighed against this
+one and left where they are. That is all this list is. It is not a survey of
+every duration the package prints — several modules render a span in a shape
+of their own, and nothing here has counted them, so a sweep for a rendering
+defect starts from a grep, not from this paragraph:
 
 - ``domains.perp.freshness``'s ``_format_duration_ms`` prints a compound
   ``14h 12m 30s`` and is deliberately NOT converged onto this: its sentences
@@ -170,8 +172,8 @@ def gap_label(ms: int) -> str:
 
     The ladder stops at hours on purpose, with no day tier, and NOT because
     the figures stay small: a ``1d`` research document is a supported shape,
-    so its ordinary first refusal — one skipped producer run — already
-    renders ``48.0h``. It stops there because the module that does print days
+    and the first age its bound refuses already renders ``48.0h``. It stops
+    there because the module that does print days
     (``freshness._format_duration_ms``, above) opens that band at 48h for a
     reason of its own, and two ladders in one package disagreeing about where
     a day begins is worse than one of them counting hours past 24. ``48.0h``

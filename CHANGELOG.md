@@ -10,9 +10,8 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **One rendering of a BARE measured gap, shared by the two refusal paths that
-  print one** (`contrib/hyperliquid_perp/common/instants.py`, issue #284
-  item 1).
+- **A shared rendering for a measured gap**
+  (`contrib/hyperliquid_perp/common/instants.py`, issue #284 item 1).
   `_gap` — the rule that renders a duration in the LARGEST unit whose figure
   reaches 1.0, so a real gap never prints as `0.0h` and a figure is never
   promoted into a unit it has not reached — moves out of
@@ -34,8 +33,9 @@ Breaking changes within the 0.x line are called out explicitly.
   filter keyed on the old wording needs updating. The boundary table that pins
   the unit rule moves with the helper to `tests/common/test_instants.py`.
 
-  Two other sites in the package print a duration and are named in the
-  helper's docstring so the next reader knows they were weighed.
+  Two other renderings are named in the helper's docstring because they were
+  weighed against it and left alone — not as a survey of what the package
+  prints.
   `domains/perp/freshness.py` keeps its own compound `14h 12m 30s` renderer on
   purpose — it prints an age and the limit it is read against in one shape,
   which answers a related question rather than restating this one.

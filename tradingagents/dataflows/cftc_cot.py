@@ -443,7 +443,7 @@ def _as_of(reports: list[Report], curr_day: date) -> list[Report]:
 
 
 def _gap_note(
-    current: Report, other: Report | None, places: int, column: str, dropped: list[str]
+    current: Report, other: Report | None, places: int, column: str, unreadable: list[str]
 ) -> str:
     """Why a change column spans more than its ``places`` weeks, or nothing.
 
@@ -458,9 +458,7 @@ def _gap_note(
     span = (current.report_date - other.report_date).days
     expected = 7 * places
     between = [
-        d
-        for d in dropped
-        if d != "?" and other.report_date.isoformat() < d < current.report_date.isoformat()
+        d for d in unreadable if other.report_date.isoformat() < d < current.report_date.isoformat()
     ]
     if between:
         return (
@@ -589,11 +587,14 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     # newest of them, if it is newer than the report served, is the one that
     # makes this report older than the CFTC's — said, since nothing else
     # would (the lag line needs two missed weeks to fire).
+    # A dropped date the series still holds a good row for (a malformed
+    # duplicate) is not an unreadable report: that week was read.
+    kept = {r.report_date.isoformat() for r in snapshot.reports}
+    unreadable = [d for d in snapshot.dropped if d != "?" and d not in kept]
     missed_newer = [
         d
-        for d in snapshot.dropped
-        if d != "?"
-        and d > current.report_date.isoformat()
+        for d in unreadable
+        if d > current.report_date.isoformat()
         and publication_date(date.fromisoformat(d)) <= curr_day
     ]
 
@@ -663,7 +664,7 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     if prior is None:
         lines.append("_No earlier published report in the series, so the change columns are n/a._")
     for other, places, column in ((prior, 1, "first"), (trend_base, TREND_REPORTS, "second")):
-        note = _gap_note(current, other, places, column, snapshot.dropped)
+        note = _gap_note(current, other, places, column, unreadable)
         if note:
             lines.append(note)
     if trend_base is None:

@@ -43,8 +43,9 @@ Breaking changes within the 0.x line are called out explicitly.
   "derived" label is the disclosure. The report prints both dates and the
   report date's actual weekday.
 
-  **A scale, from the series it holds.** Over the 52 reports before the one
-  served (its own change is the thing being judged), the median and
+  **A scale, from the series it holds.** Over the 52 changes between the 53
+  reports before the one served (its own change is the thing being judged),
+  the median and
   upper-quartile absolute weekly
   change in each headline category's net, and the range of its net as a share
   of open interest — measured on 2026-09-21, the leveraged-fund median was

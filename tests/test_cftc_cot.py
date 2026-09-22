@@ -318,6 +318,7 @@ class TestCache:
             (lambda p: p["rows"][0]["cats"].__setitem__("Dealer", [1, 2]), "malformed report"),
             (lambda p: p["rows"][0]["cats"].__setitem__("Dealer", ["x", 2, 3]), "malformed report"),
             (lambda p: p.__setitem__("dropped", "2026-09-15"), "'dropped' is missing"),
+            (lambda p: p.__setitem__("dropped", [5]), "'dropped' is missing"),
         ],
     )
     def test_a_bad_cache_is_rejected_with_its_reason(
@@ -512,6 +513,37 @@ class TestReport:
         # On a date that could not have seen the dropped report either, no notice.
         assert "A newer report" not in cftc_cot.get_futures_positioning("BTC", "2026-09-17")
 
+    def test_two_unreadable_reports_are_named_newest_first(self, monkeypatch, clock, cache):
+        # 09-15 and 09-08 both dropped: the served report is 09-01, the
+        # notice names the NEWEST unreadable one, and the first change column
+        # (09-01 vs 08-25) has nothing between its ends to name.
+        body = [
+            dict(ROWS[0], asset_mgr_positions_short=""),
+            dict(ROWS[1], asset_mgr_positions_short=""),
+        ] + ROWS[2:]
+        out = _report(monkeypatch, body=body)
+        assert "- Report as of 2026-09-01 (Tuesday close)" in out
+        assert "_A newer report, as of 2026-09-15, is in the CFTC's series" in out
+        assert "2026-09-08, is in the CFTC's series" not in out
+        assert "change column spans" not in out
+
+    def test_a_span_two_days_off_is_a_gap(self, monkeypatch, clock, cache):
+        # Nine days between a Wednesday report and the Monday before it: a
+        # holiday moves a report day by one, never two.
+        wednesday = dict(ROWS[0], report_date_as_yyyy_mm_dd="2026-09-16T00:00:00.000")
+        monday = dict(ROWS[1], report_date_as_yyyy_mm_dd="2026-09-07T00:00:00.000")
+        out = _report(monkeypatch, body=[wednesday, monday] + ROWS[2:])
+        assert "_The first change column spans 9 days, not 7: a report is missing" in out
+
+    def test_a_dropped_duplicate_of_a_kept_report_is_not_a_gap(self, monkeypatch, clock, cache):
+        # A malformed copy of 09-08 beside a good one: the date is in the
+        # dropped list AND at the column's own end, and only a date strictly
+        # between the two ends is a gap.
+        body = [ROWS[0], dict(ROWS[1], asset_mgr_positions_short=""), ROWS[1]] + ROWS[2:]
+        out = _report(monkeypatch, body=body)
+        assert "- Report as of 2026-09-15" in out and "| Δ net vs 2026-09-08 |" in out
+        assert "change column spans" not in out and "A newer report" not in out
+
     def test_the_method_line_carries_the_shared_carry_note(self, monkeypatch, clock, cache):
         method = _report(monkeypatch).split("_Method:")[1].split("_Reading:")[0]
         assert f"{cftc_cot.CARRY_NOTE}." in method
@@ -522,7 +554,7 @@ class TestReport:
     def test_the_scale_is_measured_from_the_reports_the_date_could_see(
         self, monkeypatch, clock, cache
     ):
-        # Fourteen weekly reports with a known leveraged-fund net path: the
+        # Fifteen weekly reports with a known leveraged-fund net path: the
         # window is the 13 changes, whose median and upper quartile are
         # computed by hand below; the range is of net as a share of OI.
         from datetime import date, timedelta
@@ -540,7 +572,9 @@ class TestReport:
             row = dict(ROWS[0], report_date_as_yyyy_mm_dd=f"{day.isoformat()}T00:00:00.000")
             row["lev_money_positions_long"] = "1000"
             row["lev_money_positions_short"] = str(1000 - net)
-            row["open_interest_all"] = "10000"
+            # One report inside the window with no open interest: its share
+            # is left out of the range rather than divided by zero.
+            row["open_interest_all"] = "0" if i == 5 else "10000"
             rows.append(row)
         out = _report(monkeypatch, body=rows)
         scale = out.split("_Scale, over the 13 changes between the 14 reports before this one — ")[

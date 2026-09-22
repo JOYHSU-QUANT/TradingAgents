@@ -794,6 +794,7 @@ class TestProseFollowsTheConstants:
         assert "when either of the two readings has no annualized figure" in text
         assert "when Yahoo served too little to build a reading" in text
         assert "when the report says it is not a live reading" in text
+        assert "Yahoo can simply be late with a bar" in text  # the second cause, not only the weekend
 
     def test_the_scale_note_states_the_constants(self):
         assert (

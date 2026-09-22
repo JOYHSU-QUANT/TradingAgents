@@ -46,9 +46,11 @@ Breaking changes within the 0.x line are called out explicitly.
   last Friday of the month (it can be a day late around an exchange holiday;
   the report calls the figure approximate). The annualized figure is withheld
   within 5 days of expiry — the quotient blows up, Yahoo rolls the continuous
-  symbol on an unannounced day of that week, and the fixed offset between
-  Yahoo's aggregate spot and the contract's reference rate (about +0.05% to
-  +0.1%) is multiplied by 365/days — and for the first hours after a roll,
+  symbol on an unannounced day of that week, and the small level offset
+  between Yahoo's aggregate spot and the contract's reference rate is
+  magnified there (measured by bucket, the annualized median is flat from 8 to
+  28 days out, about a point high at 5 to 7 days and three points high at 3
+  to 4) — and for the first hours after a roll,
   while the window still holds the old contract's hours. The withholding is
   said in the figure's own line, in the change line, and in the closing
   `_Reading:_` sentence a downstream summary keeps.
@@ -62,9 +64,10 @@ Breaking changes within the 0.x line are called out explicitly.
   Hours after `curr_date` are never read (the bound is the midnight ending it,
   or the clock); the whole report is withheld with no figures for a date more
   than a day ahead of the UTC clock or more than 709 days behind it — a
-  reading asks for 21 days of the 729 days of hourly history Yahoo serves, the
-  21 being the 7-day lookback, the 5 days a window may span and the 7 days the
-  newest hour may itself trail by.
+  reading asks for 21 days of the 729 days of hourly history Yahoo serves: the
+  7-day lookback, the 5 days a window may span and the 7 days the newest hour
+  may itself trail by make 19, and two more cover a holiday weekend's closed
+  days ahead of the earlier window.
 
   **Too little data is a notice, not the no-data sentinel.** Fewer than 12
   synchronous hours, or a newest one more than 7 days old, returns the same

@@ -109,8 +109,9 @@ MAX_STALENESS_DAYS = 7
 # date — NOT from the newest hour, which is only known after the fetch and may
 # itself trail by ``MAX_STALENESS_DAYS``. The earlier reading then ends
 # ``LOOKBACK_DAYS`` before that and reaches ``MAX_WINDOW_SPAN_DAYS`` further.
-# The three add up to 19; at 14, a feed a week behind reported "no earlier
-# reading" for a reading that existed and had simply not been asked for.
+# The three add up to 19, and two more days cover a holiday weekend's closed
+# days ahead of the earlier window. At 14, a feed a week behind reported "no
+# earlier reading" for a reading that existed and had simply not been asked for.
 FETCH_WINDOW_DAYS = 21
 
 # The oldest analysis date served. A past date's fetch starts
@@ -128,13 +129,17 @@ MAX_DATE_AGE_DAYS = HOURLY_HISTORY_DAYS - FETCH_WINDOW_DAYS + 1
 # Five days withholds the whole of expiry week, Monday to Friday.
 #
 # It also bounds a second distortion. Yahoo's spot is an aggregate, not the
-# reference rate the contract settles to, and a regression of the daily basis
-# on days to expiry over 610 days (2026-09-21) puts a fixed offset of about
-# +0.05% to +0.1% under a carry of about 5.9% a year. Annualizing multiplies
-# that offset by 365 / days, so the figure drifts up into expiry: its median
-# was 6.4% to 6.6% in every bucket from 8 to 28 days out, 7.4% at 5 to 7 days,
-# and 9.2% at 3 to 4. At 5 the drift is under a point against an interquartile
-# range of five, so the bound stays where expiry week ends.
+# reference rate the contract settles to, so the nominal basis carries a
+# small level offset that annualizing magnifies as expiry nears. Measured by
+# bucket over 610 days (2026-09-21), the annualized median was 6.4% to 6.6%
+# everywhere from 8 to 28 days out, 7.4% at 5 to 7 days and 9.2% at 3 to 4
+# — flat until the last week, then about a point high, then three. (A linear
+# regression of the same series puts a fixed term of +0.05% to +0.1% under a
+# carry of about 5.9% a year, but 365/days of that term would already add
+# three points at 8 days out, and the buckets show no such thing: the fit is
+# not the mechanism, the buckets are the measurement.) At 5 the drift is about
+# a point against an interquartile range of five, so the bound stays where
+# expiry week ends.
 MIN_DAYS_TO_EXPIRY = 5
 
 # Simple, not compounded: nominal basis x this / days to expiry.

@@ -143,8 +143,8 @@ def load_research_signal(
     if age_ms > max_age_ms:
         # This sentence names a bound, so it prints the EXCESS as a second
         # figure; that rule is argued on :func:`.gap_label`. What is local
-        # here is WHICH of the two faults it fixed were reachable at this
-        # project's cadence (issue #284). The bound-contradiction was: the
+        # here is WHICH of the two faults this change fixed were reachable at
+        # this project's cadence (issue #284). The bound-contradiction was: the
         # first refusable age is ``2 x interval + 1``, which at 4h rendered
         # "decided 8.0h ... past the 2 x 4h bound". The vanishing scale was
         # not — the old ``%.1fh`` could only collapse to "0.0h" for a 1m

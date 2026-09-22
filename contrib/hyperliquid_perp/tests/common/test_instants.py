@@ -89,8 +89,10 @@ def test_a_gap_is_rendered_in_the_largest_unit_that_reaches_one(ms, expected):
 
 
 def test_a_value_this_helper_has_no_unit_for_is_rendered_rather_than_refused():
-    # The one contract in this module that is deliberately NOT enforced by a
-    # raise, pinned here so a later consistency pass cannot quietly add one.
+    # A precondition this module deliberately does NOT enforce by a raise
+    # (`seconds_span` and `delta_ms` leave one stated each, but theirs are
+    # merely unreachable; this one would also be unsafe to raise on), pinned
+    # here so a later consistency pass cannot quietly add the guard.
     # Every call site is an argument to a WARNING on a path that is already
     # refusing something, and those refusals cost a prompt SECTION — an
     # exception escaping there would cost the whole decision cycle instead.

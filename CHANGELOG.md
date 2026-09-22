@@ -33,9 +33,9 @@ Breaking changes within the 0.x line are called out explicitly.
   filter keyed on the old wording needs updating. The boundary table that pins
   the unit rule moves with the helper to `tests/common/test_instants.py`.
 
-  Two other renderings are named in the helper's docstring because they were
-  weighed against it and left alone — not as a survey of what the package
-  prints.
+  Two other renderings are named in `instants.py`'s MODULE docstring because
+  they were weighed against it and left alone — not as a survey of what the
+  package prints.
   `domains/perp/freshness.py` keeps its own compound `14h 12m 30s` renderer on
   purpose — it prints an age and the limit it is read against in one shape,
   which answers a related question rather than restating this one.
@@ -47,16 +47,20 @@ Breaking changes within the 0.x line are called out explicitly.
   Issue #284's item 2 — the macro `Basis:` line being long — is deliberately
   NOT acted on, and the umbrella issue is closed with this entry as its
   record. Re-measured while closing it, because the issue's own figures were
-  not: the line is 948 literal characters, against 292 for the volume
+  not: the line is 948 characters of literal source (927 once its three
+  placeholders render at this run's `4h`/`200`), against 292 for the volume
   profile's and 586 for the research signal's, so it is about 3.2 times the
-  first rather than the "1,050 characters, four times" the issue states. It
-  is still longer than the four rows it qualifies, and every one of its seven
+  first — not the "1,050 characters, four times" the issue states, on either
+  reading. It is still longer than the four rows it qualifies, and each of its
+  seven
   sentences has a reason (six disclosures plus one on weighting), so this is
   a question of whether the caveats earn their length and not a defect —
   which is a question for after run 6 has shown how the model actually uses
   the section, not one to answer by feel now. (Not every sentence is pinned
-  by a test, which is what one would want before shortening any of them;
-  that gap is recorded as test debt in the follow-up issue rather than
+  by a test, which is what one would want before shortening any of them:
+  deleting either of two — the "lagging measure by construction" disclosure
+  and the one dating the figures to the newest closed daily bar — leaves the
+  whole suite green. That is recorded as test debt in #290 §3 rather than
   closed here.)
 
 - **`futures_basis` and `futures_positioning` cut over on 2026-09-22**

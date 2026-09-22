@@ -166,13 +166,11 @@ def load_research_signal(
         )
         return None
     if -age_ms >= candle_interval_ms:
-        # One figure here, not two: this sentence names no bound to be read
-        # against — it says no closed bar of the same market can sit ahead at
-        # all — so there is nothing for a figure equal to the bound to
-        # contradict. The scale is still the helper's, on the same terms as
-        # above: a 1m run's first refusable lead printed "0.0h AFTER" under
-        # the old fixed unit, which is no gap in the one sentence whose point
-        # is that there is one.
+        # ONE figure here: this sentence names no bound — it says no closed
+        # bar of the same market can sit ahead at all — so it is the other
+        # side of the pairing rule on :func:`.gap_label`. The scale is still
+        # the helper's, on the same terms as above: a 1m run's first
+        # refusable lead printed "0.0h AFTER" under the old fixed unit.
         logger.warning(
             "research signal at %s is stamped %s AFTER this context's own bar, which no "
             "closed bar of the same market can be, so the prompt omits the section — check the "

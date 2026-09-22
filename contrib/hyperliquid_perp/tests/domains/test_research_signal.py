@@ -332,6 +332,15 @@ def test_the_stale_refusal_states_a_gap_that_cannot_read_as_no_gap(tmp_path, cap
     assert "decided 2.0 min before" in caplog.text
     assert f"own bar, 1 ms past the {MAX_SIGNAL_AGE_INTERVALS} x 1m bound" in caplog.text
 
+    # A second, much later age, because the boundary case alone cannot say
+    # the excess TRACKS how far past the bound this is: at ``bound + 1`` the
+    # figure is 1 ms whether it is computed or hard-coded, and a constant
+    # there passes the assertion above. Ninety seconds past pins both that it
+    # is derived and that it picks its own unit independently of the age's.
+    assert _load(path, caplog, as_of_ms=_AS_OF_MS + bound + 90_000) is None
+    assert "decided 3.5 min before" in caplog.text
+    assert f"own bar, 1.5 min past the {MAX_SIGNAL_AGE_INTERVALS} x 1m bound" in caplog.text
+
 
 def test_the_from_ahead_refusal_states_a_gap_that_cannot_read_as_no_gap(tmp_path, caplog):
     # The mirror, at the finest interval a RUN can have — the future bound is

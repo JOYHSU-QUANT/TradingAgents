@@ -176,11 +176,11 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
     if age_ms > MAX_DAILY_CANDLE_AGE_MS:
         # A readable scale, not raw epoch-ms: this repeats every cycle while
         # a feed is down, and an operator should not have to subtract two
-        # 13-digit integers to learn that it is two days stale. Two figures,
-        # because the age alone cannot say the bound was passed when it
-        # rounds to the bound (``24.0h`` against a 24h limit) — the second
-        # is the excess, and it can be milliseconds. The date is printed
-        # for the same readability reason.
+        # 13-digit integers to learn that it is two days stale. The date is
+        # printed for the same reason. TWO figures because this sentence
+        # names its bound — the second is the excess past it, and it can be
+        # milliseconds; why a sentence that names a bound needs that second
+        # figure is stated once, on :func:`.gap_label`.
         logger.warning(
             "the newest daily candle is dated %s and closed %s before this context's "
             "as-of — %s past the %.0fh a healthy daily feed stays within; the daily feed "

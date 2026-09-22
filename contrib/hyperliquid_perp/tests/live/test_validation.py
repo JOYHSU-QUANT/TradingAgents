@@ -2316,8 +2316,10 @@ def test_every_daemon_only_count_says_that_live_smoke_rows_were_excluded(tmp_pat
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=600))
     shortfall = next(s for s in report.shortfalls if "too few to judge" in s)
     assert "kill_switch_refresh_total = 10" in shortfall
-    assert "— a further 4 refresh attempt(s) on record were written during" in shortfall
-    assert "live-smoke" in shortfall  # anchored on the word before the figure (issue #290)
+    # Anchored on the dash before the figure (issue #290); one string, so the
+    # clause stays adjacent to the "live-smoke" it qualifies.
+    note = "— a further 4 refresh attempt(s) on record were written during live-smoke"
+    assert note in shortfall
 
 
 def test_a_passing_runs_summary_still_says_live_smoke_rows_were_excluded(tmp_path):
@@ -2377,8 +2379,10 @@ def test_the_single_instant_branch_also_says_the_suite_rows_were_excluded(tmp_pa
     with db:
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=600))
     shortfall = next(s for s in report.shortfalls if "span no elapsed time" in s)
-    assert "— a further 1 refresh attempt(s) on record were written during" in shortfall
-    assert "live-smoke" in shortfall  # anchored on the word before the figure (issue #290)
+    # Anchored on the dash before the figure (issue #290); one string, so the
+    # clause stays adjacent to the "live-smoke" it qualifies.
+    note = "— a further 1 refresh attempt(s) on record were written during live-smoke"
+    assert note in shortfall
 
 
 def test_the_row_that_carries_exchange_text_is_the_sweeps_and_stays_the_daemons(tmp_path):

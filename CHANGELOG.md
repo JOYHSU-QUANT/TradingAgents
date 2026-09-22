@@ -8,6 +8,29 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The prompt's last-fill age no longer prints `0.0 hours` for a fill under
+  three minutes old** (`contrib/hyperliquid_perp/domains/perp/prompt_context.py`,
+  issue #288). The Position section's `Last fill: ... (N before the as-of time
+  above)` clause rendered the gap between the fill and the context's as-of at
+  a fixed `%.1f` hours, so a fill inside the last three minutes before a 4h
+  close — an SL/TP, or a resting maker order filling just before the bar —
+  read as "0.0 hours before" in the next cycle's prompt: no gap, in a clause
+  whose job is to size one, read by the model, which has nowhere else to
+  recover the number from. It now renders through `common.instants.gap_label`,
+  the unit-picking rule `macro_trend` and `research_signal` already use, so
+  the same fills read "2.0 min before", "59.0 s before", "1 ms before", and a
+  twelve-hour-old fill reads "12.0h before" rather than "12.0 hours before".
+  The "after the as-of time above" side is unchanged, and so is every other
+  line of the section. Because the context's wording moves, `PROMPT_VERSION`
+  moves with it, to `phase2-target-v6`, as RUNBOOK §4 asks for a context or
+  format change of shape OR wording; the format block itself is unchanged,
+  so v6 carries v5's digest, as v4 carried v3's. `ai_inputs.prompt_version`
+  therefore marks the boundary in the data. Whether the deploy that carries
+  it crosses the running paper segment on that key or opens a new run-id is
+  RUNBOOK §4's call at deploy time.
+
 ### Changed
 
 - **A shared rendering for a measured gap**

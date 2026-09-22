@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from ...common.instants import from_epoch_ms
+from ...common.instants import delta_ms, from_epoch_ms, gap_label
 from .schema import (
     MacroAlignment,
     MacroTrend,
@@ -471,15 +471,20 @@ def _position_lines(pos: PositionContext, ctx: PerpMarketContext) -> list[str]:
     if pos.last_fill_at is None:
         lines.append("  Last fill: none recorded for this run")
     else:
-        # Against the context's own as-of (the last closed candle), the same
-        # vintage every other line here is dated to. A fill booked AFTER
-        # that close is possible (an order filled minutes ago against a
-        # candle that closed hours ago) and is said so rather than shown as
-        # a negative age.
-        age_hours = (ctx.as_of - pos.last_fill_at).total_seconds() / 3600
+        # Against the context's own as-of (the last closed candle). A fill
+        # booked AFTER that close is possible (an order filled minutes ago
+        # against a candle that closed hours ago) and is said so rather than
+        # shown as a negative age. The age itself goes through ``gap_label``
+        # — the largest unit whose figure reaches 1.0 — because a fixed
+        # ``%.1f`` hours rendered a fill under three minutes old as "0.0
+        # hours before", and the model reading this line has nowhere else to
+        # recover that number from (issue #288). ``delta_ms`` floors, so a
+        # fill inside the same millisecond as the as-of stays on the
+        # "before" side and prints "0 ms before".
+        age_ms = delta_ms(ctx.as_of, pos.last_fill_at)
         when = (
-            f"{age_hours:.1f} hours before the as-of time above"
-            if age_hours >= 0
+            f"{gap_label(age_ms)} before the as-of time above"
+            if age_ms >= 0
             else "after the as-of time above"
         )
         lines.append(f"  Last fill: {pos.last_fill_at.isoformat()} UTC ({when})")

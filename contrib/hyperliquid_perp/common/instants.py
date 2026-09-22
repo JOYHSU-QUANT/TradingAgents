@@ -23,16 +23,20 @@ hours must refuse at import rather than render truncated, because "5h" over a
 in a message, but the measured distance between two venue stamps — how stale a
 feed is, how far a handoff document sits from the bar it is read against. It
 lives beside :func:`whole_hours_label` for the same reason. Its callers are
-the two age refusals in ``domains.perp.macro_trend`` and the two in
+the two age refusals in ``domains.perp.macro_trend``, the two in
 ``domains.perp.research_signal`` — siblings by design,
 which had nonetheless arrived at two different answers to the one question: a
 fixed ``%.1fh``, which prints a real gap as ``0.0h``, and the unit-picking
-rule below, which does not (issue #284).
+rule below, which does not (issue #284) — and the last-fill line of
+``domains.perp.prompt_context``, which had the same fixed ``%.1f`` hours in
+PROMPT text and so told the model a fill under three minutes old was "0.0
+hours" before the as-of (issue #288; shipped on its own because moving a
+prompt byte is a paper-run segmentation point).
 
-Two OTHER renderings are named below because they were weighed against this
-one and left where they are. That is all this list is. It is not a survey of
-every duration the package prints — several modules render a span in a shape
-of their own, and nothing here has counted them, so a sweep for a rendering
+One OTHER rendering is named below because it was weighed against this one
+and left where it is. That is all this list is. It is not a survey of every
+duration the package prints — several modules render a span in a shape of
+their own, and nothing here has counted them, so a sweep for a rendering
 defect starts from a grep, not from this paragraph:
 
 - ``domains.perp.freshness``'s ``_format_duration_ms`` prints a compound
@@ -42,13 +46,6 @@ defect starts from a grep, not from this paragraph:
   rather than "what single figure do I state a gap as?". Converging them
   would rewrite live freshness refusal text to settle a question it has not
   got.
-- ``domains.perp.prompt_context``'s last-fill line renders exactly the gap
-  this helper is for, with exactly the fixed ``%.1f`` hours this helper
-  replaces — and so prints ``0.0 hours`` for a fill under three minutes old.
-  That is a defect, tracked as issue #288 and NOT fixed here for one reason
-  only: it is prompt text, so changing it moves a prompt byte, which is a
-  segmentation point for a paper run and cannot ride along inside an internal
-  refactor.
 
 :func:`seconds_span` is the ONE convergence of a ``*_seconds`` constructor
 argument onto a span. Four live constructors take one (the backfill lookback,
@@ -180,19 +177,22 @@ def gap_label(ms: int) -> str:
     is legible; ``2d 0h`` beside a ``30h 0m 0s`` from the other renderer is
     not.
 
-    Takes a duration in milliseconds because that is the form both callers
-    hold one in: each subtracts one venue stamp from another — a candle's
-    ``close_time``, a handoff document's ``as_of_ms`` — and those are integer
-    milliseconds the whole way, never a float of seconds.
+    Takes a duration in milliseconds because that is the form the refusal
+    callers hold one in: each subtracts one venue stamp from another — a
+    candle's ``close_time``, a handoff document's ``as_of_ms`` — and those
+    are integer milliseconds the whole way, never a float of seconds. The
+    prompt's last-fill line holds two aware datetimes instead and takes the
+    difference through :func:`delta_ms`, which is the same integer route.
     Negative input is the caller's to flip — the two directions are separate
     sentences with separate causes, so which one is being told is decided
     where the sign is read, not here. That precondition is NOT enforced by a
-    raise, and deliberately: every call site is an argument to a WARNING on a
-    path that is already refusing something, and those refusals cost their
-    caller a prompt SECTION while an exception escaping there would cost the
-    whole decision cycle. A forgotten flip therefore prints a raw millisecond
-    count — ugly, and caught by a test at each live call site — rather than
-    ending a run over a log line.
+    raise, and deliberately: the refusal call sites are arguments to a
+    WARNING on a path that is already costing their caller a prompt SECTION,
+    and the prompt call site is one line of the Position section; an
+    exception escaping from any of them would cost the whole decision cycle.
+    A forgotten flip therefore prints a raw millisecond count — ugly, and
+    caught by a test at each call site — rather than ending a run over one
+    line of text.
     """
     for scale, unit in ((3_600_000, "h"), (60_000, " min"), (1000, " s")):
         value = ms / scale

@@ -155,7 +155,7 @@ prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，
 內容等不等於舊版無所謂；`v4` 已被 2026-08-27 的 `Position:` 段用掉、`v5` 已被 2026-09-01
-的「格式段不印門檻數字」用掉，都不是回滾備用值）。另注意 `decision_format_instructions` 的文字（`domains/perp/target_decision.py`）與這個常數
+的「格式段不印門檻數字」用掉、`v6` 已被 2026-09-22 的「`Last fill:` 行年齡單位」（issue #288）用掉，都不是回滾備用值）。另注意 `decision_format_instructions` 的文字（`domains/perp/target_decision.py`）與這個常數
 （`common/prompt_regime.py`）不在同一個模組，也沒有任何東西讓常數跟著文字動——所以有一個測試把
 版本戳釘在渲染出來的區塊指紋上：改了 prompt 文字卻忘了改戳就會紅。
 

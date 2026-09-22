@@ -55,10 +55,13 @@ __all__ = [
 # block is unchanged (v4's digest is v3's).
 # v5 (2026-09-01): the FORMAT block no longer renders the three gate
 # thresholds as numbers (marginal-cost plan PR-B); the context is unchanged.
+# v6 (2026-09-22): the context's ``Last fill:`` line states the fill's age
+# in the largest unit its figure reaches instead of fixed hours (issue
+# #288); the format block is unchanged (v6's digest is v5's).
 # The text this versions is rendered in ``domains/perp/target_decision``; a
 # test pins this value to that block's digest so an edit there that forgot
 # the bump fails (tests/cli/test_cli.py).
-PROMPT_VERSION = "phase2-target-v5"
+PROMPT_VERSION = "phase2-target-v6"
 
 # The grep handle. ``validate`` has printed it since schema v11 (issue #129,
 # when the third key landed); the daemon log and ``--context-only`` now carry

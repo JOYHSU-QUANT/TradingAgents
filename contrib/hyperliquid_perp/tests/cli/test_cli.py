@@ -311,7 +311,8 @@ def test_request_decision_names_the_cap_when_the_decision_completion_was_cut(mon
     assert len(errors) == 1
     msg = errors[0].getMessage()
     assert "the decision completion was truncated" in msg
-    assert "4096 output tokens against a cap of 4096" in msg
+    # anchored on the word before the figure (issue #290)
+    assert "truncated: 4096 output tokens against a cap of 4096 (model" in msg
     assert "model deep" in msg
     assert "fails closed as truncated_output" in msg
     assert "engine.max_completion_tokens" in msg
@@ -395,7 +396,7 @@ def test_the_verdict_reads_the_last_decision_completion_not_any_truncated_one(mo
         parsed = provider.request_decision(_decision_input())
     assert parsed.invalid_reason == "truncated_output"
     (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert "4096 output tokens against a cap of 4096" in error
+    assert "truncated: 4096 output tokens against a cap of 4096 (model" in error
 
 
 def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, caplog):
@@ -417,7 +418,7 @@ def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, 
         provider.request_decision(_decision_input())
     (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert "the engine run then failed before the answer could be parsed" in error
-    assert "4096 output tokens against a cap of 4096" in error
+    assert "truncated (4096 output tokens against a cap of 4096, model" in error
     assert "the cap bound regardless" in error
     # The api_failed row this becomes says it too: error_message is the
     # RUNBOOK's free-text discriminator for that status, and the log alone
@@ -3685,7 +3686,8 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
     notes = [r for r in caplog.records if "decision cycle for r" in r.getMessage()]
     # Four failures observed, never three in a row: all WARNING, none ERROR.
     assert [r.levelno for r in notes] == [logging.WARNING] * 4
-    assert "1 consecutive" in notes[2].getMessage()  # the one right after the decided cycle
+    # The one right after the decided cycle; anchored on the dash (issue #290).
+    assert "— 1 consecutive" in notes[2].getMessage()
     db.close()
 
 

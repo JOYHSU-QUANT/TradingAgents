@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..common.instants import parse_instant
+from ..common.instants import delta_ms, gap_label, parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 
@@ -32,6 +32,7 @@ __all__ = [
     "RunLockError",
     "acquire_run_lock",
     "heartbeat_run_lock",
+    "lease_age_label",
     "peek_run_lock",
     "release_run_lock",
 ]
@@ -51,14 +52,35 @@ class RunLockError(Exception):
     """Another live process already holds this run's lease."""
 
 
-def _holder(state, now: datetime) -> tuple[int, float] | None:
-    """The (pid, heartbeat age in seconds) of a *fresh* lease, else ``None``."""
+def lease_age_label(heartbeat_at: datetime, *, now: datetime) -> str:
+    """How long ago a lease was heartbeated, as a refusal message states it.
+
+    Shared by this module's refusal and the CLI's migration refusal
+    (``cli._common``), which are one message family and must not drift apart.
+    Rendered through :func:`gap_label` rather than a fixed ``%.0fs``: the
+    holder heartbeats once per loop iteration, so a lease read just after a
+    write is a fraction of a second old, and ``%.0fs`` printed that as
+    "heartbeat 0s ago" (issue #290). A stamp AHEAD of ``now`` — the writer's
+    clock ahead of this host's — is a fresh lease by definition and reads as
+    no age at all, not as a negative one.
+    """
+    return gap_label(max(0, delta_ms(now, heartbeat_at)))
+
+
+# The lease bound as the refusal states it, in the same unit ladder as the age
+# beside it — an age in "ms" against a bound in "900s" would make the operator
+# convert to know how long to wait.
+_STALE_LABEL = gap_label(LOCK_STALE_SECONDS * 1000)
+
+
+def _holder(state, now: datetime) -> tuple[int, datetime] | None:
+    """The (pid, heartbeat instant) of a *fresh* lease, else ``None``."""
     if state is None or state["lock_pid"] is None or state["lock_heartbeat_at"] is None:
         return None
-    age = (now - parse_instant(state["lock_heartbeat_at"])).total_seconds()
-    if age >= LOCK_STALE_SECONDS:
+    heartbeat_at = parse_instant(state["lock_heartbeat_at"])
+    if (now - heartbeat_at).total_seconds() >= LOCK_STALE_SECONDS:
         return None
-    return int(state["lock_pid"]), age
+    return int(state["lock_pid"]), heartbeat_at
 
 
 def _refuse_if_held(state, run_id: str, *, pid: int | None, now: datetime) -> None:
@@ -71,9 +93,9 @@ def _refuse_if_held(state, run_id: str, *, pid: int | None, now: datetime) -> No
     if holder is not None and holder[0] != pid:
         raise RunLockError(
             f"run {run_id!r} is already being driven by pid {holder[0]} "
-            f"(heartbeat {holder[1]:.0f}s ago). Two processes on one run would "
-            "cancel each other's live orders and double the AI spend. If that "
-            f"process is truly gone, retry after {LOCK_STALE_SECONDS}s."
+            f"(heartbeat {lease_age_label(holder[1], now=now)} ago). Two processes "
+            "on one run would cancel each other's live orders and double the AI "
+            f"spend. If that process is truly gone, retry after {_STALE_LABEL}."
         )
 
 

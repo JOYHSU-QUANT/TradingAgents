@@ -2743,10 +2743,11 @@ def test_an_off_coin_position_that_moves_still_dedupes_to_one_row(env, caplog):
             reconciler.run("heartbeat")
     (row,) = _cases(db, "exchange_position_mismatch")
     assert row["exchange_value"] == "ETH|unknown_coin"
-    assert "2.5" in (row["detail"] or "")  # the first sighting's magnitude, in the row
+    # The first sighting's magnitude, in the row (anchored, issue #290).
+    assert "position of 2.5 but" in (row["detail"] or "")
     # ...and the LATER magnitudes, which no row will ever carry, in the log the
     # key change made load-bearing.
-    assert any("3.5" in r.getMessage() for r in caplog.records)
+    assert any("position of 3.5 but" in r.getMessage() for r in caplog.records)
 
 
 def test_two_off_coins_of_equal_size_never_share_a_fact_key(env):
@@ -2781,8 +2782,10 @@ def test_an_unprotected_position_that_moves_still_dedupes_to_one_row(env, caplog
             assert not report.position_protected
     (row,) = _cases(db, "position_sl_missing")
     assert row["exchange_value"] == "BTC|sl_missing"
-    assert "0.001" in (row["detail"] or "")  # the first sighting's magnitude, in the row
-    assert any("0.002" in r.getMessage() for r in caplog.records)  # the later ones, logged
+    # The first sighting's magnitude, in the row (anchored, issue #290).
+    assert "live position of 0.001 has" in (row["detail"] or "")
+    # The later ones, logged (anchored, issue #290).
+    assert any("live position of 0.002 has" in r.getMessage() for r in caplog.records)
 
 
 def test_the_persisted_diff_carries_each_passs_own_magnitude(env):
@@ -2806,8 +2809,8 @@ def test_the_persisted_diff_carries_each_passs_own_magnitude(env):
         ).fetchall()
     ]
     # The fact key is size-free, so 3.5 can only be there via the case detail.
-    assert "2.5" in diffs[0]
-    assert "3.5" in diffs[-1]
+    assert "position of 2.5 but" in diffs[0]  # anchored on the word before the figure (issue #290)
+    assert "position of 3.5 but" in diffs[-1]
 
 
 def test_the_persisted_diff_clips_the_strings_it_does_not_author(env):

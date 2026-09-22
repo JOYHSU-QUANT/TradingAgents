@@ -854,7 +854,7 @@ def test_live_smoke_real_run_refuses_while_a_sibling_run_is_live(tmp_path, capsy
     assert rc == 1
     err = capsys.readouterr().err
     assert "'sibling-run'" in err
-    assert "4321" in err
+    assert "by pid 4321 right now" in err  # anchored on the word before the figure (issue #290)
     assert "ACCOUNT-wide" in err
     # Nothing on the wire: no leverage write, no kill-switch arm, no sweep.
     assert smoke_seams.schedule_calls == []

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
-from .instants import parse_instant
+from .instants import parse_instant, whole_hours
 
 __all__ = [
     "NO_DECISION_STREAK_THRESHOLD",
@@ -172,16 +172,24 @@ def trailing_failure_streaks(conn: sqlite3.Connection, run_id: str) -> TrailingF
     return TrailingFailureStreaks(no_decision, stale_feed, latest_at)
 
 
-def _streak_hours(streak: int) -> int:
-    """``streak`` cycles as an approximate span, at the scheduler's cadence.
+# The wording below multiplies a cycle count into "~Nh", so the cadence has to
+# be whole hours for that product to be exact: the old ``total_seconds() //
+# 3600`` truncated any other cadence, down to "~0h with no decision" for three
+# cycles at anything under 20 minutes (issue #290). Refused at import instead,
+# by the same guard ``domains.perp.freshness`` puts on the same constant.
+_CYCLE_HOURS = whole_hours(CYCLE_INTERVAL, what="common.constants.CYCLE_INTERVAL")
 
-    Reads the module-level ``CYCLE_INTERVAL``, so a cadence change moves this
-    with it. It does NOT track a ``LiveDecisionDriver`` constructed with a
-    non-default ``cycle_interval`` — no production wiring passes one, and the
-    shortfall wording is shared with the live VALIDATOR, which reads a store
-    and has no driver to ask.
+
+def _streak_hours(streak: int) -> int:
+    """``streak`` cycles as a span in hours, at the scheduler's cadence.
+
+    Reads the module-level ``CYCLE_INTERVAL`` (pinned to whole hours above),
+    so a cadence change moves this with it. It does NOT track a
+    ``LiveDecisionDriver`` constructed with a non-default ``cycle_interval``
+    — no production wiring passes one, and the shortfall wording is shared
+    with the live VALIDATOR, which reads a store and has no driver to ask.
     """
-    return int(streak * CYCLE_INTERVAL.total_seconds() // 3600)
+    return streak * _CYCLE_HOURS
 
 
 def note_cycle_outcome(streak: int, status: str, error_type: str | None, *, run_id: str) -> int:

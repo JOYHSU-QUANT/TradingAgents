@@ -299,7 +299,8 @@ def test_volume_profile_states_the_coarse_candle_basis():
     text = render_market_context(_ctx(volume_profile=_profile()))
     basis = next(line for line in text.splitlines() if line.strip().startswith("Basis:"))
     assert "spread evenly" in basis
-    assert "24 price levels" in basis
+    # anchored on the word before the figure (issue #290)
+    assert "bucketed into 24 price levels" in basis
     assert "not tick data" in basis
 
 
@@ -632,7 +633,7 @@ def test_the_held_for_line_gives_a_figure_only_when_the_window_can_date_the_star
     dated = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[3]
     capped = _macro_block(render_market_context(_ctx(macro_trend=_macro_capped())))[3]
 
-    assert "50 daily bars" in dated
+    assert "Held for: 50 daily bars" in dated  # anchored on the word before the figure (issue #290)
     assert "this run began on the bar dated" in dated
     # No digits at all on the capped branch — the window is in the header.
     assert not any(ch.isdigit() for ch in capped), capped
@@ -726,6 +727,18 @@ def test_the_basis_line_closes_by_saying_how_to_weigh_the_section():
     # directive ("treat these levels as approximate reference").
     basis = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[5]
     assert "Treat it as trend context, not as an entry or exit signal." in basis
+
+
+def test_the_basis_line_discloses_its_lag_and_the_vintage_of_its_figures():
+    # The two disclosures that say how far behind this section can be. Neither
+    # was pinned before (deleting either left the suite green — PR #289's exit
+    # check, recorded in issue #290 §3), so a pass at shortening the line would
+    # have taken them first. The vintage clause is pinned at both ends, since
+    # the Mark comparison is the half a shortening would drop.
+    basis = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[5]
+    assert "A lagging measure by construction" in basis
+    assert "The figures date to the newest closed daily bar" in basis
+    assert "the Mark above is a live reading, so the gap to THAT can be larger" in basis
 
 
 def test_the_basis_line_names_the_regime_line_as_an_independent_reading():
@@ -977,7 +990,7 @@ def test_zero_funding_prints_a_zero_holding_cost_not_pays_or_receives():
         )
     )
     holding = next(line for line in block.split("\n") if line.startswith("  Holding cost"))
-    assert "0.0000 USDC (funding rate is zero) per 8h" in holding
+    assert "funding rate: 0.0000 USDC (funding rate is zero) per 8h" in holding
     assert "pays" not in holding
     assert "receives" not in holding
 

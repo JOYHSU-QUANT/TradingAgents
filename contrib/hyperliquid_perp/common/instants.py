@@ -22,16 +22,15 @@ hours must refuse at import rather than render truncated, because "5h" over a
 :func:`gap_label` renders the OTHER operator-facing span: not a bound stated
 in a message, but the measured distance between two venue stamps — how stale a
 feed is, how far a handoff document sits from the bar it is read against. It
-lives beside :func:`whole_hours_label` for the same reason. Its callers are
-the two age refusals in ``domains.perp.macro_trend``, the two in
+lives beside :func:`whole_hours_label` for the same reason. Its first callers
+were the two age refusals in ``domains.perp.macro_trend`` and the two in
 ``domains.perp.research_signal`` — siblings by design,
 which had nonetheless arrived at two different answers to the one question: a
 fixed ``%.1fh``, which prints a real gap as ``0.0h``, and the unit-picking
-rule below, which does not (issue #284) — and the last-fill line of
-``domains.perp.prompt_context``, which had the same fixed ``%.1f`` hours in
-PROMPT text and so told the model a fill under three minutes old was "0.0
-hours" before the as-of (issue #288; shipped on its own because moving a
-prompt byte is a paper-run segmentation point).
+rule below, which does not (issue #284). The callers since (the prompt's
+last-fill line, issue #288; the run-lease refusals and two live-validator
+sentences, issue #290) are found by a grep for the name, not listed here — a
+list of callers goes stale the way the one this paragraph used to carry did.
 
 One OTHER rendering is named below because it was weighed against this one
 and left where it is. That is all this list is. It is not a survey of every
@@ -90,6 +89,7 @@ __all__ = [
     "gap_label",
     "parse_instant",
     "seconds_span",
+    "whole_hours",
     "whole_hours_label",
 ]
 
@@ -112,20 +112,28 @@ def parse_instant(text: str) -> datetime:
     return value
 
 
-def whole_hours_label(span: timedelta, *, what: str) -> str:
-    """``span`` as ``"6h"``; ``ValueError`` naming ``what`` if it is not whole hours.
+def whole_hours(span: timedelta, *, what: str) -> int:
+    """``span`` as a count of hours; ``ValueError`` naming ``what`` if it is not whole hours.
 
     Meant for module-level constants and construction-time bindings, so the
     raise lands at import or at start-up, before the first cycle — a retuned
     window that is no longer whole hours is a change the message rendering it
-    has to be rewritten for, not rounded past.
+    has to be rewritten for, not rounded past. The integer form is for a
+    caller that multiplies the count (``common.no_decision`` turns a cycle
+    count into hours); :func:`whole_hours_label` is the same guard for a
+    caller that prints it.
     """
     if span % _HOUR:
         raise ValueError(
             f"{what} must be a whole number of hours; the operator-facing label "
             f"renders it as hours (got {span})"
         )
-    return f"{span // _HOUR}h"
+    return span // _HOUR
+
+
+def whole_hours_label(span: timedelta, *, what: str) -> str:
+    """``span`` as ``"6h"``, through :func:`whole_hours` and its refusal."""
+    return f"{whole_hours(span, what=what)}h"
 
 
 def gap_label(ms: int) -> str:

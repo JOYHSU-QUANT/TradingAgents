@@ -1144,7 +1144,8 @@ def test_a_gate_blocked_resize_does_not_claim_the_undersized_sl_covers(env):
     ][0]
     assert blocked["order_id"] is None  # an under-covering SL is NOT protection
     assert "NO covering stop-loss" in blocked["detail"]
-    assert "0.1" in blocked["detail"] and "0.2" in blocked["detail"]  # names the shortfall
+    # Names the shortfall; anchored on the side word before the figures (issue #290).
+    assert "(resting sell 0.1 vs 0.2 needed)" in blocked["detail"]
 
 
 def test_a_rate_limited_ladder_holds_instead_of_emergency_closing(env):
@@ -1754,7 +1755,8 @@ def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env
     assert mgr.identity.latched is True
     rows = identity_latch_rows(db, run_id="r")
     assert len(rows) == 1
-    assert f"{K} consecutive" in rows[0]["detail"], rows[0]["detail"]
+    # The count opens the detail, so startswith is the anchor (issue #290).
+    assert rows[0]["detail"].startswith(f"{K} consecutive unreadable"), rows[0]["detail"]
     # The row names the probe's own verdict, so triage does not have to guess
     # which of the two probe sites, or which fault, produced the latch.
     assert "answered with cloid" in rows[0]["detail"], rows[0]["detail"]

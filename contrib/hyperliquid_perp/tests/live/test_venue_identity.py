@@ -121,7 +121,8 @@ def test_the_kth_consecutive_unreadable_answer_latches_and_the_k_minus_first_doe
     (row,) = identity_latch_rows(db, run_id="r")
     assert row["symbol"] == "BTC"
     assert row["cloid_hex"] == _OURS
-    assert f"{K} consecutive" in row["detail"]
+    # The count opens the detail, so startswith is the anchor (issue #290).
+    assert row["detail"].startswith(f"{K} consecutive unreadable")
     # The row names the SITE that crossed the line and the parser's own
     # verdict, so triage does not have to guess which consumer or which fault.
     assert "kill-switch disarm cross-check" in row["detail"]

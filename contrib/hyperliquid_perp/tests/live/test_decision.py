@@ -477,7 +477,8 @@ def test_driver_streak_is_reset_by_a_cycle_that_decided(tmp_path, caplog):
         assert driver.pump() == "api_failed"  # streak 1 again, not 3
     notes = [r for r in caplog.records if "decision cycle for r" in r.getMessage()]
     assert [r.levelno for r in notes] == [logging.WARNING] * 3
-    assert "1 consecutive" in notes[-1].getMessage()
+    # anchored on the word before the figure (issue #290)
+    assert "— 1 consecutive" in notes[-1].getMessage()
     db.close()
 
 

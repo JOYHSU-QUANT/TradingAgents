@@ -122,7 +122,7 @@ TradingAgents/
     └── hyperliquid_perp/
         ├── exchanges/
         ├── domains/
-        ├── common/                      # 跨層共用（enum guard · seam_guard.py 建構期 seam 守衛（callable 與物件兩型） · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label／時距 label gap_label（macro_trend、research_signal 的年齡拒絕與 prompt_context 的 Last fill 行共用；freshness 的複合 `14h 12m 30s` 刻意不收斂）／epoch-ms 換算唯一實作／`*_seconds` 參數收斂 seconds_span · no_decision.py no-decision 升級政策）
+        ├── common/                      # 跨層共用（enum guard · seam_guard.py 建構期 seam 守衛（callable 與物件兩型） · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label／時距 label gap_label（呼叫者橫跨 domains／paper／live／cli，用 grep 找、不列舉；freshness 的複合 `14h 12m 30s` 刻意不收斂）／whole_hours 整點守衛（label 建在它上面）／epoch-ms 換算唯一實作／`*_seconds` 參數收斂 seconds_span · no_decision.py no-decision 升級政策）
         ├── integration/                 # bridge to the unmodified engine
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── persistence/                 # Phase 2 SQLite source of truth

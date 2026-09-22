@@ -651,7 +651,8 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
     is expanded into the attribute chains read off it
     (``paper.accounting.replay_within``), so a symbol reached that way counts
     like one imported by name. A module tail with no read below it — bound
-    but never read, or plainly ``import``ed — stays as the bare tail.
+    but never read, or plainly ``import``ed without an alias — stays as the
+    bare tail.
     """
     tree = ast.parse(source.read_text(encoding="utf-8"))
     found: set[str] = set()
@@ -664,12 +665,13 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
             target = f"{base}.{alias.name}" if base else alias.name
         if not _within(target, pkg):
             continue
-        if from_import and _module_file(target, root) is not None:
-            modules[alias.asname or alias.name] = target
+        bound = alias.asname or (alias.name if from_import else None)
+        if bound is not None and _module_file(target, root) is not None:
+            modules[bound] = target
         else:
             found.add(target)
     for node in ast.walk(tree):
-        read = _module_read(node, modules)
+        read = _module_read(node, modules, root)
         if read is not None:
             found.add(read)
     found.update(modules.values())
@@ -680,15 +682,26 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
     }
 
 
-def _module_read(node: ast.AST, modules: dict[str, str]) -> str | None:
-    """``paper.accounting.x`` for an attribute chain rooted at a name ``modules`` binds, else ``None``."""
+def _module_read(node: ast.AST, modules: dict[str, str], root: Path) -> str | None:
+    """The symbol an attribute chain rooted at a name ``modules`` binds reads, else ``None``.
+
+    The chain is followed only as far as the modules on disk go, plus one
+    segment: ``accounting.AccountMetrics.from_row`` is a read of
+    ``paper.accounting.AccountMetrics``, and ``from_row`` is that class's
+    business.
+    """
     parts: list[str] = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
-    if isinstance(node, ast.Name) and node.id in modules:
-        return ".".join([modules[node.id], *reversed(parts)])
-    return None
+    if not (isinstance(node, ast.Name) and node.id in modules):
+        return None
+    tail = modules[node.id]
+    for part in reversed(parts):
+        tail = f"{tail}.{part}"
+        if _module_file(tail, root) is None:
+            break
+    return tail
 
 
 @pytest.mark.parametrize(
@@ -707,7 +720,7 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
     for pkg in ("paper", "live"):
         (tmp_path / pkg).mkdir()
         (tmp_path / pkg / "__init__.py").write_text("", encoding="utf-8")
-    for module in ("accounting", "twap", "engine"):
+    for module in ("accounting", "twap", "engine", "stops"):
         (tmp_path / "paper" / f"{module}.py").write_text("", encoding="utf-8")
     (tmp_path / "live" / "x.py").write_text(
         "from typing import TYPE_CHECKING\n"
@@ -717,22 +730,26 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
         "from .. import paper, common\n"
         "from ..persistence import db\n"
         "from contrib.hyperliquid_perp.paper.stops import round_to_tick\n"
+        "import contrib.hyperliquid_perp.paper.stops as st\n"
         "import contrib.hyperliquid_perp.paper.market_feed\n"
         "if TYPE_CHECKING:\n"
         "    from ..paper.engine import AssetSpec\n"
         "def f():\n"
         "    from ..paper.position_facts import read_books\n"
         "    paper.engine.FundingSource\n"
+        "    accounting.AccountMetrics.from_row(st.StopConfig)\n"
         "    return accounting.replay_within(accounting.summarize_account(db.x))\n",
         encoding="utf-8",
     )
     assert _symbols_imported_from(tmp_path / "live" / "x.py", "paper", root=tmp_path) == {
         "paper.clock.Clock",
         "paper.clock.WallClock",
+        "paper.accounting.AccountMetrics",  # the chain stops at the first non-module
         "paper.accounting.replay_within",
         "paper.accounting.summarize_account",
         "paper.twap",  # bound, never read
         "paper.stops.round_to_tick",
+        "paper.stops.StopConfig",  # read through an aliased plain import
         "paper.market_feed",
         "paper.engine.AssetSpec",
         "paper.engine.FundingSource",  # read through the package binding

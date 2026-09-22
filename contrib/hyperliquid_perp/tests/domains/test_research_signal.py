@@ -334,9 +334,10 @@ def test_the_stale_refusal_states_a_gap_that_cannot_read_as_no_gap(tmp_path, cap
 
     # A second, much later age, because the boundary case alone cannot say
     # the excess TRACKS how far past the bound this is: at ``bound + 1`` the
-    # figure is 1 ms whether it is computed or hard-coded, and a constant
-    # there passes the assertion above. Ninety seconds past pins both that it
-    # is derived and that it picks its own unit independently of the age's.
+    # figure is 1 ms whether it is computed or hard-coded, so a constant
+    # passes the assertion above. Ninety seconds past pins that it is
+    # derived. (What the 1 ms case pins, and this one cannot, is that the
+    # two figures choose their units apart: there it is "2.0 min ... 1 ms".)
     assert _load(path, caplog, as_of_ms=_AS_OF_MS + bound + 90_000) is None
     assert "decided 3.5 min before" in caplog.text
     assert f"own bar, 1.5 min past the {MAX_SIGNAL_AGE_INTERVALS} x 1m bound" in caplog.text

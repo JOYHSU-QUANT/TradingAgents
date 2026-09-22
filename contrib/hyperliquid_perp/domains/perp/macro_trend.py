@@ -180,7 +180,7 @@ def compute_macro_trend(daily_candles: Sequence[Candle], *, as_of_ms: int) -> Ma
         # printed for the same reason. TWO figures because this sentence
         # names its bound — the second is the excess past it, and it can be
         # milliseconds; why a sentence that names a bound needs that second
-        # figure is stated once, on :func:`.gap_label`.
+        # figure is argued on :func:`.gap_label`.
         logger.warning(
             "the newest daily candle is dated %s and closed %s before this context's "
             "as-of — %s past the %.0fh a healthy daily feed stays within; the daily feed "

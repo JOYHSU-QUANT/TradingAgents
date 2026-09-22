@@ -142,18 +142,14 @@ def load_research_signal(
     max_age_ms = MAX_SIGNAL_AGE_INTERVALS * interval_to_ms(signal.interval)
     if age_ms > max_age_ms:
         # This sentence names a bound, so it prints the EXCESS as a second
-        # figure; the pairing rule and why it exists live on
-        # :func:`.gap_label`, which is where to change them. What is local
-        # here is WHICH of the two faults each figure answers (issue #284).
-        # The excess is live at this project's cadence: the first refusable
-        # age is ``2 x interval + 1``, which at 4h rendered "decided 8.0h
-        # before this context's own bar, past the 2 x 4h bound" — a figure
-        # equal to the bound, in the sentence saying the bound was passed.
-        # The scale is not: the old ``%.1fh`` could only collapse to "0.0h"
-        # for a 1m document (2m + 1ms), since at 5m the first refusable age
-        # already prints 0.2h. It is fixed because the rendering is the
-        # helper's now, not because a 1m research document is a cadence this
-        # project runs.
+        # figure; that rule is argued on :func:`.gap_label`. What is local
+        # here is WHICH of the two faults it fixed were reachable at this
+        # project's cadence (issue #284). The bound-contradiction was: the
+        # first refusable age is ``2 x interval + 1``, which at 4h rendered
+        # "decided 8.0h ... past the 2 x 4h bound". The vanishing scale was
+        # not — the old ``%.1fh`` could only collapse to "0.0h" for a 1m
+        # document (2m + 1 ms), since at 5m the first refusable age already
+        # prints 0.2h.
         logger.warning(
             "research signal at %s was decided %s before this context's own bar, %s past the "
             "%d x %s bound, so the prompt omits the section — re-run the research radar's "

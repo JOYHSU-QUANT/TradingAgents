@@ -23,9 +23,8 @@ hours must refuse at import rather than render truncated, because "5h" over a
 in a message, but the measured distance between two venue stamps — how stale a
 feed is, how far a handoff document sits from the bar it is read against. It
 lives beside :func:`whole_hours_label` for the same reason. Its callers are
-``domains.perp.macro_trend``'s macro-section refusals (one of which blames
-the SHORT series rather than the daily feed) and
-``domains.perp.research_signal``'s two age refusals — siblings by design,
+the two age refusals in ``domains.perp.macro_trend`` and the two in
+``domains.perp.research_signal`` — siblings by design,
 which had nonetheless arrived at two different answers to the one question: a
 fixed ``%.1fh``, which prints a real gap as ``0.0h``, and the unit-picking
 rule below, which does not (issue #284).
@@ -188,15 +187,12 @@ def gap_label(ms: int) -> str:
     Negative input is the caller's to flip — the two directions are separate
     sentences with separate causes, so which one is being told is decided
     where the sign is read, not here. That precondition is NOT enforced by a
-    raise, and deliberately (this module leaves one other stated precondition
-    unenforced — see :func:`seconds_span` on spans of thousands of years, and
-    :func:`delta_ms`, which has no awareness guard at all — but those are
-    unreachable rather than unsafe to raise on, which this one is BOTH): every
-    call site is an argument to a WARNING on a path that is already refusing
-    something, and those refusals cost their caller a prompt SECTION while an
-    exception escaping there would cost the whole decision cycle. A forgotten
-    flip therefore prints a raw millisecond count — ugly, and caught by a test
-    at each live call site — rather than ending a run over a log line.
+    raise, and deliberately: every call site is an argument to a WARNING on a
+    path that is already refusing something, and those refusals cost their
+    caller a prompt SECTION while an exception escaping there would cost the
+    whole decision cycle. A forgotten flip therefore prints a raw millisecond
+    count — ugly, and caught by a test at each live call site — rather than
+    ending a run over a log line.
     """
     for scale, unit in ((3_600_000, "h"), (60_000, " min"), (1000, " s")):
         value = ms / scale

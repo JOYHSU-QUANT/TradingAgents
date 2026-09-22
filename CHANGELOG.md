@@ -49,12 +49,12 @@ Breaking changes within the 0.x line are called out explicitly.
   record. Re-measured while closing it, because the issue's own figures were
   not: the line is 948 characters of literal source (927 once its three
   placeholders render at this run's `4h`/`200`), against 292 for the volume
-  profile's and 586 for the research signal's, so it is about 3.2 times the
-  first — not the "1,050 characters, four times" the issue states, on either
-  reading. It is still longer than the four rows it qualifies, and each of its
-  seven
-  sentences has a reason (six disclosures plus one on weighting), so this is
-  a question of whether the caveats earn their length and not a defect —
+  profile's and 586 for the research signal's, measured the same way, so it
+  is about 3.2 times the first — not the "1,050 characters, four times" the
+  issue states, on either reading. It is still longer than the four rows it
+  qualifies, and each of its seven sentences has a reason (six disclosures
+  plus one on weighting), so this is a question of whether the caveats earn
+  their length and not a defect —
   which is a question for after run 6 has shown how the model actually uses
   the section, not one to answer by feel now. (Not every sentence is pinned
   by a test, which is what one would want before shortening any of them:

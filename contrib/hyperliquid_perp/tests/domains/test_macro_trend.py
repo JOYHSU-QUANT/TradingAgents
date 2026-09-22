@@ -313,8 +313,8 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
     # still satisfy it.
     assert "closed 48.0h before" in caplog.text
     # The EXCESS, at a value far from the bound. The 1 ms case below cannot
-    # tell a computed excess from a hard-coded one; this one can, and it also
-    # shows the two figures picking their units independently.
+    # tell a computed excess from a hard-coded one — at the bound + 1 ms the
+    # right answer IS 1 ms — and this one can.
     assert "as-of — 24.0h past the 24h" in caplog.text
     assert "stopped publishing" in caplog.text
     assert str(as_of) not in caplog.text  # no raw epoch stamps

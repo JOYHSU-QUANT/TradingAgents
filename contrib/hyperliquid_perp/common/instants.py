@@ -181,8 +181,9 @@ def gap_label(ms: int) -> str:
     not.
 
     Takes a duration in milliseconds because that is the form both callers
-    hold one in: every stamp they subtract is a venue stamp, and
-    :func:`delta_ms` / :func:`epoch_ms` keep those exact as integer ms.
+    hold one in: each subtracts one venue stamp from another — a candle's
+    ``close_time``, a handoff document's ``as_of_ms`` — and those are integer
+    milliseconds the whole way, never a float of seconds.
     Negative input is the caller's to flip — the two directions are separate
     sentences with separate causes, so which one is being told is decided
     where the sign is read, not here. Unlike everything else in this module,

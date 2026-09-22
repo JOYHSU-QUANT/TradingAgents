@@ -44,14 +44,20 @@ Breaking changes within the 0.x line are called out explicitly.
   that is a defect, opened as #288 rather than fixed here, because the line is
   PROMPT text and moving a prompt byte is a paper-run segmentation point.
 
-  Issue #284's item 2 — the macro `Basis:` line running about 1,050
-  characters, some four times the volume profile's and longer than the four
-  rows it qualifies — is deliberately NOT acted on, and the umbrella issue is
-  closed with this entry as its record. Every clause there is pinned by a test
-  and has a reason (six disclosures plus one sentence on weighting), so it is
-  not a defect; whether the caveats earn their length is a question for after
-  run 6 has shown how the model actually uses the section, not one to answer
-  by feel now.
+  Issue #284's item 2 — the macro `Basis:` line being long — is deliberately
+  NOT acted on, and the umbrella issue is closed with this entry as its
+  record. Re-measured while closing it, because the issue's own figures were
+  not: the line is 948 literal characters, against 292 for the volume
+  profile's and 586 for the research signal's, so it is about 3.2 times the
+  first rather than the "1,050 characters, four times" the issue states. It
+  is still longer than the four rows it qualifies, and every one of its seven
+  sentences has a reason (six disclosures plus one on weighting), so this is
+  a question of whether the caveats earn their length and not a defect —
+  which is a question for after run 6 has shown how the model actually uses
+  the section, not one to answer by feel now. (Not every sentence is pinned
+  by a test, which is what one would want before shortening any of them;
+  that gap is recorded as test debt in the follow-up issue rather than
+  closed here.)
 
 - **`futures_basis` and `futures_positioning` cut over on 2026-09-22**
   (`tradingagents/default_config.py`): the CME futures basis (#285) flips

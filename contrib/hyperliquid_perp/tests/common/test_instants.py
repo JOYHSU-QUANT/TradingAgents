@@ -81,10 +81,25 @@ def test_whole_hours_label_refuses_a_fractional_hour_naming_the_constant():
 )
 def test_a_gap_is_rendered_in_the_largest_unit_that_reaches_one(ms, expected):
     # Exact strings, not a property. The property this helper exists for
-    # ("never prints as 0.0 of a unit") is satisfied by the SECOND wrong rule
-    # this helper shipped with — the one that selected on the rounded figure
-    # — so asserting the property alone is exactly what let that rule through.
+    # ("never prints as 0.0 of a unit") is satisfied by the second rule this
+    # helper was written with — the one that selected on the rounded figure,
+    # caught in review before it shipped — so asserting the property alone is
+    # exactly what would have let that rule through.
     assert gap_label(ms) == expected
+
+
+def test_a_value_this_helper_has_no_unit_for_is_rendered_rather_than_refused():
+    # The one contract in this module that is deliberately NOT enforced by a
+    # raise, pinned here so a later consistency pass cannot quietly add one.
+    # Every call site is an argument to a WARNING on a path that is already
+    # refusing something, and those refusals cost a prompt SECTION — an
+    # exception escaping there would cost the whole decision cycle instead.
+    # So a caller that forgot to flip its sign gets an ugly millisecond count
+    # in a log line, which a test at each live call site catches, rather than
+    # a dead run.
+    assert gap_label(-1) == "-1 ms"
+    assert gap_label(-3_600_000) == "-3600000 ms"
+    assert gap_label(0) == "0 ms"
 
 
 def test_seconds_span_converges_a_number_of_seconds_onto_a_span():

@@ -671,8 +671,10 @@ def positioning_enabled():
 
 @pytest.mark.unit
 class TestRouting:
-    def test_it_ships_off_until_a_dated_cutover(self):
-        assert DEFAULT_CONFIG["data_vendors"]["futures_positioning"] == interface.DISABLED_VENDOR
+    def test_the_vendor_is_live_since_the_dated_cutover(self):
+        # See test_cme_basis: the 2026-09-22 cutover flipped both categories
+        # in one dated commit, and this pin is what sees a silent flip back.
+        assert DEFAULT_CONFIG["data_vendors"]["futures_positioning"] == "cftc"
 
     def test_the_registration_points_at_this_module(self):
         assert "futures_positioning" in interface.OPTIONAL_CATEGORIES
@@ -745,10 +747,12 @@ def _bound(llm) -> set[str]:
 
 @pytest.mark.unit
 class TestNewsAnalystWiring:
-    def test_the_shipped_default_does_not_bind_it(self):
+    def test_the_shipped_default_binds_it_for_crypto(self):
+        # No fixture on purpose: the one test that sees the default (live
+        # since the 2026-09-22 cutover).
         llm = _run_analyst()
-        assert "get_futures_positioning" not in _bound(llm)
-        assert "get_futures_positioning" not in _prompt(llm)
+        assert "get_futures_positioning" in _bound(llm)
+        assert "get_futures_positioning(asset, curr_date)" in _prompt(llm)
 
     def test_crypto_binds_and_advertises_it_when_enabled(self, positioning_enabled):
         llm = _run_analyst()

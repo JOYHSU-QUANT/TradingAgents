@@ -982,13 +982,18 @@ def test_zero_funding_prints_a_zero_holding_cost_not_pays_or_receives():
     assert "receives" not in holding
 
 
-def test_a_fill_after_the_as_of_is_said_not_shown_as_a_negative_age():
-    later = _AS_OF.replace(hour=5)
+@pytest.mark.parametrize(
+    "after",
+    [timedelta(hours=2), timedelta(milliseconds=1)],
+    ids=["hours-after", "one-ms-after"],
+)
+def test_a_fill_after_the_as_of_is_said_not_shown_as_a_negative_age(after):
+    later = _AS_OF + after
     block = _position_block(
         render_market_context(_ctx(position=_open_position(last_fill_at=later)))
     )
     assert f"Last fill: {later.isoformat()} UTC (after the as-of time above)" in block
-    assert "-" + "1." not in block  # no "-1.9 hours"
+    assert "-" + "1" not in block  # no "-1.9 hours", no "-1 ms"
 
 
 @pytest.mark.parametrize(

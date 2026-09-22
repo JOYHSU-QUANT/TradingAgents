@@ -660,10 +660,13 @@ def basis_enabled():
 
 @pytest.mark.unit
 class TestRouting:
-    def test_it_ships_off_until_a_dated_cutover(self):
-        # The cutover PR inverts this one line; the binding half is
-        # TestMarketAnalystWiring.test_the_shipped_default_does_not_bind_it.
-        assert DEFAULT_CONFIG["data_vendors"]["futures_basis"] == interface.DISABLED_VENDOR
+    def test_the_vendor_is_live_since_the_dated_cutover(self):
+        # Shipped off so that merging could not change the running paper
+        # deployment's analyst input surface unannounced; the 2026-09-22
+        # cutover is that announced change. Kept pointing this way for the
+        # reason the ship-off pin existed: every other test FORCES the value,
+        # so nothing else would see a silent flip back.
+        assert DEFAULT_CONFIG["data_vendors"]["futures_basis"] == "yfinance"
 
     def test_the_registration_points_at_this_module(self):
         assert "futures_basis" in interface.OPTIONAL_CATEGORIES
@@ -734,11 +737,12 @@ def _bound(llm) -> set[str]:
 
 @pytest.mark.unit
 class TestMarketAnalystWiring:
-    def test_the_shipped_default_does_not_bind_it(self):
-        # No fixture on purpose: this is the one test that sees the default.
+    def test_the_shipped_default_binds_it_for_crypto(self):
+        # No fixture on purpose: this is the one test that sees the default
+        # (live since the 2026-09-22 cutover).
         llm = _run_analyst()
-        assert "get_futures_basis" not in _bound(llm)
-        assert "get_futures_basis" not in _prompt(llm)
+        assert "get_futures_basis" in _bound(llm)
+        assert "get_futures_basis(asset, curr_date)" in _prompt(llm)
 
     def test_crypto_binds_it_when_enabled(self, basis_enabled):
         llm = _run_analyst()
@@ -767,12 +771,15 @@ class TestMarketAnalystWiring:
         assert "get_options_market" not in _prompt(llm)
 
     def test_enabling_it_leaves_the_options_paragraph_as_it_was(self):
-        before = _prompt(_run_analyst())
-        with _basis_vendor("yfinance"):
-            after = _prompt(_run_analyst())
+        # Since the 2026-09-22 cutover the default is on, so the comparison
+        # runs the other way: switched off, the prompt is the on-prompt less
+        # exactly this tool's paragraph and its name in the tool list.
+        with _basis_vendor("none"):
+            without = _prompt(_run_analyst())
+        with_it = _prompt(_run_analyst())
         added = market_analyst_module._futures_basis_message()
-        assert added in after
-        assert after.replace(added, "").replace(", get_futures_basis", "") == before
+        assert added in with_it
+        assert with_it.replace(added, "").replace(", get_futures_basis", "") == without
 
     def test_the_gate_names_the_tool_as_well_as_the_category(self):
         # The second argument is the whole tool_vendors disable lane.

@@ -8,6 +8,26 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+
+- **`futures_basis` and `futures_positioning` cut over on 2026-09-22**
+  (`tradingagents/default_config.py`): the CME futures basis (#285) flips
+  from `"none"` to `"yfinance"` and the CFTC positioning report (#286) from
+  `"none"` to `"cftc"`, in one dated commit, as `options_data` (2026-08-12),
+  the two SoSoValue categories (2026-09-02) and their own ship-off notes
+  asked for. One flip rather than two because the two tools describe one
+  market — the price side and the holder side of the CME Bitcoin future —
+  and each analyst's instructions refer to the other's report, so they enter
+  the analyst input surface together. The perp engine's config overlay
+  carries a fixed key list and does not pipe `data_vendors` through, so this
+  default IS the paper deployment's live value: the first deploy carrying
+  this commit is the dated input-surface segmentation point for that run,
+  and switching either category back off is a code change. Nothing else
+  changes: the getters, the analyst wiring and the report text are as #285
+  and #286 merged them, and the ship-off pins in their tests now point the
+  other way (`SHIPPED_OFF_CATEGORIES` shrinks to `whale_positioning`, which
+  still awaits its own flip).
+
 ### Added
 
 - **CFTC Commitments of Traders positioning as a crypto news-analyst tool, off

@@ -1466,7 +1466,7 @@ def test_both_fundamentals_vendors_end_a_library_bug_the_same_way(vendor):
 # Declared rather than derived. "Exempt whatever is currently off" would make
 # the lock below pass VACUOUSLY for a category someone switched off by
 # accident, which is the accident it exists for.
-SHIPPED_OFF_CATEGORIES = {"whale_positioning", "futures_basis", "futures_positioning"}
+SHIPPED_OFF_CATEGORIES = {"whale_positioning"}
 
 
 def _shipped_off_categories():

@@ -529,10 +529,12 @@ method is two
 uncached Yahoo requests per call, through the same throttle latch as every
 other yfinance leaf.
 
-It **ships disabled**, for the reason above:
+Shipped disabled for the reason above and **cut over to `"yfinance"` on
+2026-09-22**, in the same dated flip as the CFTC positioning tool below. To
+switch it back off:
 
 ```python
-config["data_vendors"]["futures_basis"] = "yfinance"  # the dated cutover
+config["data_vendors"]["futures_basis"] = "none"
 ```
 
 A fifth news-analyst source is the **CFTC Commitments of Traders report on CME
@@ -574,10 +576,13 @@ published by `curr_date`, or a newest one more than 21 days old, is withheld
 with no figures. A 404 on the dataset is reported as the Socrata id having
 moved rather than as an outage.
 
-It **ships disabled**, for the same reason:
+Shipped disabled for the same reason and **cut over to `"cftc"` on
+2026-09-22**, together with the futures basis: the two are one market's price
+side and holder side, so they entered the analyst input surface as one dated
+segmentation point. To switch it back off:
 
 ```python
-config["data_vendors"]["futures_positioning"] = "cftc"  # the dated cutover
+config["data_vendors"]["futures_positioning"] = "none"
 ```
 
 Any data category can be switched off by setting its vendor to `"none"`:

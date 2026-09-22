@@ -342,17 +342,19 @@ DEFAULT_CONFIG = _apply_env_overrides({
         # is what a later paper review attributes a behaviour change to. Per
         # the note above, this default IS the perp deployment's live value.
         "whale_positioning": "none",         # Options: hyperliquid_stats (keyless), none
-        # CME Bitcoin front-month futures basis over spot, from hourly Yahoo
-        # bars the yfinance layer already reaches. Keyless, so it ships OFF
-        # for whale_positioning's reason above: the dated flip to "yfinance"
-        # is the server-side action a later paper review attributes a
-        # behaviour change to, and this default IS the perp deployment's
-        # live value.
-        "futures_basis": "none",             # Options: yfinance (keyless, BTC only), none
-        # CFTC Commitments of Traders positioning in CME Bitcoin futures, by
-        # trader category, from the CFTC's public Socrata API. Keyless, so
-        # it ships OFF for the same reason as the two above.
-        "futures_positioning": "none",       # Options: cftc (keyless, BTC only), none
+        # CME Bitcoin front-month futures basis over spot (hourly Yahoo bars
+        # through the yfinance layer) and CFTC Commitments of Traders
+        # positioning in the same future (the CFTC's public Socrata API).
+        # Both keyless, both shipped OFF for whale_positioning's reason above,
+        # and both cut over on 2026-09-22 in one dated flip — the two are one
+        # market's price side and holder side, and their instructions refer
+        # to each other, so they enter the analyst input surface together.
+        # Per the note above this default IS the perp deployment's live
+        # value: the first deploy carrying this commit is the dated
+        # input-surface segmentation point, and switching either back off is
+        # a code change, not a YAML edit.
+        "futures_basis": "yfinance",         # Options: yfinance (keyless, BTC only), none
+        "futures_positioning": "cftc",       # Options: cftc (keyless, BTC only), none
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

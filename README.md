@@ -535,6 +535,39 @@ It **ships disabled**, for the reason above:
 config["data_vendors"]["futures_basis"] = "yfinance"  # the dated cutover
 ```
 
+A fifth news-analyst source is the **CFTC Commitments of Traders report on CME
+Bitcoin futures** (`futures_positioning`, vendor `cftc`, keyless, BTC only):
+open interest and, for each trader category — dealers, asset managers,
+leveraged funds, other reportables, non-reportables — the long, short and
+spreading positions, the net, its share of open interest, and the change over
+one week and four weeks, read from the CFTC's public Socrata API. It is the
+institution-side positioning read: who holds the regulated future, where the
+Hyperliquid leaderboard says who holds the venue's perp and the basis says what
+the future pays over spot.
+
+**As-of is the publication date, not the report date.** Each report is as of
+Tuesday's close and published Friday afternoon, so a run on a Wednesday serves
+the previous week's report — the new one exists as a fact about Tuesday but
+nobody could have read it yet, and filtering on the report date would leak
+three days of the future into every mid-week backtest. The module derives the
+publication date (report date + 4 days: Friday's release hour plus a day of
+holiday margin, in the safe direction) and prints both dates. Only the 5-BTC
+standard contract (code 133741) is read; the Micro contract is a separate
+series and the report says so. The report also says what the categories
+usually are — a large leveraged-fund short is often the futures leg of a
+cash-and-carry trade against spot or ETF holdings, not a bearish view. The
+whole series is a few hundred rows, cached daily through the family's rolling
+snapshot (stale serves up to 21 days, failed fetches never written); no report
+published by `curr_date`, or a newest one more than 21 days old, is withheld
+with no figures. A 404 on the dataset is reported as the Socrata id having
+moved rather than as an outage.
+
+It **ships disabled**, for the same reason:
+
+```python
+config["data_vendors"]["futures_positioning"] = "cftc"  # the dated cutover
+```
+
 Any data category can be switched off by setting its vendor to `"none"`:
 
 ```python

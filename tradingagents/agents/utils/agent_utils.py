@@ -14,6 +14,7 @@ from tradingagents.agents.utils.crypto_data_tools import (
     get_etf_flows,
     get_fear_greed,
     get_futures_basis,
+    get_futures_positioning,
     get_options_market,
     get_whale_positions,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "get_btc_treasuries",
     "get_whale_positions",
     "get_futures_basis",
+    "get_futures_positioning",
     "get_verified_market_snapshot",
     "build_instrument_context",
     "resolve_instrument_identity",

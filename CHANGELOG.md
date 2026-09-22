@@ -10,6 +10,43 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **CFTC Commitments of Traders positioning as a crypto news-analyst tool, off
+  by default** (`tradingagents/dataflows/cftc_cot.py`, routed tool
+  `get_futures_positioning`, optional category `futures_positioning`, vendor
+  `cftc`, BTC only). The Traders in Financial Futures report for the CME
+  Bitcoin future from the CFTC's public Socrata API: open interest and each
+  trader category's long, short, spreading and net positions with the net's
+  share of open interest and its change over one and four weeks. A row in the
+  news analyst's `OPTIONAL_NEWS_TOOLS` table, so the ToolNode registers it
+  from the same row; nothing under `contrib/` is touched.
+
+  **The publication date is the as-of.** A report is as of Tuesday's close
+  and published on Friday; the one served is the newest whose derived
+  publication date (report date + `PUBLICATION_LAG_DAYS`, 4) is on or before
+  `curr_date`. A mid-week date therefore sees the previous week's report, as
+  a reader on that day did — filtering on the report date would leak the
+  future into every Wednesday-to-Friday backtest. The lag includes a day of
+  margin in the safe direction (a derived date later than the truth withholds
+  a report for a day; an earlier one serves the future), and the report
+  prints both dates and calls the publication date derived.
+
+  One contract (the 5-BTC standard, code 133741; the Micro is a separate
+  series), five categories, and a Method line saying what they usually are —
+  a large leveraged-fund short is often the futures leg of a cash-and-carry
+  trade, not a view. Cached through the family's rolling snapshot
+  (`sosovalue_common.load_rolling_snapshot`) on the family's clock — the
+  module's own `_utc_now` delegates to it, so the cache's age and the decision
+  to serve it are one clock (#279's farside split, avoided). A fetch that
+  fails serves the cache for up to 21 days with the STALE caveat and never
+  writes; no report published by `curr_date`, or a newest one more than 21
+  days old, is withheld with no figures. A 404 on the dataset says the
+  Socrata id has probably moved; a 429 is the rate-limit type; a 5xx, an
+  unreachable host and a non-JSON body are the outage type; everything else
+  the vendor answers is the module type.
+
+  **Ships disabled** (`data_vendors["futures_positioning"] = "none"`), as
+  `futures_basis` and `whale_positioning` did.
+
 - **CME Bitcoin futures basis as a crypto market-analyst tool, off by default**
   (`tradingagents/dataflows/cme_basis.py`, routed tool `get_futures_basis`,
   optional category `futures_basis`, vendor `yfinance`, BTC only). What the

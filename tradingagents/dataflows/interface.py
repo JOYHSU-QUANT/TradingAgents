@@ -13,6 +13,7 @@ from .alpha_vantage import (
     get_news as get_alpha_vantage_news,
     get_stock as get_alpha_vantage_stock,
 )
+from .cftc_cot import get_futures_positioning as get_cftc_futures_positioning
 from .cme_basis import get_futures_basis as get_yfinance_futures_basis
 from .config import get_config
 from .deribit import get_options_market_data as get_deribit_options_market
@@ -129,6 +130,12 @@ TOOLS_CATEGORIES = {
             "get_futures_basis",
         ],
     },
+    "futures_positioning": {
+        "description": "CFTC Commitments of Traders positioning in CME Bitcoin futures by trader category (crypto)",
+        "tools": [
+            "get_futures_positioning",
+        ],
+    },
 }
 
 # Configuring a category (or tool) to this sentinel switches it off entirely.
@@ -155,6 +162,7 @@ VENDOR_LIST = [
     "alternative_me",
     "deribit",
     "hyperliquid_stats",
+    "cftc",
 ]
 
 # Optional enrichment categories. These add macro/event/positioning context to
@@ -173,6 +181,7 @@ OPTIONAL_CATEGORIES = {
     "btc_treasuries",
     "whale_positioning",
     "futures_basis",
+    "futures_positioning",
 }
 
 # Categories whose vendor's own library failing is never rendered as the
@@ -299,6 +308,10 @@ VENDOR_METHODS = {
     "get_futures_basis": {
         "yfinance": get_yfinance_futures_basis,
     },
+    # futures_positioning
+    "get_futures_positioning": {
+        "cftc": get_cftc_futures_positioning,
+    },
 }
 
 
@@ -337,6 +350,7 @@ _LIBRARY_SUBJECTS = {
     "get_btc_treasuries": "BTC treasuries for {0}",
     "get_whale_positions": "whale positioning for {0}",
     "get_futures_basis": "futures basis for {0}",
+    "get_futures_positioning": "futures positioning for {0}",
 }
 
 

@@ -7,6 +7,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_economic_calendar,
     get_etf_flows,
     get_fear_greed,
+    get_futures_positioning,
     get_global_news,
     get_instrument_context_from_state,
     get_language_instruction,
@@ -145,6 +146,20 @@ OPTIONAL_NEWS_TOOLS = (
             "held elsewhere, so treat it as venue-level positioning of large "
             "accounts rather than crowd sentiment, and never as a standalone "
             "directional signal"
+        ),
+    ),
+    _OptionalNewsTool(
+        tool=get_futures_positioning,
+        category="futures_positioning",
+        scope="crypto",
+        hint=(
+            "get_futures_positioning(asset, curr_date) for the CFTC Commitments of "
+            "Traders report on CME Bitcoin futures — each trader category's long, "
+            "short and net positions against open interest with the one-week and "
+            "four-week changes; it is weekly and as of the Tuesday before the "
+            "publication the analysis date could have seen, a leveraged-fund short "
+            "is often the futures leg of a cash-and-carry trade rather than a view, "
+            "and it is BTC only (another asset gets a no-signal note)"
         ),
     ),
 )

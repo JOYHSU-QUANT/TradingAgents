@@ -652,8 +652,9 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
     is expanded into the attribute chains read off it
     (``paper.accounting.replay_within``), so a symbol reached that way counts
     like one imported by name. A module bound but never read stays as its
-    bare tail, and a plain ``import`` without an alias always does — its
-    reads are spelled through ``contrib``, which no binding here tracks.
+    bare tail unless a sibling statement reads deeper into it; a plain
+    ``import`` without an alias always stays — its reads are spelled through
+    ``contrib``, which no binding here tracks.
     """
     tree = ast.parse(source.read_text(encoding="utf-8"))
     found: set[str] = set()

@@ -32,4 +32,4 @@ def test_a_cadence_that_is_not_whole_hours_is_refused_at_import():
     )
     assert result.returncode != 0
     assert "CYCLE_INTERVAL must be a whole number of hours" in result.stderr
-    assert "0:30:00" in result.stderr  # names the offending value
+    assert "(got 0:30:00)" in result.stderr  # names the offending value (issue #290 anchor)

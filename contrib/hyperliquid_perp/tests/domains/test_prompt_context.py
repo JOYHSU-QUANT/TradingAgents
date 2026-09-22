@@ -299,7 +299,8 @@ def test_volume_profile_states_the_coarse_candle_basis():
     text = render_market_context(_ctx(volume_profile=_profile()))
     basis = next(line for line in text.splitlines() if line.strip().startswith("Basis:"))
     assert "spread evenly" in basis
-    assert "24 price levels" in basis
+    # anchored on the word before the figure (issue #290)
+    assert "bucketed into 24 price levels" in basis
     assert "not tick data" in basis
 
 
@@ -632,7 +633,7 @@ def test_the_held_for_line_gives_a_figure_only_when_the_window_can_date_the_star
     dated = _macro_block(render_market_context(_ctx(macro_trend=_macro())))[3]
     capped = _macro_block(render_market_context(_ctx(macro_trend=_macro_capped())))[3]
 
-    assert "50 daily bars" in dated
+    assert "Held for: 50 daily bars" in dated  # anchored on the word before the figure (issue #290)
     assert "this run began on the bar dated" in dated
     # No digits at all on the capped branch — the window is in the header.
     assert not any(ch.isdigit() for ch in capped), capped
@@ -989,7 +990,7 @@ def test_zero_funding_prints_a_zero_holding_cost_not_pays_or_receives():
         )
     )
     holding = next(line for line in block.split("\n") if line.startswith("  Holding cost"))
-    assert "0.0000 USDC (funding rate is zero) per 8h" in holding
+    assert "funding rate: 0.0000 USDC (funding rate is zero) per 8h" in holding
     assert "pays" not in holding
     assert "receives" not in holding
 

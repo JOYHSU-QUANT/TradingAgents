@@ -836,7 +836,7 @@ def test_no_decision_streak_counts_the_l2book_outage_the_stale_one_cannot(tmp_pa
     assert len(report.shortfalls) == 1
     # ...and it says what it can rather than blaming a feed it has no evidence
     # about.
-    assert "0 refused as stale market data, 3 other failures" in report.shortfalls[0]
+    assert "— 0 refused as stale market data, 3 other failures" in report.shortfalls[0]
     assert "all refused as stale" not in report.shortfalls[0]
     db.close()
 

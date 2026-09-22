@@ -82,7 +82,8 @@ def test_resolve_coin_warns_when_multiple_configured(capsys):
     coin = bridge_mod._resolve_coin(None, {"coins": ["btc", "eth", "sol"]})
     assert coin == "BTC"
     err = capsys.readouterr().err
-    assert "3 coins configured" in err
+    # anchored on the word before the figure (issue #290)
+    assert "warning: 3 coins configured" in err
     assert "ETH" in err and "SOL" in err
 
 
@@ -1437,8 +1438,8 @@ def test_context_refusal_flags_a_stalled_candle_feed():
     # Named numbers, not a bare "stale": an operator must be able to tell a
     # 14h-old feed from a 3-day-old one without reading the code.
     assert "2026-08-16T22:00:00Z" in msg
-    assert "14h 0m 0s" in msg
-    assert "12h 0m 0s freshness limit (3 x 4h)" in msg
+    assert ", 14h 0m 0s before now" in msg  # anchored on the word before the figure (issue #290)
+    assert "past the 12h 0m 0s freshness limit (3 x 4h)" in msg
     # Both causes named, neither asserted: a host clock running AHEAD lands
     # here (the exchange has no future candles to truncate, so the age really
     # does read large) and is indistinguishable from a feed that stopped —
@@ -1597,7 +1598,7 @@ def test_context_refusal_still_refuses_a_daily_feed_that_stopped(exchange_time, 
 
     msg = verdict(timedelta(days=3))
     assert msg is not None
-    assert "28h 0m 0s freshness limit" in msg
+    assert "past the 28h 0m 0s freshness limit" in msg
     assert "one 1d bar plus one 4h decision cycle" in msg
     assert "cap would sit below a single healthy bar" in msg
     # The grace is the whole cycle, not just "one bar": 27h passes. (Without
@@ -1688,8 +1689,9 @@ def test_refusal_age_carries_seconds_past_the_limit(exchange_time, host_skew):
     )
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert f"12h 0m 30s {_BEFORE[exchange_time]}" in msg
-    assert "12h 0m 0s freshness limit" in msg
+    # anchored on the word before the figure (issue #290)
+    assert f", 12h 0m 30s {_BEFORE[exchange_time]}" in msg
+    assert "past the 12h 0m 0s freshness limit" in msg
 
 
 @_BOTH_CLOCKS
@@ -1700,7 +1702,7 @@ def test_refusal_age_reads_in_days_once_it_is_long(exchange_time, host_skew):
         _NOW - timedelta(days=5, hours=3), exchange_time=exchange_time, host_skew=host_skew
     )
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
-    assert msg is not None and f"5d 3h {_BEFORE[exchange_time]}" in msg
+    assert msg is not None and f", 5d 3h {_BEFORE[exchange_time]}" in msg
 
 
 @_BOTH_CLOCKS
@@ -1712,7 +1714,7 @@ def test_refusal_age_stays_in_hours_for_an_overnight_outage(exchange_time, host_
         _NOW - timedelta(hours=30), exchange_time=exchange_time, host_skew=host_skew
     )
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
-    assert msg is not None and f"30h 0m 0s {_BEFORE[exchange_time]}" in msg
+    assert msg is not None and f", 30h 0m 0s {_BEFORE[exchange_time]}" in msg
 
 
 def test_context_refusal_future_bound_is_exclusive_on_the_host_clock():
@@ -1731,7 +1733,9 @@ def test_context_refusal_future_bound_is_exclusive_on_the_host_clock():
     daily = _ctx_closing_at(_NOW + timedelta(hours=28), interval="1d")
     assert guards_mod.context_refusal_message(daily, "BTC", {}, now=_NOW) is None
     daily = _ctx_closing_at(_NOW + timedelta(hours=28, seconds=1), interval="1d")
-    assert "28h 0m 1s AFTER" in guards_mod.context_refusal_message(daily, "BTC", {}, now=_NOW)
+    msg = guards_mod.context_refusal_message(daily, "BTC", {}, now=_NOW)
+    # anchored on the word before the figure (issue #290)
+    assert msg is not None and "which is 28h 0m 1s AFTER" in msg
 
 
 def test_context_refusal_candle_lead_bound_is_exclusive_on_the_exchange_clock():
@@ -1761,8 +1765,8 @@ def test_context_refusal_flags_a_clock_that_jumped():
     assert msg is not None
     assert "jumped between the two readings" in msg
     assert "did not come from a live market fetch" in msg
-    assert "13h 0m 0s AFTER" in msg
-    assert "12h 0m 0s tolerance (3 x 4h)" in msg
+    assert "which is 13h 0m 0s AFTER" in msg  # anchored on the word before the figure (issue #290)
+    assert "more than the 12h 0m 0s tolerance (3 x 4h)" in msg
     # No direction claimed: the daemon reads its clock BEFORE the fetch and the
     # one-shot callers AFTER it, so the same branch means a forward jump on one
     # path and a backward jump on the other. Naming either would be wrong half
@@ -1833,7 +1837,8 @@ def test_freshness_guard_passes_a_host_behind_because_the_window_is_cut_at_the_e
         assert guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW) is None
     warned = [r.getMessage() for r in caplog.records if "Fix time sync" in r.getMessage()]
     assert len(warned) == 1
-    assert "24h 0m 0s behind the exchange's" in warned[0]
+    # anchored on the word before the figure (issue #290)
+    assert ", 24h 0m 0s behind the exchange's" in warned[0]
     assert "cut at the exchange's clock" in warned[0]
     # ...and a GENUINELY stale context on the same host is still refused, for
     # the feed — the host's clock, however far behind, cannot have truncated a
@@ -1844,11 +1849,11 @@ def test_freshness_guard_passes_a_host_behind_because_the_window_is_cut_at_the_e
     )
     msg = guards_mod.context_refusal_message(stale, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "24h 0m 0s before the exchange's clock" in msg
-    assert "12h 0m 0s freshness limit (3 x 4h)" in msg
+    assert ", 24h 0m 0s before the exchange's clock" in msg
+    assert "past the 12h 0m 0s freshness limit (3 x 4h)" in msg
     assert "feed itself stopped advancing" in msg
     assert "cannot have truncated it" in msg
-    assert "24h 0m 0s behind the exchange's" in msg  # carried as information
+    assert ", 24h 0m 0s behind the exchange's" in msg  # carried as information
     assert "time sync" not in msg
 
 
@@ -1874,7 +1879,7 @@ def test_freshness_guard_names_the_feed_whatever_the_skew(host_skew):
     ctx = _ctx_closing_at(_NOW - timedelta(hours=20), exchange_time=_NOW, host_skew=host_skew)
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "20h 0m 0s before the exchange's clock" in msg
+    assert ", 20h 0m 0s before the exchange's clock" in msg
     assert "feed itself stopped advancing" in msg
     assert "accounts for" not in msg
     assert "by itself puts the newest" not in msg
@@ -1913,7 +1918,7 @@ def test_freshness_guard_reports_the_skew_as_unknown_without_a_paired_reading(ca
     with caplog.at_level(logging.WARNING, logger=freshness_mod.__name__):
         msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "14h 0m 0s before the exchange's clock" in msg
+    assert ", 14h 0m 0s before the exchange's clock" in msg
     assert "no paired host-clock reading, so the skew is unknown" in msg
     assert "feed itself stopped advancing" in msg
     # No "agrees" — nothing was measured.
@@ -1936,12 +1941,12 @@ def test_freshness_guard_stale_message_carries_the_skew_note_with_size_and_direc
     ctx = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-timedelta(hours=12, seconds=1))
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "12h 0m 1s behind the exchange's" in msg
+    assert ", 12h 0m 1s behind the exchange's" in msg
     assert "feed itself stopped advancing" in msg
     ctx = _ctx_closing_at(age, exchange_time=_NOW, host_skew=timedelta(minutes=90))
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "1h 30m 0s ahead of the exchange's" in msg
+    assert ", 1h 30m 0s ahead of the exchange's" in msg
     assert "feed itself stopped advancing" in msg
 
 
@@ -1955,7 +1960,8 @@ def test_freshness_guard_skew_note_floor_is_inclusive_in_the_refusal():
     at_floor = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-floor)
     msg = guards_mod.context_refusal_message(at_floor, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "1m 0s behind the exchange's" in msg
+    # anchored on the word before the figure (issue #290)
+    assert ", 1m 0s behind the exchange's" in msg
     assert "feed itself stopped advancing" in msg
     under = _ctx_closing_at(age, exchange_time=_NOW, host_skew=-(floor - timedelta(milliseconds=1)))
     msg = guards_mod.context_refusal_message(under, "BTC", {}, now=_NOW)
@@ -2011,7 +2017,7 @@ def test_freshness_guard_measures_skew_between_the_paired_readings_not_now(caplo
         assert guards_mod.context_refusal_message(ahead, "BTC", {}, now=_NOW) is None
     warned = [r.getMessage() for r in caplog.records if "This host's clock" in r.getMessage()]
     assert len(warned) == 1
-    assert "10h 0m 0s ahead of the exchange's" in warned[0]
+    assert ", 10h 0m 0s ahead of the exchange's" in warned[0]
     assert "Fix time sync (NTP)" in warned[0]
     # It says exactly what the offset reaches (issue #124): not the market
     # data — both windows are cut at the exchange's clock — but the stamps
@@ -2051,7 +2057,7 @@ def test_freshness_guard_flags_a_candle_closing_past_the_exchanges_clock():
     ctx = _ctx_closing_at(_NOW + timedelta(hours=13), exchange_time=_NOW)
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "13h 0m 0s AFTER the exchange's clock" in msg
+    assert "which is 13h 0m 0s AFTER the exchange's clock" in msg
     assert "agrees with the exchange's" in msg
     assert "did not come from a live market fetch" in msg
     assert "Fix time sync" not in msg
@@ -2097,7 +2103,7 @@ def test_freshness_guard_refuses_any_lead_whatever_the_paired_skew_says():
         )
         msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
         assert msg is not None, skew
-        assert "30m 0s AFTER the exchange's clock" in msg, skew
+        assert "which is 30m 0s AFTER the exchange's clock" in msg, skew
         assert "did not come from a live market fetch" in msg, skew
         assert "cut at that same clock reading" in msg, skew
         assert "has not closed" not in msg, skew
@@ -2117,7 +2123,8 @@ def test_freshness_guard_refuses_a_lead_smaller_than_the_old_tolerance():
     ctx = _ctx_closing_at(_NOW + timedelta(seconds=30), exchange_time=_NOW)
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert msg is not None
-    assert "0m 30s AFTER the exchange's clock" in msg
+    # anchored on the word before the figure (issue #290)
+    assert "which is 0m 30s AFTER the exchange's clock" in msg
     assert "did not come from a live market fetch" in msg
 
 
@@ -2508,7 +2515,8 @@ def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monk
         assert handed["daily_candles"] is None
         logged = [r.getMessage() for r in caplog.records if "macro-trend" in r.getMessage()]
         assert len(logged) == 1, logged
-        assert "1d" in logged[0]
+        # anchored on the word before the figure (issue #290)
+        assert "the 1d candle read" in logged[0]
         assert "the decision proceeds without it" in logged[0]
         # The state it leaves behind is the same one "switch off" leaves, and
         # nothing downstream can tell them apart — so the line says so.
@@ -2655,7 +2663,7 @@ def test_context_refusal_fails_closed_on_an_unmeasurable_interval():
     ctx = _ctx_closing_at(_NOW, interval="4H")
     msg = guards_mod.context_refusal_message(ctx, "BTC", {}, now=_NOW)
     assert "freshness cannot be checked" in msg
-    assert "4H" in msg  # the offending value is named
+    assert "'4H'" in msg  # the offending value is named, quoted (issue #290 anchor)
 
 
 def test_context_refusal_reports_warmup_before_staleness():
@@ -2728,7 +2736,8 @@ def test_run_engine_reports_engine_failure_when_propagate_raises(monkeypatch, ca
     assert rc == 1
     err = capsys.readouterr().err
     assert "engine run failed" in err
-    assert "429" in err  # the original cause is surfaced, not swallowed
+    # The original cause is surfaced, not swallowed; anchored on the type (issue #290).
+    assert "(RuntimeError: provider rate-limited (429))" in err
 
 
 def test_run_engine_aborts_on_non_dict_final_state(monkeypatch, capsys):
@@ -2922,7 +2931,8 @@ def test_run_engine_names_the_cap_when_a_cut_decision_is_followed_by_a_failed_ru
         if r.levelno == logging.ERROR and r.name.endswith("completion_usage")
     ]
     assert "the engine run then failed before the answer could be parsed" in error
-    assert "8192 output tokens against a cap of" in error
+    # anchored on the word before the figure (issue #290)
+    assert "truncated (8192 output tokens against a cap of" in error
 
 
 def test_run_engine_fails_closed_on_empty_engine_output(monkeypatch, capsys):

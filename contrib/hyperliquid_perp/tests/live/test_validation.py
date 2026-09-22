@@ -1939,7 +1939,8 @@ def test_suite_authored_refreshes_are_cover_but_not_sample_credit(tmp_path):
     # seconds is a report the operator cannot reconcile (2026-08-01 round-16).
     shortfall = _zero_evidence_shortfall(report)
     assert "no kill-switch refresh events yet" not in shortfall
-    assert "120" in shortfall and "live-smoke" in shortfall
+    assert "— the 120 refresh attempt(s) on record" in shortfall  # issue #290 anchor
+    assert "live-smoke" in shortfall
 
 
 def test_the_marker_is_a_token_not_merely_the_presence_of_a_detail(tmp_path):
@@ -2106,7 +2107,8 @@ def test_a_suite_whose_refreshes_all_failed_is_still_reported_honestly(tmp_path)
     assert "no kill-switch refresh events yet" not in shortfall
     assert "live-smoke" in shortfall
     # The count is the term that was missing: three failed attempts, named.
-    assert "3 refresh attempt(s)" in shortfall
+    # anchored on the word before the figure (issue #290)
+    assert "— the 3 refresh attempt(s)" in shortfall
     # And the claim the sentence leads with — what is absent, and whose. Only
     # the tail was pinned, so replacing this clause with a placeholder left the
     # suite green (2026-08-01 round-18 probe).
@@ -2314,7 +2316,8 @@ def test_every_daemon_only_count_says_that_live_smoke_rows_were_excluded(tmp_pat
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=600))
     shortfall = next(s for s in report.shortfalls if "too few to judge" in s)
     assert "kill_switch_refresh_total = 10" in shortfall
-    assert "4 refresh attempt(s) on record were written during live-smoke" in shortfall
+    assert "— a further 4 refresh attempt(s) on record were written during" in shortfall
+    assert "live-smoke" in shortfall  # anchored on the word before the figure (issue #290)
 
 
 def test_a_passing_runs_summary_still_says_live_smoke_rows_were_excluded(tmp_path):
@@ -2374,7 +2377,8 @@ def test_the_single_instant_branch_also_says_the_suite_rows_were_excluded(tmp_pa
     with db:
         report = validate_live_run(db, run_id="r", now=_T0 + timedelta(seconds=600))
     shortfall = next(s for s in report.shortfalls if "span no elapsed time" in s)
-    assert "1 refresh attempt(s) on record were written during live-smoke" in shortfall
+    assert "— a further 1 refresh attempt(s) on record were written during" in shortfall
+    assert "live-smoke" in shortfall  # anchored on the word before the figure (issue #290)
 
 
 def test_the_row_that_carries_exchange_text_is_the_sweeps_and_stays_the_daemons(tmp_path):

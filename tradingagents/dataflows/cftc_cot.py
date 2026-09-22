@@ -22,8 +22,8 @@ derives — the first Saturday after the report date (``publication_date``) —
 and the report prints both dates and says the second is derived. Saturday
 rather than Friday because the release is Friday evening in UTC and
 ``curr_date`` has no hour: on Friday itself a report has to be withheld from
-the one cycle that could see it rather than served to the five that could
-not. Anchored to the weekday, not to "report date + 4", because in a
+the last cycle or two that could see it rather than served to the ones that
+could not. Anchored to the weekday, not to "report date + 4", because in a
 holiday week the report itself is as of Monday, and +4 from a Monday is the
 Friday the fourth day exists to avoid. What the derived date does NOT cover
 is a release delayed past Saturday — a holiday Friday, or the weeks-late
@@ -110,8 +110,8 @@ TREND_REPORTS = 4
 
 # The trailing window the scale is measured over: a year of weekly reports.
 SCALE_REPORTS = 52
-# Fewer published reports than this and no scale is printed: a median over
-# a handful of changes is not a scale.
+# Fewer changes than this — one more report than that, all before the one
+# served — and no scale is printed: a median over a handful is not a scale.
 MIN_SCALE_REPORTS = 13
 
 # The categories the report reasons about, with the dataset's column stems.
@@ -442,6 +442,39 @@ def _as_of(reports: list[Report], curr_day: date) -> list[Report]:
     return [r for r in reports if r.published <= curr_day]
 
 
+def _gap_note(
+    current: Report, other: Report | None, places: int, column: str, dropped: list[str]
+) -> str:
+    """Why a change column spans more than its ``places`` weeks, or nothing.
+
+    A day or two either way is the CFTC moving a report day to Monday around
+    a holiday, not a gap, and gets no note: the column header carries the
+    comparison date. A row this module dropped between the two IS a gap, and
+    is named; a span beyond a holiday's give with no dropped row to explain
+    it is said as a missing report, which is the one thing left it can be.
+    """
+    if other is None:
+        return ""
+    span = (current.report_date - other.report_date).days
+    expected = 7 * places
+    between = [
+        d
+        for d in dropped
+        if d != "?" and other.report_date.isoformat() < d < current.report_date.isoformat()
+    ]
+    if between:
+        return (
+            f"_The {column} change column spans {span} days, not {expected}: the report as of "
+            f"{between[0]} between its two ends could not be read (a malformed row)._"
+        )
+    if abs(span - expected) <= 1:
+        return ""
+    return (
+        f"_The {column} change column spans {span} days, not {expected}: a report is missing "
+        f"from the series between its two ends._"
+    )
+
+
 def _scale_line(published: list[Report]) -> str:
     """What size of change is ordinary, and where each headline net sits in its year.
 
@@ -452,11 +485,14 @@ def _scale_line(published: list[Report]) -> str:
     say whether that is large — over the year to 2026-09-15 the leveraged-fund
     median was about 660 contracts, so it was.
     """
-    window = published[: SCALE_REPORTS + 1]
+    # The reports BEFORE the one served: its own change is the thing being
+    # judged, and a baseline that included it would be that much easier to
+    # sit inside.
+    window = published[1 : SCALE_REPORTS + 2]
     if len(window) < MIN_SCALE_REPORTS + 1:
         return (
-            f"_Scale: withheld — only {len(window)} published reports are in the trailing "
-            f"window, fewer than the {MIN_SCALE_REPORTS + 1} a scale needs._"
+            f"_Scale: withheld — only {len(window)} published reports precede this one in the "
+            f"trailing window, fewer than the {MIN_SCALE_REPORTS + 1} a scale needs._"
         )
     parts = []
     for name in HEADLINE_CATEGORIES:
@@ -473,9 +509,8 @@ def _scale_line(published: list[Report]) -> str:
             f"under {upper:,d} unremarkable, and net has ranged {span} of OI"
         )
     return (
-        f"_Scale, over the {len(window) - 1} report-to-report changes before this one — "
-        + "; ".join(parts)
-        + "._"
+        f"_Scale, over the {len(window) - 1} changes between the {len(window)} reports before "
+        f"this one — " + "; ".join(parts) + "._"
     )
 
 
@@ -627,18 +662,17 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
     lines.append("")
     if prior is None:
         lines.append("_No earlier published report in the series, so the change columns are n/a._")
-    elif (current.report_date - prior.report_date).days != 7:
-        lines.append(
-            f"_The previous published report is {(current.report_date - prior.report_date).days} "
-            f"days before this one, not a week: a report is missing from the series between "
-            f"them, so the first change column spans more than one week._"
-        )
+    for other, places, column in ((prior, 1, "first"), (trend_base, TREND_REPORTS, "second")):
+        note = _gap_note(current, other, places, column, snapshot.dropped)
+        if note:
+            lines.append(note)
     if trend_base is None:
         lines.append(
             f"_Fewer than {TREND_REPORTS + 1} published reports in the series, so the second "
             f"change column is n/a._"
         )
-    lines.append(_scale_line(published))
+    scale = _scale_line(published)
+    lines.append(scale)
 
     lines.append(
         f"_Method: positions are contracts held at the report date's close as reported to the "
@@ -662,7 +696,8 @@ def get_futures_positioning(asset: str, curr_date: str) -> str:
         f"_Reading: CME Bitcoin futures as of {current.report_date.isoformat()}, "
         f"{current.open_interest:,d} contracts of open interest — {headline}. Positioning is "
         f"a slow-moving, weekly, institution-side input: read the direction of the changes "
-        f"and the net levels against open interest and against their own trailing year, and "
+        f"and the net levels against open interest"
+        f"{' and against their own trailing year' if not scale.startswith('_Scale: withheld') else ''}, and "
         f"never a single week's move as a standalone directional signal._"
     )
     return "\n".join(lines) + "\n"

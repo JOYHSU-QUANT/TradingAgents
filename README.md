@@ -562,8 +562,8 @@ batch releases after the late-2025 shutdown — is still served early in a
 backtest of that window; the dataset has no release-date column, and the
 "derived" label is the disclosure. Only the 5-BTC standard contract (code
 133741) is read; the Micro contract is a separate series and the report says
-so. A Scale line, computed from the trailing 52 reports the analysis date could
-see, says what size of weekly change is ordinary for each headline category
+so. A Scale line, computed from the 52 reports before the one served, says
+what size of weekly change is ordinary for each headline category
 and where its net has ranged as a share of open interest. The whole series is
 a few hundred rows, cached daily through the family's rolling snapshot on the
 family's clock (stale serves up to 21 days, failed fetches never written); a

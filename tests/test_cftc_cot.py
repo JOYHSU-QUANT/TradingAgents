@@ -406,7 +406,8 @@ class TestAsOf:
         assert (
             "_Fewer than 5 published reports in the series, so the second change column is n/a._"
         ) in out
-        assert "_Scale: withheld — only 1 published reports are in the trailing window" in out
+        assert "_Scale: withheld — only 0 published reports precede this one" in out
+        assert "against their own trailing year" not in out  # no year to read against
 
     def test_a_stale_series_is_withheld_past_the_bound(self, monkeypatch, clock, cache):
         # The newest report publishes 09-19: 21 days later is served, 22 is not.
@@ -465,9 +466,35 @@ class TestReport:
         assert "**Open interest:** 20,773 contracts (+1,076 since the 2026-09-01 report)" in out
         assert "| Δ net vs 2026-09-01 | Δ net vs 2026-08-11 |" in out
         assert "| Dealer | 6,587 | 3,168 | 620 | +3,419 | 16.5% | +635 | +340 |" in out
-        assert "_The previous published report is 14 days before this one, not a week" in out
+        assert (
+            "_The first change column spans 14 days, not 7: the report as of 2026-09-08 between "
+            "its two ends could not be read (a malformed row)._"
+        ) in out
+        assert (
+            "_The second change column spans 35 days, not 28: the report as of 2026-09-08 "
+            "between its two ends could not be read (a malformed row)._"
+        ) in out
         assert "dealer net +3,419 (16.5% of OI, +635 since 2026-09-01)" in out
         assert "on the week" not in out
+
+    def test_a_holiday_shift_of_the_report_day_is_not_called_a_gap(self, monkeypatch, clock, cache):
+        # A Monday report six days after the previous Tuesday, and the next
+        # Tuesday eight days after it: the CFTC moving its day, not a gap.
+        monday = dict(ROWS[1], report_date_as_yyyy_mm_dd="2026-09-07T00:00:00.000")
+        out = _report(monkeypatch, body=[ROWS[0], monday] + ROWS[2:])
+        assert "| Δ net vs 2026-09-07 |" in out and "change column spans" not in out
+        out = _report(monkeypatch, "2026-09-12", body=[ROWS[0], monday] + ROWS[2:])
+        assert "- Report as of 2026-09-07 (Monday close)" in out
+        assert "change column spans" not in out
+
+    def test_a_span_no_dropped_row_explains_is_a_missing_report(self, monkeypatch, clock, cache):
+        # The 09-08 row absent from the payload altogether (nothing dropped):
+        # the span is said, and the cause is the one thing left it can be.
+        out = _report(monkeypatch, body=[ROWS[0]] + ROWS[2:])
+        assert (
+            "_The first change column spans 14 days, not 7: a report is missing from the "
+            "series between its two ends._"
+        ) in out
 
     def test_an_unreadable_newest_report_is_disclosed(self, monkeypatch, clock, cache, caplog):
         # The newest row dropped: the previous week is served, and the report
@@ -500,9 +527,10 @@ class TestReport:
         # computed by hand below; the range is of net as a share of OI.
         from datetime import date, timedelta
 
-        # Thirteen changes, skewed so that median, upper quartile, mean and
-        # max all differ: nine of 100, three of 300, one of 2,000.
-        deltas = [100] * 9 + [300] * 3 + [2000]
+        # The change INTO the served report (999) is not in the window; the
+        # thirteen before it are skewed so that median, upper quartile, mean
+        # and max all differ: nine of 100, three of 300, one of 2,000.
+        deltas = [999] + [100] * 9 + [300] * 3 + [2000]
         nets = [-1000]
         for delta in deltas:
             nets.append(nets[-1] - delta)  # newest first, growing more short
@@ -515,18 +543,21 @@ class TestReport:
             row["open_interest_all"] = "10000"
             rows.append(row)
         out = _report(monkeypatch, body=rows)
-        scale = out.split("_Scale, over the 13 report-to-report changes before this one — ")[1]
+        scale = out.split("_Scale, over the 13 changes between the 14 reports before this one — ")[
+            1
+        ]
         assert (
             "leveraged funds: a weekly change under about 100 contracts is ordinary and under "
-            "300 unremarkable, and net has ranged -48.0% to -10.0% of OI"
+            "300 unremarkable, and net has ranged -58.0% to -20.0% of OI"
         ) in scale
+        assert "against their own trailing year" in out
         # One fewer report and there is no scale (the clock moves past the
         # cache TTL so the shorter series is actually fetched).
         _freeze(monkeypatch, datetime(2026, 9, 23, 13, tzinfo=timezone.utc))
-        out = _report(monkeypatch, body=rows[:13])
+        out = _report(monkeypatch, body=rows[:14])
         assert (
-            "_Scale: withheld — only 13 published reports are in the trailing window, fewer "
-            "than the 14 a scale needs._"
+            "_Scale: withheld — only 13 published reports precede this one in the trailing "
+            "window, fewer than the 14 a scale needs._"
         ) in out
 
     def test_the_scale_window_is_capped_at_a_year(self, monkeypatch, clock, cache):
@@ -540,7 +571,7 @@ class TestReport:
             row["lev_money_positions_short"] = "50000" if i == 56 else "11899"
             rows.append(row)
         out = _report(monkeypatch, body=rows)
-        assert "_Scale, over the 52 report-to-report changes before this one" in out
+        assert "_Scale, over the 52 changes between the 53 reports before this one" in out
         assert "under about 0 contracts is ordinary and under 0 unremarkable" in out
 
     def test_a_zero_open_interest_report_does_not_divide(self, monkeypatch, clock, cache):

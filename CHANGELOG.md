@@ -20,8 +20,9 @@ Breaking changes within the 0.x line are called out explicitly.
   and the one four reports back — each column labelled with the date of the
   report it compares against, because "1-week" over a gap in the series would
   be a lie the label told on its own (the CFTC has not skipped a week in 441
-  rows; a row this module could not read would leave one, and the report then
-  says the gap's length). A row in the news analyst's `OPTIONAL_NEWS_TOOLS`
+  rows, only moved the report day to Monday around a holiday, which is not a
+  gap and gets no note; a row this module could not read would leave one, and
+  the report then names it). A row in the news analyst's `OPTIONAL_NEWS_TOOLS`
   table, so the ToolNode registers it from the same row; nothing under
   `contrib/` is touched.
 
@@ -42,13 +43,14 @@ Breaking changes within the 0.x line are called out explicitly.
   "derived" label is the disclosure. The report prints both dates and the
   report date's actual weekday.
 
-  **A scale, from the series it holds.** Over the trailing 52 reports the
-  analysis date could see, the median and upper-quartile absolute weekly
+  **A scale, from the series it holds.** Over the 52 reports before the one
+  served (its own change is the thing being judged), the median and
+  upper-quartile absolute weekly
   change in each headline category's net, and the range of its net as a share
   of open interest — measured on 2026-09-21, the leveraged-fund median was
   about 660 contracts, so the fixture's "+1,538" is large, and its −30.6% of
   OI was the least short of the year, which a model reading the raw figure
-  could not know. Withheld below 14 reports.
+  could not know. Withheld with fewer than 14 reports before the one served.
 
   One contract (the 5-BTC standard, code 133741; the Micro is a separate
   series), five categories, and one interpretive sentence, `CARRY_NOTE`, read

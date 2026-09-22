@@ -44,14 +44,14 @@ def _check_funding_identities(
     """
     with localcontext(DECIMAL_CONTEXT):  # round exactly like the producing math
         if None not in (position_size, mark_price, signed_position_notional):
-            expected = position_size * mark_price
+            expected = position_size * mark_price  # type: ignore[operator]
             if signed_position_notional != expected:
                 raise ValueError(
                     f"signed_position_notional {signed_position_notional} != "
                     f"position_size * mark_price {expected}"
                 )
         if None not in (signed_position_notional, funding_rate, funding_pnl):
-            expected = -signed_position_notional * funding_rate
+            expected = -signed_position_notional * funding_rate  # type: ignore[operator]
             if funding_pnl != expected:
                 raise ValueError(
                     f"funding_pnl {funding_pnl} != "

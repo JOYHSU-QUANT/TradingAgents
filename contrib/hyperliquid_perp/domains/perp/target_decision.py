@@ -457,7 +457,7 @@ def parse_target_decision(
             decision=TargetDecision.fail_closed(),
             is_valid=False,
             invalid_reason=reason,
-            raw_response=raw_text,
+            raw_response=raw_text,  # type: ignore[arg-type]
         )
 
     if not is_str:
@@ -468,10 +468,10 @@ def parse_target_decision(
     # The one verdict the stop reason relabels (see the docstring).
     no_usable_json = TRUNCATED_OUTPUT if truncated else INVALID_OUTPUT
 
-    if not raw_text.strip():
+    if not raw_text.strip():  # type: ignore[attr-defined]
         return _invalid(no_usable_json)
 
-    source = extract_json_block(raw_text)
+    source = extract_json_block(raw_text)  # type: ignore[arg-type]
     if source is None:
         return _invalid(no_usable_json)
     payload = json.loads(source)  # extract_json_block guarantees this is a dict
@@ -560,7 +560,7 @@ def parse_target_decision(
     if reason is not None:
         return _invalid(reason)
     return ParsedDecision(
-        decision=decision, is_valid=True, invalid_reason=None, raw_response=raw_text
+        decision=decision, is_valid=True, invalid_reason=None, raw_response=raw_text  # type: ignore[arg-type]
     )
 
 

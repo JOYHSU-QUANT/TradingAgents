@@ -178,11 +178,6 @@ SMOKE_MIN_KILL_SWITCH_DEADLINE = timedelta(seconds=120)
 # test measures this against a driven suite; a doc-pin ties the RUNBOOK to it.
 REFRESHES_PER_FULL_SUITE = len(SMOKE_TESTS) + 1
 _BY_KEY: dict[str, SmokeTest] = {t.key: t for t in SMOKE_TESTS}
-# ``key`` is the identity the gate, the validator, and ``--only`` all key off of;
-# a silent collision (a future item copy-pasted from an existing one) would drop
-# a test from the suite via the dict fold. Turn that into a loud import-time error.
-if len(_BY_KEY) != len(SMOKE_TESTS):
-    raise AssertionError("SMOKE_TESTS keys must be unique")
 
 # The tests whose execution touches the account-wide dead man's switch: the
 # three restart tests (their §19.1 recovery ARMS the scheduleCancel and never
@@ -255,17 +250,6 @@ _TRIGGER_PROBE_TESTS: frozenset[str] = frozenset(
         "take_profit_cancel",
     }
 )
-
-# These three sets are literal copies of SMOKE_TESTS keys: a key renamed there
-# without them would silently drop a test from its policy bucket — a suite that
-# armed the kill switch would skip the exit disarm, an order-placing test would
-# skip the pre-flight, a trigger test would probe flat. Fail at import (the
-# same guard validation.py carries for its §20.3 key literals).
-for _copied in (_KILL_SWITCH_TESTS, _ORDER_PLACING_TESTS, _TRIGGER_PROBE_TESTS):
-    if not _copied <= set(SMOKE_TEST_KEYS):
-        raise AssertionError(
-            f"smoke policy set drifted from SMOKE_TESTS: {sorted(_copied - set(SMOKE_TEST_KEYS))}"
-        )
 
 # Just over Hyperliquid's ~$10 minimum order value, so a probe order the suite
 # means to REST or FILL is not refused for being dust.
@@ -751,8 +735,8 @@ class SmokeTestRunner:
             # run()'s loop past _record() — so, uniquely, no live_smoke_tests
             # row for the attempted test, breaking the append-only audit
             # promise — while a staged real long and an armed kill switch may
-            # still be outstanding. The import-time guard at the bottom of this
-            # module makes it unreachable; this keeps it contained regardless.
+            # still be outstanding. The registry test in tests/live/test_smoke
+            # makes it unreachable; this keeps it contained regardless.
             method = getattr(self, f"_test_{test.key}")
             return method()
         except _SmokeAbort as exc:
@@ -2418,18 +2402,3 @@ def rerun_keys_for(keys: Iterable[str]) -> tuple[str, ...]:
     if "slice_order_status" in selection:
         selection.add("slice_order_submit")
     return tuple(k for k in SMOKE_TEST_KEYS if k in selection)
-
-
-# The dispatch table is reflective (``getattr(self, f"_test_{key}")``), so it is
-# the one mapping in this module with no compile-time link between the registry
-# and the code. It is also the most consequential: a new SMOKE_TESTS entry whose
-# method is missing (or either side typo'd) passes the uniqueness guard above
-# and only breaks when that key is SELECTED — mid-suite, on a real run. Bind it
-# here, the same way the three policy sets are bound to SMOKE_TEST_KEYS.
-_MISSING_TEST_METHODS = [
-    t.key for t in SMOKE_TESTS if not hasattr(SmokeTestRunner, f"_test_{t.key}")
-]
-if _MISSING_TEST_METHODS:
-    raise AssertionError(
-        f"SMOKE_TESTS keys with no SmokeTestRunner._test_<key> method: {_MISSING_TEST_METHODS}"
-    )

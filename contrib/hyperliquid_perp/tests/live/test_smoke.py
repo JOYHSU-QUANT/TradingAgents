@@ -51,6 +51,27 @@ def test_the_smoke_floor_and_the_daemon_default_keep_their_relationship():
     assert floor >= daemon_default
 
 
+def test_every_registered_smoke_test_has_a_runner_method():
+    # The dispatch is reflective (``getattr(self, f"_test_{key}")``), so a key
+    # whose method is missing or typo'd only breaks when it is SELECTED —
+    # mid-suite, on a real run.
+    missing = [
+        t.key for t in smoke.SMOKE_TESTS if not hasattr(smoke.SmokeTestRunner, f"_test_{t.key}")
+    ]
+    assert missing == []
+
+
+def test_the_registry_keys_are_unique_and_the_policy_sets_are_drawn_from_them():
+    # ``key`` is what the gate, the validator and ``--only`` key off: a
+    # copy-pasted duplicate would drop a test in the ``_BY_KEY`` fold, and a
+    # key renamed in SMOKE_TESTS but not in a policy set would drop that test
+    # from its bucket (no exit disarm, no pre-flight, a flat probe).
+    keys = [t.key for t in smoke.SMOKE_TESTS]
+    assert len(set(keys)) == len(keys), sorted({k for k in keys if keys.count(k) > 1})
+    for copied in (smoke._KILL_SWITCH_TESTS, smoke._ORDER_PLACING_TESTS, smoke._TRIGGER_PROBE_TESTS):
+        assert copied <= set(keys), sorted(copied - set(keys))
+
+
 @dataclass
 class _Ack:
     status: str = "filled"
@@ -1484,8 +1505,8 @@ def test_an_unresolvable_test_key_is_contained_as_an_error_verdict(live_db):
     # link to the registry. Resolved outside the try it raised AttributeError
     # before any containment, escaping run()'s loop past _record() — no
     # live_smoke_tests row for the attempted test, breaking the append-only
-    # audit promise, mid-suite. (The import-time guard makes this unreachable
-    # in practice; this pins the containment behind it.)
+    # audit promise, mid-suite. (The registry test above makes this
+    # unreachable in practice; this pins the containment behind it.)
     runner = smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned()))
     result = runner._execute(smoke.SmokeTest(99, "no_such_probe", "fabricated"))
     assert result.status == "error"

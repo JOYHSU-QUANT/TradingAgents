@@ -294,9 +294,9 @@ class RiskGateResult:
             # CurrentPositionState — PR 3's flip re-run hand-builds this result and
             # a sign mismatch would silently corrupt order sizing downstream.
             signed = self.target_signed_notional
-            if self.target_side is TargetSide.LONG and signed <= 0:
+            if self.target_side is TargetSide.LONG and signed <= 0:  # type: ignore[operator]
                 raise ValueError("a long target must carry a positive signed notional")
-            if self.target_side is TargetSide.SHORT and signed >= 0:
+            if self.target_side is TargetSide.SHORT and signed >= 0:  # type: ignore[operator]
                 raise ValueError("a short target must carry a negative signed notional")
             if self.target_side is TargetSide.FLAT and (
                 signed != 0
@@ -309,11 +309,11 @@ class RiskGateResult:
             # The sized fields are one quantity in three encodings, so they must
             # agree exactly — evaluate() computes them with pure Decimal math and
             # PR 3's hand-built flip legs get no rounding slack either.
-            if self.target_notional != self.target_margin * self.configured_leverage:
+            if self.target_notional != self.target_margin * self.configured_leverage:  # type: ignore[operator]
                 raise ValueError("target_notional must equal target_margin * configured_leverage")
-            if abs(self.target_signed_notional) != self.target_notional:
+            if abs(self.target_signed_notional) != self.target_notional:  # type: ignore[arg-type]
                 raise ValueError("target_signed_notional magnitude must equal target_notional")
-            if self.delta_notional != self.target_signed_notional - self.current_signed_notional:
+            if self.delta_notional != self.target_signed_notional - self.current_signed_notional:  # type: ignore[operator]
                 raise ValueError(
                     "delta_notional must equal target_signed_notional - current_signed_notional"
                 )

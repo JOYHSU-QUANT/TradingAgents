@@ -93,7 +93,7 @@ def int_from_yaml(value: object) -> int:
         parsed = int(value)
     else:
         try:
-            parsed = int(value)  # int/numeric string passes through
+            parsed = int(value)  # type: ignore[call-overload]  # int/numeric string passes through
         except (TypeError, ValueError):
             # A non-numeric string raises ValueError; a list/dict (YAML
             # indentation slip) raises TypeError. Normalise both to ValueError

@@ -13,19 +13,27 @@ None of these invariants is exercised anywhere else:
   ``hyperliquid_perp`` package would otherwise be enforced by review only;
 - the config loader, the pre-LLM context guards and the no-decision policy
   keep their load-time import closures below the SDK, the store and the
-  engines (issue #122).
+  engines (issue #122);
+- the layering debt measured on 2026-09-22 is frozen so it can only shrink
+  (refactor plan v2, T0 — the Ratchets section at the end of this file).
 """
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+import re
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp import common as common_pkg
+from contrib import hyperliquid_perp as perp_pkg
+from contrib.hyperliquid_perp import (
+    common as common_pkg,
+    live as live_pkg,
+    persistence as persistence_pkg,
+)
 from contrib.hyperliquid_perp.common import decimal_context
 from contrib.hyperliquid_perp.domains.perp import margin
 from contrib.hyperliquid_perp.persistence import models
@@ -38,7 +46,7 @@ _PACKAGE = "contrib.hyperliquid_perp"
 def _within(name: str | None, pkg: str) -> bool:
     """``name`` is the package ``pkg`` itself or a dotted name inside it.
 
-    The one spelling of "is `pkg` or lies under `pkg`" the three predicates
+    The one spelling of "is `pkg` or lies under `pkg`" the predicates
     below share — a copy that baked the dot into a prefix test read the bare
     package as outside (issue #155), so they are not spelled twice.
     """
@@ -148,7 +156,7 @@ def _load_time_import_closure(source: Path, root: Path = _SOURCE_ROOT) -> set[st
     if (root / "__init__.py").is_file():  # ``""`` deliberately has no file
         walked.add(root / "__init__.py")
         queue.append(root / "__init__.py")
-    walk_packages_of(".".join(source.resolve().relative_to(root).parent.parts))
+    walk_packages_of(".".join(_own_package(source, root)))
     while queue:
         for tail in _in_package_imports(queue.pop(), root) - seen:
             seen.add(tail)
@@ -313,6 +321,48 @@ def test_package_sources_reaches_subpackages_in_path_order(tmp_path):
     ]
 
 
+def _own_package(source: Path, root: Path) -> tuple[str, ...]:
+    """The package parts of ``source`` under ``root``: ``("domains", "perp")`` for ``domains/perp/x.py``."""
+    return source.resolve().relative_to(root).parent.parts
+
+
+def _imports(
+    statements: Iterable[ast.AST], own_package: tuple[str, ...]
+) -> Iterator[tuple[str | None, ast.alias, bool]]:
+    """``(base, alias, from_import)`` for every import among ``statements``.
+
+    ``base`` is the in-package dotted tail the statement names — for
+    ``from X import a`` the tail of ``X`` (:func:`_dotted_tail`), for
+    ``import X`` the tail of ``X`` itself (:func:`_package_tail`) — or ``None``
+    when it is not ours. The one reader of the level rules: each walker over
+    it only chooses which statements to feed it and how to project
+    ``(base, alias)`` — the binding rule (``asname`` or not) is the walker's.
+    """
+    for node in statements:
+        if isinstance(node, ast.ImportFrom):
+            base = _dotted_tail(node.module, node.level, own_package)
+            for alias in node.names:
+                yield base, alias, True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                yield _package_tail(alias.name), alias, False
+
+
+def _dotted_tail(name: str | None, level: int, own_package: tuple[str, ...]) -> str | None:
+    """The in-package tail a ``from <'.' * level><name> import`` names, seen from ``own_package``.
+
+    Level 0 is an absolute import, normalised by :func:`_package_tail`. One
+    dot is the module's own package; each further one climbs a package.
+    Climbing past the package root is an ImportError at runtime; it resolves
+    to the root (``""``) here rather than let a negative slice bound silently
+    drop packages from the END of the path.
+    """
+    if level == 0:
+        return _package_tail(name)
+    base = list(own_package[: max(0, len(own_package) - (level - 1))])
+    return ".".join([*base, name] if name else base)
+
+
 def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
     """Dotted tails (``domains.perp.x``) of ``source``'s LOAD-TIME in-package imports.
 
@@ -325,10 +375,7 @@ def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
     (level 0), or a plain ``import contrib.hyperliquid_perp...``, drags in
     exactly the same compute module while passing a level-1-only filter, so
     both node kinds are walked and absolute forms are normalised to the same
-    dotted tail an allowlist is written in. A relative import is resolved
-    against the module's own package depth, so ``from .schema import x``
-    inside ``domains/perp/`` and ``from ...common.constants import y`` come
-    back as ``domains.perp.schema`` / ``common.constants``.
+    dotted tail an allowlist is written in (:func:`_imports`).
 
     ``from pkg import x`` resolves to the SUBMODULE ``pkg.x`` when one exists
     on disk — its own imports are part of the closure, so the walk has to
@@ -341,34 +388,18 @@ def _in_package_imports(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
     the historical offender the loader test's docstring cites. Letting either
     fall through as ``None`` would allow both.
     """
-    own_package = source.resolve().relative_to(root).parent.parts
-
-    def tail(name: str | None, level: int) -> str | None:
-        if level == 0:
-            return _package_tail(name)
-        # ``level`` dots: one for the module's own package, each further one
-        # climbs a package. Climbing past the package root is an ImportError
-        # at runtime; resolve it to the root ("") rather than let a negative
-        # slice bound silently drop packages from the END of the path.
-        base = list(own_package[: max(0, len(own_package) - (level - 1))])
-        return ".".join([*base, name] if name else base)
-
     def imported(base: str | None, name: str) -> str | None:
         if base is None:
             return None
         submodule = f"{base}.{name}" if base else name
         return submodule if _module_file(submodule, root) is not None else base
 
+    tree = ast.parse(source.read_text(encoding="utf-8"))
     found: set[str] = set()
-    for node in _load_time_statements(ast.parse(source.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.ImportFrom):
-            base = tail(node.module, node.level)
-            names = [imported(base, alias.name) for alias in node.names]
-        elif isinstance(node, ast.Import):
-            names = [_package_tail(alias.name) for alias in node.names]
-        else:
-            continue
-        found.update(n for n in names if n is not None)
+    for base, alias, from_import in _imports(_load_time_statements(tree), _own_package(source, root)):
+        tail = imported(base, alias.name) if from_import else base
+        if tail is not None:
+            found.add(tail)
     return found
 
 
@@ -552,3 +583,345 @@ def test_common_imports_nothing_from_the_rest_of_the_package():
                     if is_contrib(alias.name)
                 )
     assert not offenders, offenders
+
+
+# --- Ratchets: the layering debt of 2026-09-22, frozen so it can only shrink --
+#
+# Refactor plan v2, T0. Each allowlist is compared by EQUALITY: a new entry
+# fails (move the thing down instead — a package below ``live/`` and
+# ``paper/`` for a paper symbol, a ``repository`` read for SQL, an injected
+# collaborator for a cli private),
+# and a retired entry fails too, so the list is pruned in the PR that pays
+# the debt off rather than going stale.
+
+
+def _ratchet_message(what: str, found: set[str], frozen: frozenset[str]) -> str:
+    return f"{what}: new {sorted(found - frozen)}, retired {sorted(frozen - found)}"
+
+
+_LIVE_PAPER_IMPORTS = frozenset(
+    {
+        "paper.accounting.LiveFillEffect",
+        "paper.accounting.PositionValuation",
+        "paper.accounting.account_equity",
+        "paper.accounting.adjustment_ledger_delta",
+        "paper.accounting.available_balance",
+        "paper.accounting.compute_live_fill_effect",
+        "paper.accounting.effective_leverage",
+        "paper.accounting.margin_ratio",
+        "paper.accounting.replay_within",
+        "paper.accounting.summarize_account",
+        "paper.clock.Clock",
+        "paper.clock.WallClock",
+        "paper.engine.AssetSpec",
+        "paper.market_feed.SnapshotProvider",
+        "paper.position_facts.read_books",
+        "paper.run_lock.RunLockError",
+        "paper.scheduler.DecisionInput",
+        "paper.scheduler.DecisionProvider",
+        "paper.scheduler.RetryableDecisionError",
+        "paper.stops.StopAction",
+        "paper.stops.StopConfig",
+        "paper.stops.round_to_tick",
+        "paper.stops.stop_loss_decision",
+        "paper.stops.take_profit_price",
+        "paper.twap.MAX_SLICES",
+        "paper.twap.PlanDisposition",
+        "paper.twap.Side",
+        "paper.twap.build_slice_plan",
+        "paper.twap.floor_to_step",
+        "paper.twap.rebalance_delta",
+        "paper.twap.split_flip_budget",
+        "paper.validation.prompt_regime_lines",
+    }
+)
+_PERSISTENCE_PAPER_IMPORTS = frozenset(
+    {
+        "paper.accounting.AccountMetrics",
+        "paper.scheduler.DecisionInput",
+    }
+)
+
+
+def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) -> set[str]:
+    """``<module>.<name>`` for every name ``source`` takes from the package ``pkg``.
+
+    The whole tree, not the load-time closure: a lazy or ``TYPE_CHECKING``
+    import is the same dependency for this purpose. A MODULE or PACKAGE bound
+    as a name (``from ..paper import accounting``, ``from .. import paper``)
+    is expanded into the attribute chains read off it
+    (``paper.accounting.replay_within``), so a symbol reached that way counts
+    like one imported by name. A module bound but never read stays as its
+    bare tail unless a sibling statement reads deeper into it; a plain
+    ``import`` without an alias always stays — its reads are spelled through
+    ``contrib``, which no binding here tracks.
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    plain: set[str] = set()  # unaliased ``import x.y``: never pruned
+    modules: dict[str, str] = {}  # bound name -> module tail
+    for base, alias, from_import in _imports(ast.walk(tree), _own_package(source, root)):
+        if base is None:
+            continue
+        target = base
+        if from_import:
+            target = f"{base}.{alias.name}" if base else alias.name
+        if not _within(target, pkg):
+            continue
+        bound = alias.asname or (alias.name if from_import else None)
+        if bound is None:
+            plain.add(target)
+        elif _module_file(target, root) is not None:
+            modules[bound] = target
+        else:
+            found.add(target)
+    for node in ast.walk(tree):
+        read = _module_read(node, modules, root)
+        if read is not None:
+            found.add(read)
+    found.update(modules.values())
+    # A module tail that only prefixes a deeper read (``paper`` under
+    # ``paper.engine.AssetSpec``) is the road, not a borrowed name.
+    prefixes = {
+        s
+        for s in found - plain
+        if _module_file(s, root) is not None and any(o.startswith(s + ".") for o in found)
+    }
+    return (found - prefixes) | plain
+
+
+def _module_read(node: ast.AST, modules: dict[str, str], root: Path) -> str | None:
+    """The symbol an attribute chain rooted at a name ``modules`` binds reads, else ``None``.
+
+    The chain is followed only as far as the modules on disk go, plus one
+    segment: ``accounting.AccountMetrics.from_row`` is a read of
+    ``paper.accounting.AccountMetrics``, and ``from_row`` is that class's
+    business.
+    """
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not (isinstance(node, ast.Name) and node.id in modules):
+        return None
+    tail = modules[node.id]
+    for part in reversed(parts):
+        tail = f"{tail}.{part}"
+        if _module_file(tail, root) is None:
+            break
+    return tail
+
+
+@pytest.mark.parametrize(
+    ("pkg", "frozen"),
+    [(live_pkg, _LIVE_PAPER_IMPORTS), (persistence_pkg, _PERSISTENCE_PAPER_IMPORTS)],
+    ids=["live", "persistence"],
+)
+def test_the_reverse_edges_into_paper_carry_exactly_the_symbols_frozen_on_2026_09_22(pkg, frozen):
+    found = set().union(*(_symbols_imported_from(s, "paper") for s in package_sources(pkg)))
+    assert found == frozen, _ratchet_message(f"{pkg.__name__}'s paper imports", found, frozen)
+
+
+def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
+    # No live module is written in the absolute or plain-``import`` forms
+    # today, so the shapes are pinned on a synthetic tree.
+    for pkg in ("paper", "live"):
+        (tmp_path / pkg).mkdir()
+        (tmp_path / pkg / "__init__.py").write_text("", encoding="utf-8")
+    for module in ("accounting", "twap", "engine", "stops"):
+        (tmp_path / "paper" / f"{module}.py").write_text("", encoding="utf-8")
+    (tmp_path / "live" / "x.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "import sqlite3\n"
+        "from ..paper.clock import Clock, WallClock\n"
+        "from ..paper import accounting, twap as tw\n"
+        "from .. import paper, common\n"
+        "from ..persistence import db\n"
+        "from contrib.hyperliquid_perp.paper.stops import round_to_tick\n"
+        "import contrib.hyperliquid_perp.paper.stops as st\n"
+        "import contrib.hyperliquid_perp.paper.stops\n"
+        "import contrib.hyperliquid_perp.paper.market_feed\n"
+        "if TYPE_CHECKING:\n"
+        "    from ..paper.engine import AssetSpec\n"
+        "def f():\n"
+        "    from ..paper.position_facts import read_books\n"
+        "    paper.engine.FundingSource\n"
+        "    accounting.AccountMetrics.from_row(st.StopConfig)\n"
+        "    return accounting.replay_within(accounting.summarize_account(db.x))\n",
+        encoding="utf-8",
+    )
+    assert _symbols_imported_from(tmp_path / "live" / "x.py", "paper", root=tmp_path) == {
+        "paper.clock.Clock",
+        "paper.clock.WallClock",
+        "paper.accounting.AccountMetrics",  # the chain stops at the first non-module
+        "paper.accounting.replay_within",
+        "paper.accounting.summarize_account",
+        "paper.twap",  # bound, never read
+        "paper.stops.round_to_tick",
+        "paper.stops.StopConfig",  # read through an aliased plain import
+        "paper.stops",  # the unaliased plain import stays beside the deeper reads
+        "paper.market_feed",
+        "paper.engine.AssetSpec",
+        "paper.engine.FundingSource",  # read through the package binding
+        "paper.position_facts.read_books",
+    }
+
+
+_SQL_SITES_OUTSIDE_PERSISTENCE = {
+    "common/no_decision.py": 2,
+    "live/validation.py": 9,
+    "paper/run_lock.py": 2,
+    "paper/validation.py": 21,
+}
+# A site is a cursor ``execute*`` call or a string literal that opens with a
+# SQL statement. Counted, not flagged, so a statement added to a module
+# already on the list still moves its number, and one moved into
+# ``repository`` moves it back.
+_SQL_STATEMENT = re.compile(
+    r"\s*(SELECT\b|INSERT INTO\b|UPDATE \S+ SET\b|DELETE FROM\b"
+    r"|CREATE (TABLE|INDEX|UNIQUE)\b|ALTER TABLE\b|PRAGMA \w|WITH \w+ AS\b)"
+)
+_CURSOR_CALLS = frozenset({"execute", "executemany", "executescript"})
+
+
+def _sql_sites(source: Path) -> int:
+    sites = 0
+    for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            sites += node.func.attr in _CURSOR_CALLS
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            sites += bool(_SQL_STATEMENT.match(node.value))
+    return sites
+
+
+def test_sql_sites_outside_persistence_count_exactly_what_they_did_on_2026_09_22():
+    # ``persistence/`` owns SQL by design; ``tests/`` may write it to stage a store.
+    found: dict[str, int] = {}
+    for path in package_sources(perp_pkg):
+        rel = path.relative_to(_SOURCE_ROOT)
+        if rel.parts[0] not in ("persistence", "tests") and (sites := _sql_sites(path)):
+            found[rel.as_posix()] = sites
+    frozen = _SQL_SITES_OUTSIDE_PERSISTENCE
+    moved = {
+        m: (frozen.get(m, 0), found.get(m, 0))
+        for m in frozen.keys() | found.keys()
+        if frozen.get(m, 0) != found.get(m, 0)
+    }
+    assert not moved, f"SQL sites outside persistence, (frozen, now): {moved}"
+
+
+@pytest.mark.parametrize(
+    ("body", "sites"),
+    [
+        ('"""Update the books."""\n', 0),  # prose, not a statement
+        ('x = "select 1"\n', 0),  # lower-case is not SQL here
+        ('x = "UPDATE the operator"\n', 0),  # a verb alone is not a statement
+        ('x = "SELECTED"\n', 0),  # the verb ends at a word boundary
+        ("rows = conn.execute(q)\n", 1),
+        ("conn.executemany(q, rows)\n", 1),
+        ('q = "SELECT 1"\n', 1),
+        ('q = f"SELECT * FROM {table}"\n', 1),
+        ('q = "  WITH t AS (SELECT 1) SELECT * FROM t"\n', 1),
+        ('q = "ALTER TABLE t ADD COLUMN c"\n', 1),
+        ('conn.execute("UPDATE t SET a = 1")\n', 2),  # the call and its literal
+    ],
+)
+def test_the_sql_scan_counts_calls_and_statements_but_not_prose(tmp_path, body, sites):
+    (tmp_path / "m.py").write_text(body, encoding="utf-8")
+    assert _sql_sites(tmp_path / "m.py") == sites
+
+
+_CLI_PRIVATE_REEXPORTS = frozenset(
+    {
+        "_EngineDecisionProvider",
+        "_HARD_DRIFT_KINDS",
+        "_HistoryFundingSource",
+        "_LIVE_TICK_SECONDS",
+        "_RECOVERY_MAX_TICK_GAP_SECONDS",
+        "_UNVERIFIED_MARKER",
+        "_build_real_smoke_session",
+        "_build_smoke_session",
+        "_classify_engine_error",
+        "_cmd_export",
+        "_cmd_live",
+        "_cmd_live_smoke",
+        "_cmd_paper",
+        "_cmd_safe_mode",
+        "_cmd_validate",
+        "_config_drift_report",
+        "_conflicting_run_lease",
+        "_contain_as_recoverable_safe_mode",
+        "_day_baseline_from_exchange",
+        "_existing_run_row",
+        "_live_heartbeat",
+        "_live_startup_recovery",
+        "_mark_export_verification",
+        "_migrate_owned_store",
+        "_norm_network",
+        "_open_existing_db",
+        "_open_owned_store",
+        "_paper_loop",
+        "_post_cycle_export",
+        "_print_smoke_gate",
+        "_provider",
+        "_raise_keyboard_interrupt",
+        "_require_agent_key",
+        "_require_api_key",
+        "_require_live_run_mode",
+        "_retry_pending_funding",
+        "_run_config_subset",
+        "_run_genesis_network",
+        "_run_live_loop",
+        "_smoke_gate_buckets",
+        "_smoke_startup_recovery",
+        "_stamp_breadcrumb",
+        "_stamp_reconciliation_case",
+        "_still_owns_run",
+        "_timing_preflight",
+        "_validate_live",
+    }
+)
+
+
+def _private_import_bindings(source: Path, root: Path = _SOURCE_ROOT) -> set[str]:
+    """The underscore names ``source`` binds at load time by importing.
+
+    The BINDING is what a test monkeypatches: ``asname`` when aliased, else
+    the name, and for ``import a.b`` the top package ``a``.
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for _base, alias, from_import in _imports(_load_time_statements(tree), _own_package(source, root)):
+        bound = alias.asname or (alias.name if from_import else alias.name.split(".")[0])
+        if bound.startswith("_"):
+            found.add(bound)
+    return found
+
+
+def test_the_cli_package_reexports_exactly_the_private_names_frozen_on_2026_09_22():
+    # The ``_cmd_*`` targets are read by ``main()`` in the same file; every
+    # other name is re-exported so a test can IMPORT it from the package
+    # (PR #75). Patch targets are the defining submodules, never these.
+    found = _private_import_bindings(_SOURCE_ROOT / "cli" / "__init__.py")
+    assert found == _CLI_PRIVATE_REEXPORTS, _ratchet_message(
+        "cli/__init__'s private re-exports", found, _CLI_PRIVATE_REEXPORTS
+    )
+
+
+def test_the_private_binding_scan_reads_the_bound_name_not_the_imported_one(tmp_path):
+    # ``cli/__init__`` aliases nothing today, so the alias rules are pinned on
+    # a synthetic module.
+    (tmp_path / "m.py").write_text(
+        "from ._a import _x, y, _z as w, q as _r\n"
+        "import _m.sub\n"
+        "import pkg.mod as _alias\n"
+        "def f():\n"
+        "    from ._b import _lazy\n",
+        encoding="utf-8",
+    )
+    assert _private_import_bindings(tmp_path / "m.py", root=tmp_path) == {
+        "_x",
+        "_r",
+        "_m",
+        "_alias",
+    }

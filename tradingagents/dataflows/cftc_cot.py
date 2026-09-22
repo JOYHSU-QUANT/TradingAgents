@@ -447,8 +447,10 @@ def _gap_note(
 ) -> str:
     """Why a change column spans more than its ``places`` weeks, or nothing.
 
-    A day or two either way is the CFTC moving a report day to Monday around
-    a holiday, not a gap, and gets no note: the column header carries the
+    A day either way is the CFTC moving a report day to Monday around a
+    holiday, not a gap, and gets no note (each end can shift by at most one
+    day, and both shift the same way, so the span never moves by two): the
+    column header carries the
     comparison date. A row this module dropped between the two IS a gap, and
     is named; a span beyond a holiday's give with no dropped row to explain
     it is said as a missing report, which is the one thing left it can be.

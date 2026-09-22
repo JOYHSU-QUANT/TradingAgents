@@ -1372,7 +1372,10 @@ class TestReport:
     def test_even_one_day_behind_is_withheld(self, tmp_path, monkeypatch):
         # One day back is the band a backtest most often sits in, and the band
         # the previous labelling threshold left completely silent.
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        # From the clock the fixture freezes, not the wall clock: derived from
+        # the latter this went red the day after it was written, once the real
+        # "yesterday" caught up with the frozen "today".
+        yesterday = (datetime.strptime(DATE, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
         out = self._report(tmp_path, monkeypatch, curr_date=yesterday)
         assert f"Withheld for {yesterday}" in out
 

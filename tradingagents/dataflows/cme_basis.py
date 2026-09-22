@@ -109,9 +109,11 @@ MAX_STALENESS_DAYS = 7
 # date — NOT from the newest hour, which is only known after the fetch and may
 # itself trail by ``MAX_STALENESS_DAYS``. The earlier reading then ends
 # ``LOOKBACK_DAYS`` before that and reaches ``MAX_WINDOW_SPAN_DAYS`` further.
-# The three add up to 19, and two more days cover a holiday weekend's closed
-# days ahead of the earlier window. At 14, a feed a week behind reported "no
-# earlier reading" for a reading that existed and had simply not been asked for.
+# The three add up to 19, and two more days cover the closed days a holiday
+# weekend puts between the earlier anchor and its newest traded hour (a second
+# closure inside that window would need more; short, the report says "no
+# earlier reading", never a wrong figure). At 14, a feed a week behind reported
+# "no earlier reading" for a reading that existed and had not been asked for.
 FETCH_WINDOW_DAYS = 21
 
 # The oldest analysis date served. A past date's fetch starts
@@ -190,8 +192,9 @@ SCALE_NOTE = (
     f"{ORDINARY_CHANGE_POINTS} annualized points and a reading sits within about "
     f"{ORDINARY_GAP_POINTS} points of its own {LOOKBACK_DAYS}-day median, so treat differences "
     f"of that size as ordinary variation. The annualized figure also runs about a point high "
-    f"in the week before it is withheld and steps back down after the roll, because Yahoo's "
-    f"spot is an aggregate rather than the rate the contract settles to"
+    f"in the last days before it is withheld ({MIN_DAYS_TO_EXPIRY} to {MIN_DAYS_TO_EXPIRY + 2} "
+    f"days from expiry) and steps back down after the roll, because Yahoo's spot is an "
+    f"aggregate rather than the rate the contract settles to"
 )
 
 

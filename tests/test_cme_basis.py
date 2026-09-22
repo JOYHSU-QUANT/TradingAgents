@@ -187,6 +187,18 @@ class TestMatchedBasis:
         _, spot = _frames(_hours("2026-09-15 03:00", "2026-09-15 09:00"))
         assert len(self._basis(futures, spot)) == 3
 
+    def test_the_bound_cuts_each_leg_before_they_are_matched(self):
+        # A spot bar stamped AT the bound with no futures bar beside it: the
+        # join alone would never show it, but the withheld notice reports each
+        # leg unjoined, so the cut has to hold on both legs.
+        futures, _ = _frames(_hours("2026-09-16 20:00", "2026-09-17 00:00"))
+        _, spot = _frames(_hours("2026-09-16 20:00", "2026-09-17 01:00"))
+        futures_leg, spot_leg = cme_basis.usable_legs(
+            futures.set_axis(futures.index.tz_convert("UTC")), spot, self.BOUND
+        )
+        assert futures_leg.index.max() == spot_leg.index.max()
+        assert spot_leg.index.max() == pd.Timestamp("2026-09-16 23:00", tz="UTC")
+
     def test_futures_rows_without_a_volume_column_are_refused(self):
         futures, spot = _frames(_hours("2026-09-15", "2026-09-15 06:00"))
         with pytest.raises(cme_basis.CmeBasisError, match="Volume"):
@@ -794,15 +806,18 @@ class TestProseFollowsTheConstants:
         assert "when either of the two readings has no annualized figure" in text
         assert "when Yahoo served too little to build a reading" in text
         assert "when the report says it is not a live reading" in text
-        assert "Yahoo can simply be late with a bar" in text  # the second cause, not only the weekend
-
-    def test_the_scale_note_states_the_constants(self):
         assert (
-            f"under about {cme_basis.ORDINARY_CHANGE_POINTS} annualized points"
-            in cme_basis.SCALE_NOTE
-        )
-        assert f"within about {cme_basis.ORDINARY_GAP_POINTS} points" in cme_basis.SCALE_NOTE
-        assert cme_basis.SCALE_NOTE.count(f"{cme_basis.LOOKBACK_DAYS}-day") == 2
+            "Yahoo can simply be late with a bar" in text
+        )  # the second cause, not only the weekend
+
+    def test_the_scale_note_states_the_measured_figures(self):
+        # Literals, not the constants: the two numbers are a measurement
+        # (2026-09-21, 492 days), and a test that read them back off the
+        # module would pass for any value, swapped ones included.
+        assert "under about 3 annualized points" in cme_basis.SCALE_NOTE
+        assert "within about 1.5 points of its own 7-day median" in cme_basis.SCALE_NOTE
+        assert "(5 to 7 days from expiry)" in cme_basis.SCALE_NOTE
+        assert cme_basis.SCALE_NOTE.count("7-day") == 2
 
     def test_the_tool_description(self):
         text = " ".join(crypto_data_tools.get_futures_basis.description.split())

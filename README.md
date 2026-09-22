@@ -522,9 +522,10 @@ paper loop does not, so a reading whose newest hour ended more than 3 hours
 earlier says it is not a live one. The report also carries its own scale: on
 three days in four (measured over 492 days) the 7-day change was under about 3
 annualized points and a reading sat within about 1.5 points of its own 7-day
-median, and the annualized figure runs about a point high in the week before it
-is withheld, because Yahoo's spot is an aggregate rather than the rate the
-contract settles to. The cost of the hourly method is two
+median, and the annualized figure runs about a point high in the last days
+before it is withheld (5 to 7 days from expiry), because Yahoo's spot is an
+aggregate rather than the rate the contract settles to. The cost of the hourly
+method is two
 uncached Yahoo requests per call, through the same throttle latch as every
 other yfinance leaf.
 

@@ -66,8 +66,8 @@ Breaking changes within the 0.x line are called out explicitly.
   than a day ahead of the UTC clock or more than 709 days behind it — a
   reading asks for 21 days of the 729 days of hourly history Yahoo serves: the
   7-day lookback, the 5 days a window may span and the 7 days the newest hour
-  may itself trail by make 19, and two more cover a holiday weekend's closed
-  days ahead of the earlier window.
+  may itself trail by make 19, and two more cover the closed days a holiday
+  weekend puts between the earlier anchor and its newest traded hour.
 
   **Too little data is a notice, not the no-data sentinel.** Fewer than 12
   synchronous hours, or a newest one more than 7 days old, returns the same
@@ -85,7 +85,7 @@ Breaking changes within the 0.x line are called out explicitly.
   reading sat within about 1.5 points of its own 7-day median — adjacent
   4-hour cycles share 20 of a window's 24 hours, and without a scale a model
   narrates the same point of noise six times a day — and says that the figure
-  runs about a point high in the week before it is withheld.
+  runs about a point high in the last days before it is withheld.
 
   The cost of the hourly method is that it cannot use
   `load_ohlcv`'s disk cache: two Yahoo requests per call, through

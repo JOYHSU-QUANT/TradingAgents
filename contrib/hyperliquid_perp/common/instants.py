@@ -177,19 +177,22 @@ def gap_label(ms: int) -> str:
     is legible; ``2d 0h`` beside a ``30h 0m 0s`` from the other renderer is
     not.
 
-    Takes a duration in milliseconds because that is the form both callers
-    hold one in: each subtracts one venue stamp from another — a candle's
-    ``close_time``, a handoff document's ``as_of_ms`` — and those are integer
-    milliseconds the whole way, never a float of seconds.
+    Takes a duration in milliseconds because that is the form the refusal
+    callers hold one in: each subtracts one venue stamp from another — a
+    candle's ``close_time``, a handoff document's ``as_of_ms`` — and those
+    are integer milliseconds the whole way, never a float of seconds. The
+    prompt's last-fill line holds two aware datetimes instead and takes the
+    difference through :func:`delta_ms`, which is the same integer route.
     Negative input is the caller's to flip — the two directions are separate
     sentences with separate causes, so which one is being told is decided
     where the sign is read, not here. That precondition is NOT enforced by a
-    raise, and deliberately: every call site is an argument to a WARNING on a
-    path that is already refusing something, and those refusals cost their
-    caller a prompt SECTION while an exception escaping there would cost the
-    whole decision cycle. A forgotten flip therefore prints a raw millisecond
-    count — ugly, and caught by a test at each live call site — rather than
-    ending a run over a log line.
+    raise, and deliberately: the refusal call sites are arguments to a
+    WARNING on a path that is already costing their caller a prompt SECTION,
+    and the prompt call site is one line of the Position section; an
+    exception escaping from any of them would cost the whole decision cycle.
+    A forgotten flip therefore prints a raw millisecond count — ugly, and
+    caught by a test at each call site — rather than ending a run over one
+    line of text.
     """
     for scale, unit in ((3_600_000, "h"), (60_000, " min"), (1000, " s")):
         value = ms / scale

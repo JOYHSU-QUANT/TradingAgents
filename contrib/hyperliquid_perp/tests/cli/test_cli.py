@@ -7774,7 +7774,9 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # section; the format block itself did not change, so v4's digest was
     # v3's. v5 (2026-09-01) changed the FORMAT block: the three gate
     # thresholds are no longer rendered as numbers (marginal-cost plan PR-B).
-    assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v5", "947e85a9b7b750f1")
+    # v6 (2026-09-22) bumped for the CONTEXT again — the Last fill: line's
+    # age unit (issue #288) — so v6's digest is v5's.
+    assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v6", "947e85a9b7b750f1")
     # The two ``cli`` spellings are the same object, not a second declaration
     # that would keep equal today and fork the next time one side moves: the
     # daemon stamps through ``_provider``, the preview through ``common``.

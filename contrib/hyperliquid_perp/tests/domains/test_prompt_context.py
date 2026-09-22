@@ -1001,7 +1001,8 @@ def test_a_fill_after_the_as_of_is_said_not_shown_as_a_negative_age():
     ],
 )
 def test_a_recent_fill_states_its_age_in_a_unit_that_does_not_vanish(before, rendered):
-    """A fill under three minutes old is NOT "0.0 hours before" (issue #288).
+    """The age is rendered in the largest unit its figure reaches, so a fill
+    under three minutes old is no longer "0.0 hours before" (issue #288).
 
     Anchored on the opening parenthesis, the character before the figure, so
     a sign or an extra leading digit cannot slip past as a superstring.

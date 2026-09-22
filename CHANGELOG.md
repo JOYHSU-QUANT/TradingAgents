@@ -23,9 +23,13 @@ Breaking changes within the 0.x line are called out explicitly.
   the same fills read "2.0 min before", "59.0 s before", "1 ms before", and a
   twelve-hour-old fill reads "12.0h before" rather than "12.0 hours before".
   The "after the as-of time above" side is unchanged, and so is every other
-  line of the section. This moves a prompt byte: the first paper deploy that
-  carries it is a prompt segmentation point for that run, so record the
-  deploy instant and the first cycle id rendered with the new wording.
+  line of the section. Because the context's wording moves, `PROMPT_VERSION`
+  moves with it, to `phase2-target-v6`, as RUNBOOK §4 asks for a context or
+  format change of shape OR wording; the format block itself is unchanged,
+  so v6 carries v5's digest, as v4 carried v3's. `ai_inputs.prompt_version`
+  therefore marks the boundary in the data. Whether the deploy that carries
+  it crosses the running paper segment on that key or opens a new run-id is
+  RUNBOOK §4's call at deploy time.
 
 ### Changed
 

@@ -46,7 +46,7 @@ _PACKAGE = "contrib.hyperliquid_perp"
 def _within(name: str | None, pkg: str) -> bool:
     """``name`` is the package ``pkg`` itself or a dotted name inside it.
 
-    The one spelling of "is `pkg` or lies under `pkg`" the three predicates
+    The one spelling of "is `pkg` or lies under `pkg`" the predicates
     below share — a copy that baked the dot into a prefix test read the bare
     package as outside (issue #155), so they are not spelled twice.
     """
@@ -334,9 +334,9 @@ def _imports(
     ``base`` is the in-package dotted tail the statement names — for
     ``from X import a`` the tail of ``X`` (:func:`_dotted_tail`), for
     ``import X`` the tail of ``X`` itself (:func:`_package_tail`) — or ``None``
-    when it is not ours. The one reader of the alias and level rules: each
-    walker over it only chooses which statements to feed it and which
-    projection of ``(base, alias)`` to keep.
+    when it is not ours. The one reader of the level rules: each walker over
+    it only chooses which statements to feed it and how to project
+    ``(base, alias)`` — the binding rule (``asname`` or not) is the walker's.
     """
     for node in statements:
         if isinstance(node, ast.ImportFrom):
@@ -588,8 +588,9 @@ def test_common_imports_nothing_from_the_rest_of_the_package():
 # --- Ratchets: the layering debt of 2026-09-22, frozen so it can only shrink --
 #
 # Refactor plan v2, T0. Each allowlist is compared by EQUALITY: a new entry
-# fails (move the thing down instead — ``runtime/`` for a paper symbol, a
-# ``repository`` read for SQL, an injected collaborator for a cli private),
+# fails (move the thing down instead — a package below ``live/`` and
+# ``paper/`` for a paper symbol, a ``repository`` read for SQL, an injected
+# collaborator for a cli private),
 # and a retired entry fails too, so the list is pruned in the PR that pays
 # the debt off rather than going stale.
 
@@ -650,12 +651,13 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
     as a name (``from ..paper import accounting``, ``from .. import paper``)
     is expanded into the attribute chains read off it
     (``paper.accounting.replay_within``), so a symbol reached that way counts
-    like one imported by name. A module tail with no read below it — bound
-    but never read, or plainly ``import``ed without an alias — stays as the
-    bare tail.
+    like one imported by name. A module bound but never read stays as its
+    bare tail, and a plain ``import`` without an alias always does — its
+    reads are spelled through ``contrib``, which no binding here tracks.
     """
     tree = ast.parse(source.read_text(encoding="utf-8"))
     found: set[str] = set()
+    plain: set[str] = set()  # unaliased ``import x.y``: never pruned
     modules: dict[str, str] = {}  # bound name -> module tail
     for base, alias, from_import in _imports(ast.walk(tree), _own_package(source, root)):
         if base is None:
@@ -666,7 +668,9 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
         if not _within(target, pkg):
             continue
         bound = alias.asname or (alias.name if from_import else None)
-        if bound is not None and _module_file(target, root) is not None:
+        if bound is None:
+            plain.add(target)
+        elif _module_file(target, root) is not None:
             modules[bound] = target
         else:
             found.add(target)
@@ -675,11 +679,14 @@ def _symbols_imported_from(source: Path, pkg: str, root: Path = _SOURCE_ROOT) ->
         if read is not None:
             found.add(read)
     found.update(modules.values())
-    return {
+    # A module tail that only prefixes a deeper read (``paper`` under
+    # ``paper.engine.AssetSpec``) is the road, not a borrowed name.
+    prefixes = {
         s
-        for s in found
-        if not (_module_file(s, root) is not None and any(o.startswith(s + ".") for o in found))
+        for s in found - plain
+        if _module_file(s, root) is not None and any(o.startswith(s + ".") for o in found)
     }
+    return (found - prefixes) | plain
 
 
 def _module_read(node: ast.AST, modules: dict[str, str], root: Path) -> str | None:
@@ -731,6 +738,7 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
         "from ..persistence import db\n"
         "from contrib.hyperliquid_perp.paper.stops import round_to_tick\n"
         "import contrib.hyperliquid_perp.paper.stops as st\n"
+        "import contrib.hyperliquid_perp.paper.stops\n"
         "import contrib.hyperliquid_perp.paper.market_feed\n"
         "if TYPE_CHECKING:\n"
         "    from ..paper.engine import AssetSpec\n"
@@ -750,6 +758,7 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
         "paper.twap",  # bound, never read
         "paper.stops.round_to_tick",
         "paper.stops.StopConfig",  # read through an aliased plain import
+        "paper.stops",  # the unaliased plain import stays beside the deeper reads
         "paper.market_feed",
         "paper.engine.AssetSpec",
         "paper.engine.FundingSource",  # read through the package binding
@@ -890,7 +899,8 @@ def _private_import_bindings(source: Path, root: Path = _SOURCE_ROOT) -> set[str
 
 def test_the_cli_package_reexports_exactly_the_private_names_frozen_on_2026_09_22():
     # The ``_cmd_*`` targets are read by ``main()`` in the same file; every
-    # other name is imported so a test can monkeypatch it through the package.
+    # other name is re-exported so a test can IMPORT it from the package
+    # (PR #75). Patch targets are the defining submodules, never these.
     found = _private_import_bindings(_SOURCE_ROOT / "cli" / "__init__.py")
     assert found == _CLI_PRIVATE_REEXPORTS, _ratchet_message(
         "cli/__init__'s private re-exports", found, _CLI_PRIVATE_REEXPORTS

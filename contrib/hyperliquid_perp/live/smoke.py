@@ -735,8 +735,8 @@ class SmokeTestRunner:
             # run()'s loop past _record() — so, uniquely, no live_smoke_tests
             # row for the attempted test, breaking the append-only audit
             # promise — while a staged real long and an armed kill switch may
-            # still be outstanding. The import-time guard at the bottom of this
-            # module makes it unreachable; this keeps it contained regardless.
+            # still be outstanding. The registry test in tests/live/test_smoke
+            # makes it unreachable; this keeps it contained regardless.
             method = getattr(self, f"_test_{test.key}")
             return method()
         except _SmokeAbort as exc:

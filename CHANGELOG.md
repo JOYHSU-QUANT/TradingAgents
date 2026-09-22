@@ -39,7 +39,7 @@ Breaking changes within the 0.x line are called out explicitly.
   layering debt measured on 2026-09-22 by equality, so it can only shrink:
   the 32 `paper` symbols `live/` reaches (a module imported as a name counts
   by the attributes read off it) and the 2 `persistence/` reaches; the SQL
-  sites per module outside `persistence/` (`common/no_decision.py` 2,
+  sites per module outside `persistence/` and `tests/` (`common/no_decision.py` 2,
   `live/validation.py` 9, `paper/run_lock.py` 2, `paper/validation.py` 21);
   and the 46 private names `cli/__init__.py` re-exports for its tests. CI
   gains a `typecheck` job running mypy over the perp module's lower layers

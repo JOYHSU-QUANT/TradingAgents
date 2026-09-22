@@ -10,8 +10,9 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **One rendering of a BARE measured gap, shared by the two modules that print
-  one** (`contrib/hyperliquid_perp/common/instants.py`, issue #284 item 1).
+- **One rendering of a BARE measured gap, shared by the two refusal paths that
+  print one** (`contrib/hyperliquid_perp/common/instants.py`, issue #284
+  item 1).
   `_gap` — the rule that renders a duration in the LARGEST unit whose figure
   reaches 1.0, so a real gap never prints as `0.0h` and a figure is never
   promoted into a unit it has not reached — moves out of
@@ -30,12 +31,18 @@ Breaking changes within the 0.x line are called out explicitly.
   sentence names no bound to be contradicted. What does NOT change: every
   refusal CONDITION on both sides, and `macro_trend`'s messages, which are
   byte-identical — `research_signal`'s two WARNING texts do change, so a log
-  filter keyed on the old wording needs updating. `domains/perp/freshness.py`
-  keeps its own compound `14h 12m 30s` renderer on purpose: it prints an age
-  and the limit it is read against in one shape, which is a third answer to a
-  related question rather than a fourth copy of this one. The boundary table
-  that pins the unit rule moves with the helper to
-  `tests/common/test_instants.py`.
+  filter keyed on the old wording needs updating. The boundary table that pins
+  the unit rule moves with the helper to `tests/common/test_instants.py`.
+
+  Two other sites in the package print a duration and are named in the
+  helper's docstring so the next reader knows they were weighed.
+  `domains/perp/freshness.py` keeps its own compound `14h 12m 30s` renderer on
+  purpose — it prints an age and the limit it is read against in one shape,
+  which answers a related question rather than restating this one.
+  `domains/perp/prompt_context.py`'s last-fill line has the identical fixed
+  `%.1f` hours and does print `0.0 hours` for a fill under three minutes old;
+  that is a defect, opened as #288 rather than fixed here, because the line is
+  PROMPT text and moving a prompt byte is a paper-run segmentation point.
 
   Issue #284's item 2 — the macro `Basis:` line running about 1,050
   characters, some four times the volume profile's and longer than the four

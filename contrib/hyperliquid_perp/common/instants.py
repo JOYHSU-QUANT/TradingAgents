@@ -29,13 +29,24 @@ because the two modules that render such a gap AS A BARE FIGURE
 and had two different answers to it — a fixed ``%.1fh``, which prints a real
 gap as ``0.0h``, and the unit-picking rule below, which does not (issue #284).
 
-A THIRD module in the same package renders a duration and is deliberately not
-converged onto this one: ``domains.perp.freshness``'s ``_format_duration_ms``
-prints a compound ``14h 12m 30s``, because its sentences carry an age and the
-limit it is read against side by side and want the two in ONE shape — it
-answers "how do I state an age next to its limit?", not "what single figure
-do I state a gap as?". Converging them would rewrite live freshness refusal
-text to settle a question neither module has.
+Those two are not the whole census of durations printed in this package, and
+the other two sites are named here so that the next reader does not have to
+re-derive that they were considered:
+
+- ``domains.perp.freshness``'s ``_format_duration_ms`` prints a compound
+  ``14h 12m 30s`` and is deliberately NOT converged onto this: its sentences
+  carry an age and the limit it is read against side by side and want the two
+  in ONE shape, which answers "how do I state an age next to its limit?"
+  rather than "what single figure do I state a gap as?". Converging them
+  would rewrite live freshness refusal text to settle a question it has not
+  got.
+- ``domains.perp.prompt_context``'s last-fill line renders exactly the gap
+  this helper is for, with exactly the fixed ``%.1f`` hours this helper
+  replaces — and so prints ``0.0 hours`` for a fill under three minutes old.
+  That is a defect, tracked as issue #288 and NOT fixed here for one reason
+  only: it is prompt text, so changing it moves a prompt byte, which is a
+  segmentation point for a paper run and cannot ride along inside an internal
+  refactor.
 
 :func:`seconds_span` is the ONE convergence of a ``*_seconds`` constructor
 argument onto a span. Four live constructors take one (the backfill lookback,
@@ -157,13 +168,15 @@ def gap_label(ms: int) -> str:
     only that no closed bar can sit there) has nothing to contradict and
     prints one figure.
 
-    The ladder stops at hours on purpose, with no day tier: every bound in
-    play is a day or less (24h for the daily feed, a few research bars for
-    the signal), so a figure large enough to want days already means a feed
-    that has been down for days, which the message says in words. The module
-    that does print days — ``freshness._format_duration_ms``, above — starts
-    that band at 48h for its own stated reason, and this helper deferring to
-    it is better than two ladders disagreeing about where a day begins.
+    The ladder stops at hours on purpose, with no day tier, and NOT because
+    the figures stay small: a ``1d`` research document is a supported shape,
+    so its ordinary first refusal — one skipped producer run — already
+    renders ``48.0h``. It stops there because the module that does print days
+    (``freshness._format_duration_ms``, above) opens that band at 48h for a
+    reason of its own, and two ladders in one package disagreeing about where
+    a day begins is worse than one of them counting hours past 24. ``48.0h``
+    is legible; ``2d 0h`` beside a ``30h 0m 0s`` from the other renderer is
+    not.
 
     Takes a duration in milliseconds because that is the form both callers
     hold one in: every stamp they subtract is a venue stamp, and

@@ -317,10 +317,11 @@ def test_a_stale_daily_feed_is_refused_readably_and_blames_the_daily_feed(caplog
 
 
 def test_the_gap_is_reported_at_a_scale_that_cannot_contradict_the_sentence(caplog):
-    # The FIRST illegal lag — one millisecond past the bound, the value the
-    # boundary table in ``tests/common/test_instants`` (which pins the shared
-    # renderer, ``gap_label``) marks as refused. At one decimal place of hours it
-    # read "closed 24.0h before this context's as-of, past the 24h a healthy
+    # The FIRST illegal lag — one millisecond past the bound. What the shared
+    # renderer makes of that millisecond is pinned separately, by the boundary
+    # table in ``tests/common/test_instants``; the refusal is this file's.
+    # At one decimal place of hours the message read
+    # "closed 24.0h before this context's as-of, past the 24h a healthy
     # daily feed stays within": a figure equal to the limit in a sentence
     # saying the limit was exceeded. The mirror case, a bar 1 ms AHEAD, read
     # "0.0h AFTER" — no gap at all, in a sentence about a gap.

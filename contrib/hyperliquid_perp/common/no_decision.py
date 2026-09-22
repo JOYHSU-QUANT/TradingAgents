@@ -24,10 +24,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from .constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
-from .instants import parse_instant
+from .instants import parse_instant, whole_hours
 
 __all__ = [
     "NO_DECISION_STREAK_THRESHOLD",
@@ -172,18 +172,12 @@ def trailing_failure_streaks(conn: sqlite3.Connection, run_id: str) -> TrailingF
     return TrailingFailureStreaks(no_decision, stale_feed, latest_at)
 
 
-_HOUR = timedelta(hours=1)
 # The wording below multiplies a cycle count into "~Nh", so the cadence has to
-# be whole hours for that product to be exact: at a 30-minute cadence the old
-# ``total_seconds() // 3600`` floored three cycles to "~0h with no decision"
-# (issue #290). Refused at import, the way ``domains.perp.freshness`` refuses
-# the same constant for its own label, rather than rendered truncated.
-if CYCLE_INTERVAL % _HOUR:
-    raise ValueError(
-        "common.constants.CYCLE_INTERVAL must be a whole number of hours; the "
-        f"no-decision wording renders a cycle count as hours (got {CYCLE_INTERVAL})"
-    )
-_CYCLE_HOURS = CYCLE_INTERVAL // _HOUR
+# be whole hours for that product to be exact: the old ``total_seconds() //
+# 3600`` truncated any other cadence, down to "~0h with no decision" for three
+# cycles at anything under 20 minutes (issue #290). Refused at import instead,
+# by the same guard ``domains.perp.freshness`` puts on the same constant.
+_CYCLE_HOURS = whole_hours(CYCLE_INTERVAL, what="common.constants.CYCLE_INTERVAL")
 
 
 def _streak_hours(streak: int) -> int:

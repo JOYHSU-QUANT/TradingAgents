@@ -16,6 +16,7 @@ from contrib.hyperliquid_perp.common.instants import (
     gap_label,
     parse_instant,
     seconds_span,
+    whole_hours,
     whole_hours_label,
 )
 
@@ -34,6 +35,13 @@ def test_parse_instant_refuses_a_naive_stamp():
     # arithmetic instead of here, where the message names the store.
     with pytest.raises(ValueError, match="naive; the store is corrupt"):
         parse_instant("2026-08-31T12:00:05")
+
+
+def test_whole_hours_is_the_integer_the_label_is_built_on():
+    assert whole_hours(timedelta(hours=4), what="x") == 4
+    assert whole_hours(timedelta(days=1), what="x") == 24
+    with pytest.raises(ValueError, match=r"^y must be a whole number of hours; .*\(got 0:30:00\)$"):
+        whole_hours(timedelta(minutes=30), what="y")
 
 
 def test_whole_hours_label_renders_a_span_as_hours():

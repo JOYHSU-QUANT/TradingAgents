@@ -1739,10 +1739,7 @@ def validate_live_run(
         stuck_for = now - stranded.oldest_at
         if stuck_for >= _ADOPTION_WEDGE_AFTER:
             # The measured span through ``gap_label`` (23h59m used to floor to
-            # "~23h") and the bound as its whole-hours label; the bound is
-            # named, so the pairing rule on ``gap_label`` would want the excess
-            # too, but every value here is at least the bound and a day-old
-            # wedge is not a figure the operator has to size to the minute.
+            # "~23h") and the bound as its whole-hours label.
             shortfalls.append(
                 f"stranded_decision_cycle = {stranded.oldest_id} (in_progress and "
                 f"unchanged for {gap_label(delta_ms(now, stranded.oldest_at))}, past the "

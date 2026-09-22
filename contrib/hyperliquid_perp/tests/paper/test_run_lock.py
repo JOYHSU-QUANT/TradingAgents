@@ -47,12 +47,12 @@ def test_second_process_with_fresh_heartbeat_is_refused(db):
 
 
 def test_the_refusal_states_the_heartbeat_age_in_a_unit_that_does_not_vanish(db):
-    # The common holder is a sibling daemon heartbeating right now, a few hundred
-    # milliseconds ago; a fixed "%.0fs" printed that as "heartbeat 0s ago"
-    # (issue #290). Anchored on "(heartbeat " so a sign or a stray leading digit
-    # cannot pass as a superstring.
+    # A lease read just after the holder's heartbeat is a fraction of a second
+    # old; a fixed "%.0fs" printed that as "heartbeat 0s ago" (issue #290).
+    # Anchored on "(heartbeat " so a sign or a stray leading digit cannot pass
+    # as a superstring. The bound in the remedy is in the same ladder.
     acquire_run_lock(db, "r", pid=101, now=_T0)
-    with pytest.raises(RunLockError, match=r"\(heartbeat 400 ms ago\)"):
+    with pytest.raises(RunLockError, match=r"\(heartbeat 400 ms ago\).*retry after 15\.0 min\."):
         acquire_run_lock(db, "r", pid=202, now=_T0 + timedelta(milliseconds=400))
     with pytest.raises(RunLockError, match=r"\(heartbeat 2\.5 min ago\)"):
         acquire_run_lock(db, "r", pid=202, now=_T0 + timedelta(seconds=150))

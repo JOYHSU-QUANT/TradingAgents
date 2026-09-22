@@ -20,7 +20,9 @@ def test_a_streak_renders_as_whole_hours_at_the_configured_cadence():
 def test_a_cadence_that_is_not_whole_hours_is_refused_at_import():
     # In a subprocess rather than via ``importlib.reload``: reloading would
     # rebind the module's classes under every test that already imported them.
-    # The guard has to fire at IMPORT, before any wording could render "~0h".
+    # The guard has to fire at IMPORT, before any wording could render a
+    # truncated hour count (30 minutes is enough to be refused; the old
+    # arithmetic would have floored three such cycles to "~1h", not "~0h").
     code = (
         "from datetime import timedelta\n"
         "from contrib.hyperliquid_perp.common import constants\n"

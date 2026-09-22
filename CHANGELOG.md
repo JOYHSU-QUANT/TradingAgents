@@ -39,30 +39,48 @@ Breaking changes within the 0.x line are called out explicitly.
   cannot truncate:
   - The two run-lease refusals — `paper/run_lock.py`'s `RunLockError` and
     `cli/_common.py`'s "this build needs to migrate the store" — printed the
-    holder's heartbeat age as `%.0fs`, and the common holder is a sibling
-    daemon heartbeating right now, whose lease is a few hundred milliseconds
+    holder's heartbeat age as `%.0fs`; the holder heartbeats once per loop
+    iteration, so a lease read just after a write is a fraction of a second
     old: "heartbeat 0s ago". Both now share `run_lock.lease_age_label`
     ("heartbeat 400 ms ago", "2.5 min ago"), one helper so the two messages of
-    one family cannot drift; a stamp ahead of the reader's clock reads as
-    "0 ms ago" rather than as a negative age.
+    one family cannot drift, and the lock's own refusal states its bound in
+    the same ladder ("retry after 15.0 min", not "900s") so the two figures in
+    one sentence can be subtracted. A stamp ahead of the reader's clock is
+    rendered as "0 ms ago" — chosen over naming the skew, since the lease is
+    fresh either way and the remedy is the same.
   - `live/validation.py`'s refresh-rate failure sentence rendered the outage
     and covered spans as `%.0fs`; both go through `gap_label` now ("5.5 min
     unrefreshed across 11 outage(s)"). The summary's
     `kill_switch_outage_seconds:` line keeps whole seconds on purpose: that
     key names its unit.
   - `common/no_decision.py` multiplied a cycle count into "~Nh" with
-    `total_seconds() // 3600`, which at any sub-hour cadence would have
-    floored three cycles to "~0h with no decision". The module now refuses a
-    `CYCLE_INTERVAL` that is not whole hours at import — the guard
-    `domains/perp/freshness.py` already puts on the same constant — and the
-    product is exact. At today's 4h cadence nothing renders differently.
+    `total_seconds() // 3600`, which truncated any cadence that is not whole
+    hours — down to "~0h with no decision" for three cycles at anything under
+    20 minutes. The module now refuses such a `CYCLE_INTERVAL` at import with a
+    `ValueError`, through a new `common.instants.whole_hours` that
+    `whole_hours_label` (the guard `domains/perp/freshness.py` already puts on
+    the same constant) is now built on, and the product is exact. At today's
+    4h cadence nothing renders differently; the constant is source, not
+    config, so the raise is a developer's tripwire at import, not an
+    operator's start-up failure.
   - `live/validation.py`'s stranded-cycle shortfall truncated the measured
     wedge ("unchanged for ~23h" at 23h59m) and the bound; it now prints the
     span through `gap_label` and the bound through `whole_hours_label`
     ("unchanged for 13.0h, past the 12h this gate allows").
 
   Not converged, as the issue asked: `domains/perp/freshness.py`'s compound
-  `14h 12m 30s` renderer.
+  `14h 12m 30s` renderer. Known trade-off, recorded rather than filed: the
+  always-printed `kill_switch_outage_seconds:` summary line still rounds a
+  sub-second total to `0` beside a non-zero episode count; the key names its
+  unit and the RUNBOOK's threshold list reads it as seconds, so the figure is
+  left whole and the episode count beside it is what says a lapse happened.
+
+  Test-side, from the same issue: 48 digit-first substring assertions across
+  eleven test modules are anchored on the text the renderer prints before the
+  figure (§2 — "1 consecutive" was a substring of "11 consecutive", "2.5" of
+  "-2.5"; six mutation classes now fail that passed before), and the two
+  macro `Basis:` sentences the #284 entry below records as unpinned have a
+  test (§3).
 
 - **A shared rendering for a measured gap**
   (`contrib/hyperliquid_perp/common/instants.py`, issue #284 item 1).
@@ -114,8 +132,8 @@ Breaking changes within the 0.x line are called out explicitly.
   by a test, which is what one would want before shortening any of them:
   deleting either of two — the "lagging measure by construction" disclosure
   and the one dating the figures to the newest closed daily bar — leaves the
-  whole suite green. That is recorded as test debt in #290 §3 rather than
-  closed here.)
+  whole suite green. That was recorded as test debt in #290 §3 and is closed
+  by the #290 entry above.)
 
 - **`futures_basis` and `futures_positioning` cut over on 2026-09-22**
   (`tradingagents/default_config.py`): the CME futures basis (#285) flips

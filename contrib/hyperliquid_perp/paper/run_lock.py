@@ -58,13 +58,19 @@ def lease_age_label(heartbeat_at: datetime, *, now: datetime) -> str:
     Shared by this module's refusal and the CLI's migration refusal
     (``cli._common``), which are one message family and must not drift apart.
     Rendered through :func:`gap_label` rather than a fixed ``%.0fs``: the
-    common holder is a sibling daemon that is heartbeating right now, whose
-    lease is a few hundred milliseconds old, and ``%.0fs`` printed that as
+    holder heartbeats once per loop iteration, so a lease read just after a
+    write is a fraction of a second old, and ``%.0fs`` printed that as
     "heartbeat 0s ago" (issue #290). A stamp AHEAD of ``now`` — the writer's
     clock ahead of this host's — is a fresh lease by definition and reads as
     no age at all, not as a negative one.
     """
     return gap_label(max(0, delta_ms(now, heartbeat_at)))
+
+
+# The lease bound as the refusal states it, in the same unit ladder as the age
+# beside it — an age in "ms" against a bound in "900s" would make the operator
+# convert to know how long to wait.
+_STALE_LABEL = gap_label(LOCK_STALE_SECONDS * 1000)
 
 
 def _holder(state, now: datetime) -> tuple[int, datetime] | None:
@@ -89,7 +95,7 @@ def _refuse_if_held(state, run_id: str, *, pid: int | None, now: datetime) -> No
             f"run {run_id!r} is already being driven by pid {holder[0]} "
             f"(heartbeat {lease_age_label(holder[1], now=now)} ago). Two processes "
             "on one run would cancel each other's live orders and double the AI "
-            f"spend. If that process is truly gone, retry after {LOCK_STALE_SECONDS}s."
+            f"spend. If that process is truly gone, retry after {_STALE_LABEL}."
         )
 
 

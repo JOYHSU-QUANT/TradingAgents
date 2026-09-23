@@ -65,8 +65,10 @@ Breaking changes within the 0.x line are called out explicitly.
   symbols to 13 (`paper/twap`, `paper/stops`, `prompt_regime_lines`), and
   the persistence upward edge names `runtime.accounting.AccountMetrics` in
   place of the `paper` one. `runtime/accounting.py` enters mypy's checked set
-  with no new pins (the module's one pre-existing error is in `apply_fill`,
-  which stays in `paper/`). Tests: `tests/paper/test_accounting.py` splits
+  with no pin added: the one `# type: ignore[arg-type]` it carries (on
+  `_dec_or_none`) moved with the code and is still needed, and the one mypy
+  error the old module reported (the `unrealized_pnl` call in `apply_fill`)
+  stays in `paper/`, outside the checked set. Tests: `tests/paper/test_accounting.py` splits
   along the module split, 25 tests to `tests/runtime/test_accounting.py` and
   28 staying; the total falls by the two compat-path pins.
 

@@ -105,6 +105,7 @@ def test_without_a_payload_directory_the_count_is_skipped(store, capsys):
         (("--research-db", "missing.sqlite"), "--research-db 'missing.sqlite' does not exist"),
         (("--payload-root", "missing-dir"), "--payload-root 'missing-dir' is not a directory"),
         (("--payload-root", ""), "--payload-root needs a directory, got ''"),
+        (("--out", ""), "--out needs a directory, got ''"),
     ],
 )
 def test_a_flag_pointing_nowhere_is_a_named_exit_1(
@@ -161,7 +162,7 @@ def test_the_header_names_the_genesis_blocks_that_are_missing(tmp_path, capsys):
     first = capsys.readouterr().out.splitlines()[0]
     assert first.endswith(
         "costs and interval from the run's recorded config, except market_data "
-        "(absent from the genesis: defaults used))"
+        "absent from the genesis: defaults used)"
     )
 
 

@@ -204,6 +204,10 @@ def _cmd_score(args: argparse.Namespace) -> int:
     for line in lines:
         print(line)
     if args.out is not None:
+        if not args.out:
+            # ``Path("")`` is the working directory; an unset shell variable
+            # must not quietly write there.
+            return _fail("--out needs a directory, got ''")
         out = Path(args.out)
         decisions_csv = out / f"{facts.run_id}-decisions.csv"
         summary = out / f"{facts.run_id}-summary.txt"

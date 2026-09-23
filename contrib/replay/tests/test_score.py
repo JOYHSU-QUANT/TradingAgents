@@ -24,13 +24,21 @@ from contrib.replay.score import (
     score_run,
     sign_test,
 )
-from contrib.replay.upstream import CostModel, FillRole, SegmentName, Split, TargetSide
+from contrib.replay.upstream import (
+    CostModel,
+    FillRole,
+    SegmentName,
+    Split,
+    TargetSide,
+    from_epoch_ms,
+)
 
 from .conftest import (
     ANCHOR_MS,
     RESEARCH_CLOSES,
     STEP_MS,
     at_ms,
+    attempt_id,
     fixture_answers,
     fixture_questions,
     input_id,
@@ -314,6 +322,40 @@ def test_a_horizon_no_question_reaches_has_no_band_and_judges_no_flat_call():
     assert card.rows[0].outcome(6).ai_hit is None  # no later mark at 24h either
     lines = card.summary().describe(card)
     assert "  flat band n/a; answered rows marked from the research store: 0" in lines
+    # The judgement itself, without a band: a flat call is neither right nor wrong.
+    from contrib.replay.score import _hit
+
+    assert _hit(TargetSide.FLAT, 0.0, None) is None
+    assert _hit(TargetSide.LONG, 0.5, None) is True
+
+
+def test_records_take_the_gates_decimals():
+    """PR 2 builds these records from the gate's own Decimal results, in-process."""
+    from decimal import Decimal
+
+    question = Question(
+        input_id="d",
+        at_ms=at_ms(0),
+        mark=Decimal("100.5"),
+        current_side="long",
+        current_margin_pct=Decimal("10"),
+        leverage=Decimal("3"),
+        max_margin_pct=Decimal("50"),
+        account_equity=Decimal("1000"),
+    )
+    assert (question.mark, question.current_exposure) == (100.5, pytest.approx(0.3))
+    answer = Answer(
+        input_id="d",
+        decision_mode="set_target",
+        target_side="long",
+        requested_margin_pct=Decimal("30"),
+        approved_margin_pct=Decimal("30"),
+        risk_action="approved",
+        risk_reason=None,
+        confidence=Decimal("0.8"),
+        order_created=True,
+    )
+    assert (answer.requested_margin_pct, answer.confidence) == (30.0, 0.8)
 
 
 def test_the_top_confidence_bucket_is_closed_at_one():
@@ -546,6 +588,21 @@ def test_sharpe_is_annualised_by_the_horizons_in_a_year():
     ]
     expected = statistics.fmean(values) / statistics.stdev(values) * (365 * 24 / 4) ** 0.5
     assert h.executed_pnl.sharpe == pytest.approx(expected)
+    # Six bars on: 365 such horizons in a year, not 2190.
+    six = card.summary().horizons[1]
+    values6 = [
+        row.outcome(6).executed_pnl for row in card.rows if row.outcome(6).executed_pnl is not None
+    ]
+    assert six.executed_pnl.sharpe == pytest.approx(
+        statistics.fmean(values6) / statistics.stdev(values6) * 365**0.5
+    )
+    lone = score_run(
+        [_question(), _question(input_id="next", at_ms=at_ms(1), mark=101.0)],
+        [_answer()],
+        step_ms=STEP_MS,
+        costs=TAKER,
+    )
+    assert str(lone.summary().horizons[0].executed_pnl).endswith("sharpe 0.00 (n<2)")
 
 
 def test_describe_prints_one_fact_per_line():
@@ -846,3 +903,8 @@ def test_csv_table_has_one_row_per_question_with_the_horizons_by_label():
     assert row2["ai_pnl_4h"] == pytest.approx(-0.4 * NEXT_RETURN[2] - 0.7 * TAKER_COST)
     assert row2["executed_pnl_4h"] == pytest.approx(-0.2 * NEXT_RETURN[2] - 0.5 * TAKER_COST)
     assert (row2["ai_hit_24h"], row2["executed_hit_24h"]) == (False, False)
+    assert row2["attempt_id"] == attempt_id(2)
+    assert row2["at"] == from_epoch_ms(at_ms(2)).isoformat()
+    # The hit pair where the two readings disagree: the rejected row 6.
+    row6 = by_id[input_id(6)]
+    assert (row6["ai_hit_4h"], row6["executed_hit_4h"]) == (False, True)

@@ -74,9 +74,11 @@ ROWS: tuple[Row, ...] = (
         {"decision_mode": "set_target", "target_side": "long", "requested": "30", "approved": "30",
          "risk_action": "approved", "risk_reason": None, "confidence": "0.8",
          "order_created": True, "no_order_reason": None}),
+    # A genuine maintain keeps the confidence the model quoted (the gate
+    # passes it through); the calibration must leave it out all the same.
     Row(1, "101", "long", "30", "1", "long",
         {"decision_mode": "maintain_current", "target_side": None, "requested": None, "approved": None,
-         "risk_action": "approved", "risk_reason": None, "confidence": None,
+         "risk_action": "approved", "risk_reason": None, "confidence": "0.6",
          "order_created": False, "no_order_reason": "maintain_current"}),
     Row(2, "99", "long", "30", "1", "short",
         {"decision_mode": "set_target", "target_side": "short", "requested": "40", "approved": "20",

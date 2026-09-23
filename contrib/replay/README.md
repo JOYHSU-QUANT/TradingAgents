@@ -46,7 +46,9 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
   排程是滾動的（下一次＝上次決策＋4h，不對齊整點）、mark 是決策當下的即時價，用已收盤 K 線的
   時戳配對會把跨過整點的 cycle 讀成缺口、把幾分鐘後的收盤價當成「4h 後」（run 3 實測；
   2026-09-23 拍板）。半根內沒有題的目標時點改讀研究 store 最近的 candle close（`--research-db`），
-  CSV 會標明來源；兩題相距半根以內（含）視為配對歧義、具名拒絕。鎖只套在選中的那個候選上：
+  CSV 會標明來源；兩題相距半根以內（含）視為配對歧義、具名拒絕（實務上會撞到的情形：決策後
+  一小時內重啟、reconcile 取消還活著的 plan 並立刻排下一次決策——那一題距上一題不到 2h，整個
+  run 被拒，要先決定那兩題留哪一題）。鎖只套在選中的那個候選上：
   store 裡半根內有題但它在 holdout，答案就是「沒有」，不會退而讀旁邊的研究收盤價（否則同一列
   鎖住與 `--holdout` 兩種跑法會用不同價格計分）。
 - **方向**：模型的主張＝它要的 `target_side`——approved／clamped 的 `set_target` 如此，**被拒的也如此**

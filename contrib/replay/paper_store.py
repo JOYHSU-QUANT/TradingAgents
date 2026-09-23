@@ -123,11 +123,14 @@ class RunFacts:
         """Where the costs and the interval came from, for the report's first line."""
         if not self.config_recorded:
             return "defaults, no config_json"
-        if self.missing_blocks:
-            return (
-                "the run's recorded config, except "
-                f"{', '.join(self.missing_blocks)} (absent from the genesis: defaults used)"
-            )
+        defaulted = [block for block in self.missing_blocks if block != "coin"]
+        notes = []
+        if defaulted:
+            notes.append(f"{', '.join(defaulted)} absent from the genesis: defaults used")
+        if "coin" in self.missing_blocks:
+            notes.append("coin read from the run's first input row")
+        if notes:
+            return f"the run's recorded config, except {'; '.join(notes)}"
         return "the run's recorded config"
 
 
@@ -168,6 +171,8 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
         ).fetchone()
         coin = "?" if first is None else str(first["symbol"])
     recorded = row["config_json"] is not None
+    # Without a genesis nothing is "missing" — everything is defaulted, and
+    # ``describe_source`` says so in one sentence rather than three.
     missing = tuple(
         block for block in ("market_data", "paper_trading", "coin") if recorded and block not in config
     )
@@ -339,6 +344,15 @@ def load_decisions(
             raise ScoreError(
                 f"{row['decision_attempt_id']}: names output {row['attempt_output_id']!r}, "
                 "which ai_outputs does not hold"
+            )
+        # The engine writes a terminal status and its output row in one
+        # transaction, so a finished attempt without an output — or an
+        # api_failed one with — is a store the scorecard must not guess at.
+        if (row["status"] == "api_failed") != (row["attempt_output_id"] is None):
+            raise ScoreError(
+                f"{row['decision_attempt_id']}: status {row['status']!r} with "
+                f"output {row['attempt_output_id']!r}; a finished attempt carries an output and "
+                "an api_failed one none"
             )
         tries = int(row["attempt_count"] or 1)
         if tries > 1:

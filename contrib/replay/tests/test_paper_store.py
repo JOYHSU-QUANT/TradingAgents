@@ -12,6 +12,7 @@ from contrib.hyperliquid_perp.integration import decision_reports
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.replay.paper_store import (
     REPORTS_SUFFIX,
+    RunFacts,
     load_decisions,
     load_research_closes,
     run_facts,
@@ -275,7 +276,23 @@ def test_run_facts_fall_back_to_the_config_defaults_without_a_genesis_config(tmp
         assert run_facts(db, "no-such-run") is None
     assert facts is not None
     assert not facts.config_recorded
+    assert facts.missing_blocks == ()  # nothing is "missing" when nothing was recorded
+    assert facts.describe_source() == "defaults, no config_json"
     assert facts.coin == COIN  # from the first ai_inputs row's symbol
+    named = RunFacts(
+        run_id="r",
+        mode="paper",
+        coin=COIN,
+        interval="4h",
+        step_ms=STEP_MS,
+        costs=facts.costs,
+        config_recorded=True,
+        missing_blocks=("market_data", "coin"),
+    )
+    assert named.describe_source() == (
+        "the run's recorded config, except market_data absent from the genesis: defaults used; "
+        "coin read from the run's first input row"
+    )
     assert facts.costs == CostModel(
         taker_fee_rate=0.00045,
         maker_fee_rate=0.00015,
@@ -325,7 +342,7 @@ def test_research_closes_are_keyed_by_close_time(tmp_path):
 
 
 def test_a_question_is_placed_at_its_decision_instant_not_its_closed_bar(store):
-    """A cycle that ran at 15:53 against the bar closed at 12:00 sits at 15:53."""
+    """A cycle decided one bar after the bar it read (slot 15 against slot 14's close) sits at slot 15."""
     decided, closed = from_epoch_ms(at_ms(15)), from_epoch_ms(at_ms(14))
     with Database(store) as db, db.transaction() as conn:
         repo.insert_ai_input(
@@ -354,6 +371,36 @@ def test_a_question_is_placed_at_its_decision_instant_not_its_closed_bar(store):
     with Database(store, migrate=False) as db:
         questions = load_decisions(db, RUN_ID).questions
     assert next(q for q in questions if q.input_id == "in-late").at_ms == at_ms(15)
+
+
+def test_a_finished_attempt_without_an_output_is_refused_not_read_as_unanswered(store):
+    stamp = from_epoch_ms(at_ms(15))
+    with Database(store) as db, db.transaction() as conn:
+        repo.insert_ai_input(
+            conn,
+            input_id="in-torn",
+            timestamp=stamp,
+            mode="paper",
+            run_id=RUN_ID,
+            symbol=COIN,
+            candle_end=stamp,
+            mark_price=Decimal("1"),
+            current_position_side="flat",
+            configured_leverage=Decimal("1"),
+            max_target_margin_pct=Decimal("60"),
+        )
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id="att-torn",
+            timestamp=stamp,
+            mode="paper",
+            run_id=RUN_ID,
+            scheduled_at=stamp,
+            input_id="in-torn",
+            status="completed",
+        )
+    with Database(store, migrate=False) as db, pytest.raises(ScoreError, match="att-torn: status 'completed'"):
+        load_decisions(db, RUN_ID)
 
 
 def test_an_attempt_naming_an_output_the_store_lacks_is_refused(store):

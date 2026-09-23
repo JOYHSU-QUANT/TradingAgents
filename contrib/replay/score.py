@@ -148,6 +148,9 @@ def _number(value: object, what: str) -> float:
 
 
 def _amount(value: object, what: str, *, positive: bool = False) -> float:
+    """A non-negative (or positive) finite number, ``Decimal`` taken as :func:`_number` takes it."""
+    if isinstance(value, Decimal):
+        value = float(value)
     try:
         return require_amount(value, what, positive=positive)
     except ValueError as exc:
@@ -564,7 +567,7 @@ class Scorecard:
     rows: tuple[Scored, ...]
     step_ms: int
     costs: CostModel
-    flat_bands: Mapping[int, float | None]  # None: no scored row reached that horizon
+    flat_bands: Mapping[int, float | None]  # None: no locked row has a later mark at that horizon
     split: Split | None
     holdout_read: bool
 
@@ -984,6 +987,7 @@ def _summarise(card: Scorecard) -> Summary:
     reports = None if all(flag is None for flag in checked) else sum(bool(flag) for flag in checked)
 
     horizons = []
+    answered_rows = [row for row, _ in answered]
     for bars in HORIZONS:
         outcomes = [(row, answer, row.outcomes[bars]) for row, answer in answered]
         horizons.append(
@@ -1005,9 +1009,9 @@ def _summarise(card: Scorecard) -> Summary:
                 two_by_two=_two_by_two(o for _, _, o in outcomes),
                 calibration=_calibration([(a, o) for _, a, o in outcomes]),
                 baselines=(
-                    _baseline("buy_hold", [r for r, _ in answered], bars, _cap, card),
-                    _baseline("flat", [r for r, _ in answered], bars, lambda row: 0.0, card),
-                    _baseline("research_bias", [r for r, _ in answered], bars, _bias_exposure, card),
+                    _baseline("buy_hold", answered_rows, bars, _cap, card),
+                    _baseline("flat", answered_rows, bars, lambda row: 0.0, card),
+                    _baseline("research_bias", answered_rows, bars, _bias_exposure, card),
                 ),
             )
         )

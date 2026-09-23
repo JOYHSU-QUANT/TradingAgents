@@ -133,8 +133,8 @@ def _conflicting_run_lease(
     live wallet.
     """
     from ..common.instants import parse_instant
-    from ..paper.run_lock import LOCK_STALE_SECONDS
     from ..persistence import repository as repo
+    from ..runtime.run_lock import LOCK_STALE_SECONDS
 
     if own_network is None:
         own = repo.get_run(db.conn, run_id)

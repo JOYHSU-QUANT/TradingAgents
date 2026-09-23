@@ -30,12 +30,12 @@ from contrib.hyperliquid_perp.live.fills import (
 )
 from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.accounting import compute_live_fill_effect
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.ids import live_fill_id
 from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 _NOW = datetime(2026, 7, 14, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16

@@ -41,7 +41,8 @@ from typing import Any
 from ..common.instants import Seconds, epoch_ms, seconds_span
 from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
-from ..paper.clock import Clock, WallClock
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .fills import IngestOutcome, LiveFillProcessor
 from .ws_stream import USER_FILLS_CHANNEL
 

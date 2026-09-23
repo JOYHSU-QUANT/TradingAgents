@@ -722,7 +722,7 @@ def test_conflicting_run_lease_ignores_a_stale_sibling_at_the_boundary(tmp_path)
     # takeable (the holder is presumed dead), so refusing on it would ground the
     # smoke suite on the corpse of a crashed run forever.
     from contrib.hyperliquid_perp.cli import _conflicting_run_lease
-    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS
+    from contrib.hyperliquid_perp.runtime.run_lock import LOCK_STALE_SECONDS
 
     now = datetime.now(timezone.utc)
     dbp = tmp_path / "sib.db"
@@ -871,7 +871,7 @@ def test_live_smoke_real_run_not_refused_by_own_lease_or_a_stale_sibling(
     # ordinary invocation looks like this once the row exists) and a sibling
     # whose holder is long dead. Refusing on either would make the guard a
     # permanent outage instead of a concurrency check.
-    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS
+    from contrib.hyperliquid_perp.runtime.run_lock import LOCK_STALE_SECONDS
 
     now = datetime.now(timezone.utc)
     cfg = _smoke_yaml(tmp_path)

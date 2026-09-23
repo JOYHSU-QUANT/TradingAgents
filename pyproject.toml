@@ -73,7 +73,8 @@ filterwarnings = [
 
 [tool.mypy]
 # Refactor plan v2, T0: the perp module's lower layers only (pure types, no
-# SDK). What they import is checked silently. The 15 errors these layers had
+# SDK); T1 added ``runtime/``, the kernel both lanes share. What they import
+# is checked silently. The 15 errors these layers had
 # on 2026-09-22 are pinned where they sit with ``# type: ignore[code]``, and
 # ``warn_unused_ignores`` fails the job once one is fixed, so a pin can only
 # be removed.
@@ -82,6 +83,7 @@ files = [
     "contrib/hyperliquid_perp/domains",
     "contrib/hyperliquid_perp/persistence",
     "contrib/hyperliquid_perp/ports.py",
+    "contrib/hyperliquid_perp/runtime",
 ]
 python_version = "3.10"
 follow_imports = "silent"

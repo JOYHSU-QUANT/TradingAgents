@@ -83,10 +83,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from enum import Enum
-from typing import Protocol, runtime_checkable
 
-from ..common.constants import CYCLE_INTERVAL, ERROR_TYPES
-from ..common.enum_guard import check_enum
+from ..common.constants import CYCLE_INTERVAL
 from ..common.inflight import (
     InFlightDecision,
     failed_cycle_next_at,
@@ -95,16 +93,17 @@ from ..common.inflight import (
 )
 from ..common.instants import parse_instant
 from ..domains.perp.risk_gate import RiskConfig
-from ..domains.perp.schema import PerpMarketContext
 from ..domains.perp.target_decision import DecisionConfig, ParsedDecision, parse_target_decision
 from ..persistence import audit_rows, repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import decision_attempt_id as derive_attempt_id
 from ..persistence.models import DECIMAL_CONTEXT
+from ..ports import Clock, DecisionProvider
+from ..runtime.asset_spec import AssetSpec
+from ..runtime.decision import DecisionInput, RetryableDecisionError
+from ..runtime.position_facts import read_books
 from . import accounting
-from .clock import Clock
-from .engine import AssetSpec, PaperExecutionEngine, PlanStartResult
-from .position_facts import BookFacts, read_books
+from .engine import PaperExecutionEngine, PlanStartResult
 
 __all__ = [
     "CYCLE_INTERVAL",
@@ -126,8 +125,11 @@ logger = logging.getLogger(__name__)
 # stay in ``__all__`` for the callers that always imported them from here
 # (issue #122 moved the definitions down so the freshness guard and the
 # no-decision policy could read them without importing this module — and, with
-# it, the whole paper engine). The §3.1 retry ladder: after the first failure
-# wait 10s, after the second 30s, after the third → api_failed.
+# it, the whole paper engine). ``DecisionInput`` and ``RetryableDecisionError``
+# (``runtime.decision``) and ``DecisionProvider`` (``ports``) stay for the
+# same reason (refactor plan v2, T1-c; plan PR 3 drops them). The §3.1 retry
+# ladder: after the first failure wait 10s, after the second 30s, after the
+# third → api_failed.
 MAX_DECISION_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (10, 30)
 
@@ -144,114 +146,6 @@ RETRY_DELAYS_SECONDS = (10, 30)
 # in-process retries cannot fix — unbounded containment would wedge the run
 # invisibly (no terminal row, no §3.1 streak, a fresh lease heartbeat).
 _MAX_PERSIST_FAILURES = 10
-
-
-class RetryableDecisionError(Exception):
-    """A market-data / AI API failure worth retrying (spec §3.1).
-
-    ``error_type`` is a member of the §6.2 vocabulary,
-    ``common.constants.ERROR_TYPES`` (the member-by-member rationale lives
-    there); ``check_enum`` enforces it HERE, at construction — the same
-    posture as ``ContextRefusal`` — so a producer's typo fails on the raise
-    instead of when the daemon tries to record its failure at the repository
-    write boundary (which checks the same set; issue #122). Anything the
-    provider does not classify is a bug, not a retry: it fails the cycle
-    closed with no class at all (see ``PaperScheduler._fail_untyped``).
-    """
-
-    def __init__(self, error_type: str, message: str) -> None:
-        check_enum(error_type, ERROR_TYPES, name="RetryableDecisionError.error_type")
-        super().__init__(f"{error_type}: {message}")
-        self.error_type = error_type
-        self.message = message
-
-
-@dataclass(frozen=True)
-class DecisionInput:
-    """Everything one AI call sees, built by the provider before the call.
-
-    ``context`` is the market side of the ``ai_inputs`` row; the account side
-    rides along as ``books`` (the one read the position section was priced
-    from), and the driver reads it itself only for an input that carries
-    none. The payload
-    path/hash point at the full JSON the provider persisted (phase2-data §5:
-    SQLite keeps the summary + path + hash, never the whole prompt).
-    """
-
-    context: PerpMarketContext
-    candle_start: datetime | None = None
-    candle_end: datetime | None = None
-    input_payload_path: str | None = None
-    input_payload_hash: str | None = None
-    prompt_version: str | None = None
-    # The prompt's section structure (prompt_context.context_shape), the
-    # second segmentation key beside prompt_version (issue #97).
-    context_shape: str | None = None
-    # The third: a content digest of the format block
-    # (target_decision.format_fingerprint) — the half of the prompt the other
-    # two keys do not cover, whose numbers move on a config edit (issue #129).
-    format_fingerprint: str | None = None
-    model: str | None = None
-    # The books the position section was priced from — ledger, position, the
-    # newest fill's stamp — so the ``ai_inputs`` row is written from the SAME
-    # read rather than a second one (issue #134). ``None``: the provider
-    # carries no books (a test double, a replay harness) and the driver reads
-    # them itself.
-    books: BookFacts | None = None
-
-    def __post_init__(self) -> None:
-        # Path and hash are two halves of one artifact (phase2-data §5: the
-        # store keeps path + hash together); a provider supplying one without
-        # the other would persist an audit row that can't be verified. The
-        # candle window is the same kind of pair: one boundary without the
-        # other is a malformed §5 audit row, not a narrower one.
-        if (self.input_payload_path is None) != (self.input_payload_hash is None):
-            raise ValueError(
-                "DecisionInput.input_payload_path and input_payload_hash must be "
-                "provided together (or both omitted)"
-            )
-        if (self.candle_start is None) != (self.candle_end is None):
-            raise ValueError(
-                "DecisionInput.candle_start and candle_end must be provided "
-                "together (or both omitted)"
-            )
-        # The three segmentation keys are one set too: a row stamped with a
-        # version but no shape (or no fingerprint) would be indistinguishable
-        # from pre-v10 / pre-v11 history, which the review reads as "unknown".
-        keys = (self.prompt_version, self.context_shape, self.format_fingerprint)
-        if any(k is None for k in keys) and not all(k is None for k in keys):
-            raise ValueError(
-                "DecisionInput.prompt_version, context_shape and format_fingerprint "
-                "must be provided together (or all omitted)"
-            )
-        # An inverted window (start after end) is a malformed §5 row the same way
-        # a half-present pair is; the spec pair is one candle's [start, end].
-        if (
-            self.candle_start is not None
-            and self.candle_end is not None
-            and self.candle_start > self.candle_end
-        ):
-            raise ValueError(
-                "DecisionInput.candle_start must not be after candle_end "
-                f"({self.candle_start} > {self.candle_end})"
-            )
-
-
-@runtime_checkable
-class DecisionProvider(Protocol):
-    """The AI/market seam: build the input, then ask for one decision.
-
-    Two phases so the ``ai_inputs`` row can be recorded *between* them (§5.1:
-    每次呼叫 AI 前記錄一次 — the record must exist before the paid call).
-    Both raise :class:`RetryableDecisionError` for §3.1-retryable failures.
-    ``build_input`` must return a context that already passed the pre-LLM
-    guards (``context_guards.context_refusal``); drivers do not re-check before
-    spending the paid call.
-    """
-
-    def build_input(self, *, coin: str, as_of: datetime) -> DecisionInput: ...
-
-    def request_decision(self, decision_input: DecisionInput) -> ParsedDecision: ...
 
 
 class CycleEvent(str, Enum):

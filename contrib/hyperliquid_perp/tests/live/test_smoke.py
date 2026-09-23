@@ -1575,7 +1575,7 @@ def test_superseded_lease_aborts_and_suppresses_disarm(live_db):
     # (and the wallet's kill switch): the suite must stop before the next wire
     # action and must NOT fire the account-wide clear (it would strip the
     # successor's dead-man cover). Completed verdicts stay durable.
-    from contrib.hyperliquid_perp.paper.run_lock import RunLockError
+    from contrib.hyperliquid_perp.runtime.run_lock import RunLockError
 
     signed = _FakeSigned()
     beats = {"n": 0}
@@ -1640,7 +1640,7 @@ def test_a_takeover_at_the_exit_recheck_hands_the_staged_long_over_unclosed(live
     # position, and clearing the switch would strip ITS cover. So: no close, no
     # disarm, and the real exposure is handed over loudly on the operator surface
     # rather than dropped silently.
-    from contrib.hyperliquid_perp.paper.run_lock import RunLockError
+    from contrib.hyperliquid_perp.runtime.run_lock import RunLockError
 
     signed = _FakeSigned(raise_on={"modify_trigger_order"})
     beats = {"n": 0}

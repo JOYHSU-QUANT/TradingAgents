@@ -17,11 +17,11 @@ from contrib.hyperliquid_perp.live.config import (
 )
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
 from contrib.hyperliquid_perp.live.protection import ProtectionManager, ProtectionOutcome
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.stops import StopConfig, round_to_tick
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState, Side
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import echo_order_status_cloid, identity_latch_rows, misrouted_order_status
 

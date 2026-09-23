@@ -41,6 +41,10 @@ from ..domains.perp.margin import (
 )
 from ..persistence.models import DECIMAL_CONTEXT
 
+# Re-exported: the tick is defined beside ``AssetSpec`` now (refactor plan v2,
+# T1); plan PR 3 drops the name here.
+from ..runtime.asset_spec import price_tick_from_sz_decimals
+
 __all__ = [
     "LIQUIDATION_MODEL_VERSION",
     "LiquidationEstimate",
@@ -56,18 +60,6 @@ LIQUIDATION_MODEL_VERSION = "1"
 # Enough halvings that the bracket collapses far below any real tick size; fixed
 # (not tolerance-based) so the result is bit-for-bit reproducible on replay.
 _BISECT_ITERATIONS = 200
-
-# Perp price precision on Hyperliquid: a price may carry up to (6 - szDecimals)
-# decimal places, so the tick is 10 ** -(6 - szDecimals).
-_PERP_PRICE_MAX_DECIMALS = 6
-
-
-def price_tick_from_sz_decimals(sz_decimals: int) -> Decimal:
-    """The perp price tick implied by an asset's ``szDecimals`` (never hardcoded)."""
-    if sz_decimals < 0:
-        raise ValueError(f"szDecimals must be >= 0, got {sz_decimals}")
-    return Decimal(10) ** -(_PERP_PRICE_MAX_DECIMALS - sz_decimals)
-
 
 @dataclass(frozen=True)
 class MaintenanceSnapshot:

@@ -20,10 +20,10 @@ from pathlib import Path
 
 from ..exchanges.hyperliquid.errors import ExchangeError
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-from ..paper.clock import Clock
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
+from ..ports import Clock
 from .payloads import payload_column, write_raw_payload
 
 __all__ = ["cancel_bot_order_with_evidence"]

@@ -6,7 +6,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from contrib.hyperliquid_perp.paper.run_lock import (
+from contrib.hyperliquid_perp.persistence import repository as repo
+from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.runtime.run_lock import (
     LOCK_STALE_SECONDS,
     RunLockError,
     acquire_run_lock,
@@ -14,8 +16,6 @@ from contrib.hyperliquid_perp.paper.run_lock import (
     peek_run_lock,
     release_run_lock,
 )
-from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database
 
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
 

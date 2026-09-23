@@ -943,7 +943,7 @@ terminalize；只有一列而 `scheduled_at`／`timestamp` 讀不出來：那列
 **不要刪列**，稽核軌跡與 §21.4 計數都靠它。
 
 照抄下面這個形狀，不要自己編欄位值——`validate` 的 no-decision streak 下一輪就會讀這幾欄
-（`common/no_decision.py` 只數非 `in_progress` 的列）。三個容易漏的點：
+（`runtime/no_decision.py` 只數非 `in_progress` 的列）。三個容易漏的點：
 
 - **`error_type` 留 NULL**：非 §6.2 詞彙的失敗一律如此，理由寫在 `error_message`。
 - **`pending_raw_response` 一定要清成 NULL**：終態列不帶回覆是這個 store 的不變量，平常由

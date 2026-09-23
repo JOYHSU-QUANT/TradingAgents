@@ -39,7 +39,6 @@ from ..common.inflight import (
     parse_stored_response,
 )
 from ..common.instants import parse_instant
-from ..common.no_decision import note_cycle_outcome
 from ..domains.perp.risk_gate import RiskConfig
 from ..domains.perp.target_decision import (
     DecisionConfig,
@@ -47,12 +46,14 @@ from ..domains.perp.target_decision import (
     parse_target_decision,
 )
 from ..paper import accounting
-from ..paper.clock import Clock, WallClock
-from ..paper.engine import AssetSpec
-from ..paper.position_facts import read_books
-from ..paper.scheduler import DecisionInput, DecisionProvider, RetryableDecisionError
 from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
+from ..ports import Clock, DecisionProvider
+from ..runtime.asset_spec import AssetSpec
+from ..runtime.clock import WallClock
+from ..runtime.decision import DecisionInput, RetryableDecisionError
+from ..runtime.no_decision import note_cycle_outcome
+from ..runtime.position_facts import read_books
 
 if TYPE_CHECKING:
     # Referenced as a forward-ref STRING in _InFlight's generic base (the base
@@ -448,7 +449,7 @@ class LiveDecisionDriver:
 
         Once per process would be quieter, and wrong. This repo's other
         never-deciding condition escalates on EVERY cycle
-        (``common.no_decision.note_cycle_outcome``) precisely so a log scraper
+        (``runtime.no_decision.note_cycle_outcome``) precisely so a log scraper
         sees it without querying the store; a single line at the moment of the
         wedge is findable only by someone who already knows to look for it, and
         an operator reading the last few hundred journal lines a day later

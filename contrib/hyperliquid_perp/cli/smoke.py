@@ -178,7 +178,7 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     preflight_error: str | None = None
     import signal
 
-    from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
+    from ..runtime.run_lock import RunLockError, acquire_run_lock, release_run_lock
 
     try:
         session = _build_smoke_session(args, db)
@@ -375,7 +375,7 @@ def _build_smoke_session(args, db):
     from ..engine_bridge import load_config_or_exit
     from ..live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
     from ..live.smoke import SmokeContext
-    from ..paper.clock import WallClock
+    from ..runtime.clock import WallClock
 
     config = load_config_or_exit(args.config)
     if config is None:
@@ -490,7 +490,7 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     from ..live.authorization import AgentAuthorizationError, verify_agent_authorization
     from ..live.order_gate import RealOrderGate
     from ..live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE, SmokeContext
-    from ..paper.engine import AssetSpec
+    from ..runtime.asset_spec import AssetSpec
 
     if not live_cfg.allow_real_orders:
         print(
@@ -570,7 +570,7 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     def _heartbeat() -> None:
         # Keeps the lease _cmd_live_smoke acquired fresh across the suite;
         # raises RunLockError once superseded (the runner aborts on it).
-        from ..paper.run_lock import heartbeat_run_lock
+        from ..runtime.run_lock import heartbeat_run_lock
 
         heartbeat_run_lock(db, args.run_id, pid=os.getpid(), now=datetime.now(timezone.utc))
 

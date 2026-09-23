@@ -65,7 +65,7 @@ MAX_COST_ROWS = 13
 class BookPosition:
     """The books' position facts: signed size, entry, wallet balance, newest fill.
 
-    Derived from a run's store by ``paper.position_facts.read_books`` (the
+    Derived from a run's store by ``runtime.position_facts.read_books`` (the
     paper ledger and the live store keep the same tables) and priced here. It
     lives in ``domains/`` rather than beside its reader because the context
     builder — which must not import ``paper/`` — names it as an input.

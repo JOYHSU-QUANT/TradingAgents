@@ -38,11 +38,11 @@ from contrib.hyperliquid_perp.live.venue_identity import (
     escalate_identity_fault,
 )
 from contrib.hyperliquid_perp.paper import accounting
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.stops import StopConfig
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import doc_text, identity_latch_rows, misrouted_order_status
 

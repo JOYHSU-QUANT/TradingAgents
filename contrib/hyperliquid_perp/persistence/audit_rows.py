@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from ..domains.perp.risk_gate import RiskGateResult
     from ..domains.perp.target_decision import ParsedDecision
     from ..paper.accounting import AccountMetrics
-    from ..paper.scheduler import DecisionInput
+    from ..runtime.decision import DecisionInput
     from .models import AccountLedger
 
 __all__ = ["write_ai_input", "write_ai_output"]
@@ -77,7 +77,7 @@ def write_ai_input(
     persisted. ``liquidation_price`` is the engine-owned estimate, computed by
     the caller (the same value the engine trades on). ``last_fill_time`` is the
     storage-form stamp of the run's newest fill, read by the caller together
-    with the ledger and the position (``paper.position_facts.read_books`` —
+    with the ledger and the position (``runtime.position_facts.read_books`` —
     the one books read the prompt's position section shares, issue #134) and
     written verbatim.
     """

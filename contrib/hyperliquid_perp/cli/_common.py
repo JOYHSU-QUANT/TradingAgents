@@ -124,8 +124,8 @@ def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
     ``BEGIN IMMEDIATE`` step that only ADDs columns and tables.
     """
     from ..common.instants import parse_instant
-    from ..paper.run_lock import LOCK_STALE_SECONDS, lease_age_label
     from ..persistence import repository as repo
+    from ..runtime.run_lock import LOCK_STALE_SECONDS, lease_age_label
 
     if not db.migration_pending:
         return False

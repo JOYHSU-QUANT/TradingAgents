@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from contrib.hyperliquid_perp.paper.clock import ManualClock, WallClock
+from contrib.hyperliquid_perp.runtime.clock import ManualClock, WallClock
 
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
 

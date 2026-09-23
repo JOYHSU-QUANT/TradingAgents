@@ -6,18 +6,15 @@ guard (:mod:`.seam_guard`; issue #169), the YAML-coercion seam, the
 pinned decimal context, the network vocabulary, the store's timestamp decoder,
 the on-disk layout beside a store (:mod:`.store_layout`; issue #221), the
 legacy-vs-subcommand argv split the two entry points make
-(:mod:`.entry_argv`; issue #221) and the atomic text write — plus the three
+(:mod:`.entry_argv`; issue #221) and the atomic text write — plus the two
 things the paper and live sides
 share without either owning them: the decision cadence
-(``constants.CYCLE_INTERVAL``), the no-decision escalation policy
-(:mod:`.no_decision`; issue #122), and the in-flight decision state machine
+(``constants.CYCLE_INTERVAL``) and the in-flight decision state machine
 the two drivers advance a cycle through (:mod:`.inflight`; issue #181 — the
 fields, the ordering rules between them, the per-try id scheme and the
-resume step, with only the escalation policy left to each lane). That
-no-decision policy is the one module here that
-knows the store's shape — it queries ``decision_attempts`` through plain
-``sqlite3`` rather than through ``persistence.repository``, which sits above
-this package; a change to that table has to look here too.
+resume step, with only the escalation policy left to each lane). The
+no-decision escalation policy lives in ``runtime.no_decision``: it queries
+``decision_attempts``, which nothing here may know.
 Nothing here may import from any other ``hyperliquid_perp`` package, so any
 module can depend on ``common`` without creating a cycle.
 """

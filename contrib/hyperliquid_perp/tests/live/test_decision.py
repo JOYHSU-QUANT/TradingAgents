@@ -28,8 +28,6 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
 from contrib.hyperliquid_perp.live import decision as decision_mod
 from contrib.hyperliquid_perp.live.decision import LiveDecisionDriver, LiveDecisionWorker
 from contrib.hyperliquid_perp.paper import accounting
-from contrib.hyperliquid_perp.paper.clock import ManualClock
-from contrib.hyperliquid_perp.paper.engine import AssetSpec
 from contrib.hyperliquid_perp.paper.scheduler import (
     CYCLE_INTERVAL,
     DecisionInput,
@@ -38,6 +36,8 @@ from contrib.hyperliquid_perp.paper.scheduler import (
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import arm_lock_fault, poison_stored_parse
 
@@ -334,7 +334,7 @@ def test_driver_writes_the_audit_row_from_the_books_the_provider_carried(tmp_pat
     # scheduler keeps — books carried on the input are written as-is, and the
     # prologue makes none of the three reads; a bookless input still gets the
     # lane's own read (and its own "no ledger" refusal, unchanged).
-    from contrib.hyperliquid_perp.paper.position_facts import read_books
+    from contrib.hyperliquid_perp.runtime.position_facts import read_books
 
     # read_books' three statements (the prologue's SL/TP read is another fact).
     reads = (
@@ -436,10 +436,10 @@ def test_driver_escalates_consecutive_stale_feed_refusals(tmp_path, caplog):
     # tests/paper/test_validation.py.
     import logging
 
-    from contrib.hyperliquid_perp.common.no_decision import NO_DECISION_STREAK_THRESHOLD
+    from contrib.hyperliquid_perp.runtime.no_decision import NO_DECISION_STREAK_THRESHOLD
 
     db, clock, driver, engine, worker, provider = _driver(tmp_path, build_error=_stale_refusal())
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.runtime.no_decision"):
         for _ in range(NO_DECISION_STREAK_THRESHOLD):
             assert driver.pump() == "api_failed"
             state = repo.get_scheduler_state(db.conn, "r")
@@ -463,7 +463,7 @@ def test_driver_streak_is_reset_by_a_cycle_that_decided(tmp_path, caplog):
         state = repo.get_scheduler_state(db.conn, "r")
         clock.set(parse_instant(state["next_decision_at"]))
 
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.runtime.no_decision"):
         assert driver.pump() == "api_failed"  # streak 1
         _advance()
         assert driver.pump() == "api_failed"  # streak 2
@@ -502,7 +502,7 @@ def test_driver_counts_a_refused_cycle_once_even_when_its_write_keeps_failing(tm
         return real_fail_cycle(*args, **kwargs)
 
     driver._fail_cycle = _flaky_fail_cycle
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.runtime.no_decision"):
         for _ in range(2):
             with pytest.raises(sqlite3.OperationalError):
                 driver.pump()

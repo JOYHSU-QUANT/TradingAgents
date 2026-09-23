@@ -3,7 +3,7 @@
 Everything else in ``paper/`` is pure math or a thin persistence seam; this module
 is where they compose into the actual paper-trading behaviour. It is driven one
 **tick** at a time by its caller (PR4's 30-second monitor loop in production, a
-:class:`~.clock.ManualClock`-advancing test otherwise) — the engine never sleeps,
+:class:`~..runtime.clock.ManualClock`-advancing test otherwise) — the engine never sleeps,
 so its logic stays a deterministic function of the injected clock, snapshot
 provider, and funding source. A 120-slice / one-hour plan is therefore fully
 reproducible in microseconds, and a replay of the same tick sequence rebuilds the
@@ -49,15 +49,13 @@ from __future__ import annotations
 import functools
 import logging
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, localcontext
 from enum import Enum
-from typing import Protocol, runtime_checkable
 
 from ..domains.perp.margin import (
     DECIMAL_CONTEXT,
-    MarginSchedule,
     position_notional,
     unrealized_pnl,
 )
@@ -72,17 +70,17 @@ from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import fill_id as derive_fill_id, slice_id as derive_slice_id
 from ..persistence.models import PositionState, Side
+from ..ports import Clock, FundingSource, SnapshotProvider
+from ..runtime.asset_spec import AssetSpec
+from ..runtime.market_feed import SnapshotOutcome, SnapshotResult
 from . import accounting
-from .clock import Clock
 from .config import PaperTradingConfig
 from .fill_model import fill_price, maker_post_price, maker_would_fill
 from .liquidation import (
     LIQUIDATION_MODEL_VERSION,
     estimated_liquidation_price,
     maintenance_snapshot,
-    price_tick_from_sz_decimals,
 )
-from .market_feed import SnapshotOutcome, SnapshotProvider, SnapshotResult
 from .stops import StopAction, StopConfig, stop_loss_decision, take_profit_price
 from .twap import (
     MAX_SLICES,
@@ -90,11 +88,13 @@ from .twap import (
     SLICE_INTERVAL_SECONDS,
     PlanDisposition,
     build_slice_plan,
-    qty_step_from_sz_decimals,
     rebalance_delta,
     split_flip_budget,
 )
 
+# ``AssetSpec`` and ``FundingSource`` are defined in ``runtime.asset_spec`` and
+# ``ports`` now (refactor plan v2, T1) and stay in ``__all__`` for the callers
+# that always imported them from here, until plan PR 3 drops them.
 __all__ = [
     "AssetSpec",
     "EngineHaltedError",
@@ -137,43 +137,6 @@ def _fail_stop(method):
 # The one-hour terminal deadline every plan must reach (execution §1.2).
 _PLAN_LIFETIME = timedelta(seconds=PLAN_LIFETIME_SECONDS)
 _MODE = "paper"
-
-
-@runtime_checkable
-class FundingSource(Protocol):
-    """Supplies the Hyperliquid funding rate for a settlement hour (execution §6.5).
-
-    ``rate_at`` returns the rate as a fraction, or ``None`` when it is not yet
-    available (the engine then records a ``pending`` funding event to backfill).
-    """
-
-    def rate_at(self, coin: str, funding_timestamp: datetime) -> Decimal | None: ...
-
-
-@dataclass(frozen=True)
-class AssetSpec:
-    """The per-asset metadata the engine needs, never hardcoded (execution §1.2 / §6.6.1).
-
-    ``sz_decimals`` fixes the quantity step and price tick; ``margin_schedule`` is
-    the exchange's maintenance-margin table (from the ``meta`` response). The two
-    derived steps are computed once at construction.
-    """
-
-    coin: str
-    sz_decimals: int
-    margin_schedule: MarginSchedule
-    qty_step: Decimal = field(init=False)
-    tick_size: Decimal = field(init=False)
-
-    def __post_init__(self) -> None:
-        if not self.coin or not self.coin.strip():
-            raise ValueError("AssetSpec.coin must be a non-empty string")
-        if self.margin_schedule.coin != self.coin:
-            raise ValueError(
-                f"AssetSpec.margin_schedule is for {self.margin_schedule.coin!r}, not {self.coin!r}"
-            )
-        object.__setattr__(self, "qty_step", qty_step_from_sz_decimals(self.sz_decimals))
-        object.__setattr__(self, "tick_size", price_tick_from_sz_decimals(self.sz_decimals))
 
 
 class TickEvent(str, Enum):

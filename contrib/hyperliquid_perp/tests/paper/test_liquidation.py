@@ -31,7 +31,6 @@ from contrib.hyperliquid_perp.paper.liquidation import (
     MaintenanceSnapshot,
     estimated_liquidation_price,
     maintenance_snapshot,
-    price_tick_from_sz_decimals,
 )
 
 _TICK = Decimal("0.1")  # BTC: szDecimals 5 -> tick 0.1
@@ -67,11 +66,6 @@ def _assert_short_bracket(price, f, tick):
 # --------------------------------------------------------------------------
 # tick derivation
 # --------------------------------------------------------------------------
-
-
-def test_price_tick_from_sz_decimals():
-    assert price_tick_from_sz_decimals(5) == Decimal("0.1")
-    assert price_tick_from_sz_decimals(4) == Decimal("0.01")
 
 
 # --------------------------------------------------------------------------

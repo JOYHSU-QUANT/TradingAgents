@@ -61,9 +61,6 @@ from ..exchanges.hyperliquid.errors import (
     ExchangeRequestError,
     MalformedResponseError,
 )
-from ..paper.clock import Clock, WallClock
-from ..paper.engine import AssetSpec
-from ..paper.market_feed import SnapshotProvider
 from ..paper.stops import round_to_tick
 from ..paper.twap import (
     MAX_SLICES,
@@ -77,6 +74,9 @@ from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex as derive_cloid_hex, cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState
+from ..ports import Clock, SnapshotProvider
+from ..runtime.asset_spec import AssetSpec
+from ..runtime.clock import WallClock
 from .config import (
     AGGRESSIVE_FILL_BAND_PCT,
     EXCHANGE_MIN_ORDER_NOTIONAL_USDC,

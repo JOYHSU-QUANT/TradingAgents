@@ -38,9 +38,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..common.enum_guard import check_enum
-from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .order_gate import RealOrderGate
 
 __all__ = [

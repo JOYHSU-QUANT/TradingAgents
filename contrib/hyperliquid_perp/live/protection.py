@@ -49,7 +49,6 @@ from ..exchanges.hyperliquid.errors import (
     MalformedResponseError,
 )
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-from ..paper.clock import Clock, WallClock
 from ..paper.stops import (
     StopAction,
     StopConfig,
@@ -62,6 +61,8 @@ from ..persistence import repository as repo
 from ..persistence.cloid import LIVE_ORDER_ROLES, cloid_hex as derive_cloid_hex, cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .config import AGGRESSIVE_FILL_BAND_PCT, LiveProtectionConfig
 from .kill_switch import KillSwitchManager, refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate

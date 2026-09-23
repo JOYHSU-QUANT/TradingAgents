@@ -64,7 +64,6 @@ from ..paper.accounting import (
     adjustment_ledger_delta,
     compute_live_fill_effect,
 )
-from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import (
@@ -74,6 +73,8 @@ from ..persistence.ids import (
     usable_fill_tid,
 )
 from ..persistence.models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .payloads import write_raw_payload
 from .ws_stream import USER_FILLS_CHANNEL
 

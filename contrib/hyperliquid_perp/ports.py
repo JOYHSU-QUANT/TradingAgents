@@ -1,14 +1,17 @@
 """Ports (interfaces) between this package's layers.
 
 These ``Protocol`` classes are seams that keep concrete layers decoupled.
-``ExchangeMarketData`` faces outward: the paper engine's snapshot provider
-(``paper.market_feed.PortSnapshotProvider``) type-hints against it, so a
+``ExchangeMarketData`` faces outward: the engines' snapshot provider
+(``runtime.market_feed.PortSnapshotProvider``) type-hints against it, so a
 scripted/backtest market feed can be dropped in without touching that
 consumer; the CLI/legacy entry points construct the concrete reader directly
 and may call methods beyond this port (e.g. ``get_asset_meta``). ``OrderGate``
 faces the other way: it is the application-layer contract the exchange
 adapter's signed client judges every mutation against, so the adapter never
-imports the application layer for a type hint.
+imports the application layer for a type hint. The four that follow —
+``Clock``, ``FundingSource``, ``SnapshotProvider``, ``DecisionProvider`` —
+are the seams the paper and live engines are driven through; their
+implementations live in ``runtime/``.
 
 Structural typing: an implementation does not subclass these — it just needs
 matching method signatures.
@@ -17,9 +20,20 @@ matching method signatures.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from decimal import Decimal
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .domains.perp.schema import Candle, FundingPoint, MarketSnapshot
+
+if TYPE_CHECKING:
+    # Annotation-only, all three. ``DecisionInput`` and ``SnapshotResult`` are
+    # owned by ``runtime``, which imports this module for the ports it
+    # implements; under ``from __future__ import annotations`` the names stay
+    # strings, and ``runtime_checkable`` compares method names, not
+    # signatures, so nothing here loads them at import.
+    from .domains.perp.target_decision import ParsedDecision
+    from .runtime.decision import DecisionInput
+    from .runtime.market_feed import SnapshotResult
 
 
 @runtime_checkable
@@ -109,3 +123,78 @@ class OrderGate(Protocol):
         :mod:`~contrib.hyperliquid_perp.live.order_gate` for both decisions.
         """
         ...
+
+
+@runtime_checkable
+class Clock(Protocol):
+    """The engines' only source of "now". Always timezone-aware UTC.
+
+    Time enters the paper engine, the live engine and the scheduler through
+    this one seam: production binds :class:`~.runtime.clock.WallClock`, a
+    test binds :class:`~.runtime.clock.ManualClock` and advances it by hand,
+    so a 120-slice / one-hour plan runs in microseconds and the same script
+    always produces the same schedule. Only ``now()`` is on the protocol: no
+    engine ever *sleeps* — each is driven one tick at a time by its caller, so
+    its logic stays a pure function of "what time is it now?".
+    """
+
+    def now(self) -> datetime:
+        """The current instant as a timezone-aware UTC :class:`datetime`."""
+        ...
+
+
+@runtime_checkable
+class FundingSource(Protocol):
+    """Supplies the Hyperliquid funding rate for a settlement hour (execution §6.5).
+
+    ``rate_at`` returns the rate as a fraction, or ``None`` when it is not yet
+    available (the engine then records a ``pending`` funding event to backfill).
+    """
+
+    def rate_at(self, coin: str, funding_timestamp: datetime) -> Decimal | None: ...
+
+
+@runtime_checkable
+class SnapshotProvider(Protocol):
+    """Issues one market-data request and reports a :class:`~.runtime.market_feed.SnapshotResult`.
+
+    The engine passes the request instant and the timeout; the provider owns the
+    "did a fresh, complete response arrive in time?" decision so the engine's
+    freshness logic stays provider-agnostic.
+
+    A FAILED REQUEST must come back as a ``SnapshotResult`` carrying a
+    non-``OK`` :class:`~.runtime.market_feed.SnapshotOutcome`, never as an
+    exception — whether the port timed out, refused, answered malformed, or
+    blew up. All five call sites rely on that, and one of them
+    (``paper.engine.try_write_cycle_snapshot``, called from the scheduler's
+    terminal lane) is deliberately not fail-stop and sits inside no broad
+    handler, so a raise there ends the daemon after the terminal row has
+    committed — with no halt breadcrumb for the operator to find.
+
+    Programmer errors are a different matter and do raise: a non-positive
+    ``timeout_seconds`` is refused before the request goes out, and
+    :class:`~.runtime.market_feed.ScriptedSnapshotProvider` raises on a coin
+    it was not scripted for or a script it has run past. Those are caller
+    bugs, not answers about the market.
+    """
+
+    def fetch(
+        self, coin: str, *, requested_at: datetime, timeout_seconds: Decimal
+    ) -> SnapshotResult: ...
+
+
+@runtime_checkable
+class DecisionProvider(Protocol):
+    """The AI/market seam: build the input, then ask for one decision.
+
+    Two phases so the ``ai_inputs`` row can be recorded *between* them (§5.1:
+    每次呼叫 AI 前記錄一次 — the record must exist before the paid call).
+    Both raise :class:`~.runtime.decision.RetryableDecisionError` for
+    §3.1-retryable failures. ``build_input`` must return a context that
+    already passed the pre-LLM guards (``context_guards.context_refusal``);
+    drivers do not re-check before spending the paid call.
+    """
+
+    def build_input(self, *, coin: str, as_of: datetime) -> DecisionInput: ...
+
+    def request_decision(self, decision_input: DecisionInput) -> ParsedDecision: ...

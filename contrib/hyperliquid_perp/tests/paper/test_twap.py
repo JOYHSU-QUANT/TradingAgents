@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
-
 from contrib.hyperliquid_perp.paper.twap import (
     MAX_SLICES,
     PlanDisposition,
@@ -13,7 +11,6 @@ from contrib.hyperliquid_perp.paper.twap import (
     ceil_to_step,
     floor_to_step,
     min_order_qty,
-    qty_step_from_sz_decimals,
     rebalance_delta,
     split_flip_budget,
 )
@@ -25,17 +22,6 @@ D = Decimal
 # --------------------------------------------------------------------------
 # step helpers
 # --------------------------------------------------------------------------
-
-
-def test_qty_step_from_sz_decimals():
-    assert qty_step_from_sz_decimals(0) == D(1)
-    assert qty_step_from_sz_decimals(2) == D("0.01")
-    assert qty_step_from_sz_decimals(5) == D("0.00001")
-
-
-def test_qty_step_rejects_negative():
-    with pytest.raises(ValueError):
-        qty_step_from_sz_decimals(-1)
 
 
 def test_floor_and_ceil_to_step():

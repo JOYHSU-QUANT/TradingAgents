@@ -3,20 +3,17 @@
 One policy, four consumers: the streak threshold, the store query behind it,
 the recency window, the shortfall wording the paper and live VALIDATORS print,
 and the per-cycle log escalation the paper and live RUNNING loops call
-(:func:`note_cycle_outcome`). It lived in :mod:`.validation` because the two
+(:func:`note_cycle_outcome`). It lived in ``paper.validation`` because the two
 validators already shared that module — but that module is a read-only
 acceptance validator by contract, and a writer the running loops call did not
 belong under that sentence (issue #94). Here the policy has a home whose
 docstring is true of every function in it.
 
-In ``common/`` rather than ``paper/`` (issue #122): the consumers are the
-paper AND live sides — both validators, both running loops — and neither owns
-the policy, so ``live`` importing ``paper`` for it drew a dependency that
-described no real ownership (the same reason ``ERROR_TYPES`` moved down from
-the persistence package). It reads the store through plain ``sqlite3`` and
-needs only the cadence and the timestamp decoder, both of which live beside
-it now; importing it no longer loads the paper scheduler — and, through it,
-the whole paper engine — as its old ``paper.scheduler`` import did.
+In ``runtime/``: both lanes consume it — both validators, both running
+loops — and neither owns it (issue #122), and it reads ``decision_attempts``
+through plain ``sqlite3``, a table shape ``common/`` may not know. From
+``common`` it needs only the cadence and the timestamp decoder; importing it
+loads neither engine.
 """
 
 from __future__ import annotations
@@ -26,8 +23,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
-from .constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
-from .instants import parse_instant, whole_hours
+from ..common.constants import CYCLE_INTERVAL, STALE_MARKET_DATA_ERROR
+from ..common.instants import parse_instant, whole_hours
 
 __all__ = [
     "NO_DECISION_STREAK_THRESHOLD",

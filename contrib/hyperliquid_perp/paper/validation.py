@@ -35,7 +35,7 @@ issue #208), and a config drift recorded at the last resume.
 
 The no-decision escalation policy the gate's last condition rests on (issue
 #50) — threshold, streak query, shortfall wording — is
-:mod:`..common.no_decision`'s; this module only consumes it.
+:mod:`..runtime.no_decision`'s; this module only consumes it.
 """
 
 from __future__ import annotations
@@ -47,15 +47,15 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 
 from ..common.instants import parse_instant
-from ..common.no_decision import (
-    TrailingFailureStreaks,
-    no_decision_shortfall,
-    trailing_failure_streaks,
-)
 from ..common.prompt_regime import prompt_regime_line
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import DECIMAL_CONTEXT
+from ..runtime.no_decision import (
+    TrailingFailureStreaks,
+    no_decision_shortfall,
+    trailing_failure_streaks,
+)
 from . import accounting
 from .reconcile import STALE_PENDING_FUNDING
 

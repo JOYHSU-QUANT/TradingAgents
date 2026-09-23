@@ -37,6 +37,10 @@ from enum import Enum
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..persistence.models import Side
 
+# Re-exported: the step is defined beside ``AssetSpec`` now (refactor plan v2,
+# T1); plan PR 3 drops the name here.
+from ..runtime.asset_spec import qty_step_from_sz_decimals
+
 __all__ = [
     "MAX_SLICES",
     "PLAN_LIFETIME_SECONDS",
@@ -67,13 +71,6 @@ class PlanDisposition(str, Enum):
     REJECT = "reject"  # no legal slice fits — residual, never rounded up
     PAPER_MARKET = "paper_market"  # a single full-quantity fill
     TWAP = "twap"  # 2–120 slices, 30 s apart
-
-
-def qty_step_from_sz_decimals(sz_decimals: int) -> Decimal:
-    """The quantity step ``10 ** -szDecimals`` for an asset (never hardcoded)."""
-    if sz_decimals < 0:
-        raise ValueError(f"szDecimals must be >= 0, got {sz_decimals}")
-    return Decimal(10) ** -sz_decimals
 
 
 def floor_to_step(value: Decimal, step: Decimal) -> Decimal:

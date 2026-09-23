@@ -25,10 +25,10 @@ from contrib.hyperliquid_perp.live.ws_stream import (
     bind_user_subscriptions,
 )
 from contrib.hyperliquid_perp.paper import accounting
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 _NOW = datetime(2026, 7, 14, 8, 0, tzinfo=timezone.utc)
 _TIME_MS = int(_NOW.timestamp() * 1000)

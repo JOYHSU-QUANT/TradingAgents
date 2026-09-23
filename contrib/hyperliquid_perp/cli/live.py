@@ -444,15 +444,15 @@ def _live_startup_recovery(
     )
     from ..live.wiring import build_reconciliation
     from ..paper import accounting
-    from ..paper.run_lock import (
+    from ..persistence import repository as repo
+    from ..persistence.models import PositionState
+    from ..persistence.schema import SCHEMA_VERSION
+    from ..runtime.run_lock import (
         RunLockError,
         acquire_run_lock,
         peek_run_lock,
         release_run_lock,
     )
-    from ..persistence import repository as repo
-    from ..persistence.models import PositionState
-    from ..persistence.schema import SCHEMA_VERSION
 
     if agent_key is None:
         print(

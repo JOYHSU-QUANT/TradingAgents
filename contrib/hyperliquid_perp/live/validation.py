@@ -118,16 +118,16 @@ from ..common.config_coercion import int_from_yaml
 from ..common.constants import CYCLE_INTERVAL
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..common.instants import delta_ms, gap_label, parse_instant, whole_hours_label
-from ..common.no_decision import (
+from ..paper import accounting
+from ..paper.validation import prompt_regime_lines
+from ..persistence import repository as repo
+from ..persistence.db import Database
+from ..runtime.no_decision import (
     NO_DECISION_STREAK_THRESHOLD,
     TrailingFailureStreaks,
     no_decision_shortfall,
     trailing_failure_streaks,
 )
-from ..paper import accounting
-from ..paper.validation import prompt_regime_lines
-from ..persistence import repository as repo
-from ..persistence.db import Database
 from .config import DEFAULT_SCHEDULE_CANCEL_SECONDS as _CONFIG_DEFAULT_DEADLINE_S, ExecutionMode
 from .kill_switch import is_suite_authored
 from .safe_mode import REASON_DAILY_LOSS, SAFE_MODE_MANUAL
@@ -407,7 +407,7 @@ class LiveValidationReport:
     # visible rather than merely absent from the count.
     invalid_output_count: int
     # Trailing cycles that reached no decision, and the stale-feed subset of
-    # them (issue #50; see common.no_decision.trailing_failure_streaks). Past the
+    # them (issue #50; see runtime.no_decision.trailing_failure_streaks). Past the
     # threshold — and while still recent — the run is holding a position on
     # SL/TP alone with nothing deciding for it, which is "not at the gate"
     # however many cycles came before; the validator turns that into a
@@ -883,7 +883,7 @@ class _StrandedAttempts:
 
     def __post_init__(self) -> None:
         # A frozen dataclass rather than a NamedTuple for the reason
-        # ``TrailingFailureStreaks`` spells out in common/no_decision.py:
+        # ``TrailingFailureStreaks`` spells out in runtime/no_decision.py:
         # NamedTuple builds through __new__ and never calls __post_init__, so
         # the same guard written there is decoration. The three verdicts this
         # type feeds are all gated on ``count``, so a mismatched instance

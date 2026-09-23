@@ -10,8 +10,8 @@ import pytest
 
 from contrib.hyperliquid_perp.domains.perp.schema import MarketSnapshot
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
-from contrib.hyperliquid_perp.paper.clock import ManualClock
-from contrib.hyperliquid_perp.paper.market_feed import (
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
+from contrib.hyperliquid_perp.runtime.market_feed import (
     PortSnapshotProvider,
     PriceSnapshot,
     ScriptedSnapshotProvider,

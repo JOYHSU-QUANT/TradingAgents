@@ -232,7 +232,7 @@ def test_the_runtime_package_loads_nothing_above_the_store():
     # convenience import of an engine, the SDK or the whole adapter added to
     # any runtime module fails here by name.
     offenders = {
-        (source.name, tail)
+        (source.relative_to(_SOURCE_ROOT).as_posix(), tail)
         for source in package_sources(runtime_pkg)
         for tail in _load_time_import_closure(source)
         if not any(_within(tail, pkg) for pkg in _RUNTIME_FLOOR)
@@ -244,7 +244,7 @@ def test_the_runtime_package_reaches_neither_engine_at_any_depth():
     # The whole tree, not only load time: a lazy or TYPE_CHECKING import of
     # ``paper`` or ``live`` from the kernel is the same upward edge.
     found = {
-        symbol
+        (source.relative_to(_SOURCE_ROOT).as_posix(), symbol)
         for source in package_sources(runtime_pkg)
         for pkg in ("paper", "live")
         for symbol in _symbols_imported_from(source, pkg)

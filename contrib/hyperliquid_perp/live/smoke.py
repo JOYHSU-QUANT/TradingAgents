@@ -48,12 +48,12 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
 
 from ..common.decimal_context import DECIMAL_CONTEXT
-from ..paper.run_lock import RunLockError
 from ..paper.stops import round_to_tick
 from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
 from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
+from ..runtime.run_lock import RunLockError
 from .config import AGGRESSIVE_FILL_BAND_PCT
 from .kill_switch import deadline_detail, record_kill_switch_event
 from .orders import ORDER_TYPE_FOR_TIF, local_status_for_exchange_status, parse_order_status
@@ -306,7 +306,7 @@ class SmokeContext:
     leverage: int = 1
     is_cross: bool = True
     run_recovery: Callable[[], RecoveryResult] | None = None
-    # Refreshes the run lease (the CLI wires paper.run_lock.heartbeat_run_lock).
+    # Refreshes the run lease (the CLI wires runtime.run_lock.heartbeat_run_lock).
     # A full suite runs up to 4 real recoveries + ~14 wire actions — past
     # LOCK_STALE_SECONDS an un-refreshed lease reads as abandoned and a
     # concurrent ``live --loop`` could silently take the run over mid-suite.

@@ -42,8 +42,8 @@ from decimal import Decimal, InvalidOperation
 from ..common.instants import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
+from ..ports import FundingSource
 from . import accounting
-from .engine import FundingSource
 
 __all__ = [
     "STALE_PENDING_FUNDING",

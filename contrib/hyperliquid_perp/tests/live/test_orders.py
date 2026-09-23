@@ -35,13 +35,13 @@ from contrib.hyperliquid_perp.live.orders import (
     local_status_for_exchange_status,
     parse_order_status,
 )
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.cloid import (
     cloid_hex as derive_cloid_hex,
     cloid_logical,
 )
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import echo_order_status_cloid
 

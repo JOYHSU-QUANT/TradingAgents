@@ -119,7 +119,7 @@ def whole_hours(span: timedelta, *, what: str) -> int:
     raise lands at import or at start-up, before the first cycle — a retuned
     window that is no longer whole hours is a change the message rendering it
     has to be rewritten for, not rounded past. The integer form is for a
-    caller that multiplies the count (``common.no_decision`` turns a cycle
+    caller that multiplies the count (``runtime.no_decision`` turns a cycle
     count into hours); :func:`whole_hours_label` is the same guard for a
     caller that prints it.
     """

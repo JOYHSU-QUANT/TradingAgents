@@ -55,12 +55,13 @@ from ..exchanges.hyperliquid.signed_client import (
     HyperliquidSignedClient,
     OrderAck,
 )
-from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.cloid import assert_cloid_provenance, cloid_hex as derive_cloid_hex
 from ..persistence.db import Database
 from ..persistence.ids import live_order_attempt_id
 from ..persistence.models import Side
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .order_gate import PROTECTIVE_ORDER_ROLES, LiveOrderGateRejected, RealOrderGate
 from .payloads import payload_column, write_raw_payload
 

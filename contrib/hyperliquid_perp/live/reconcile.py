@@ -45,11 +45,12 @@ from ..exchanges.hyperliquid.mapper import (
     require_decimal,
 )
 from ..paper import accounting
-from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import exchange_fill_key, usable_fill_tid
 from ..persistence.models import DECIMAL_CONTEXT
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .fill_backfill import (
     DEFAULT_LOOKBACK,
     DEFAULT_MAX_PAGES,

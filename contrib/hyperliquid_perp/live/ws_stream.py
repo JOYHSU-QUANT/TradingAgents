@@ -34,7 +34,8 @@ from typing import Any, Protocol
 
 from ..common.instants import Seconds, seconds_span
 from ..common.seam_guard import require_seam
-from ..paper.clock import Clock, WallClock
+from ..ports import Clock
+from ..runtime.clock import WallClock
 
 __all__ = [
     "CLEARINGHOUSE_CHANNEL",

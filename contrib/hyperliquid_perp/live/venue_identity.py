@@ -54,9 +54,10 @@ from typing import Any
 from ..common.enum_guard import check_enum
 from ..common.seam_guard import require_seam
 from ..exchanges.hyperliquid.errors import MalformedResponseError
-from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.db import Database
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .order_gate import PROTECTIVE_ORDER_ROLES
 from .orders import OrderStatusQuery, OrderStatusReading, parse_order_status
 from .payloads import write_raw_payload

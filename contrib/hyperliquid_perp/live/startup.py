@@ -58,10 +58,11 @@ from pathlib import Path
 from typing import Any
 
 from ..exchanges.hyperliquid.mapper import hl_closing_side, map_account_snapshot
-from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.cloid import LIVE_ORDER_ROLES
 from ..persistence.db import Database
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .cancel import cancel_bot_order_with_evidence
 from .kill_switch import KillSwitchManager
 from .order_gate import RealOrderGate

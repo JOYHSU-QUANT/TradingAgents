@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 from contrib.hyperliquid_perp.live import fill_backfill as fill_backfill_mod, kill_switch as ks_mod
 from contrib.hyperliquid_perp.live.wiring import build_reconciliation
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 _NOW = datetime(2026, 9, 8, 8, 0, tzinfo=timezone.utc)
 

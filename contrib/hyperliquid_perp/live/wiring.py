@@ -34,8 +34,8 @@ from . import (
 
 if TYPE_CHECKING:
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-    from ..paper.clock import Clock
     from ..persistence.db import Database
+    from ..ports import Clock
     from .fills import LiveFillProcessor
     from .kill_switch import KillSwitchManager
     from .venue_identity import VenueIdentityMonitor

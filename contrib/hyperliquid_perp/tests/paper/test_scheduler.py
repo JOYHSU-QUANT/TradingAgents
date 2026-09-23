@@ -25,10 +25,8 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetSide,
 )
 from contrib.hyperliquid_perp.paper import accounting
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
-from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine
-from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
+from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
 from contrib.hyperliquid_perp.paper.scheduler import (
     CYCLE_INTERVAL,
     MAX_DECISION_ATTEMPTS,
@@ -41,6 +39,9 @@ from contrib.hyperliquid_perp.paper.scheduler import (
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
+from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
 
 from ..conftest import arm_lock_fault, poison_stored_parse
 
@@ -563,7 +564,7 @@ def test_the_audit_row_is_written_from_the_books_the_provider_carried(tmp_path):
     # writes THOSE, making none of its own three reads. Measured on the SQL
     # the prologue issues, so a re-read sneaking back in fails here rather
     # than only showing up as a second scan in a profile.
-    from contrib.hyperliquid_perp.paper.position_facts import read_books
+    from contrib.hyperliquid_perp.runtime.position_facts import read_books
 
     db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
     carried = {}

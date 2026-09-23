@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from ..common.prompt_regime import PROMPT_VERSION, position_section_omitted, prompt_regime_line
 
 if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function-local
-    from ..paper.position_facts import BookFacts, BookSource
+    from ..runtime.position_facts import BookFacts, BookSource
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ class _EngineDecisionProvider:
         # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
         self._on_blocking_read = on_blocking_read
         # ``position_facts.BookSource`` — the run's books, read at build
-        # time (``paper.position_facts.read_books``, bound by the paper
+        # time (``runtime.position_facts.read_books``, bound by the paper
         # and live wirings). REQUIRED, with no default: both wirings pass one,
         # and a new one that forgot to would produce a silently position-blind
         # prompt (prompt v4's section simply absent, the ``|position`` token
@@ -270,7 +270,7 @@ class _EngineDecisionProvider:
         )
         from ..engine_bridge import _build_context
         from ..exchanges.hyperliquid.errors import ExchangeError, MalformedResponseError
-        from ..paper.scheduler import DecisionInput, RetryableDecisionError
+        from ..runtime.decision import DecisionInput, RetryableDecisionError
 
         # Read BEFORE the fetch, so the builder can price the section at the
         # same snapshot the rest of the context is built from. That also puts
@@ -423,7 +423,7 @@ class _EngineDecisionProvider:
             report_usage,
         )
         from ..integration.trading_graph import build_graph
-        from ..paper.scheduler import RetryableDecisionError
+        from ..runtime.decision import RetryableDecisionError
 
         # One collector per request (issue #182): the live lane runs this on a
         # worker thread, and a cycle's completions must not mix with another's.

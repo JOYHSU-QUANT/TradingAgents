@@ -56,10 +56,11 @@ from pathlib import Path
 
 from ..common.instants import Seconds, seconds_span
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-from ..paper.clock import Clock, WallClock
 from ..persistence import repository as repo
 from ..persistence.cloid import LIVE_ORDER_ROLES
 from ..persistence.db import Database
+from ..ports import Clock
+from ..runtime.clock import WallClock
 from .cancel import cancel_bot_order_with_evidence
 from .config import KillSwitchConfig
 from .order_gate import RealOrderGate

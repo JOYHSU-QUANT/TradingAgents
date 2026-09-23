@@ -122,10 +122,11 @@ TradingAgents/
     └── hyperliquid_perp/
         ├── exchanges/
         ├── domains/
-        ├── common/                      # 跨層共用（enum guard · seam_guard.py 建構期 seam 守衛（callable 與物件兩型） · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label／時距 label gap_label（呼叫者橫跨 domains／paper／live／cli，用 grep 找、不列舉；freshness 的複合 `14h 12m 30s` 刻意不收斂）／whole_hours 整點守衛（label 建在它上面）／epoch-ms 換算唯一實作／`*_seconds` 參數收斂 seconds_span · no_decision.py no-decision 升級政策）
+        ├── common/                      # 跨層共用（enum guard · seam_guard.py 建構期 seam 守衛（callable 與物件兩型） · YAML coercion · decimal context · 常數含 CYCLE_INTERVAL · atomic write · instants.py 時戳解碼／whole-hours label／時距 label gap_label（呼叫者橫跨 domains／paper／live／cli，用 grep 找、不列舉；freshness 的複合 `14h 12m 30s` 刻意不收斂）／whole_hours 整點守衛（label 建在它上面）／epoch-ms 換算唯一實作／`*_seconds` 參數收斂 seconds_span）
         ├── integration/                 # bridge to the unmodified engine
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── persistence/                 # Phase 2 SQLite source of truth
+        ├── runtime/                     # paper／live 共用的執行核心（ports 四個 seam Clock／SnapshotProvider／DecisionProvider／FundingSource 的實作與資料型別：clock · market_feed · asset_spec · decision · position_facts · run_lock · no_decision）
         ├── paper/                       # Phase 2 paper accounting + execution engine
         ├── live/                        # Phase 3 live execution（平行於 paper/，PR 1 起）
         ├── risk/
@@ -156,7 +157,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 
 | 檔案 | 狀態 | 說明 |
 |---|---|---|
-| `ports.py` | ✅ | `ExchangeMarketData` / `OrderGate` 介面定義——最先寫這個。 |
+| `ports.py` | ✅ | `ExchangeMarketData` / `OrderGate` 介面定義——最先寫這個。兩個引擎被驅動的四個 seam 也住這裡：`Clock`、`FundingSource`、`SnapshotProvider`、`DecisionProvider`（實作與資料型別在 `runtime/`）。 |
 | `exchanges/hyperliquid/sdk_client.py` | ✅ | 官方 SDK 初始化、testnet/mainnet 設定載入。 |
 | `exchanges/hyperliquid/market_data.py` | ✅ | SDK Info → market snapshot。 |
 | `exchanges/hyperliquid/account.py` | ✅ | SDK Info → account / position snapshot。 |
@@ -167,7 +168,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `domains/perp/volume_profile.py` | ✅ | 滾動 K 線視窗的成交量分布 → POC · value area · D/P/b/細長形狀。純函數、fail-closed（視窗不可用整組回 `None`，該段就不進 prompt）。**預設關閉**，由 `market_data.volume_profile_window_candles` 開啟；只進 analyst 輸入面，不接任何 gate 或 sizing。每根 K 線的量均攤進自己的 high–low，是 OHLCV 粗粒度近似而非逐筆成交，prompt 內會如實標註。 |
 | `domains/perp/macro_trend.py` | ✅ | **第二條序列**（日線）上的 SMA(50)／SMA(200) 排列狀態：誰在上、相差幾 %、已維持幾根日 K（視窗看得到這段排列的起點就給根數與起始日；看不到就只說「比這個視窗能標定的還久」、不給數字——那個數字是視窗寬度不是量到的年紀）、最新日收盤相對 SMA(200) 幾 %。純標準函式庫、Decimal、fail-closed（日 K 不足 200 根／日線 feed 過期或超前／兩條均線完全相等 → 整組回 `None`，該段就不進 prompt，各留一行具名 WARNING）。**餵狀態不餵「交叉事件」**——交叉一年一兩次，對 4h cycle 幾乎恆為否；「維持 1 根」就是換向那一根。週期固定 50/200 不可調（可調週期＝可調 prompt 詞彙）。**日線缺根不檢查**（v1），prompt 的 Basis 行會如實講。**預設關閉**，由 `market_data.macro_trend_daily_lookback`（`0` = 關，否則 `200`–`2000`）開啟；那一次日線 REST 讀失敗只留 WARNING、該 cycle 省略這一段，**不會讓決策停擺**；只進 analyst 輸入面，不接任何 gate 或 sizing。 |
 | `domains/perp/research_signal.py` | ✅ | 讀 research radar（`contrib/autoresearch`）寫出來的交接 JSON，回一個 `ResearchSignal` 或 `None`。純標準函式庫、**不 import 那個套件、也不認得它的 SQLite schema**（契約型別 `ResearchSignal` 住在 `schema.py`，兩邊共用同一份定義）。fail-closed 整段省略：檔案讀不到／不是 UTF-8／JSON 壞掉／版本不符／多欄少欄／換了 coin／比本 cycle 最新一根舊超過 2 根文件自己的 bar／新到達到或超過一根本 run K 線——每種各留一行具名 WARNING。**預設關閉**，由 `market_data.autoresearch_signal`（路徑，`""` = 關）開啟；只進 analyst 輸入面，不接任何 gate 或 sizing。 |
-| `domains/perp/marginal_cost.py` | ✅ | prompt v4 的 `Position:` 段：從本地帳本（`paper/position_facts.py` 讀 paper／live 共用的 `current_positions`／`current_account_state`／`fills`）算出倉位事實與**每個合法目標的往返成本**（fee＋slippage 兩腿都算，預設 19 bps；換算成 breakeven bps）。純函數、fail-closed（無帳本／權益 ≤ 0 整段省略＋WARNING）。只餵邊際成本、不餵沉沒成本；段落只有事實與價格，不含任何 gate 門檻規則。cost 表在細網格上抽樣（`MAX_COST_ROWS`）並附每 1 個百分點的線性費率。輸入面的三個 DTO 也住這裡：`BookPosition`（帳本事實）、`PositionPricing`（槓桿／合法網格／fee／slippage，`grid_max` 必須已是**有效上限**）、`PositionInputs`（兩者的單一 optional 綑包，供 `context_builder` 收）。帳本讀取本身在 `paper/position_facts.py`（`read_books` → `BookFacts`，每 cycle 讀一次，同時餵 prompt 與 `ai_inputs` 列；`BookSource` 是 wiring 綁 store 的那個 callable 的型別）。 |
+| `domains/perp/marginal_cost.py` | ✅ | prompt v4 的 `Position:` 段：從本地帳本（`runtime/position_facts.py` 讀 paper／live 共用的 `current_positions`／`current_account_state`／`fills`）算出倉位事實與**每個合法目標的往返成本**（fee＋slippage 兩腿都算，預設 19 bps；換算成 breakeven bps）。純函數、fail-closed（無帳本／權益 ≤ 0 整段省略＋WARNING）。只餵邊際成本、不餵沉沒成本；段落只有事實與價格，不含任何 gate 門檻規則。cost 表在細網格上抽樣（`MAX_COST_ROWS`）並附每 1 個百分點的線性費率。輸入面的三個 DTO 也住這裡：`BookPosition`（帳本事實）、`PositionPricing`（槓桿／合法網格／fee／slippage，`grid_max` 必須已是**有效上限**）、`PositionInputs`（兩者的單一 optional 綑包，供 `context_builder` 收）。帳本讀取本身在 `runtime/position_facts.py`（`read_books` → `BookFacts`，每 cycle 讀一次，同時餵 prompt 與 `ai_inputs` 列；`BookSource` 是 wiring 綁 store 的那個 callable 的型別）。 |
 | `domains/perp/prompt_context.py` | ⚠️ | 結構開源；確切措辭私有（funding-rate 的表述方式是你的 alpha）。另提供 `context_shape(ctx)`：當次渲染的段落結構字串（段落標題＋指標列名＋有無 `macro_trend` 段＋有無 volume profile 段＋有無 `autoresearch` 段＋有無 `position` 段；不含標籤裡的數字與隨資料有無出現的行），寫進 `ai_inputs.context_shape`（schema v10）與 payload JSON，與 `prompt_version` 並列為切段鍵（issue #97）；第三個鍵＝format 段的內容指紋 `ai_inputs.format_fingerprint`（schema v11，`target_decision.format_fingerprint`，issue #129），`validate` 依三鍵印 `prompt_regime:` 分佈。 |
 | `domains/perp/decision.py` | ~~✅~~ 已刪除 | `PerpTradeDecision` schema（Phase 1 意圖決策）。**Phase 2 起退役刪除**——舊 audit 紀錄（schema_version 2）仍可讀，但寫入路徑由 `target_decision.py` 的 structured target 契約取代。 |
 | `integration/trading_graph.py` | ✅ | `HyperliquidTradingGraph(TradingAgentsGraph)`——override `resolve_instrument_context()`，零核心修改；`build_graph(callbacks=…)` 把 callback handlers 轉給基底建構子。 |
@@ -196,11 +197,17 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `paper/accounting.py` | ✅ | fills · fees（taker 0.045%）· funding exactly-once · account 公式 · accounting replay（**依 run mode 分流**：paper 用模型 fee/realized；live 用交易所 closedPnl/fee、依交易所時間排序、並折算 accounting adjustments）· live fill effect（`compute_live_fill_effect` / `adjustment_ledger_delta`）（phase2-execution §6、phase3-spec §15）。 |
 | `paper/liquidation.py` | ✅ | paper estimated liquidation price · margin tier bisection（phase2-execution §6.6.1）。 |
 | `paper/config.py` | ✅ | typed `paper_trading:` block（phase2-execution §5.4）。 |
-| `paper/engine.py`（+ `clock` / `fill_model` / `market_feed` / `stops` / `twap`） | ✅ | TWAP / flip plan · SL/TP lifecycle · paper 成交模擬 · market-data 新鮮度／pause／gap-stop · monitor tick 邏輯（外層 30s loop 屬 PR4 scheduler；phase2-execution §1–5）。 |
+| `paper/engine.py`（+ `fill_model` / `stops` / `twap`） | ✅ | TWAP / flip plan · SL/TP lifecycle · paper 成交模擬 · market-data 新鮮度／pause／gap-stop · monitor tick 邏輯（外層 30s loop 屬 PR4 scheduler；phase2-execution §1–5）。 |
 | `paper/scheduler.py` | ✅ | 4h rolling cycle · deterministic `decision_attempt_id` · 3-attempt retry（10s/30s，跨重啟延續）· `invalid_output` fail-closed · `ai_inputs`/`ai_outputs`/`decision_attempts` audit rows（phase2-spec §3／§3.1）。 |
 | `paper/reconcile.py` | ✅ | 重啟 reconciliation 九步：canceled_restart + residual · pending funding 以 stored basis 補帳 · replay 不一致時 flat 拒絕啟動／非 flat 轉 protection-only（引擎續守 SL/TP、halt 新決策）· 取消到未完成 plan 時立即開新 cycle（phase2-execution §1.2）。 |
 | `paper/validation.py` | ✅ | 驗收器：13 項 summary 指標 · orphan／snapshot／replay 鏈路檢查 · 可進 Phase 3 判定（phase2-spec §5）。 |
-| `paper/run_lock.py` | ✅ | 單實例 lease（`scheduler_state` 的 pid + heartbeat）：同一 run 同時只允許一個 `paper` process，防重複啟動互相取消活單、雙倍 AI 花費。 |
+| `runtime/` | ✅ | paper／live 共用的執行核心（refactor plan v2 T1）：住在 `persistence` 之上、兩個引擎之下；舊路徑 `paper/{clock,market_feed,run_lock,position_facts}.py` 與 `paper.engine.AssetSpec`／`paper.scheduler.DecisionInput` 等名字留 re-export，到 plan PR 3 才刪。 |
+| `runtime/clock.py`＋`runtime/market_feed.py` | ✅ | `WallClock`／`ManualClock`（`ports.Clock` 的兩個實作）；`PortSnapshotProvider`／`ScriptedSnapshotProvider` 與 `SnapshotResult` 家族（`ports.SnapshotProvider` 的實作與回傳型別）：市場快照的新鮮度記帳（execution §1.1／§5.2）。 |
+| `runtime/asset_spec.py` | ✅ | `AssetSpec`（coin／szDecimals／margin schedule，qty step 與 price tick 建構時算好）與兩個精度 helper `qty_step_from_sz_decimals`／`price_tick_from_sz_decimals`（`paper/twap.py`、`paper/liquidation.py` 仍 re-export）。 |
+| `runtime/decision.py` | ✅ | `DecisionInput`（一次 AI 呼叫看到的全部：context、K 線窗、payload path＋hash、三個切段鍵、books）與 `RetryableDecisionError`（§3.1 可重試失敗，建構時 `check_enum` 驗 §6.2 詞彙）：`ports.DecisionProvider` seam 的資料半邊。 |
+| `runtime/position_facts.py` | ✅ | `read_books` → `BookFacts`：每 cycle 讀一次帳本／倉位／最新 fill 戳，同時餵 prompt 的 Position 段與 `ai_inputs` 列；`BookSource` 是 wiring 綁 store 的 callable 型別。 |
+| `runtime/run_lock.py` | ✅ | 單實例 lease（`scheduler_state` 的 pid + heartbeat）：同一 run 同時只允許一個 process（paper daemon 或 live loop），防重複啟動互相取消活單、雙倍 AI 花費。 |
+| `runtime/no_decision.py` | ✅ | no-decision 升級政策（issue #50／#122）：streak 門檻、`decision_attempts` 查詢、shortfall 措辭、每 cycle 的 log 升級；兩個 validator 與兩個 running loop 共用。從 `common/` 搬來——它認得 store 的表形狀，不該住在 import 圖最底層。 |
 | `cli/` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate`；空 argv／旗標式呼叫原樣委派 legacy `main.py`（`--context-only` 不變），未知裸字具名報錯 exit 1；迴圈運行中 SIGTERM 與 Ctrl-C 同樣走收尾 export（啟動／reconciliation 階段收到則 exit 130、無收尾 export）。 |
 
 ### Phase 3 — live execution

@@ -154,7 +154,7 @@ def _live_heartbeat(db, run_id: str, *, pid: int, now, safe_mode) -> None:
     heartbeat blip. Contain it exactly like a tick error instead: log, enter
     recoverable safe mode, retry on the next tick's heartbeat.
     """
-    from ..paper import run_lock
+    from ..runtime import run_lock
 
     try:
         run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
@@ -189,7 +189,7 @@ def _still_owns_run(db, run_id: str, *, pid: int, now) -> bool:
     so it is logged and treated as owned. Only ``RunLockError`` gives the run
     away.
     """
-    from ..paper import run_lock
+    from ..runtime import run_lock
 
     try:
         run_lock.heartbeat_run_lock(db, run_id, pid=pid, now=now)
@@ -275,12 +275,12 @@ def _run_live_loop(
     from ..live.orders import LiveOrderSubmitter
     from ..live.protection import ProtectionManager
     from ..live.ws_stream import LiveWsStream
-    from ..paper.clock import WallClock
-    from ..paper.engine import AssetSpec
-    from ..paper.market_feed import PortSnapshotProvider
-    from ..paper.position_facts import read_books
     from ..paper.stops import StopConfig
     from ..persistence import repository as repo
+    from ..runtime.asset_spec import AssetSpec
+    from ..runtime.clock import WallClock
+    from ..runtime.market_feed import PortSnapshotProvider
+    from ..runtime.position_facts import read_books
 
     # ``cfgs`` was validated by _cmd_live's front gate (decided 2026-07-22): a
     # bad risk:/decision:/paper_trading: block is an exit-1 up front, so this

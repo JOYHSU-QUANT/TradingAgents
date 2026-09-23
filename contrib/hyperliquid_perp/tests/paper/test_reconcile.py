@@ -18,10 +18,8 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetSide,
 )
 from contrib.hyperliquid_perp.paper import accounting, reconcile as reconcile_module
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
-from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine
-from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider
+from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
 from contrib.hyperliquid_perp.paper.reconcile import (
     ReconciliationError,
     reconcile_on_restart,
@@ -30,6 +28,9 @@ from contrib.hyperliquid_perp.paper.scheduler import parse_instant
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import AccountLedger
+from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
+from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -431,8 +432,9 @@ def test_forced_cycle_fires_immediately_via_scheduler(tmp_path):
         def request_decision(self, decision_input):
             return _decision("long", 5)
 
-    from contrib.hyperliquid_perp.paper.engine import AssetSpec, PaperExecutionEngine
-    from contrib.hyperliquid_perp.paper.market_feed import ScriptedSnapshotProvider
+    from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
+    from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
+    from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider
 
     asset = AssetSpec(
         coin="BTC",

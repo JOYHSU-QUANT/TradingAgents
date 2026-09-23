@@ -11,9 +11,11 @@ None of these invariants is exercised anywhere else:
 - ``common/`` stays at the bottom of the import graph — the rule in
   ``common/__init__``'s docstring that nothing there imports from another
   ``hyperliquid_perp`` package would otherwise be enforced by review only;
-- the config loader, the pre-LLM context guards and the no-decision policy
-  keep their load-time import closures below the SDK, the store and the
-  engines (issue #122);
+- the config loader and the pre-LLM context guards keep their load-time
+  import closures below the SDK, the store and the engines (issue #122);
+- ``runtime/``, the kernel both lanes share, keeps its load-time closure on
+  the store, the ports and the floor, and reaches neither ``paper`` nor
+  ``live`` at any depth (refactor plan v2, T1);
 - the layering debt measured on 2026-09-22 is frozen so it can only shrink
   (refactor plan v2, T0 — the Ratchets section at the end of this file).
 """
@@ -33,6 +35,7 @@ from contrib.hyperliquid_perp import (
     common as common_pkg,
     live as live_pkg,
     persistence as persistence_pkg,
+    runtime as runtime_pkg,
 )
 from contrib.hyperliquid_perp.common import decimal_context
 from contrib.hyperliquid_perp.domains.perp import margin
@@ -193,26 +196,56 @@ def _above_the_floor(tail: str) -> bool:
 @pytest.mark.parametrize(
     "module",
     [
-        "common/no_decision.py",
         "domains/perp/freshness.py",
         "domains/perp/context_guards.py",
     ],
 )
-def test_the_context_guard_family_and_the_no_decision_policy_stay_below_the_engines(module):
-    # Issue #122. The four pre-LLM guards and the no-decision policy are read
-    # by both engines and by the keyless entry points, so they must sit BELOW
-    # the SDK, the persistence package, ``paper`` and ``live`` — a claim that
-    # was prose in ``freshness``'s docstring until the guards moved out of
-    # ``engine_bridge`` (which imports the SDK at module level) and the policy
-    # out of ``paper`` (whose scheduler import loaded the whole paper engine).
-    # Pinned as a load-time import closure, like the config loader's, so a
-    # convenience import of ``exchanges``/``persistence``/``paper`` added to
-    # any of the three fails here by name. (``common/`` is also covered by the
-    # tree-wide check below; it is listed so the policy's acceptance is stated
-    # once, beside the guards it serves.)
+def test_the_context_guard_family_stays_below_the_engines(module):
+    # Issue #122. The four pre-LLM guards are read by both engines and by the
+    # keyless entry points, so they must sit BELOW the SDK, the persistence
+    # package, ``paper`` and ``live`` — a claim that was prose in
+    # ``freshness``'s docstring until the guards moved out of ``engine_bridge``
+    # (which imports the SDK at module level). Pinned as a load-time import
+    # closure, like the config loader's, so a convenience import of
+    # ``exchanges``/``persistence``/``paper`` added to either fails here by
+    # name. The no-decision policy that shared this floor sits in ``runtime/``
+    # since refactor plan v2 T1-c and is covered by the package check below,
+    # whose floor includes the store the policy reads.
     closure = _load_time_import_closure(_SOURCE_ROOT / module)
     offenders = {t for t in closure if _above_the_floor(t)}
     assert not offenders, f"{module} reaches above domains/common at load time: {sorted(offenders)}"
+
+
+# Where the shared kernel may sit (refactor plan v2, T1): on its own siblings,
+# the store, the ports, the exchange adapter's error family and the floor —
+# never on either engine or the SDK.
+_RUNTIME_FLOOR = _FLOOR + ("runtime", "persistence", "ports", "exchanges.hyperliquid.errors")
+
+
+def test_the_runtime_package_loads_nothing_above_the_store():
+    # ``runtime/__init__``'s docstring places the package above ``persistence``
+    # and below ``paper`` / ``live``; this is the check. Per module, so a
+    # convenience import of an engine, the SDK or the whole adapter added to
+    # any runtime module fails here by name.
+    offenders = {
+        (source.name, tail)
+        for source in package_sources(runtime_pkg)
+        for tail in _load_time_import_closure(source)
+        if not any(_within(tail, pkg) for pkg in _RUNTIME_FLOOR)
+    }
+    assert not offenders, f"runtime/ reaches above the store at load time: {sorted(offenders)}"
+
+
+def test_the_runtime_package_reaches_neither_engine_at_any_depth():
+    # The whole tree, not only load time: a lazy or TYPE_CHECKING import of
+    # ``paper`` or ``live`` from the kernel is the same upward edge.
+    found = {
+        symbol
+        for source in package_sources(runtime_pkg)
+        for pkg in ("paper", "live")
+        for symbol in _symbols_imported_from(source, pkg)
+    }
+    assert not found, f"runtime/ imports from an engine: {sorted(found)}"
 
 
 def test_the_closure_walk_reaches_an_import_two_hops_away(tmp_path):
@@ -588,9 +621,8 @@ def test_common_imports_nothing_from_the_rest_of_the_package():
 # --- Ratchets: the layering debt of 2026-09-22, frozen so it can only shrink --
 #
 # Refactor plan v2, T0. Each allowlist is compared by EQUALITY: a new entry
-# fails (move the thing down instead — a package below ``live/`` and
-# ``paper/`` for a paper symbol, a ``repository`` read for SQL, an injected
-# collaborator for a cli private),
+# fails (move the thing down instead — ``runtime/`` for a paper symbol, a
+# ``repository`` read for SQL, an injected collaborator for a cli private),
 # and a retired entry fails too, so the list is pruned in the PR that pays
 # the debt off rather than going stale.
 
@@ -611,15 +643,6 @@ _LIVE_PAPER_IMPORTS = frozenset(
         "paper.accounting.margin_ratio",
         "paper.accounting.replay_within",
         "paper.accounting.summarize_account",
-        "paper.clock.Clock",
-        "paper.clock.WallClock",
-        "paper.engine.AssetSpec",
-        "paper.market_feed.SnapshotProvider",
-        "paper.position_facts.read_books",
-        "paper.run_lock.RunLockError",
-        "paper.scheduler.DecisionInput",
-        "paper.scheduler.DecisionProvider",
-        "paper.scheduler.RetryableDecisionError",
         "paper.stops.StopAction",
         "paper.stops.StopConfig",
         "paper.stops.round_to_tick",
@@ -635,10 +658,24 @@ _LIVE_PAPER_IMPORTS = frozenset(
         "paper.validation.prompt_regime_lines",
     }
 )
-_PERSISTENCE_PAPER_IMPORTS = frozenset(
+# The store's upward edges are keyed by DIRECTION — every package above it
+# that it reaches, ``paper`` and (since refactor plan v2 T1) ``runtime`` — so
+# a symbol that moves between the two stays counted rather than dropping
+# out of sight.
+_PERSISTENCE_UPWARD_PACKAGES = ("paper", "runtime")
+_PERSISTENCE_UPWARD_IMPORTS = frozenset(
     {
         "paper.accounting.AccountMetrics",
-        "paper.scheduler.DecisionInput",
+        "runtime.decision.DecisionInput",
+    }
+)
+# ``ports.py`` names two DTOs the layer above it owns, annotation-only (its
+# TYPE_CHECKING block says why). Frozen so the edge cannot grow unnoticed;
+# whether the two belong lower is a plan question, not this test's.
+_PORTS_RUNTIME_IMPORTS = frozenset(
+    {
+        "runtime.decision.DecisionInput",
+        "runtime.market_feed.SnapshotResult",
     }
 )
 
@@ -713,13 +750,28 @@ def _module_read(node: ast.AST, modules: dict[str, str], root: Path) -> str | No
 
 
 @pytest.mark.parametrize(
-    ("pkg", "frozen"),
-    [(live_pkg, _LIVE_PAPER_IMPORTS), (persistence_pkg, _PERSISTENCE_PAPER_IMPORTS)],
+    ("pkg", "targets", "frozen"),
+    [
+        (live_pkg, ("paper",), _LIVE_PAPER_IMPORTS),
+        (persistence_pkg, _PERSISTENCE_UPWARD_PACKAGES, _PERSISTENCE_UPWARD_IMPORTS),
+    ],
     ids=["live", "persistence"],
 )
-def test_the_reverse_edges_into_paper_carry_exactly_the_symbols_frozen_on_2026_09_22(pkg, frozen):
-    found = set().union(*(_symbols_imported_from(s, "paper") for s in package_sources(pkg)))
-    assert found == frozen, _ratchet_message(f"{pkg.__name__}'s paper imports", found, frozen)
+def test_the_upward_edges_carry_exactly_the_symbols_frozen_on_2026_09_22(pkg, targets, frozen):
+    found = {
+        symbol
+        for source in package_sources(pkg)
+        for target in targets
+        for symbol in _symbols_imported_from(source, target)
+    }
+    assert found == frozen, _ratchet_message(f"{pkg.__name__}'s upward imports", found, frozen)
+
+
+def test_ports_names_exactly_the_runtime_types_frozen_on_2026_09_23():
+    found = _symbols_imported_from(_SOURCE_ROOT / "ports.py", "runtime")
+    assert found == _PORTS_RUNTIME_IMPORTS, _ratchet_message(
+        "ports.py's runtime imports", found, _PORTS_RUNTIME_IMPORTS
+    )
 
 
 def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
@@ -768,10 +820,10 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
 
 
 _SQL_SITES_OUTSIDE_PERSISTENCE = {
-    "common/no_decision.py": 2,
     "live/validation.py": 9,
-    "paper/run_lock.py": 2,
     "paper/validation.py": 21,
+    "runtime/no_decision.py": 2,
+    "runtime/run_lock.py": 2,
 }
 # A site is a cursor ``execute*`` call or a string literal that opens with a
 # SQL statement. Counted, not flagged, so a statement added to a module

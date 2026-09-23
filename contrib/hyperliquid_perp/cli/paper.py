@@ -98,11 +98,11 @@ def _cmd_paper(argv: list[str]) -> int:
     from ..exchanges.hyperliquid.errors import ExchangeError
     from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
     from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from ..paper.clock import WallClock
     from ..paper.config import PaperTradingConfig
-    from ..paper.engine import AssetSpec
-    from ..paper.run_lock import RunLockError, acquire_run_lock, release_run_lock
     from ..persistence import repository as repo
+    from ..runtime.asset_spec import AssetSpec
+    from ..runtime.clock import WallClock
+    from ..runtime.run_lock import RunLockError, acquire_run_lock, release_run_lock
 
     config = load_config_or_exit(args.config)
     if config is None:
@@ -194,12 +194,12 @@ def _cmd_paper(argv: list[str]) -> int:
             from ..engine_bridge import EngineConfigError
             from ..paper import accounting
             from ..paper.engine import PaperExecutionEngine
-            from ..paper.market_feed import PortSnapshotProvider
             from ..paper.reconcile import ReconciliationError, reconcile_on_restart
             from ..paper.scheduler import PaperScheduler
             from ..persistence import repository as repo
             from ..persistence.models import PositionState
             from ..persistence.schema import SCHEMA_VERSION
+            from ..runtime.market_feed import PortSnapshotProvider
 
             trading_halted = False
             halt_cause: str | None = None  # the EngineConfigError text, for the settle-exit line
@@ -210,7 +210,7 @@ def _cmd_paper(argv: list[str]) -> int:
             def _build_provider():
                 from functools import partial
 
-                from ..paper.position_facts import read_books
+                from ..runtime.position_facts import read_books
 
                 return _provider._EngineDecisionProvider(
                     config,
@@ -548,13 +548,13 @@ def _paper_loop(
     decoupled (defensive — config already rejects intervals above the 30s TWAP
     slice cadence; early wakes touch only SQLite). A superseded
     lease raises
-    :class:`~.paper.run_lock.RunLockError` out of the loop (see
-    :func:`~.paper.run_lock.heartbeat_run_lock`).
+    :class:`~.runtime.run_lock.RunLockError` out of the loop (see
+    :func:`~.runtime.run_lock.heartbeat_run_lock`).
     """
-    from ..common.no_decision import note_cycle_outcome
     from ..paper.reconcile import backfill_pending_funding
-    from ..paper.run_lock import heartbeat_run_lock
     from ..paper.scheduler import CycleEvent
+    from ..runtime.no_decision import note_cycle_outcome
+    from ..runtime.run_lock import heartbeat_run_lock
 
     pid = os.getpid()
     next_tick_at: datetime | None = None  # None → the first tick fires immediately

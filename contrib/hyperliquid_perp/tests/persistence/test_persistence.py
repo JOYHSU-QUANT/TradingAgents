@@ -174,12 +174,12 @@ def test_every_pre_lease_reader_works_on_a_store_at_or_above_the_lease_floor(tmp
     import json
 
     from contrib.hyperliquid_perp.cli.live_shared import _conflicting_run_lease
-    from contrib.hyperliquid_perp.paper.run_lock import (
+    from contrib.hyperliquid_perp.persistence.db import stored_schema_version
+    from contrib.hyperliquid_perp.runtime.run_lock import (
         acquire_run_lock,
         peek_run_lock,
         release_run_lock,
     )
-    from contrib.hyperliquid_perp.persistence.db import stored_schema_version
 
     genesis = json.dumps({"live": {"network": "testnet"}})
     now = datetime.now(timezone.utc)

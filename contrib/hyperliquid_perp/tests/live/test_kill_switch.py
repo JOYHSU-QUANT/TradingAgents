@@ -16,10 +16,10 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelA
 from contrib.hyperliquid_perp.live.config import ExecutionMode, KillSwitchConfig
 from contrib.hyperliquid_perp.live.kill_switch import KillSwitchManager
 from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
-from contrib.hyperliquid_perp.paper.clock import ManualClock
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
+from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import echo_order_status_cloid
 

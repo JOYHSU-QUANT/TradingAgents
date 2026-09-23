@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from contrib.hyperliquid_perp.common.no_decision import _streak_hours
+from contrib.hyperliquid_perp.runtime.no_decision import _streak_hours
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -27,7 +27,7 @@ def test_a_cadence_that_is_not_whole_hours_is_refused_at_import():
         "from datetime import timedelta\n"
         "from contrib.hyperliquid_perp.common import constants\n"
         "constants.CYCLE_INTERVAL = timedelta(minutes=30)\n"
-        "import contrib.hyperliquid_perp.common.no_decision\n"
+        "import contrib.hyperliquid_perp.runtime.no_decision\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code], cwd=_REPO_ROOT, capture_output=True, text=True

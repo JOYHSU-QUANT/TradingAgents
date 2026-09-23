@@ -36,7 +36,6 @@ from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, Risk
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext, TopOfBook
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.paper import accounting
-from contrib.hyperliquid_perp.paper.scheduler import DecisionInput
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect, stored_schema_version
 from contrib.hyperliquid_perp.persistence.models import PositionState
@@ -45,6 +44,7 @@ from contrib.hyperliquid_perp.persistence.schema import (
     MIGRATIONS,
     SCHEMA_VERSION,
 )
+from contrib.hyperliquid_perp.runtime.decision import DecisionInput
 
 from ..conftest import (
     assert_paired_sweep_refreshes,
@@ -403,7 +403,7 @@ def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, 
     # The decision completion hit the cap, then the engine's trailing call
     # raised: no parse happens, so the post-parse verdict never fires. The cap
     # is still named outright, not left as a word in the INFO list.
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     provider = _usage_provider(
         monkeypatch,
@@ -433,7 +433,7 @@ def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, 
 def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch, caplog):
     # The other no-parse exit: propagate returned, but not the (final_state,
     # signal) pair. The cap still bound on the decision call and is still named.
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     provider = _usage_provider(
         monkeypatch,
@@ -601,7 +601,7 @@ def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):
     # Ten completions that end in a provider exception were still paid for:
     # the usage line is written on the raising exit too, before the retryable
     # classification the scheduler ladder relies on.
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     provider = _usage_provider(
         monkeypatch,
@@ -647,7 +647,7 @@ def test_build_input_payload_write_failure_rides_retry_ladder(tmp_path, monkeypa
     # error_message names the cause.
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.domains.perp import context_guards as guards_mod
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of)
@@ -687,8 +687,8 @@ def test_build_input_files_an_unreadable_answer_apart_from_a_disconnect(monkeypa
         ExchangeThrottledError,
         MalformedResponseError,
     )
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
     from contrib.hyperliquid_perp.persistence.repository import ERROR_TYPES
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     cases = [
@@ -775,7 +775,7 @@ def test_build_input_refuses_untradeable_indicators(
 
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
     from contrib.hyperliquid_perp.domains.perp import context_guards as guards_mod
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     # Threshold monkeypatched to 150 — a value the default indicator set's 50
     # can't mimic: candle_count 200 clears the warm-up gate, 100 exercises it
@@ -810,7 +810,7 @@ def test_build_input_refuses_a_stalled_candle_feed(monkeypatch):
     # analysts' research window back with it, since as_of becomes trade_date
     # (see test_request_decision_drives_engine_with_cycle_as_of_not_now).
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=20))  # 4h bars: past the 3 x 4h bound
@@ -963,7 +963,7 @@ def test_build_input_logs_the_regime_only_for_a_cycle_that_reached_its_payload(
     from pathlib import Path
 
     import contrib.hyperliquid_perp.engine_bridge as bridge_mod
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=1))
@@ -3004,7 +3004,7 @@ def test_live_heartbeat_run_lock_error_stays_fatal(monkeypatch):
     # The pid fence (RunLockError: this process was superseded by a newer one)
     # must PROPAGATE — two writers must never flip-flop the lease — and must
     # not be softened into a safe-mode entry.
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     def fenced(db_, run_id, *, pid, now):
         raise run_lock_mod.RunLockError("superseded by a newer process")
@@ -3022,7 +3022,7 @@ def test_live_heartbeat_transient_failure_is_contained_in_safe_mode(monkeypatch)
     # strip the resting SL/TP — and exactly one recoverable safe-mode entry
     # with the live-tick-error reason.
     from contrib.hyperliquid_perp.live.safe_mode import REASON_LIVE_TICK_ERROR
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     def busy(db_, run_id, *, pid, now):
         raise RuntimeError("database is locked")
@@ -3040,7 +3040,7 @@ def test_live_heartbeat_contains_a_failing_safe_mode_write(monkeypatch):
     # The containment must not depend on the safe-mode write succeeding: a
     # store busy enough to fail the heartbeat can fail that write too, and a
     # raise from EITHER must not end the loop.
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     def busy(db_, run_id, *, pid, now):
         raise RuntimeError("database is locked")
@@ -3064,7 +3064,7 @@ def test_still_owns_run_false_once_a_successor_holds_the_lease(tmp_path):
     # process still reads ``superseded is False`` — and the §18.2 sweep would
     # then cancel the SUCCESSOR's SL/TP and clear the wallet's dead-man switch.
     # This is the re-ASK that catches it.
-    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS, acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import LOCK_STALE_SECONDS, acquire_run_lock
 
     db = Database(tmp_path / "own.db")
     acquire_run_lock(db, "r", pid=101, now=_T0)
@@ -3081,7 +3081,7 @@ def test_still_owns_run_true_for_the_holder_and_refreshes_the_lease(tmp_path):
     # The ordinary shutdown: the lease is ours, the sweep must run. The refresh
     # is not incidental — the check goes through heartbeat_run_lock, so the
     # lease stays warm for however long the sweep's cancels take on the wire.
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     db = Database(tmp_path / "own.db")
     acquire_run_lock(db, "r", pid=101, now=_T0)
@@ -3097,7 +3097,7 @@ def test_still_owns_run_fails_open_when_the_store_blips(tmp_path, caplog, monkey
     # as one would skip the §18.2 sweep and strand this run's own resting orders
     # on the wallet with nothing left to cancel them. Only RunLockError — a
     # positive answer that someone else holds the lease — gives the run away.
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     def busy(db_, run_id, *, pid, now):
         raise sqlite3.OperationalError("database is locked")
@@ -3417,9 +3417,10 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
     from datetime import timedelta
 
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -3523,10 +3524,11 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
 
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
-    from contrib.hyperliquid_perp.common.no_decision import NO_DECISION_STREAK_THRESHOLD
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
+    from contrib.hyperliquid_perp.runtime.no_decision import NO_DECISION_STREAK_THRESHOLD
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -3575,7 +3577,7 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.runtime.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(
@@ -3608,9 +3610,10 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
 
     import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -3668,7 +3671,7 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
     monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
 
     with (
-        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.common.no_decision"),
+        caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.runtime.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
         cli_mod._paper_loop(
@@ -3699,8 +3702,8 @@ def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, mon
     pins the loop's defensive invariant with a direct call (interval=120),
     not an operator-reachable configuration."""
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -3758,8 +3761,8 @@ def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch
     start never builds the scheduler/decision provider, so the loop must never
     touch it."""
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     calls: list[str] = []
@@ -3808,8 +3811,8 @@ def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch,
     # Same settle-exit lane, but a keyless-healthy halt must tell the operator
     # to set the key — not to investigate a store that verified fine.
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
@@ -3857,8 +3860,8 @@ def test_paper_loop_engine_config_error_settle_exit_names_the_cause(tmp_path, mo
     # exit message must point at the environment fix — not at investigating a
     # store that verified fine, and not at the API key.
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
@@ -3911,8 +3914,9 @@ def test_paper_loop_halted_retries_pending_funding_hourly(tmp_path, monkeypatch)
     retry waits a full period: every entry into halted mode has just run a
     backfill."""
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -3968,9 +3972,10 @@ def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch
     from datetime import timedelta
 
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     clock = ManualClock(_T0)
@@ -4044,8 +4049,9 @@ def test_paper_loop_settle_exit_retries_pending_funding_before_final_export(tmp_
     # resolve now must be posted before that final export, not left uncounted
     # forever because the process exits.
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     calls: list[str] = []
@@ -4098,8 +4104,9 @@ def test_paper_loop_shutdown_funding_retry_is_best_effort(tmp_path, monkeypatch)
     # cost us the export itself (or, in the halted timer, kill the loop that
     # keeps SL/TP alive).
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
@@ -4283,9 +4290,10 @@ def test_paper_lease_takeover_exits_1_without_export_and_preserves_successor(
     import os
 
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     path = tmp_path / "cli.db"
     db = Database(path)
@@ -4385,9 +4393,10 @@ def test_paper_loop_names_an_untyped_failure_instead_of_counting_api_tries(
     from datetime import timedelta
 
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
@@ -4444,9 +4453,10 @@ def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatc
     from datetime import timedelta
 
     import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod, run_lock as run_lock_mod
-    from contrib.hyperliquid_perp.paper.clock import ManualClock
+    from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = _seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
@@ -4538,7 +4548,7 @@ def test_paper_acquire_conflict_with_live_holder_exits_1(tmp_path, capsys, paper
     # _cmd_paper wiring and its exit-1 mapping).
     import os
 
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     path, db = _seed_db(tmp_path)
     run_lock_mod.acquire_run_lock(db, "r", pid=os.getpid() + 1, now=datetime.now(timezone.utc))
@@ -4589,7 +4599,7 @@ def test_paper_lease_conflict_leaves_a_behind_store_unmigrated(
     # refusal must leave the store byte-for-byte the version the daemon owns.
     # At the lease floor too (issue #147): the refusal's own reads must not
     # need anything younger than the lease columns.
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     def build():
         path, db = _seed_db(tmp_path)
@@ -4658,8 +4668,8 @@ def test_the_runbook_quotes_the_migration_window_literals():
     # staleness window, and the suffix `live` appends to its lease refusal.
     # Same criterion as test_smoke's RUNBOOK pins: a value the code enforces,
     # restated by the doc as a literal, with nothing tying the two.
-    from contrib.hyperliquid_perp.paper.run_lock import LOCK_STALE_SECONDS
     from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE
+    from contrib.hyperliquid_perp.runtime.run_lock import LOCK_STALE_SECONDS
 
     runbook = doc_text("RUNBOOK-live.md")
     assert f"`LOCK_STALE_SECONDS`＝{LOCK_STALE_SECONDS} 秒" in runbook
@@ -4676,7 +4686,7 @@ def test_paper_will_not_migrate_under_a_sibling_runs_fresh_lease(tmp_path, capsy
     # own lease is free, but upgrading now would rewrite the schema under
     # "other". Refused by name; version unchanged; the lease "r" just took is
     # released (the refusal sits inside the lease-releasing try).
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     def build():
         path, db = _seed_db(tmp_path)
@@ -4709,7 +4719,7 @@ def test_paper_restart_beside_a_sibling_is_unaffected_when_the_store_is_current(
     # Negative control for the guard above: nothing owed → no sibling check,
     # so a routine restart next to a running sibling proceeds to its ordinary
     # next refusal (here the keyless flat-restart one).
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     path, db = _seed_db(tmp_path)
@@ -5857,7 +5867,7 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     # The refusal is scripted rather than a pre-held lease: since issue #129
     # a held lease is caught by the read-only peek at open, before the gate.
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     acquires: list[tuple[str, int]] = []
 
@@ -6131,7 +6141,7 @@ def test_live_lease_conflict_leaves_a_behind_store_unmigrated(
     # (no --loop, so no smoke gate) against a run another pid holds must be
     # refused with the store still at the version that daemon owns — at the
     # lease floor too (issue #147), where none of the live tables exist yet.
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     cfg = _live_yaml(
@@ -6196,7 +6206,7 @@ def test_live_will_not_migrate_under_a_paper_siblings_fresh_lease(
     # file is exactly what the wallet-hazard check (_conflicting_run_lease)
     # deliberately ignores — it signs nothing — but a migration rewrites its
     # tables all the same. With an upgrade owed, its fresh lease refuses.
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     cfg = _live_yaml(
@@ -6270,8 +6280,8 @@ def test_live_create_refused_by_a_sibling_leaves_no_half_created_run(
     # left a half-created run behind, and the operator's corrected re-run was
     # then rejected with "already exists — drop --create to resume it" — a
     # second, unrelated error for a run they never got to start.
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
     from contrib.hyperliquid_perp.persistence import repository as repo_mod
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -6300,7 +6310,7 @@ def test_live_loop_refuses_a_same_wallet_sibling_run(tmp_path, capsys, live_seam
     # scheduleCancel and runs the §19.3 sweep, whose bot-ownership lookup carries
     # no run_id — so the two runs cancel each other's resting orders and
     # whichever shuts down first strips the other's dead-man cover.
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -6335,7 +6345,7 @@ def test_live_loop_smoke_gate_does_not_apply_to_a_mainnet_run(
     forever — permanently unstartable, which is exactly why the scoping exists.
     The negative control is the testnet test above: same empty table, exit 4.
     """
-    from contrib.hyperliquid_perp.paper import run_lock as run_lock_mod
+    from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     # The lock is scripted to refuse so the command stops there — proof it got
     # PAST the gate rather than being refused by it. (A pre-held lease no
@@ -6389,7 +6399,7 @@ def test_live_without_loop_still_runs_keyless(tmp_path, capsys, live_seams, monk
     It arms, sweeps and exits, so it must stay keyless — the guard belongs to
     --loop alone. Stopped at the pre-held lease, well past the key check.
     """
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -7551,7 +7561,7 @@ def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatc
     # live-smoke places real orders and runs recoveries — the same actions the
     # run lease keeps single-owner. A held lease must refuse the suite.
     from contrib.hyperliquid_perp import cli as cli_mod
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     dbp = _make_live_run(tmp_path)
     db = Database(dbp)
@@ -7572,7 +7582,7 @@ def test_live_smoke_preflight_failure_exits_4_and_releases_the_lease(tmp_path, c
     # stderr, and the lease released so the operator can immediately retry.
     from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
-    from contrib.hyperliquid_perp.paper.run_lock import acquire_run_lock
+    from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     dbp = _make_live_run(tmp_path)
     monkeypatch.setattr(
@@ -7600,7 +7610,7 @@ def test_live_smoke_superseded_lease_exits_1_by_name(tmp_path, capsys, monkeypat
     # not main()'s generic exit 2.
     from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
-    from contrib.hyperliquid_perp.paper.run_lock import RunLockError
+    from contrib.hyperliquid_perp.runtime.run_lock import RunLockError
 
     dbp = _make_live_run(tmp_path)
     monkeypatch.setattr(
@@ -7788,8 +7798,8 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
 
 def _book(**overrides):
     """The books as ``read_books`` returns them: an open long, one fill booked."""
-    from contrib.hyperliquid_perp.paper.position_facts import BookFacts
     from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
+    from contrib.hyperliquid_perp.runtime.position_facts import BookFacts
 
     base = {
         "ledger": AccountLedger(wallet_balance=D(1000)),
@@ -7911,7 +7921,7 @@ def test_build_input_reads_the_books_once_before_the_fetch_even_if_the_cycle_is_
     # on to refuse has already made its three local SQLite reads. They touch
     # no network and spend nothing. What must NOT drift is the count — one
     # read per build_input, never one per section-rendering site.
-    from contrib.hyperliquid_perp.paper.scheduler import RetryableDecisionError
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     as_of = datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc)
     ctx = _perp_ctx(as_of - timedelta(hours=20))  # stale: refused
@@ -7932,8 +7942,8 @@ def test_build_input_reads_the_books_once_before_the_fetch_even_if_the_cycle_is_
 
 def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
     """``source`` is ``read_books`` bound over THIS run's store, in order."""
-    from contrib.hyperliquid_perp.paper.position_facts import read_books
     from contrib.hyperliquid_perp.persistence.db import Database
+    from contrib.hyperliquid_perp.runtime.position_facts import read_books
 
     assert source.func is read_books
     db, bound_run, bound_coin = source.args

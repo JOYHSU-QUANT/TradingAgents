@@ -33,6 +33,34 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **A `runtime/` package for the execution kernel the paper and live lanes
+  share** (refactor plan v2, T1 — PR 2 of the plan). `paper/clock.py`,
+  `paper/market_feed.py`, `paper/run_lock.py`, `paper/position_facts.py`
+  and `common/no_decision.py` move to `contrib/hyperliquid_perp/runtime/`;
+  `AssetSpec` leaves `paper/engine.py` for `runtime/asset_spec.py`, taking
+  the two `szDecimals` precision helpers with it (`paper/twap.py` and
+  `paper/liquidation.py` re-export them); `DecisionInput` and
+  `RetryableDecisionError` leave `paper/scheduler.py` for
+  `runtime/decision.py`; and the four protocols the engines are driven
+  through — `Clock`, `FundingSource`, `SnapshotProvider`, `DecisionProvider`
+  — join `ExchangeMarketData` and `OrderGate` in `ports.py`. Every importer
+  inside the package uses the new paths; the four vacated `paper/` modules
+  and the moved engine / scheduler / twap / liquidation names re-export
+  until the plan's PR 3 deletes them (`tests/runtime/test_compat_paths.py`
+  pins each re-export by identity). `common/no_decision.py` gets no shim:
+  a re-export there would import upward, which `common/` may not do. The
+  `live→paper` ratchet drops from 32 symbols to 23; the store's ratchet is
+  keyed by direction now (`paper` and `runtime`) and stays at 2, since
+  `audit_rows`' `DecisionInput` edge moved rather than went; the SQL-site
+  ratchet re-keys the two moved modules at the same counts; two new checks
+  pin `runtime/` where the plan puts it (load-time closure on the store,
+  the ports and the floor; no `paper` or `live` symbol at any depth) and
+  `ports.py`'s two annotation-only `runtime` names are frozen; the mypy
+  job covers `runtime/` too. No
+  behaviour changes: no message, schema or config key moves. The one
+  visible difference is in the journal, where the no-decision escalation
+  lines carry the logger name `contrib.hyperliquid_perp.runtime.no_decision`
+  (the module's name) instead of `...common.no_decision`.
 - **Layering ratchets, a mypy job, and no import-time registry checks in
   `live/smoke.py`** (refactor plan v2, T0).
   `contrib/hyperliquid_perp/tests/common/test_layering.py` freezes the

@@ -37,7 +37,7 @@ SCHEMA_VERSION = 13
 # open and ``Database.apply_deferred_migration`` those commands touch only the
 # v1 ``runs`` row and the lease columns of ``scheduler_state`` — the reads
 # (``repository.get_run``, ``repository.iter_other_run_leases``,
-# ``paper.run_lock.peek_run_lock``, the CLI's ``_conflicting_run_lease``) and
+# ``runtime.run_lock.peek_run_lock``, the CLI's ``_conflicting_run_lease``) and
 # the one write pair (``acquire_run_lock`` / ``release_run_lock``, since a
 # refusal after the lease is taken releases it against the still-old schema).
 # The lease columns arrived in v3, so v3 is the floor: ``Database`` refuses a

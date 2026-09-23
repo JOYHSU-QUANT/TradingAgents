@@ -303,7 +303,8 @@ Breaking changes within the 0.x line are called out explicitly.
   leave a `.usage.json` (written in the `finally`) with no `.reports.json`
   beside it, and that pairing means "engine failed", not "write lost" —
   unless the cycle's log carries the `decision reports sidecar could not be
-  written` ERROR, the one other way to it. Same rules as the usage sidecar:
+  written` ERROR, the other way to it short of a kill landing between the
+  two writes. Same rules as the usage sidecar:
   no row points at it, it is outside the `input_payload_hash` contract,
   `validate`/`export`/the fingerprint backfill never read it, a write
   failure is logged and the decision is unaffected. The model is shown no

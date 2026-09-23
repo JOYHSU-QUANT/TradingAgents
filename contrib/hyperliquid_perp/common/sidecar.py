@@ -73,8 +73,8 @@ def write_sidecar(
     record or turn its container into a repr string, and the degradation is
     not silent. A dict KEY JSON cannot carry is the one exception:
     ``json.dumps`` never consults ``default`` for keys, so that record is lost
-    whole — logged as a failed write, no file. Both builders today emit
-    ``str`` keys only.
+    whole — logged as a failed write, no file. Both builders' own keys are
+    ``str``; the reports record's nested debate dicts are upstream's.
     """
     if payload_path is None:
         return

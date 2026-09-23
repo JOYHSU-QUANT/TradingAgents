@@ -16,7 +16,8 @@ Written only for a cycle that got a ``final_state`` back: the two
 a drifted shape) have nothing to record, so a ``.usage.json`` with no
 ``.reports.json`` beside it is an engine-failed cycle, not a lost write —
 unless that cycle's log carries the ``decision reports sidecar could not be
-written`` ERROR, which is the one other way to the same pairing.
+written`` ERROR, the other way to the same pairing short of a kill landing
+between the two writes.
 """
 
 from __future__ import annotations

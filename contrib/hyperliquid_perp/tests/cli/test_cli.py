@@ -716,6 +716,36 @@ def test_an_engine_failure_leaves_the_usage_sidecar_and_no_reports_sidecar(monke
     assert not (tmp_path / "BTC-20260315T000000_000000Z.reports.json").exists()
 
 
+def test_a_drifted_engine_shape_leaves_the_same_pairing(monkeypatch, tmp_path):
+    # The other api_failed exit — propagate returned, but not the
+    # (final_state, signal) pair — lands after the finally too: same pairing.
+    import contrib.hyperliquid_perp.integration.trading_graph as tg
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
+
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(monkeypatch, decision_text="never reached", completions=[])
+    built = tg.build_graph  # the stub installed by _usage_provider
+
+    class _OneValue:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def propagate(self, *a, **k):
+            self._inner.propagate(*a, **k)
+            return {"final_trade_decision": ""}  # a single dict, not a 2-tuple
+
+    monkeypatch.setattr(tg, "build_graph", lambda **kw: _OneValue(built(**kw)))
+
+    with pytest.raises(RetryableDecisionError):
+        provider.request_decision(
+            _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+        )
+
+    assert (tmp_path / "BTC-20260315T000000_000000Z.usage.json").exists()
+    assert not (tmp_path / "BTC-20260315T000000_000000Z.reports.json").exists()
+
+
 def test_a_logging_failure_in_report_usage_does_not_cost_the_usage_sidecar(
     monkeypatch, tmp_path, caplog
 ):
@@ -783,8 +813,9 @@ def test_the_runbook_names_the_truncation_tag_and_the_sidecar():
     assert "the decision completion was truncated" in runbook
     assert "completion truncated in <node>" in runbook
     assert "completion usage:" in runbook
-    # The sidecar contract's three operator-facing spellings (§5): both log
-    # templates and the stamp value, emitted by common.sidecar.
+    # The sidecar contract's four operator-facing spellings (§5): both log
+    # templates and the stamp value, emitted by common.sidecar, and the
+    # reports sidecar's file name.
     assert "sidecar could not be written; the decision is unaffected" in runbook
     assert "value JSON cannot carry was stored as its str" in runbook
     assert f"`schema: {SIDECAR_SCHEMA}`" in runbook

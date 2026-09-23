@@ -296,14 +296,19 @@ Breaking changes within the 0.x line are called out explicitly.
   past decision could not be replayed: the input payload holds the perp
   snapshot and the format text, not what the analysts saw that cycle. The
   provider now writes `<payload>.reports.json` (`schema`, `selected_analysts`,
-  then nine fixed keys, `null` for one the state lacks) next to the payload and its `.usage.json` sidecar,
-  before the parse, so a fail-closed cycle keeps the reports that led there.
-  Same rules as the usage sidecar: no row points at it, it is outside the
-  `input_payload_hash` contract, `validate`/`export`/the fingerprint backfill
-  never read it, a write failure is logged and the decision is unaffected.
-  The model is shown no different text, so `PROMPT_VERSION` and the prompt
-  regime's three keys are unchanged and a deploy carrying this alone is not
-  a segment point.
+  then nine fixed keys, `null` for one the state lacks) next to the payload
+  and its `.usage.json` sidecar, before the parse, so a fail-closed cycle
+  keeps the reports that led there. It is written only for a cycle that got
+  a `final_state` back: the two `api_failed` exits of `request_decision`
+  leave a `.usage.json` (written in the `finally`) with no `.reports.json`
+  beside it, and that pairing means "engine failed", not "write lost" —
+  unless the cycle's log carries the `decision reports sidecar could not be
+  written` ERROR, the one other way to it. Same rules as the usage sidecar:
+  no row points at it, it is outside the `input_payload_hash` contract,
+  `validate`/`export`/the fingerprint backfill never read it, a write
+  failure is logged and the decision is unaffected. The model is shown no
+  different text, so `PROMPT_VERSION` and the prompt regime's three keys are
+  unchanged and a deploy carrying this alone is not a segment point.
 
   The record also carries `selected_analysts` — which analysts the engine was
   configured with that cycle — because under the default `[market, social,
@@ -319,11 +324,7 @@ Breaking changes within the 0.x line are called out explicitly.
   the engine on its own default, `structured_output` back on), and the
   `asset_type == "crypto"` comparison the upstream crypto branches make — the
   three other places where an upstream rename would fail silently rather
-  than loudly. The sidecar is written only for a
-  cycle that got a `final_state` back: the two `api_failed` exits of
-  `request_decision` leave a `.usage.json` (written in the `finally`) with no
-  `.reports.json` beside it, and that pairing means "engine failed", not
-  "write lost".
+  than loudly.
 
   The second sidecar is where the shared writer appeared: those rules now
   live once, in `common/sidecar.py` (`sidecar_path`, `write_sidecar`), and
@@ -347,7 +348,8 @@ Breaking changes within the 0.x line are called out explicitly.
   so the degradation is not silent. A builder that returns its own `schema`
   key is refused (logged, nothing written): the stamp is the contract's, not
   the writer's. A `.usage.json` with no `schema` key is one written before
-  this change (paper-BTC runs up to 6), same shape minus the stamp.
+  the stamp shipped (every paper-BTC run up to and including 6, the run live
+  when this landed), same shape minus the stamp.
 
 - **CFTC Commitments of Traders positioning as a crypto news-analyst tool, off
   by default** (`tradingagents/dataflows/cftc_cot.py`, routed tool

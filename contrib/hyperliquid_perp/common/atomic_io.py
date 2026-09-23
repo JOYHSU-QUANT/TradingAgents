@@ -1,5 +1,4 @@
-"""Atomic file writes, shared by CSV export, the audit decision log and the
-payload sidecars.
+"""Atomic file writes, shared by CSV export, the audit log and the payload sidecars.
 
 One definition of the tmp -> replace dance (phase2-data §1.1): write the whole
 payload to a sibling ``<name>.tmp``, then atomically rename over the

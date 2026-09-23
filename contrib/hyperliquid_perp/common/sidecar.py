@@ -17,8 +17,8 @@ and this module IS that contract, so a third sidecar cannot drift from it:
 - every record carries ``"schema": SIDECAR_SCHEMA`` so a later reader can
   tell the format apart from a successor's instead of guessing from which
   keys happen to be present. A ``.usage.json`` with NO ``schema`` key is one
-  written before the stamp existed (paper-BTC runs up to 6): same shape as
-  schema 1 minus the stamp;
+  written before the stamp shipped (every paper-BTC run up to and including
+  6, the run live when this landed): same shape as schema 1 minus the stamp;
 - atomic (:func:`.atomic_io.atomic_write_bytes`): a service restart landing
   mid-write — a deploy push while a cycle is finishing — must not leave a
   truncated file at the final path for a later reader to choke on;
@@ -55,7 +55,7 @@ def sidecar_path(payload_path: str | Path, suffix: str) -> Path:
 
 
 def write_sidecar(
-    payload_path: str | None,
+    payload_path: str | Path | None,
     *,
     suffix: str,
     what: str,
@@ -68,10 +68,13 @@ def write_sidecar(
     nowhere to put a sidecar and writes nothing — ``build`` is not called. The
     stamp is this module's: a builder that returns its own ``"schema"`` key is
     refused (logged, nothing written) rather than allowed to lie about the
-    format. A value JSON cannot carry is stored as its ``str`` at that leaf,
+    format. A VALUE JSON cannot carry is stored as its ``str`` at that leaf,
     with one WARNING per type per write, so one odd value cannot sink the
     record or turn its container into a repr string, and the degradation is
-    not silent.
+    not silent. A dict KEY JSON cannot carry is the one exception:
+    ``json.dumps`` never consults ``default`` for keys, so that record is lost
+    whole — logged as a failed write, no file. Both builders today emit
+    ``str`` keys only.
     """
     if payload_path is None:
         return

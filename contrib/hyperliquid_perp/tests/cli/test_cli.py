@@ -632,7 +632,7 @@ def test_the_reports_sidecar_is_kept_for_a_cycle_that_fails_closed(monkeypatch, 
     assert record["market_report"] == "market says up"
 
 
-def test_a_sidecar_write_failure_is_logged_and_does_not_cost_the_decision(
+def test_both_sidecar_write_failures_are_logged_in_order_and_neither_costs_the_decision(
     monkeypatch, tmp_path, caplog
 ):
     from pathlib import Path
@@ -691,6 +691,63 @@ def test_a_failure_in_the_usage_reporting_itself_is_the_wrappers_own_line(monkey
     assert error.exc_info is not None
 
 
+def test_an_engine_failure_leaves_the_usage_sidecar_and_no_reports_sidecar(monkeypatch, tmp_path):
+    # The operator's pairing rule (RUNBOOK §5): usage without reports means
+    # the engine failed. It rests on two placements — report_usage in
+    # request_decision's finally, write_decision_reports after the shape
+    # guard — so pin the pairing on disk, not the placements.
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
+
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="never reached",
+        completions=[_completion("Market Analyst", finish_reason="stop", output_tokens=100)],
+        raise_from_engine=RuntimeError("provider down"),
+    )
+
+    with pytest.raises(RetryableDecisionError):
+        provider.request_decision(
+            _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+        )
+
+    assert (tmp_path / "BTC-20260315T000000_000000Z.usage.json").exists()
+    assert not (tmp_path / "BTC-20260315T000000_000000Z.reports.json").exists()
+
+
+def test_a_logging_failure_in_report_usage_does_not_cost_the_usage_sidecar(
+    monkeypatch, tmp_path, caplog
+):
+    # The sidecar write sits in report_usage's finally: break the logging
+    # half (the per-call label) and the measurement still lands, beside the
+    # wrapper's own ERROR line.
+    import contrib.hyperliquid_perp.integration.completion_usage as cu
+
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[_completion("Portfolio Manager", finish_reason="length", output_tokens=4096)],
+    )
+
+    def _boom(call):
+        raise RuntimeError("label failed")
+
+    monkeypatch.setattr(cu, "_call_label", _boom)
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(
+            _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+        )
+
+    assert parsed.is_valid is True
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "completion usage could not be reported; the decision is unaffected" in errors
+    sidecar = tmp_path / "BTC-20260315T000000_000000Z.usage.json"
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["call_count"] == 1
+
+
 def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):
     # Ten completions that end in a provider exception were still paid for:
     # the usage line is written on the raising exit too, before the retryable
@@ -718,6 +775,7 @@ def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):
 def test_the_runbook_names_the_truncation_tag_and_the_sidecar():
     # RUNBOOK §5 and the §7 table are where an operator meets these two
     # spellings; the code that emits them is the pin's other half.
+    from contrib.hyperliquid_perp.common.sidecar import SIDECAR_SCHEMA
     from contrib.hyperliquid_perp.domains.perp.target_decision import TRUNCATED_OUTPUT
 
     runbook = doc_text("RUNBOOK.md")
@@ -725,6 +783,12 @@ def test_the_runbook_names_the_truncation_tag_and_the_sidecar():
     assert "the decision completion was truncated" in runbook
     assert "completion truncated in <node>" in runbook
     assert "completion usage:" in runbook
+    # The sidecar contract's three operator-facing spellings (§5): both log
+    # templates and the stamp value, emitted by common.sidecar.
+    assert "sidecar could not be written; the decision is unaffected" in runbook
+    assert "value JSON cannot carry was stored as its str" in runbook
+    assert f"`schema: {SIDECAR_SCHEMA}`" in runbook
+    assert "`<payload>.reports.json`" in runbook
     assert "`<payload>.usage.json`" in runbook
     # The no-parse exit's two spellings: the ERROR line and the error_message
     # suffix the api_failed row carries (the code side is pinned by

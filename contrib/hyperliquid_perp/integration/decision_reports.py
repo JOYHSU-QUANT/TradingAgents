@@ -1,5 +1,4 @@
-"""The ``<payload>.reports.json`` sidecar: what the engine's agents wrote on the
-way to the decision.
+"""The ``<payload>.reports.json`` sidecar: what the agents wrote on the way to the decision.
 
 Each cycle runs the whole TradingAgents graph — the analysts fetch their data
 and write reports at run time, the researchers debate, the trader plans, the
@@ -15,7 +14,9 @@ atomic, never raises). The model is shown no different text, so
 Written only for a cycle that got a ``final_state`` back: the two
 ``api_failed`` exits of ``request_decision`` (the engine raised, or returned
 a drifted shape) have nothing to record, so a ``.usage.json`` with no
-``.reports.json`` beside it is an engine-failed cycle, not a lost write.
+``.reports.json`` beside it is an engine-failed cycle, not a lost write —
+unless that cycle's log carries the ``decision reports sidecar could not be
+written`` ERROR, which is the one other way to the same pairing.
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ def write_decision_reports(
     payload_path: str | None,
     selected_analysts: Sequence[str],
 ) -> None:
-    """Write ``<payload>.reports.json`` beside the input payload. Never raises."""
+    """Write ``<payload>.reports.json`` beside the input payload, when the run has one. Never raises."""
     write_sidecar(
         payload_path,
         suffix=".reports.json",

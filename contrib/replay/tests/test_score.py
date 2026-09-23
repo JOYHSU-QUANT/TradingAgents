@@ -17,13 +17,12 @@ from contrib.replay.score import (
     Outcome,
     Question,
     ScoreError,
+    bar_open_ms,
     build_split,
     csv_table,
-    loadable_until_slot,
     paired_hits,
     score_run,
     sign_test,
-    slot_of,
 )
 from contrib.replay.upstream import CostModel, FillRole, SegmentName, TargetSide
 
@@ -41,7 +40,6 @@ TAKER = CostModel()  # the paper run's own: 0.045% taker fee, 5 bps slippage
 MAKER = CostModel(fill_role=FillRole.MAKER)  # 0.015% maker fee, the same slippage
 TAKER_COST = 0.00045 + 0.0005  # per unit of turnover, as a fraction of equity
 MAKER_COST = 0.00015 + 0.0005
-BASE_SLOT = ANCHOR_MS // STEP_MS
 
 # The next-close return of each answered row: later mark over this row's mark.
 NEXT_RETURN = {
@@ -79,11 +77,49 @@ def _row(card, slot: int):
 # -- slots ------------------------------------------------------------------
 
 
-def test_slot_of_rounds_a_close_onto_the_slot_it_names():
-    assert slot_of(at_ms(3), STEP_MS) == BASE_SLOT + 3  # 1 ms before the open
-    assert slot_of(ANCHOR_MS + 3 * STEP_MS, STEP_MS) == BASE_SLOT + 3  # on the open
-    assert slot_of(ANCHOR_MS + 3 * STEP_MS + STEP_MS // 2 - 1, STEP_MS) == BASE_SLOT + 3
-    assert slot_of(ANCHOR_MS + 3 * STEP_MS + STEP_MS // 2, STEP_MS) == BASE_SLOT + 4
+def test_bar_open_ms_floors_an_instant_onto_the_grid():
+    assert bar_open_ms(at_ms(3), STEP_MS) == ANCHOR_MS + 2 * STEP_MS  # 1 ms before the boundary
+    assert bar_open_ms(ANCHOR_MS + 3 * STEP_MS, STEP_MS) == ANCHOR_MS + 3 * STEP_MS  # on it
+    assert bar_open_ms(ANCHOR_MS + 3 * STEP_MS + 1, STEP_MS) == ANCHOR_MS + 3 * STEP_MS
+
+
+# -- pairing by the decision instant --------------------------------------------
+
+
+def test_a_cycle_that_drifted_across_a_bar_boundary_still_pairs_with_the_next_decision():
+    """Run 3 on 2026-09-23: decisions at 03:53 and 07:59 — one bar apart, two closed bars apart."""
+    minute = 60_000
+    t0 = ANCHOR_MS + 233 * minute  # 03:53 past a boundary
+    t1 = t0 + STEP_MS + 6 * minute  # 07:59: 4h06m later
+    t2 = t1 + STEP_MS
+    questions = [
+        _question(input_id="a", at_ms=t0, mark=100.0),
+        _question(input_id="b", at_ms=t1, mark=101.0),
+        _question(input_id="c", at_ms=t2, mark=102.0),
+    ]
+    card = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes={ANCHOR_MS + 2 * STEP_MS - 1: 999.0})
+    first = card.rows[0].outcomes[1]
+    # The next decision is 6 minutes past the 4h target: paired from the
+    # store, never from the research close that happens to sit nearer a grid slot.
+    assert (first.later_mark, first.source, first.ret) == (101.0, "store", pytest.approx(0.01))
+    assert card.rows[1].outcomes[1].later_mark == 102.0
+
+
+def test_a_gap_is_filled_by_the_nearest_close_within_half_a_bar_or_not_at_all():
+    questions = [_question(input_id="a", at_ms=at_ms(0)), _question(input_id="b", at_ms=at_ms(2), mark=102.0)]
+    target = at_ms(0) + STEP_MS
+    near = {target + STEP_MS // 2: 101.0}  # exactly half a bar away: still paired
+    far = {target + STEP_MS // 2 + 1: 101.0}  # one millisecond further: not
+    assert score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=near).rows[0].outcomes[1].source == "research"
+    assert score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=far).rows[0].outcomes[1].source is None
+
+
+def test_two_questions_within_the_tolerance_are_refused_as_unpairable():
+    questions = [_question(input_id="a", at_ms=at_ms(0)), _question(input_id="b", at_ms=at_ms(0) + 3_600_000)]
+    with pytest.raises(ScoreError, match="a and b: two questions within 2h"):
+        score_run(questions, [], step_ms=STEP_MS, costs=TAKER)
+    with pytest.raises(ScoreError, match="tolerance_ms"):
+        score_run(questions, [], step_ms=STEP_MS, costs=TAKER, tolerance_ms=STEP_MS)
 
 
 # -- the two readings ---------------------------------------------------------
@@ -451,7 +487,10 @@ def test_describe_prints_one_fact_per_line():
     lines = card.summary().describe(card)
     assert lines[0] == "decisions: 11 questions, 10 answered, 1 unanswered"
     assert lines[1] == "fail-closed: 2/10 (20.0%) (invalid_output 1, truncated_output 1)"
-    assert lines[2] == "set_target: 6, clamped 1/6 (16.7%), rejected 1/6 (16.7%); maintain_current: 2"
+    assert lines[2] == (
+        "asked a target: 6 (set_target, or rejected), clamped 1/6 (16.7%), "
+        "rejected 1/6 (16.7%); maintained: 2"
+    )
     assert lines[3] == "flips: 2/10 (20.0%)"
     assert lines[4] == (
         "costs: taker fills at 0.00045 fee + 5 bps slippage; exposure = margin x configured leverage"
@@ -471,19 +510,28 @@ def test_build_split_spans_the_first_open_to_the_last_close():
     # Twelve bars: 7 / 3 / 2.
     assert (split.train.end_ms - split.train.start_ms) // STEP_MS == 7
     assert (split.validation.end_ms - split.validation.start_ms) // STEP_MS == 3
-    assert loadable_until_slot(split, step_ms=STEP_MS) == BASE_SLOT + 9
-    assert loadable_until_slot(split, step_ms=STEP_MS, holdout=True) == BASE_SLOT + 11
+    assert split.loadable_until() == ANCHOR_MS + 9 * STEP_MS - 1  # row 9's own instant
+    assert split.loadable_until(holdout=True) == ANCHOR_MS + 11 * STEP_MS - 1
 
 
-def test_a_stamp_on_the_slot_boundary_lands_in_the_same_segment_as_the_close_before_it():
+def test_a_stamp_on_the_bar_boundary_belongs_to_the_bar_opening_there():
+    """The split's edges are bar opens; a question is placed by the bar it falls in, floored."""
     questions = fixture_questions()
     split = build_split(questions, interval="4h", step_ms=STEP_MS)
+    # One millisecond later than the fixture's stamps: every question moves
+    # into the NEXT bar, so the segments shift by one row and the last
+    # question falls off the span.
     on_boundary = [
-        _question(input_id=q.input_id, at_ms=q.at_ms + 1, mark=q.mark, current_side="flat", current_margin_pct=0.0)
-        for q in questions
+        _question(
+            input_id=q.input_id, at_ms=q.at_ms + 1, mark=q.mark,
+            current_side="flat", current_margin_pct=0.0,
+        )
+        for q in questions[:-1]
     ]
     card = score_run(on_boundary, [], step_ms=STEP_MS, costs=TAKER, split=split)
-    assert [row.segment.value for row in card.rows] == ["train"] * 6 + ["validation"] * 3
+    # Slots 0-3 and 5 open in the train bars (slot 4 is the missing cycle), 6-8 in validation.
+    assert [row.segment.value for row in card.rows] == ["train"] * 5 + ["validation"] * 3
+    assert [row.question.input_id for row in card.rows] == [input_id(s) for s in range(9) if s != 4]
     beyond = _question(input_id="beyond", at_ms=at_ms(12), mark=100.0)
     with pytest.raises(ScoreError, match="no segment of the split"):
         score_run([*questions, beyond], [], step_ms=STEP_MS, costs=TAKER, split=split)
@@ -557,8 +605,9 @@ def _answer(**overrides) -> Answer:
 def test_a_losing_position_may_carry_more_than_100_percent_margin():
     """Imputed from the books, ``current_margin_pct`` exceeds 100 when equity has shrunk."""
     assert _question(current_margin_pct=130.0).current_exposure == pytest.approx(1.3)
-    with pytest.raises(ScoreError, match="max_margin_pct is a percent 0-100"):
-        _question(max_margin_pct=130.0)
+    for cap in (130.0, 0.0):
+        with pytest.raises(ScoreError, match=r"max_margin_pct is a percent in \(0, 100\]"):
+            _question(max_margin_pct=cap)
 
 
 @pytest.mark.parametrize(
@@ -655,7 +704,7 @@ def test_score_run_refuses_a_question_or_answer_seen_twice_and_an_orphan_answer(
         score_run([q], [a, a], step_ms=STEP_MS, costs=TAKER)
     with pytest.raises(ScoreError, match="without a question"):
         score_run([q], [_answer(input_id="other")], step_ms=STEP_MS, costs=TAKER)
-    with pytest.raises(ScoreError, match="two questions in the slot"):
+    with pytest.raises(ScoreError, match="two questions within"):
         score_run([q, _question(input_id="r", at_ms=at_ms(0) + 1)], [], step_ms=STEP_MS, costs=TAKER)
 
 

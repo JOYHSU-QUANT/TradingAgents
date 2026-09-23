@@ -55,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="mark one paper run's decisions against the price that followed",
         description=(
             "Read one paper run's decision attempts (each cycle's final input and its "
-            "output), mark every decision at the next close and six closes on, and print "
+            "output), mark every decision one bar and six bars on, and print "
             "the scorecard: hit rates by mode, "
             "net P&L under the run's own fill model, fail-closed / clamp / flip rates, "
             "confidence calibration, and three baselines. Never writes to the store."
@@ -148,19 +148,20 @@ def _cmd_score(args: argparse.Namespace) -> int:
     except SplitError as exc:
         return _fail(
             f"run {args.run_id!r} is too short to cut into train / validation / holdout "
-            f"({exc}); the scorecard needs at least three {facts.interval} bars"
+            f"({exc}); the scorecard needs at least four {facts.interval} bars"
         )
     research: Mapping[int, float] = {}
     if research_path is not None:
         try:
             with ResearchStore(research_path) as store:
-                # Only the bars the split can ever pair: the lock at the I/O seam.
+                # Only the bars the split can ever pair: the lock at the I/O
+                # seam. One bar of slack below, for a later mark wanted half
+                # a bar before the first question's bar closes.
                 research = load_research_closes(
                     store,
                     coin=facts.coin,
                     interval=facts.interval,
-                    step_ms=facts.step_ms,
-                    since_ms=split.train.start_ms,
+                    since_ms=split.train.start_ms - facts.step_ms,
                     until_ms=split.loadable_until(holdout=True),
                 )
         except StoreError as exc:

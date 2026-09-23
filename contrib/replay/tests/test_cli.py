@@ -138,7 +138,7 @@ def test_a_run_too_short_to_split_is_refused_with_the_reason(tmp_path, capsys):
     assert main(_score(short)) == 1
     err = capsys.readouterr().err
     assert "too short to cut into train / validation / holdout" in err
-    assert "at least three 4h bars" in err
+    assert "at least four 4h bars" in err
 
 
 def test_a_run_with_no_rows_is_refused(tmp_path, capsys):

@@ -293,10 +293,14 @@ Breaking changes within the 0.x line are called out explicitly.
   every decision (a `decision_attempts` row per cycle, its final `ai_inputs`
   row and its `ai_outputs` row) and the price that followed it (the next
   cycles' `mark_price`), and nothing read the two together. The command
-  marks each decision at the next close and six closes on — paired by
-  `candle_end` slot, never by row order, because cycles go missing; a slot
-  no cycle fills is read from the research store's candle closes with
-  `--research-db`, and the CSV says which marks came from it. A question is
+  marks each decision one bar and six bars on — paired by the DECISION
+  instant (the nearest later decision within half a bar of `timestamp +
+  k × 4h`), never by row order, because cycles go missing, and not by the
+  closed bar's `candle_end`, because the scheduler rolls while the mark is
+  the price at the decision (a cycle that drifted across a boundary read
+  as a missing cycle, with a close minutes away as its "4h" mark); an
+  instant no cycle sits near is read from the research store's candle
+  closes with `--research-db`, and the CSV says which marks came from it. A question is
   the attempt's final input, not every input row: a retried cycle leaves
   its earlier tries in `ai_inputs` unanswered (22 of run 3's 94 rows), and
   read row by row they would sit in the same slot as the answer and get the
@@ -313,8 +317,9 @@ Breaking changes within the 0.x line are called out explicitly.
   backtest. Beside the hit rates: fail-closed (`invalid_output` /
   `truncated_output`), clamp, rejection and flip rates, how many cycles
   were retried and how many were still in progress or never built a prompt,
-  a ten-bucket confidence calibration over the rows the model made a call
-  on, and three baselines over the same answered rows (always long at the
+  a ten-bucket confidence calibration over the rows on which the model
+  asked a target (a `set_target`, or a rejected one — the bucket the clamp
+  and rejection rates are over), and three baselines over the same answered rows (always long at the
   margin cap, always flat, the radar's `autoresearch_bias` at the cap),
   each carrying its position and paying its own turnover; the 24h Sharpe is
   printed with an "overlapping, ranking only" caveat because consecutive

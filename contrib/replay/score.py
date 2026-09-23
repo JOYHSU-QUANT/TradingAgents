@@ -2,14 +2,20 @@
 
 Replay plan §3-7 fixes the definitions, and they are written here once:
 
-- A decision is scored at two horizons, the NEXT close and SIX closes on
+- A decision is scored at two horizons, ONE bar and SIX bars on
   (:data:`HORIZONS` — 4h and 24h on the paper cadence). The later mark is
-  the ``mark_price`` of the question that sits ``k`` slots later, matched
-  by ``candle_end`` and not by row order, because cycles go missing
-  (``api_failed``, a restart); a slot no question fills is read from the
-  research store's candle closes instead, and the row says which it got.
-  One question per slot: a run whose store holds two decisions for the
-  same bar close is refused by name rather than paired ambiguously.
+  the ``mark_price`` of the question decided ``k`` bars after this one —
+  the nearest question within half a bar of ``at_ms + k × step``, matched
+  by the decision INSTANT and not by row order, because cycles go missing
+  (``api_failed``, a restart), and not by the closed bar's ``candle_end``,
+  because the paper scheduler rolls (next cycle = last decision + 4h, never
+  a clock boundary) while the mark is the price at the decision: pairing on
+  the bar's stamp made a cycle that drifted across a boundary read as a
+  missing cycle, and its "4h" mark a close minutes away (run 3, measured
+  2026-09-23; decided the same day). A gap no question fills within the
+  tolerance is read from the research store's candle closes instead, and
+  the row says which it got. Two questions inside one tolerance of each
+  other cannot be paired unambiguously and the run is refused by name.
 - Direction: the model's call is the ``target_side`` it asked for — on an
   approved or clamped ``set_target``, and equally on a REJECTED one, which
   the gate records as ``maintain_current`` with the refused side and margin
@@ -30,8 +36,10 @@ Replay plan §3-7 fixes the definitions, and they are written here once:
   the requested margin and the model's side; the EXECUTED reading uses the
   approved margin when an order was created and the unchanged position
   otherwise (a rejection, a fail-closed round, a target inside the deadband).
-- Confidence calibration (plan §3-8): the rows the model made a call on,
-  ten buckets, the model's own hit rate per bucket.
+- Confidence calibration (plan §3-8): the rows on which the model ASKED A
+  TARGET (a ``set_target``, or a rejected one — the same bucket the clamp
+  and rejection rates are over), ten buckets, the model's own hit rate per
+  bucket.
 - Three baselines beside the trader, over the same answered rows: always
   long at the row's margin cap, always flat, and the research radar's
   ``autoresearch_bias`` as if it were traded at the cap. Each carries its
@@ -53,6 +61,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -91,11 +100,9 @@ __all__ = [
     "bar_open_ms",
     "build_split",
     "csv_table",
-    "loadable_until_slot",
     "paired_hits",
     "score_run",
     "sign_test",
-    "slot_of",
 ]
 
 # Bars ahead a decision is marked at: the next close, and six closes on.
@@ -148,10 +155,11 @@ def _enum(value: object, kind: type[_E], what: str) -> _E:
 class Question:
     """One ``ai_inputs`` row: the facts a decision was made from.
 
-    ``at_ms`` is the row's ``candle_end`` as epoch ms — the instant the
-    decision is placed on the slot grid by. Margins are the store's percent:
-    ``max_margin_pct`` is the cap the baselines trade at (``0–100``, the
-    config's own bound), while ``current_margin_pct`` is imputed from the
+    ``at_ms`` is the DECISION instant as epoch ms (the row's ``timestamp``,
+    when ``mark`` was read), the instant later marks are paired to and the
+    split is placed by. Margins are the store's percent: ``max_margin_pct``
+    is the cap the baselines trade at (``(0, 100]``, the risk config's own
+    bound), while ``current_margin_pct`` is imputed from the
     books (``notional / leverage / equity``) and exceeds 100 on a losing
     position, so it is only held to be non-negative and to agree with the
     side (flat carries none, a sized side carries some). ``leverage`` is the
@@ -185,8 +193,8 @@ class Question:
         if self.research_bias is not None:
             set_(self, "research_bias", _enum(self.research_bias, TargetSide, f"{me}: bias"))
         cap = _number(self.max_margin_pct, f"{me}: max_margin_pct")
-        if not 0 <= cap <= 100:
-            raise ScoreError(f"{me}: max_margin_pct is a percent 0-100, got {cap!r}")
+        if not 0 < cap <= 100:
+            raise ScoreError(f"{me}: max_margin_pct is a percent in (0, 100], got {cap!r}")
         set_(self, "max_margin_pct", cap)
         set_(self, "current_margin_pct", _amount(self.current_margin_pct, f"{me}: current_margin_pct"))
         set_(self, "leverage", _amount(self.leverage, f"{me}: leverage", positive=True))
@@ -218,8 +226,10 @@ class Answer:
     every rejection and every fail-closed round is recorded as
     ``maintain_current`` with no approved margin and no order — a REJECTED
     one keeping the side and margin it refused, a genuine maintain carrying
-    neither. ``order_created`` is what separates an approved target from an
-    executed one: an approved target inside the deadband changed nothing.
+    neither, a fail-closed one carrying whatever the parser salvaged (which
+    is never read as a call). ``order_created`` is what separates an
+    approved target from an executed one: an approved target inside the
+    deadband changed nothing.
     """
 
     input_id: str
@@ -363,49 +373,31 @@ class Scored:
         return self.outcomes[bars]
 
 
-# -- slots -------------------------------------------------------------------
-
-
-def slot_of(at_ms: int, step_ms: int) -> int:
-    """The grid slot an instant belongs to: the nearest multiple of ``step_ms``.
-
-    A ``candle_end`` is the venue's close, one millisecond BEFORE the next
-    open (``contrib.autoresearch.constants``), so it sits a hair under the
-    slot it names; rounding to the nearest slot puts it where a reader
-    thinking in closes expects it, and a stamp on the exact boundary lands
-    in the same place. Integer arithmetic, so two stamps a millisecond apart
-    can never round to different slots through a float.
-    """
-    return (at_ms + step_ms // 2) // step_ms
+# -- the grid and the split ------------------------------------------------------
 
 
 def bar_open_ms(at_ms: int, step_ms: int) -> int:
-    """The open of the bar whose close the instant's slot names: ``(slot - 1) × step``.
+    """The open of the bar the instant falls in: ``at_ms`` floored to the grid.
 
     The one quantity a question is placed on a split by — the split's edges
     are bar opens — and the span :func:`build_split` cuts is built from.
     """
-    return (slot_of(at_ms, step_ms) - 1) * step_ms
+    return at_ms - at_ms % step_ms
 
 
 def build_split(questions: Sequence[Question], *, interval: str, step_ms: int) -> Split:
     """The research split cut over the span the questions cover.
 
-    From the open of the first question's bar to the close of the last
-    one's, so every question falls inside exactly one segment and the last
-    one falls inside the holdout's final bar rather than on its edge.
-    Raises :class:`~contrib.autoresearch.split.SplitError` on a run too short
-    to cut three segments from.
+    From the open of the bar the first question falls in to the close of
+    the bar the last one falls in, so every question is inside exactly one
+    segment and the last one is inside the holdout's final bar rather than
+    on its edge. Raises :class:`~contrib.autoresearch.split.SplitError` on a
+    run too short to cut three segments from (fewer than four bars).
     """
     if not questions:
         raise ScoreError("no questions to split")
     opens = [bar_open_ms(q.at_ms, step_ms) for q in questions]
     return Split.by_shares(interval, start_ms=min(opens), end_ms=max(opens) + step_ms)
-
-
-def loadable_until_slot(split: Split, *, step_ms: int, holdout: bool = False) -> int:
-    """The newest slot whose mark may be read: the close of the last loadable bar."""
-    return slot_of(split.loadable_until(holdout=holdout), step_ms)
 
 
 def _segment_of(split: Split | None, at_ms: int, step_ms: int) -> SegmentName | None:
@@ -423,6 +415,42 @@ def _segment_of(split: Split | None, at_ms: int, step_ms: int) -> SegmentName | 
     raise ScoreError(
         f"no segment of the split holds the bar opening at {from_epoch_ms(opened).isoformat()}"
     )
+
+
+# -- pairing ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Series:
+    """Stamped prices in time order, answering "the one nearest ``target``, within ``tolerance``"."""
+
+    stamps: tuple[int, ...]
+    prices: tuple[float, ...]
+
+    @classmethod
+    def of(cls, points: Mapping[int, float]) -> _Series:
+        stamps = tuple(sorted(points))
+        return cls(stamps, tuple(points[s] for s in stamps))
+
+    def nearest(self, target: int, *, tolerance: int, until_ms: int | None) -> float | None:
+        """The price stamped nearest ``target`` within ``tolerance``; ``None`` past ``until_ms``.
+
+        The lock applies to the nearest stamp, not to the next-nearest: a
+        bound that hid the nearest and served the other would pair a
+        question with a mark it should not see at all.
+        """
+        index = bisect_left(self.stamps, target)
+        candidates = [
+            i
+            for i in (index - 1, index)
+            if 0 <= i < len(self.stamps) and abs(self.stamps[i] - target) <= tolerance
+        ]
+        if not candidates:
+            return None
+        winner = min(candidates, key=lambda i: abs(self.stamps[i] - target))
+        if until_ms is not None and self.stamps[winner] > until_ms:
+            return None
+        return self.prices[winner]
 
 
 # -- scoring -----------------------------------------------------------------
@@ -489,23 +517,24 @@ def _later_marks(
     questions: Sequence[Question],
     *,
     step_ms: int,
-    marks: Mapping[int, float],
-    research: Mapping[int, float],
-    until_slot: int | None,
+    tolerance_ms: int,
+    store: _Series,
+    research: _Series,
+    until_ms: int | None,
 ) -> dict[str, dict[int, _Mark]]:
-    """Per question and horizon, ``(later mark, source)`` — ``(None, None)`` past ``until_slot``."""
+    """Per question and horizon, ``(later mark, source)``: the store's question first, else a close."""
 
-    def lookup(slot: int) -> _Mark:
-        if until_slot is not None and slot > until_slot:
-            return None, None
-        if slot in marks:
-            return marks[slot], "store"
-        if slot in research:
-            return research[slot], "research"
+    def lookup(target: int) -> _Mark:
+        mark = store.nearest(target, tolerance=tolerance_ms, until_ms=until_ms)
+        if mark is not None:
+            return mark, "store"
+        mark = research.nearest(target, tolerance=tolerance_ms, until_ms=until_ms)
+        if mark is not None:
+            return mark, "research"
         return None, None
 
     return {
-        q.input_id: {bars: lookup(slot_of(q.at_ms, step_ms) + bars) for bars in HORIZONS}
+        q.input_id: {bars: lookup(q.at_ms + bars * step_ms) for bars in HORIZONS}
         for q in questions
     }
 
@@ -542,17 +571,23 @@ def score_run(
     research_closes: Mapping[int, float] | None = None,
     split: Split | None = None,
     holdout: bool = False,
+    tolerance_ms: int | None = None,
 ) -> Scorecard:
     """Score every question of a run. The one entry point.
 
-    ``research_closes`` maps a slot to the close read from the research
-    store, consulted only for a slot no question fills. With a ``split``,
-    holdout rows are dropped unless ``holdout`` is set, and later marks past
-    the loadable bound are unavailable either way — read them and the
-    validation score of the last day leaks the holdout's first day.
+    ``research_closes`` maps a candle's ``close_time`` to its close, read
+    from the research store and consulted only where no question sits
+    within ``tolerance_ms`` (half a bar by default) of the instant a later
+    mark is wanted at. With a ``split``, holdout rows are dropped unless
+    ``holdout`` is set, and later marks past the loadable bound are
+    unavailable either way — read them and the validation score of the last
+    day leaks the holdout's first day.
     """
     if step_ms <= 0:
         raise ScoreError(f"step_ms must be > 0, got {step_ms!r}")
+    tolerance = step_ms // 2 if tolerance_ms is None else tolerance_ms
+    if not 0 <= tolerance < step_ms:
+        raise ScoreError(f"tolerance_ms must be in [0, step_ms), got {tolerance_ms!r}")
     by_input: dict[str, Answer] = {}
     for given in answers:
         if given.input_id in by_input:
@@ -560,28 +595,31 @@ def score_run(
         by_input[given.input_id] = given
     ordered = sorted(questions, key=lambda q: q.at_ms)
     seen: set[str] = set()
-    marks: dict[int, float] = {}
     for question in ordered:
         if question.input_id in seen:
             raise ScoreError(f"{question.input_id}: asked twice")
         seen.add(question.input_id)
-        slot = slot_of(question.at_ms, step_ms)
-        if slot in marks:
+    for earlier, later_q in zip(ordered, ordered[1:], strict=False):
+        if later_q.at_ms - earlier.at_ms <= tolerance:
             raise ScoreError(
-                f"{question.input_id}: two questions in the slot closing at "
-                f"{from_epoch_ms(slot * step_ms).isoformat()}"
+                f"{earlier.input_id} and {later_q.input_id}: two questions within "
+                f"{tolerance / 3_600_000:g}h of each other cannot be paired unambiguously"
             )
-        marks[slot] = question.mark
     unmatched = set(by_input) - seen
     if unmatched:
         raise ScoreError(f"answers without a question: {sorted(unmatched)}")
 
-    research = research_closes or {}
+    store = _Series.of({q.at_ms: q.mark for q in ordered})
+    research = _Series.of(research_closes or {})
     segments = {q.input_id: _segment_of(split, q.at_ms, step_ms) for q in ordered}
     locked_rows = [q for q in ordered if segments[q.input_id] is not SegmentName.HOLDOUT]
-    locked_until = None if split is None else loadable_until_slot(split, step_ms=step_ms)
     locked = _later_marks(
-        locked_rows, step_ms=step_ms, marks=marks, research=research, until_slot=locked_until
+        locked_rows,
+        step_ms=step_ms,
+        tolerance_ms=tolerance,
+        store=store,
+        research=research,
+        until_ms=None if split is None else split.loadable_until(),
     )
     # The band is a fact about the train and validation rows under the lock,
     # whether or not the holdout is being read: opening the holdout must not
@@ -603,9 +641,10 @@ def score_run(
         later = _later_marks(
             kept,
             step_ms=step_ms,
-            marks=marks,
+            tolerance_ms=tolerance,
+            store=store,
             research=research,
-            until_slot=None if split is None else loadable_until_slot(split, step_ms=step_ms, holdout=True),
+            until_ms=None if split is None else split.loadable_until(holdout=True),
         )
     else:
         kept, later = locked_rows, locked
@@ -764,9 +803,9 @@ class Summary:
             f"{self.unanswered} unanswered",
             f"fail-closed: {_rate(self.fail_closed, self.answered)}"
             + (f" ({reasons})" if reasons else ""),
-            f"set_target: {self.set_target}, clamped {_rate(self.clamped, self.set_target)}, "
-            f"rejected {_rate(self.rejected, self.set_target)}; maintain_current: "
-            f"{self.maintain_current}",
+            f"asked a target: {self.set_target} (set_target, or rejected), clamped "
+            f"{_rate(self.clamped, self.set_target)}, rejected "
+            f"{_rate(self.rejected, self.set_target)}; maintained: {self.maintain_current}",
             f"flips: {_rate(self.flips, self.answered)}",
             # Spelled here rather than through ``CostModel.describe()``: its
             # tail ("funding settled hourly, leverage 1") describes the

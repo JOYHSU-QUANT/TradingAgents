@@ -320,35 +320,70 @@ def test_the_reports_suffix_is_the_one_the_engine_writes():
 def test_research_closes_are_keyed_by_the_slot_the_close_names(tmp_path):
     path = write_research_store(tmp_path / "autoresearch.sqlite")
     with ResearchStore(path) as research:
-        closes = load_research_closes(research, coin=COIN, interval="4h", step_ms=STEP_MS)
+        closes = load_research_closes(research, coin=COIN, interval="4h")
     assert dict(closes) == RESEARCH_CLOSES
 
 
-def test_a_row_the_grid_cannot_place_is_refused_by_name(store):
+def test_a_question_is_placed_at_its_decision_instant_not_its_closed_bar(store):
+    """A cycle that ran at 15:53 against the bar closed at 12:00 sits at 15:53."""
+    decided, closed = from_epoch_ms(at_ms(15)), from_epoch_ms(at_ms(14))
+    with Database(store) as db, db.transaction() as conn:
+        repo.insert_ai_input(
+            conn,
+            input_id="in-late",
+            timestamp=decided,
+            mode="paper",
+            run_id=RUN_ID,
+            symbol=COIN,
+            candle_end=closed,
+            mark_price=Decimal("1"),
+            current_position_side="flat",
+            configured_leverage=Decimal("1"),
+            max_target_margin_pct=Decimal("60"),
+        )
+        repo.insert_decision_attempt(
+            conn,
+            decision_attempt_id="att-late",
+            timestamp=decided,
+            mode="paper",
+            run_id=RUN_ID,
+            scheduled_at=decided,
+            input_id="in-late",
+            status="api_failed",
+        )
+    with Database(store, migrate=False) as db:
+        questions = load_decisions(db, RUN_ID).questions
+    assert next(q for q in questions if q.input_id == "in-late").at_ms == at_ms(15)
+
+
+def test_an_attempt_naming_an_output_the_store_lacks_is_refused(store):
     stamp = from_epoch_ms(at_ms(15))
     with Database(store) as db, db.transaction() as conn:
         repo.insert_ai_input(
             conn,
-            input_id="in-bad",
+            input_id="in-half",
             timestamp=stamp,
             mode="paper",
             run_id=RUN_ID,
             symbol=COIN,
-            candle_end=None,
+            candle_end=stamp,
             mark_price=Decimal("1"),
             current_position_side="flat",
+            configured_leverage=Decimal("1"),
+            max_target_margin_pct=Decimal("60"),
         )
         repo.insert_decision_attempt(
             conn,
-            decision_attempt_id="att-bad",
+            decision_attempt_id="att-half",
             timestamp=stamp,
             mode="paper",
             run_id=RUN_ID,
             scheduled_at=stamp,
-            input_id="in-bad",
+            input_id="in-half",
+            output_id="out-missing",
             status="completed",
         )
-    with Database(store, migrate=False) as db, pytest.raises(ScoreError, match="in-bad: candle_end"):
+    with Database(store, migrate=False) as db, pytest.raises(ScoreError, match="out-missing"):
         load_decisions(db, RUN_ID)
 
 

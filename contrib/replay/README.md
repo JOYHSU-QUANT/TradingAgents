@@ -28,8 +28,8 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
     [--research-db data/autoresearch.sqlite] [--payload-root DIR] [--out DIR] [--holdout]
 ```
 
-只讀 `runs` 與 `decision_attempts`（每個 attempt 的最後一個 `ai_inputs` 當題目、它的
-`ai_outputs` 當答案），永遠不寫 paper store。**題目的單位是 decision attempt、不是 `ai_inputs` 列**：
+只讀 `runs`，以及每個 `decision_attempts` 列與它指到的最後一列 `ai_inputs`（題目）和
+`ai_outputs`（答案），永遠不寫 paper store。**題目的單位是 decision attempt、不是 `ai_inputs` 列**：
 一個 cycle 重試幾次就寫幾列 input（`#in1`／`#in2`／`#in3`），只有最後一列有答案；照列讀會把
 前幾次當成同一格位的沒答題目，整個 run 被拒。attempt 在寫出任何 input 之前就失敗的 cycle
 不是題目，摘要另外計數；複製 store 時還在進行中（`in_progress`）的 cycle 也不是，一樣另外計數。
@@ -40,10 +40,13 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 
 ### 定義（寫死在 `score.py`，改了就是改分數的意義）
 
-- **兩個時距**：下一根收盤（4h）與往後六根（24h）。事後 mark＝`candle_end` 落在 k 個格位之後
-  那一列的 `ai_inputs.mark_price`——按時間戳配對、不按列序，因為 cycle 會缺
-  （`api_failed`、重啟）；沒有列的格位改讀研究 store 的 candle close（`--research-db`），
-  CSV 會標明來源。
+- **兩個時距**：一根之後（4h）與六根之後（24h）。事後 mark＝**決策時刻** `+k×4h` 這個目標時點
+  前後半根（±2h）內最近那一題的 `ai_inputs.mark_price`——按決策時刻（`ai_inputs.timestamp`）
+  配對、不按列序，因為 cycle 會缺（`api_failed`、重啟）；也**不按 `candle_end`**，因為 paper
+  排程是滾動的（下一次＝上次決策＋4h，不對齊整點）、mark 是決策當下的即時價，用已收盤 K 線的
+  時戳配對會把跨過整點的 cycle 讀成缺口、把幾分鐘後的收盤價當成「4h 後」（run 3 實測；
+  2026-09-23 拍板）。半根內沒有題的目標時點改讀研究 store 最近的 candle close（`--research-db`），
+  CSV 會標明來源；兩題相距不到半根視為配對歧義、具名拒絕。
 - **方向**：模型的主張＝它要的 `target_side`——approved／clamped 的 `set_target` 如此，**被拒的也如此**
   （gate 把被拒記成 `maintain_current` 但保留被拒的方向與 margin，讀取器看的是保留下來的方向、不是
   `decision_mode`）；真正的 `maintain_current` 看當時倉位方向；fail-closed 那一輪沒有主張。
@@ -56,14 +59,16 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 - **兩種讀法，湊成 2×2**：**模型**讀法用 requested margin 與模型的方向；**執行**讀法用
   approved margin（且真的下了單）——被拒、fail-closed、落在 deadband 內沒下單的，都是「倉位不變」。
   摘要印 both／model only／rule only／neither，回答「AI 對、規則對、兩者都錯」。
-- **信心校準**：只算 `set_target`，`confidence` 十等分，每桶模型讀法的命中率。
+- **「模型要了一個目標」（asked a target）**＝`set_target`，或被拒的那種（gate 記成 `maintain_current`
+  但保留方向與 margin）。摘要的 `asked a target: N` 用這個定義，clamp 率與拒絕率以它為分母，
+  信心校準也只算這些題（`confidence` 十等分，每桶模型讀法的命中率）。它與 CSV 的
+  `decision_mode = set_target` 不同：後者不含被拒的。
 - **對照組**：買進持有（該列的 `max_target_margin_pct` 上限）、永遠 flat、`autoresearch_bias`
-  照上限交易；跨列帶倉位、部位改變時付周轉成本，**只跑在有答案的題上**，n 與交易員相同
-  （2026-09-23 拍板）。
-- **fail-closed 率**＝`risk_action = invalid_fail_closed`（依 `risk_reason` 分 `invalid_output`／
-  `truncated_output`），分母是最終答案；同一個 cycle 內的重試另印一行「attempts retried N」、
-  不併入分母（2026-09-23 拍板）。clamp 率與拒絕率以「模型有主張」的題為分母；翻轉率＝執行方向
-  由多轉空或反之。
+  照上限交易；跨列帶倉位、部位改變時付周轉成本，**只跑在有答案的題上**（2026-09-23 拍板）。
+  buy-hold 與 flat 的 n 與交易員相同；research_bias 跳過沒有 bias 的列，n 較小。
+- **fail-closed 率**＝`risk_action = invalid_fail_closed`，依 `risk_reason` 分組（通常是
+  `invalid_output`／`truncated_output`），分母是最終答案；同一個 cycle 內的重試另印一行
+  「attempts retried N」、不併入分母（2026-09-23 拍板）。翻轉率＝執行方向由多轉空或反之。
 - **Sharpe**：每題損益的平均／標準差，乘 √(一年有幾個這種時距)；少於兩題或無變異＝0
   （同評估器慣例）。§5 的門檻用 4h；24h 相鄰題目重疊、標準差被低估，照印但行尾標
   `(overlapping, ranking only)`（2026-09-23 拍板）。
@@ -99,5 +104,7 @@ pytest -q contrib/replay/tests
 ```
 
 夾具是一張 11 題的手寫表（`tests/conftest.py::ROWS`）：一個缺席的 cycle、一題沒答案、
-每種讀法各一列。期望值全部寫成從那張表推得出來的算式，不是程式印出來的數字。
-同一張表也透過 perp 的 repository 寫進真的 store，讓讀取器對著 daemon 的編碼方式測。
+每種讀法各一列。`test_score.py` 的期望值全部寫成從那張表推得出來的算式，不是程式印出來的數字。
+同一張表也透過 perp 的 repository 寫進真的 store，讓讀取器對著 daemon 的編碼方式測；
+另有一個往返測試把真的 gate（`parse_target_decision` → `evaluate` → `write_ai_output`）寫出來的
+四種答案讀回來，釘住夾具的手寫形狀與 gate 的真形狀不會分家。

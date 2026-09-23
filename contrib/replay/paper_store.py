@@ -41,7 +41,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final, TypeVar
 
-from .score import Answer, Question, ScoreError, slot_of
+from .score import Answer, Question, ScoreError
 from .upstream import (
     TERMINAL_ATTEMPT_STATUSES,
     CostModel,
@@ -77,8 +77,8 @@ REPORTS_SUFFIX: Final = ".reports.json"
 
 _DECISIONS_SQL: Final = """
 SELECT a.decision_attempt_id, a.scheduled_at, a.status, a.attempt_count,
-       a.input_id AS attempt_input_id,
-       i.input_id, i.symbol, i.candle_end, i.mark_price, i.account_equity,
+       a.input_id AS attempt_input_id, a.output_id AS attempt_output_id,
+       i.input_id, i.symbol, i.timestamp, i.mark_price, i.account_equity,
        i.current_position_side, i.current_margin_pct, i.configured_leverage,
        i.max_target_margin_pct, i.autoresearch_bias, i.autoresearch_strategy_id,
        i.prompt_version, i.model, i.context_shape, i.input_payload_path,
@@ -190,9 +190,12 @@ def _float(text: str) -> float:
 
 
 def _question(row: sqlite3.Row, reports_root: Path | None) -> Question:
-    stamp = _need(row, "candle_end", str)
+    # The decision instant — when the mark was read — not ``candle_end``,
+    # the closed bar's stamp: the scheduler rolls, so the two drift apart by
+    # up to a bar (``score`` module docstring).
+    stamp = _need(row, "timestamp", str)
     try:
-        at_ms = epoch_ms(parse_instant(stamp), what=f"{row['input_id']}: candle_end")
+        at_ms = epoch_ms(parse_instant(stamp), what=f"{row['input_id']}: timestamp")
     except ValueError as exc:
         raise ScoreError(str(exc)) from exc
     reports: bool | None = None
@@ -252,8 +255,10 @@ class Decisions:
     scheduled but never turned into a question, reported so a short run and
     a run that kept failing to build its prompt read differently.
     ``in_progress`` counts the attempts not yet terminal when the store was
-    read; ``retried`` the finished attempts that took more than one try,
-    and ``extra_tries`` how many tries beyond the first they took in all.
+    read; ``retried`` the QUESTIONS that took more than one try, and
+    ``extra_tries`` how many tries beyond the first they took in all (an
+    attempt that never wrote an input is counted under ``without_input``
+    only, whatever its try count).
     """
 
     questions: list[Question]
@@ -310,6 +315,11 @@ def load_decisions(
                 f"{row['decision_attempt_id']}: names input {row['attempt_input_id']!r}, which "
                 "ai_inputs does not hold"
             )
+        if row["attempt_output_id"] is not None and row["output_id"] is None:
+            raise ScoreError(
+                f"{row['decision_attempt_id']}: names output {row['attempt_output_id']!r}, "
+                "which ai_outputs does not hold"
+            )
         tries = int(row["attempt_count"] or 1)
         if tries > 1:
             retried += 1
@@ -325,11 +335,10 @@ def load_research_closes(
     *,
     coin: str,
     interval: str,
-    step_ms: int,
     since_ms: int | None = None,
     until_ms: int | None = None,
 ) -> Mapping[int, float]:
-    """The series' closes keyed by the slot each ``close_time`` names, over ``[since, until]`` opens.
+    """The series' closes keyed by ``close_time``, for the bars opening in ``[since, until]``.
 
     Read through the store's own :meth:`iter_candles`, which re-checks each
     bar's invariants — a corrupt research row fails there, by field, not
@@ -337,6 +346,6 @@ def load_research_closes(
     opens past ``until_ms`` is never decoded, let alone paired.
     """
     return {
-        slot_of(c.close_time, step_ms): float(c.close)
+        c.close_time: float(c.close)
         for c in store.iter_candles(coin, interval, since_ms=since_ms, until_ms=until_ms)
     }

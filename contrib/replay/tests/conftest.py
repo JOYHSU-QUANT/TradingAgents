@@ -27,7 +27,7 @@ from contrib.hyperliquid_perp.domains.perp.schema import Candle
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.ids import decision_attempt_id
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
-from contrib.replay.score import Answer, Question, slot_of
+from contrib.replay.score import Answer, Question
 from contrib.replay.upstream import (
     Database,
     ResearchStore,
@@ -45,7 +45,11 @@ COIN = "BTC"
 
 
 def at_ms(slot: int) -> int:
-    """The ``candle_end`` of the fixture's slot ``slot``: the venue's close, 1 ms before the open."""
+    """The decision instant of the fixture's slot ``slot``: 1 ms before the bar boundary.
+
+    Exactly one bar apart, so a later mark is found exactly at its target;
+    the drift the real scheduler has is exercised by its own test.
+    """
     return ANCHOR_MS + slot * STEP_MS - 1
 
 
@@ -125,8 +129,8 @@ RESEARCH_CANDLE = Candle(
     close=Decimal("104"),
     volume=Decimal("1"),
 )
-# Keyed by the ABSOLUTE slot, as ``load_research_closes`` keys it.
-RESEARCH_CLOSES = {slot_of(at_ms(4), STEP_MS): 104.0}
+# Keyed by ``close_time``, as ``load_research_closes`` keys it.
+RESEARCH_CLOSES = {RESEARCH_CANDLE.close_time: 104.0}
 
 MAX_MARGIN_PCT = "60"
 PROMPT_VERSION = "phase2-target-v6"

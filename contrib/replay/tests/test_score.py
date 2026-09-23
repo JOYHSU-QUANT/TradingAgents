@@ -24,7 +24,7 @@ from contrib.replay.score import (
     score_run,
     sign_test,
 )
-from contrib.replay.upstream import CostModel, FillRole, SegmentName, TargetSide
+from contrib.replay.upstream import CostModel, FillRole, SegmentName, Split, TargetSide
 
 from .conftest import (
     ANCHOR_MS,
@@ -133,19 +133,34 @@ def test_two_questions_within_the_tolerance_are_refused_as_unpairable():
 
 
 def test_the_lock_applies_to_the_candidate_chosen_and_never_falls_through():
-    """A store question inside the tolerance but past the bound is 'unavailable', not the close beside it."""
-    questions = [_question(input_id=f"s{i}", at_ms=at_ms(i), mark=100.0 + i) for i in range(12)]
-    split = build_split(questions, interval="4h", step_ms=STEP_MS)
-    # Twelve bars cut 7 / 3 / 2: row 9 is the last validation row and its
-    # one-bar target is row 10's instant, in the holdout. A research close
-    # one hour before that target is inside the tolerance and inside the
-    # bound — and must NOT be served.
-    beside = {at_ms(10) - 3_600_000: 555.0}
-    locked = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=beside, split=split)
-    assert [r.question.input_id for r in locked.rows][-1] == "s9"
+    """A store question inside the tolerance but past the bound is 'unavailable', not the close beside it.
+
+    Twelve bars cut 7 / 3 / 2, so the locked bound is the last validation
+    bar's close, B. The question ``q`` (one hour into the last validation
+    bar) wants its one-bar mark at B + 1h; the holdout question ``h`` sits
+    30 minutes past that target and a research close sits at B, an hour
+    before it. ``h`` is the nearer candidate and is past the bound, so the
+    answer is "unavailable" — a lock applied per series would have served
+    the close, which is inside the bound.
+    """
+    hour = 3_600_000
+    bound = ANCHOR_MS + 9 * STEP_MS - 1
+    split = Split.by_shares("4h", start_ms=ANCHOR_MS - STEP_MS, end_ms=ANCHOR_MS + 11 * STEP_MS)
+    assert split.loadable_until() == bound
+    questions = [
+        *(_question(input_id=f"s{i}", at_ms=at_ms(i), mark=100.0 + i) for i in range(8)),
+        _question(input_id="q", at_ms=bound - STEP_MS + hour, mark=100.0),
+        _question(input_id="h", at_ms=bound + hour + hour // 2, mark=110.0),
+        _question(input_id="s11", at_ms=at_ms(11), mark=111.0),
+    ]
+    at_bound = {bound: 555.0}
+    locked = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=at_bound, split=split)
+    assert [r.question.input_id for r in locked.rows][-1] == "q"
     assert locked.rows[-1].outcomes[1].later_mark is None
-    opened = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=beside, split=split, holdout=True)
-    assert next(r for r in opened.rows if r.question.input_id == "s9").outcomes[1].later_mark == 110.0
+    opened = score_run(
+        questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=at_bound, split=split, holdout=True
+    )
+    assert next(r for r in opened.rows if r.question.input_id == "q").outcomes[1].later_mark == 110.0
 
 
 def test_the_nearer_of_two_research_closes_is_served():
@@ -351,7 +366,7 @@ def test_six_bars_on_reads_the_mark_six_bars_later_or_nothing():
 
 def test_the_six_bar_hits_and_the_band_at_that_horizon():
     card = _card()
-    # Five rows reach six closes on: 0 (+5%), 1 (+2.97%), 2 (+7.07%), 3 (+5.88%), 5 (+5.83%).
+    # Five rows reach six bars on: 0 (+5%), 1 (+2.97%), 2 (+7.07%), 3 (+5.88%), 5 (+5.83%).
     # The median is row 5's own move, so its flat call sits ON the band and misses.
     assert card.flat_bands[6] == pytest.approx(109 / 103 - 1)
     assert _row(card, 5).outcome(6).ai_hit is False

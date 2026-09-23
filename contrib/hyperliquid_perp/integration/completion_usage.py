@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -44,7 +43,7 @@ from langchain_core.outputs import LLMResult
 
 from tradingagents.llm_clients.completion_metadata import completion_metadata_of, is_truncated
 
-from ..common.digest import json_bytes
+from ..common.sidecar import write_sidecar
 from ..domains.perp.target_decision import TRUNCATED_OUTPUT
 
 if TYPE_CHECKING:
@@ -203,12 +202,11 @@ def report_usage(
     sidecar: the cycle's completion budget made measurable (issue #182; "8192
     is enough" was a guess nothing measured).
 
-    The sidecar sits beside the input payload but is NOT the payload: that
-    file's bytes are hashed into ``ai_inputs.input_payload_hash`` and verified
-    by the fingerprint backfill, so usage cannot be appended to it after the
-    fact. No row points at the sidecar; it is a durable measurement artifact,
-    not an audit-trail contract. Never raises — a measurement failure must not
-    cost the decision the engine already paid for.
+    The sidecar follows ``common.sidecar``'s contract (beside the payload, not
+    the payload, no row points at it, atomic, never raises); it is a durable
+    measurement artifact, not an audit-trail contract. The logging here never
+    raises either — a measurement failure must not cost the decision the
+    engine already paid for.
     """
     try:
         truncated = usage.truncated_calls()
@@ -233,10 +231,9 @@ def report_usage(
                 call.output_tokens,
                 cap,
             )
-        if payload_path is not None:
-            Path(payload_path).with_suffix(".usage.json").write_bytes(
-                json_bytes(usage.to_record(cap=cap))
-            )
+        write_sidecar(
+            payload_path, suffix=".usage.json", record=usage.to_record(cap=cap), what="completion usage"
+        )
     except Exception:  # noqa: BLE001 — measurement must never fail the cycle
         logger.exception("completion usage could not be reported; the decision is unaffected")
 

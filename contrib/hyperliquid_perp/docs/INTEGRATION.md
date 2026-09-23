@@ -35,7 +35,8 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 | `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——加即時 HL tool（不在 Phase 3 第一版範圍，見 phase3-spec §25）。 |
 | `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |
 | `final_state["final_trade_decision"]` | PM 的自由文字決策（注入 output-format 契約後結尾帶 structured target JSON）。**契約只在 free-text 路徑存活**：structured output 成功時輸出是 `render_pm_decision` 的固定欄位 markdown、天生不含 JSON，故 perp 端 `_build_engine_config` 預設 `structured_output: false` 強制 free-text。 | `parse_target_decision` 的輸入。 |
-| `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Phase 2 不再讀取（Phase 1 adapter 的價格水位輸入，已退役）。 |
+| `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Phase 2 不再**消費**（Phase 1 adapter 的價格水位輸入，已退役）；只由下一列的 sidecar 原樣記錄。 |
+| `final_state` 的九個報告 key：`market_report`、`sentiment_report`、`news_report`、`fundamentals_report`、`investment_debate_state`、`investment_plan`、`trader_investment_plan`、`risk_debate_state`、`final_trade_decision` | 引擎在得出決策途中各節點寫下的報告、辯論狀態與計畫（`agents/utils/agent_states.py::AgentState`）。 | `integration/decision_reports.write_decision_reports` 每個 cycle 原樣寫進 `<payload>.reports.json`（缺的 key 記 `null`），留給離線重放；**只記錄、不消費**——決策路徑仍只讀 `final_trade_decision`。key 名是對上游的依賴：上游改名時 sidecar 那一欄會變成 `null`，不會壞 cycle。 |
 | `PortfolioDecision` | `rating`（Buy/Overweight/Hold/Underweight/Sell）、`executive_summary`、`investment_thesis`、`price_target`、`time_horizon`。 | Phase 2 不再直接消費（Phase 1 `intent`/`rationale` 來源，已退役）；rationale 現由 target JSON 自帶。 |
 | `signal`（第二個回傳值） | `parse_rating(...)` → 5 tiers 之一。 | Phase 2 不再使用（Phase 1 便利用途，已退役）。 |
 
@@ -57,6 +58,9 @@ contrib main.py
    ├─ final_state, signal = graph.propagate("BTC", date, asset_type="crypto")
    │     └─ UNCHANGED engine: analysts → researchers → trader → PM
    │        → PortfolioDecision (rating + thesis)
+   │
+   ├─ write_decision_reports(final_state, payload_path)   (integration/decision_reports.py)
+   │     └─ <payload>.reports.json：九個報告 key 原樣落地，只記錄不消費；never raises
    │
    ├─ parsed = parse_target_decision(final_state["final_trade_decision"], cfg)
    │     └─ structured target JSON（DESIGN Part 2）；invalid → fail-closed maintain_current

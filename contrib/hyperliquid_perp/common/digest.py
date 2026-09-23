@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Any
 
 __all__ = ["json_bytes", "payload_digest"]
 
 
-def json_bytes(obj: Any) -> bytes:
+def json_bytes(obj: Any, *, default: Callable[[Any], Any] | None = None) -> bytes:
     """The one spelling of "indented JSON as UTF-8 bytes" the artifacts are written in.
 
-    The input payload (``cli._provider``), its ``.usage.json`` sidecar and the
-    tests that fabricate payload files all write this shape; ``payload_digest``
-    hashes exactly these bytes. One function so an ``indent``/``sort_keys``
-    change for digest stability cannot land on one writer and not the others.
+    The input payload (``cli._provider``), the sidecars beside it
+    (``common.sidecar``) and the tests that fabricate payload files all write
+    this shape; ``payload_digest`` hashes exactly these bytes. One function so
+    an ``indent``/``sort_keys`` change for digest stability cannot land on one
+    writer and not the others. ``default`` is :func:`json.dumps`'s: what to
+    store for a value JSON cannot carry; it is digest-neutral, since it is
+    never consulted for input that already serialises.
     """
-    return json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+    return json.dumps(obj, ensure_ascii=False, indent=2, default=default).encode("utf-8")
 
 
 def payload_digest(raw: bytes) -> str:

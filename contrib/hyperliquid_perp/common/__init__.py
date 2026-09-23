@@ -6,7 +6,9 @@ guard (:mod:`.seam_guard`; issue #169), the YAML-coercion seam, the
 pinned decimal context, the network vocabulary, the store's timestamp decoder,
 the on-disk layout beside a store (:mod:`.store_layout`; issue #221), the
 legacy-vs-subcommand argv split the two entry points make
-(:mod:`.entry_argv`; issue #221) and the atomic text write — plus the two
+(:mod:`.entry_argv`; issue #221), the atomic text/bytes write and the
+sidecar contract every artifact beside an input payload follows
+(:mod:`.sidecar`) — plus the two
 things the paper and live sides
 share without either owning them: the decision cadence
 (``constants.CYCLE_INTERVAL``) and the in-flight decision state machine

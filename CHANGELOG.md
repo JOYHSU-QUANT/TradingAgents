@@ -287,6 +287,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Each decision cycle now keeps the agents' reports beside the input
+  payload** (`contrib/hyperliquid_perp/integration/decision_reports.py`,
+  called from `cli/_provider.py::request_decision`). The engine's
+  `final_state` was read for one key, `final_trade_decision`, and the rest —
+  the market, sentiment, news and fundamentals reports, the researcher debate
+  and its verdict, the trader's plan, the risk debate — was dropped, so a
+  past decision could not be replayed: the input payload holds the perp
+  snapshot and the format text, not what the analysts saw that cycle. The
+  provider now writes `<payload>.reports.json` (nine fixed keys, `null` for
+  one the state lacks) next to the payload and its `.usage.json` sidecar,
+  before the parse, so a fail-closed cycle keeps the reports that led there.
+  Same rules as the usage sidecar: no row points at it, it is outside the
+  `input_payload_hash` contract, `validate`/`export`/the fingerprint backfill
+  never read it, a write failure is logged and the decision is unaffected.
+  The model is shown no different text, so `PROMPT_VERSION` and the prompt
+  regime's three keys are unchanged and a deploy carrying this alone is not
+  a segment point.
+
+  The second sidecar is where the shared writer appeared: those rules now
+  live once, in `common/sidecar.py` (`sidecar_path`, `write_sidecar`), and
+  both sidecars go through it. Two consequences for the existing
+  `.usage.json`: it is now written atomically (`common/atomic_io.py` gained
+  `atomic_write_bytes`; a restart mid-write can no longer leave a truncated
+  file at the final path), and its write-failure log line reads
+  `completion usage sidecar could not be written; the decision is
+  unaffected` (was `… could not be reported …`; the wrapper's own line keeps
+  that wording for a failure in the logging itself). `digest.json_bytes`
+  gained a pass-through `default=` so a value JSON cannot carry is stored as
+  its `str` at that leaf — digest-neutral, since it is never consulted for
+  input that already serialises.
+
 - **CFTC Commitments of Traders positioning as a crypto news-analyst tool, off
   by default** (`tradingagents/dataflows/cftc_cot.py`, routed tool
   `get_futures_positioning`, optional category `futures_positioning`, vendor

@@ -452,6 +452,10 @@ cap 的問題，不是那個 timeout。
 「8192 夠不夠」從此可量測——注意那個檔沒有任何列指向它，也**不在** `input_payload_hash`
 的契約內（payload 本體 bytes 被 hash 釘住，不能事後補寫）；`validate`、`export`、
 fingerprint backfill 都不讀它，刪掉或輪替 sidecar 不影響任何驗收判定，只會少掉那段量測。
+同一個目錄還有第二個 sidecar `<payload>.reports.json`：引擎在得出 `final_trade_decision`
+之前產出的分析師報告、辯論與 trader 計畫（九個固定 key，缺的是 `null`），留給之後的離線
+重放用。規則同 `.usage.json`——沒有列指向它、不在 hash 契約內、寫失敗只 log 不影響 cycle、
+模型看到的文字零改動（不 bump `PROMPT_VERSION`）。
 
 ## 6. 驗收（約 5 天後）
 

@@ -422,6 +422,7 @@ class _EngineDecisionProvider:
             log_unparsed_decision_truncation,
             report_usage,
         )
+        from ..integration.decision_reports import write_decision_reports
         from ..integration.trading_graph import build_graph
         from ..runtime.decision import RetryableDecisionError
 
@@ -472,6 +473,11 @@ class _EngineDecisionProvider:
                 "server_error",
                 f"engine.propagate returned an unexpected shape ({type(propagated).__name__}){note}",
             )
+        # What the agents wrote on the way to the decision, beside the input
+        # payload (the replay plan's PR 0): before the parse, so a cycle whose
+        # target JSON fails closed still keeps the reports that led there.
+        # Never raises; the model saw no different text.
+        write_decision_reports(propagated[0], payload_path=decision_input.input_payload_path)
         # The decision completion's own stop reason decides ONE verdict: a
         # missing target JSON under a bound cap is recorded as truncated_output,
         # not invalid_output (issue #182) — the operator audits the cap number,

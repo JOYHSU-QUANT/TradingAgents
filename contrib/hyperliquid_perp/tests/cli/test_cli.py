@@ -240,14 +240,24 @@ def _completion(node, *, finish_reason, output_tokens, model="m"):
     return (node, finish_reason, output_tokens, model)
 
 
-def _usage_provider(monkeypatch, *, decision_text, completions, cap=4096, raise_from_engine=None):
+def _usage_provider(
+    monkeypatch,
+    *,
+    decision_text=None,
+    completions=(),
+    cap=4096,
+    raise_from_engine=None,
+    final_state=None,
+):
     """A provider whose stubbed engine feeds ``completions`` into the collector.
 
     The stub reaches the collector the way the real engine does — through the
     ``callbacks`` kwarg ``build_graph`` receives — and drives it with the
     handler API (start with the node's ``langgraph_node`` metadata, end with an
     ``LLMResult``), so the test exercises the provider's reading of the
-    collector, not a hand-set attribute.
+    collector, not a hand-set attribute. The engine returns ``final_state``
+    whole when given one (the reports-sidecar tests), else a state holding
+    just ``decision_text``.
     """
     import uuid
 
@@ -273,6 +283,8 @@ def _usage_provider(monkeypatch, *, decision_text, completions, cap=4096, raise_
                 )
             if raise_from_engine is not None:
                 raise raise_from_engine
+            if final_state is not None:
+                return final_state, "signal"
             return {"final_trade_decision": decision_text}, "signal"
 
     monkeypatch.setattr(tg, "build_graph", lambda **kw: _FakeGraph(kw["callbacks"]))
@@ -570,6 +582,53 @@ def test_request_decision_writes_the_usage_sidecar_beside_the_payload(monkeypatc
     assert sorted(tmp_path.iterdir()) == before
 
 
+def test_request_decision_writes_the_reports_sidecar_beside_the_payload(monkeypatch, tmp_path):
+    # The replay plan's PR 0: the hook is wired in — what the agents wrote on
+    # the way to the decision lands next to the payload (the record's shape is
+    # pinned in tests/integration/test_decision_reports.py).
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        final_state={
+            "market_report": "market says up",
+            "final_trade_decision": f"```json\n{_DECISION_JSON}\n```",
+        },
+    )
+
+    parsed = provider.request_decision(
+        _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+    )
+
+    assert parsed.is_valid  # the decision itself is untouched by the recording
+    sidecar = tmp_path / "BTC-20260315T000000_000000Z.reports.json"
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["market_report"] == "market says up"
+    assert record["final_trade_decision"] == f"```json\n{_DECISION_JSON}\n```"
+    assert payload.read_bytes() == b"{}"  # the hash-locked payload is untouched
+
+
+def test_the_reports_sidecar_is_kept_for_a_cycle_that_fails_closed(monkeypatch, tmp_path):
+    # Written before the parse: a cycle whose target JSON is missing still
+    # keeps the reports that led there — that cycle is the one worth replaying.
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        final_state={"market_report": "market says up", "final_trade_decision": "no block here"},
+    )
+
+    parsed = provider.request_decision(
+        _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+    )
+
+    assert parsed.is_valid is False
+    record = json.loads(
+        (tmp_path / "BTC-20260315T000000_000000Z.reports.json").read_text(encoding="utf-8")
+    )
+    assert record["market_report"] == "market says up"
+
+
 def test_a_sidecar_write_failure_is_logged_and_does_not_cost_the_decision(
     monkeypatch, tmp_path, caplog
 ):
@@ -593,9 +652,15 @@ def test_a_sidecar_write_failure_is_logged_and_does_not_cost_the_decision(
         )
 
     assert parsed.is_valid is True
-    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert "completion usage could not be reported; the decision is unaffected" in error.getMessage()
-    assert error.exc_info is not None  # the traceback travels with it
+    # Both sidecars share the disk and the one writer: each failure is its own
+    # ERROR (usage first — written on the engine's exit — then the reports),
+    # and neither costs the decision.
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == [
+        "completion usage sidecar could not be written; the decision is unaffected",
+        "decision reports sidecar could not be written; the decision is unaffected",
+    ]
+    assert all(r.exc_info is not None for r in errors)  # the tracebacks travel with them
 
 
 def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):

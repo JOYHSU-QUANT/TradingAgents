@@ -24,8 +24,10 @@ Replay plan §3-7 fixes the definitions, and they are written here once:
   on a genuine ``maintain_current``; a fail-closed round has no call.
   ``long`` is a hit when the mark rose, ``short`` when it fell, and ``flat``
   — "it will not move" — when the absolute return stayed under the median
-  absolute return of the scored rows at that horizon (the train and
-  validation rows; the band does not move when the holdout is opened).
+  absolute return, at that horizon, of every train and validation question
+  with a later mark, answered or not (the band does not move when the
+  holdout is opened; a horizon no question reaches has no band, and a flat
+  call there is not judged).
 - Net P&L, as a fraction of equity: ``exposure × return − cost``, where
   exposure is ``±margin_pct / 100 × leverage`` and the cost is the run's own
   fill model (:class:`~contrib.autoresearch.costs.CostModel`, plan §3-6)
@@ -66,6 +68,7 @@ from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final, TypeVar
 
 from .upstream import (
@@ -130,7 +133,14 @@ class ScoreError(ValueError):
 
 
 def _number(value: object, what: str) -> float:
-    """A finite number — the research package's one numeric guard, in this module's error."""
+    """A finite number — the research package's one numeric guard, in this module's error.
+
+    A ``Decimal`` is taken as its float first: the gate's own results carry
+    ``Decimal`` margins and confidences, and the past-papers command (plan
+    PR 2) builds these records from them in-process.
+    """
+    if isinstance(value, Decimal):
+        value = float(value)
     try:
         return require_number(value, what)
     except SpecError as exc:
@@ -430,8 +440,13 @@ class _Series:
 
     @classmethod
     def of(cls, points: Mapping[int, float]) -> _Series:
+        """From ``{stamp: price}``; every price a finite positive number, every stamp an int."""
+        for stamp in points:
+            if isinstance(stamp, bool) or not isinstance(stamp, int):
+                raise ScoreError(f"a price stamp is epoch ms, got {stamp!r}")
         stamps = tuple(sorted(points))
-        return cls(stamps, tuple(points[s] for s in stamps))
+        prices = tuple(_amount(points[s], f"price at {s}", positive=True) for s in stamps)
+        return cls(stamps, prices)
 
     def nearest(self, target: int, *, tolerance: int) -> tuple[int, float] | None:
         """``(stamp, price)`` of the stamp nearest ``target`` within ``tolerance`` (inclusive)."""
@@ -458,12 +473,13 @@ def _side_of(exposure: float) -> TargetSide:
     return TargetSide.FLAT
 
 
-def _hit(side: TargetSide, ret: float, flat_band: float) -> bool:
+def _hit(side: TargetSide, ret: float, flat_band: float | None) -> bool | None:
+    """Whether a call was right; ``None`` for a flat call at a horizon with no band to judge it by."""
     if side is TargetSide.LONG:
         return ret > 0
     if side is TargetSide.SHORT:
         return ret < 0
-    return abs(ret) < flat_band
+    return None if flat_band is None else abs(ret) < flat_band
 
 
 def _pnl(exposure: float, ret: float, turnover: float, costs: CostModel) -> float:
@@ -548,7 +564,7 @@ class Scorecard:
     rows: tuple[Scored, ...]
     step_ms: int
     costs: CostModel
-    flat_bands: Mapping[int, float]
+    flat_bands: Mapping[int, float | None]  # None: no scored row reached that horizon
     split: Split | None
     holdout_read: bool
 
@@ -626,8 +642,8 @@ def score_run(
     # The band is a fact about the train and validation rows under the lock,
     # whether or not the holdout is being read: opening the holdout must not
     # move the bar every earlier flat call was judged against.
-    flat_bands = {
-        bars: statistics.median(moves) if moves else 0.0
+    flat_bands: dict[int, float | None] = {
+        bars: statistics.median(moves) if moves else None
         for bars in HORIZONS
         for moves in [
             [
@@ -736,6 +752,8 @@ class PnlStats:
 
     def __str__(self) -> str:
         caveat = " (overlapping, ranking only)" if self.overlapping else ""
+        if self.n < 2:
+            caveat = " (n<2)" + caveat
         return (
             f"total {self.total:+.2%}, mean {self.mean:+.3%}/decision, "
             f"sharpe {self.sharpe:.2f}{caveat}"
@@ -766,7 +784,7 @@ class Baseline:
 class HorizonSummary:
     bars: int
     label: str
-    flat_band: float
+    flat_band: float | None
     marks_from_research: int
     executed: HitStats
     ai: HitStats
@@ -790,6 +808,7 @@ class Summary:
     set_target: int
     maintain_current: int
     segments: Mapping[str, int]
+    regimes: Mapping[str, int]
     reports_present: int | None
     horizons: tuple[HorizonSummary, ...]
 
@@ -800,9 +819,13 @@ class Summary:
     def describe(self, card: Scorecard) -> list[str]:
         """The report, one fact per line."""
         reasons = ", ".join(f"{k} {v}" for k, v in sorted(self.fail_closed_by_reason.items()))
+        regimes = ", ".join(f"{regime} {n}" for regime, n in self.regimes.items())
         lines = [
             f"decisions: {self.questions} questions, {self.answered} answered, "
             f"{self.unanswered} unanswered",
+            # One run-id can span more than one prompt segment (RUNBOOK §4);
+            # a card pooled over two regimes has to say so.
+            f"regimes (prompt_version/model/context_shape): {regimes}",
             f"fail-closed: {_rate(self.fail_closed, self.answered)}"
             + (f" ({reasons})" if reasons else ""),
             f"asked a target: {self.set_target} (set_target, or rejected), clamped "
@@ -819,7 +842,7 @@ class Summary:
             lines.extend(card.split.describe())
             counted = ", ".join(f"{name} {n}" for name, n in self.segments.items())
             lines.append(
-                f"segments scored: {counted}"
+                f"segments (questions): {counted}"
                 + (" -- HOLDOUT READ" if card.holdout_read else " (holdout not read)")
             )
         if self.reports_present is not None:
@@ -829,8 +852,9 @@ class Summary:
             )
         for horizon in self.horizons:
             lines.append(f"-- {horizon.label} ahead ({horizon.bars} bar(s)) --")
+            band = "n/a" if horizon.flat_band is None else f"+/-{horizon.flat_band:.3%}"
             lines.append(
-                f"  flat band +/-{horizon.flat_band:.3%}; later marks from the research store: "
+                f"  flat band {band}; answered rows marked from the research store: "
                 f"{horizon.marks_from_research}"
             )
             lines.append(f"  executed hit {horizon.executed}; model hit {horizon.ai}")
@@ -889,7 +913,7 @@ def _baseline(
     later mark moves the position too, and the turnover it paid is carried
     to the next row that is scored rather than dropped.
     """
-    hits: list[bool] = []
+    hits: list[bool | None] = []
     pnls: list[float] = []
     held = owed = 0.0
     for row in rows:
@@ -949,6 +973,13 @@ def _summarise(card: Scorecard) -> Summary:
         answer.risk_reason or "?" for _, answer in answered if answer.fail_closed
     )
     segments = Counter(row.segment.value for row in rows if row.segment is not None)
+    regimes = Counter(
+        "/".join(
+            "?" if value is None else value
+            for value in (q.prompt_version, q.model, q.context_shape)
+        )
+        for q in (row.question for row in rows)
+    )
     checked = [row.question.reports_present for row in rows]
     reports = None if all(flag is None for flag in checked) else sum(bool(flag) for flag in checked)
 
@@ -960,7 +991,7 @@ def _summarise(card: Scorecard) -> Summary:
                 bars=bars,
                 label=card.horizon_label(bars),
                 flat_band=card.flat_bands[bars],
-                marks_from_research=sum(1 for row in rows if row.outcomes[bars].source == "research"),
+                marks_from_research=sum(1 for _, _, o in outcomes if o.source == "research"),
                 executed=_hit_stats(o.executed_hit for _, _, o in outcomes),
                 ai=_hit_stats(o.ai_hit for _, _, o in outcomes),
                 executed_by_mode={
@@ -991,6 +1022,7 @@ def _summarise(card: Scorecard) -> Summary:
         set_target=modes[DecisionMode.SET_TARGET.value],
         maintain_current=modes[DecisionMode.MAINTAIN_CURRENT.value],
         segments=dict(segments),
+        regimes=dict(regimes),
         reports_present=reports,
         horizons=tuple(horizons),
     )

@@ -317,6 +317,9 @@ Breaking changes within the 0.x line are called out explicitly.
   backtest. Beside the hit rates: fail-closed (`invalid_output` /
   `truncated_output`), clamp, rejection and flip rates, how many cycles
   were retried and how many were still in progress or never built a prompt,
+  a `regimes` line counting the `prompt_version/model/context_shape`
+  triples pooled (one run-id can span two prompt segments), a first line
+  naming any genesis block the costs or interval had to be defaulted for,
   a ten-bucket confidence calibration over the rows on which the model
   asked a target (a `set_target`, or a rejected one — the bucket the clamp
   and rejection rates are over), and three baselines over the same answered rows (always long at the

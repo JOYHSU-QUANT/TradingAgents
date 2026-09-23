@@ -102,9 +102,12 @@ class RunFacts:
     ``fill_model.style``. Its ``leverage`` is left at 1 on purpose — the
     scorecard scales each row's exposure by that row's own configured
     leverage, which the store records per decision. ``config_recorded`` is
-    false for a genesis row with no ``config_json`` at all, in which case
-    the costs and the interval are the config parser's defaults and the
-    coin is read off the run's first input row; the report says so.
+    false for a genesis row with no ``config_json`` at all; ``missing_blocks``
+    names the blocks a recorded genesis lacks (``market_data``,
+    ``paper_trading``, ``coin`` — older genesis rows predate some of them,
+    ``cli/_drift.py`` says which). A missing block means its terms are the
+    parser's defaults, and the coin is read off the run's first input row;
+    the report says so either way.
     """
 
     run_id: str
@@ -114,6 +117,18 @@ class RunFacts:
     step_ms: int
     costs: CostModel
     config_recorded: bool
+    missing_blocks: tuple[str, ...]
+
+    def describe_source(self) -> str:
+        """Where the costs and the interval came from, for the report's first line."""
+        if not self.config_recorded:
+            return "defaults, no config_json"
+        if self.missing_blocks:
+            return (
+                "the run's recorded config, except "
+                f"{', '.join(self.missing_blocks)} (absent from the genesis: defaults used)"
+            )
+        return "the run's recorded config"
 
 
 def _config(run_id: str, text: object) -> dict:
@@ -152,6 +167,10 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
             "SELECT symbol FROM ai_inputs WHERE run_id = ? ORDER BY timestamp LIMIT 1", (run_id,)
         ).fetchone()
         coin = "?" if first is None else str(first["symbol"])
+    recorded = row["config_json"] is not None
+    missing = tuple(
+        block for block in ("market_data", "paper_trading", "coin") if recorded and block not in config
+    )
     return RunFacts(
         run_id=run_id,
         mode=str(row["mode"]),
@@ -159,7 +178,8 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
         interval=market_data.candle_interval,
         step_ms=interval_to_ms(market_data.candle_interval),
         costs=costs,
-        config_recorded=row["config_json"] is not None,
+        config_recorded=recorded,
+        missing_blocks=missing,
     )
 
 

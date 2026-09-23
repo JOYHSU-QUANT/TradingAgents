@@ -284,7 +284,7 @@ def test_a_zero_move_hits_nothing_but_flat_and_the_flat_band_is_strict():
         _question(input_id="c", at_ms=at_ms(2), mark=101.0, current_side="flat", current_margin_pct=0.0),
         _question(input_id="d", at_ms=at_ms(3), mark=103.0, current_side="flat", current_margin_pct=0.0),
     ]
-    # Next-close moves: 0, +1%, +1.98% -> band = median = 1%.
+    # One-bar moves: 0, +1%, +1.98% -> band = median = 1%.
     answers = [
         _answer(input_id="a", target_side="long"),
         _answer(input_id="b", target_side="flat", requested_margin_pct=0.0, approved_margin_pct=0.0),
@@ -296,6 +296,24 @@ def test_a_zero_move_hits_nothing_but_flat_and_the_flat_band_is_strict():
     assert by_id["a"].ai_hit is False  # a zero move is not a rise
     assert by_id["b"].ai_hit is False  # a move exactly on the band is not under it
     assert by_id["c"].ai_hit is False
+    # ... nor is a zero move a fall.
+    short_on_flat = score_run(
+        questions[:2], [_answer(input_id="a", target_side="short")], step_ms=STEP_MS, costs=TAKER
+    )
+    assert short_on_flat.rows[0].outcome(1).ai_hit is False
+
+
+def test_a_horizon_no_question_reaches_has_no_band_and_judges_no_flat_call():
+    questions = [
+        _question(input_id="a", at_ms=at_ms(0), current_side="flat", current_margin_pct=0.0),
+        _question(input_id="b", at_ms=at_ms(1), mark=101.0, current_side="flat", current_margin_pct=0.0),
+    ]
+    flat = _answer(input_id="a", target_side="flat", requested_margin_pct=0.0, approved_margin_pct=0.0)
+    card = score_run(questions, [flat], step_ms=STEP_MS, costs=TAKER)
+    assert card.flat_bands[6] is None
+    assert card.rows[0].outcome(6).ai_hit is None  # no later mark at 24h either
+    lines = card.summary().describe(card)
+    assert "  flat band n/a; answered rows marked from the research store: 0" in lines
 
 
 def test_the_top_confidence_bucket_is_closed_at_one():
@@ -534,13 +552,14 @@ def test_describe_prints_one_fact_per_line():
     card = _card()
     lines = card.summary().describe(card)
     assert lines[0] == "decisions: 11 questions, 10 answered, 1 unanswered"
-    assert lines[1] == "fail-closed: 2/10 (20.0%) (invalid_output 1, truncated_output 1)"
-    assert lines[2] == (
+    assert lines[1] == "regimes (prompt_version/model/context_shape): phase2-target-v6/test-model/perp 11"
+    assert lines[2] == "fail-closed: 2/10 (20.0%) (invalid_output 1, truncated_output 1)"
+    assert lines[3] == (
         "asked a target: 6 (set_target, or rejected), clamped 1/6 (16.7%), "
         "rejected 1/6 (16.7%); maintained: 2"
     )
-    assert lines[3] == "flips: 2/10 (20.0%)"
-    assert lines[4] == (
+    assert lines[4] == "flips: 2/10 (20.0%)"
+    assert lines[5] == (
         "costs: taker fills at 0.00045 fee + 5 bps slippage; exposure = margin x configured leverage"
     )
     assert "  executed hit 50.0% (5/10); model hit 37.5% (3/8)" in lines
@@ -613,7 +632,7 @@ def test_the_holdout_is_neither_scored_nor_read_unless_asked():
     assert dict(opened.summary().segments) == {"train": 6, "validation": 3, "holdout": 2}
     assert _row(opened, 9).outcome(1).ret == pytest.approx(NEXT_RETURN[9])
     assert _row(opened, 10).segment is SegmentName.HOLDOUT
-    assert "segments scored: train 6, validation 3, holdout 2 -- HOLDOUT READ" in (
+    assert "segments (questions): train 6, validation 3, holdout 2 -- HOLDOUT READ" in (
         opened.summary().describe(opened)
     )
 
@@ -789,3 +808,41 @@ def test_csv_table_has_one_row_per_question_with_the_horizons_by_label():
     assert by_id[input_id(11)]["decision_mode"] is None
     assert by_id[input_id(7)]["no_order_reason"] == "within_deadband"
     assert by_id[input_id(0)]["at"].endswith("+00:00")
+    # One whole row, so the header and the values cannot drift apart: slot 2
+    # (clamped 40 -> 20, long -> short) has every pair of sibling columns distinct.
+    row2 = by_id[input_id(2)]
+    assert {k: row2[k] for k in header[:29]} == {
+        "input_id": input_id(2),
+        "attempt_id": row2["attempt_id"],
+        "at": row2["at"],
+        "segment": None,
+        "prompt_version": "phase2-target-v6",
+        "model": "test-model",
+        "context_shape": "perp",
+        "research_bias": "short",
+        "research_strategy_id": "btc-4h-maker#9",
+        "reports_present": None,
+        "mark": 99.0,
+        "account_equity": 1000.0,
+        "current_side": "long",
+        "current_margin_pct": 30.0,
+        "leverage": 1.0,
+        "decision_mode": "set_target",
+        "target_side": "short",
+        "requested_margin_pct": 40.0,
+        "approved_margin_pct": 20.0,
+        "risk_action": "clamped",
+        "risk_reason": "exceeds_max_target_margin_pct",
+        "confidence": 0.7,
+        "order_created": True,
+        "no_order_reason": None,
+        "ai_side": "short",
+        "executed_side": "short",
+        "ai_exposure": -0.4,
+        "executed_exposure": -0.2,
+        "flip": True,
+    }
+    assert (row2["later_mark_4h"], row2["later_mark_source_4h"]) == (102.0, "store")
+    assert row2["ai_pnl_4h"] == pytest.approx(-0.4 * NEXT_RETURN[2] - 0.7 * TAKER_COST)
+    assert row2["executed_pnl_4h"] == pytest.approx(-0.2 * NEXT_RETURN[2] - 0.5 * TAKER_COST)
+    assert (row2["ai_hit_24h"], row2["executed_hit_24h"]) == (False, False)

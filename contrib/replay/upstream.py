@@ -31,16 +31,16 @@ What is borrowed and why:
   decoded by the same integer arithmetic that encoded it;
 - the on-disk layout (``payload_dir``, ``sidecar_path``), to count how many
   questions already carry a ``.reports.json`` beside their payload;
-- from the research package: the split and its holdout lock (plan §3-9),
-  the cost model (plan §3-6), the research store that fills a missing
-  cycle's later mark (plan §2-5), its numeric guards (one finiteness rule
-  for every number a record carries), and the day in milliseconds the
-  annualisation is built from.
+- from the research package: the split and its holdout lock (plan §3-9)
+  with the intervals it can be cut on, the cost model (plan §3-6), the
+  research store that fills a missing cycle's later mark (plan §2-5), its
+  numeric guards (one finiteness rule for every number a record carries),
+  and the day in milliseconds the annualisation is built from.
 """
 
 from __future__ import annotations
 
-from contrib.autoresearch.constants import MS_PER_DAY
+from contrib.autoresearch.constants import MS_PER_DAY, STUDIED_INTERVALS
 from contrib.autoresearch.costs import CostModel, FillRole, require_amount
 from contrib.autoresearch.split import SegmentName, Split, SplitError
 from contrib.autoresearch.store import ResearchStore, StoreError
@@ -59,6 +59,7 @@ from contrib.hyperliquid_perp.persistence.repository import TERMINAL_ATTEMPT_STA
 __all__ = [
     "BORROWED",
     "MS_PER_DAY",
+    "STUDIED_INTERVALS",
     "TERMINAL_ATTEMPT_STATUSES",
     "UPSTREAM_PACKAGES",
     "CostModel",
@@ -97,6 +98,7 @@ UPSTREAM_PACKAGES: tuple[str, ...] = ("contrib.hyperliquid_perp", "contrib.autor
 # the imports above and to ``__all__``.
 BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.constants", "MS_PER_DAY"),
+    ("contrib.autoresearch.constants", "STUDIED_INTERVALS"),
     ("contrib.autoresearch.costs", "CostModel"),
     ("contrib.autoresearch.costs", "FillRole"),
     ("contrib.autoresearch.costs", "require_amount"),

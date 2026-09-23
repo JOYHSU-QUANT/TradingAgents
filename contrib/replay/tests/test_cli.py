@@ -39,14 +39,14 @@ def test_score_prints_the_scorecard_over_train_and_validation(store, capsys):
     assert main(_score(store)) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0] == (
-        f"scorecard: run {RUN_ID} (BTC, 4h cycle; costs from the run's recorded config)"
+        f"scorecard: run {RUN_ID} (BTC, 4h cycle; costs and interval from the run's recorded config)"
     )
     assert "decisions: 9 questions, 9 answered, 0 unanswered" in out
-    assert "segments scored: train 6, validation 3 (holdout not read)" in out
+    assert "segments (questions): train 6, validation 3 (holdout not read)" in out
     # Without the research store the missing slot's later mark is unavailable:
-    # row 3 drops out of the next-close count.
+    # row 3 drops out of the one-bar count.
     assert "  executed hit 57.1% (4/7); model hit 33.3% (2/6)" in out
-    assert "  flat band +/-1.923%; later marks from the research store: 0" in out
+    assert "  flat band +/-1.923%; answered rows marked from the research store: 0" in out
 
 
 def test_the_research_store_fills_the_missing_cycle(store, tmp_path, capsys):
@@ -54,7 +54,7 @@ def test_the_research_store_fills_the_missing_cycle(store, tmp_path, capsys):
     assert main(_score(store, "--research-db", str(research))) == 0
     out = capsys.readouterr().out.splitlines()
     assert "  executed hit 50.0% (4/8); model hit 33.3% (2/6)" in out
-    assert any(line.endswith("later marks from the research store: 1") for line in out)
+    assert any(line.endswith("answered rows marked from the research store: 1") for line in out)
 
 
 def test_out_writes_one_csv_row_per_decision_and_the_summary(store, tmp_path, capsys):
@@ -75,7 +75,7 @@ def test_holdout_scores_every_row_and_says_so(store, capsys):
     assert main(_score(store, "--holdout")) == 0
     out = capsys.readouterr().out.splitlines()
     assert "decisions: 11 questions, 10 answered, 1 unanswered" in out
-    assert "segments scored: train 6, validation 3, holdout 2 -- HOLDOUT READ" in out
+    assert "segments (questions): train 6, validation 3, holdout 2 -- HOLDOUT READ" in out
 
 
 def test_reports_are_counted_beside_the_store_by_default_or_under_payload_root(
@@ -141,6 +141,37 @@ def test_a_run_too_short_to_split_is_refused_with_the_reason(tmp_path, capsys):
     assert "at least four 4h bars" in err
 
 
+def test_a_run_on_an_interval_the_split_cannot_cut_is_refused_by_name(tmp_path, capsys):
+    hourly = write_paper_store(
+        tmp_path / "hourly.db", payload_root=tmp_path / "p", config=run_config(interval="1h")
+    )
+    assert main(_score(hourly)) == 1
+    err = capsys.readouterr().err
+    assert "was traded on 1h candles; the scorecard scores runs on 4h / 1d candles" in err
+    assert "too short" not in err
+
+
+def test_the_header_names_the_genesis_blocks_that_are_missing(tmp_path, capsys):
+    partial = write_paper_store(
+        tmp_path / "partial.db",
+        payload_root=tmp_path / "p",
+        config={"coin": "BTC", "paper_trading": run_config()["paper_trading"]},
+    )
+    assert main(_score(partial)) == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first.endswith(
+        "costs and interval from the run's recorded config, except market_data "
+        "(absent from the genesis: defaults used))"
+    )
+
+
+def test_the_regimes_line_counts_each_prompt_model_shape_triple(store, capsys):
+    assert main(_score(store)) == 0
+    assert "regimes (prompt_version/model/context_shape): phase2-target-v6/test-model/perp 9" in (
+        capsys.readouterr().out.splitlines()
+    )
+
+
 def test_a_run_with_no_rows_is_refused(tmp_path, capsys):
     empty = write_paper_store(
         tmp_path / "empty.db", payload_root=tmp_path / "p", config=run_config(), rows=()
@@ -167,8 +198,9 @@ def test_a_research_store_without_the_series_is_a_warning_not_a_silence(store, t
         pass
     assert main(_score(store, "--research-db", str(tmp_path / "empty.sqlite"))) == 0
     captured = capsys.readouterr()
-    assert "warning: --research-db" in captured.err and "holds no BTC 4h candles" in captured.err
-    assert "later marks from the research store: 0" in captured.out
+    assert "warning: --research-db" in captured.err
+    assert "holds no BTC 4h candles opening between 2027-01-15 04:00 and 2027-01-16 19:59" in captured.err
+    assert "answered rows marked from the research store: 0" in captured.out
 
 
 def test_no_command_is_a_usage_error():

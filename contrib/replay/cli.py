@@ -33,11 +33,13 @@ from pathlib import Path
 from .paper_store import load_decisions, load_research_closes, run_facts
 from .score import ScoreError, build_split, csv_table, score_run
 from .upstream import (
+    STUDIED_INTERVALS,
     Database,
     ResearchStore,
     SchemaVersionError,
     SplitError,
     StoreError,
+    from_epoch_ms,
     payload_dir,
 )
 
@@ -143,6 +145,13 @@ def _cmd_score(args: argparse.Namespace) -> int:
     questions, answers = decisions.questions, decisions.answers
     if not questions:
         return _fail(f"run {args.run_id!r} has no decision attempt with an input row to score")
+    if facts.interval not in STUDIED_INTERVALS:
+        # Said before the split is cut: the split would refuse the interval
+        # too, but in a sentence about the run being too short.
+        return _fail(
+            f"run {args.run_id!r} was traded on {facts.interval} candles; the scorecard scores "
+            f"runs on {' / '.join(STUDIED_INTERVALS)} candles (the research split's intervals)"
+        )
     try:
         split = build_split(questions, interval=facts.interval, step_ms=facts.step_ms)
     except SplitError as exc:
@@ -154,23 +163,27 @@ def _cmd_score(args: argparse.Namespace) -> int:
     if research_path is not None:
         try:
             with ResearchStore(research_path) as store:
-                # Only the bars the split can ever pair: the lock at the I/O
-                # seam. The first question is decided at or after the train
-                # start, so no bar opening before it is within a half-bar
-                # tolerance of any later mark it wants.
+                # Only the bars this run can pair: the lock at the I/O seam,
+                # so a locked run never reads a holdout bar off disk. The
+                # first question is decided at or after the train start, so
+                # no bar opening before it is within a half-bar tolerance of
+                # any later mark it wants.
+                window = (split.train.start_ms, split.loadable_until(holdout=args.holdout))
                 research = load_research_closes(
                     store,
                     coin=facts.coin,
                     interval=facts.interval,
-                    since_ms=split.train.start_ms,
-                    until_ms=split.loadable_until(holdout=True),
+                    since_ms=window[0],
+                    until_ms=window[1],
                 )
         except StoreError as exc:
             return _fail(str(exc))
         if not research:
             print(
                 f"warning: --research-db {args.research_db} holds no {facts.coin} "
-                f"{facts.interval} candles; no missing cycle can be filled from it",
+                f"{facts.interval} candles opening between {from_epoch_ms(window[0]):%Y-%m-%d %H:%M} "
+                f"and {from_epoch_ms(window[1]):%Y-%m-%d %H:%M}; no missing cycle can be filled "
+                "from it",
                 file=sys.stderr,
             )
     card = score_run(
@@ -182,9 +195,9 @@ def _cmd_score(args: argparse.Namespace) -> int:
         split=split,
         holdout=args.holdout,
     )
-    source = "the run's recorded config" if facts.config_recorded else "defaults, no config_json"
     lines = [
-        f"scorecard: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; costs from {source})",
+        f"scorecard: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; costs and "
+        f"interval from {facts.describe_source()})",
         *decisions.describe(),
         *card.summary().describe(card),
     ]
@@ -192,15 +205,18 @@ def _cmd_score(args: argparse.Namespace) -> int:
         print(line)
     if args.out is not None:
         out = Path(args.out)
-        out.mkdir(parents=True, exist_ok=True)
-        header, rows = csv_table(card)
         decisions_csv = out / f"{facts.run_id}-decisions.csv"
-        with decisions_csv.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(header)
-            writer.writerows(rows)
         summary = out / f"{facts.run_id}-summary.txt"
-        summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        header, rows = csv_table(card)
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            with decisions_csv.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(header)
+                writer.writerows(rows)
+            summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            return _fail(f"could not write under --out {args.out!r}: {exc}")
         for path in (decisions_csv, summary):
             print(f"wrote {path}", file=sys.stderr)
     return 0

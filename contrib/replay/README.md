@@ -42,7 +42,7 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 
 - **兩個時距**：一根之後（4h）與六根之後（24h）。事後 mark＝**決策時刻** `+k×4h` 這個目標時點
   前後半根（±2h）內最近那一題的 `ai_inputs.mark_price`——按決策時刻（`ai_inputs.timestamp`）
-  配對、不按列序，因為 cycle 會缺（`api_failed`、重啟）；也**不按 `candle_end`**，因為 paper
+  配對、不按列序，因為 cycle 會缺（在寫出 input 之前就 `api_failed`、停機）；也**不按 `candle_end`**，因為 paper
   排程是滾動的（下一次＝上次決策＋4h，不對齊整點）、mark 是決策當下的即時價，用已收盤 K 線的
   時戳配對會把跨過整點的 cycle 讀成缺口、把幾分鐘後的收盤價當成「4h 後」（run 3 實測；
   2026-09-23 拍板）。半根內沒有題的目標時點改讀研究 store 最近的 candle close（`--research-db`），
@@ -53,7 +53,8 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
   （gate 把被拒記成 `maintain_current` 但保留被拒的方向與 margin，讀取器看的是保留下來的方向、不是
   `decision_mode`）；真正的 `maintain_current` 看當時倉位方向；fail-closed 那一輪沒有主張。
   `long` 命中＝mark 上漲，`short`＝下跌，`flat`（「不會動」）＝|報酬| **嚴格小於**該時距
-  有計分的列（train＋validation）的中位絕對報酬；`--holdout` 打開時這個門檻不動。
+  有事後 mark 的 train＋validation 題（含沒答案的）的中位絕對報酬；`--holdout` 打開時這個門檻
+  不動；某個時距一題都搆不到時門檻是 n/a、flat 的主張在那個時距不判對錯。
 - **淨損益**（權益的分數）：`exposure × 報酬 − 成本`，exposure＝`±margin_pct/100 × configured_leverage`，
   成本＝該 run 自己的 fill model（`runs.config_json` 裡 `paper_trading.execution`：taker 費率、
   `fill_model.style`、maker 費率、slippage）乘上「從決策當下的倉位換到目標倉位」的周轉量。
@@ -87,8 +88,11 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 
 ### 輸出
 
-stdout 印摘要（一行一個事實）。`--out DIR` 另寫 `<run-id>-decisions.csv`（一列一決策，
-時距欄位以 `_4h`／`_24h` 結尾）與 `<run-id>-summary.txt`。有 `--payload-root`（或 store 旁邊
+stdout 印摘要（一行一個事實）。第一行說成本與 interval 來自 run 的 genesis 還是預設值（genesis
+缺哪個區塊會點名）；`regimes` 那一行按 `prompt_version/model/context_shape` 計數，一個 run-id 橫跨
+兩個 prompt 段（RUNBOOK §4）時看得出來。`--out DIR` 另寫 `<run-id>-decisions.csv`（一列一決策，
+時距欄位以 `_4h`／`_24h` 結尾）與 `<run-id>-summary.txt`。只支援 4h／1d 的 run（研究 split 的
+兩種 interval），其他 interval 具名拒絕。有 `--payload-root`（或 store 旁邊
 就有 daemon 的 `payloads/<run-id>/`）時，摘要多一行「幾題已有 `.reports.json`」——那是 PR 3
 題庫完整度的計數。
 

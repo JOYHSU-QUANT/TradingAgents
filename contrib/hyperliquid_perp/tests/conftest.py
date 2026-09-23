@@ -258,6 +258,24 @@ def clearinghouse_state():
     return _load("clearinghouse_state.json")
 
 
+def record_constructor_kwargs(monkeypatch, module, name: str, sink: list) -> None:
+    """Patch ``module.name`` with a subclass that records each constructor's kwargs.
+
+    Records AFTER the real constructor accepts them, for the reason
+    ``record_reconciliation_sweep_wiring``'s ``_RecordingSwitch`` argues: a
+    call site that drifts from the signature must die here, not bank its
+    evidence first.
+    """
+    real = getattr(module, name)
+
+    class _Recording(real):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            sink.append(kwargs)
+
+    monkeypatch.setattr(module, name, _Recording)
+
+
 def record_reconciliation_sweep_wiring(monkeypatch):
     """Record what a recovery site builds its §18.2 sweep components with.
 
@@ -290,7 +308,7 @@ def record_reconciliation_sweep_wiring(monkeypatch):
             # first made every pin blind to the failure mode they exist for: a
             # call site that drifts from the signature (an extra or renamed
             # kwarg) dies on EVERY start-up, but the recorder had already banked
-            # its evidence — the instance here, the kwargs in ``_record_kwargs``
+            # its evidence — the instance here, the kwargs in ``record_constructor_kwargs``
             # — so the drive's own suppression swallowed the TypeError and the
             # assertions still passed (2026-08-19 mutation probe).
             super().__init__(**kwargs)
@@ -309,22 +327,12 @@ def record_reconciliation_sweep_wiring(monkeypatch):
         # argues at length. (The helper never raises, so nothing is lost.)
         record.refreshes.append((switch, what))
 
-    def _record_kwargs(module, name, sink):
-        real = getattr(module, name)
-
-        class _Recording(real):  # type: ignore[misc, valid-type]
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)  # order matters — see _RecordingSwitch
-                sink.append(kwargs)
-
-        monkeypatch.setattr(module, name, _Recording)
-
     # cli.py imports all of these inside the command functions, so the seam is
     # the SOURCE module — the closures the CLI builds pick the patched ones up.
     monkeypatch.setattr(ks_mod, "KillSwitchManager", _RecordingSwitch)
     monkeypatch.setattr(ks_mod, "refresh_across_blocking_work", _recording_refresh)
-    _record_kwargs(fb_mod, "FillBackfiller", record.backfillers)
-    _record_kwargs(rec_mod, "LiveReconciler", record.reconcilers)
+    record_constructor_kwargs(monkeypatch, fb_mod, "FillBackfiller", record.backfillers)
+    record_constructor_kwargs(monkeypatch, rec_mod, "LiveReconciler", record.reconcilers)
     return record
 
 

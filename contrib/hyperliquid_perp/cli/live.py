@@ -34,6 +34,28 @@ from .live_shared import (
 logger = logging.getLogger(__name__)
 
 
+def _gate_refusal_wording(refusal) -> str:
+    """This command's operator wording for each rung of ``load_live_gates`` it can hit.
+
+    ``live`` passes no ``modes`` (every live mode is its business), so the
+    ``MODE_NOT_ACCEPTED`` rung never fires here and has no wording.
+    """
+    from ..live.config import LiveGateStage as Stage
+
+    wording = {
+        Stage.NO_LIVE_BLOCK: (
+            "config has no live: block — the live subcommand needs one "
+            "(phase3-spec §4). Add it to the YAML and re-run."
+        ),
+        Stage.INVALID_LIVE: "invalid live: config — {detail}. Fix the YAML and re-run.",
+        Stage.PAPER_MODE: (
+            "live.mode is 'paper' — use the paper subcommand for paper "
+            "runs; the live subcommand needs testnet_live or mainnet_tiny."
+        ),
+    }
+    return wording[refusal.stage].format(detail=refusal.detail)
+
+
 def _cmd_live(argv: list[str]) -> int:
     """Load the ``live:`` gates, verify agent authorization, print caps, exit.
 
@@ -126,12 +148,10 @@ def _cmd_live(argv: list[str]) -> int:
     )
 
     from ..config import wallet_address
-    from ..domains.perp.risk_gate import RiskConfig
     from ..engine_bridge import load_config_or_exit
     from ..exchanges.hyperliquid.account import HyperliquidAccount
     from ..exchanges.hyperliquid.errors import ExchangeError
     from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from ..live.authorization import (
         EXPIRY_WARNING_HORIZON,
         AgentAuthorizationError,
@@ -139,58 +159,24 @@ def _cmd_live(argv: list[str]) -> int:
     )
     from ..live.config import (
         EXCHANGE_MIN_ORDER_NOTIONAL_USDC,
-        ExecutionMode,
-        LiveConfig,
+        LiveGateRefusal,
         compute_notional_caps,
-        validate_live_risk_consistency,
+        load_live_gates,
     )
     from ..live.secrets import load_agent_key
+    from ..live.wiring import build_signed_client
 
     config = load_config_or_exit(args.config)
     if config is None:
         return 1
-    raw_live = config.get("live")
-    if raw_live is None:
-        print(
-            "error: config has no live: block — the live subcommand needs one "
-            "(phase3-spec §4). Add it to the YAML and re-run.",
-            file=sys.stderr,
-        )
-        return 1
+    # The config ladder both live-mode commands climb (``live.config``); each
+    # refusal's wording is this command's own.
     try:
-        live_cfg = LiveConfig.from_dict(raw_live)
-    except ValueError as exc:
-        print(f"error: invalid live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        gates = load_live_gates(config)
+    except LiveGateRefusal as refusal:
+        print(f"error: {_gate_refusal_wording(refusal)}", file=sys.stderr)
         return 1
-    if live_cfg.mode is ExecutionMode.PAPER:
-        print(
-            "error: live.mode is 'paper' — use the paper subcommand for paper "
-            "runs; the live subcommand needs testnet_live or mainnet_tiny.",
-            file=sys.stderr,
-        )
-        return 1
-    # The AI gate (risk:) and the live hard caps (live.safety:) must agree on
-    # the sizing regime — PR 5's loop wires them together, so a divergent
-    # pair is a config mistake at load time, not a runtime surprise. The block
-    # and its cross-checked fields must be operator-written (§24 — see
-    # validate_live_risk_consistency for the vacuous-pass rationale).
-    raw_risk = config.get("risk")
-    if raw_risk is None:
-        print(
-            "error: config has no risk: block — the live subcommand refuses to "
-            "run the AI gate on implicit defaults; write the block explicitly "
-            "so the risk:/live.safety cross-check compares operator intent.",
-            file=sys.stderr,
-        )
-        return 1
-    try:
-        risk_cfg = RiskConfig.from_dict(raw_risk)
-        validate_live_risk_consistency(live_cfg, risk_cfg, raw_risk)
-    except ValueError as exc:
-        print(
-            f"error: invalid risk:/live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr
-        )
-        return 1
+    raw_live, live_cfg = gates.raw_live, gates.live_cfg
 
     # PR 5 (decided 2026-07-22): --loop consumes the risk:/decision: grid the
     # same way the paper engine does — validate those blocks HERE, where a typo
@@ -312,14 +298,12 @@ def _cmd_live(argv: list[str]) -> int:
         # fail-closed: no runtime condition is proven in this config-only
         # command, so the client could not place an order even if asked.
         try:
-            from ..live.order_gate import RealOrderGate
-
-            signed = HyperliquidSignedClient(
-                live_cfg.network,
-                agent_key,
+            _gate, signed = build_signed_client(
+                live_cfg,
+                agent_key=agent_key,
                 wallet_address=addr,
-                gate=RealOrderGate.from_config(live_cfg),
                 timeout=client.timeout,
+                agent_authorized=False,
             )
             signed.health_check()
         except ExchangeError as exc:
@@ -431,18 +415,8 @@ def _live_startup_recovery(
     from ..engine_bridge import EngineConfigError
     from ..exchanges.hyperliquid.mapper import map_account_snapshot
     from ..exchanges.hyperliquid.sdk_client import call_sdk
-    from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
-    from ..live.fills import LiveFillProcessor
-    from ..live.kill_switch import KillSwitchManager
-    from ..live.order_gate import RealOrderGate
-    from ..live.safe_mode import SafeModeManager
-    from ..live.startup import run_startup_recovery
-    from ..live.venue_identity import (
-        EscalationHolder,
-        VenueIdentityMonitor,
-        escalate_identity_fault,
-    )
-    from ..live.wiring import build_reconciliation
+    from ..live.venue_identity import EscalationHolder, escalate_identity_fault
+    from ..live.wiring import build_live_session, build_signed_client
     from ..persistence import repository as repo
     from ..persistence.models import PositionState
     from ..persistence.schema import SCHEMA_VERSION
@@ -482,14 +456,12 @@ def _live_startup_recovery(
     now = datetime.now(timezone.utc)
 
     # The runtime gate: config pins the wire conditions; §6.1 passed above.
-    gate = RealOrderGate.from_config(live_cfg)
-    gate.agent_authorized = True
-    signed = HyperliquidSignedClient(
-        live_cfg.network,
-        agent_key,
+    gate, signed = build_signed_client(
+        live_cfg,
+        agent_key=agent_key,
         wallet_address=wallet,
-        gate=gate,
         timeout=client.timeout,
+        agent_authorized=True,
     )
 
     def fetch_clearinghouse():
@@ -769,57 +741,25 @@ def _live_startup_recovery(
             return 1
         signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
         try:
-            # §13.5 (issue #80): ONE venue-identity monitor for the whole
-            # process. The kill switch's disarm cross-check, the reconciler's
-            # per-order probes and (under --loop) the §17 protection manager
-            # all read orderStatus through it, so consecutive answers the
-            # venue cannot make about OUR cloids are one streak wherever they
-            # were asked — and its payload_dir keeps every refused answer.
-            identity = VenueIdentityMonitor(
-                query_order_by_cloid=signed.query_order_by_cloid,
-                db=db,
-                run_id=run_id,
-                symbol=coin,
-                payload_dir=payload_dir,
-            )
-            kill_switch = KillSwitchManager(
-                client=signed,
+            # The preflight above already proved the timing invariant with the
+            # SAME constant and the SAME timeout, so the switch's constructor
+            # cannot raise on timing.
+            session = build_live_session(
+                signed=signed,
                 gate=gate,
                 db=db,
                 run_id=run_id,
-                config=live_cfg.kill_switch,
-                # The preflight above already proved this invariant with the
-                # SAME constant and the SAME timeout, so this constructor cannot
-                # raise on timing. Both are passed explicitly: the timeout used to
-                # be probed off the client with getattr, which silently dropped
-                # the term on every production manager.
-                max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
-                network_timeout_s=signed.timeout,
-                payload_dir=payload_dir,
-                identity=identity,
-            )
-            safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
-            processor = LiveFillProcessor(
-                db=db,
-                run_id=run_id,
-                payload_dir=payload_dir,
-                wallet_address=signed.wallet_address,
-            )
-
-            # The sweep pair, wired the one way both recovery sites wire it
-            # (``live.wiring``; issue #224): the exchange seam bound once, the
-            # §18.2 refresh across each sweep, the §13.5 monitor shared.
-            _backfiller, reconciler = build_reconciliation(
-                signed=signed,
-                db=db,
-                run_id=run_id,
                 coin=coin,
+                live_cfg=live_cfg,
                 fetch_clearinghouse=fetch_clearinghouse,
-                identity=identity,
-                processor=processor,
-                kill_switch=kill_switch,
                 payload_dir=payload_dir,
+                max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
             )
+            identity = session.identity
+            kill_switch = session.kill_switch
+            safe_mode = session.safe_mode
+            processor = session.processor
+            reconciler = session.reconciler
             shutdown_problem: str | None = None
             superseded = False
             # False until the §19.1 verdict PASSES — a recovery that raised
@@ -853,17 +793,7 @@ def _live_startup_recovery(
             # error already printed, not call it an unaccounted-for raise.
             loop_refused = False
             try:
-                result = run_startup_recovery(
-                    db=db,
-                    run_id=run_id,
-                    client=signed,
-                    fetch_clearinghouse=fetch_clearinghouse,
-                    gate=gate,
-                    kill_switch=kill_switch,
-                    reconciler=reconciler,
-                    safe_mode=safe_mode,
-                    payload_dir=payload_dir,
-                )
+                result = session.run_startup_recovery()
                 verdict_passed = result.passed
                 # PR 5: with --loop, a passing recovery hands off to the live
                 # trading loop; it returns on Ctrl-C / SIGTERM, and the §18.2

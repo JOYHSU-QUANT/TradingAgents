@@ -27,6 +27,24 @@ from .live_shared import (
 )
 
 
+def _gate_refusal_wording(refusal) -> str:
+    """This command's operator wording for each rung of ``load_live_gates``."""
+    from ..live.config import LiveGateStage as Stage
+
+    wording = {
+        Stage.NO_LIVE_BLOCK: "config has no live: block — live-smoke needs one (phase3-spec §4).",
+        Stage.INVALID_LIVE: "invalid live: config — {detail}. Fix the YAML and re-run.",
+        Stage.PAPER_MODE: "live.mode is 'paper' — the smoke suite is a live-mode tool.",
+        Stage.MODE_NOT_ACCEPTED: (
+            "live-smoke runs only against a testnet_live run — live.mode is "
+            "'{mode}'. mainnet_tiny relies on the smoke suite proven on "
+            "the separate testnet run (§21.3); it is never smoke-tested on mainnet."
+        ),
+    }
+    mode = "" if refusal.mode is None else refusal.mode.value
+    return wording[refusal.stage].format(detail=refusal.detail, mode=mode)
+
+
 def _cmd_live_smoke(argv: list[str]) -> int:
     """Run the §20.2 testnet smoke checklist and report the cycle-entry gate.
 
@@ -371,55 +389,26 @@ def _build_smoke_session(args, db):
     """
     from decimal import Decimal
 
-    from ..domains.perp.risk_gate import RiskConfig
     from ..engine_bridge import load_config_or_exit
-    from ..live.config import ExecutionMode, LiveConfig, validate_live_risk_consistency
+    from ..live.config import ExecutionMode, LiveGateRefusal, load_live_gates
     from ..live.smoke import SmokeContext
     from ..runtime.clock import WallClock
 
     config = load_config_or_exit(args.config)
     if config is None:
         return 1
-    raw_live = config.get("live")
-    if raw_live is None:
-        print(
-            "error: config has no live: block — live-smoke needs one (phase3-spec §4).",
-            file=sys.stderr,
-        )
-        return 1
+    # The config ladder both live-mode commands climb (``live.config``), with
+    # one rung the suite adds: the §20.2 smoke suite is a TESTNET pre-flight
+    # (it opens/closes real positions and rests/cancels real SL/TP triggers),
+    # and mainnet_tiny relies on the smoke proven on the SEPARATE testnet run
+    # (§21.3) — so every other live mode is refused, --dry-run included, and a
+    # mis-pointed config can never drive a real order onto mainnet.
     try:
-        live_cfg = LiveConfig.from_dict(raw_live)
-    except ValueError as exc:
-        print(f"error: invalid live: config — {exc}. Fix the YAML and re-run.", file=sys.stderr)
+        gates = load_live_gates(config, modes=(ExecutionMode.TESTNET_LIVE,))
+    except LiveGateRefusal as refusal:
+        print(f"error: {_gate_refusal_wording(refusal)}", file=sys.stderr)
         return 1
-    if live_cfg.mode is ExecutionMode.PAPER:
-        print("error: live.mode is 'paper' — the smoke suite is a live-mode tool.", file=sys.stderr)
-        return 1
-    if live_cfg.mode is not ExecutionMode.TESTNET_LIVE:
-        # The §20.2 smoke suite is a TESTNET pre-flight: it opens/closes real
-        # positions and rests/cancels real SL/TP triggers. mainnet_tiny relies on
-        # the smoke proven on the SEPARATE testnet run (§21.3) and is never
-        # smoke-tested on mainnet — refuse here (both --dry-run and real) so a
-        # mis-pointed config can never drive a real order onto mainnet.
-        print(
-            f"error: live-smoke runs only against a testnet_live run — live.mode is "
-            f"'{live_cfg.mode.value}'. mainnet_tiny relies on the smoke suite proven on "
-            "the separate testnet run (§21.3); it is never smoke-tested on mainnet.",
-            file=sys.stderr,
-        )
-        return 1
-    raw_risk = config.get("risk")
-    if raw_risk is None:
-        print(
-            "error: config has no risk: block — required for the live gate (§24).", file=sys.stderr
-        )
-        return 1
-    try:
-        risk_cfg = RiskConfig.from_dict(raw_risk)
-        validate_live_risk_consistency(live_cfg, risk_cfg, raw_risk)
-    except ValueError as exc:
-        print(f"error: invalid risk:/live: config — {exc}.", file=sys.stderr)
-        return 1
+    live_cfg = gates.live_cfg
 
     coin = live_cfg.safety.allowed_symbols[0]
     clock = WallClock()
@@ -486,10 +475,9 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     from ..exchanges.hyperliquid.errors import ExchangeError
     from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
     from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
-    from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from ..live.authorization import AgentAuthorizationError, verify_agent_authorization
-    from ..live.order_gate import RealOrderGate
     from ..live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE, SmokeContext
+    from ..live.wiring import build_signed_client
     from ..runtime.asset_spec import AssetSpec
 
     if not live_cfg.allow_real_orders:
@@ -535,10 +523,12 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     if _timing_preflight(live_cfg, client) != 0:
         return 1
 
-    gate = RealOrderGate.from_config(live_cfg)
-    gate.agent_authorized = True
-    signed = HyperliquidSignedClient(
-        live_cfg.network, agent_key, wallet_address=addr, gate=gate, timeout=client.timeout
+    gate, signed = build_signed_client(
+        live_cfg,
+        agent_key=agent_key,
+        wallet_address=addr,
+        timeout=client.timeout,
+        agent_authorized=True,
     )
     try:
         signed.health_check()
@@ -633,78 +623,25 @@ def _smoke_startup_recovery(
     tests assert is clean given the operator-staged preconditions.
     """
     from ..exchanges.hyperliquid.sdk_client import call_sdk
-    from ..live.fills import LiveFillProcessor
-    from ..live.kill_switch import KillSwitchManager
-    from ..live.safe_mode import SafeModeManager
-    from ..live.startup import run_startup_recovery
-    from ..live.venue_identity import VenueIdentityMonitor
-    from ..live.wiring import build_reconciliation
+    from ..live.wiring import build_live_session
 
     def fetch_clearinghouse():
         return call_sdk(client.info.user_state, wallet)
 
-    # §13.5 (issue #80): one venue-identity monitor shared by the switch's
-    # disarm cross-check and the reconciler's per-order probes — the same
-    # wiring as the live lane's, so the restart tests exercise it too.
-    identity = VenueIdentityMonitor(
-        query_order_by_cloid=signed.query_order_by_cloid,
-        db=db,
-        run_id=run_id,
-        symbol=coin,
-        payload_dir=payload_dir,
-    )
-    kill_switch = KillSwitchManager(
-        client=signed,
-        gate=gate,
-        db=db,
-        run_id=run_id,
-        config=live_cfg.kill_switch,
-        max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
-        network_timeout_s=signed.timeout,
-        payload_dir=payload_dir,
-        # This manager belongs to a live-smoke run: its arm and its tick-driven
-        # refreshes happen inside the suite, so they are cover but not evidence
-        # that the DAEMON exercised the switch — the marker drops these rows
-        # from the §20.3 sample floor AND from the clean-shutdown daemon
-        # verdict alike.
-        suite_authored=True,
-        identity=identity,
-    )
-    safe_mode = SafeModeManager(db=db, run_id=run_id, gate=gate)
-    processor = LiveFillProcessor(
-        db=db,
-        run_id=run_id,
-        payload_dir=payload_dir,
-        wallet_address=signed.wallet_address,
-    )
-
-    # The same sweep pair the live lane builds, from the same factory
-    # (``live.wiring``; issue #224) — this path ARMS the switch (it is handed to
-    # run_startup_recovery below) under the same _RECOVERY_MAX_TICK_GAP_SECONDS,
-    # so its sweep can lapse the deadline and cancel the wallet mid-recovery
-    # exactly as the live one can. Wiring only the live lane once left the smoke
-    # restart tests (15–17) running the unrefreshed version of the very sweep
-    # they exist to exercise (2026-07-31 deadline review); one factory is what
-    # keeps the two sites from drifting apart again.
-    _backfiller, reconciler = build_reconciliation(
+    # This path ARMS the switch under the same _RECOVERY_MAX_TICK_GAP_SECONDS
+    # as the daemon, so its sweep can lapse the deadline and cancel the wallet
+    # mid-recovery exactly as the live one can.
+    session = build_live_session(
         signed=signed,
+        gate=gate,
         db=db,
         run_id=run_id,
         coin=coin,
+        live_cfg=live_cfg,
         fetch_clearinghouse=fetch_clearinghouse,
-        identity=identity,
-        processor=processor,
-        kill_switch=kill_switch,
         payload_dir=payload_dir,
+        max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
+        # A live-smoke run's manager: its rows are cover, not daemon evidence.
+        suite_authored=True,
     )
-    return run_startup_recovery(
-        db=db,
-        run_id=run_id,
-        client=signed,
-        fetch_clearinghouse=fetch_clearinghouse,
-        gate=gate,
-        kill_switch=kill_switch,
-        reconciler=reconciler,
-        safe_mode=safe_mode,
-        payload_dir=payload_dir,
-    )
+    return session.run_startup_recovery()

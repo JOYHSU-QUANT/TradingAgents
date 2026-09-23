@@ -33,6 +33,45 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The live lane's composition root moves out of `cli/`: `live/wiring.py`
+  builds the signed client and the recovery session, `live/config.py`
+  climbs the config ladder** (refactor plan v2, T2-a — PR 4 of the plan).
+  `live` and `live-smoke` used to construct the same objects by hand, in
+  near-verbatim copies — two of the `live:`/`risk:` config gates, three of
+  the `RealOrderGate` plus `HyperliquidSignedClient` pair (the keyless `live`
+  gate check has one too), two of the recovery components
+  (`VenueIdentityMonitor`, `KillSwitchManager`, `SafeModeManager`,
+  `LiveFillProcessor`, the `build_reconciliation` pair,
+  `run_startup_recovery`). Three factories replace the copies:
+  `live.config.load_live_gates(config, *, modes=None)` climbs the gates in
+  their existing order and raises `LiveGateRefusal` with a `LiveGateStage`
+  (`no_live_block`, `invalid_live`, `paper_mode`, `mode_not_accepted`) — it
+  prints nothing, because each command words the same refusal differently
+  and each keeps its own words in a module-level table;
+  `live.wiring.build_signed_client(live_cfg, *, agent_key, wallet_address,
+  timeout, agent_authorized)` returns the gate and the client bound to it;
+  `live.wiring.build_live_session(...)` returns a frozen `LiveSession`
+  carrying every component, whose `run_startup_recovery()` drives §19.1
+  steps 5–16 over exactly those. The smoke suite's testnet-only rung is the
+  `modes=(ExecutionMode.TESTNET_LIVE,)` argument, checked where it was
+  checked before (after the paper refusal). The old copies' three `risk:`
+  rungs — block present, parses, passes the §24 cross-check — are not on
+  the ladder: `config.load_config` runs exactly those on every load that
+  carries a `live:` block, and both commands load through it, so those
+  rungs and their five CLI refusal lines were unreachable before this
+  change and are dropped with it. `cli/live.py` and `cli/smoke.py` call the
+  factories; `_RECOVERY_MAX_TICK_GAP_SECONDS` stays in `cli/live_shared.py`
+  beside the timing preflight and is passed in. The factories resolve the
+  classes on their modules at call time, so the existing CLI tests are
+  unchanged. No behaviour changes; every refusal line a command can print
+  is the same bytes. Tests: `tests/live/test_wiring.py` gains five (the
+  gate's flags per `agent_authorized`, one monitor shared by switch and
+  reconciler, `suite_authored` reaching only the switch, the recovery call's
+  kwargs) and `tests/live/test_config.py` four (each rung's stage and
+  carried detail, refusal order, the `modes` rung, the `risk:` block not
+  being a rung); `tests/conftest.py`'s constructor recorder becomes the
+  importable `record_constructor_kwargs`.
+
 - **`paper/accounting.py` splits: the account math, the two fill effects, the
   run genesis and the accounting replay move to `runtime/accounting.py`**
   (refactor plan v2, T1-d — PR 3 of the plan). `paper/accounting.py` keeps

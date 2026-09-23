@@ -1,46 +1,203 @@
-"""The §19.1 reconciliation sweep's production wiring, built in one place.
+"""The live lane's production wiring, built in one place.
 
-``live --run-id`` and the ``live-smoke`` restart recovery each construct the
-same pair — a :class:`~.fill_backfill.FillBackfiller` and a
-:class:`~.reconcile.LiveReconciler` over one signed client, one fill
-processor and one kill-switch refresh closure — and until issue #224 each did
-it by hand, as two copies of the same two-constructor block. A copy is where the
-two drift: issue #169 found the backfiller's ``fetch`` unguarded while the
-reconciler's ``fetch_fills`` — the SAME ``user_fills_by_time`` object — was
-refused at boot, exactly because each site named it twice.
-:func:`build_reconciliation` binds that seam once and hands it to both, so
-the two CLIs cannot disagree about what the sweep reads, and the refresh
-closure (§18.2) exists once rather than as a per-site definition that one
-site could forget.
+``live --run-id`` and ``live-smoke`` each construct the same components over
+one signed client — a runtime-armed gate, the §13.5 venue-identity monitor,
+the §18 kill switch, the §13 safe-mode machine, the fill processor and the
+§19.1 sweep pair — and until issue #224 each did it by hand, as two copies of
+the same constructor block. A copy is where the two drift: issue #169 found
+the backfiller's ``fetch`` unguarded while the reconciler's ``fetch_fills`` —
+the SAME ``user_fills_by_time`` object — was refused at boot, exactly because
+each site named it twice. Each factory here binds its seam once and hands it
+to both CLIs, so the two cannot disagree about what a recovery reads, and the
+§18.2 refresh closure exists once rather than as a per-site definition that
+one site could forget.
 
 The components are looked up on their modules at call time rather than bound
 at import: the wiring pins (``tests/conftest.py``
-``record_reconciliation_sweep_wiring``) record what each CLI builds by
-patching the SOURCE modules' names, and those pins are what proves the two
-sites still pass the §18.2 hook and the §19.1 evidence directory.
+``record_reconciliation_sweep_wiring``, and the constructor recorders in
+``tests/cli/``) record what each CLI builds by patching the SOURCE modules'
+names, and those pins are what proves the two sites still pass the §18.2 hook
+and the §19.1 evidence directory.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..exchanges.hyperliquid import signed_client as signed_client_mod
 from . import (
     fill_backfill as fill_backfill_mod,
+    fills as fills_mod,
     kill_switch as kill_switch_mod,
+    order_gate as order_gate_mod,
     reconcile as reconcile_mod,
+    safe_mode as safe_mode_mod,
+    startup as startup_mod,
+    venue_identity as venue_identity_mod,
 )
 
 if TYPE_CHECKING:
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
     from ..persistence.db import Database
     from ..ports import Clock
+    from .config import LiveConfig
+    from .fill_backfill import FillBackfiller
     from .fills import LiveFillProcessor
     from .kill_switch import KillSwitchManager
+    from .order_gate import RealOrderGate
+    from .reconcile import LiveReconciler
+    from .safe_mode import SafeModeManager
+    from .startup import StartupResult
     from .venue_identity import VenueIdentityMonitor
 
-__all__ = ["build_reconciliation"]
+__all__ = ["LiveSession", "build_live_session", "build_reconciliation", "build_signed_client"]
+
+
+def build_signed_client(
+    live_cfg: LiveConfig,
+    *,
+    agent_key: str,
+    wallet_address: str,
+    timeout: float | None,
+    agent_authorized: bool,
+) -> tuple[RealOrderGate, HyperliquidSignedClient]:
+    """A fresh-from-config §4.1 gate and the signed client bound to it.
+
+    ``agent_authorized`` is the only gate flag set at construction — True
+    only once :func:`~.authorization.verify_agent_authorization` passed for
+    this key and wallet (§6.1); every other flag starts fail-closed and is
+    proven at runtime (§19.1). ``timeout`` is the read client's, so both
+    transports share one §18.2 timing budget.
+    """
+    gate = order_gate_mod.RealOrderGate.from_config(live_cfg)
+    gate.agent_authorized = agent_authorized
+    signed = signed_client_mod.HyperliquidSignedClient(
+        live_cfg.network,
+        agent_key,
+        wallet_address=wallet_address,
+        gate=gate,
+        timeout=timeout,
+    )
+    return gate, signed
+
+
+@dataclass(frozen=True)
+class LiveSession:
+    """The components one live-mode process runs its §19.1 recovery over.
+
+    Built by :func:`build_live_session`. The daemon keeps its session for the
+    ``--loop`` hand-off and the §18.2 shutdown sweep; the smoke suite builds
+    one per recovery it runs (the pre-flight and restart tests 15–17).
+    """
+
+    signed: HyperliquidSignedClient
+    gate: RealOrderGate
+    db: Database
+    run_id: str
+    payload_dir: Path
+    fetch_clearinghouse: Callable[[], Any]
+    identity: VenueIdentityMonitor
+    kill_switch: KillSwitchManager
+    safe_mode: SafeModeManager
+    processor: LiveFillProcessor
+    backfiller: FillBackfiller
+    reconciler: LiveReconciler
+
+    def run_startup_recovery(self) -> StartupResult:
+        """Steps 5–16 of §19.1 over this session's components (arms the switch)."""
+        return startup_mod.run_startup_recovery(
+            db=self.db,
+            run_id=self.run_id,
+            client=self.signed,
+            fetch_clearinghouse=self.fetch_clearinghouse,
+            gate=self.gate,
+            kill_switch=self.kill_switch,
+            reconciler=self.reconciler,
+            safe_mode=self.safe_mode,
+            payload_dir=self.payload_dir,
+        )
+
+
+def build_live_session(
+    *,
+    signed: HyperliquidSignedClient,
+    gate: RealOrderGate,
+    db: Database,
+    run_id: str,
+    coin: str,
+    live_cfg: LiveConfig,
+    fetch_clearinghouse: Callable[[], Any],
+    payload_dir: Path,
+    max_tick_gap_seconds: float,
+    suite_authored: bool = False,
+) -> LiveSession:
+    """The recovery components, wired the one way both CLIs wire them.
+
+    ``signed`` and ``gate`` come from :func:`build_signed_client` with the
+    §6.1 flag set; ``fetch_clearinghouse`` is the site's account read.
+    ``max_tick_gap_seconds`` is the number the caller's timing preflight
+    proved, and ``signed.timeout`` the failed-attempt term: both reach the
+    switch explicitly, never probed off the client. ``suite_authored`` marks
+    the switch's rows as the smoke suite's (see
+    :class:`~.kill_switch.KillSwitchManager`). One venue-identity monitor per
+    session (§13.5), shared by the switch, the reconciler and the loop's
+    protection manager; the processor carries the signed wallet so its
+    envelope-identity check is armed.
+    """
+    identity = venue_identity_mod.VenueIdentityMonitor(
+        query_order_by_cloid=signed.query_order_by_cloid,
+        db=db,
+        run_id=run_id,
+        symbol=coin,
+        payload_dir=payload_dir,
+    )
+    kill_switch = kill_switch_mod.KillSwitchManager(
+        client=signed,
+        gate=gate,
+        db=db,
+        run_id=run_id,
+        config=live_cfg.kill_switch,
+        max_tick_gap_seconds=max_tick_gap_seconds,
+        network_timeout_s=signed.timeout,
+        payload_dir=payload_dir,
+        suite_authored=suite_authored,
+        identity=identity,
+    )
+    safe_mode = safe_mode_mod.SafeModeManager(db=db, run_id=run_id, gate=gate)
+    processor = fills_mod.LiveFillProcessor(
+        db=db,
+        run_id=run_id,
+        payload_dir=payload_dir,
+        wallet_address=signed.wallet_address,
+    )
+    backfiller, reconciler = build_reconciliation(
+        signed=signed,
+        db=db,
+        run_id=run_id,
+        coin=coin,
+        fetch_clearinghouse=fetch_clearinghouse,
+        identity=identity,
+        processor=processor,
+        kill_switch=kill_switch,
+        payload_dir=payload_dir,
+    )
+    return LiveSession(
+        signed=signed,
+        gate=gate,
+        db=db,
+        run_id=run_id,
+        payload_dir=payload_dir,
+        fetch_clearinghouse=fetch_clearinghouse,
+        identity=identity,
+        kill_switch=kill_switch,
+        safe_mode=safe_mode,
+        processor=processor,
+        backfiller=backfiller,
+        reconciler=reconciler,
+    )
 
 
 def build_reconciliation(

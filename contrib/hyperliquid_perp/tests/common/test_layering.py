@@ -11,8 +11,9 @@ None of these invariants is exercised anywhere else:
 - ``common/`` stays at the bottom of the import graph — the rule in
   ``common/__init__``'s docstring that nothing there imports from another
   ``hyperliquid_perp`` package would otherwise be enforced by review only;
-- the config loader and the pre-LLM context guards keep their load-time
-  import closures below the SDK, the store and the engines (issue #122);
+- the config loader, the pre-LLM context guards and the no-decision policy
+  keep their load-time import closures below the SDK, the store and the
+  engines (issue #122);
 - ``runtime/``, the kernel both lanes share, keeps its load-time closure on
   the store, the ports and the floor, and reaches neither ``paper`` nor
   ``live`` at any depth (refactor plan v2, T1);
@@ -196,21 +197,24 @@ def _above_the_floor(tail: str) -> bool:
 @pytest.mark.parametrize(
     "module",
     [
+        "runtime/no_decision.py",
         "domains/perp/freshness.py",
         "domains/perp/context_guards.py",
     ],
 )
-def test_the_context_guard_family_stays_below_the_engines(module):
-    # Issue #122. The four pre-LLM guards are read by both engines and by the
-    # keyless entry points, so they must sit BELOW the SDK, the persistence
-    # package, ``paper`` and ``live`` — a claim that was prose in
-    # ``freshness``'s docstring until the guards moved out of ``engine_bridge``
-    # (which imports the SDK at module level). Pinned as a load-time import
-    # closure, like the config loader's, so a convenience import of
-    # ``exchanges``/``persistence``/``paper`` added to either fails here by
-    # name. The no-decision policy that shared this floor sits in ``runtime/``
-    # since refactor plan v2 T1-c and is covered by the package check below,
-    # whose floor includes the store the policy reads.
+def test_the_context_guard_family_and_the_no_decision_policy_stay_below_the_engines(module):
+    # Issue #122. The four pre-LLM guards and the no-decision policy are read
+    # by both engines and by the keyless entry points, so they must sit BELOW
+    # the SDK, the persistence package, ``paper`` and ``live`` — a claim that
+    # was prose in ``freshness``'s docstring until the guards moved out of
+    # ``engine_bridge`` (which imports the SDK at module level) and the policy
+    # out of ``paper`` (whose scheduler import loaded the whole paper engine).
+    # Pinned as a load-time import closure, like the config loader's, so a
+    # convenience import of ``exchanges``/``persistence``/``paper`` added to
+    # any of the three fails here by name. The policy lives in ``runtime/``
+    # since refactor plan v2 T1-c, whose package check below allows the store;
+    # it keeps this narrower floor because its docstring commits to plain
+    # ``sqlite3`` reads — the PR that moves it onto ``repository`` drops it here.
     closure = _load_time_import_closure(_SOURCE_ROOT / module)
     offenders = {t for t in closure if _above_the_floor(t)}
     assert not offenders, f"{module} reaches above domains/common at load time: {sorted(offenders)}"

@@ -68,9 +68,10 @@ Breaking changes within the 0.x line are called out explicitly.
   with no pin added: the one `# type: ignore[arg-type]` it carries (on
   `_dec_or_none`) moved with the code and is still needed, and the one mypy
   error the old module reported (the `unrealized_pnl` call in `apply_fill`)
-  stays in `paper/`, outside the checked set. Tests: `tests/paper/test_accounting.py` splits
-  along the module split, 25 tests to `tests/runtime/test_accounting.py` and
-  28 staying; the total falls by the two compat-path pins.
+  stays in `paper/`, outside the checked set. Tests:
+  `tests/paper/test_accounting.py` splits along the module split, 25 tests to
+  `tests/runtime/test_accounting.py` and 28 staying; the total falls by the
+  two compat-path pins.
 
 - **A `runtime/` package for the execution kernel the paper and live lanes
   share** (refactor plan v2, T1 — PR 2 of the plan). `paper/clock.py`,

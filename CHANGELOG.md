@@ -71,11 +71,10 @@ Breaking changes within the 0.x line are called out explicitly.
   (the gate's flags per `agent_authorized`, parametrized both ways; one
   monitor shared by switch and reconciler; `suite_authored` reaching only
   the switch; the recovery call's kwargs) and `tests/live/test_config.py`
-  five (each rung's stage, a block
-  that does not parse being `load_config`'s error rather than a refusal,
-  refusal order, the `modes` rung, the `risk:` block not being a rung);
-  `tests/conftest.py`'s constructor recorder becomes the importable
-  `record_constructor_kwargs`.
+  five (each rung's stage, a block that does not parse being
+  `load_config`'s error rather than a refusal, refusal order, the `modes`
+  rung, the `risk:` block not being a rung); `tests/conftest.py`'s
+  constructor recorder becomes the importable `record_constructor_kwargs`.
 
 - **`paper/accounting.py` splits: the account math, the two fill effects, the
   run genesis and the accounting replay move to `runtime/accounting.py`**

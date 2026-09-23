@@ -317,7 +317,7 @@ def test_the_reports_suffix_is_the_one_the_engine_writes():
     assert f'suffix="{REPORTS_SUFFIX}"' in source
 
 
-def test_research_closes_are_keyed_by_the_slot_the_close_names(tmp_path):
+def test_research_closes_are_keyed_by_close_time(tmp_path):
     path = write_research_store(tmp_path / "autoresearch.sqlite")
     with ResearchStore(path) as research:
         closes = load_research_closes(research, coin=COIN, interval="4h")

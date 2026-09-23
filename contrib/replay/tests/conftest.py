@@ -38,7 +38,7 @@ from contrib.replay.upstream import (
 
 STEP_MS = interval_to_ms("4h")
 # A 4h-aligned anchor well inside the decodable range; slot 0 of the fixture
-# closes one millisecond before it.
+# is decided one millisecond before it.
 ANCHOR_MS = 1_800_000_000_000 - (1_800_000_000_000 % STEP_MS)
 RUN_ID = "paper-FIX"
 COIN = "BTC"
@@ -118,8 +118,8 @@ ROWS: tuple[Row, ...] = (
 )
 # fmt: on
 
-# The bar the research store holds for the missing slot: opened at slot 3's
-# close, closed at slot 4's.
+# The bar the research store holds for the missing slot: opened one ms after
+# slot 3's instant, closed at slot 4's — exactly row 3's one-bar target.
 RESEARCH_CANDLE = Candle(
     open_time=ANCHOR_MS + 3 * STEP_MS,
     close_time=at_ms(4),

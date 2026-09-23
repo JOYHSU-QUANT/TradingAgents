@@ -27,8 +27,8 @@ What is borrowed and why:
 - the store (``Database``, ``SchemaVersionError``, ``get_run``) and the
   paper config (``PaperTradingConfig``), because the cost a run was
   measured under is the run's own fill model (plan §3-6);
-- the instants and the interval table, so a ``candle_end`` is decoded by the
-  same integer arithmetic that encoded it;
+- the instants and the interval table, so a decision's ``timestamp`` is
+  decoded by the same integer arithmetic that encoded it;
 - the on-disk layout (``payload_dir``, ``sidecar_path``), to count how many
   questions already carry a ``.reports.json`` beside their payload;
 - from the research package: the split and its holdout lock (plan §3-9),

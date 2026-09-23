@@ -303,7 +303,7 @@ Breaking changes within the 0.x line are called out explicitly.
   closes with `--research-db`, and the CSV says which marks came from it. A question is
   the attempt's final input, not every input row: a retried cycle leaves
   its earlier tries in `ai_inputs` unanswered (22 of run 3's 94 rows), and
-  read row by row they would sit in the same slot as the answer and get the
+  read row by row they would sit within minutes of the answer and get the
   run refused. Every decision is read twice, as the MODEL asked (requested margin,
   the model's side — read off the side the gate preserved, because a
   rejection is stored as `maintain_current` with the refused target kept

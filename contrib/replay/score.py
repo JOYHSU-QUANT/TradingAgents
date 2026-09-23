@@ -14,8 +14,9 @@ Replay plan §3-7 fixes the definitions, and they are written here once:
   missing cycle, and its "4h" mark a close minutes away (run 3, measured
   2026-09-23; decided the same day). A gap no question fills within the
   tolerance is read from the research store's candle closes instead, and
-  the row says which it got. Two questions inside one tolerance of each
-  other cannot be paired unambiguously and the run is refused by name.
+  the row says which it got. Two questions within one tolerance of each
+  other (inclusive) cannot be paired unambiguously and the run is refused
+  by name.
 - Direction: the model's call is the ``target_side`` it asked for — on an
   approved or clamped ``set_target``, and equally on a REJECTED one, which
   the gate records as ``maintain_current`` with the refused side and margin
@@ -105,7 +106,7 @@ __all__ = [
     "sign_test",
 ]
 
-# Bars ahead a decision is marked at: the next close, and six closes on.
+# Bars ahead a decision is marked at: one bar on, and six bars on.
 HORIZONS: Final = (1, 6)
 
 # The baselines, in report order.
@@ -323,10 +324,10 @@ class Answer:
 class Outcome:
     """What one horizon says about one decision. ``None`` where nothing can be said.
 
-    ``ret`` is ``None`` when no later mark exists (the run ended, the slot is
-    past the loadable bound, or neither the store nor the research candles
-    hold it); the model-side fields are ``None`` on an unanswered or
-    fail-closed row as well.
+    ``ret`` is ``None`` when no later mark exists (the run ended, the mark
+    found is past the loadable bound, or neither the store nor the research
+    candles hold one within the tolerance); the model-side fields are
+    ``None`` on an unanswered or fail-closed row as well.
     """
 
     bars: int
@@ -432,13 +433,8 @@ class _Series:
         stamps = tuple(sorted(points))
         return cls(stamps, tuple(points[s] for s in stamps))
 
-    def nearest(self, target: int, *, tolerance: int, until_ms: int | None) -> float | None:
-        """The price stamped nearest ``target`` within ``tolerance``; ``None`` past ``until_ms``.
-
-        The lock applies to the nearest stamp, not to the next-nearest: a
-        bound that hid the nearest and served the other would pair a
-        question with a mark it should not see at all.
-        """
+    def nearest(self, target: int, *, tolerance: int) -> tuple[int, float] | None:
+        """``(stamp, price)`` of the stamp nearest ``target`` within ``tolerance`` (inclusive)."""
         index = bisect_left(self.stamps, target)
         candidates = [
             i
@@ -448,9 +444,7 @@ class _Series:
         if not candidates:
             return None
         winner = min(candidates, key=lambda i: abs(self.stamps[i] - target))
-        if until_ms is not None and self.stamps[winner] > until_ms:
-            return None
-        return self.prices[winner]
+        return self.stamps[winner], self.prices[winner]
 
 
 # -- scoring -----------------------------------------------------------------
@@ -522,15 +516,23 @@ def _later_marks(
     research: _Series,
     until_ms: int | None,
 ) -> dict[str, dict[int, _Mark]]:
-    """Per question and horizon, ``(later mark, source)``: the store's question first, else a close."""
+    """Per question and horizon, ``(later mark, source)``: the store's question first, else a close.
+
+    The lock is applied ONCE, to the candidate chosen: a store question
+    inside the tolerance is the mark whether or not the bound allows it,
+    and when it does not the answer is "unavailable" — never the research
+    close beside it. Falling through would score the same validation row
+    on different prices locked and opened.
+    """
 
     def lookup(target: int) -> _Mark:
-        mark = store.nearest(target, tolerance=tolerance_ms, until_ms=until_ms)
-        if mark is not None:
-            return mark, "store"
-        mark = research.nearest(target, tolerance=tolerance_ms, until_ms=until_ms)
-        if mark is not None:
-            return mark, "research"
+        for series, source in ((store, "store"), (research, "research")):
+            found = series.nearest(target, tolerance=tolerance_ms)
+            if found is not None:
+                stamp, mark = found
+                if until_ms is not None and stamp > until_ms:
+                    return None, None
+                return mark, source
         return None, None
 
     return {

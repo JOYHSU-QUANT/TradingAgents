@@ -41,7 +41,7 @@ MAKER = CostModel(fill_role=FillRole.MAKER)  # 0.015% maker fee, the same slippa
 TAKER_COST = 0.00045 + 0.0005  # per unit of turnover, as a fraction of equity
 MAKER_COST = 0.00015 + 0.0005
 
-# The next-close return of each answered row: later mark over this row's mark.
+# The one-bar return of each answered row: later mark over this row's mark.
 NEXT_RETURN = {
     0: 101 / 100 - 1,
     1: 99 / 101 - 1,
@@ -54,7 +54,7 @@ NEXT_RETURN = {
     9: 107 / 108 - 1,
     10: 109 / 107 - 1,
 }
-# The median of the ten absolute next-close moves: the 5th and 6th sorted are
+# The median of the ten absolute one-bar moves: the 5th and 6th sorted are
 # rows 8 and 7.
 FLAT_BAND = (abs(NEXT_RETURN[8]) + abs(NEXT_RETURN[7])) / 2
 
@@ -74,7 +74,7 @@ def _row(card, slot: int):
     return next(row for row in card.rows if row.question.input_id == input_id(slot))
 
 
-# -- slots ------------------------------------------------------------------
+# -- bars and the split ----------------------------------------------------
 
 
 def test_bar_open_ms_floors_an_instant_onto_the_grid():
@@ -87,22 +87,29 @@ def test_bar_open_ms_floors_an_instant_onto_the_grid():
 
 
 def test_a_cycle_that_drifted_across_a_bar_boundary_still_pairs_with_the_next_decision():
-    """Run 3 on 2026-09-23: decisions at 03:53 and 07:59 — one bar apart, two closed bars apart."""
+    """Run 3 on 2026-09-23: decisions at 03:53 and 08:01 — one bar apart, two closed bars apart.
+
+    Paired on the closed bars' stamps the second decision would have sat two
+    bars on and the research close at the 04:00 boundary would have been
+    served as the "4h" mark of a decision made seven minutes earlier.
+    """
     minute = 60_000
     t0 = ANCHOR_MS + 233 * minute  # 03:53 past a boundary
-    t1 = t0 + STEP_MS + 6 * minute  # 07:59: 4h06m later
+    t1 = t0 + STEP_MS + 8 * minute  # 08:01: 4h08m later, across the next boundary
     t2 = t1 + STEP_MS
     questions = [
         _question(input_id="a", at_ms=t0, mark=100.0),
         _question(input_id="b", at_ms=t1, mark=101.0),
         _question(input_id="c", at_ms=t2, mark=102.0),
     ]
-    card = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes={ANCHOR_MS + 2 * STEP_MS - 1: 999.0})
+    boundary_close = {ANCHOR_MS + STEP_MS - 1: 999.0}  # the 04:00 close, 7 minutes after t0
+    card = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=boundary_close)
     first = card.rows[0].outcomes[1]
-    # The next decision is 6 minutes past the 4h target: paired from the
-    # store, never from the research close that happens to sit nearer a grid slot.
     assert (first.later_mark, first.source, first.ret) == (101.0, "store", pytest.approx(0.01))
     assert card.rows[1].outcomes[1].later_mark == 102.0
+    # And a decision more than half a bar past the target is not "one bar on".
+    late = [questions[0], _question(input_id="b", at_ms=t0 + STEP_MS + STEP_MS // 2 + 1, mark=101.0)]
+    assert score_run(late, [], step_ms=STEP_MS, costs=TAKER).rows[0].outcomes[1].later_mark is None
 
 
 def test_a_gap_is_filled_by_the_nearest_close_within_half_a_bar_or_not_at_all():
@@ -115,11 +122,37 @@ def test_a_gap_is_filled_by_the_nearest_close_within_half_a_bar_or_not_at_all():
 
 
 def test_two_questions_within_the_tolerance_are_refused_as_unpairable():
-    questions = [_question(input_id="a", at_ms=at_ms(0)), _question(input_id="b", at_ms=at_ms(0) + 3_600_000)]
+    """Refused at exactly half a bar apart (the pairing is inclusive too), accepted one ms further."""
+    at_half = [_question(input_id="a", at_ms=at_ms(0)), _question(input_id="b", at_ms=at_ms(0) + STEP_MS // 2)]
     with pytest.raises(ScoreError, match="a and b: two questions within 2h"):
-        score_run(questions, [], step_ms=STEP_MS, costs=TAKER)
+        score_run(at_half, [], step_ms=STEP_MS, costs=TAKER)
+    past_half = [at_half[0], _question(input_id="b", at_ms=at_ms(0) + STEP_MS // 2 + 1)]
+    assert len(score_run(past_half, [], step_ms=STEP_MS, costs=TAKER).rows) == 2
     with pytest.raises(ScoreError, match="tolerance_ms"):
-        score_run(questions, [], step_ms=STEP_MS, costs=TAKER, tolerance_ms=STEP_MS)
+        score_run(past_half, [], step_ms=STEP_MS, costs=TAKER, tolerance_ms=STEP_MS)
+
+
+def test_the_lock_applies_to_the_candidate_chosen_and_never_falls_through():
+    """A store question inside the tolerance but past the bound is 'unavailable', not the close beside it."""
+    questions = [_question(input_id=f"s{i}", at_ms=at_ms(i), mark=100.0 + i) for i in range(12)]
+    split = build_split(questions, interval="4h", step_ms=STEP_MS)
+    # Twelve bars cut 7 / 3 / 2: row 9 is the last validation row and its
+    # one-bar target is row 10's instant, in the holdout. A research close
+    # one hour before that target is inside the tolerance and inside the
+    # bound — and must NOT be served.
+    beside = {at_ms(10) - 3_600_000: 555.0}
+    locked = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=beside, split=split)
+    assert [r.question.input_id for r in locked.rows][-1] == "s9"
+    assert locked.rows[-1].outcomes[1].later_mark is None
+    opened = score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=beside, split=split, holdout=True)
+    assert next(r for r in opened.rows if r.question.input_id == "s9").outcomes[1].later_mark == 110.0
+
+
+def test_the_nearer_of_two_research_closes_is_served():
+    questions = [_question(input_id="a", at_ms=at_ms(0)), _question(input_id="b", at_ms=at_ms(3), mark=103.0)]
+    target = at_ms(0) + STEP_MS
+    closes = {target - 90 * 60_000: 111.0, target + 30 * 60_000: 222.0}
+    assert score_run(questions, [], step_ms=STEP_MS, costs=TAKER, research_closes=closes).rows[0].outcomes[1].later_mark == 222.0
 
 
 # -- the two readings ---------------------------------------------------------
@@ -157,7 +190,7 @@ def test_each_row_is_read_from_the_model_and_from_the_rule(
     assert row.answered is (slot != 11)
 
 
-# -- next close ---------------------------------------------------------------
+# -- one bar on ------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -175,13 +208,13 @@ def test_each_row_is_read_from_the_model_and_from_the_rule(
         (10, False, False),
     ],
 )
-def test_the_next_close_return_and_both_hits_per_row(slot, ai_hit, executed_hit):
+def test_the_one_bar_return_and_both_hits_per_row(slot, ai_hit, executed_hit):
     outcome = _row(_card(), slot).outcome(1)
     assert outcome.ret == pytest.approx(NEXT_RETURN[slot])
     assert (outcome.ai_hit, outcome.executed_hit) == (ai_hit, executed_hit)
 
 
-def test_the_flat_band_is_the_median_absolute_next_close_move():
+def test_the_flat_band_is_the_median_absolute_one_bar_move():
     card = _card()
     assert card.flat_bands[1] == pytest.approx(FLAT_BAND)
     assert abs(NEXT_RETURN[5]) > FLAT_BAND > abs(NEXT_RETURN[6])
@@ -303,10 +336,10 @@ def test_maker_costs_change_the_fee_and_nothing_else():
     assert _row(maker, 1).outcome(1).executed_pnl == _row(taker, 1).outcome(1).executed_pnl
 
 
-# -- six closes on --------------------------------------------------------------
+# -- six bars on -----------------------------------------------------------
 
 
-def test_six_closes_on_reads_the_mark_six_slots_later_or_nothing():
+def test_six_bars_on_reads_the_mark_six_bars_later_or_nothing():
     card = _card()
     first = _row(card, 0).outcome(6)
     assert (first.later_mark, first.ret, first.ai_hit) == (105.0, pytest.approx(105 / 100 - 1), True)
@@ -316,7 +349,7 @@ def test_six_closes_on_reads_the_mark_six_slots_later_or_nothing():
     assert card.horizon_label(1) == "4h" and card.horizon_label(6) == "24h"
 
 
-def test_the_six_close_hits_and_the_band_at_that_horizon():
+def test_the_six_bar_hits_and_the_band_at_that_horizon():
     card = _card()
     # Five rows reach six closes on: 0 (+5%), 1 (+2.97%), 2 (+7.07%), 3 (+5.88%), 5 (+5.83%).
     # The median is row 5's own move, so its flat call sits ON the band and misses.
@@ -352,7 +385,7 @@ def test_the_summary_counts_the_fixture():
     assert dict(s.segments) == {}
 
 
-def test_the_next_close_hit_rates_and_the_two_by_two():
+def test_the_one_bar_hit_rates_and_the_two_by_two():
     h = _card().summary().horizons[0]
     assert (h.bars, h.label) == (1, "4h")
     assert h.executed == HitStats(10, 5)
@@ -377,7 +410,7 @@ def test_the_confidence_buckets_hold_the_set_target_rows_only():
     assert [b.label for b in h.calibration][-2:] == ["[0.8, 0.9)", "[0.9, 1.0]"]
 
 
-def test_the_next_close_pnl_totals():
+def test_the_one_bar_pnl_totals():
     h = _card().summary().horizons[0]
     executed = [
         0.3 * NEXT_RETURN[0] - 0.3 * TAKER_COST,
@@ -462,7 +495,7 @@ def test_a_baseline_pays_the_turnover_of_a_row_it_could_not_score_on_the_next_sc
     expected = [
         0.6 * r0 - 0.6 * TAKER_COST,  # entered long at the cap
         0.6 * r1,  # held
-        # slot 2: flipped to short (turnover 1.2) but has no next close; slot 3 is missing
+        # slot 2: flipped to short (turnover 1.2) but has no next decision; slot 3 is missing
         -0.6 * r4 - 1.2 * TAKER_COST,  # slot 4 pays the flip it inherited
     ]
     assert (bias.pnl.n, bias.pnl.total) == (3, pytest.approx(sum(expected)))
@@ -552,11 +585,11 @@ def test_the_holdout_is_neither_scored_nor_read_unless_asked():
     assert [row.question.input_id for row in card.rows] == [input_id(s) for s in range(10) if s != 4]
     assert dict(card.summary().segments) == {"train": 6, "validation": 3}
     assert _row(card, 9).segment is SegmentName.VALIDATION
-    # Row 9's next close is slot 10 — the holdout's first bar — so it is not read.
+    # Row 9's next decision is slot 10 — the holdout's first bar — so it is not read.
     assert _row(card, 9).outcome(1).ret is None
-    # Row 3's sixth close is slot 9, the last validation bar: readable.
+    # Row 3's sixth bar is slot 9, the last validation bar: readable.
     assert _row(card, 3).outcome(6).later_mark == 108.0
-    # Row 5's sixth close is slot 11: not.
+    # Row 5's sixth bar is slot 11: not.
     assert _row(card, 5).outcome(6).later_mark is None
     assert not card.holdout_read
 

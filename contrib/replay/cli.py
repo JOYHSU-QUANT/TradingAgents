@@ -155,13 +155,14 @@ def _cmd_score(args: argparse.Namespace) -> int:
         try:
             with ResearchStore(research_path) as store:
                 # Only the bars the split can ever pair: the lock at the I/O
-                # seam. One bar of slack below, for a later mark wanted half
-                # a bar before the first question's bar closes.
+                # seam. The first question is decided at or after the train
+                # start, so no bar opening before it is within a half-bar
+                # tolerance of any later mark it wants.
                 research = load_research_closes(
                     store,
                     coin=facts.coin,
                     interval=facts.interval,
-                    since_ms=split.train.start_ms - facts.step_ms,
+                    since_ms=split.train.start_ms,
                     until_ms=split.loadable_until(holdout=True),
                 )
         except StoreError as exc:

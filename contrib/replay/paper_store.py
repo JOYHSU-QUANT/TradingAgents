@@ -14,8 +14,8 @@ cycle writes an input row per try (``#in1``, ``#in2``, ``#in3`` on the paper
 store — measured 2026-09-23: 22 of run 3's 94 input rows and 4 of run 4's
 55 were earlier tries), the attempt's ``input_id`` is moved to the latest
 try, and only that one can carry the output. Read row by row, the earlier
-tries would be unanswered questions in the same slot as the answered one
-and the slot pairing would refuse the run; read through the attempt, each
+tries would be unanswered questions within minutes of the answered one and
+the pairing would refuse the run; read through the attempt, each
 cycle is one question — its final input — answered by its output or not
 (``api_failed``: the last try's input, no output). An attempt that failed
 before any input was written has no question at all and is counted apart,
@@ -149,7 +149,7 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
     coin = config.get("coin")
     if not isinstance(coin, str) or not coin:
         first = db.conn.execute(
-            "SELECT symbol FROM ai_inputs WHERE run_id = ? ORDER BY candle_end LIMIT 1", (run_id,)
+            "SELECT symbol FROM ai_inputs WHERE run_id = ? ORDER BY timestamp LIMIT 1", (run_id,)
         ).fetchone()
         coin = "?" if first is None else str(first["symbol"])
     return RunFacts(

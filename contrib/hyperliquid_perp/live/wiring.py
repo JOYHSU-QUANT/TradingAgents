@@ -235,7 +235,8 @@ def build_reconciliation(
     # across their own work (2026-07-31 deadline review). Both production
     # sites arm the switch this refreshes: the daemon's loop and the smoke
     # restart recovery, which runs under the same recovery tick budget and
-    # was once left unwired on the mistaken belief that it had no switch.
+    # which an in-review draft had left unwired on the mistaken belief that
+    # it had no switch.
     def _refresh_across_sweep() -> None:
         kill_switch_mod.refresh_across_blocking_work(kill_switch, what="reconciliation")
 

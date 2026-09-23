@@ -644,7 +644,6 @@ def _smoke_startup_recovery(
         fetch_clearinghouse=fetch_clearinghouse,
         payload_dir=payload_dir,
         max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
-        # A live-smoke run's manager: its rows are cover, not daemon evidence.
-        suite_authored=True,
+        suite_authored=True,  # see KillSwitchManager: cover, not daemon evidence
     )
     return session.run_startup_recovery()

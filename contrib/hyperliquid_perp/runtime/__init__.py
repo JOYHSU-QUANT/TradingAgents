@@ -2,7 +2,10 @@
 
 Sits above ``persistence`` and below ``paper`` / ``live``: these modules read
 the store (the run lease, the books, the no-decision policy) and so cannot
-live in ``common``, and none of them is owned by either lane.
+live in ``common``, and none of them is owned by either lane. Single-venue
+by design: the kernel may name the Hyperliquid adapter's error family
+(``exchanges.hyperliquid.errors``) directly, as the snapshot provider does to
+sort a raise into ERROR or DEFECT; a second venue is not in scope.
 
 - :mod:`.clock` — the two clocks behind the :class:`~..ports.Clock` seam;
 - :mod:`.market_feed` — market-data snapshots with freshness accounting, the

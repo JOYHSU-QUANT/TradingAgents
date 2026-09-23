@@ -58,9 +58,11 @@ Breaking changes within the 0.x line are called out explicitly.
   `ports.py`'s two annotation-only `runtime` names are frozen; the mypy
   job covers `runtime/` too. No
   behaviour changes: no message, schema or config key moves. The one
-  visible difference is in the journal, where the no-decision escalation
-  lines carry the logger name `contrib.hyperliquid_perp.runtime.no_decision`
-  (the module's name) instead of `...common.no_decision`.
+  visible difference is in the journal, where two loggers follow their
+  modules: the no-decision escalation lines carry
+  `contrib.hyperliquid_perp.runtime.no_decision` instead of
+  `...common.no_decision`, and the snapshot provider's DEFECT tracebacks
+  carry `...runtime.market_feed` instead of `...paper.market_feed`.
 - **Layering ratchets, a mypy job, and no import-time registry checks in
   `live/smoke.py`** (refactor plan v2, T0).
   `contrib/hyperliquid_perp/tests/common/test_layering.py` freezes the

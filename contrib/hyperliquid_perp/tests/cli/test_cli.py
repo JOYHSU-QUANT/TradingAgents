@@ -240,14 +240,24 @@ def _completion(node, *, finish_reason, output_tokens, model="m"):
     return (node, finish_reason, output_tokens, model)
 
 
-def _usage_provider(monkeypatch, *, decision_text, completions, cap=4096, raise_from_engine=None):
+def _usage_provider(
+    monkeypatch,
+    *,
+    decision_text=None,
+    completions=(),
+    cap=4096,
+    raise_from_engine=None,
+    final_state=None,
+):
     """A provider whose stubbed engine feeds ``completions`` into the collector.
 
     The stub reaches the collector the way the real engine does — through the
     ``callbacks`` kwarg ``build_graph`` receives — and drives it with the
     handler API (start with the node's ``langgraph_node`` metadata, end with an
     ``LLMResult``), so the test exercises the provider's reading of the
-    collector, not a hand-set attribute.
+    collector, not a hand-set attribute. The engine returns ``final_state``
+    whole when given one (the reports-sidecar tests), else a state holding
+    just ``decision_text``.
     """
     import uuid
 
@@ -273,6 +283,8 @@ def _usage_provider(monkeypatch, *, decision_text, completions, cap=4096, raise_
                 )
             if raise_from_engine is not None:
                 raise raise_from_engine
+            if final_state is not None:
+                return final_state, "signal"
             return {"final_trade_decision": decision_text}, "signal"
 
     monkeypatch.setattr(tg, "build_graph", lambda **kw: _FakeGraph(kw["callbacks"]))
@@ -538,6 +550,7 @@ def test_request_decision_writes_the_usage_sidecar_beside_the_payload(monkeypatc
     assert payload.read_bytes() == b"{}"  # the hash-locked payload is untouched
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     assert record == {
+        "schema": 1,
         "cap": 4096,
         "call_count": 2,
         "total_output_tokens": 4896,
@@ -570,7 +583,56 @@ def test_request_decision_writes_the_usage_sidecar_beside_the_payload(monkeypatc
     assert sorted(tmp_path.iterdir()) == before
 
 
-def test_a_sidecar_write_failure_is_logged_and_does_not_cost_the_decision(
+def test_request_decision_writes_the_reports_sidecar_beside_the_payload(monkeypatch, tmp_path):
+    # The replay plan's PR 0: the hook is wired in — what the agents wrote on
+    # the way to the decision lands next to the payload (the record's shape is
+    # pinned in tests/integration/test_decision_reports.py).
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        final_state={
+            "market_report": "market says up",
+            "final_trade_decision": f"```json\n{_DECISION_JSON}\n```",
+        },
+    )
+
+    parsed = provider.request_decision(
+        _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+    )
+
+    assert parsed.is_valid  # the decision itself is untouched by the recording
+    sidecar = tmp_path / "BTC-20260315T000000_000000Z.reports.json"
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["schema"] == 1
+    assert record["selected_analysts"] == []  # the stub provider's analyst list, verbatim
+    assert record["market_report"] == "market says up"
+    assert record["final_trade_decision"] == f"```json\n{_DECISION_JSON}\n```"
+    assert payload.read_bytes() == b"{}"  # the hash-locked payload is untouched
+
+
+def test_the_reports_sidecar_is_kept_for_a_cycle_that_fails_closed(monkeypatch, tmp_path):
+    # Written before the parse: a cycle whose target JSON is missing still
+    # keeps the reports that led there — that cycle is the one worth replaying.
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        final_state={"market_report": "market says up", "final_trade_decision": "no block here"},
+    )
+
+    parsed = provider.request_decision(
+        _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+    )
+
+    assert parsed.is_valid is False
+    record = json.loads(
+        (tmp_path / "BTC-20260315T000000_000000Z.reports.json").read_text(encoding="utf-8")
+    )
+    assert record["market_report"] == "market says up"
+
+
+def test_both_sidecar_write_failures_are_logged_in_order_and_neither_costs_the_decision(
     monkeypatch, tmp_path, caplog
 ):
     from pathlib import Path
@@ -593,9 +655,127 @@ def test_a_sidecar_write_failure_is_logged_and_does_not_cost_the_decision(
         )
 
     assert parsed.is_valid is True
+    # Both sidecars share the disk and the one writer: each failure is its own
+    # ERROR (usage first — written on the engine's exit — then the reports),
+    # and neither costs the decision.
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == [
+        "completion usage sidecar could not be written; the decision is unaffected",
+        "decision reports sidecar could not be written; the decision is unaffected",
+    ]
+    assert all(r.exc_info is not None for r in errors)  # the tracebacks travel with them
+
+
+def test_a_failure_in_the_usage_reporting_itself_is_the_wrappers_own_line(monkeypatch, caplog):
+    # The sidecar write moved under common.sidecar's own never-raise, so the
+    # wrapper's line now covers the rest of report_usage: the truncation scan
+    # and the log formatting. It must still be there, still with a traceback.
+    from contrib.hyperliquid_perp.integration.completion_usage import CompletionUsageCollector
+
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[_completion("Portfolio Manager", finish_reason="stop", output_tokens=500)],
+    )
+
+    def _boom(self):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(CompletionUsageCollector, "truncated_calls", _boom)
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+
+    assert parsed.is_valid is True
     (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert "completion usage could not be reported; the decision is unaffected" in error.getMessage()
-    assert error.exc_info is not None  # the traceback travels with it
+    assert error.getMessage() == "completion usage could not be reported; the decision is unaffected"
+    assert error.exc_info is not None
+
+
+def test_an_engine_failure_leaves_the_usage_sidecar_and_no_reports_sidecar(monkeypatch, tmp_path):
+    # The operator's pairing rule (RUNBOOK §5): usage without reports means
+    # the engine failed. It rests on two placements — report_usage in
+    # request_decision's finally, write_decision_reports after the shape
+    # guard — so pin the pairing on disk, not the placements.
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
+
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text="never reached",
+        completions=[_completion("Market Analyst", finish_reason="stop", output_tokens=100)],
+        raise_from_engine=RuntimeError("provider down"),
+    )
+
+    with pytest.raises(RetryableDecisionError):
+        provider.request_decision(
+            _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+        )
+
+    assert (tmp_path / "BTC-20260315T000000_000000Z.usage.json").exists()
+    assert not (tmp_path / "BTC-20260315T000000_000000Z.reports.json").exists()
+
+
+def test_a_drifted_engine_shape_leaves_the_same_pairing(monkeypatch, tmp_path):
+    # The other api_failed exit — propagate returned, but not the
+    # (final_state, signal) pair — lands after the finally too: same pairing.
+    import contrib.hyperliquid_perp.integration.trading_graph as tg
+    from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
+
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(monkeypatch, decision_text="never reached", completions=[])
+    built = tg.build_graph  # the stub installed by _usage_provider
+
+    class _OneValue:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def propagate(self, *a, **k):
+            self._inner.propagate(*a, **k)
+            return {"final_trade_decision": ""}  # a single dict, not a 2-tuple
+
+    monkeypatch.setattr(tg, "build_graph", lambda **kw: _OneValue(built(**kw)))
+
+    with pytest.raises(RetryableDecisionError):
+        provider.request_decision(
+            _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+        )
+
+    assert (tmp_path / "BTC-20260315T000000_000000Z.usage.json").exists()
+    assert not (tmp_path / "BTC-20260315T000000_000000Z.reports.json").exists()
+
+
+def test_a_logging_failure_in_report_usage_does_not_cost_the_usage_sidecar(
+    monkeypatch, tmp_path, caplog
+):
+    # The sidecar write sits in report_usage's finally: break the logging
+    # half (the per-call label) and the measurement still lands, beside the
+    # wrapper's own ERROR line.
+    import contrib.hyperliquid_perp.integration.completion_usage as cu
+
+    payload = tmp_path / "BTC-20260315T000000_000000Z.json"
+    payload.write_bytes(b"{}")
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[_completion("Portfolio Manager", finish_reason="length", output_tokens=4096)],
+    )
+
+    def _boom(call):
+        raise RuntimeError("label failed")
+
+    monkeypatch.setattr(cu, "_call_label", _boom)
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(
+            _decision_input(input_payload_path=str(payload), input_payload_hash="sha256:x")
+        )
+
+    assert parsed.is_valid is True
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "completion usage could not be reported; the decision is unaffected" in errors
+    sidecar = tmp_path / "BTC-20260315T000000_000000Z.usage.json"
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["call_count"] == 1
 
 
 def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):
@@ -625,6 +805,7 @@ def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):
 def test_the_runbook_names_the_truncation_tag_and_the_sidecar():
     # RUNBOOK §5 and the §7 table are where an operator meets these two
     # spellings; the code that emits them is the pin's other half.
+    from contrib.hyperliquid_perp.common.sidecar import SIDECAR_SCHEMA
     from contrib.hyperliquid_perp.domains.perp.target_decision import TRUNCATED_OUTPUT
 
     runbook = doc_text("RUNBOOK.md")
@@ -632,6 +813,13 @@ def test_the_runbook_names_the_truncation_tag_and_the_sidecar():
     assert "the decision completion was truncated" in runbook
     assert "completion truncated in <node>" in runbook
     assert "completion usage:" in runbook
+    # The sidecar contract's four operator-facing spellings (§5): both log
+    # templates and the stamp value, emitted by common.sidecar, and the
+    # reports sidecar's file name.
+    assert "sidecar could not be written; the decision is unaffected" in runbook
+    assert "value JSON cannot carry was stored as its str" in runbook
+    assert f"`schema: {SIDECAR_SCHEMA}`" in runbook
+    assert "`<payload>.reports.json`" in runbook
     assert "`<payload>.usage.json`" in runbook
     # The no-parse exit's two spellings: the ERROR line and the error_message
     # suffix the api_failed row carries (the code side is pinned by

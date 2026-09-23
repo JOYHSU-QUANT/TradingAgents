@@ -41,6 +41,7 @@ from .domains.perp import context_guards, risk_gate
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.prompt_context import context_shape, render_market_context
 from .domains.perp.target_decision import (
+    FINAL_TRADE_DECISION_KEY,
     decision_format_instructions,
     format_fingerprint,
     parse_target_decision,
@@ -414,7 +415,7 @@ def run_engine(config: dict, coin: str) -> int:
     decision_call = usage.last_call(PORTFOLIO_MANAGER_NODE)
     truncated = decision_call is not None and decision_call.truncated
     parsed = parse_target_decision(
-        final_state.get("final_trade_decision"), decision_cfg, truncated=truncated
+        final_state.get(FINAL_TRADE_DECISION_KEY), decision_cfg, truncated=truncated
     )
     if truncated:
         log_decision_truncation(decision_call, parsed, cap=cap)

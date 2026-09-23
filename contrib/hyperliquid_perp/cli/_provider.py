@@ -415,13 +415,14 @@ class _EngineDecisionProvider:
     def request_decision(self, decision_input):
         from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
 
-        from ..domains.perp.target_decision import parse_target_decision
+        from ..domains.perp.target_decision import FINAL_TRADE_DECISION_KEY, parse_target_decision
         from ..integration.completion_usage import (
             CompletionUsageCollector,
             log_decision_truncation,
             log_unparsed_decision_truncation,
             report_usage,
         )
+        from ..integration.decision_reports import write_decision_reports
         from ..integration.trading_graph import build_graph
         from ..runtime.decision import RetryableDecisionError
 
@@ -472,6 +473,16 @@ class _EngineDecisionProvider:
                 "server_error",
                 f"engine.propagate returned an unexpected shape ({type(propagated).__name__}){note}",
             )
+        # What the agents wrote on the way to the decision, beside the input
+        # payload (the replay plan's PR 0): before the parse, so a cycle whose
+        # target JSON fails closed still keeps the reports that led there.
+        # Never raises; the model saw no different text. Not reached on the
+        # two api_failed exits above — they have no final_state to record.
+        write_decision_reports(
+            propagated[0],
+            payload_path=decision_input.input_payload_path,
+            selected_analysts=self._analysts,
+        )
         # The decision completion's own stop reason decides ONE verdict: a
         # missing target JSON under a bound cap is recorded as truncated_output,
         # not invalid_output (issue #182) — the operator audits the cap number,
@@ -481,7 +492,7 @@ class _EngineDecisionProvider:
         decision_call = usage.last_call(PORTFOLIO_MANAGER_NODE)
         truncated = decision_call is not None and decision_call.truncated
         parsed = parse_target_decision(
-            propagated[0].get("final_trade_decision"), self._decision, truncated=truncated
+            propagated[0].get(FINAL_TRADE_DECISION_KEY), self._decision, truncated=truncated
         )
         if truncated:
             log_decision_truncation(decision_call, parsed, cap=cap)

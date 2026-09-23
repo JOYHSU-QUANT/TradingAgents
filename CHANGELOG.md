@@ -33,6 +33,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **`paper/accounting.py` splits: the account math, the two fill effects, the
+  run genesis and the accounting replay move to `runtime/accounting.py`**
+  (refactor plan v2, T1-d — PR 3 of the plan). `paper/accounting.py` keeps
+  the paper lane's transactional posting only: `post_fill`, `apply_fill`,
+  `record_funding` and `FundingResult`. The §6 formulas,
+  `FillEffect`/`compute_fill_effect`, `LiveFillEffect`/`compute_live_fill_effect`,
+  `PositionValuation`/`AccountMetrics`/`summarize_account`, `initialize_run`,
+  `LedgerDeltas`/`adjustment_ledger_delta` and
+  `ReplayResult`/`replay`/`replay_within` now live in
+  `contrib/hyperliquid_perp/runtime/accounting.py`. Two placements differ from
+  the plan's table: the live fill effect sits in `runtime/` rather than a new
+  `live/fill_effect.py`, because the shared replay folds live fills with it
+  and `runtime` may not import `live`; and `initialize_run` moves too, because
+  both CLI lanes call it and it takes the run's `mode`. Every importer reads
+  the new path. The four `paper/` compatibility modules PR 2 left (`clock`,
+  `market_feed`, `run_lock`, `position_facts`), the re-export names on
+  `paper.engine`, `paper.scheduler`, `paper.twap` and `paper.liquidation`,
+  and `tests/runtime/test_compat_paths.py` are deleted. No behaviour changes
+  and no message or error string changes; one logger name moves with the
+  code (plan §2 rule 2 exception): `initialize_run`'s non-positive-balance
+  warning now logs under `contrib.hyperliquid_perp.runtime.accounting`.
+  `docs/phase3-spec.md` §2.1 now names `runtime/` and `ports.py` as what the
+  lanes share; the layering ratchet's live→paper allowlist shrinks from 23
+  symbols to 13 (`paper/twap`, `paper/stops`, `prompt_regime_lines`), and
+  the persistence upward edge names `runtime.accounting.AccountMetrics` in
+  place of the `paper` one. `runtime/accounting.py` enters mypy's checked set
+  with no new pins (the module's one pre-existing error is in `apply_fill`,
+  which stays in `paper/`). Tests: `tests/paper/test_accounting.py` splits
+  along the module split, 25 tests to `tests/runtime/test_accounting.py` and
+  28 staying; the total falls by the two compat-path pins.
+
 - **A `runtime/` package for the execution kernel the paper and live lanes
   share** (refactor plan v2, T1 — PR 2 of the plan). `paper/clock.py`,
   `paper/market_feed.py`, `paper/run_lock.py`, `paper/position_facts.py`

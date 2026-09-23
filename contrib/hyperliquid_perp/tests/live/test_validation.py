@@ -21,10 +21,10 @@ from contrib.hyperliquid_perp.live.validation import (
     _StrandedAttempts,
     validate_live_run,
 )
-from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.no_decision import TrailingFailureStreaks
 
 from ..conftest import insert_decision_attempts, stamp_prompt_regimes

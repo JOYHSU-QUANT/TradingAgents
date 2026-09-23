@@ -795,8 +795,8 @@ def test_a_paper_sibling_is_not_a_conflict(tmp_path):
     import json
 
     from contrib.hyperliquid_perp.cli import _conflicting_run_lease
-    from contrib.hyperliquid_perp.paper import accounting
     from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+    from contrib.hyperliquid_perp.runtime import accounting
 
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)

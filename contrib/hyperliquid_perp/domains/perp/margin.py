@@ -73,7 +73,7 @@ def funding_cost(signed_position_notional: Decimal, funding_rate: Decimal) -> De
 
     Positive means the position PAYS: a long (positive notional) at a positive
     rate pays, a short receives. The ledger states the same quantity the other
-    way round — income positive — so ``paper.accounting.funding_pnl`` is this
+    way round — income positive — so ``runtime.accounting.funding_pnl`` is this
     negated, and the prompt's holding cost (``marginal_cost``) is this times
     the horizon it states. One formula, three readers: a sign that drifted in
     one copy would have the prompt calling a rebate a cost while the books

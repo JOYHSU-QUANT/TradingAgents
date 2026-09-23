@@ -44,12 +44,12 @@ from ..exchanges.hyperliquid.mapper import (
     optional_decimal,
     require_decimal,
 )
-from ..paper import accounting
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import exchange_fill_key, usable_fill_tid
 from ..persistence.models import DECIMAL_CONTEXT
 from ..ports import Clock
+from ..runtime import accounting
 from ..runtime.clock import WallClock
 from .fill_backfill import (
     DEFAULT_LOOKBACK,
@@ -2261,7 +2261,7 @@ class LiveReconciler:
         # identities the mode-agnostic ``validate`` recomputes over every
         # account_snapshots row (paper/validation.py _account_row_identities_ok,
         # under DECIMAL_CONTEXT). Derive them with the SAME canonical formulas
-        # the paper engine's writer uses (paper.accounting) under the SAME
+        # the paper engine's writer uses (runtime.accounting) under the SAME
         # pinned context — a hand-rolled expression here once stored an INVERTED
         # margin_ratio (maint/equity) and a duplicate of exchange_withdrawable,
         # which read as corruption to the auditor. The exchange's own figures

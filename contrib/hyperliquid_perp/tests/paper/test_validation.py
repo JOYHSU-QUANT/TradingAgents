@@ -17,13 +17,14 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
-from contrib.hyperliquid_perp.paper import accounting
+from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
 from contrib.hyperliquid_perp.paper.scheduler import PaperScheduler
 from contrib.hyperliquid_perp.paper.validation import validate_run
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 from contrib.hyperliquid_perp.runtime.decision import DecisionInput
@@ -212,7 +213,7 @@ def test_report_rejects_nonzero_unrealized_without_as_of():
 def test_orphan_fill_detected(tmp_path):
     db = _run_one_cycle_with_fill(tmp_path)
     # post_fill keeps the ledger consistent but references a non-existent order.
-    accounting.post_fill(
+    paper_accounting.post_fill(
         db,
         run_id="r",
         mode="paper",
@@ -572,7 +573,7 @@ def test_stale_pending_funding_warns_not_gates(tmp_path):
     from contrib.hyperliquid_perp.paper.reconcile import STALE_PENDING_FUNDING
 
     db = _run_one_cycle_with_fill(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -614,7 +615,7 @@ def test_stale_pending_funding_warns_not_gates(tmp_path):
 
 
 def _pending_funding_event(db, *, symbol="BTC", at=_T0):
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",

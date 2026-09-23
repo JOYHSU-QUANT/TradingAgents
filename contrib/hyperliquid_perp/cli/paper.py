@@ -192,13 +192,13 @@ def _cmd_paper(argv: list[str]) -> int:
             if _migrate_owned_store(db, run_id=run_id, now=clock.now()):
                 return 1
             from ..engine_bridge import EngineConfigError
-            from ..paper import accounting
             from ..paper.engine import PaperExecutionEngine
             from ..paper.reconcile import ReconciliationError, reconcile_on_restart
             from ..paper.scheduler import PaperScheduler
             from ..persistence import repository as repo
             from ..persistence.models import PositionState
             from ..persistence.schema import SCHEMA_VERSION
+            from ..runtime import accounting
             from ..runtime.market_feed import PortSnapshotProvider
 
             trading_halted = False

@@ -224,7 +224,7 @@ def posted_exchange_fee(exchange_fee: Decimal | None) -> Decimal:
     later correction folds from (``live.fills._effective_fee``, for
     ``backfill_fill_fee``), the out-of-order position re-fold
     (``live.fills._rebuild_position``), and the §5 replay's live fold
-    (``paper.accounting.replay_within``). Were the pending
+    (``runtime.accounting.replay_within``). Were the pending
     placeholder ever to change — say to an ESTIMATED fee — a copy left behind would
     have the backfill book ``new - 0`` against a ledger that had already taken the
     estimate, double-charging the fee; and replay would reproduce the double-charge
@@ -243,7 +243,7 @@ def require_live_fill_basis(fill: sqlite3.Row) -> Decimal:
 
     The one definition of the check, because the two live folds must agree on it:
     the out-of-order position re-fold (``live.fills._rebuild_position``) and the §5
-    replay's live fold (``paper.accounting.replay_within``). Were one to grow a
+    replay's live fold (``runtime.accounting.replay_within``). Were one to grow a
     fallback the other lacks, materialized and replayed state would diverge on
     exactly the row the check exists to catch.
     """

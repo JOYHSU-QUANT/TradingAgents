@@ -118,10 +118,10 @@ from ..common.config_coercion import int_from_yaml
 from ..common.constants import CYCLE_INTERVAL
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..common.instants import delta_ms, gap_label, parse_instant, whole_hours_label
-from ..paper import accounting
 from ..paper.validation import prompt_regime_lines
 from ..persistence import repository as repo
 from ..persistence.db import Database
+from ..runtime import accounting
 from ..runtime.no_decision import (
     NO_DECISION_STREAK_THRESHOLD,
     TrailingFailureStreaks,

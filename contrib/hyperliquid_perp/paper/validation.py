@@ -51,12 +51,12 @@ from ..common.prompt_regime import prompt_regime_line
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.models import DECIMAL_CONTEXT
+from ..runtime import accounting
 from ..runtime.no_decision import (
     TrailingFailureStreaks,
     no_decision_shortfall,
     trailing_failure_streaks,
 )
-from . import accounting
 from .reconcile import STALE_PENDING_FUNDING
 
 __all__ = [

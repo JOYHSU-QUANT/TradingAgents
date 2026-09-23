@@ -110,7 +110,7 @@ class _HistoryFundingSource:
 
 
 class _EngineDecisionProvider:
-    """Production :class:`~.paper.scheduler.DecisionProvider`: the TradingAgents engine.
+    """Production :class:`~.ports.DecisionProvider`: the TradingAgents engine.
 
     ``build_input`` fetches market data and persists the full payload JSON
     (phase2-data §5: SQLite keeps summary + path + hash); ``request_decision``

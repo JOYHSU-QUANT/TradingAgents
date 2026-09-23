@@ -41,17 +41,12 @@ from ..domains.perp.margin import (
 )
 from ..persistence.models import DECIMAL_CONTEXT
 
-# Re-exported: the tick is defined beside ``AssetSpec`` now (refactor plan v2,
-# T1); plan PR 3 drops the name here.
-from ..runtime.asset_spec import price_tick_from_sz_decimals
-
 __all__ = [
     "LIQUIDATION_MODEL_VERSION",
     "LiquidationEstimate",
     "MaintenanceSnapshot",
     "estimated_liquidation_price",
     "maintenance_snapshot",
-    "price_tick_from_sz_decimals",
 ]
 
 # Bump when the estimation math changes so recorded snapshots stay attributable.

@@ -99,22 +99,19 @@ from ..persistence.db import Database
 from ..persistence.ids import decision_attempt_id as derive_attempt_id
 from ..persistence.models import DECIMAL_CONTEXT
 from ..ports import Clock, DecisionProvider
+from ..runtime import accounting
 from ..runtime.asset_spec import AssetSpec
 from ..runtime.decision import DecisionInput, RetryableDecisionError
 from ..runtime.position_facts import read_books
-from . import accounting
 from .engine import PaperExecutionEngine, PlanStartResult
 
 __all__ = [
     "CYCLE_INTERVAL",
     "CycleEvent",
-    "DecisionInput",
-    "DecisionProvider",
     "MAX_DECISION_ATTEMPTS",
     "PaperScheduler",
     "PollResult",
     "RETRY_DELAYS_SECONDS",
-    "RetryableDecisionError",
     "parse_instant",
 ]
 
@@ -125,11 +122,8 @@ logger = logging.getLogger(__name__)
 # stay in ``__all__`` for the callers that always imported them from here
 # (issue #122 moved the definitions down so the freshness guard and the
 # no-decision policy could read them without importing this module — and, with
-# it, the whole paper engine). ``DecisionInput`` and ``RetryableDecisionError``
-# (``runtime.decision``) and ``DecisionProvider`` (``ports``) stay for the
-# same reason (refactor plan v2, T1-c; plan PR 3 drops them). The §3.1 retry
-# ladder: after the first failure wait 10s, after the second 30s, after the
-# third → api_failed.
+# it, the whole paper engine). The §3.1 retry ladder: after the first failure
+# wait 10s, after the second 30s, after the third → api_failed.
 MAX_DECISION_ATTEMPTS = 3
 RETRY_DELAYS_SECONDS = (10, 30)
 

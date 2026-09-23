@@ -43,7 +43,8 @@ from ..common.instants import parse_instant
 from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..ports import FundingSource
-from . import accounting
+from ..runtime import accounting
+from . import accounting as paper_accounting
 
 __all__ = [
     "STALE_PENDING_FUNDING",
@@ -378,7 +379,7 @@ def backfill_pending_funding(
                 )
                 continue
             try:
-                res = accounting.record_funding(
+                res = paper_accounting.record_funding(
                     db,
                     run_id=run_id,
                     mode=event["mode"],

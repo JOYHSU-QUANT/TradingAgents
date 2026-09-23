@@ -846,7 +846,7 @@ def test_load_live_gates_returns_the_raw_live_block_and_its_typed_view():
     assert load_live_gates(_full_config(risk={"leverage": 1})).live_cfg == gates.live_cfg
 
 
-def test_each_rung_refuses_with_its_own_stage():
+def test_no_live_block_and_paper_mode_refuse_with_their_own_stage():
     # 1. no live: block — the stage that carries no mode carries none
     refusal = _refusal(_full_config(live=None))
     assert (refusal.stage, refusal.mode) == (LiveGateStage.NO_LIVE_BLOCK, None)

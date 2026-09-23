@@ -853,8 +853,9 @@ def load_live_gates(
 
     ``config`` is :func:`~..config.load_config`'s output: a ``live:`` block it
     carries has already parsed there and passed the §24 ``risk:`` cross-check,
-    so the ladder re-runs neither (a block that does not parse raises
-    ``LiveConfig.from_dict``'s ``ValueError``, not a refusal). The rungs:
+    so neither is a rung here — the ladder calls ``LiveConfig.from_dict`` only
+    for the typed view (a block that does not parse raises its ``ValueError``,
+    not a refusal) and never reads ``risk:``. The rungs:
     1. a ``live:`` block exists; 2. ``live.mode`` is not ``paper``; 3. when
     ``modes`` is given, the mode is one of them. The first failing rung raises
     :class:`LiveGateRefusal`; nothing is printed here, because each command

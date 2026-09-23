@@ -67,10 +67,11 @@ Breaking changes within the 0.x line are called out explicitly.
   beside the timing preflight and is passed in. The factories resolve the
   classes on their modules at call time, so the existing CLI tests are
   unchanged. No behaviour changes; every refusal line a command can print
-  is the same bytes. Tests: `tests/live/test_wiring.py` gains five (the
-  gate's flags per `agent_authorized`, one monitor shared by switch and
-  reconciler, `suite_authored` reaching only the switch, the recovery call's
-  kwargs) and `tests/live/test_config.py` five (each rung's stage, a block
+  is the same bytes. Tests: `tests/live/test_wiring.py` gains five cases
+  (the gate's flags per `agent_authorized`, parametrized both ways; one
+  monitor shared by switch and reconciler; `suite_authored` reaching only
+  the switch; the recovery call's kwargs) and `tests/live/test_config.py`
+  five (each rung's stage, a block
   that does not parse being `load_config`'s error rather than a refusal,
   refusal order, the `modes` rung, the `risk:` block not being a rung);
   `tests/conftest.py`'s constructor recorder becomes the importable

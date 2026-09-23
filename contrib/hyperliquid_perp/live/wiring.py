@@ -7,13 +7,13 @@ the §18 kill switch, the §13 safe-mode machine, the fill processor and the
 constructor block: the sweep pair until issue #224, the rest until refactor
 plan v2's PR 4. A copy is where the two drift: issue #169 found the
 backfiller's ``fetch`` unguarded while the reconciler's ``fetch_fills`` — the
-SAME ``user_fills_by_time`` object — was refused at boot, exactly because each
-site named it twice; and the smoke restart tests (15–17) once ran the sweep
-unrefreshed because only the daemon's copy had been wired to the §18.2 hook
-(2026-07-31). Each factory here binds its seam once and hands it to both
-CLIs, so the two cannot disagree about what a recovery reads, and the §18.2
-refresh closure exists once rather than as a per-site definition that one
-site could forget.
+SAME ``user_fills_by_time`` seam — was refused at boot, exactly because each
+site named it twice; and wiring only the daemon's copy to the §18.2 hook would
+have left the smoke restart tests (15–17) running the sweep unrefreshed
+(2026-07-31 deadline review). Each factory here binds its seam once and hands
+it to both CLIs, so the two cannot disagree about what a recovery reads, and
+the §18.2 refresh closure exists once rather than as a per-site definition
+that one site could forget.
 
 The components are looked up on their modules at call time rather than bound
 at import: the wiring pins (``tests/conftest.py``

@@ -452,10 +452,17 @@ cap 的問題，不是那個 timeout。
 「8192 夠不夠」從此可量測——注意那個檔沒有任何列指向它，也**不在** `input_payload_hash`
 的契約內（payload 本體 bytes 被 hash 釘住，不能事後補寫）；`validate`、`export`、
 fingerprint backfill 都不讀它，刪掉或輪替 sidecar 不影響任何驗收判定，只會少掉那段量測。
-同一個目錄還有第二個 sidecar `<payload>.reports.json`：引擎在得出 `final_trade_decision`
-之前產出的分析師報告、辯論與 trader 計畫（九個固定 key，缺的是 `null`），留給之後的離線
-重放用。規則同 `.usage.json`——沒有列指向它、不在 hash 契約內、寫失敗只 log 不影響 cycle、
-模型看到的文字零改動（不 bump `PROMPT_VERSION`）。
+同一個目錄還有第二個 sidecar `<payload>.reports.json`：`selected_analysts`（這個 cycle 配了
+哪些分析師）加上引擎 `final_state` 的九個 key——四份分析師報告、兩場辯論、投資計畫、trader
+計畫、`final_trade_decision` 本文（缺的是 `null`；預設只開 market／social／news，所以
+`fundamentals_report` 每個 cycle 都是 `null`，`selected_analysts` 就是讓你分得出「沒選」
+與「選了但空」的那個欄位），留給之後的離線重放用。兩個 sidecar 同一套契約（`common/sidecar.py`）：
+每份記錄蓋 `schema: 1`、沒有列指向它、不在 hash 契約內、atomic 寫入、寫失敗只 log 不影響
+cycle；模型看到的文字零改動（不 bump `PROMPT_VERSION`）。兩個差別要知道：**`.reports.json`
+只在引擎真的回了 `final_state` 時才有**——`api_failed` 的 cycle 只留 `.usage.json`（那個寫在
+`finally`），所以「有 usage、沒 reports」是引擎失敗的 cycle，不是漏寫；以及它比 `.usage.json`
+大兩三個數量級（整段辯論逐字），4h 一份、一天約 0.3–1.2 MB，`payloads/<run-id>/` 目前沒有任何
+輪替，磁碟長期由它主導，要清就清 sidecar、別碰 payload 本體。
 
 ## 6. 驗收（約 5 天後）
 

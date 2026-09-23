@@ -305,18 +305,36 @@ Breaking changes within the 0.x line are called out explicitly.
   regime's three keys are unchanged and a deploy carrying this alone is not
   a segment point.
 
+  The record also carries `selected_analysts` — which analysts the engine was
+  configured with that cycle — because under the default `[market, social,
+  news]` the fundamentals report is `null` on every cycle and nothing in the
+  store says so per cycle; without it a reader cannot tell "not selected"
+  from "selected and empty". The nine key names mirror upstream `AgentState`
+  and a test pins them to it, so an upstream rename fails CI instead of
+  recording `null` quietly from then on. The sidecar is written only for a
+  cycle that got a `final_state` back: the two `api_failed` exits of
+  `request_decision` leave a `.usage.json` (written in the `finally`) with no
+  `.reports.json` beside it, and that pairing means "engine failed", not
+  "write lost".
+
   The second sidecar is where the shared writer appeared: those rules now
   live once, in `common/sidecar.py` (`sidecar_path`, `write_sidecar`), and
-  both sidecars go through it. Two consequences for the existing
-  `.usage.json`: it is now written atomically (`common/atomic_io.py` gained
-  `atomic_write_bytes`; a restart mid-write can no longer leave a truncated
-  file at the final path), and its write-failure log line reads
-  `completion usage sidecar could not be written; the decision is
-  unaffected` (was `… could not be reported …`; the wrapper's own line keeps
-  that wording for a failure in the logging itself). `digest.json_bytes`
+  both sidecars go through it. Every sidecar record is stamped
+  `"schema": 1` (`SIDECAR_SCHEMA`) so a later reader tells the format from a
+  successor's instead of guessing from which keys are present. `write_sidecar`
+  takes the record as a builder callable and calls it inside its own
+  never-raise, so a builder tripping over its input is a logged failure, not
+  a lost decision. Two consequences for the existing `.usage.json`: it is now
+  written atomically (`common/atomic_io.py` gained `atomic_write_bytes`; a
+  restart mid-write can no longer leave a truncated file at the final path),
+  and its write-failure log line reads `completion usage sidecar could not
+  be written; the decision is unaffected` (was `… could not be reported …`;
+  the wrapper's own line keeps that wording for a failure in the truncation
+  scan or the logging itself, and a test now pins that line). `digest.json_bytes`
   gained a pass-through `default=` so a value JSON cannot carry is stored as
-  its `str` at that leaf — digest-neutral, since it is never consulted for
-  input that already serialises.
+  its `str` at that leaf, with a WARNING naming the type so the degradation
+  is not silent — digest-neutral, since it is never consulted for input that
+  already serialises.
 
 - **CFTC Commitments of Traders positioning as a crypto news-analyst tool, off
   by default** (`tradingagents/dataflows/cftc_cot.py`, routed tool

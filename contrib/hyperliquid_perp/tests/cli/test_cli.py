@@ -550,6 +550,7 @@ def test_request_decision_writes_the_usage_sidecar_beside_the_payload(monkeypatc
     assert payload.read_bytes() == b"{}"  # the hash-locked payload is untouched
     record = json.loads(sidecar.read_text(encoding="utf-8"))
     assert record == {
+        "schema": 1,
         "cap": 4096,
         "call_count": 2,
         "total_output_tokens": 4896,
@@ -603,6 +604,8 @@ def test_request_decision_writes_the_reports_sidecar_beside_the_payload(monkeypa
     assert parsed.is_valid  # the decision itself is untouched by the recording
     sidecar = tmp_path / "BTC-20260315T000000_000000Z.reports.json"
     record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["schema"] == 1
+    assert record["selected_analysts"] == []  # the stub provider's analyst list, verbatim
     assert record["market_report"] == "market says up"
     assert record["final_trade_decision"] == f"```json\n{_DECISION_JSON}\n```"
     assert payload.read_bytes() == b"{}"  # the hash-locked payload is untouched
@@ -661,6 +664,31 @@ def test_a_sidecar_write_failure_is_logged_and_does_not_cost_the_decision(
         "decision reports sidecar could not be written; the decision is unaffected",
     ]
     assert all(r.exc_info is not None for r in errors)  # the tracebacks travel with them
+
+
+def test_a_failure_in_the_usage_reporting_itself_is_the_wrappers_own_line(monkeypatch, caplog):
+    # The sidecar write moved under common.sidecar's own never-raise, so the
+    # wrapper's line now covers the rest of report_usage: the truncation scan
+    # and the log formatting. It must still be there, still with a traceback.
+    from contrib.hyperliquid_perp.integration.completion_usage import CompletionUsageCollector
+
+    provider = _usage_provider(
+        monkeypatch,
+        decision_text=f"```json\n{_DECISION_JSON}\n```",
+        completions=[_completion("Portfolio Manager", finish_reason="stop", output_tokens=500)],
+    )
+
+    def _boom(self):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr(CompletionUsageCollector, "truncated_calls", _boom)
+    with caplog.at_level(logging.INFO, logger=_USAGE_LOGGER):
+        parsed = provider.request_decision(_decision_input())
+
+    assert parsed.is_valid is True
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert error.getMessage() == "completion usage could not be reported; the decision is unaffected"
+    assert error.exc_info is not None
 
 
 def test_usage_is_reported_even_when_the_engine_run_raises(monkeypatch, caplog):

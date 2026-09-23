@@ -32,6 +32,7 @@ from typing import Any
 from ...common.config_coercion import config_overrides, decimal_from_yaml, int_from_yaml
 
 __all__ = [
+    "FINAL_TRADE_DECISION_KEY",
     "INVALID_OUTPUT",
     "TRUNCATED_OUTPUT",
     "DecisionConfig",
@@ -55,6 +56,13 @@ __all__ = [
 # Kept apart so an operator reading the trail audits the cap, not the prompt.
 INVALID_OUTPUT = "invalid_output"
 TRUNCATED_OUTPUT = "truncated_output"
+
+# The ``final_state`` key this seam parses — upstream ``AgentState``'s field
+# name, spelled ONCE here for the two callers (``main.py``, ``cli/_provider``)
+# and the reports sidecar, and pinned to upstream by
+# ``tests/test_upstream_names.py``: a rename there must fail a test, not make
+# ``.get()`` return ``None`` and every cycle fail closed.
+FINAL_TRADE_DECISION_KEY = "final_trade_decision"
 
 
 class DecisionMode(str, Enum):

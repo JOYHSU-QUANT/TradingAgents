@@ -232,7 +232,10 @@ def report_usage(
                 cap,
             )
         write_sidecar(
-            payload_path, suffix=".usage.json", record=usage.to_record(cap=cap), what="completion usage"
+            payload_path,
+            suffix=".usage.json",
+            what="completion usage",
+            build=lambda: usage.to_record(cap=cap),
         )
     except Exception:  # noqa: BLE001 — measurement must never fail the cycle
         logger.exception("completion usage could not be reported; the decision is unaffected")

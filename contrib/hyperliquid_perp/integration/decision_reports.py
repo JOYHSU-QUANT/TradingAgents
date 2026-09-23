@@ -8,16 +8,22 @@ was read out of ``final_state``; the rest was dropped, so a past decision
 could not be replayed: the input payload holds the perp snapshot and the
 format text, not what the analysts saw that cycle (the replay plan's PR 0).
 This module keeps those reports beside the payload under the sidecar contract
-(:mod:`..common.sidecar`: not the payload, no row points at it, atomic, never
-raises). The model is shown no different text, so ``PROMPT_VERSION`` and the
-prompt regime's three keys are untouched.
+(:mod:`..common.sidecar`: not the payload, no row points at it, schema-stamped,
+atomic, never raises). The model is shown no different text, so
+``PROMPT_VERSION`` and the prompt regime's three keys are untouched.
+
+Written only for a cycle that got a ``final_state`` back: the two
+``api_failed`` exits of ``request_decision`` (the engine raised, or returned
+a drifted shape) have nothing to record, so a ``.usage.json`` with no
+``.reports.json`` beside it is an engine-failed cycle, not a lost write.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from ..common.sidecar import write_sidecar
+from ..domains.perp.target_decision import FINAL_TRADE_DECISION_KEY
 
 __all__ = ["REPORT_KEYS", "reports_record", "write_decision_reports"]
 
@@ -28,6 +34,9 @@ __all__ = ["REPORT_KEYS", "reports_record", "write_decision_reports"]
 #: key set and ``messages`` (LangChain objects) stays out. ``past_context``
 #: (the upstream memory log's injection) is left out too: the contrib does
 #: not enable that log, and the key is not something an agent wrote this cycle.
+#: These spell upstream ``AgentState``'s field names; ``tests/test_upstream_names.py``
+#: pins them to it so a rename there fails CI instead of quietly recording
+#: ``null`` forever. The last one is the parse seam's own key, shared.
 REPORT_KEYS: tuple[str, ...] = (
     "market_report",
     "sentiment_report",
@@ -37,22 +46,37 @@ REPORT_KEYS: tuple[str, ...] = (
     "investment_plan",
     "trader_investment_plan",
     "risk_debate_state",
-    "final_trade_decision",
+    FINAL_TRADE_DECISION_KEY,
 )
 
 
-def reports_record(final_state: Mapping[str, object]) -> dict[str, object]:
-    """The sidecar's shape: one entry per :data:`REPORT_KEYS`, ``None`` for a key
-    the state lacks, values as the engine left them (strings, and the two
-    debate states as dicts)."""
-    return {key: final_state.get(key) for key in REPORT_KEYS}
+def reports_record(
+    final_state: Mapping[str, object], *, selected_analysts: Sequence[str]
+) -> dict[str, object]:
+    """The sidecar's shape: ``selected_analysts`` — which analysts this cycle's
+    engine was configured with — then one entry per :data:`REPORT_KEYS`,
+    ``None`` for a key the state lacks, values as the engine left them
+    (strings, and the two debate states as dicts).
+
+    ``selected_analysts`` is what makes a ``null`` report legible: under the
+    default ``[market, social, news]`` the fundamentals report is ``null`` on
+    every cycle, and nothing in the store says so per cycle."""
+    return {
+        "selected_analysts": list(selected_analysts),
+        **{key: final_state.get(key) for key in REPORT_KEYS},
+    }
 
 
-def write_decision_reports(final_state: Mapping[str, object], *, payload_path: str | None) -> None:
+def write_decision_reports(
+    final_state: Mapping[str, object],
+    *,
+    payload_path: str | None,
+    selected_analysts: Sequence[str],
+) -> None:
     """Write ``<payload>.reports.json`` beside the input payload. Never raises."""
     write_sidecar(
         payload_path,
         suffix=".reports.json",
-        record=reports_record(final_state),
         what="decision reports",
+        build=lambda: reports_record(final_state, selected_analysts=selected_analysts),
     )

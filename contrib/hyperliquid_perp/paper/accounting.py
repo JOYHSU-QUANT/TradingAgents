@@ -23,6 +23,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
+from typing import TYPE_CHECKING
 
 from ..common.enum_guard import check_enum
 from ..domains.perp.margin import unrealized_pnl
@@ -30,7 +31,13 @@ from ..persistence import repository as repo
 from ..persistence.db import Database
 from ..persistence.ids import funding_event_id
 from ..persistence.models import DECIMAL_CONTEXT, AccountLedger, PositionState, Side
-from ..runtime.accounting import FillEffect, compute_fill_effect, funding_pnl
+
+# The two kernel formulas this module posts with: bound for use, not part of
+# this module's surface (``__all__`` below is).
+from ..runtime.accounting import compute_fill_effect, funding_pnl
+
+if TYPE_CHECKING:
+    from ..runtime.accounting import FillEffect
 
 __all__ = [
     "FundingResult",

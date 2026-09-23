@@ -48,9 +48,15 @@ Breaking changes within the 0.x line are called out explicitly.
   and `runtime` may not import `live`; and `initialize_run` moves too, because
   both CLI lanes call it and it takes the run's `mode`. Every importer reads
   the new path. The four `paper/` compatibility modules PR 2 left (`clock`,
-  `market_feed`, `run_lock`, `position_facts`), the re-export names on
-  `paper.engine`, `paper.scheduler`, `paper.twap` and `paper.liquidation`,
-  and `tests/runtime/test_compat_paths.py` are deleted. No behaviour changes
+  `market_feed`, `run_lock`, `position_facts`) and
+  `tests/runtime/test_compat_paths.py` are deleted; `paper.twap` and
+  `paper.liquidation` drop their re-export imports of the two `szDecimals`
+  helpers; `paper.engine` and `paper.scheduler` drop `AssetSpec`,
+  `FundingSource`, `DecisionInput`, `DecisionProvider` and
+  `RetryableDecisionError` from `__all__` (both still import those names for
+  their own use, so the old spelling resolves but is no longer advertised;
+  the live→paper ratchet, which counts import statements, is what keeps the
+  live lane off it). No behaviour changes
   and no message or error string changes; one logger name moves with the
   code (plan §2 rule 2 exception): `initialize_run`'s non-positive-balance
   warning now logs under `contrib.hyperliquid_perp.runtime.accounting`.

@@ -20,7 +20,6 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     decision_format_instructions,
     format_fingerprint,
 )
-from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.validation import validate_run
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.backfill import (
@@ -29,6 +28,7 @@ from contrib.hyperliquid_perp.persistence.backfill import (
 )
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.runtime import accounting
 
 from ..conftest import insert_decision_attempts, stamp_prompt_regimes, write_payload
 

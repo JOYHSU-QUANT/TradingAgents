@@ -13,10 +13,10 @@ from contrib.hyperliquid_perp.live.safe_mode import (
     REASON_WS_DISCONNECT,
     SafeModeManager,
 )
-from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
+from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)

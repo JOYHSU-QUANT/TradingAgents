@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
+from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.position_facts import BookFacts, BookPosition, read_books
 
 D = Decimal

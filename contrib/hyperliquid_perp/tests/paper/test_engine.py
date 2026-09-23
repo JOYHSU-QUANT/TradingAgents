@@ -21,10 +21,8 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
-from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import (
-    AssetSpec,
     EngineHaltedError,
     PaperExecutionEngine,
     TickEvent,
@@ -37,6 +35,8 @@ from contrib.hyperliquid_perp.paper.twap import PlanDisposition
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState, Side
+from contrib.hyperliquid_perp.runtime import accounting
+from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
 

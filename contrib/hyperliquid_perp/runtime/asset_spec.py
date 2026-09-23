@@ -1,9 +1,7 @@
 """The per-asset metadata an engine needs, and the precision steps behind it.
 
 :class:`AssetSpec` serves both lanes. Its two derived steps come from
-``szDecimals`` and nothing else, so their definitions live beside it;
-``paper/twap.py`` and ``paper/liquidation.py`` re-export them under the names
-they always had, until plan PR 3.
+``szDecimals`` and nothing else, so their definitions live beside it.
 """
 
 from __future__ import annotations

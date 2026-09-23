@@ -71,9 +71,10 @@ from ..persistence.db import Database
 from ..persistence.ids import fill_id as derive_fill_id, slice_id as derive_slice_id
 from ..persistence.models import PositionState, Side
 from ..ports import Clock, FundingSource, SnapshotProvider
+from ..runtime import accounting
 from ..runtime.asset_spec import AssetSpec
 from ..runtime.market_feed import SnapshotOutcome, SnapshotResult
-from . import accounting
+from . import accounting as paper_accounting
 from .config import PaperTradingConfig
 from .fill_model import fill_price, maker_post_price, maker_would_fill
 from .liquidation import (
@@ -92,13 +93,8 @@ from .twap import (
     split_flip_budget,
 )
 
-# ``AssetSpec`` and ``FundingSource`` are defined in ``runtime.asset_spec`` and
-# ``ports`` now (refactor plan v2, T1) and stay in ``__all__`` for the callers
-# that always imported them from here, until plan PR 3 drops them.
 __all__ = [
-    "AssetSpec",
     "EngineHaltedError",
-    "FundingSource",
     "PaperExecutionEngine",
     "PlanStartResult",
     "TickEvent",
@@ -1132,7 +1128,7 @@ class PaperExecutionEngine:
         h = self._last_funding_hour + timedelta(hours=1)
         while h <= now:
             rate = self._funding.rate_at(self._coin, h)
-            res = accounting.record_funding(
+            res = paper_accounting.record_funding(
                 self._db,
                 run_id=self._run_id,
                 mode=_MODE,
@@ -1357,7 +1353,7 @@ class PaperExecutionEngine:
         self, now, leg: _Leg, *, size, price, fee_rate, slice_id, fill_id, slice_index
     ) -> None:
         with self._db.transaction() as conn:
-            accounting.apply_fill(
+            paper_accounting.apply_fill(
                 conn,
                 run_id=self._run_id,
                 mode=_MODE,
@@ -1451,7 +1447,7 @@ class PaperExecutionEngine:
                 active_from=now,
                 timestamp=now,
             )
-            accounting.apply_fill(
+            paper_accounting.apply_fill(
                 conn,
                 run_id=self._run_id,
                 mode=_MODE,

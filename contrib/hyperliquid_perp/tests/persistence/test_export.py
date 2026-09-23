@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from contrib.hyperliquid_perp.common import atomic_io
-from contrib.hyperliquid_perp.paper import accounting
+from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.export import (
     EXPORT_SPECS,
@@ -19,6 +19,7 @@ from contrib.hyperliquid_perp.persistence.export import (
     ExportError,
     export_run,
 )
+from contrib.hyperliquid_perp.runtime import accounting
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -44,7 +45,7 @@ def _init(tmp_path) -> Database:
 
 
 def _post_one_fill(db) -> None:
-    accounting.post_fill(
+    paper_accounting.post_fill(
         db,
         run_id="r",
         mode="paper",

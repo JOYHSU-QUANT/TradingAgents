@@ -3,7 +3,7 @@
 Persistence / accounting (PR2):
 
 - :mod:`.config` — typed ``paper_trading:`` config (phase2-execution §5.4);
-- :mod:`.accounting` — fill / funding posting, account formulas, replay (§6);
+- :mod:`.accounting` — simulated fill / funding posting (§6);
 - :mod:`.liquidation` — estimated liquidation price over margin tiers (§6.6.1).
 
 Execution engine (PR3):
@@ -20,10 +20,9 @@ Scheduler / acceptance (PR4):
 - :mod:`.reconcile` — restart reconciliation (phase2-execution §1.2);
 - :mod:`.validation` — the spec §5 acceptance report and Phase-3 verdict.
 
-The injectable clock, the snapshot provider, the run lease and the books
-read are the live lane's too, and moved to :mod:`..runtime` (refactor plan
-v2, T1); ``clock``, ``market_feed``, ``run_lock`` and ``position_facts``
-here re-export them until plan PR 3 deletes the paths.
+The injectable clock, the snapshot provider, the run lease, the books read
+and the account math are the live lane's too and live in :mod:`..runtime`
+(refactor plan v2, T1).
 """
 
 from __future__ import annotations

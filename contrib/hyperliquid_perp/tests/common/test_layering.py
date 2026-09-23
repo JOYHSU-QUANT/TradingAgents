@@ -637,16 +637,6 @@ def _ratchet_message(what: str, found: set[str], frozen: frozenset[str]) -> str:
 
 _LIVE_PAPER_IMPORTS = frozenset(
     {
-        "paper.accounting.LiveFillEffect",
-        "paper.accounting.PositionValuation",
-        "paper.accounting.account_equity",
-        "paper.accounting.adjustment_ledger_delta",
-        "paper.accounting.available_balance",
-        "paper.accounting.compute_live_fill_effect",
-        "paper.accounting.effective_leverage",
-        "paper.accounting.margin_ratio",
-        "paper.accounting.replay_within",
-        "paper.accounting.summarize_account",
         "paper.stops.StopAction",
         "paper.stops.StopConfig",
         "paper.stops.round_to_tick",
@@ -669,7 +659,7 @@ _LIVE_PAPER_IMPORTS = frozenset(
 _PERSISTENCE_UPWARD_PACKAGES = ("paper", "runtime")
 _PERSISTENCE_UPWARD_IMPORTS = frozenset(
     {
-        "paper.accounting.AccountMetrics",
+        "runtime.accounting.AccountMetrics",
         "runtime.decision.DecisionInput",
     }
 )
@@ -736,7 +726,7 @@ def _module_read(node: ast.AST, modules: dict[str, str], root: Path) -> str | No
 
     The chain is followed only as far as the modules on disk go, plus one
     segment: ``accounting.AccountMetrics.from_row`` is a read of
-    ``paper.accounting.AccountMetrics``, and ``from_row`` is that class's
+    ``runtime.accounting.AccountMetrics``, and ``from_row`` is that class's
     business.
     """
     parts: list[str] = []

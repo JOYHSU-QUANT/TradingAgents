@@ -37,10 +37,6 @@ from enum import Enum
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..persistence.models import Side
 
-# Re-exported: the step is defined beside ``AssetSpec`` now (refactor plan v2,
-# T1); plan PR 3 drops the name here.
-from ..runtime.asset_spec import qty_step_from_sz_decimals
-
 __all__ = [
     "MAX_SLICES",
     "PLAN_LIFETIME_SECONDS",
@@ -52,7 +48,6 @@ __all__ = [
     "ceil_to_step",
     "floor_to_step",
     "min_order_qty",
-    "qty_step_from_sz_decimals",
     "rebalance_delta",
     "split_flip_budget",
 ]

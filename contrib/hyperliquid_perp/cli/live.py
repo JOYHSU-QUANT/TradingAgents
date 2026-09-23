@@ -443,10 +443,10 @@ def _live_startup_recovery(
         escalate_identity_fault,
     )
     from ..live.wiring import build_reconciliation
-    from ..paper import accounting
     from ..persistence import repository as repo
     from ..persistence.models import PositionState
     from ..persistence.schema import SCHEMA_VERSION
+    from ..runtime import accounting
     from ..runtime.run_lock import (
         RunLockError,
         acquire_run_lock,

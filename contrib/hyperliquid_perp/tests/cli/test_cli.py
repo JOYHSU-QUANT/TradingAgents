@@ -35,7 +35,7 @@ from contrib.hyperliquid_perp.common import store_layout
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext, TopOfBook
 from contrib.hyperliquid_perp.live.config import ExecutionMode
-from contrib.hyperliquid_perp.paper import accounting
+from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect, stored_schema_version
 from contrib.hyperliquid_perp.persistence.models import PositionState
@@ -44,6 +44,7 @@ from contrib.hyperliquid_perp.persistence.schema import (
     MIGRATIONS,
     SCHEMA_VERSION,
 )
+from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.decision import DecisionInput
 
 from ..conftest import (
@@ -1021,7 +1022,7 @@ def test_validate_exit_codes(tmp_path, capsys):
 
     # Integrity failure (orphan fill) -> 5 ("store is broken"), not 4.
     db = Database(path)
-    accounting.post_fill(
+    paper_accounting.post_fill(
         db,
         run_id="r",
         mode="paper",
@@ -1044,7 +1045,7 @@ def test_validate_exit_5_when_replay_raises(tmp_path, capsys):
     # "investigate the store" signal: exit 5 with a partial report (ledger
     # metrics n/a), not the generic exit-2 crash lane.
     path, db = _seed_db(tmp_path)
-    accounting.post_fill(
+    paper_accounting.post_fill(
         db,
         run_id="r",
         mode="paper",
@@ -1731,7 +1732,7 @@ def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams)
         reached.append(True)
         raise RuntimeError("stop right after the key check")
 
-    # cli lazy-imports `from .paper import accounting`; patch the module itself.
+    # cli lazy-imports `from ..runtime import accounting`; patch the module itself.
     monkeypatch.setattr(accounting, "initialize_run", _stop)
     # The provider pre-flight sits between the key check and initialize_run;
     # stub it so this test stays off the real tradingagents import.
@@ -1830,7 +1831,7 @@ def test_paper_resume_ignores_flat_off_coin_position(tmp_path, capsys, monkeypat
         schema_version=1,
         initial_positions=[PositionState(coin="ETH", size=D("0.1"), entry_price=D(3000))],
     )
-    accounting.post_fill(
+    paper_accounting.post_fill(
         db,
         run_id="r",
         mode="paper",
@@ -2335,7 +2336,7 @@ def test_mark_export_verification_writes_and_clears(tmp_path):
 def test_post_cycle_export_marks_unverified_on_replay_mismatch(tmp_path, monkeypatch):
     path, db = _seed_db(tmp_path)
     export_dir = tmp_path / "exp"
-    from contrib.hyperliquid_perp.paper import accounting as acc_mod
+    from contrib.hyperliquid_perp.runtime import accounting as acc_mod
 
     # Force a replay inconsistency without corrupting the store.
     monkeypatch.setattr(
@@ -2783,8 +2784,8 @@ def test_post_cycle_export_persists_status_breadcrumbs(tmp_path, monkeypatch):
 def test_post_cycle_export_persists_replay_breadcrumbs(tmp_path, monkeypatch):
     """Replay outcomes land durably on scheduler_state (ok/mismatch/failed lanes)."""
     from contrib.hyperliquid_perp.cli import _post_cycle_export
-    from contrib.hyperliquid_perp.paper import accounting as acc_mod
     from contrib.hyperliquid_perp.persistence.models import AccountLedger
+    from contrib.hyperliquid_perp.runtime import accounting as acc_mod
 
     path, db = _seed_db(tmp_path)
     out = tmp_path / "exports"

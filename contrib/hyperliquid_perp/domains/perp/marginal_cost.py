@@ -266,7 +266,7 @@ def build_position_context(
         # The §6.5 hourly formula by name, over the horizon this section
         # states. COST-signed: a long pays a positive rate, a short receives
         # it, so positive here = the position PAYS. The books state the same
-        # hour income-signed (``paper.accounting.funding_pnl``); one formula,
+        # hour income-signed (``runtime.accounting.funding_pnl``); one formula,
         # one negation, so the two cannot drift apart (issue #134).
         holding = funding_cost(state.signed_notional, funding_rate) * HOLDING_COST_HOURS
         rate = derive_round_trip_rate(pricing.taker_fee_rate, pricing.slippage_bps)

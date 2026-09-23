@@ -17,7 +17,10 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     TargetDecision,
     TargetSide,
 )
-from contrib.hyperliquid_perp.paper import accounting, reconcile as reconcile_module
+from contrib.hyperliquid_perp.paper import (
+    accounting as paper_accounting,
+    reconcile as reconcile_module,
+)
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
 from contrib.hyperliquid_perp.paper.reconcile import (
@@ -28,6 +31,7 @@ from contrib.hyperliquid_perp.paper.scheduler import parse_instant
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import AccountLedger
+from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider
@@ -154,7 +158,7 @@ def test_no_live_plan_means_no_forced_cycle(tmp_path):
 def test_pending_funding_backfills_exactly_once(tmp_path):
     db = _init(tmp_path)
     hour = _T0.replace(minute=0)
-    res = accounting.record_funding(
+    res = paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -198,7 +202,7 @@ def test_force_cycle_survives_crash_before_replay(tmp_path, monkeypatch):
     """
     db = _init(tmp_path)
     clock, plan_id = _engine_with_plan(db, slices_filled=1)  # non-flat, live plan
-    accounting.record_funding(  # a pending event so backfill has work to do
+    paper_accounting.record_funding(  # a pending event so backfill has work to do
         db,
         run_id="r",
         mode="paper",
@@ -235,7 +239,7 @@ def test_stale_pending_funding_escalates_to_error(tmp_path, caplog):
     )
 
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -269,7 +273,7 @@ def test_young_pending_funding_warns_not_errors(tmp_path, caplog):
     from contrib.hyperliquid_perp.paper.reconcile import backfill_pending_funding
 
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -289,7 +293,7 @@ def test_young_pending_funding_warns_not_errors(tmp_path, caplog):
 
 def test_pending_funding_stays_pending_without_rate(tmp_path):
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -388,11 +392,8 @@ def test_unknown_run_raises(tmp_path):
 
 def test_forced_cycle_fires_immediately_via_scheduler(tmp_path):
     from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
-    from contrib.hyperliquid_perp.paper.scheduler import (
-        CycleEvent,
-        DecisionInput,
-        PaperScheduler,
-    )
+    from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PaperScheduler
+    from contrib.hyperliquid_perp.runtime.decision import DecisionInput
 
     db = _init(tmp_path)
     clock, _plan_id = _engine_with_plan(db, slices_filled=1)
@@ -566,7 +567,7 @@ def test_backfill_contains_corrupt_stored_row(tmp_path, caplog):
     bad_hour = good_hour - timedelta(hours=1)
     db = _init(tmp_path)
     for hour in (bad_hour, good_hour):
-        accounting.record_funding(
+        paper_accounting.record_funding(
             db,
             run_id="r",
             mode="paper",
@@ -611,7 +612,7 @@ def test_backfill_reads_a_reader_failure_apart_from_a_corrupt_row(tmp_path, capl
     SQLite to hunt a fault that was in the code.
     """
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -649,7 +650,7 @@ def test_backfill_still_reads_a_corrupt_stored_timestamp_as_a_corrupt_row(tmp_pa
     # so. Both ends of the split are pinned — this one and the reader lane
     # above — because the whole point is that they differ.
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -690,7 +691,7 @@ def test_backfill_reads_a_wrong_typed_stored_cell_as_a_corrupt_row(tmp_path, cap
     reachable, and therefore worth having.
     """
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -725,7 +726,7 @@ def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatc
     says in its own words that this one is a defect to read the traceback for.
     """
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -746,7 +747,7 @@ def test_backfill_contains_a_failure_no_lane_claims(tmp_path, caplog, monkeypatc
         # outer lane exists for.
         raise RuntimeError("the reconciler asked accounting for something it no longer does")
 
-    monkeypatch.setattr(accounting, "record_funding", drifted)
+    monkeypatch.setattr(paper_accounting, "record_funding", drifted)
     with caplog.at_level(logging.ERROR):
         posted, still_pending = reconcile_module.backfill_pending_funding(
             db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
@@ -771,7 +772,7 @@ def test_backfill_names_a_result_status_it_has_no_verdict_for(tmp_path, caplog, 
     and says which word it did not know.
     """
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -785,7 +786,7 @@ def test_backfill_names_a_result_status_it_has_no_verdict_for(tmp_path, caplog, 
     class _GrownVocabulary:
         status = "reversed"
 
-    monkeypatch.setattr(accounting, "record_funding", lambda *a, **k: _GrownVocabulary())
+    monkeypatch.setattr(paper_accounting, "record_funding", lambda *a, **k: _GrownVocabulary())
     with caplog.at_level(logging.WARNING):
         posted, still_pending = reconcile_module.backfill_pending_funding(
             db, run_id="r", now=_T0, funding_source=_Rates(D("0.0001"))
@@ -814,7 +815,7 @@ def _raiser(exc):
 
 
 def _pending_event(db, *, timestamp=_T0):
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -886,9 +887,9 @@ def test_every_reachable_lane_records_why_the_event_stayed_pending(
     if break_store is not None:
         break_store(db)
     if break_call is not None:
-        monkeypatch.setattr(accounting, "record_funding", _raiser(break_call))
+        monkeypatch.setattr(paper_accounting, "record_funding", _raiser(break_call))
     if lane == "unknown_status":
-        monkeypatch.setattr(accounting, "record_funding", lambda *a, **k: _GrownVocabulary())
+        monkeypatch.setattr(paper_accounting, "record_funding", lambda *a, **k: _GrownVocabulary())
 
     posted, still_pending = reconcile_module.backfill_pending_funding(
         db, run_id="r", now=_T0, funding_source=source or _Rates(D("0.0001"))
@@ -1102,7 +1103,7 @@ def test_backfill_contains_a_store_error(tmp_path, caplog, monkeypatch):
 
     hour = _T0.replace(minute=0)
     db = _init(tmp_path)
-    accounting.record_funding(
+    paper_accounting.record_funding(
         db,
         run_id="r",
         mode="paper",
@@ -1116,7 +1117,7 @@ def test_backfill_contains_a_store_error(tmp_path, caplog, monkeypatch):
     def _locked(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(reconcile_mod.accounting, "record_funding", _locked)
+    monkeypatch.setattr(reconcile_mod.paper_accounting, "record_funding", _locked)
 
     with caplog.at_level(logging.ERROR):
         posted, still_pending = backfill_pending_funding(

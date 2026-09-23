@@ -34,7 +34,7 @@ def test_the_prompt_and_the_books_read_one_funding_hour_with_opposite_signs():
     # itself, which neither side's own arithmetic test can see.
     #
     # Hand-computed: a 250 USDC long at 1 bp/h pays 250 * 0.0001 = 0.025.
-    from contrib.hyperliquid_perp.paper.accounting import funding_pnl
+    from contrib.hyperliquid_perp.runtime.accounting import funding_pnl
 
     notional, rate = Decimal(250), Decimal("0.0001")
     assert funding_cost(notional, rate) == Decimal("0.025")  # cost-signed: it PAYS

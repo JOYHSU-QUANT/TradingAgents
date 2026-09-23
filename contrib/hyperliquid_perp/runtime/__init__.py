@@ -7,6 +7,8 @@ by design: the kernel may name the Hyperliquid adapter's error family
 (``exchanges.hyperliquid.errors``) directly, as the snapshot provider does to
 sort a raise into ERROR or DEFECT; a second venue is not in scope.
 
+- :mod:`.accounting` — the §6 account formulas, the two fill effects (modelled
+  and exchange-basis), the run genesis and the spec §5 accounting replay;
 - :mod:`.clock` — the two clocks behind the :class:`~..ports.Clock` seam;
 - :mod:`.market_feed` — market-data snapshots with freshness accounting, the
   providers behind :class:`~..ports.SnapshotProvider`;

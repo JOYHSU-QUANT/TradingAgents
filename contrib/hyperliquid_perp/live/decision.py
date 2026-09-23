@@ -45,10 +45,10 @@ from ..domains.perp.target_decision import (
     ParsedDecision,
     parse_target_decision,
 )
-from ..paper import accounting
 from ..persistence import audit_rows, ids, repository as repo
 from ..persistence.db import Database
 from ..ports import Clock, DecisionProvider
+from ..runtime import accounting
 from ..runtime.asset_spec import AssetSpec
 from ..runtime.clock import WallClock
 from ..runtime.decision import DecisionInput, RetryableDecisionError

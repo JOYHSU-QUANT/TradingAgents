@@ -33,11 +33,11 @@ from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.orders import OrderStatusReading, SubmitOutcomeKind
 from contrib.hyperliquid_perp.live.protection import ProtectionOutcome
 from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
-from contrib.hyperliquid_perp.paper import accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.cloid import cloid_hex as derive_cloid_hex
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState
+from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider, SnapshotOutcome

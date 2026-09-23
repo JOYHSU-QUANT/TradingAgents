@@ -40,7 +40,7 @@ from .models import DECIMAL_CONTEXT, PositionState
 if TYPE_CHECKING:
     from ..domains.perp.risk_gate import RiskGateResult
     from ..domains.perp.target_decision import ParsedDecision
-    from ..paper.accounting import AccountMetrics
+    from ..runtime.accounting import AccountMetrics
     from ..runtime.decision import DecisionInput
     from .models import AccountLedger
 

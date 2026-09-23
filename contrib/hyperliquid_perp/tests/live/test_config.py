@@ -821,7 +821,8 @@ def _full_config(**over) -> dict:
     """A config both live-mode commands accept; overrides replace whole blocks.
 
     ``risk:`` rides along as ``load_config`` would have left it: the ladder
-    never reads it, and the tests below prove that by dropping it.
+    never reads it, and the tests below prove that by dropping it. (No test
+    here drives ``load_config`` itself; its own rungs are pinned above.)
     """
     config = {"live": _live_block(), "risk": _raw_risk(RiskConfig())}
     config.update(over)
@@ -845,27 +846,27 @@ def test_load_live_gates_returns_the_raw_live_block_and_its_typed_view():
     assert load_live_gates(_full_config(risk={"leverage": 1})).live_cfg == gates.live_cfg
 
 
-def test_each_rung_refuses_with_its_own_stage_and_carries_the_parse_error():
-    # 1. no live: block — and the stages that carry nothing carry nothing
+def test_each_rung_refuses_with_its_own_stage():
+    # 1. no live: block — the stage that carries no mode carries none
     refusal = _refusal(_full_config(live=None))
-    assert (refusal.stage, refusal.detail, refusal.mode) == (LiveGateStage.NO_LIVE_BLOCK, "", None)
-    # 2. live: block that does not parse — the ValueError's text is the detail
-    refusal = _refusal(_full_config(live={"network": "testnet"}))
-    assert refusal.stage is LiveGateStage.INVALID_LIVE
-    assert refusal.detail == str(refusal.__cause__)
-    assert "live.mode is required" in refusal.detail
-    # 3. paper mode
+    assert (refusal.stage, refusal.mode) == (LiveGateStage.NO_LIVE_BLOCK, None)
+    # 2. paper mode
     refusal = _refusal(_full_config(live={"mode": "paper", "network": "testnet"}))
     assert refusal.stage is LiveGateStage.PAPER_MODE
     assert refusal.mode is ExecutionMode.PAPER
-    # A refusal is not the ValueError it wraps: an ``except ValueError``
-    # around the ladder must not swallow it.
+    # A refusal is not a config ValueError: an ``except ValueError`` around
+    # the ladder must not swallow it.
     assert not isinstance(refusal, ValueError)
 
 
+def test_a_block_that_does_not_parse_is_load_configs_error_not_a_refusal():
+    # The ladder takes load_config's output, where the block has already
+    # parsed; a hand-built config that skipped it gets from_dict's own error.
+    with pytest.raises(ValueError, match="live.mode is required"):
+        load_live_gates(_full_config(live={"network": "testnet"}))
+
+
 def test_the_rungs_refuse_in_order_so_the_first_fault_is_the_one_named():
-    # Missing live block AND unparseable-if-present: the first rung names it.
-    assert _refusal({}).stage is LiveGateStage.NO_LIVE_BLOCK
     # Paper mode AND a mode restriction it also fails: the paper rung wins.
     config = _full_config(live={"mode": "paper", "network": "testnet"})
     assert _refusal(config, modes=(ExecutionMode.TESTNET_LIVE,)).stage is LiveGateStage.PAPER_MODE

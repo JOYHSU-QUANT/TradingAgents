@@ -12,6 +12,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..common import store_layout
 from ._common import (
@@ -31,10 +32,13 @@ from .live_shared import (
     _timing_preflight,
 )
 
+if TYPE_CHECKING:
+    from ..live.config import LiveGateRefusal
+
 logger = logging.getLogger(__name__)
 
 
-def _gate_refusal_wording(refusal) -> str:
+def _gate_refusal_wording(refusal: LiveGateRefusal) -> str:
     """This command's operator wording for each rung of ``load_live_gates`` it can hit.
 
     ``live`` passes no ``modes`` (every live mode is its business), so the
@@ -47,13 +51,12 @@ def _gate_refusal_wording(refusal) -> str:
             "config has no live: block — the live subcommand needs one "
             "(phase3-spec §4). Add it to the YAML and re-run."
         ),
-        Stage.INVALID_LIVE: "invalid live: config — {detail}. Fix the YAML and re-run.",
         Stage.PAPER_MODE: (
             "live.mode is 'paper' — use the paper subcommand for paper "
             "runs; the live subcommand needs testnet_live or mainnet_tiny."
         ),
     }
-    return wording[refusal.stage].format(detail=refusal.detail)
+    return wording[refusal.stage]
 
 
 def _cmd_live(argv: list[str]) -> int:

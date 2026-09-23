@@ -3,14 +3,17 @@
 ``live --run-id`` and ``live-smoke`` each construct the same components over
 one signed client — a runtime-armed gate, the §13.5 venue-identity monitor,
 the §18 kill switch, the §13 safe-mode machine, the fill processor and the
-§19.1 sweep pair — and until issue #224 each did it by hand, as two copies of
-the same constructor block. A copy is where the two drift: issue #169 found
-the backfiller's ``fetch`` unguarded while the reconciler's ``fetch_fills`` —
-the SAME ``user_fills_by_time`` object — was refused at boot, exactly because
-each site named it twice. Each factory here binds its seam once and hands it
-to both CLIs, so the two cannot disagree about what a recovery reads, and the
-§18.2 refresh closure exists once rather than as a per-site definition that
-one site could forget.
+§19.1 sweep pair — and each did it by hand, as two copies of the same
+constructor block: the sweep pair until issue #224, the rest until refactor
+plan v2's PR 4. A copy is where the two drift: issue #169 found the
+backfiller's ``fetch`` unguarded while the reconciler's ``fetch_fills`` — the
+SAME ``user_fills_by_time`` object — was refused at boot, exactly because each
+site named it twice; and the smoke restart tests (15–17) once ran the sweep
+unrefreshed because only the daemon's copy had been wired to the §18.2 hook
+(2026-07-31). Each factory here binds its seam once and hands it to both
+CLIs, so the two cannot disagree about what a recovery reads, and the §18.2
+refresh closure exists once rather than as a per-site definition that one
+site could forget.
 
 The components are looked up on their modules at call time rather than bound
 at import: the wiring pins (``tests/conftest.py``
@@ -69,8 +72,7 @@ def build_signed_client(
     ``agent_authorized`` is the only gate flag set at construction — True
     only once :func:`~.authorization.verify_agent_authorization` passed for
     this key and wallet (§6.1); every other flag starts fail-closed and is
-    proven at runtime (§19.1). ``timeout`` is the read client's, so both
-    transports share one §18.2 timing budget.
+    proven at runtime (§19.1). ``timeout`` is the read client's.
     """
     gate = order_gate_mod.RealOrderGate.from_config(live_cfg)
     gate.agent_authorized = agent_authorized
@@ -88,9 +90,10 @@ def build_signed_client(
 class LiveSession:
     """The components one live-mode process runs its §19.1 recovery over.
 
-    Built by :func:`build_live_session`. The daemon keeps its session for the
-    ``--loop`` hand-off and the §18.2 shutdown sweep; the smoke suite builds
-    one per recovery it runs (the pre-flight and restart tests 15–17).
+    Built by :func:`build_live_session`. The daemon reads the components back
+    off its session for the ``--loop`` hand-off and the §18.2 shutdown sweep;
+    the smoke suite builds one per recovery it runs (the pre-flight and
+    restart tests 15–17).
     """
 
     signed: HyperliquidSignedClient
@@ -143,9 +146,9 @@ def build_live_session(
     switch explicitly, never probed off the client. ``suite_authored`` marks
     the switch's rows as the smoke suite's (see
     :class:`~.kill_switch.KillSwitchManager`). One venue-identity monitor per
-    session (§13.5), shared by the switch, the reconciler and the loop's
-    protection manager; the processor carries the signed wallet so its
-    envelope-identity check is armed.
+    session (§13.5), shared by the switch and the reconciler (the daemon hands
+    the same one to the loop's protection manager); the processor carries the
+    signed wallet so its envelope-identity check is armed.
     """
     identity = venue_identity_mod.VenueIdentityMonitor(
         query_order_by_cloid=signed.query_order_by_cloid,

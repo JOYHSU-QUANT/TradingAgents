@@ -8,6 +8,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from ..common import store_layout
 from ._common import (
@@ -26,14 +27,16 @@ from .live_shared import (
     _timing_preflight,
 )
 
+if TYPE_CHECKING:
+    from ..live.config import LiveGateRefusal
 
-def _gate_refusal_wording(refusal) -> str:
+
+def _gate_refusal_wording(refusal: LiveGateRefusal) -> str:
     """This command's operator wording for each rung of ``load_live_gates``."""
     from ..live.config import LiveGateStage as Stage
 
     wording = {
         Stage.NO_LIVE_BLOCK: "config has no live: block — live-smoke needs one (phase3-spec §4).",
-        Stage.INVALID_LIVE: "invalid live: config — {detail}. Fix the YAML and re-run.",
         Stage.PAPER_MODE: "live.mode is 'paper' — the smoke suite is a live-mode tool.",
         Stage.MODE_NOT_ACCEPTED: (
             "live-smoke runs only against a testnet_live run — live.mode is "
@@ -42,7 +45,7 @@ def _gate_refusal_wording(refusal) -> str:
         ),
     }
     mode = "" if refusal.mode is None else refusal.mode.value
-    return wording[refusal.stage].format(detail=refusal.detail, mode=mode)
+    return wording[refusal.stage].format(mode=mode)
 
 
 def _cmd_live_smoke(argv: list[str]) -> int:

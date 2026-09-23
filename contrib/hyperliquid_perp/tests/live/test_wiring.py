@@ -1,8 +1,8 @@
 """``live.wiring`` — the one place both live-mode CLIs build their components (issue #224).
 
-The two CLI sites pin that they GO THROUGH the factories and hand them the
-right inputs (``tests/cli/test_cli.py``, ``tests/cli/test_smoke.py``, over the
-shared recorder in ``tests/conftest.py``); this file pins what the factories
+The CLI drives pin what each command builds and hands its components
+(``tests/cli/test_cli.py``, ``tests/cli/test_smoke.py``, over the shared
+recorder in ``tests/conftest.py``); this file pins what the factories
 themselves bind.
 """
 
@@ -144,7 +144,7 @@ def test_the_signed_client_is_bound_to_a_fresh_gate_carrying_the_one_flag(monkey
     seen: list[tuple[tuple, dict]] = []
 
     class _FakeSigned:
-        def __init__(self, network, agent_key, *, wallet_address, gate, timeout=None):
+        def __init__(self, network, agent_key, *, wallet_address, gate, timeout):
             seen.append(
                 (
                     (network, agent_key),
@@ -204,7 +204,8 @@ def _session(tmp_path, monkeypatch, **over) -> tuple[dict, LiveSession, dict[str
         "live_cfg": _live_cfg(),
         "fetch_clearinghouse": lambda: {},
         "payload_dir": tmp_path / "payloads",
-        # 30 (interval) + 20 (tick) + 8 (timeout) + 15 (backoff) + 20 = 93 < 120.
+        # 30 (interval) + 20 (tick) + 8 (timeout) + 8 (backoff = min(timeout, 15))
+        # + 20 (retry's tick) = 86 < 120 (``kill_switch_timing_violation``).
         "max_tick_gap_seconds": 20.0,
         **over,
     }

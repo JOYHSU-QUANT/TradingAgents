@@ -821,7 +821,6 @@ class LiveGateStage(str, Enum):
     """Which rung of :func:`load_live_gates` refused the config."""
 
     NO_LIVE_BLOCK = "no_live_block"
-    INVALID_LIVE = "invalid_live"
     PAPER_MODE = "paper_mode"
     MODE_NOT_ACCEPTED = "mode_not_accepted"
 
@@ -829,17 +828,13 @@ class LiveGateStage(str, Enum):
 class LiveGateRefusal(Exception):
     """One rung of :func:`load_live_gates` refused; the caller words it.
 
-    ``stage`` names the rung. ``detail`` is the text of the ``ValueError``
-    the ``INVALID_LIVE`` rung caught, empty for the rest. ``mode`` is the
-    parsed ``live.mode`` on the two mode rungs, None on the rest.
+    ``stage`` names the rung. ``mode`` is the parsed ``live.mode`` on the two
+    mode rungs, None on the first.
     """
 
-    def __init__(
-        self, stage: LiveGateStage, *, detail: str = "", mode: ExecutionMode | None = None
-    ) -> None:
-        super().__init__(f"{stage.value}: {detail}" if detail else stage.value)
+    def __init__(self, stage: LiveGateStage, *, mode: ExecutionMode | None = None) -> None:
+        super().__init__(stage.value)
         self.stage = stage
-        self.detail = detail
         self.mode = mode
 
 
@@ -856,22 +851,19 @@ def load_live_gates(
 ) -> LiveGates:
     """The config gates ``live`` and ``live-smoke`` share, in refusal order.
 
-    1. a ``live:`` block exists; 2. it parses (:meth:`LiveConfig.from_dict`);
-    3. ``live.mode`` is not ``paper``; 4. when ``modes`` is given, the mode is
-    one of them (the smoke suite accepts ``testnet_live`` alone). The first
-    failing rung raises :class:`LiveGateRefusal`; nothing is printed here,
-    because each command words the same refusal with its own remedy and
-    RUNBOOK pins the words. The ``risk:`` block and its §24 cross-check
-    against ``live.safety`` are :func:`~..config.load_config`'s, run on every
-    load that carries a ``live:`` block, so the ladder does not repeat them.
+    ``config`` is :func:`~..config.load_config`'s output: a ``live:`` block it
+    carries has already parsed there and passed the §24 ``risk:`` cross-check,
+    so the ladder re-runs neither (a block that does not parse raises
+    ``LiveConfig.from_dict``'s ``ValueError``, not a refusal). The rungs:
+    1. a ``live:`` block exists; 2. ``live.mode`` is not ``paper``; 3. when
+    ``modes`` is given, the mode is one of them. The first failing rung raises
+    :class:`LiveGateRefusal`; nothing is printed here, because each command
+    words the same refusal with its own remedy.
     """
     raw_live = config.get("live")
     if raw_live is None:
         raise LiveGateRefusal(LiveGateStage.NO_LIVE_BLOCK)
-    try:
-        live_cfg = LiveConfig.from_dict(raw_live)
-    except ValueError as exc:
-        raise LiveGateRefusal(LiveGateStage.INVALID_LIVE, detail=str(exc)) from exc
+    live_cfg = LiveConfig.from_dict(raw_live)
     if live_cfg.mode is ExecutionMode.PAPER:
         raise LiveGateRefusal(LiveGateStage.PAPER_MODE, mode=live_cfg.mode)
     if modes is not None and live_cfg.mode not in modes:

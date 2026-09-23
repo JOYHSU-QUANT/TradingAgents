@@ -51,12 +51,12 @@ Breaking changes within the 0.x line are called out explicitly.
   `market_feed`, `run_lock`, `position_facts`) and
   `tests/runtime/test_compat_paths.py` are deleted; `paper.twap` and
   `paper.liquidation` drop their re-export imports of the two `szDecimals`
-  helpers; `paper.engine` and `paper.scheduler` drop `AssetSpec`,
-  `FundingSource`, `DecisionInput`, `DecisionProvider` and
-  `RetryableDecisionError` from `__all__` (both still import those names for
-  their own use, so the old spelling resolves but is no longer advertised;
-  the live→paper ratchet, which counts import statements, is what keeps the
-  live lane off it). No behaviour changes
+  helpers; `paper.engine` drops `AssetSpec` and `FundingSource` from its
+  `__all__`, and `paper.scheduler` drops `DecisionInput`, `DecisionProvider`
+  and `RetryableDecisionError` from its own (each module still imports its
+  own names for its own use, so those spellings resolve but are no longer
+  advertised; the live→paper ratchet, which counts import statements, is
+  what keeps the live lane off them). No behaviour changes
   and no message or error string changes; one logger name moves with the
   code (plan §2 rule 2 exception): `initialize_run`'s non-positive-balance
   warning now logs under `contrib.hyperliquid_perp.runtime.accounting`.

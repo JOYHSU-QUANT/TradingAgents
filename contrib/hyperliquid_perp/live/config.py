@@ -11,10 +11,11 @@ runtime surprise. Also home to the §5 notional-cap math
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
 from enum import Enum
+from typing import Any
 
 from ..common.config_coercion import (
     bool_from_yaml,
@@ -39,6 +40,9 @@ __all__ = [
     "KillSwitchConfig",
     "LiveConfig",
     "LiveExecutionConfig",
+    "LiveGateRefusal",
+    "LiveGateStage",
+    "LiveGates",
     "LiveProtectionConfig",
     "LiveSafetyConfig",
     "LiveWebsocketConfig",
@@ -47,6 +51,7 @@ __all__ = [
     "ShutdownPolicy",
     "TpFailureMode",
     "compute_notional_caps",
+    "load_live_gates",
     "validate_live_risk_consistency",
 ]
 
@@ -807,3 +812,61 @@ def validate_live_risk_consistency(
             "the live cap would advertise headroom the AI gate can never approve; "
             "a tighter live cap is fine, a looser one is a config mistake"
         )
+
+
+# ── The config ladder every live-mode command climbs ─────────────────────────
+
+
+class LiveGateStage(str, Enum):
+    """Which rung of :func:`load_live_gates` refused the config."""
+
+    NO_LIVE_BLOCK = "no_live_block"
+    PAPER_MODE = "paper_mode"
+    MODE_NOT_ACCEPTED = "mode_not_accepted"
+
+
+class LiveGateRefusal(Exception):
+    """One rung of :func:`load_live_gates` refused; the caller words it.
+
+    ``stage`` names the rung. ``mode`` is the parsed ``live.mode`` on the two
+    mode rungs, None on the first.
+    """
+
+    def __init__(self, stage: LiveGateStage, *, mode: ExecutionMode | None = None) -> None:
+        super().__init__(stage.value)
+        self.stage = stage
+        self.mode = mode
+
+
+@dataclass(frozen=True)
+class LiveGates:
+    """What :func:`load_live_gates` proved: the raw ``live:`` block and its typed view."""
+
+    raw_live: dict
+    live_cfg: LiveConfig
+
+
+def load_live_gates(
+    config: Mapping[str, Any], *, modes: Collection[ExecutionMode] | None = None
+) -> LiveGates:
+    """The config gates ``live`` and ``live-smoke`` share, in refusal order.
+
+    ``config`` is :func:`~..config.load_config`'s output: a ``live:`` block it
+    carries has already parsed there and passed the §24 ``risk:`` cross-check,
+    so neither is a rung here — the ladder calls ``LiveConfig.from_dict`` only
+    for the typed view (a block that does not parse raises its ``ValueError``,
+    not a refusal) and never reads ``risk:``. The rungs:
+    1. a ``live:`` block exists; 2. ``live.mode`` is not ``paper``; 3. when
+    ``modes`` is given, the mode is one of them. The first failing rung raises
+    :class:`LiveGateRefusal`; nothing is printed here, because each command
+    words the same refusal with its own remedy.
+    """
+    raw_live = config.get("live")
+    if raw_live is None:
+        raise LiveGateRefusal(LiveGateStage.NO_LIVE_BLOCK)
+    live_cfg = LiveConfig.from_dict(raw_live)
+    if live_cfg.mode is ExecutionMode.PAPER:
+        raise LiveGateRefusal(LiveGateStage.PAPER_MODE, mode=live_cfg.mode)
+    if modes is not None and live_cfg.mode not in modes:
+        raise LiveGateRefusal(LiveGateStage.MODE_NOT_ACCEPTED, mode=live_cfg.mode)
+    return LiveGates(raw_live=raw_live, live_cfg=live_cfg)

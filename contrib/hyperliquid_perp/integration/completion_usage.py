@@ -203,10 +203,12 @@ def report_usage(
     is enough" was a guess nothing measured).
 
     The sidecar follows ``common.sidecar``'s contract (beside the payload, not
-    the payload, no row points at it, atomic, never raises); it is a durable
-    measurement artifact, not an audit-trail contract. The logging here never
-    raises either — a measurement failure must not cost the decision the
-    engine already paid for.
+    the payload, no row points at it, schema-stamped, atomic, never raises);
+    it is a durable measurement artifact, not an audit-trail contract. It is
+    written in the ``finally`` so a failure in the logging above it — which
+    never raises either, but is the non-durable half — cannot cost the
+    measurement: a measurement failure must not cost the decision the engine
+    already paid for, and a log failure must not cost the measurement.
     """
     try:
         truncated = usage.truncated_calls()
@@ -231,14 +233,15 @@ def report_usage(
                 call.output_tokens,
                 cap,
             )
+    except Exception:  # noqa: BLE001 — measurement must never fail the cycle
+        logger.exception("completion usage could not be reported; the decision is unaffected")
+    finally:
         write_sidecar(
             payload_path,
             suffix=".usage.json",
             what="completion usage",
             build=lambda: usage.to_record(cap=cap),
         )
-    except Exception:  # noqa: BLE001 — measurement must never fail the cycle
-        logger.exception("completion usage could not be reported; the decision is unaffected")
 
 
 def log_decision_truncation(call: CompletionCall, parsed: ParsedDecision, *, cap: int | None) -> None:

@@ -295,8 +295,8 @@ Breaking changes within the 0.x line are called out explicitly.
   and its verdict, the trader's plan, the risk debate — was dropped, so a
   past decision could not be replayed: the input payload holds the perp
   snapshot and the format text, not what the analysts saw that cycle. The
-  provider now writes `<payload>.reports.json` (nine fixed keys, `null` for
-  one the state lacks) next to the payload and its `.usage.json` sidecar,
+  provider now writes `<payload>.reports.json` (`schema`, `selected_analysts`,
+  then nine fixed keys, `null` for one the state lacks) next to the payload and its `.usage.json` sidecar,
   before the parse, so a fail-closed cycle keeps the reports that led there.
   Same rules as the usage sidecar: no row points at it, it is outside the
   `input_payload_hash` contract, `validate`/`export`/the fingerprint backfill
@@ -310,8 +310,16 @@ Breaking changes within the 0.x line are called out explicitly.
   news]` the fundamentals report is `null` on every cycle and nothing in the
   store says so per cycle; without it a reader cannot tell "not selected"
   from "selected and empty". The nine key names mirror upstream `AgentState`
-  and a test pins them to it, so an upstream rename fails CI instead of
-  recording `null` quietly from then on. The sidecar is written only for a
+  and `tests/test_upstream_names.py` pins them to it, so an upstream rename
+  fails CI instead of recording `null` quietly from then on; the same file
+  pins the parse seam's key (now the one constant
+  `target_decision.FINAL_TRADE_DECISION_KEY`, used by `main.py`,
+  `cli/_provider.py` and the sidecar), the `DEFAULT_CONFIG` keys
+  `engine_bridge` writes onto its copy (a write on a renamed key would leave
+  the engine on its own default, `structured_output` back on), and the
+  `asset_type == "crypto"` comparison the upstream crypto branches make — the
+  three other places where an upstream rename would fail silently rather
+  than loudly. The sidecar is written only for a
   cycle that got a `final_state` back: the two `api_failed` exits of
   `request_decision` leave a `.usage.json` (written in the `finally`) with no
   `.reports.json` beside it, and that pairing means "engine failed", not
@@ -330,11 +338,16 @@ Breaking changes within the 0.x line are called out explicitly.
   and its write-failure log line reads `completion usage sidecar could not
   be written; the decision is unaffected` (was `… could not be reported …`;
   the wrapper's own line keeps that wording for a failure in the truncation
-  scan or the logging itself, and a test now pins that line). `digest.json_bytes`
-  gained a pass-through `default=` so a value JSON cannot carry is stored as
-  its `str` at that leaf, with a WARNING naming the type so the degradation
-  is not silent — digest-neutral, since it is never consulted for input that
-  already serialises.
+  scan or the logging itself, and a test now pins that line; the sidecar
+  write sits in that wrapper's `finally`, so a logging failure cannot cost
+  the measurement). `digest.json_bytes` gained a pass-through `default=`,
+  digest-neutral since it is never consulted for input that already
+  serialises; `write_sidecar` uses it to store a value JSON cannot carry as
+  its `str` at that leaf and logs one WARNING per type per write naming it,
+  so the degradation is not silent. A builder that returns its own `schema`
+  key is refused (logged, nothing written): the stamp is the contract's, not
+  the writer's. A `.usage.json` with no `schema` key is one written before
+  this change (paper-BTC runs up to 6), same shape minus the stamp.
 
 - **CFTC Commitments of Traders positioning as a crypto news-analyst tool, off
   by default** (`tradingagents/dataflows/cftc_cot.py`, routed tool

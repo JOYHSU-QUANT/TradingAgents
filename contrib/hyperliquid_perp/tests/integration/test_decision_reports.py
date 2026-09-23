@@ -15,7 +15,6 @@ from contrib.hyperliquid_perp.integration.decision_reports import (
     reports_record,
     write_decision_reports,
 )
-from tradingagents.agents.utils.agent_states import AgentState
 
 _ANALYSTS = ["market", "social", "news"]
 
@@ -39,13 +38,6 @@ _FULL_STATE = {
     "risk_debate_state": {"judge_decision": "approve", "count": 3},
     "final_trade_decision": '{"decision_mode": "maintain_current"}',
 }
-
-
-def test_every_report_key_is_a_field_of_upstream_agent_state():
-    # The allowlist spells upstream names; an upstream rename must fail here,
-    # not quietly record null for that key on every cycle from then on.
-    missing = set(REPORT_KEYS) - set(AgentState.__annotations__)
-    assert not missing, f"REPORT_KEYS no longer match AgentState: {sorted(missing)}"
 
 
 def test_the_record_is_the_analyst_set_then_the_nine_keys_in_pipeline_order_and_nothing_else():

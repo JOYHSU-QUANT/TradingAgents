@@ -16,7 +16,9 @@ and this module IS that contract, so a third sidecar cannot drift from it:
   or a record, never a verdict;
 - every record carries ``"schema": SIDECAR_SCHEMA`` so a later reader can
   tell the format apart from a successor's instead of guessing from which
-  keys happen to be present;
+  keys happen to be present. A ``.usage.json`` with NO ``schema`` key is one
+  written before the stamp existed (paper-BTC runs up to 6): same shape as
+  schema 1 minus the stamp;
 - atomic (:func:`.atomic_io.atomic_write_bytes`): a service restart landing
   mid-write — a deploy push while a cycle is finishing — must not leave a
   truncated file at the final path for a later reader to choke on;
@@ -63,15 +65,21 @@ def write_sidecar(
 
     ``what`` names the artifact in the log lines. A run with no input payload
     (``payload_path`` is ``None``: the one-shot and test harnesses) has
-    nowhere to put a sidecar and writes nothing — ``build`` is not called. A
-    value JSON cannot carry is stored as its ``str`` at that leaf, with a
-    WARNING naming its type, so one odd value cannot sink the record or turn
-    its container into a repr string, and the degradation is not silent.
+    nowhere to put a sidecar and writes nothing — ``build`` is not called. The
+    stamp is this module's: a builder that returns its own ``"schema"`` key is
+    refused (logged, nothing written) rather than allowed to lie about the
+    format. A value JSON cannot carry is stored as its ``str`` at that leaf,
+    with one WARNING per type per write, so one odd value cannot sink the
+    record or turn its container into a repr string, and the degradation is
+    not silent.
     """
     if payload_path is None:
         return
     try:
-        record = {"schema": SIDECAR_SCHEMA, **build()}
+        built = build()
+        if "schema" in built:
+            raise ValueError(f"{what} sidecar builder returned its own 'schema' key")
+        record = {"schema": SIDECAR_SCHEMA, **built}
         atomic_write_bytes(
             sidecar_path(payload_path, suffix), json_bytes(record, default=_stringify_for(what))
         )
@@ -80,12 +88,16 @@ def write_sidecar(
 
 
 def _stringify_for(what: str) -> Callable[[Any], str]:
+    """``json.dumps``'s ``default`` for one write: ``str(value)``, warned once per type."""
+    warned: set[str] = set()
+
     def default(value: Any) -> str:
-        logger.warning(
-            "%s sidecar: a %s value JSON cannot carry was stored as its str",
-            what,
-            type(value).__name__,
-        )
+        kind = type(value).__name__
+        if kind not in warned:
+            warned.add(kind)
+            logger.warning(
+                "%s sidecar: a %s value JSON cannot carry was stored as its str", what, kind
+            )
         return str(value)
 
     return default

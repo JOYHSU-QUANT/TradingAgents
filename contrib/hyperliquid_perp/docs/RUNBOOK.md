@@ -457,8 +457,12 @@ fingerprint backfill 都不讀它，刪掉或輪替 sidecar 不影響任何驗�
 計畫、`final_trade_decision` 本文（缺的是 `null`；預設只開 market／social／news，所以
 `fundamentals_report` 每個 cycle 都是 `null`，`selected_analysts` 就是讓你分得出「沒選」
 與「選了但空」的那個欄位），留給之後的離線重放用。兩個 sidecar 同一套契約（`common/sidecar.py`）：
-每份記錄蓋 `schema: 1`、沒有列指向它、不在 hash 契約內、atomic 寫入、寫失敗只 log 不影響
-cycle；模型看到的文字零改動（不 bump `PROMPT_VERSION`）。兩個差別要知道：**`.reports.json`
+每份記錄蓋 `schema: 1`（沒有 `schema` 的 `.usage.json` 是 run 6 以前寫的，形狀同 1 只少那個
+stamp）、沒有列指向它、不在 hash 契約內、atomic 寫入、寫失敗只 log 不影響 cycle（ERROR
+`<what> sidecar could not be written; the decision is unaffected`）；值 JSON 帶不動時葉子降成
+字串並留 WARNING `<what> sidecar: a <型別> value JSON cannot carry was stored as its str`（每型別
+每次寫一行）——看到這行代表上游把非 JSON 物件塞進了報告或辯論狀態，重放前要先看那欄。
+模型看到的文字零改動（不 bump `PROMPT_VERSION`）。兩個差別要知道：**`.reports.json`
 只在引擎真的回了 `final_state` 時才有**——`api_failed` 的 cycle 只留 `.usage.json`（那個寫在
 `finally`），所以「有 usage、沒 reports」是引擎失敗的 cycle，不是漏寫；以及它比 `.usage.json`
 大兩三個數量級（整段辯論逐字），4h 一份、一天約 0.3–1.2 MB，`payloads/<run-id>/` 目前沒有任何

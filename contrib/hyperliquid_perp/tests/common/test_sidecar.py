@@ -30,8 +30,20 @@ def test_write_puts_the_stamped_record_beside_the_payload_and_leaves_the_payload
     write_sidecar(str(payload), suffix=".x.json", what="x", build=lambda: {"a": 1, "b": ["two"]})
 
     assert _read(tmp_path / f"{_STEM}.x.json") == {"schema": SIDECAR_SCHEMA, "a": 1, "b": ["two"]}
-    assert SIDECAR_SCHEMA == 1  # the format every file on disk so far carries
+    assert SIDECAR_SCHEMA == 1  # the one format stamped so far; unstamped files predate it
     assert payload.read_bytes() == b"{}"  # the hash-locked payload is untouched
+
+
+def test_a_builder_that_brings_its_own_schema_key_is_refused_not_believed(tmp_path, caplog):
+    payload = tmp_path / f"{_STEM}.json"
+
+    with caplog.at_level(logging.ERROR, logger=_LOGGER):
+        write_sidecar(str(payload), suffix=".x.json", what="x", build=lambda: {"schema": 7, "a": 1})
+
+    (error,) = [r for r in caplog.records if r.name == _LOGGER]
+    assert error.getMessage() == "x sidecar could not be written; the decision is unaffected"
+    assert "returned its own 'schema' key" in str(error.exc_info[1])
+    assert not (tmp_path / f"{_STEM}.x.json").exists()
 
 
 def test_a_value_json_cannot_carry_is_stored_as_its_str_at_the_leaf_and_warned(tmp_path, caplog):
@@ -42,17 +54,20 @@ def test_a_value_json_cannot_carry_is_stored_as_its_str_at_the_leaf_and_warned(t
     payload = tmp_path / f"{_STEM}.json"
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         write_sidecar(
-            str(payload), suffix=".x.json", what="x", build=lambda: {"in": {"m": _Message()}}
+            str(payload),
+            suffix=".x.json",
+            what="x",
+            build=lambda: {"in": {"m": _Message(), "n": _Message()}, "o": object()},
         )
 
-    # The leaf became a string; its container is still a JSON object, not a repr.
-    assert _read(tmp_path / f"{_STEM}.x.json")["in"] == {"m": "message text"}
-    (warning,) = [r for r in caplog.records if r.name == _LOGGER]
-    assert warning.levelno == logging.WARNING
-    assert (
-        warning.getMessage()
-        == "x sidecar: a _Message value JSON cannot carry was stored as its str"
-    )
+    # The leaves became strings; their containers are still JSON objects, not reprs.
+    assert _read(tmp_path / f"{_STEM}.x.json")["in"] == {"m": "message text", "n": "message text"}
+    # One WARNING per type per write — two _Message leaves, one line for them.
+    warnings = [r.getMessage() for r in caplog.records if r.name == _LOGGER]
+    assert warnings == [
+        "x sidecar: a _Message value JSON cannot carry was stored as its str",
+        "x sidecar: a object value JSON cannot carry was stored as its str",
+    ]
 
 
 def test_no_payload_path_writes_nothing_and_does_not_build(monkeypatch):

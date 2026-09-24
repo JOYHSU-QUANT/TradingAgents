@@ -463,7 +463,7 @@ fingerprint backfill 都不讀它，刪掉或輪替 sidecar 不影響任何驗�
 字串並留 WARNING `<what> sidecar: a <型別> value JSON cannot carry was stored as its str`（每型別
 每次寫一行）——看到這行代表上游把非 JSON 物件塞進了報告或辯論狀態，重放前要先看那欄。
 模型看到的文字零改動（不 bump `PROMPT_VERSION`）。兩個差別要知道：**`.reports.json`
-只在引擎真的回了 `final_state` 時才有**——`api_failed` 的 cycle 只留 `.usage.json`（那個寫在
+只在引擎真的回了 dict `final_state` 時才有**——`api_failed` 的 cycle 只留 `.usage.json`（那個寫在
 `finally`），所以「有 usage、沒 reports」是引擎失敗的 cycle，不是漏寫——**除非同一個 cycle 的
 log 有那行 `decision reports sidecar could not be written` ERROR**，那才是漏寫（磁碟滿、builder
 炸掉），先看 log 再下結論；以及它比 `.usage.json` 大一個數量級以上（整段辯論逐字），4h 一份、

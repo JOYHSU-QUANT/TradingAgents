@@ -38,14 +38,14 @@ Breaking changes within the 0.x line are called out explicitly.
   `EngineDecisionProvider.request_decision` (the paper and live daemons)
   each carried a copy of the same engine run: collector, graph, `propagate`
   with the usage report, the return-shape checks and the parse, plus the
-  reports sidecar on the daemon side. The one-shot now reaches that call
-  too, and it writes nothing there, as there is no input payload. It now
-  lives once, in `integration/engine_drive.py` (`build_engine_run(...)` then
-  `EngineRun.drive(...)`). When nothing can be parsed, `drive` raises
-  `EngineRunFailed`, `NonDictFinalState` or `EngineOutputError`, and each
-  caller words it as before: the daemon's `RetryableDecisionError` and the
-  one-shot's `error:` lines and exit 1 are unchanged. No logger changes
-  name.
+  reports sidecar on the daemon side. It now lives once, in
+  `integration/engine_drive.py` (`build_engine_run(...)` then
+  `EngineRun.drive(...)`). The one-shot now reaches `write_decision_reports`
+  too and writes nothing, as it has no input payload. When nothing can be
+  parsed, `drive` raises `EngineRunFailed`, `NonDictFinalState` or
+  `EngineOutputError`, and each caller words it as before: the daemon's
+  `RetryableDecisionError` and the one-shot's `error:` lines and exit 1 are
+  unchanged. No logger changes name.
   One difference, on the one-shot only and only when `propagate` raises: the
   order of its stderr lines. The cap ERROR (when the cap bound) and the
   usage report now come before main's traceback and `error:` line, because

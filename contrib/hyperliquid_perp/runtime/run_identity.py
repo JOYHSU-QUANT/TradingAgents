@@ -1,4 +1,4 @@
-"""Opening the store a daemon OWNS, and settling which run it is.
+"""Opening the store of a command that OWNS a run, and settling which run it is.
 
 ``paper`` and ``live --run-id`` climb the same first rungs before anything
 lane-specific: open the store, read the run row, and refuse the two
@@ -69,14 +69,15 @@ class OpenedRun:
 
 
 def open_run(db_path: str | Path, run_id: str, *, create: bool) -> OpenedRun:
-    """Open the store for the daemon that owns it and settle fresh-vs-restart.
+    """Open the store for the command that owns ``run_id`` and settle fresh-vs-restart.
 
-    The store is opened AS-IS: an existing one may be owned by a running
-    daemon, and the lease that proves otherwise lives inside it, so the schema
-    upgrade is deferred to the caller (issue #129); :class:`Database`'s
-    deferred policy settles what is built, refused (``SchemaVersionError``)
-    or opened at this point. Then the run row is read and the ``--create``
-    flag is checked both ways: a missing run without it is
+    An existing store is opened AS-IS: a running process may own it, and the
+    lease that proves otherwise lives inside it, so the schema upgrade is
+    deferred to the caller (issue #129). :class:`Database`'s deferred policy
+    decides what is built, refused or opened here. A missing file is built in
+    full, so a caller refuses a missing path without ``--create`` BEFORE this
+    call, or an empty store is left behind. Then the run row is read and the
+    ``--create`` flag is checked both ways: a missing run without it is
     :attr:`RunIdentityStage.MISSING_RUN`, an existing run with it
     :attr:`RunIdentityStage.RUN_EXISTS` — a silent resume would append to an
     old run's books when the operator meant a fresh one. On either refusal

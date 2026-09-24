@@ -73,7 +73,7 @@ def test_write_genesis_with_no_seeds_opens_a_flat_run(db):
 
 
 def test_write_genesis_goes_through_the_accounting_module_attribute(db, monkeypatch):
-    # The cli tests stop a fresh run by patching ``accounting.initialize_run``;
+    # A cli test stops a fresh run by patching ``accounting.initialize_run``;
     # the seam must read that name at call time, not bind it at import. The
     # seed is the paper lane's config shape (the live lane's is above).
     calls = []

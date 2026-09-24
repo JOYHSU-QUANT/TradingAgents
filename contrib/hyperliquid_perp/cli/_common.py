@@ -70,11 +70,11 @@ def _open_existing_db(
 
 
 def _open_run_or_exit(db_path: str | Path, run_id: str, *, create: bool) -> OpenedRun | None:
-    """:func:`~..runtime.run_identity.open_run` for a daemon, or ``None`` after printing why.
+    """:func:`~..runtime.run_identity.open_run`, or ``None`` after printing why.
 
-    ``paper`` and ``live --run-id`` climb the same rungs with the same remedy,
-    so one wording table serves both; the store's own at-open refusal prints
-    as :func:`_open_existing_db` prints it.
+    A refusal prints its stage's wording, which ``paper`` and ``live --run-id``
+    share; a ``SchemaVersionError`` prints its own text, as
+    :func:`_open_existing_db` prints it.
     """
     try:
         return open_run(db_path, run_id, create=create)
@@ -97,7 +97,10 @@ def _open_run_or_exit(db_path: str | Path, run_id: str, *, create: bool) -> Open
 
 
 def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
-    """Pay the upgrade the deferred open owes; True if it was REFUSED.
+    """Pay the upgrade a deferred open owes; True if it was REFUSED.
+
+    The deferred opens are :func:`~..runtime.run_identity.open_run` and
+    :func:`_open_existing_db` with ``defer_migration=True``.
 
     A no-op when nothing is owed (the store was built on open, or a dry run
     opened it read-only), so every owning command calls it unconditionally at

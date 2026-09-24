@@ -5,7 +5,8 @@ These ``Protocol`` classes are seams that keep concrete layers decoupled.
 (``runtime.market_feed.PortSnapshotProvider``) type-hints against it, so a
 scripted/backtest market feed can be dropped in without touching that
 consumer; the CLI/legacy entry points construct the concrete reader directly
-and may call methods beyond this port (e.g. ``get_asset_meta``). ``OrderGate``
+and may call methods beyond this port (e.g. ``get_asset_meta``, read through
+``runtime.asset_spec.build_asset_spec``). ``OrderGate``
 faces the other way: it is the application-layer contract the exchange
 adapter's signed client judges every mutation against, so the adapter never
 imports the application layer for a type hint. The four that follow —

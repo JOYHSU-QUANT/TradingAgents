@@ -1920,7 +1920,8 @@ def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams)
         reached.append(True)
         raise RuntimeError("stop right after the key check")
 
-    # cli lazy-imports `from ..runtime import accounting`; patch the module itself.
+    # cli reaches initialize_run through runtime.genesis, which reads it off
+    # `accounting` at call time; patch the module itself.
     monkeypatch.setattr(accounting, "initialize_run", _stop)
     # The provider pre-flight sits between the key check and initialize_run;
     # stub it so this test stays off the real tradingagents import.

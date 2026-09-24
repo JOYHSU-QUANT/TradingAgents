@@ -73,11 +73,9 @@ def test_a_restart_opens_with_the_run_row(tmp_path):
         assert opened.existing_run["initial_balance_usdc"] == "100"
 
 
-def test_the_store_is_opened_deferred_not_migrated(tmp_path, opened_stores):
-    # A populated store older than this build is opened AS-IS (issue #129): the
-    # caller pays the upgrade once it owns the run. ``Database``'s own tests
-    # cover what that policy does to each kind of store; this pins that
-    # ``open_run`` asks for it.
+def test_open_run_asks_database_for_the_deferred_open(tmp_path, opened_stores):
+    # ``Database``'s own tests cover what the deferred policy does to each
+    # kind of store; this pins only that ``open_run`` asks for it.
     opened = open_run(tmp_path / "s.db", "r", create=True)
     with opened.db:
         assert opened_stores == [(opened.db, {"migrate": False, "defer_migration": True})]
@@ -107,7 +105,6 @@ def test_an_existing_run_under_create_is_refused_with_the_store_closed(tmp_path,
 
 
 def test_the_refusal_is_not_a_value_error():
-    # A caller's ``except ValueError`` around config parsing must not swallow it.
     refusal = RunIdentityRefusal(RunIdentityStage.MISSING_RUN, run_id="r", db_path="s.db")
     assert not isinstance(refusal, ValueError)
 
@@ -125,8 +122,7 @@ def test_foreign_mode_names_the_other_lanes_mode(tmp_path, lane, expected):
 
 
 def test_a_store_from_a_newer_build_raises_schema_version_error_unwrapped(tmp_path):
-    # The at-open refusal ``Database`` makes stays the caller's to word, as it
-    # was before the factory: nothing here catches it.
+    # Nothing here catches it; ``cli._common._open_run_or_exit`` prints its text.
     path = tmp_path / "s.db"
     _seed(path)
     db = Database(path)

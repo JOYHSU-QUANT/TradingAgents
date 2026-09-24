@@ -1,9 +1,8 @@
 """The per-asset metadata an engine needs, and the precision steps behind it.
 
 :class:`AssetSpec` serves both lanes. Its two derived steps come from
-``szDecimals`` and nothing else, so their definitions live beside it, and
-so does :func:`build_asset_spec`, the one way a running lane reads it off
-the venue.
+``szDecimals`` and nothing else, so their definitions live beside it;
+:func:`build_asset_spec` is the venue read that builds one.
 """
 
 from __future__ import annotations
@@ -78,9 +77,9 @@ class AssetMetaSource(Protocol):
 def build_asset_spec(market: AssetMetaSource, coin: str) -> AssetSpec:
     """The :class:`AssetSpec` for ``coin`` as the venue reports it.
 
-    One ``meta`` read, then the constructor; a venue failure propagates as the
-    reader raises it (the callers' ``ExchangeError`` lanes), and a mismatched
-    schedule as the constructor's ``ValueError``.
+    One ``meta`` read, then the constructor. Nothing is caught: a venue
+    failure propagates as the reader raises it, and a mismatched schedule as
+    the constructor's ``ValueError``.
     """
     sz_decimals, schedule = market.get_asset_meta(coin)
     return AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)

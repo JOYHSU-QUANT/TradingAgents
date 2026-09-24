@@ -79,8 +79,8 @@ def test_build_asset_spec_reads_one_meta_and_builds_the_spec():
 
 
 def test_build_asset_spec_lets_the_venue_failure_through_unchanged():
-    # The callers own the ``ExchangeError`` lane (a named exit 1); nothing
-    # here catches or rewraps it.
+    # Nothing here catches or rewraps it; each caller decides what a venue
+    # failure at this read means.
     market = _Market(ExchangeError("meta endpoint down"))
     with pytest.raises(ExchangeError, match="meta endpoint down"):
         build_asset_spec(market, "BTC")

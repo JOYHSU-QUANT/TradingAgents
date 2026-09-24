@@ -40,43 +40,31 @@ Breaking changes within the 0.x line are called out explicitly.
   the run genesis through the same `initialize_run` call with the same seed
   and JSON shaping; and `paper`, `live --loop` and `live-smoke` each read
   the asset meta and built the `AssetSpec` by hand. Three seams replace the
-  copies. `runtime.run_identity.open_run(db_path, run_id, *, create)` opens
-  the store as-is (the deferred-migration open that was
-  `cli._common._open_owned_store`, now gone) and returns an `OpenedRun` —
-  the store, the run row or `None`, `is_restart`, and `foreign_mode(lane)`
-  for the run-mode check — or raises `RunIdentityRefusal` with a
-  `RunIdentityStage` (`missing_run`, `run_exists`) after closing the store;
-  a store from a newer build raises `SchemaVersionError` as `Database`
-  always did. `cli._common._open_run_or_exit` words both and returns
-  `None`, the shape `_open_existing_db` has, so each lane is back to one
-  call and one `if`.
-  `runtime.genesis.write_genesis(db, *, run_id, mode, initial_balance_usdc,
-  seeds, config_subset, created_at)` builds the `PositionState` seeds from
-  anything carrying `coin`/`size`/`entry_price`, serialises the subset as
-  before (`ensure_ascii=False`, `default=str`), stamps `SCHEMA_VERSION` and
-  calls `initialize_run`. `runtime.asset_spec.build_asset_spec(market,
-  coin)` is the meta read plus the constructor — the spec half of the
-  plan's D2 chain; the client-and-reader half (`HyperliquidClient` then
-  `HyperliquidMarketData`) stays hand-written at each site, including
-  `engine_bridge._build_context`, which builds no spec and is untouched.
-  Two placements differ from the plan's table: the run-mode check is
-  `OpenedRun.foreign_mode`, called by each lane where its check stood — in
-  `live` after the wallet-sibling lease check — rather than a rung inside
-  `open_run`; and `build_asset_spec` sits beside `AssetSpec` and takes the
-  market reader rather than the config, because the two live callers hold a
-  client pinned to `live.network` and every caller keeps the reader for its
-  own reads. The lease, its SIGTERM handler and the deferred migration stay
-  in the lanes: the paper daemon takes the lease before migrating, the live
-  command after genesis and the smoke gate, and each lane's `finally`
-  releases its own. Each lane's foreign-mode line stays in that lane. The
-  seams resolve `Database` and `accounting.initialize_run` on their modules
-  at call time, so the existing CLI tests are unchanged. No behaviour
-  changes; every refusal line a command can print is the same bytes, in the
-  same order. `cli/__init__.py` no longer re-exports `_open_owned_store`,
-  and the layering ratchet's re-export list shrinks by that one name. Tests:
-  `tests/runtime/test_run_identity.py` and `tests/runtime/test_genesis.py`
-  are new, and `tests/runtime/test_asset_spec.py` covers
-  `build_asset_spec`.
+  copies. `runtime.run_identity.open_run` does the first and replaces
+  `cli._common._open_owned_store`, which is gone; a refusal is a
+  `RunIdentityRefusal` carrying a `RunIdentityStage`.
+  `cli._common._open_run_or_exit` prints that refusal, or the text of the
+  `SchemaVersionError` `Database` raises at open, and returns `None`, so
+  each lane makes one call and one `if`. `runtime.genesis.write_genesis`
+  does the second and `runtime.asset_spec.build_asset_spec(market, coin)`
+  the third. Two placements differ from the plan's table. The run-mode
+  check is `OpenedRun.foreign_mode(lane)`, called by each lane where its
+  check stood, rather than a rung inside `open_run`: in `live` the
+  wallet-sibling lease check sits between the `--create` checks and the
+  mode check. And `build_asset_spec` sits beside `AssetSpec` and takes the
+  market reader rather than the config, because the two live callers hold
+  a client pinned to `live.network` and every caller keeps the reader for
+  its own reads. That is the spec half of the plan's D2 chain; the
+  client-and-reader lines stay at each site. The lease, its SIGTERM handler
+  and the deferred migration stay in the lanes, whose order differs.
+  `write_genesis` reads `accounting.initialize_run` at call time, which the
+  one CLI test that stops a fresh run patches, so the existing CLI tests
+  are unchanged. No behaviour changes: every line a command can print is
+  the same bytes, in the same order. `cli/__init__.py` no longer re-exports
+  `_open_owned_store`, and the layering ratchet's re-export list shrinks by
+  that one name. Tests: `tests/runtime/test_run_identity.py` and
+  `tests/runtime/test_genesis.py` are new, and
+  `tests/runtime/test_asset_spec.py` covers `build_asset_spec`.
 
 - **The live lane's composition root moves out of `cli/`: `live/wiring.py`
   builds the signed client and the recovery session, `live/config.py`

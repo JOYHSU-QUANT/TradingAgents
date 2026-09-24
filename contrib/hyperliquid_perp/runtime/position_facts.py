@@ -3,8 +3,9 @@
 Shared by the paper daemon and the live loop: both keep the same
 ``current_positions`` / ``current_account_state`` / ``fills`` tables, and the
 ``integration.decision_provider.EngineDecisionProvider`` that READS these books runs in
-both. The read happens once per cycle, before the market fetch: the provider
-hands the domain half (:class:`BookPosition`) to the context builder, which
+both. The read happens once per ``build_input`` (each try of a cycle), before
+the market fetch: the provider hands the domain half (:class:`BookPosition`)
+to the context builder, which
 prices the ``Position:`` section, and carries the whole :class:`BookFacts` on
 the ``DecisionInput`` so the driver's ``ai_inputs`` prologue writes the same
 books the prompt was built from instead of reading the three tables a second
@@ -64,7 +65,7 @@ class BookFacts:
 
 
 # How a wiring hands the daemon provider its books: bound over the run's store
-# at construction, called once per cycle (the fresh-run provider is built
+# at construction, called in each ``build_input`` (the fresh-run provider is built
 # before the ledger is seeded, so the read must be able to answer "no books
 # yet"). Named so the seam is a declared type rather than a bare callable
 # passed by keyword (issue #134).

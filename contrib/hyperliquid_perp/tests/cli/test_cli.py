@@ -7729,9 +7729,9 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
 
 
 def test_the_live_loop_wires_the_books_as_the_provider_position_source(tmp_path, monkeypatch):
-    # Prompt v4 on the live lane: the same read_books binding
-    # build_decision_provider makes for the paper daemon, over THIS run's store — dropped, None, or bound to the
-    # wrong run/coin would leave the live prompt silently position-blind.
+    # Prompt v4 on the live lane: build_decision_provider binds read_books
+    # over THIS run's store, as it does for paper — dropped, None, or bound
+    # to the wrong run/coin would leave the live prompt silently position-blind.
     built = _drive_live_loop_construction(
         tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
     )

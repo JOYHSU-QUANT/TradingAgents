@@ -713,7 +713,7 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     # block".
     #
     # ``idx_fills_run_timestamp`` — ``fills.MAX(timestamp) WHERE run_id`` is
-    # read once per cycle (``ai_inputs.last_fill_time`` and the prompt's
+    # read once per ``build_input`` (``ai_inputs.last_fill_time`` and the prompt's
     # position section share the read) and was a full-table scan. The
     # acceptance validator's "a fill at or before this order" orphan probe
     # filters on ``(run_id, symbol, timestamp)``, so this index narrows it to

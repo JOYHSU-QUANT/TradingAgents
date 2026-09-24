@@ -6,15 +6,15 @@ next mark is in the holdout), and each run's train base rate is up 50% /
 down 0% / flat 50% (see ``test_probe``). Run one is probed with h4 up .6 /
 down .1 / flat .3, whose Brier on an up is 0.26; run two with up .2 / down
 .5 / flat .3, whose Brier on an up is .8² + .5² + .3² = 0.98; the base rate
-costs 0.5 on either. Pooled: 1 - (0.26 + 0.98) / (0.5 + 0.5) = -0.24.
-With one block per run, a draw takes two blocks: both from run one
-(+0.48, a quarter of the draws), both from run two (-0.96, a quarter), or
-one of each (-0.24, half); so the 5th and 95th percentiles are -0.96 and
-+0.48.
+costs 0.5 on either. Pooled: 1 - (0.26 + 0.98) / (0.5 + 0.5) = -0.24. Each
+run is redrawn on its own circle, and a circle of one question always
+redraws that question: every draw is -0.24, and two blocks are fewer than
+the bar's five.
 """
 
 from __future__ import annotations
 
+import random
 import sqlite3
 from pathlib import Path
 
@@ -24,11 +24,14 @@ from contrib.replay import cli
 from contrib.replay.paper_store import load_decisions
 from contrib.replay.pool import (
     BLOCK,
+    MIN_BLOCKS,
     Interval,
     RunScores,
     _quantile,
-    blocks_of,
+    _verdict,
+    block_count,
     bootstrap,
+    circular_draw,
     describe_pool,
     pooled_skill,
 )
@@ -43,29 +46,50 @@ from .test_probe import Forecaster, forecast_text, write_probe
 
 OTHER_RUN = "paper-GATE2"
 STEP_MS = 4 * 3_600_000
+A, B = (0.26, 0.5), (0.98, 0.5)  # an up forecast at .6 and one at .2, against the base rate
 
 
 def _score(i: int, brier: float, base: float) -> QuestionScore:
     return QuestionScore(f"q{i}", i, brier, base, False, None)
 
 
+class _Starts(random.Random):
+    """A generator whose ``randrange`` hands out the starts it was given, in order."""
+
+    def __init__(self, starts: list[int]) -> None:
+        super().__init__(0)
+        self.starts = list(starts)
+
+    def randrange(self, *_args, **_kwargs) -> int:  # type: ignore[override]
+        return self.starts.pop(0)
+
+
 # -- the pure functions -------------------------------------------------------------
 
 
 def test_the_pooled_skill_weighs_every_question_alike():
-    assert pooled_skill([(0.26, 0.5), (0.98, 0.5)]) == pytest.approx(1 - 1.24 / 1.0)
+    assert pooled_skill([A, B]) == pytest.approx(1 - 1.24 / 1.0)
     assert pooled_skill([(0.2, 0.0)]) is None  # a base that scores perfectly
     assert pooled_skill([]) is None
 
 
-def test_blocks_are_consecutive_and_the_last_may_be_short():
-    pairs = [(float(i), 1.0) for i in range(7)]
-    assert [len(b) for b in blocks_of(pairs, 3)] == [3, 3, 1]
-    assert blocks_of(pairs, 3)[1][0] == (3.0, 1.0)
-    assert blocks_of([], 6) == []
-    with pytest.raises(ValueError, match="at least one question"):
-        blocks_of(pairs, 0)
+def test_the_blocks_are_counted_per_run():
+    # 7 questions make two blocks of 6 (the second wraps), 1 makes one, 0 none.
+    assert block_count([[A] * 7, [B], []], 6) == 3
+    assert block_count([[A] * 30], 6) == MIN_BLOCKS == 5
     assert BLOCK == 6
+    with pytest.raises(ValueError, match="at least one question"):
+        block_count([[A]], 0)
+
+
+def test_a_circular_draw_wraps_within_the_run_and_keeps_its_size():
+    run = [(float(i), 1.0) for i in range(5)]
+    # Blocks of 2 starting at 4, 1 and 3: (4, 0), (1, 2), (3, 4) cut back to 5.
+    drawn = circular_draw(run, 2, _Starts([4, 1, 3]))
+    assert [m for m, _ in drawn] == [4.0, 0.0, 1.0, 2.0, 3.0]
+    # A block as long as the run is a rotation of it: every question, once.
+    whole = circular_draw(run, 5, _Starts([3]))
+    assert [m for m, _ in whole] == [3.0, 4.0, 0.0, 1.0, 2.0]
 
 
 def test_the_quantile_interpolates_between_order_statistics():
@@ -75,69 +99,109 @@ def test_the_quantile_interpolates_between_order_statistics():
     assert _quantile([7.0], 0.05) == 7.0
 
 
-def test_identical_blocks_give_an_interval_of_one_point():
-    found = bootstrap([[(0.26, 0.5)], [(0.26, 0.5)]], draws=200, seed=1)
-    assert found == Interval(2, 2, pytest.approx(0.48), pytest.approx(0.48), pytest.approx(0.48), 0)
+def test_each_run_is_redrawn_on_its_own_circle():
+    # Two one-question runs: each draw keeps each run's only question.
+    apart = bootstrap([[A], [B]], block=6, draws=500, seed=1)
+    assert apart == Interval(
+        2, 2, pytest.approx(-0.24), pytest.approx(-0.24), pytest.approx(-0.24), 0
+    )
+    # Runs of one and two questions, blocks of 1: run one always redraws A, run
+    # two only B's, so every draw is 1 - (0.26 + 0.98 x 2) / 1.5 = -0.48; one
+    # circle over all three would mix them.
+    kept = bootstrap([[A], [B, B]], block=1, draws=500, seed=1)
+    assert kept.low == kept.high == pytest.approx(-0.48)
+    # The same two questions as one run, blocks of 1: a draw is AA (+0.48, a
+    # quarter), BB (-0.96, a quarter) or one of each (-0.24, half).
+    together = bootstrap([[A, B]], block=1, draws=4000, seed=7)
+    assert together.skill == pytest.approx(-0.24)
+    assert (together.low, together.high) == (pytest.approx(-0.96), pytest.approx(0.48))
+    assert bootstrap([[A, B]], block=1, draws=4000, seed=7) == together  # seeded
+    # Blocks of 2 on that run are rotations of it: every draw is the whole run.
+    whole = bootstrap([[A, B]], block=2, draws=500, seed=3)
+    assert whole.low == whole.high == pytest.approx(-0.24)
 
 
-def test_the_bootstrap_resamples_whole_blocks_and_is_seeded():
-    # Two blocks as in the module docstring: the draws can only be +0.48,
-    # -0.24 or -0.96, and a quarter of them are each extreme.
-    blocks = [[(0.26, 0.5)], [(0.98, 0.5)]]
-    found = bootstrap(blocks, draws=4000, seed=7)
-    assert (found.n, found.blocks, found.dropped) == (2, 2, 0)
-    assert found.skill == pytest.approx(-0.24)
-    assert (found.low, found.high) == (pytest.approx(-0.96), pytest.approx(0.48))
-    assert bootstrap(blocks, draws=4000, seed=7) == found
-    # A block of two questions moves as one: its questions are never split.
-    paired = bootstrap([[(0.26, 0.5), (0.98, 0.5)]], draws=50, seed=3)
-    assert paired.low == paired.high == pytest.approx(-0.24)
+def test_the_interval_reads_the_5th_and_95th_percentiles():
+    # One run of twenty questions, Brier 0.00, 0.05, ..., 0.95 against a base of
+    # 1, blocks of 1: the skill is 1 minus the mean of 20 draws, whose mean is
+    # 0.475 and standard error 0.2883 / sqrt(20) = 0.0645. The 90% interval is
+    # about 0.525 -/+ 1.645 x 0.0645, [0.419, 0.631]; an 80% one would be
+    # [0.442, 0.608].
+    run = [(i / 20, 1.0) for i in range(20)]
+    found = bootstrap([run], block=1, draws=20000, seed=11)
+    assert found.skill == pytest.approx(0.525)
+    assert found.low == pytest.approx(0.419, abs=0.01)
+    assert found.high == pytest.approx(0.631, abs=0.01)
 
 
 def test_draws_whose_base_scores_perfectly_are_left_out_and_counted():
-    found = bootstrap([[(0.1, 0.0)], [(0.26, 0.5)]], draws=1000, seed=2)
+    found = bootstrap([[(0.1, 0.0), A]], block=1, draws=1000, seed=2)
     assert found.skill == pytest.approx(1 - 0.36 / 0.5)
-    # Only a draw of the first block twice has no skill: about a quarter.
+    # Only a draw of the first question twice has no skill: about a quarter.
     assert 150 < found.dropped < 350
     assert found.low is not None
     assert found.high == pytest.approx(0.48)
-    assert bootstrap([], draws=10, seed=0) == Interval(0, 0, None, None, None, 0)
+    assert bootstrap([], block=6, draws=10, seed=0) == Interval(0, 0, None, None, None, 0)
+    assert bootstrap([[], [A]], block=6, draws=10, seed=0).blocks == 1  # an empty run adds none
     with pytest.raises(ValueError, match="at least one draw"):
-        bootstrap([[(0.26, 0.5)]], draws=0, seed=0)
+        bootstrap([[A]], block=6, draws=0, seed=0)
+
+
+def test_the_verdict():
+    def interval(blocks: int, skill: float, low: float | None) -> Interval:
+        return Interval(30, blocks, skill, low, 0.9, 0)
+
+    assert _verdict(interval(5, 0.3, 0.01), block=6, seed=4) == "met (seed 4)"
+    # A positive skill whose interval reaches zero does not meet the bar.
+    assert _verdict(interval(5, 0.3, -0.01), block=6, seed=4) == "not met (seed 4)"
+    assert _verdict(interval(5, 0.3, 0.0), block=6, seed=4) == "not met (seed 4)"
+    assert _verdict(interval(4, 0.3, 0.2), block=6, seed=4) == (
+        "cannot be judged: 4 block(s), fewer than the 5 the bar needs"
+    )
+    assert _verdict(interval(5, 0.3, 0.2), block=3, seed=4) == (
+        "not judged: the bar is read with blocks of 6, this report used 3"
+    )
+    assert _verdict(interval(5, 0.3, None), block=6, seed=4) == "cannot be judged (no interval)"
 
 
 def test_the_report_names_each_run_and_judges_only_the_4h_headline():
     runs = [
-        RunScores("r1", "2027-02-01T00:00:00+00:00", {"h4": [_score(1, 0.26, 0.5)], "h24": []}),
+        RunScores("r1", "2027-02-01T00:00:00+00:00", {"h4": [_score(1, *A)], "h24": []}),
         RunScores(
             "r2",
             "2027-02-01T00:00:00+00:00",
-            {"h4": [_score(2, 0.98, 0.5)], "h24": None},
+            {"h4": [_score(2, *B)], "h24": None},
             left_out=3,
         ),
     ]
-    assert describe_pool(runs, draws=4000, seed=7) == [
-        "pooled over 2 run(s), the validation segment of each run's pinned split; blocks of 6 "
-        "consecutive question(s) within a run, 4000 draws, seed 7",
+    assert describe_pool(runs, draws=400, seed=7) == [
+        "pooled over 2 run(s), the validation segment of each run's pinned split; circular "
+        "blocks of 6 consecutive question(s) within each run, 400 draws, seed 7",
         "  run r1 (split pinned 2027-02-01T00:00:00+00:00): h4 1 question(s), h24 0 question(s)",
         "  run r2 (split pinned 2027-02-01T00:00:00+00:00): h4 1 question(s), h24 n/a (no train "
         "base rate); 3 left out at the model cutoff",
-        "h4 headline: n 2 in 2 block(s); skill -0.240, 90% interval [-0.960, +0.480]",
+        "h4 headline: n 2 in 2 block(s); skill -0.240, 90% interval [-0.240, -0.240]",
         "h4 up vs down given a move: n 0 in 0 block(s); skill n/a, 90% interval [n/a, n/a] "
         "(reported only)",
         "h24 headline: n 0 in 0 block(s); skill n/a, 90% interval [n/a, n/a] (reported only: its "
         "returns overlap from question to question)",
         "h24 up vs down given a move: n 0 in 0 block(s); skill n/a, 90% interval [n/a, n/a] "
         "(reported only)",
-        "plan section 5 bar (h4 headline skill, lower end of the 90% interval above 0): not met",
+        "plan section 5 bar (h4 headline skill, lower end of the 90% interval above 0, blocks "
+        "of 6, at least 5 blocks): cannot be judged: 2 block(s), fewer than the 5 the bar needs",
     ]
 
 
-def test_the_bar_is_met_only_when_the_lower_end_is_above_zero():
-    good = [RunScores("r", "t", {"h4": [_score(i, 0.26, 0.5) for i in range(12)], "h24": []})]
-    assert describe_pool(good, draws=100)[-1].endswith(": met")
-    none = [RunScores("r", "t", {"h4": [], "h24": []})]
-    assert describe_pool(none, draws=100)[-1].endswith(": cannot be judged (no interval)")
+def test_the_bar_needs_five_blocks_of_six():
+    thirty = [RunScores("r", "t", {"h4": [_score(i, *A) for i in range(30)], "h24": []})]
+    assert describe_pool(thirty, draws=100, seed=2)[-1].endswith(": met (seed 2)")
+    twenty_four = [RunScores("r", "t", {"h4": [_score(i, *A) for i in range(24)], "h24": []})]
+    assert describe_pool(twenty_four, draws=100)[-1].endswith(
+        ": cannot be judged: 4 block(s), fewer than the 5 the bar needs"
+    )
+    assert describe_pool(thirty, block=3, draws=100)[-1].endswith(
+        ": not judged: the bar is read with blocks of 6, this report used 3"
+    )
 
 
 # -- the fixture: two runs in one store, probed ---------------------------------------
@@ -210,17 +274,15 @@ def test_one_run_pooled_is_that_runs_headline(two_runs):
 def test_the_pool_command_pools_two_runs(two_runs, capsys):
     store, _, _ = two_runs
     capsys.readouterr()
-    argv = _pool(store, "--run-id", RUN_ID, "--run-id", OTHER_RUN, "--draws", "4000", "--seed", "7")
+    argv = _pool(store, "--run-id", RUN_ID, "--run-id", OTHER_RUN, "--draws", "400", "--seed", "7")
     assert cli.main(argv) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0].startswith("direction probe 'direction-t', variant echo (")
     assert out[2].startswith(f"  run {RUN_ID} (split pinned ")
     assert out[2].endswith("): h4 1 question(s), h24 0 question(s)")
     assert out[3].startswith(f"  run {OTHER_RUN} (split pinned ")
-    assert "h4 headline: n 2 in 2 block(s); skill -0.240, 90% interval [-0.960, +0.480]" in out
-    assert out[-1] == (
-        "plan section 5 bar (h4 headline skill, lower end of the 90% interval above 0): not met"
-    )
+    assert "h4 headline: n 2 in 2 block(s); skill -0.240, 90% interval [-0.240, -0.240]" in out
+    assert out[-1].endswith(": cannot be judged: 2 block(s), fewer than the 5 the bar needs")
 
 
 def test_the_pool_command_writes_nothing(two_runs, capsys):
@@ -250,6 +312,25 @@ def test_the_pool_command_refuses_by_name(two_runs, capsys, extra, message):
     capsys.readouterr()
     assert cli.main(_pool(store, *extra)) == 1
     assert message in capsys.readouterr().err
+
+
+def test_a_run_without_a_4h_base_rate_is_refused_not_left_out(two_runs, capsys, monkeypatch):
+    store, _, _ = two_runs
+    real = cli.headline_scores
+
+    def none_for_the_other_run(card, answers, eligible, key, segment):
+        if key == "h4" and all(a.input_id.startswith(OTHER_RUN) for a in answers[0]):
+            return None
+        return real(card, answers, eligible, key, segment)
+
+    monkeypatch.setattr(cli, "headline_scores", none_for_the_other_run)
+    capsys.readouterr()
+    assert cli.main(_pool(store, "--run-id", RUN_ID, "--run-id", OTHER_RUN)) == 1
+    assert (
+        f"run {OTHER_RUN!r} has no h4 train base rate (no train question has an outcome at that "
+        "horizon)"
+    ) in capsys.readouterr().err
+    assert cli.main(_pool(store, "--run-id", RUN_ID)) == 0
 
 
 def test_a_run_without_a_pinned_split_or_the_probe_is_refused(two_runs, tmp_path, capsys):
@@ -286,26 +367,6 @@ def test_a_variant_without_a_cutoff_is_refused_unless_told(two_runs, tmp_path, c
     assert cli.main(_pool(store, "--run-id", RUN_ID, "--include-pre-cutoff", variant="blind")) == 0
 
 
-def test_the_interval_reads_the_5th_and_95th_percentiles():
-    # Twenty one-question blocks, Brier 0.00, 0.05, ..., 0.95 against a base of
-    # 1: the skill is 1 minus the mean of 20 draws, whose mean is 0.475 and
-    # standard error 0.2883 / sqrt(20) = 0.0645. The 90% interval is about
-    # 0.525 -/+ 1.645 x 0.0645, [0.419, 0.631]; an 80% one would be [0.442, 0.608].
-    blocks = [[(i / 20, 1.0)] for i in range(20)]
-    found = bootstrap(blocks, draws=20000, seed=11)
-    assert found.skill == pytest.approx(0.525)
-    assert found.low == pytest.approx(0.419, abs=0.01)
-    assert found.high == pytest.approx(0.631, abs=0.01)
-
-
-def test_a_positive_skill_whose_interval_reaches_zero_does_not_meet_the_bar():
-    # 1 - (0.1 + 0.6) / 1.0 = +0.30, but a draw of the second block twice is -0.20.
-    runs = [RunScores("r", "t", {"h4": [_score(1, 0.1, 0.5), _score(2, 0.6, 0.5)], "h24": []})]
-    lines = describe_pool(runs, block=1, draws=2000, seed=5)
-    assert "h4 headline: n 2 in 2 block(s); skill +0.300, 90% interval [-0.200, +0.800]" in lines
-    assert lines[-1].endswith(": not met")
-
-
 def test_the_pool_leaves_out_the_questions_on_or_before_the_cutoff(
     two_runs, tmp_path, capsys, monkeypatch
 ):
@@ -317,10 +378,8 @@ def test_the_pool_leaves_out_the_questions_on_or_before_the_cutoff(
     variant_file = write_variant(late, "late", cutoff="2027-01-16")
     monkeypatch.setattr(cli, "_build_model", lambda _variant: Forecaster())
     for segment in ("train", "validation"):
-        assert (
-            cli.main([*_probe_argv(store, variant_file, probe_file, RUN_ID), "--segment", segment])
-            == 0
-        )
+        argv = _probe_argv(store, variant_file, probe_file, RUN_ID)
+        assert cli.main([*argv, "--segment", segment]) == 0
     capsys.readouterr()
     assert cli.main(_pool(store, "--run-id", RUN_ID, variant="late")) == 0
     out = capsys.readouterr().out.splitlines()

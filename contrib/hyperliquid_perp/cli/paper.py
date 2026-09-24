@@ -250,9 +250,9 @@ def _cmd_paper(argv: list[str]) -> int:
                 # change behaviour mid-run while every metric treats it as one
                 # homogeneous run: a coin mismatch is a hard error, parameter
                 # drift a loud warning.
-                # ``existing_run`` was fetched once at the top of the block
-                # (is_restart proved it non-None); no writer touches the runs
-                # row between there and here.
+                # ``existing_run`` was read once, by ``open_run`` (is_restart
+                # proved it non-None); no writer touches the runs row between
+                # there and here.
                 drift = _config_drift_report(existing_run["config_json"], config, coin)
                 if drift is None:
                     # Stamp clean resumes too, so a reverted config doesn't

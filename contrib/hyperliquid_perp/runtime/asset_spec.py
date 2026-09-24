@@ -67,7 +67,7 @@ class AssetSpec:
 
 
 class AssetMetaSource(Protocol):
-    """The one venue read :func:`build_asset_spec` needs (the ``meta`` request)."""
+    """The one venue read :func:`build_asset_spec` needs (one meta request)."""
 
     def get_asset_meta(self, coin: str) -> tuple[int, MarginSchedule]:
         """``(szDecimals, MarginSchedule)`` for ``coin``."""
@@ -77,7 +77,7 @@ class AssetMetaSource(Protocol):
 def build_asset_spec(market: AssetMetaSource, coin: str) -> AssetSpec:
     """The :class:`AssetSpec` for ``coin`` as the venue reports it.
 
-    One ``meta`` read, then the constructor. Nothing is caught: a venue
+    One meta read, then the constructor. Nothing is caught: a venue
     failure propagates as the reader raises it, and a mismatched schedule as
     the constructor's ``ValueError``.
     """

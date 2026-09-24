@@ -1,8 +1,7 @@
 """Opening the store of a command that OWNS a run, and settling which run it is.
 
-``paper`` and ``live --run-id`` climb the same first rungs before anything
-lane-specific: open the store, read the run row, and refuse the two
-``--create`` mismatches. What follows differs per lane (the live
+``paper`` and ``live --run-id`` climb the same first rungs on the store:
+open it, read the run row, and refuse the two ``--create`` mismatches. What follows differs per lane (the live
 sibling-lease check, config drift, genesis, where the lease is taken), so it
 stays with the caller; :meth:`OpenedRun.foreign_mode` is the run-mode check
 behind each lane's own wording.

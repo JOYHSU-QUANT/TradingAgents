@@ -57,14 +57,17 @@ Breaking changes within the 0.x line are called out explicitly.
   its own reads. That is the spec half of the plan's D2 chain; the
   client-and-reader lines stay at each site. The lease, its SIGTERM handler
   and the deferred migration stay in the lanes, whose order differs.
-  `write_genesis` reads `accounting.initialize_run` at call time, which the
-  one CLI test that stops a fresh run patches, so the existing CLI tests
-  are unchanged. No behaviour changes: every line a command can print is
-  the same bytes, in the same order. `cli/__init__.py` no longer re-exports
-  `_open_owned_store`, and the layering ratchet's re-export list shrinks by
-  that one name. Tests: `tests/runtime/test_run_identity.py` and
-  `tests/runtime/test_genesis.py` are new, and
-  `tests/runtime/test_asset_spec.py` covers `build_asset_spec`.
+  `write_genesis` reads `accounting.initialize_run` at call time, so the one
+  CLI test that patches it still reaches the patch, and the existing CLI
+  tests pass unchanged but for one comment. No behaviour changes: every
+  line a command can print is the same bytes, in the same order.
+  `cli/__init__.py` no longer re-exports `_open_owned_store`, and the
+  layering ratchet's re-export list shrinks by that one name. Tests:
+  `tests/runtime/test_run_identity.py` and `tests/runtime/test_genesis.py`
+  are new, `tests/runtime/test_asset_spec.py` covers `build_asset_spec`,
+  and `tests/cli/test_cli.py` gains the test the live lane's run-mode
+  refusal never had (a mutation that disabled it passed every existing
+  test).
 
 - **The live lane's composition root moves out of `cli/`: `live/wiring.py`
   builds the signed client and the recovery session, `live/config.py`

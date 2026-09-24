@@ -6389,6 +6389,29 @@ def test_live_create_into_a_newer_store_is_refused_before_the_run_row(
     probe.close()
 
 
+def test_live_resume_refuses_a_paper_mode_run(tmp_path, capsys, live_seams, monkeypatch):
+    # The live mirror of test_paper_resume_refuses_a_live_mode_run: a typo'd
+    # --run-id/--db pointing at a paper run is refused by name before the
+    # lease, the kill switch or any reconciliation write touches it.
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = tmp_path / "paper_store.db"
+    db = Database(dbp)
+    accounting.initialize_run(
+        db, run_id="r1", mode="paper", initial_balance_usdc=D(1000), schema_version=SCHEMA_VERSION
+    )
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    assert "is a paper run — resuming it here would arm the kill switch" in capsys.readouterr().err
+    probe = connect(dbp)
+    assert repo.get_scheduler_state(probe, "r1") is None  # no lease stamped
+    probe.close()
+
+
 def test_live_will_not_migrate_under_a_paper_siblings_fresh_lease(
     tmp_path, capsys, live_seams, monkeypatch
 ):

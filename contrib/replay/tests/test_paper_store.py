@@ -439,3 +439,19 @@ def test_the_genesis_config_the_daemon_records_parses_here(store):
     with Database(store, migrate=False) as db:
         stored = json.loads(db.conn.execute("SELECT config_json FROM runs").fetchone()[0])
     assert set(stored) == {"coin", "market_data", "paper_trading"}
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        "/home/trader/data/payloads/paper-BTC-6/BTC-1.json",
+        r"C:\data\payloads\paper-BTC-6\BTC-1.json",
+        "BTC-1.json",
+    ],
+    ids=["posix", "windows", "bare"],
+)
+def test_a_payload_is_named_by_its_file_whichever_host_recorded_it(recorded):
+    from contrib.replay.paper_store import _payload_name
+
+    assert _payload_name(recorded) == "BTC-1.json"
+    assert _payload_name(None) is None

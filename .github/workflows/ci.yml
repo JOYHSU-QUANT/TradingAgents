@@ -70,7 +70,8 @@ jobs:
           python-version: "3.12"
       - name: Install mypy
         # Only mypy: the layers pyproject [tool.mypy] checks import stdlib
-        # plus pandas/stockstats, which its override lets mypy miss. Pinned
+        # plus pandas/stockstats and (the replay package) PyYAML and
+        # langchain_core, which its overrides let mypy miss. Pinned
         # exactly because ``warn_unused_ignores`` turns a newer mypy's better
         # narrowing into a red job; bump it on purpose, with the pins.
         run: pip install "mypy==2.3.1"

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import ast
 import importlib
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -84,13 +86,68 @@ def test_only_upstream_py_imports_a_neighbour():
 
 
 def test_upstream_imports_nothing_it_has_not_declared():
-    declared = {module_name for module_name, _ in upstream.BORROWED}
+    declared = {module_name for module_name, _ in (*upstream.BORROWED, *upstream.ENGINE_BORROWED)}
     imported = {
         name
         for name in _imported_modules(_PACKAGE / "upstream.py", _PACKAGE, "contrib.replay")
-        if _is_upstream(name)
+        if _is_upstream(name) or _is_engine(name)
     }
     assert imported == declared
+
+
+# -- the engine half, borrowed lazily ----------------------------------------------
+
+# The packages the engine half reaches: the upstream engine and the message
+# types it speaks. Named here so the scan can hold every other module off them.
+_ENGINE_PACKAGES = ("tradingagents", "langchain_core", "langchain")
+
+
+def _is_engine(name: str) -> bool:
+    return any(_is_within(name, package) for package in _ENGINE_PACKAGES)
+
+
+@pytest.mark.parametrize(("module_name", "attribute"), upstream.ENGINE_BORROWED)
+def test_every_engine_borrow_still_exists(module_name, attribute):
+    assert hasattr(importlib.import_module(module_name), attribute)
+
+
+def test_the_engine_surface_has_one_field_per_engine_borrow():
+    fields = set(upstream.Engine.__dataclass_fields__)
+    assert fields == {attribute for _, attribute in upstream.ENGINE_BORROWED}
+
+
+def test_only_upstream_py_reaches_the_engine():
+    offenders = {
+        path.name
+        for path in _sources(_PACKAGE, include_tests=False)
+        if path.name != "upstream.py"
+        and any(_is_engine(name) for name in _imported_modules(path, _PACKAGE, "contrib.replay"))
+    }
+    assert offenders == set()
+
+
+def test_importing_every_module_leaves_the_engine_unloaded():
+    """The engine half is loaded by ``load_engine`` alone: a scorecard never pays for it."""
+    modules = sorted(
+        f"contrib.replay.{path.stem}"
+        for path in _sources(_PACKAGE, include_tests=False)
+        if path.stem not in ("__init__", "__main__")
+    )
+    code = "; ".join(
+        [
+            "import sys",
+            *(f"import {name}" for name in modules),
+            f"print(sorted(m for m in sys.modules if m.split('.')[0] in {_ENGINE_PACKAGES!r}))",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_CONTRIB.parent,
+    )
+    assert result.stdout.strip() == "[]"
 
 
 # -- the reverse edge ----------------------------------------------------------
@@ -123,9 +180,20 @@ def test_the_scan_sees_an_absolute_and_a_relative_reach(tmp_path):
     assert found == {"contrib.replay.score", "contrib.replay"}
 
 
-def test_all_lists_exactly_the_borrowed_names_and_the_two_tables():
-    """The literal ``__all__`` and ``BORROWED`` are two spellings of one list; hold them equal."""
-    assert set(upstream.__all__) == {"BORROWED", "UPSTREAM_PACKAGES", *(n for _, n in upstream.BORROWED)}
+def test_all_lists_exactly_the_borrowed_names_and_the_tables():
+    """The literal ``__all__`` and ``BORROWED`` are two spellings of one list; hold them equal.
+
+    Plus the tables themselves and the lazy half's two names (the surface
+    type and the function that loads it).
+    """
+    assert set(upstream.__all__) == {
+        "BORROWED",
+        "ENGINE_BORROWED",
+        "UPSTREAM_PACKAGES",
+        "Engine",
+        "load_engine",
+        *(n for _, n in upstream.BORROWED),
+    }
 
 
 def test_every_borrowed_name_is_used_by_some_module():

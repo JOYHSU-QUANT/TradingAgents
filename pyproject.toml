@@ -97,6 +97,16 @@ warn_unused_ignores = true
 module = ["pandas", "pandas.*", "stockstats", "stockstats.*"]
 ignore_missing_imports = true
 
+# The replay package reads its variant files with PyYAML and, inside
+# ``upstream.load_engine``, borrows langchain_core's message types (replay
+# plan PR 2). The CI job installs mypy alone, so neither is found there;
+# both are read as ``Any``, as pandas is. (mypy checks a function-local
+# import too, so the lazy borrow needs the override as much as a top-level
+# one would.)
+[[tool.mypy.overrides]]
+module = ["yaml", "yaml.*", "langchain_core", "langchain_core.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

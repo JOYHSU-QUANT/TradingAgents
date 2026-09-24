@@ -347,7 +347,7 @@ def test_a_horizon_no_question_reaches_has_no_band_and_judges_no_flat_call():
 
 
 def test_records_take_the_gates_decimals():
-    """PR 2 builds these records from the gate's own Decimal results, in-process."""
+    """A record takes the gate's own ``Decimal`` results as they come (and floats them)."""
     from decimal import Decimal
 
     question = Question(

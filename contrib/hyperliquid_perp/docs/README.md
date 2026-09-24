@@ -119,7 +119,7 @@ TradingAgents/
 ├── examples/
 └── contrib/
     ├── autoresearch/                    # 研究雷達：自己的 store／評估器／ledger，只唯讀借用 hyperliquid_perp（見其 README）
-    ├── replay/                          # 離線考試：成績單（`score`）把 paper 的每個決策對事後價格；唯一同時借用兩邊的套件，兩邊都不得 import 它（見其 README）
+    ├── replay/                          # 離線考試：成績單（`score`）把 paper 的每個決策對事後價格，考古題（`replay`）把當時的題目重問別的模型、答案存自有的 replay.sqlite；唯一同時借用兩邊的套件，兩邊都不得 import 它（見其 README）
     └── hyperliquid_perp/
         ├── exchanges/
         ├── domains/

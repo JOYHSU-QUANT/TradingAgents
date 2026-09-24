@@ -71,8 +71,8 @@ def test_out_writes_one_csv_row_per_decision_and_the_summary(store, tmp_path, ca
     assert f"wrote {decisions}" in captured.err
 
 
-def test_holdout_scores_every_row_and_says_so(store, capsys):
-    assert main(_score(store, "--holdout")) == 0
+def test_holdout_scores_every_row_and_says_so(store, tmp_path, capsys):
+    assert main(_score(store, "--holdout", "--replay-db", str(tmp_path / "looks.sqlite"))) == 0
     out = capsys.readouterr().out.splitlines()
     assert "decisions: 11 questions, 10 answered, 1 unanswered" in out
     assert "segments (questions): train 6, validation 3, holdout 2 -- HOLDOUT READ" in out
@@ -113,7 +113,10 @@ def test_a_flag_pointing_nowhere_is_a_named_exit_1(
 ):
     monkeypatch.chdir(tmp_path)
     assert main(_score(store, *extra)) == 1
-    assert f"error: {message}" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert f"error: {message}" in captured.err
+    # Refused up front: nothing of the card is printed before the refusal.
+    assert captured.out == ""
     assert not (tmp_path / "missing.sqlite").exists()  # never created on the way to refusing
 
 

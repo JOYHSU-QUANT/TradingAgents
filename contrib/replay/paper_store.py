@@ -1,9 +1,10 @@
 """Reading one paper run out of its store as questions and answers.
 
 The only module here that speaks SQL to the perp store, and it only reads:
-``runs`` for the terms the run was traded under, and ``decision_attempts``
-joined to the ``ai_inputs`` row and the ``ai_outputs`` row each attempt
-names. The store is opened by the caller through the perp package's
+``runs`` for the terms the run was traded under (the fill model, and for
+the past papers the ``risk:`` / ``decision:`` blocks its gate ran under),
+and ``decision_attempts`` joined to the ``ai_inputs`` row and the
+``ai_outputs`` row each attempt names. The store is opened by the caller through the perp package's
 own :class:`~contrib.hyperliquid_perp.persistence.db.Database` with
 ``migrate=False`` — a report-only command never upgrades a store a daemon
 may own (the perp CLI's rule) — so every column read here exists: a store
@@ -38,7 +39,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Final, TypeVar
 
 from .score import Answer, Question, ScoreError
@@ -46,12 +47,14 @@ from .upstream import (
     TERMINAL_ATTEMPT_STATUSES,
     CostModel,
     Database,
+    DecisionConfig,
     DecisionMode,
     FillRole,
     MarketDataConfig,
     PaperTradingConfig,
     ResearchStore,
     RiskAction,
+    RiskConfig,
     TargetSide,
     epoch_ms,
     get_run,
@@ -63,7 +66,10 @@ from .upstream import (
 __all__ = [
     "REPORTS_SUFFIX",
     "Decisions",
+    "InputFacts",
     "RunFacts",
+    "answer_from_row",
+    "gate_config",
     "load_decisions",
     "load_research_closes",
     "run_facts",
@@ -82,6 +88,7 @@ SELECT a.decision_attempt_id, a.scheduled_at, a.status, a.attempt_count,
        i.current_position_side, i.current_margin_pct, i.configured_leverage,
        i.max_target_margin_pct, i.autoresearch_bias, i.autoresearch_strategy_id,
        i.prompt_version, i.model, i.context_shape, i.input_payload_path,
+       i.input_payload_hash, i.current_position_size,
        o.output_id, o.decision_mode, o.target_side, o.requested_target_margin_pct,
        o.approved_target_margin_pct, o.risk_action, o.risk_reason, o.confidence,
        o.order_created, o.no_order_reason
@@ -188,6 +195,38 @@ def run_facts(db: Database, run_id: str) -> RunFacts | None:
     )
 
 
+def gate_config(db: Database, run_id: str) -> tuple[RiskConfig, DecisionConfig]:
+    """The ``risk:`` and ``decision:`` blocks the run's genesis recorded, parsed as the daemon parses them.
+
+    A replayed answer passes through the run's own gate (plan PR 2): the
+    thresholds, caps and deadband the recorded answers met. Both blocks have
+    been in the genesis subset since the first run (``cli/_drift.py``), so a
+    genesis without them, or a run with no genesis config at all, is refused
+    by name. Gating at the parser's defaults instead would compare a
+    variant against a gate the run never had.
+    """
+    row = get_run(db.conn, run_id)
+    if row is None:
+        raise ScoreError(f"run {run_id!r} not found")
+    if row["config_json"] is None:
+        raise ScoreError(
+            f"run {run_id!r} recorded no genesis config, so the gate its answers met is unknown"
+        )
+    config = _config(run_id, row["config_json"])
+    missing = [block for block in ("risk", "decision") if block not in config]
+    if missing:
+        raise ScoreError(
+            f"run {run_id!r}: the genesis config lacks {', '.join(missing)}, so the gate its "
+            "answers met is unknown"
+        )
+    try:
+        return RiskConfig.from_dict(config["risk"]), DecisionConfig.from_dict(config["decision"])
+    except (TypeError, ValueError) as exc:
+        raise ScoreError(
+            f"run {run_id!r}: the genesis risk/decision blocks do not parse ({exc})"
+        ) from exc
+
+
 _T = TypeVar("_T")
 
 
@@ -225,9 +264,9 @@ def _question(row: sqlite3.Row, reports_root: Path | None) -> Question:
         raise ScoreError(str(exc)) from exc
     reports: bool | None = None
     if reports_root is not None:
-        payload = row["input_payload_path"]
-        reports = payload is not None and (
-            sidecar_path(reports_root / Path(str(payload)).name, REPORTS_SUFFIX).is_file()
+        name = _payload_name(row["input_payload_path"])
+        reports = name is not None and (
+            sidecar_path(reports_root / name, REPORTS_SUFFIX).is_file()
         )
     # The gate imputes no margin for a flat book, and none for a sized
     # position when the account has no equity to impute it from; the first
@@ -256,7 +295,13 @@ def _question(row: sqlite3.Row, reports_root: Path | None) -> Question:
     )
 
 
-def _answer(row: sqlite3.Row) -> Answer:
+def answer_from_row(row: sqlite3.Row) -> Answer:
+    """An answer row in the ``ai_outputs`` column names, as the scorecard's record.
+
+    Also the replay store's decoder: its ``answers`` rows keep these column
+    names, so a replayed answer is decoded, and refused by name, exactly as
+    a recorded one is.
+    """
     return Answer(
         input_id=str(row["input_id"]),
         decision_mode=_need(row, "decision_mode", DecisionMode),
@@ -272,6 +317,55 @@ def _answer(row: sqlite3.Row) -> Answer:
 
 
 @dataclass(frozen=True)
+class InputFacts:
+    """A question's input row as the gate and the payload lookup need it: exact, not floats.
+
+    The past-papers command (plan PR 2) re-runs the gate on a replayed
+    answer, and the gate takes ``Decimal`` account state; the scorecard's
+    floats would move a target sitting on the deadband's edge. Decoded, not
+    checked: whether a row can be put back through the gate is the replay's
+    question to refuse by name (``replay.position_state``). ``payload_name`` is
+    the file NAME of ``input_payload_path`` (the store holds the daemon
+    host's absolute path), and ``payload_hash`` the digest recorded beside it.
+    """
+
+    input_id: str
+    payload_name: str | None
+    payload_hash: str | None
+    mark: Decimal
+    account_equity: Decimal | None
+    side: TargetSide
+    size: Decimal | None
+    margin_pct: Decimal | None
+    leverage: Decimal
+
+
+def _payload_name(recorded: object) -> str | None:
+    """The file NAME of a recorded payload path, whichever host's separators it uses.
+
+    The store keeps the daemon host's absolute path; a copy is read on
+    another host, where ``Path`` would not split the other platform's
+    separators. ``PureWindowsPath`` splits on both the slash and the
+    backslash (the rule ``persistence/backfill`` uses for the same column).
+    """
+    return None if recorded is None else PureWindowsPath(str(recorded)).name
+
+
+def _input_facts(row: sqlite3.Row) -> InputFacts:
+    return InputFacts(
+        input_id=str(row["input_id"]),
+        payload_name=_payload_name(row["input_payload_path"]),
+        payload_hash=row["input_payload_hash"],
+        mark=_need(row, "mark_price", Decimal),
+        account_equity=_cell(row, "account_equity", Decimal),
+        side=_need(row, "current_position_side", TargetSide),
+        size=_cell(row, "current_position_size", Decimal),
+        margin_pct=_cell(row, "current_margin_pct", Decimal),
+        leverage=_need(row, "configured_leverage", Decimal),
+    )
+
+
+@dataclass(frozen=True)
 class Decisions:
     """One run's decision attempts as the scorecard's records.
 
@@ -283,7 +377,8 @@ class Decisions:
     read; ``retried`` the QUESTIONS that took more than one try, and
     ``extra_tries`` how many tries beyond the first they took in all (an
     attempt that never wrote an input is counted under ``without_input``
-    only, whatever its try count).
+    only, whatever its try count). ``inputs`` holds each question's
+    :class:`InputFacts`, keyed by ``input_id``.
     """
 
     questions: list[Question]
@@ -292,6 +387,7 @@ class Decisions:
     in_progress: int
     retried: int
     extra_tries: int
+    inputs: Mapping[str, InputFacts]
 
     def describe(self) -> list[str]:
         """The counts that are not questions, one line each, only when non-zero."""
@@ -327,6 +423,7 @@ def load_decisions(
     """
     questions: list[Question] = []
     answers: list[Answer] = []
+    inputs: dict[str, InputFacts] = {}
     without_input = in_progress = retried = extra_tries = 0
     for row in db.conn.execute(_DECISIONS_SQL, (run_id,)):
         if row["status"] not in TERMINAL_ATTEMPT_STATUSES:
@@ -359,9 +456,10 @@ def load_decisions(
             retried += 1
             extra_tries += tries - 1
         questions.append(_question(row, reports_root))
+        inputs[str(row["input_id"])] = _input_facts(row)
         if row["output_id"] is not None:
-            answers.append(_answer(row))
-    return Decisions(questions, answers, without_input, in_progress, retried, extra_tries)
+            answers.append(answer_from_row(row))
+    return Decisions(questions, answers, without_input, in_progress, retried, extra_tries, inputs)
 
 
 def load_research_closes(

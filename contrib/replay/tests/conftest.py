@@ -292,9 +292,12 @@ def write_paper_store(
                     order_created=answer["order_created"],
                     no_order_reason=answer["no_order_reason"],
                 )
-            # The daemon's own terminal vocabulary: ``invalid_output`` for a
-            # fail-closed answer, ``completed`` for any other, ``api_failed``
-            # when there is none.
+            # The daemon's own terminal vocabulary (``paper/scheduler.py``):
+            # ``invalid_output`` when the parse seam refused the answer,
+            # ``completed`` for any answer it parsed (a parsed answer the gate
+            # then fails closed on included), ``api_failed`` when there is
+            # none. Every fail-closed row here is a parse refusal
+            # (``invalid_output`` / ``truncated_output``), so the two readings agree.
             if row.answer is None:
                 status = "api_failed"
             elif row.answer["risk_action"] == "invalid_fail_closed":

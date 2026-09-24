@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from contrib.replay import cli
 from contrib.replay.replay import Completion
+from contrib.replay.replay_store import ReplayStore
 
 from .papers import (
     RUN_ID,
@@ -25,6 +27,7 @@ from .papers import (
     Echo,
     decision_text,
     replay_argv,
+    variant as make_variant,
     write_gate_store,
     write_variant,
 )
@@ -141,14 +144,15 @@ def test_questions_up_to_the_models_cutoff_are_left_out(store, tmp_path, monkeyp
     assert cli.main(_replay_score(store, "dated")) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[2] == (
-        "model_cutoff 2027-01-15 (dated): 5 question(s) decided on or before it left out"
+        "model_cutoff 2027-01-15 (dated): 5 of the run's questions are decided on or before it; "
+        "none of them is scored"
     )
     assert f"== repeat 0: {ASKED - 5} question(s) scored ==" in out
     assert cli.main(_replay_score(store, "dated", "--include-pre-cutoff")) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[2] == (
-        "model_cutoff 2027-01-15 (dated): 5 question(s) decided on or before it scored too "
-        "(--include-pre-cutoff)"
+        "model_cutoff 2027-01-15 (dated): 5 of the run's questions are decided on or before it; "
+        "they are scored too (--include-pre-cutoff)"
     )
     assert f"== repeat 0: {ASKED} question(s) scored ==" in out
 
@@ -162,7 +166,8 @@ def test_against_takes_the_later_cutoff_of_the_two(store, tmp_path, monkeypatch,
     out = capsys.readouterr().out.splitlines()
     assert out[2].startswith("against variant rival (")
     assert out[3] == (
-        "model_cutoff 2027-01-15 (rival): 5 question(s) decided on or before it left out"
+        "model_cutoff 2027-01-15 (rival): 5 of the run's questions are decided on or before it; "
+        "none of them is scored"
     )
     assert out[4] == (
         "model_cutoff unknown for echo: questions it may have seen are not left out"
@@ -204,6 +209,33 @@ def test_against_pairs_two_variants_repeat_by_repeat(store, tmp_path, monkeypatc
         "echo only 1, rival only 0, p 1.000",
         "echo only 1, rival only 0, p 1.000",
     ]
+
+
+def test_against_a_variant_with_no_answers_for_the_run_is_refused(
+    store, tmp_path, monkeypatch, capsys
+):
+    _ask(store, write_variant(tmp_path, "echo"), Echo(), monkeypatch)
+    with ReplayStore(store.parent / "replay.sqlite") as replay_store:
+        replay_store.register(make_variant(name="idle"), now=datetime.now(timezone.utc))
+    capsys.readouterr()
+    assert cli.main(_replay_score(store, "echo", "--against", "idle")) == 1
+    expected = f"variant 'idle' has no answers for run {RUN_ID!r} to compare with"
+    assert expected in capsys.readouterr().err
+
+
+def test_a_repeat_the_other_variant_does_not_have_is_named(
+    store, tmp_path, monkeypatch, capsys
+):
+    _ask(store, write_variant(tmp_path, "echo"), Echo(), monkeypatch)
+    rival = write_variant(tmp_path, "rival")
+    for segment in ("train", "validation"):
+        argv = replay_argv(store, rival, "--repeats", "1", "--segment", segment)
+        assert cli.main(argv) == 0
+    capsys.readouterr()
+    assert cli.main(_replay_score(store, "echo", "--against", "rival")) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "  repeat 1: rival has no repeat 1" in out
+    assert any(line.startswith("  repeat 0, 4h: n ") for line in out)
 
 
 def test_scoring_the_holdout_records_the_look_and_shows_the_earlier_ones(

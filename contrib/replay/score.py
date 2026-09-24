@@ -612,8 +612,9 @@ def score_run(
     ``only`` names the questions to score, by ``input_id``: the past papers
     (plan PR 2) answer a subset, and a question nobody put to the variant
     must not read as one it left unanswered. Every question still supplies
-    the later marks and still counts toward the flat band, so a subset is
-    scored against the same prices and the same band as the whole run.
+    the later marks, and every train and validation question still counts
+    toward the flat band, so a subset is scored against the same prices and
+    the same band as the whole run.
     """
     if step_ms <= 0:
         raise ScoreError(f"step_ms must be > 0, got {step_ms!r}")

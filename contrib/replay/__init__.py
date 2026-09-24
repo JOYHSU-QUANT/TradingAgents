@@ -18,9 +18,10 @@ factory, and only through :func:`~contrib.replay.upstream.load_engine`, so
 the scorecard never loads the engine.
 
 It is the one package under ``contrib/`` that imports BOTH neighbours —
-``contrib.hyperliquid_perp`` for the decision vocabulary, the store and the
-paper cost parameters, ``contrib.autoresearch`` for the split, the cost model
-and the research store (replay plan §3-1). The edge is one-way: neither
+``contrib.hyperliquid_perp`` for the decision vocabulary, the store, the
+paper cost parameters and (for the past papers) the parse seam, the gate,
+the payload digest and the prompt assembly, ``contrib.autoresearch`` for the
+split, the cost model and the research store (replay plan §3-1). The edge is one-way: neither
 neighbour imports this package, and ``tests/test_upstream.py`` reads their
 sources to hold that. What is borrowed is listed once, in
 :mod:`~contrib.replay.upstream`, and every other module here imports from

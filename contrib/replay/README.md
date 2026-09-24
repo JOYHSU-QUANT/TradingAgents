@@ -13,10 +13,12 @@
 ## 為什麼是一個新套件
 
 它是 `contrib/` 下**唯一**同時 import 兩個鄰居的套件：`hyperliquid_perp` 提供決策詞彙
-（`DecisionMode`／`TargetSide`／`RiskAction`）、store 與 paper 的 fill model 參數；
+（`DecisionMode`／`TargetSide`／`RiskAction`）、store 與 paper 的 fill model 參數，以及考古題用的
+parse seam、閘門（`parse_target_decision`／`evaluate`）、payload digest 與 `inject_perp_context`；
 `autoresearch` 提供 split（holdout 鎖）、`CostModel` 與研究 store。這條邊是單向的：
 兩個鄰居都不得 import `contrib.replay`，`tests/test_upstream.py` 直接讀兩邊的 source 守著。
-借了什麼一律列在 `upstream.py` 的 `BORROWED`，其他模組只從那裡 import。
+借了什麼一律列在 `upstream.py`：`BORROWED`（載入時就 import）與 `ENGINE_BORROWED`（引擎那一半，
+只在 `load_engine()` 裡 lazy import）；其他模組只從那裡 import。
 
 C1 那條「`hyperliquid_perp` 讀 autoresearch 只走 JSON 文件、不 import」的否決是針對
 **交易路徑**（prompt 段落）；一個永遠碰不到 prompt 的離線工具不是那條路徑。
@@ -174,6 +176,8 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
   同一個指令從停的地方接著跑。`--limit N` 限制這次最多存幾個新答案（重試的呼叫算一次）。
   usage collector 沒記到這次呼叫的答案（無從判斷是否截斷，照 daemon 的讀法當作沒截斷）另外計數印出。
 - `--repeats N`（預設 3，plan §3-10）：每題每 variant 存 N 個答案。
+- `--dry-run` 不能用在 holdout：dry run 會讀它檢查的每個 payload，卻什麼都不寫（連 ledger
+  都不寫），在 holdout 上就是一次沒記錄的偷看。
 
 ### `score --replay-db`
 
@@ -183,11 +187,10 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 paper 交易員自己的答案比，`--against NAME` 改跟另一個 variant 的同一個 repeat 比。
 
 - **cutoff（plan §6）**：variant 有 `model_cutoff` 時，決策時刻落在截止日當天或之前的題目**預設
-  排除**（摘要開頭說排掉幾題），`--include-pre-cutoff` 才算進來；沒有 cutoff 就明說沒有分。
+  排除**（摘要開頭說整個 run 有幾題落在截止日當天或之前），`--include-pre-cutoff` 才算進來；
+  沒有 cutoff 就明說沒有分。
   有 `--against` 時取**兩個 variant 中較晚的**截止日：對手可能看過答案的題，配對的哪一邊都不算；
   沒填 cutoff 的那個 variant 另印一行說它沒被排除。
-- `replay --dry-run` 不能用在 holdout：dry run 會讀它檢查的每個 payload，卻什麼都不寫（連 ledger
-  都不寫），在 holdout 上就是一次沒記錄的偷看。
 - `--holdout` 會先在 ledger 記一列 `score`，並列出這個 run 之前被看過幾次、誰看的。
 - `--out DIR` 寫 `<run-id>-<variant>-decisions.csv`（多一個 `repeat` 欄）與 `-summary.txt`。
 

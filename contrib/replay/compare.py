@@ -72,9 +72,13 @@ def compare(
         preamble.append("model_cutoff unknown: the questions are not split at the model's cutoff")
     else:
         preamble.append(
-            f"model_cutoff {owner.model_cutoff} ({owner.name}): {len(questions) - len(post)} "
-            "question(s) decided on or before it "
-            + ("scored too (--include-pre-cutoff)" if include_pre_cutoff else "left out")
+            f"model_cutoff {owner.model_cutoff} ({owner.name}): {len(questions) - len(post)} of "
+            "the run's questions are decided on or before it; "
+            + (
+                "they are scored too (--include-pre-cutoff)"
+                if include_pre_cutoff
+                else "none of them is scored"
+            )
         )
         preamble.extend(
             f"model_cutoff unknown for {v.name}: questions it may have seen are not left out"

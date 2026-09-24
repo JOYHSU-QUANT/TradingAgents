@@ -357,6 +357,42 @@ def test_a_dry_run_counts_what_is_already_stored(store, variant_file, echo, caps
     ) in capsys.readouterr().out.splitlines()
 
 
+def test_a_dry_run_says_how_many_payloads_had_no_digest_to_check(
+    store, variant_file, echo, capsys
+):
+    conn = sqlite3.connect(store)
+    conn.execute(
+        "UPDATE ai_inputs SET input_payload_hash = NULL WHERE input_id = ?",
+        (papers.input_id(TRAIN[0]),),
+    )
+    conn.commit()
+    conn.close()
+    assert cli.main(_replay(store, variant_file, "--dry-run")) == 0
+    assert (
+        f"payloads read: {len(TRAIN)}, each checked against its input row's digest where one "
+        "was recorded (1 recorded none and were read unchecked)"
+    ) in capsys.readouterr().out.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("blocks", "message"),
+    [
+        ({"risk": papers.RISK}, "the genesis config lacks decision"),
+        ({"decision": papers.DECISION}, "the genesis config lacks risk"),
+        (
+            {"risk": {"leverage": -1}, "decision": papers.DECISION},
+            "the genesis risk/decision blocks do not parse",
+        ),
+    ],
+    ids=["no-decision", "no-risk", "bad-risk"],
+)
+def test_gate_config_refuses_a_gate_it_cannot_rebuild(tmp_path, blocks, message):
+    config = {**run_config(), **blocks}
+    path = write_paper_store(tmp_path / "g.db", payload_root=tmp_path / "p", config=config)
+    with Database(path, migrate=False) as db, pytest.raises(ScoreError, match=message):
+        gate_config(db, FIXTURE_RUN)
+
+
 def test_a_dry_run_does_not_turn_an_empty_file_into_a_store(store, variant_file, echo, capsys):
     empty = store.parent / "replay.sqlite"
     empty.touch()

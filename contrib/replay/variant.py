@@ -20,7 +20,8 @@ been asked at the value the author meant.
 **Identity.** :attr:`Variant.sha` is a digest of what reaches the model:
 the provider and model id, the system prompt's TEXT (not its path), the
 temperature, the completion cap and the extra context. Change any of them
-and it is a new variant, stored beside the old one, never over it. The
+and it is a new variant, which needs a new name; it is stored beside the
+old one, never over it. The
 name is a label for people, held one-to-one with the sha by the store.
 ``model_cutoff`` is a fact about the model rather than something it is
 shown, so it stays out of the digest: correcting it does not throw away

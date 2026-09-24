@@ -512,9 +512,9 @@ Breaking changes within the 0.x line are called out explicitly.
   split, the cost model and the research store from `autoresearch` — through a
   single `upstream.py` whose borrow list the tests pin, and
   `tests/test_upstream.py` reads both neighbours' sources to hold the edge
-  one-way. The paired comparison the past-papers command will use
-  (`score.paired_hits`, McNemar's exact form) ships now; `--replay-db` itself
-  waits for the store PR 2 defines. Offline only: nothing deploys, no run
+  one-way. The paired comparison (`score.paired_hits`, McNemar's exact
+  form) ships here; `--replay-db`, which uses it, arrives with the past
+  papers' store (the entry above). Offline only: nothing deploys, no run
   segment moves. The CI job that runs the research radar's suite now runs this
   package's beside it, and mypy checks the package.
 

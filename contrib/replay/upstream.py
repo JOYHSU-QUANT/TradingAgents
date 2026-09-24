@@ -49,8 +49,9 @@ The engine half (the LLM client factory, the message types, the
 completion collector) is borrowed LAZILY: it is listed in
 ``ENGINE_BORROWED`` and imported only by :func:`load_engine`, because it
 pulls in ``langchain_core`` and a scorecard, a dry run and every test with
-a fake model must not pay for that. ``tradingagents`` is the one package
-outside ``contrib/`` borrowed from, and only through that function.
+a fake model must not pay for that. ``tradingagents`` and
+``langchain_core`` are the only packages outside ``contrib/`` borrowed
+from, and only through that function.
 """
 
 from __future__ import annotations

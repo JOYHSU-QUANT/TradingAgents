@@ -561,3 +561,113 @@ def test_gate_config_refuses_a_run_without_a_genesis(tmp_path):
         pytest.raises(ScoreError, match="recorded no genesis config"),
     ):
         gate_config(db, FIXTURE_RUN)
+
+
+# -- decided 2026-09-24: which failures stop, which are recorded, which are retried --------
+
+
+class _ProviderError(Exception):
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status
+
+
+class _Fails(Echo):
+    """An echo whose provider answers ``status`` for the slots in ``slots``, ``times`` times each."""
+
+    def __init__(self, status: int, slots: set[int], *, times: int = 99) -> None:
+        super().__init__()
+        self.status = status
+        self.slots = slots
+        self.left = dict.fromkeys(slots, times)
+
+    def __call__(self, system: str, human: str) -> Completion:
+        for slot in self.slots:
+            if f"question {slot:02d}:" in human and self.left[slot] > 0:
+                self.left[slot] -= 1
+                self.calls.append((system, human))
+                raise _ProviderError(self.status, f"provider says {self.status}")
+        return super().__call__(system, human)
+
+
+def _use(monkeypatch, model) -> list[float]:
+    slept: list[float] = []
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: model)
+    monkeypatch.setattr(cli, "_sleep", slept.append)
+    return slept
+
+
+def test_a_question_refused_for_its_own_sake_is_recorded_and_the_replay_goes_on(
+    store, variant_file, monkeypatch, capsys
+):
+    model = _Fails(400, {TRAIN[1]})
+    slept = _use(monkeypatch, model)
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 0
+    captured = capsys.readouterr()
+    assert slept == []  # not retried
+    assert (
+        "questions the provider refused for their own sake: 1 (recorded as unanswered; not "
+        "asked again unless --retry-failed)"
+    ) in captured.out.splitlines()
+    assert f"{papers.input_id(TRAIN[1])} repeat 0: refused (400 _ProviderError" in captured.err
+    assert len(_answers(store.parent / "replay.sqlite")) == len(TRAIN) - 1
+    calls = len(model.calls)
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 0
+    assert len(model.calls) == calls  # the refusal is not asked again
+    assert cli.main(_replay(store, variant_file, "--repeats", "1", "--dry-run")) == 0
+    dry = capsys.readouterr().out.splitlines()
+    assert "refused earlier and not asked again: 1 (--retry-failed asks them again)" in dry
+    model.left[TRAIN[1]] = 0  # the provider has changed its mind
+    assert cli.main(_replay(store, variant_file, "--repeats", "1", "--retry-failed")) == 0
+    assert "note: 1 refused question(s) will be asked again" in capsys.readouterr().err
+    assert len(_answers(store.parent / "replay.sqlite")) == len(TRAIN)
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_key_or_model_refusal_stops_the_replay_at_once(
+    store, variant_file, monkeypatch, capsys, status
+):
+    slept = _use(monkeypatch, _Fails(status, {TRAIN[0]}))
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 1
+    err = capsys.readouterr().err
+    assert f"the provider refused the call with {status}" in err
+    assert "that is the key or the model, not the question" in err
+    assert slept == []
+    assert _answers(store.parent / "replay.sqlite") == []
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 503])
+def test_a_timeout_a_rate_limit_or_a_server_error_is_tried_again(
+    store, variant_file, monkeypatch, status
+):
+    slept = _use(monkeypatch, _Fails(status, {TRAIN[0]}, times=2))
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 0
+    assert slept == list(BACKOFF_SECONDS)
+    assert len(_answers(store.parent / "replay.sqlite")) == len(TRAIN)
+
+
+def test_the_first_replay_pins_the_split(store, variant_file, echo, capsys):
+    assert cli.main(_replay(store, variant_file, "--dry-run")) == 0
+    dry = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("split: not pinned in ") for line in dry)
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 0
+    assert any(line.startswith("split: pinned ") for line in capsys.readouterr().out.splitlines())
+    conn = sqlite3.connect(store.parent / "replay.sqlite")
+    try:
+        assert conn.execute("SELECT run_id FROM splits").fetchall() == [(RUN_ID,)]
+    finally:
+        conn.close()
+
+
+def test_a_status_is_read_off_the_exception_or_its_response():
+    from types import SimpleNamespace
+
+    from contrib.replay.replay import _status
+
+    on_itself = _ProviderError(400, "bad request")
+    on_response = RuntimeError("wrapped")
+    on_response.response = SimpleNamespace(status_code=429)  # type: ignore[attr-defined]
+    boolean = RuntimeError("not a status")
+    boolean.status = True  # type: ignore[attr-defined]
+    assert (_status(on_itself), _status(on_response), _status(boolean)) == (400, 429, None)
+    assert _status(ConnectionError("no status at all")) is None

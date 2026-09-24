@@ -87,9 +87,10 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 （否則 validation 最後一天的分數會偷看 holdout 第一天）。`--holdout` 才把它打開，摘要會印
 `HOLDOUT READ`。太短切不出三段的 run 會被具名拒絕（exit 1）。
 
-> 這裡看的是 paper 交易員自己的實際決策，沒有 ledger：鎖住的是「人挑 variant 時別對著 holdout
-> 挑」。variant 的答案看 holdout 時（`replay`／`score --replay-db`），ledger 會記「誰、何時、哪個
-> variant」，見下面的考古題。
+> **`--holdout` 要配 `--replay-db PATH`**（2026-09-24 拍板）：連看 paper 交易員自己答案的 holdout
+> 也會在那個 store 的 ledger 記一列（variant 欄記成 `paper`），store 不存在就建一個。沒有
+> `--replay-db` 的 `score` 不能看 holdout。給了 `--replay-db` 時，run 用的是那個 store 釘住的 split
+> （見下面的考古題）；第一次看 holdout 時若還沒釘，就在這時釘。
 
 ### 輸出
 
@@ -155,25 +156,39 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 
 ### replay.sqlite
 
-自有的 store，三張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
-（`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、成績單讀的每個 gate 欄位）、`ledger`
-（每次看 holdout 一列：誰、何時、哪個 variant、`ask` 或 `score`）。版本在 `PRAGMA user_version`；
-別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build 寫過的 store 也拒絕。
+自有的 store，五張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
+（`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、成績單讀的每個 gate 欄位）、
+`failures`（provider 因題目本身拒答的題，見下）、`splits`（每個 run 釘住的 split）、`ledger`
+（每次看 holdout 一列：誰、何時、哪個 variant 或 `paper`、`ask` 或 `score`）。版本在
+`PRAGMA user_version`；別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build 寫過的 store 也拒絕。
+
+**`register --variant FILE [--replay-db PATH]`** 只登記 variant（或更正已登記同名 variant 的
+`model_cutoff`），不建 client、不問任何題。
 
 ### 重放的紀律
 
-- **Split 與鎖**：同一個 `Split.by_shares`（60/20/20）切整個 run。預設只問 train；`--segment
-  validation` 問 validation；問 holdout 要 `--segment holdout --holdout` **兩個都給**（缺一個具名
-  拒絕），而且 ledger 那一列**在讀第一個 holdout payload 之前**就寫下。沒被選到的段落，payload
-  **連打開都不打開**。
+- **Split 會被釘住**（2026-09-24 拍板）：一個 run **第一次被重放**時（或第一次被看 holdout 時），
+  用當下的全部題目以 `Split.by_shares`（60/20/20）切一次，存進 `splits`；之後這個 run 的每個指令
+  都用這一份，不再重切。還在跑的 run（例如 paper-BTC-7）之後多出來的題目不屬於任何段落、
+  不算進這份考卷（報告第一段會說有幾題），題目也不會從 holdout 漂到 validation／train。
+  所以**要等 run 累積到你想要的題數再做第一次重放**。
+- **鎖**：預設只問 train；`--segment validation` 問 validation；問 holdout 要
+  `--segment holdout --holdout` **兩個都給**（缺一個具名拒絕），而且 ledger 那一列**在讀第一個
+  holdout payload 之前**就寫下。沒被選到的段落，payload **連打開都不打開**。
 - **先驗再花錢**：先建 client（建不起來就在寫任何東西之前停下）；接著登記 variant、問 holdout
   時寫 ledger；然後所有題目的 payload 讀過、用 input 列記的 digest 比對（被改過的具名拒絕；
   input 列沒記 digest 的照讀不比）、閘門輸入全部重建成功，才開始問：第一次呼叫之前一毛不花。
   `--dry-run` 只做讀與驗並印出會存幾個答案（題數×repeat，扣掉已存的），不建 client、不寫任何
   東西（連 `replay.sqlite` 都不建；已存在的空檔會被具名拒絕，不會被建表）。
 - **可續跑**：每個答案判完立刻寫入（各自一個 transaction）；已存的 `(題, repeat)` 永遠不再問。
-  一次呼叫最多試 3 次（失敗後隔 5 秒、20 秒再試），第三次仍失敗就具名停下、已存的答案保留，
-  同一個指令從停的地方接著跑。`--limit N` 限制這次最多存幾個新答案（重試的呼叫算一次）。
+  `--limit N` 限制這次最多存幾個新答案（含記成拒答的題；重試的呼叫算一次）。
+- **失敗怎麼處理**（2026-09-24 拍板，看 provider 回的 HTTP 狀態）：
+  - 401／403／404（金鑰或模型錯）：每題都會一樣失敗，**立刻具名停下**，不重試。
+  - 其他 4xx（408、409、429 除外；例如 context 太長、內容過濾）：是**這一題自己的問題**，記進
+    `failures`、繼續問下一題；之後不再問它（`--retry-failed` 才重問），成績單把它算成「沒答」，
+    同 daemon 的 `api_failed`。
+  - 其他（沒有狀態碼、逾時、限流、5xx）：一次呼叫最多試 3 次（失敗後隔 5 秒、20 秒再試），第三次
+    仍失敗就具名停下、已存的答案保留，同一個指令從停的地方接著跑。
   usage collector 沒記到這次呼叫的答案（無從判斷是否截斷，照 daemon 的讀法當作沒截斷）另外計數印出。
 - `--repeats N`（預設 3，plan §3-10）：每題每 variant 存 N 個答案。
 - `--dry-run` 不能用在 holdout：dry run 會讀它檢查的每個 payload，卻什麼都不寫（連 ledger
@@ -182,15 +197,16 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 ### `score --replay-db`
 
 同一個 `score_run`，把 paper 的答案換成 variant 的答案：**每個 repeat 一張卡**（只算那個 repeat
-答過的題，沒問的題不會變成「沒答」），接著「跨 repeat 的中位數與區間」（每個時距一行：模型命中、執行命中、
+答過或被拒答的題：沒問的題不會變成「沒答」，被拒答的會），接著「跨 repeat 的中位數與區間」（每個時距一行：模型命中、執行命中、
 每題平均執行損益——用平均不用總和，因為各 repeat 答的題數可能不同，plan §3-10），最後是**逐題配對比較**（模型讀法、McNemar 精確 p，plan §3-11）：預設跟
 paper 交易員自己的答案比，`--against NAME` 改跟另一個 variant 的同一個 repeat 比。
 
-- **cutoff（plan §6）**：variant 有 `model_cutoff` 時，決策時刻落在截止日當天或之前的題目**預設
-  排除**（摘要開頭說整個 run 有幾題落在截止日當天或之前），`--include-pre-cutoff` 才算進來；
-  沒有 cutoff 就明說沒有分。
-  有 `--against` 時取**兩個 variant 中較晚的**截止日：對手可能看過答案的題，配對的哪一邊都不算；
-  沒填 cutoff 的那個 variant 另印一行說它沒被排除。
+- **cutoff（plan §6）**：決策時刻落在 variant 截止日當天或之前的題目**預設排除**（摘要開頭說整個
+  run 有幾題落在截止日當天或之前），`--include-pre-cutoff` 才算進來。**沒填 `model_cutoff` 的
+  variant 直接拒絕打分**（2026-09-24 拍板，fail-closed），除非給 `--include-pre-cutoff`；補 cutoff
+  的方法是改 variant 檔再跑 `register`（cutoff 不進 sha，已買的答案都保留）。
+  有 `--against` 時取**兩個 variant 中較晚的**截止日：對手可能看過答案的題，配對的哪一邊都不算。
+- 給了 `--replay-db`，run 就用那裡釘住的 split；報告第一段會說 split 何時釘的、之後多出幾題沒算。
 - `--holdout` 會先在 ledger 記一列 `score`，並列出這個 run 之前被看過幾次、誰看的。
 - `--out DIR` 寫 `<run-id>-<variant>-decisions.csv`（多一個 `repeat` 欄）與 `-summary.txt`。
 

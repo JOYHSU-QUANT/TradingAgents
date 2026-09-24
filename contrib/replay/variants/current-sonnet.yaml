@@ -18,4 +18,6 @@ system_prompt_path: current_system.md
 # max_tokens: 8192 is the default, the paper trader's completion cap.
 # model_cutoff: set it to the model's published training cutoff before
 # scoring, so questions the model may have seen the answer to are left out
-# (plan section 6). Left unset here rather than guessed.
+# (plan section 6). Left unset here rather than guessed; `score --replay-db`
+# refuses a variant without one unless told --include-pre-cutoff. Set it
+# and run `python -m contrib.replay register --variant <this file>`.

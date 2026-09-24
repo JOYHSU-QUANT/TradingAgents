@@ -49,7 +49,7 @@ from typing import Final
 
 from .paper_store import InputFacts
 from .replay_store import ReplayStore, StoredAnswer
-from .score import Question, segment_of
+from .score import Question, bar_open_ms, segment_of
 from .upstream import (
     DECIMAL_CONTEXT,
     CurrentPositionState,
@@ -77,6 +77,7 @@ __all__ = [
     "ReplayReport",
     "ask_all",
     "human_message",
+    "inside",
     "judge",
     "pending",
     "position_state",
@@ -87,6 +88,14 @@ __all__ = [
 # Seconds to wait before the second and the third try of a failed model call:
 # a call is tried once, and once more after each pause.
 BACKOFF_SECONDS: Final = (5.0, 20.0)
+
+# HTTP statuses that say the key or the model is wrong: every question will
+# fail the same way, so the replay stops at the first, untried again.
+_STOP_STATUSES: Final = frozenset({401, 403, 404})
+# Client errors that are still worth another try: a timeout, a conflict, a
+# rate limit. Every other 4xx is the question's own (its context too long, a
+# content filter) and is recorded as unanswered instead (decided 2026-09-24).
+_RETRY_CLIENT_STATUSES: Final = frozenset({408, 409, 429})
 
 
 class ReplayError(Exception):
@@ -143,6 +152,32 @@ class Prepared:
     @property
     def input_id(self) -> str:
         return self.paper.question.input_id
+
+
+def inside(
+    questions: Iterable[Question], *, split: Split, step_ms: int
+) -> tuple[list[Question], int]:
+    """``(questions inside the split's span, how many were decided after its end)``.
+
+    A pinned split does not grow with the run: the questions a run gained
+    after it was pinned belong to no segment and are not part of the exam.
+    A question BEFORE the split's start cannot happen on a run that only
+    grows, so it is refused rather than dropped.
+    """
+    kept: list[Question] = []
+    after = 0
+    for question in questions:
+        opened = bar_open_ms(question.at_ms, step_ms)
+        if opened >= split.holdout.end_ms:
+            after += 1
+        elif opened < split.train.start_ms:
+            raise ReplayError(
+                f"{question.input_id}: decided before the split pinned for this run begins; "
+                "the store's run and the pinned one are not the same run"
+            )
+        else:
+            kept.append(question)
+    return kept, after
 
 
 def select(
@@ -292,6 +327,7 @@ class ReplayReport:
     input_tokens: int
     output_tokens: int
     unreported: int
+    refused: int
     stopped_at_limit: bool
 
     def describe(self) -> list[str]:
@@ -300,6 +336,11 @@ class ReplayReport:
             f"fail-closed among the new answers: {self.fail_closed}",
             f"tokens reported: {self.input_tokens} in, {self.output_tokens} out",
         ]
+        if self.refused:
+            lines.append(
+                f"questions the provider refused for their own sake: {self.refused} (recorded as "
+                "unanswered; not asked again unless --retry-failed)"
+            )
         if self.unreported:
             lines.append(
                 f"answers whose call the usage collector recorded nothing for: {self.unreported} "
@@ -316,7 +357,8 @@ def pending(
     """``(question, repeat)`` still to ask, in asking order: question by question, repeats inside.
 
     The one plan both the replay and its dry run count from, so what a dry
-    run says will be asked is what is asked.
+    run says will be asked is what is asked. ``answered`` is every pair not
+    to ask again: the answers stored and the failures recorded.
     """
     return [
         (item, repeat)
@@ -345,26 +387,69 @@ def ask_all(
 
     Each answer is written the moment it is judged, in its own transaction,
     so an interruption keeps every answer paid for, and the same command
-    resumes where it stopped. A call that raises is tried again after each
-    of :data:`BACKOFF_SECONDS`; after the last try it ends the replay by
-    name, and the answers stored so far stay. ``limit`` caps the NEW answers
-    this invocation stores; a call tried again counts once.
+    resumes where it stopped. What a failed call means depends on what the
+    provider said (decided 2026-09-24):
+
+    - 401, 403 or 404 (the key or the model is wrong): the replay stops at
+      once, by name; every question would fail the same way.
+    - any other 4xx but 408, 409 and 429 (the question's own: its context
+      too long, a content filter): the question is recorded as a failure,
+      not asked again unless the caller clears the failures, and the replay
+      goes on. The scorecard counts it as unanswered.
+    - anything else (no status, a timeout, a rate limit, a 5xx): tried again
+      after each of :data:`BACKOFF_SECONDS`; after the last try the replay
+      stops by name, and the same command resumes from there.
+
+    ``limit`` caps the NEW answers and failures this invocation stores; a
+    call tried again counts once.
     """
     sha = variant.sha
-    todo = pending(prepared, answered=store.answered(sha, run_id), repeats=repeats)
+    done = set(store.answered(sha, run_id))
+    for repeat, input_ids in store.failed(sha, run_id).items():
+        done.update((input_id, repeat) for input_id in input_ids)
+    todo = pending(prepared, answered=done, repeats=repeats)
     total = len(prepared) * repeats
     skipped = total - len(todo)
-    asked = fail_closed = tokens_in = tokens_out = unreported = 0
+    asked = refused = fail_closed = tokens_in = tokens_out = unreported = 0
+
+    def report(stopped: bool) -> ReplayReport:
+        return ReplayReport(
+            asked=asked,
+            already_stored=skipped,
+            fail_closed=fail_closed,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            unreported=unreported,
+            refused=refused,
+            stopped_at_limit=stopped,
+        )
+
     humans: dict[str, str] = {}
     for item, repeat in todo:
-        if limit is not None and asked >= limit:
-            return ReplayReport(
-                asked, skipped, fail_closed, tokens_in, tokens_out, unreported, True
-            )
+        if limit is not None and asked + refused >= limit:
+            return report(True)
         human = humans.setdefault(item.input_id, human_message(item, variant.extra_context))
-        completion = _call(
-            model, variant.system_prompt, human, item=item, repeat=repeat, sleep=sleep, asked=asked
-        )
+        try:
+            completion = _call(
+                model,
+                variant.system_prompt,
+                human,
+                item=item,
+                repeat=repeat,
+                sleep=sleep,
+                asked=asked,
+            )
+        except _QuestionRefused as exc:
+            store.record_failure(
+                sha, run_id=run_id, input_id=item.input_id, repeat=repeat, error=str(exc), now=now()
+            )
+            refused += 1
+            if progress is not None:
+                progress(
+                    f"[{skipped + asked + refused}/{total}] {item.input_id} repeat {repeat}: "
+                    f"refused ({exc}); recorded as unanswered"
+                )
+            continue
         invalid_reason, raw, gate = judge(completion, item, risk=risk, decision=decision)
         store.write_answer(
             sha,
@@ -391,10 +476,24 @@ def ask_all(
         if progress is not None:
             side = "" if gate.target_side is None else f" {gate.target_side.value}"
             progress(
-                f"[{skipped + asked}/{total}] {item.input_id} repeat {repeat}: "
+                f"[{skipped + asked + refused}/{total}] {item.input_id} repeat {repeat}: "
                 f"{gate.decision_mode.value}{side} -> {gate.risk_action.value}"
             )
-    return ReplayReport(asked, skipped, fail_closed, tokens_in, tokens_out, unreported, False)
+    return report(False)
+
+
+class _QuestionRefused(Exception):
+    """The provider refused this question for its own sake; the text says how."""
+
+
+def _status(exc: BaseException) -> int | None:
+    """The HTTP status a provider SDK's exception carries, on itself or its response."""
+    for holder in (exc, getattr(exc, "response", None)):
+        for attribute in ("status_code", "status", "http_status"):
+            value = getattr(holder, attribute, None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+    return None
 
 
 def _call(
@@ -407,11 +506,25 @@ def _call(
     sleep: Callable[[float], None],
     asked: int,
 ) -> Completion:
-    """One model call, tried again after each pause; the last failure ends the replay by name."""
+    """One model call, sorted by what a failure says (see :func:`ask_all`).
+
+    Raises :class:`ReplayError` to stop the replay, or
+    :class:`_QuestionRefused` for a question the caller records and passes.
+    """
     for attempt, pause in enumerate((*BACKOFF_SECONDS, None)):
         try:
             completion = model(system, human)
         except Exception as exc:  # noqa: BLE001 - any provider failure is a failed call
+            status = _status(exc)
+            if status in _STOP_STATUSES:
+                raise ReplayError(
+                    f"{item.input_id} repeat {repeat}: the provider refused the call with "
+                    f"{status} ({type(exc).__name__}: {exc}); that is the key or the model, not "
+                    f"the question, so the replay stops here; {asked} new answer(s) were stored "
+                    "before it"
+                ) from exc
+            if status is not None and 400 <= status < 500 and status not in _RETRY_CLIENT_STATUSES:
+                raise _QuestionRefused(f"{status} {type(exc).__name__}: {exc}") from exc
             if pause is None:
                 raise ReplayError(
                     f"{item.input_id} repeat {repeat}: the model call failed {attempt + 1} time(s), "

@@ -5,7 +5,8 @@ opens the stores and prints, and everything between is here.
 
 - **One card per repeat.** Each repeat's answers go through the one
   :func:`~.score.score_run`, restricted (``only``) to the questions that
-  repeat answered, so a question nobody asked does not read as unanswered.
+  repeat answered or had refused, so a question nobody asked does not read
+  as unanswered, and a question the provider refused does.
 - **The cutoff (plan §6).** Questions decided on or before the model's
   cutoff day are left out unless the caller includes them. With a second
   variant to compare against, the LATER of the two cutoffs decides: a
@@ -56,8 +57,14 @@ def compare(
     against: Variant | None = None,
     against_answers: Mapping[int, Sequence[Answer]] | None = None,
     include_pre_cutoff: bool = False,
+    failed: Mapping[int, Collection[str]] | None = None,
+    against_failed: Mapping[int, Collection[str]] | None = None,
 ) -> Comparison:
-    """Score ``variant``'s repeats and compare them with the paper trader, or with ``against``."""
+    """Score ``variant``'s repeats and compare them with the paper trader, or with ``against``.
+
+    ``failed`` (and ``against_failed``) name, per repeat, the questions the
+    provider refused: scored as unanswered, as the daemon's ``api_failed``.
+    """
     compared = [variant] if against is None else [variant, against]
     known = [v for v in compared if v.cutoff_ms is not None]
     owner = max(known, key=lambda v: v.cutoff_ms or 0) if known else None
@@ -86,10 +93,19 @@ def compare(
             if v.cutoff_ms is None
         )
 
-    def answered(given: Sequence[Answer]) -> Scorecard:
-        return card(given, {a.input_id for a in given} & eligible)
+    def answered(given: Sequence[Answer], refused: Collection[str]) -> Scorecard:
+        return card(given, ({a.input_id for a in given} | set(refused)) & eligible)
 
-    cards = {repeat: answered(given) for repeat, given in sorted(answers.items())}
+    def by_repeat(
+        given: Mapping[int, Sequence[Answer]], refused: Mapping[int, Collection[str]] | None
+    ) -> dict[int, Scorecard]:
+        refused = refused or {}
+        return {
+            repeat: answered(given.get(repeat, ()), refused.get(repeat, ()))
+            for repeat in sorted(set(given) | set(refused))
+        }
+
+    cards = by_repeat(answers, failed)
     summaries = {repeat: scored.summary() for repeat, scored in cards.items()}
     body: list[str] = []
     header: list[str] = []
@@ -106,7 +122,7 @@ def compare(
         body.extend(_paired(cards, lambda _repeat: paper, variant.name, "paper"))
     else:
         assert against_answers is not None
-        theirs = {repeat: answered(given) for repeat, given in against_answers.items()}
+        theirs = by_repeat(against_answers, against_failed)
         body.extend(_paired(cards, theirs.get, variant.name, against.name))
     return Comparison(preamble, body, (header, rows))
 

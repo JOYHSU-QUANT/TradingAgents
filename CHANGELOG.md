@@ -449,9 +449,20 @@ Breaking changes within the 0.x line are called out explicitly.
   later of the two with `--against`) are left out unless
   `--include-pre-cutoff` (plan section 6), and `--holdout` records its look
   first. A dry run does not run on the holdout: it reads payloads and
-  records nothing. The simple version's scores compare variants with each
-  other, not with the paper trader's record: one completion is not the
-  graph it replaces. `score` itself now finds a payload's `.reports.json`
+  records nothing. Four rules decided on 2026-09-24: a run's split is
+  pinned in the replay store the first time the run is replayed (or its
+  holdout looked at), so a run still trading does not walk questions out of
+  its holdout, and the questions it gains afterwards are left out of that
+  exam, counted; `score --replay-db` refuses a variant with no
+  `model_cutoff` unless `--include-pre-cutoff` (a new `register` command
+  records a corrected cutoff without asking anything); a failed call that
+  says the key or model is wrong (401/403/404) stops the replay at once,
+  any other 4xx but 408/409/429 is the question's own, recorded as
+  unanswered and not asked again unless `--retry-failed`, and everything
+  else is retried; plain `score --holdout` needs `--replay-db`, whose
+  ledger records the look at the paper trader's own answers too. The
+  simple version's scores compare variants with each other, not with the
+  paper trader's record: one completion is not the graph it replaces. `score` itself now finds a payload's `.reports.json`
   by the file name of a path recorded with either host's separators
   (`PureWindowsPath`), so a store recorded on one platform and read on the
   other counts its sidecars. Two known differences from the daemon: the

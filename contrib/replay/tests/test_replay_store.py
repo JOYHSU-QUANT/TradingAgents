@@ -231,3 +231,40 @@ def test_a_failed_commit_is_rolled_back_so_the_next_write_can_begin(tmp_path):
         # and this BEGIN would fail inside it.
         assert store.register(make_variant(), now=NOW) == []
         assert store.variant("v").name == "v"
+
+
+def test_a_split_is_pinned_once_and_read_back(tmp_path):
+    from contrib.replay.upstream import Split
+
+    step = 14_400_000
+    start = 1_800_000_000_000 - 1_800_000_000_000 % step
+    first = Split.by_shares("4h", start_ms=start, end_ms=start + 10 * step)
+    other = Split.by_shares("4h", start_ms=start, end_ms=start + 15 * step)
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        assert store.pinned_split("run") is None
+        pinned, at = store.pin_split("run", first, now=NOW)
+        assert (pinned, at) == (first, NOW.isoformat())
+        again, _ = store.pin_split("run", other, now=NOW)
+        assert again == first  # the first pin stands
+
+
+def test_a_failure_is_recorded_listed_and_cleared(tmp_path):
+    variant = make_variant()
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        store.register(variant, now=NOW)
+        store.record_failure(
+            variant.sha, run_id="run", input_id="in-1", repeat=0, error="400 too long", now=NOW
+        )
+        assert store.failed(variant.sha, "run") == {0: {"in-1"}}
+        assert store.failed(variant.sha, "other") == {}
+        assert store.clear_failures(variant.sha, "run") == 1
+        assert store.failed(variant.sha, "run") == {}
+
+
+def test_a_look_at_the_paper_traders_answers_names_no_variant(tmp_path):
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        store.record_look(
+            action="score", run_id="run", variant_sha=None, questions=2, who="joy", now=NOW
+        )
+        (look,) = store.looks("run")
+    assert (look.action, look.variant_name, look.questions) == ("score", "paper", 2)

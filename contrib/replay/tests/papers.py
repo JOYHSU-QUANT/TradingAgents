@@ -144,26 +144,30 @@ def position(paper: Paper) -> CurrentPositionState:
     )
 
 
-def write_gate_store(path: Path, *, papers: tuple[Paper, ...] = PAPERS) -> Path:
+def write_gate_store(
+    path: Path, *, papers: tuple[Paper, ...] = PAPERS, grow: bool = False
+) -> Path:
     """The fixture run, every answer produced by the real gate, every payload on disk.
 
     Payloads go where the daemon puts them (``payloads/<run-id>/`` beside
     the store), so the ``replay`` command finds them without a flag; the
     input rows name them by the daemon host's absolute path, as the real
-    store does, and are matched by file name.
+    store does, and are matched by file name. ``grow`` adds ``papers`` to a
+    store this function already wrote: the run trading on.
     """
     risk, decision = RiskConfig.from_dict(RISK), DecisionConfig.from_dict(DECISION)
     root = payload_dir(path, RUN_ID)
     root.mkdir(parents=True, exist_ok=True)
     with Database(path) as db, db.transaction() as conn:
-        repo.insert_run(
-            conn,
-            run_id=RUN_ID,
-            mode="paper",
-            initial_balance_usdc=EQUITY,
-            schema_version=SCHEMA_VERSION,
-            config_json=json.dumps(gate_run_config()),
-        )
+        if not grow:
+            repo.insert_run(
+                conn,
+                run_id=RUN_ID,
+                mode="paper",
+                initial_balance_usdc=EQUITY,
+                schema_version=SCHEMA_VERSION,
+                config_json=json.dumps(gate_run_config()),
+            )
         for paper in papers:
             stamp = from_epoch_ms(at_ms(paper.slot))
             raw = payload_bytes(paper.slot)
@@ -264,7 +268,14 @@ def variant(**overrides) -> Variant:
     return Variant(**fields)
 
 
-def write_variant(directory: Path, name: str, *, cutoff: str | None = None) -> Path:
+# The day before the fixture's first question (2027-01-15): a cutoff that
+# leaves no question out, so a variant is scorable without it saying so.
+BEFORE_ANY_QUESTION = "2027-01-14"
+
+
+def write_variant(
+    directory: Path, name: str, *, cutoff: str | None = BEFORE_ANY_QUESTION
+) -> Path:
     """A variant file named ``name`` (model ``fixture/<name>``) and its prompt, in ``directory``."""
     (directory / "system.md").write_text(SYSTEM, encoding="utf-8")
     lines = [

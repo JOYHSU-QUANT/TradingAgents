@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import csv
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -95,7 +95,11 @@ def test_an_echo_of_the_paper_traders_answers_scores_as_the_paper_trader(
     for repeat in (0, 1):
         assert _section(out, f"== repeat {repeat}: {ASKED} question(s) scored ==") == paper[1:]
     assert out[1].startswith("variant echo (")
-    assert out[2] == "model_cutoff unknown: the questions are not split at the model's cutoff"
+    assert out[2] == (
+        "model_cutoff 2027-01-14 (echo): 0 of the run's questions are decided on or before it; "
+        "none of them is scored"
+    )
+    assert out[3].startswith("split: pinned ")
 
 
 def test_an_echo_differs_from_the_paper_trader_on_no_question(
@@ -169,9 +173,7 @@ def test_against_takes_the_later_cutoff_of_the_two(store, tmp_path, monkeypatch,
         "model_cutoff 2027-01-15 (rival): 5 of the run's questions are decided on or before it; "
         "none of them is scored"
     )
-    assert out[4] == (
-        "model_cutoff unknown for echo: questions it may have seen are not left out"
-    )
+    assert out[4].startswith("split: pinned ")
     assert f"== repeat 0: {ASKED - 5} question(s) scored ==" in out
     paired = out[out.index("-- paired with rival (model reading; McNemar exact p) --") + 1 :]
     assert all(int(line.split(": n ")[1].split(",")[0]) <= ASKED - 5 for line in paired)
@@ -216,7 +218,8 @@ def test_against_a_variant_with_no_answers_for_the_run_is_refused(
 ):
     _ask(store, write_variant(tmp_path, "echo"), Echo(), monkeypatch)
     with ReplayStore(store.parent / "replay.sqlite") as replay_store:
-        replay_store.register(make_variant(name="idle"), now=datetime.now(timezone.utc))
+        idle = make_variant(name="idle", model_cutoff=date(2027, 1, 14))
+        replay_store.register(idle, now=datetime.now(timezone.utc))
     capsys.readouterr()
     assert cli.main(_replay_score(store, "echo", "--against", "idle")) == 1
     expected = f"variant 'idle' has no answers for run {RUN_ID!r} to compare with"
@@ -328,10 +331,10 @@ def test_a_variant_with_no_answers_for_the_run_is_refused(store, tmp_path, monke
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        ((), "--replay-db needs --variant NAME"),
+        (("--against", "echo"), "--against only apply with --variant"),
         (("--variant", "echo", "--against", "echo"), "--against names the variant being scored"),
     ],
-    ids=["no-variant", "against-itself"],
+    ids=["against-without-variant", "against-itself"],
 )
 def test_the_variant_flags_are_checked_up_front(
     store, tmp_path, monkeypatch, capsys, extra, message
@@ -340,3 +343,121 @@ def test_the_variant_flags_are_checked_up_front(
     argv = _score(store, "--replay-db", str(store.parent / "replay.sqlite"), *extra)
     assert cli.main(argv) == 1
     assert message in capsys.readouterr().err
+
+
+# -- decided 2026-09-24: a cutoff is required, the split is pinned, refusals count ---------
+
+
+def test_a_variant_with_no_cutoff_is_refused_unless_every_question_is_asked_for(
+    store, tmp_path, monkeypatch, capsys
+):
+    _ask(store, write_variant(tmp_path, "undated", cutoff=None), Echo(), monkeypatch)
+    capsys.readouterr()
+    assert cli.main(_replay_score(store, "undated")) == 1
+    err = capsys.readouterr().err
+    assert "'undated' record(s) no model_cutoff" in err
+    assert "run `register`, or pass --include-pre-cutoff" in err
+    assert cli.main(_replay_score(store, "undated", "--include-pre-cutoff")) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[2] == "model_cutoff unknown: the questions are not split at the model's cutoff"
+    assert f"== repeat 0: {ASKED} question(s) scored ==" in out
+
+
+def test_register_records_a_cutoff_without_asking_anything(store, tmp_path, monkeypatch, capsys):
+    _ask(store, write_variant(tmp_path, "later", cutoff=None), Echo(), monkeypatch)
+    dated = write_variant(tmp_path, "later", cutoff="2027-01-15")
+    monkeypatch.setattr(cli, "_build_model", _no_client)
+    capsys.readouterr()
+    argv = ["register", "--variant", str(dated), "--replay-db", str(store.parent / "replay.sqlite")]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[1] == "model_cutoff: 2027-01-15"
+    assert out[2].startswith("note: model_cutoff of 'later' changed from None to 2027-01-15")
+    assert cli.main(_replay_score(store, "later")) == 0
+    assert f"== repeat 0: {ASKED - 5} question(s) scored ==" in capsys.readouterr().out
+
+
+def _no_client(variant):
+    raise AssertionError("register must not build a client")
+
+
+def test_questions_the_run_gained_after_the_pin_are_not_part_of_the_exam(
+    tmp_path, monkeypatch, capsys
+):
+    """Pinned over eight questions (5 / 1 / 2), the split stays put when the run gains two."""
+    from .papers import PAPERS
+
+    store = write_gate_store(tmp_path / "paper_trading.db", papers=PAPERS[:8])
+    variant = write_variant(tmp_path, "echo")
+    _ask(store, variant, Echo(), monkeypatch, "train")
+    write_gate_store(store, papers=PAPERS[8:], grow=True)
+    capsys.readouterr()
+    assert cli.main(_replay_score(store, "echo")) == 0
+    out = capsys.readouterr().out.splitlines()
+    (split_line,) = [line for line in out if line.startswith("split: pinned ")]
+    assert split_line.endswith("; 2 question(s) decided after its end are not part of this exam")
+    card = out[out.index("== repeat 0: 5 question(s) scored ==") + 1 :]
+    # Five train bars, one validation bar: the eight-question cut, not the ten-question one.
+    assert "split (4h): train: 2027-01-15 04:00 .. 2027-01-16 00:00" in card
+    assert "split (4h): validation: 2027-01-16 00:00 .. 2027-01-16 04:00" in card
+    assert "segments (questions): train 5 (holdout not read)" in card
+    # Unpinned, the ten questions would have cut 6 / 2 / 2: a sixth train question.
+    argv = replay_argv(store, variant, "--repeats", "2", "--dry-run")
+    assert cli.main(argv) == 0
+    dry = capsys.readouterr().out.splitlines()
+    assert dry[0].endswith("train segment: 5 question(s) x 2 repeat(s)")
+
+
+def test_a_refused_question_scores_as_unanswered(store, tmp_path, monkeypatch, capsys):
+    model = _RefusesSlot(2)
+    _ask(store, write_variant(tmp_path, "picky"), model, monkeypatch, "train")
+    capsys.readouterr()
+    assert cli.main(_replay_score(store, "picky")) == 0
+    out = capsys.readouterr().out.splitlines()
+    card = out[out.index(f"== repeat 0: {len(TRAIN)} question(s) scored ==") + 1 :]
+    assert card[0] == (
+        f"decisions: {len(TRAIN)} questions, {len(TRAIN) - 1} answered, 1 unanswered"
+    )
+
+
+class _ContextTooLong(Exception):
+    status_code = 400
+
+
+class _RefusesSlot(Echo):
+    """An echo whose provider refuses one question with a 400 every time it is asked."""
+
+    def __init__(self, slot: int) -> None:
+        super().__init__()
+        self.slot = slot
+
+    def __call__(self, system: str, human: str) -> Completion:
+        if f"question {self.slot:02d}:" in human:
+            self.calls.append((system, human))
+            raise _ContextTooLong("maximum context length exceeded")
+        return super().__call__(system, human)
+
+
+def test_looking_at_the_paper_traders_holdout_is_recorded(store, capsys):
+    assert cli.main(_score(store, "--holdout")) == 1
+    assert "--holdout needs --replay-db PATH" in capsys.readouterr().err
+    replay_db = store.parent / "looks.sqlite"
+    assert cli.main(_score(store, "--holdout", "--replay-db", str(replay_db))) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[1].startswith("split: pinned ")
+    assert "holdout looks recorded for this run before this one: 0" in out
+    assert any(line.endswith("-- HOLDOUT READ") for line in out)
+    assert cli.main(_score(store, "--holdout", "--replay-db", str(replay_db))) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "holdout looks recorded for this run before this one: 1" in out
+    assert any(line.endswith(" score paper (2 question(s))") for line in out)
+
+
+def test_a_missing_replay_store_is_not_created_to_score_a_variant_or_the_paper_unlooked(
+    store, capsys
+):
+    missing = store.parent / "nope.sqlite"
+    for extra in ((), ("--variant", "x")):
+        assert cli.main(_score(store, "--replay-db", str(missing), *extra)) == 1
+        assert f"--replay-db {str(missing)!r} does not exist" in capsys.readouterr().err
+    assert not missing.exists()

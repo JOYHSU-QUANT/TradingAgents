@@ -1,6 +1,6 @@
 """``replay.sqlite``: the past papers' own store (replay plan PR 2).
 
-Three tables, and nothing here ever writes the paper store:
+Five tables, and nothing here ever writes the paper store:
 
 - ``variants``: one row per variant this store has asked with, keyed by its
   :attr:`~.variant.Variant.sha`. The name is UNIQUE too, so a name means
@@ -13,9 +13,24 @@ Three tables, and nothing here ever writes the paper store:
   field the gate returned that the scorecard reads, in the gate's own
   spelling: enum values as text, margins as integer text (the grid is
   integral) and confidence as ``Decimal`` text.
+- ``failures``: one row per question, variant and repeat the provider
+  refused for the question's own sake (a 4xx that is not a key, model or
+  rate problem: the context too long, a content filter). A question
+  recorded here is not asked again unless the replay is told to, and the
+  scorecard counts it as unanswered, as the daemon counts an ``api_failed``
+  cycle.
+- ``splits``: one row per run, the train / validation / holdout split the
+  run was first replayed (or first looked at) under. Every later command on
+  the run uses it, however many questions the run has gained since: cut
+  afresh each time, a split over a run still trading would move its
+  boundaries every cycle and walk questions out of the holdout into
+  validation and train (decided 2026-09-24, as the research ledger pins
+  its holdout).
 - ``ledger``: one row per look at a holdout (plan §3-9). ``ask`` is written
   before the first holdout payload is read, and ``score`` before a holdout
   answer is scored; either way the row exists even if what follows fails.
+  A look at the paper trader's own answers (``score --holdout`` with no
+  variant) is recorded too, with no variant.
 
 The schema is versioned by ``PRAGMA user_version``. A file that holds
 tables but not ours is refused before anything writes to it, a store a
@@ -27,6 +42,7 @@ whatever it had begun is rolled back.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -38,7 +54,7 @@ from typing import Final
 
 from .paper_store import answer_from_row
 from .score import Answer
-from .upstream import RiskGateResult
+from .upstream import RiskGateResult, Split, SplitError
 from .variant import Variant, short_sha
 
 __all__ = [
@@ -93,18 +109,36 @@ _DDL: Final = (
     )
     """,
     """
+    CREATE TABLE failures (
+        variant_sha TEXT NOT NULL REFERENCES variants (variant_sha),
+        run_id      TEXT NOT NULL,
+        input_id    TEXT NOT NULL,
+        repeat      INTEGER NOT NULL CHECK (repeat >= 0),
+        failed_at   TEXT NOT NULL,
+        error       TEXT NOT NULL,
+        PRIMARY KEY (variant_sha, run_id, input_id, repeat)
+    )
+    """,
+    """
+    CREATE TABLE splits (
+        run_id     TEXT PRIMARY KEY,
+        split_json TEXT NOT NULL,
+        pinned_at  TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE ledger (
         entry_id    INTEGER PRIMARY KEY AUTOINCREMENT,
         at          TEXT NOT NULL,
         who         TEXT NOT NULL,
         action      TEXT NOT NULL CHECK (action IN ('ask', 'score')),
         run_id      TEXT NOT NULL,
-        variant_sha TEXT NOT NULL REFERENCES variants (variant_sha),
+        variant_sha TEXT REFERENCES variants (variant_sha),
         questions   INTEGER NOT NULL
     )
     """,
 )
-_TABLES: Final = frozenset({"variants", "answers", "ledger"})
+_TABLES: Final = frozenset({"variants", "answers", "failures", "splits", "ledger"})
 _BUSY_TIMEOUT_MS: Final = 5000
 
 
@@ -137,7 +171,7 @@ class HoldoutLook:
     at: str
     who: str
     action: str
-    variant_name: str
+    variant_name: str  # "paper" for a look at the paper trader's own answers
     questions: int
 
 
@@ -389,6 +423,41 @@ class ReplayStore:
                 ),
             )
 
+    def record_failure(
+        self,
+        variant_sha: str,
+        *,
+        run_id: str,
+        input_id: str,
+        repeat: int,
+        error: str,
+        now: datetime,
+    ) -> None:
+        """One question the provider refused for its own sake: not asked again, scored unanswered."""
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO failures (variant_sha, run_id, input_id, repeat, failed_at, error) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (variant_sha, run_id, input_id, repeat, now.isoformat(), error),
+            )
+
+    def failed(self, variant_sha: str, run_id: str) -> Mapping[int, set[str]]:
+        """The ``input_id`` of every recorded failure for this variant and run, keyed by repeat."""
+        by_repeat: dict[int, set[str]] = {}
+        for row in self.conn.execute(
+            "SELECT input_id, repeat FROM failures WHERE variant_sha = ? AND run_id = ?",
+            (variant_sha, run_id),
+        ):
+            by_repeat.setdefault(row["repeat"], set()).add(row["input_id"])
+        return by_repeat
+
+    def clear_failures(self, variant_sha: str, run_id: str) -> int:
+        """Forget this variant's recorded failures on the run, so they are asked again."""
+        with self.transaction() as conn:
+            return conn.execute(
+                "DELETE FROM failures WHERE variant_sha = ? AND run_id = ?", (variant_sha, run_id)
+            ).rowcount
+
     def answers(self, variant_sha: str, run_id: str) -> Mapping[int, Sequence[Answer]]:
         """The stored answers of one variant on one run, as scorecard records, keyed by repeat.
 
@@ -404,12 +473,49 @@ class ReplayStore:
             by_repeat.setdefault(row["repeat"], []).append(answer_from_row(row))
         return by_repeat
 
+    # -- the split ------------------------------------------------------------
+
+    def pinned_split(self, run_id: str) -> tuple[Split, str] | None:
+        """``(split, pinned_at)`` the run was pinned under, or ``None`` if it has not been."""
+        row = self.conn.execute(
+            "SELECT split_json, pinned_at FROM splits WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return Split.from_dict(json.loads(row["split_json"])), row["pinned_at"]
+        except (ValueError, SplitError) as exc:
+            raise ReplayStoreError(
+                f"{self.path}: the split pinned for run {run_id!r} cannot be read ({exc})"
+            ) from exc
+
+    def pin_split(self, run_id: str, split: Split, *, now: datetime) -> tuple[Split, str]:
+        """Pin ``split`` for the run unless one is pinned already; return the one that stands."""
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO splits (run_id, split_json, pinned_at) VALUES (?, ?, ?)",
+                (run_id, json.dumps(split.to_dict(), sort_keys=True), now.isoformat()),
+            )
+        pinned = self.pinned_split(run_id)
+        assert pinned is not None  # inserted above, or already there
+        return pinned
+
     # -- ledger --------------------------------------------------------------
 
     def record_look(
-        self, *, action: str, run_id: str, variant_sha: str, questions: int, who: str, now: datetime
+        self,
+        *,
+        action: str,
+        run_id: str,
+        variant_sha: str | None,
+        questions: int,
+        who: str,
+        now: datetime,
     ) -> None:
-        """One ledger row: ``who`` looked at ``questions`` holdout questions of ``run_id``."""
+        """One ledger row: ``who`` looked at ``questions`` holdout questions of ``run_id``.
+
+        ``variant_sha`` is ``None`` for a look at the paper trader's own answers.
+        """
         with self.transaction() as conn:
             conn.execute(
                 "INSERT INTO ledger (at, who, action, run_id, variant_sha, questions) "
@@ -424,12 +530,12 @@ class ReplayStore:
                 at=row["at"],
                 who=row["who"],
                 action=row["action"],
-                variant_name=row["name"],
+                variant_name=row["name"] or "paper",
                 questions=row["questions"],
             )
             for row in self.conn.execute(
                 "SELECT l.at, l.who, l.action, l.questions, v.name FROM ledger AS l "
-                "JOIN variants AS v ON v.variant_sha = l.variant_sha WHERE l.run_id = ? "
+                "LEFT JOIN variants AS v ON v.variant_sha = l.variant_sha WHERE l.run_id = ? "
                 "ORDER BY l.entry_id",
                 (run_id,),
             )

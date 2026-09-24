@@ -71,8 +71,8 @@ def test_out_writes_one_csv_row_per_decision_and_the_summary(store, tmp_path, ca
     assert f"wrote {decisions}" in captured.err
 
 
-def test_holdout_scores_every_row_and_says_so(store, capsys):
-    assert main(_score(store, "--holdout")) == 0
+def test_holdout_scores_every_row_and_says_so(store, tmp_path, capsys):
+    assert main(_score(store, "--holdout", "--replay-db", str(tmp_path / "looks.sqlite"))) == 0
     out = capsys.readouterr().out.splitlines()
     assert "decisions: 11 questions, 10 answered, 1 unanswered" in out
     assert "segments (questions): train 6, validation 3, holdout 2 -- HOLDOUT READ" in out

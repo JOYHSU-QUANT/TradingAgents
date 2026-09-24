@@ -85,8 +85,9 @@ __all__ = [
     "select",
 ]
 
-# Seconds to wait before the second and the third try of a failed model call:
-# a call is tried once, and once more after each pause.
+# Seconds to wait before the second and the third try of a failed model call
+# that is retried (see :func:`ask_all` for which are): a call is tried once,
+# and once more after each pause.
 BACKOFF_SECONDS: Final = (5.0, 20.0)
 
 # HTTP statuses that say the key or the model is wrong: every question will

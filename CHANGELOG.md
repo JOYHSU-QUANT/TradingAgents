@@ -428,10 +428,11 @@ Breaking changes within the 0.x line are called out explicitly.
   genesis `risk:` / `decision:` blocks and the account state its input row
   recorded; a run whose genesis lacks those blocks is refused rather than
   gated at the defaults. Answers go to the package's own `replay.sqlite`
-  (`variants`, `answers`, `ledger`), never to the paper store, one row per
-  question, variant and repeat (`--repeats`, default 3), written as each is
-  judged, so an interrupted replay resumes without re-asking; a failing call
-  is tried three times, 5 s and 20 s apart, then stops by name. Before the
+  (`variants`, `answers`, `failures`, `splits`, `ledger`), never to the
+  paper store, one row per question, variant and repeat (`--repeats`,
+  default 3), written as each is judged, so an interrupted replay resumes
+  without re-asking; a call that fails with no status, 408/409/429 or a
+  5xx is tried three times, 5 s and 20 s apart, then stops by name. Before the
   first call every payload is read and checked against its row's digest (a
   row that recorded none is read unchecked), and `--dry-run` stops there.
   Questions outside the chosen segment are never opened; the holdout needs
@@ -441,7 +442,8 @@ Breaking changes within the 0.x line are called out explicitly.
   not its path), and a name stands for one variant for the life of the
   store. `score` gains `--replay-db PATH --variant NAME`: one card per
   repeat through the same `score_run` (only the questions that repeat
-  answered; `score_run(only=...)`), the median and range across repeats
+  answered or had refused; `score_run(only=...)`), the median and range
+  across repeats
   (the P&L as a mean per decision, since repeats can answer different
   numbers of questions), and a question-by-question McNemar comparison with
   the paper trader's own answers (or `--against` another variant);
@@ -450,8 +452,9 @@ Breaking changes within the 0.x line are called out explicitly.
   `--include-pre-cutoff` (plan section 6), and `--holdout` records its look
   first. A dry run does not run on the holdout: it reads payloads and
   records nothing. Four rules decided on 2026-09-24: a run's split is
-  pinned in the replay store the first time the run is replayed (or its
-  holdout looked at), so a run still trading does not walk questions out of
+  pinned in the replay store the first time the run is replayed (once the
+  replay's checks pass) or its holdout looked at, and every later command
+  through that store uses it, so a run still trading does not walk questions out of
   its holdout, and the questions it gains afterwards are left out of that
   exam, counted; `score --replay-db` refuses a variant with no
   `model_cutoff` unless `--include-pre-cutoff` (a new `register` command

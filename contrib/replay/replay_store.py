@@ -14,14 +14,16 @@ Five tables, and nothing here ever writes the paper store:
   spelling: enum values as text, margins as integer text (the grid is
   integral) and confidence as ``Decimal`` text.
 - ``failures``: one row per question, variant and repeat the provider
-  refused for the question's own sake (a 4xx that is not a key, model or
-  rate problem: the context too long, a content filter). A question
+  refused for the question's own sake (a 4xx other than 401/403/404, the
+  key or the model, and 408/409/429, which are retried: the context too
+  long, a content filter). A question
   recorded here is not asked again unless the replay is told to, and the
   scorecard counts it as unanswered, as the daemon counts an ``api_failed``
   cycle.
 - ``splits``: one row per run, the train / validation / holdout split the
   run was first replayed (or first looked at) under. Every later command on
-  the run uses it, however many questions the run has gained since: cut
+  the run through this store uses it, however many questions the run has
+  gained since (``score`` without a store still cuts the run as it stands): cut
   afresh each time, a split over a run still trading would move its
   boundaries every cycle and walk questions out of the holdout into
   validation and train (decided 2026-09-24, as the research ledger pins
@@ -65,7 +67,10 @@ __all__ = [
     "StoredAnswer",
 ]
 
-SCHEMA_VERSION: Final = 1
+# v2 added ``failures`` and ``splits`` and let a ledger row name no variant.
+# v1 never left its pull request, so there is no migration: a v1 file is
+# named and refused, not taken for someone else's database.
+SCHEMA_VERSION: Final = 2
 
 _DDL: Final = (
     """
@@ -187,9 +192,10 @@ def _enum_text(value: object) -> str | None:
 class ReplayStore:
     """An open ``replay.sqlite``. Use as a context manager.
 
-    ``create`` decides what a missing file means: the ``replay`` command
-    creates it, and a reader (``score --replay-db``) refuses rather than
-    leave an empty store behind a typo.
+    ``create`` decides what a missing file means: ``replay``, ``register``
+    and ``score --holdout`` without a variant (it has a look to record)
+    create it, and any other reader refuses rather than leave an empty store
+    behind a typo.
     """
 
     def __init__(self, path: Path, *, create: bool = False) -> None:
@@ -221,6 +227,12 @@ class ReplayStore:
             row[0] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if names and 0 < version < SCHEMA_VERSION:
+            raise ReplayStoreError(
+                f"{self.path} was written at replay schema v{version}, before this build's "
+                f"v{SCHEMA_VERSION}, and there is no migration for it; point --replay-db at a "
+                "new file"
+            )
         if names and not names >= _TABLES:
             raise ReplayStoreError(
                 f"{self.path} is a SQLite database but not a replay store (it lacks "

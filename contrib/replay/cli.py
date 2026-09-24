@@ -21,7 +21,8 @@ Three commands:
   unless ``--segment`` says otherwise) to the variant's model ``--repeats``
   times, gate each answer through the run's own gate, and store it in
   ``--replay-db``. Resumable: an answer already stored is never asked for
-  again. The first replay of a run pins its split in the store.
+  again. The first replay of a run (or the first ``score --holdout`` look)
+  pins its split in the store, once its checks have passed.
   ``--dry-run`` checks every payload and prints what would be asked,
   without building a client or writing anything.
 - ``register --variant FILE`` — store a variant, or correct its
@@ -165,7 +166,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--replay-db",
         metavar="PATH",
         help=(
-            "a replay.sqlite: the run is scored under the split pinned there; with --variant, "
+            "a replay.sqlite: the run is scored under the split pinned there (or, if none "
+            "is pinned yet, as the run stands); with --variant, "
             "the answers that variant gave are scored instead of the paper trader's own, one "
             "card per repeat, and compared question by question with the paper trader's "
             "answers (or --against's)"
@@ -240,7 +242,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         metavar="N",
-        help="store at most N new answers this time (a call tried again counts once)"
+        help=(
+            "store at most N new answers or refusals this time (a call tried again counts once)"
+        ),
     )
     replay.add_argument(
         "--retry-failed",
@@ -302,7 +306,10 @@ class _Run:
     def split_line(self, store: Path) -> str:
         """Where the split comes from, for a report that used a replay store."""
         if self.pinned_at is None:
-            return f"split: not pinned in {store} yet; the first replay of this run pins it"
+            return (
+                f"split: not pinned in {store} yet; the first replay of this run (or the first "
+                "score --holdout) pins it"
+            )
         return f"split: pinned {self.pinned_at} in {store}" + (
             f"; {self.after_pin} question(s) decided after its end are not part of this exam"
             if self.after_pin
@@ -701,7 +708,13 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         with ReplayStore(replay_path, create=True) as store:
             for note in store.register(variant, now=_now()):
                 print(f"note: {note}", file=sys.stderr)
-            run = _pinned(run, *store.pin_split(args.run_id, run.split, now=_now()))
+            # The split pinned for the run if there is one; otherwise the one
+            # it would pin, which is pinned below only once every check has
+            # passed: a replay refused on the way (no question in the segment,
+            # a payload missing) must not freeze the exam.
+            pinned = store.pinned_split(args.run_id)
+            if pinned is not None:
+                run = _pinned(run, *pinned)
             papers = select(
                 run.decisions.questions,
                 run.decisions.inputs,
@@ -721,10 +734,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     who=_who(),
                     now=_now(),
                 )
+            prepared = prepare(papers, payload_root=payload_root, risk=risk)
+            if pinned is None:
+                run = _pinned(run, *store.pin_split(args.run_id, run.split, now=_now()))
             if args.retry_failed:
                 cleared = store.clear_failures(variant.sha, args.run_id)
                 print(f"note: {cleared} refused question(s) will be asked again", file=sys.stderr)
-            prepared = prepare(papers, payload_root=payload_root, risk=risk)
             for line in _replay_header(run, variant, segment, len(papers), args.repeats):
                 print(line)
             print(run.split_line(replay_path))

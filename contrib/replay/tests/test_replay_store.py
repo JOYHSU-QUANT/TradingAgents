@@ -268,3 +268,29 @@ def test_a_look_at_the_paper_traders_answers_names_no_variant(tmp_path):
         )
         (look,) = store.looks("run")
     assert (look.action, look.variant_name, look.questions) == ("score", "paper", 2)
+
+
+def test_an_unreadable_pin_is_refused_by_name(tmp_path):
+    path = tmp_path / "r.sqlite"
+    with ReplayStore(path, create=True):
+        pass
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT INTO splits VALUES ('run', '{not json', 't')")
+    conn.commit()
+    conn.close()
+    with ReplayStore(path) as store, pytest.raises(
+        ReplayStoreError, match="the split pinned for run 'run' cannot be read"
+    ):
+        store.pinned_split("run")
+
+
+def test_a_store_from_the_earlier_schema_is_named_not_taken_for_a_foreign_file(tmp_path):
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    for table in ("variants", "answers", "ledger"):
+        conn.execute(f"CREATE TABLE {table} (x)")
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ReplayStoreError, match="was written at replay schema v1, before"):
+        ReplayStore(path)

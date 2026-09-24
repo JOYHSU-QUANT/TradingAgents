@@ -401,6 +401,11 @@ def test_questions_the_run_gained_after_the_pin_are_not_part_of_the_exam(
     assert "split (4h): train: 2027-01-15 04:00 .. 2027-01-16 00:00" in card
     assert "split (4h): validation: 2027-01-16 00:00 .. 2027-01-16 04:00" in card
     assert "segments (questions): train 5 (holdout not read)" in card
+    # The paper trader's own card through the same store: under the pin too
+    # (six train and validation questions, not the eight of a ten-question cut).
+    assert cli.main(_score(store, "--replay-db", str(store.parent / "replay.sqlite"))) == 0
+    paper = capsys.readouterr().out.splitlines()
+    assert "decisions: 6 questions, 6 answered, 0 unanswered" in paper
     # Unpinned, the ten questions would have cut 6 / 2 / 2: a sixth train question.
     argv = replay_argv(store, variant, "--repeats", "2", "--dry-run")
     assert cli.main(argv) == 0

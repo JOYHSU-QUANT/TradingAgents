@@ -671,3 +671,47 @@ def test_a_status_is_read_off_the_exception_or_its_response():
     boolean.status = True  # type: ignore[attr-defined]
     assert (_status(on_itself), _status(on_response), _status(boolean)) == (400, 429, None)
     assert _status(ConnectionError("no status at all")) is None
+
+
+def test_a_replay_refused_at_its_checks_pins_nothing(store, variant_file, echo, capsys):
+    (payload_dir(store, RUN_ID) / papers.payload_name(TRAIN[0])).unlink()
+    assert cli.main(_replay(store, variant_file)) == 1
+    assert "cannot be read" in capsys.readouterr().err
+    conn = sqlite3.connect(store.parent / "replay.sqlite")
+    try:
+        assert conn.execute("SELECT count(*) FROM splits").fetchone() == (0,)
+    finally:
+        conn.close()
+    assert echo.calls == []
+
+
+def test_a_question_before_the_pinned_split_is_refused(store):
+    from contrib.replay.replay import inside
+
+    decisions, _, _, _ = _papers(store, SegmentName.TRAIN)
+    later = build_split(decisions.questions[2:], interval="4h", step_ms=STEP_MS)
+    with pytest.raises(ReplayError, match="not the same run"):
+        inside(decisions.questions, split=later, step_ms=STEP_MS)
+
+
+def test_the_limit_counts_refusals(store, variant_file, monkeypatch, capsys):
+    _use(monkeypatch, _Fails(400, {TRAIN[0]}))
+    assert cli.main(_replay(store, variant_file, "--repeats", "1", "--limit", "2")) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "stopped at --limit; the same command continues from here" in out
+    assert len(_answers(store.parent / "replay.sqlite")) == 1
+
+
+def test_a_dry_run_with_retry_failed_counts_the_refusals_as_to_ask(
+    store, variant_file, monkeypatch, capsys
+):
+    _use(monkeypatch, _Fails(400, {TRAIN[1]}))
+    assert cli.main(_replay(store, variant_file, "--repeats", "1")) == 0
+    capsys.readouterr()
+    assert cli.main(_replay(store, variant_file, "--repeats", "1", "--dry-run", "--retry-failed")) == 0
+    dry = capsys.readouterr().out.splitlines()
+    assert not any(line.startswith("refused earlier") for line in dry)
+    assert (
+        f"dry run: {len(TRAIN) - 1} answer(s) already stored, 1 to ask; this command would "
+        "ask for 1 of them"
+    ) in dry

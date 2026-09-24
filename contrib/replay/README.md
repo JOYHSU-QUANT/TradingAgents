@@ -27,7 +27,8 @@ C1 那條「`hyperliquid_perp` 讀 autoresearch 只走 JSON 文件、不 import�
 
 ```
 python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
-    [--research-db data/autoresearch.sqlite] [--payload-root DIR] [--out DIR] [--holdout]
+    [--research-db data/autoresearch.sqlite] [--payload-root DIR] [--out DIR] \
+    [--replay-db PATH --holdout]
 ```
 
 只讀 `runs`，以及每個 `decision_attempts` 列與它指到的最後一列 `ai_inputs`（題目）和
@@ -88,7 +89,7 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 `HOLDOUT READ`。太短切不出三段的 run 會被具名拒絕（exit 1）。
 
 > **`--holdout` 要配 `--replay-db PATH`**（2026-09-24 拍板）：連看 paper 交易員自己答案的 holdout
-> 也會在那個 store 的 ledger 記一列（variant 欄記成 `paper`），store 不存在就建一個。沒有
+> 也會在那個 store 的 ledger 記一列（variant 欄存 NULL、顯示成 `paper`），store 不存在就建一個。沒有
 > `--replay-db` 的 `score` 不能看 holdout。給了 `--replay-db` 時，run 用的是那個 store 釘住的 split
 > （見下面的考古題）；第一次看 holdout 時若還沒釘，就在這時釘。
 
@@ -108,7 +109,7 @@ stdout 印摘要（一行一個事實）。第一行說成本與 interval 來自
 python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-6 \
     --variant contrib/replay/variants/current-sonnet.yaml [--replay-db replay.sqlite] \
     [--repeats 3] [--segment train|validation|holdout] [--holdout] \
-    [--payload-root DIR] [--limit N] [--dry-run]
+    [--payload-root DIR] [--limit N] [--retry-failed] [--dry-run]
 python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
     --replay-db replay.sqlite --variant current-sonnet [--against OTHER] [--include-pre-cutoff]
 ```
@@ -168,8 +169,10 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 ### 重放的紀律
 
 - **Split 會被釘住**（2026-09-24 拍板）：一個 run **第一次被重放**時（或第一次被看 holdout 時），
-  用當下的全部題目以 `Split.by_shares`（60/20/20）切一次，存進 `splits`；之後這個 run 的每個指令
-  都用這一份，不再重切。還在跑的 run（例如 paper-BTC-7）之後多出來的題目不屬於任何段落、
+  用當下的全部題目以 `Split.by_shares`（60/20/20）切一次，存進 `splits`；之後**用同一個 store** 的指令
+  （`replay`、`--dry-run`、`score --replay-db`）都用這一份，不再重切；沒給 `--replay-db` 的 `score`
+  仍照 run 當下切。重放要等所有檢查都過了（見下）才釘，被拒的重放不會釘。
+  還在跑的 run（例如 paper-BTC-7）之後多出來的題目不屬於任何段落、
   不算進這份考卷（報告第一段會說有幾題），題目也不會從 holdout 漂到 validation／train。
   所以**要等 run 累積到你想要的題數再做第一次重放**。
 - **鎖**：預設只問 train；`--segment validation` 問 validation；問 holdout 要
@@ -177,8 +180,10 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
   holdout payload 之前**就寫下。沒被選到的段落，payload **連打開都不打開**。
 - **先驗再花錢**：先建 client（建不起來就在寫任何東西之前停下）；接著登記 variant、問 holdout
   時寫 ledger；然後所有題目的 payload 讀過、用 input 列記的 digest 比對（被改過的具名拒絕；
-  input 列沒記 digest 的照讀不比）、閘門輸入全部重建成功，才開始問：第一次呼叫之前一毛不花。
-  `--dry-run` 只做讀與驗並印出會存幾個答案（題數×repeat，扣掉已存的），不建 client、不寫任何
+  input 列沒記 digest 的照讀不比）、閘門輸入全部重建成功；都過了才釘 split（第一次重放）、
+  清掉拒答紀錄（`--retry-failed`），才開始問：第一次呼叫之前一毛不花。
+  `--dry-run` 只做讀與驗並印出會存幾個答案（題數×repeat，扣掉已存的與記過拒答的；給了
+  `--retry-failed` 就不扣拒答），不建 client、不寫任何
   東西（連 `replay.sqlite` 都不建；已存在的空檔會被具名拒絕，不會被建表）。
 - **可續跑**：每個答案判完立刻寫入（各自一個 transaction）；已存的 `(題, repeat)` 永遠不再問。
   `--limit N` 限制這次最多存幾個新答案（含記成拒答的題；重試的呼叫算一次）。
@@ -187,7 +192,7 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
   - 其他 4xx（408、409、429 除外；例如 context 太長、內容過濾）：是**這一題自己的問題**，記進
     `failures`、繼續問下一題；之後不再問它（`--retry-failed` 才重問），成績單把它算成「沒答」，
     同 daemon 的 `api_failed`。
-  - 其他（沒有狀態碼、逾時、限流、5xx）：一次呼叫最多試 3 次（失敗後隔 5 秒、20 秒再試），第三次
+  - 其他（沒有狀態碼、408／409／429、5xx 等）：一次呼叫最多試 3 次（失敗後隔 5 秒、20 秒再試），第三次
     仍失敗就具名停下、已存的答案保留，同一個指令從停的地方接著跑。
   usage collector 沒記到這次呼叫的答案（無從判斷是否截斷，照 daemon 的讀法當作沒截斷）另外計數印出。
 - `--repeats N`（預設 3，plan §3-10）：每題每 variant 存 N 個答案。

@@ -30,13 +30,13 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 
 | Symbol | 角色 | 我們的用法 |
 |---|---|---|
-| `TradingAgentsGraph(selected_analysts, config, callbacks=…)` | 建構子；`callbacks` 是掛到兩個 LLM client 上的 langchain callback handlers。 | 子類別化。`callbacks` 是每次呼叫的 response metadata（stop reason、token 用量）離開引擎的**唯一** seam（`propagate()` 只回渲染後的文字）：`integration/completion_usage.CompletionUsageCollector` 每次 `request_decision` 掛一個新實例，靠 langgraph 在 run metadata 上蓋的 `langgraph_node` 把每筆 completion 歸到節點；決策節點名稱從 `tradingagents.node_names.PORTFOLIO_MANAGER_NODE` 取（graph 自己也從那裡註冊節點），不手抄（issue #182）。 |
+| `TradingAgentsGraph(selected_analysts, config, callbacks=…)` | 建構子；`callbacks` 是掛到兩個 LLM client 上的 langchain callback handlers。 | 子類別化。`callbacks` 是每次呼叫的 response metadata（stop reason、token 用量）離開引擎的**唯一** seam（`propagate()` 只回渲染後的文字）：`integration/completion_usage.CompletionUsageCollector` 每次引擎 run（`integration/engine_drive.build_engine_run`，daemon 與 one-shot 共用）掛一個新實例，靠 langgraph 在 run metadata 上蓋的 `langgraph_node` 把每筆 completion 歸到節點；決策節點名稱從 `tradingagents.node_names.PORTFOLIO_MANAGER_NODE` 取（graph 自己也從那裡註冊節點），不手抄（issue #182）。 |
 | `.resolve_instrument_context(ticker, asset_type) -> str` | 建立注入每個 agent 的 per-instrument context 字串。 | **Override 點**——附加 perp snapshot。 |
 | `._create_tool_nodes() -> dict[str, ToolNode]` | 註冊每個 analyst 可呼叫的 tools。 | **可選 override**——加即時 HL tool（不在 Phase 3 第一版範圍，見 phase3-spec §25）。 |
 | `.propagate(company_name, trade_date, asset_type) -> (final_state, signal)` | 跑整個 graph。 | 以 `asset_type="crypto"` 呼叫。 |
 | `final_state["final_trade_decision"]` | PM 的自由文字決策（注入 output-format 契約後結尾帶 structured target JSON）。**契約只在 free-text 路徑存活**：structured output 成功時輸出是 `render_pm_decision` 的固定欄位 markdown、天生不含 JSON，故 perp 端 `_build_engine_config` 預設 `structured_output: false` 強制 free-text。 | `parse_target_decision` 的輸入。 |
 | `final_state["trader_investment_plan"]` | 渲染後的 `TraderProposal`（`action`、`entry_price`、`stop_loss`、`position_sizing`）。 | Phase 2 不再**消費**（Phase 1 adapter 的價格水位輸入，已退役）；只由下一列的 sidecar 原樣記錄。 |
-| `final_state` 的九個報告 key：`market_report`、`sentiment_report`、`news_report`、`fundamentals_report`、`investment_debate_state`、`investment_plan`、`trader_investment_plan`、`risk_debate_state`、`final_trade_decision` | 引擎在得出決策途中各節點寫下的報告、辯論狀態與計畫（`tradingagents/agents/utils/agent_states.py::AgentState`）。 | `integration/decision_reports.write_decision_reports` 在每個拿到 `final_state` 的 cycle（`api_failed` 的兩條退出沒有）原樣寫進 `<payload>.reports.json`，前面多一個 `selected_analysts`（這個 cycle 配了哪些分析師）與 sidecar 契約的 `schema: 1`；缺的 key 記 `null`。**只記錄、不消費**——決策路徑仍只讀 `final_trade_decision`。key 名是對上游的依賴：`tests/test_upstream_names.py` 釘住九個名字都是 `AgentState` 的欄位，上游改名時測試會紅，而不是 sidecar 那一欄安靜地變成 `null`。 |
+| `final_state` 的九個報告 key：`market_report`、`sentiment_report`、`news_report`、`fundamentals_report`、`investment_debate_state`、`investment_plan`、`trader_investment_plan`、`risk_debate_state`、`final_trade_decision` | 引擎在得出決策途中各節點寫下的報告、辯論狀態與計畫（`tradingagents/agents/utils/agent_states.py::AgentState`）。 | `integration/decision_reports.write_decision_reports` 在每個拿到 dict `final_state` 的 cycle（引擎拋錯或回傳形狀讀不了的 run 沒有）原樣寫進 `<payload>.reports.json`，前面多一個 `selected_analysts`（這個 cycle 配了哪些分析師）與 sidecar 契約的 `schema: 1`；缺的 key 記 `null`。**只記錄、不消費**——決策路徑仍只讀 `final_trade_decision`。key 名是對上游的依賴：`tests/test_upstream_names.py` 釘住九個名字都是 `AgentState` 的欄位，上游改名時測試會紅，而不是 sidecar 那一欄安靜地變成 `null`。 |
 | `PortfolioDecision` | `rating`（Buy/Overweight/Hold/Underweight/Sell）、`executive_summary`、`investment_thesis`、`price_target`、`time_horizon`。 | Phase 2 不再直接消費（Phase 1 `intent`/`rationale` 來源，已退役）；rationale 現由 target JSON 自帶。 |
 | `signal`（第二個回傳值） | `parse_rating(...)` → 5 tiers 之一。 | Phase 2 不再使用（Phase 1 便利用途，已退役）。 |
 
@@ -49,10 +49,11 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 
 ```
 contrib main.py（一次性）／ integration/decision_provider.py（daemon；同一條流程，多兩個 sidecar）
+（graph 到 parse 這段兩者共用 integration/engine_drive.py：build_engine_run → EngineRun.drive）
    │
    ├─ build PerpMarketContext + PerpPosition         (domains/perp)
    │
-   ├─ graph = HyperliquidTradingGraph(config, perp_context=ctx)
+   ├─ graph = build_graph(perp_context_text=…, callbacks=[collector])   (HyperliquidTradingGraph)
    │     └─ override resolve_instrument_context() injects ctx text
    │
    ├─ final_state, signal = graph.propagate("BTC", date, asset_type="crypto")
@@ -60,13 +61,13 @@ contrib main.py（一次性）／ integration/decision_provider.py（daemon；�
    │        → PortfolioDecision (rating + thesis)
    │
    ├─ report_usage(...) 在 finally 寫 <payload>.usage.json  (integration/completion_usage.py；
-   │        兩條路徑都呼叫，main.py 傳 payload_path=None 所以只有 daemon 有檔)
-   ├─ [daemon only] write_decision_reports(final_state, payload_path=…, selected_analysts=…)
+   │        drive 內唯一一處呼叫；main.py 給 drive 的 payload_path=None，所以只有 daemon 有檔)
+   ├─ write_decision_reports(final_state, payload_path=…, selected_analysts=…)
    │     └─ <payload>.reports.json：schema、selected_analysts、九個報告 key 原樣落地，
    │        只記錄不消費；never raises（integration/decision_reports.py）。
    │        main.py 一次性路徑沒有 payload，兩個 sidecar 都不寫。
    │
-   ├─ parsed = parse_target_decision(final_state["final_trade_decision"], cfg)
+   ├─ parsed = parse_target_decision(final_state["final_trade_decision"], cfg, truncated=…)
    │     └─ structured target JSON（DESIGN Part 2）；invalid → fail-closed maintain_current
    │
    └─ risk_gate.evaluate(parsed, account_equity, current, …)   (domains/perp/risk_gate.py)

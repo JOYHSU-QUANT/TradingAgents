@@ -255,7 +255,7 @@ def _usage_provider(
     The stub reaches the collector the way the real engine does — through the
     ``callbacks`` kwarg ``build_graph`` receives — and drives it with the
     handler API (start with the node's ``langgraph_node`` metadata, end with an
-    ``LLMResult``), so the test exercises the provider's reading of the
+    ``LLMResult``), so the test exercises how the engine run reads the
     collector, not a hand-set attribute. The engine returns ``final_state``
     whole when given one (the reports-sidecar tests), else a state holding
     just ``decision_text``.
@@ -444,9 +444,19 @@ def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, 
     )
 
 
-def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch, caplog):
-    # The other no-parse exit: propagate returned, but not the (final_state,
-    # signal) pair. The cap still bound on the decision call and is still named.
+@pytest.mark.parametrize(
+    ("returned", "type_name"),
+    [
+        ({"final_trade_decision": ""}, "dict"),  # a single dict, not a 2-tuple
+        ((None, None), "tuple"),  # the pair, but its final_state is not a dict
+    ],
+)
+def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(
+    monkeypatch, caplog, returned, type_name
+):
+    # The other no-parse exit: propagate returned, but nothing the parse can
+    # read. Both shapes file as one server_error, and the cap still bound on
+    # the decision call and is still named.
     from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     provider = _usage_provider(
@@ -464,7 +474,7 @@ def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch
 
         def propagate(self, *a, **k):
             self._inner.propagate(*a, **k)  # drives the collector
-            return {"final_trade_decision": ""}  # a single dict, not a 2-tuple
+            return returned
 
     monkeypatch.setattr(tg, "build_graph", lambda **kw: _OneValue(built(**kw)))
     with (
@@ -473,7 +483,8 @@ def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch
     ):
         provider.request_decision(_decision_input())
     assert exc_info.value.error_type == "server_error"
-    assert exc_info.value.message.endswith(
+    assert exc_info.value.message == (
+        f"engine.propagate returned an unexpected shape ({type_name})"
         " (decision completion truncated: 4096 output tokens against cap 4096)"
     )
     (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
@@ -694,9 +705,9 @@ def test_a_failure_in_the_usage_reporting_itself_is_the_wrappers_own_line(monkey
 
 def test_an_engine_failure_leaves_the_usage_sidecar_and_no_reports_sidecar(monkeypatch, tmp_path):
     # The operator's pairing rule (RUNBOOK §5): usage without reports means
-    # the engine failed. It rests on two placements — report_usage in
-    # request_decision's finally, write_decision_reports after the shape
-    # guard — so pin the pairing on disk, not the placements.
+    # the engine failed. It rests on two placements in EngineRun.drive —
+    # report_usage in its finally, write_decision_reports after the shape
+    # guards — so pin the pairing on disk, not the placements.
     from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     payload = tmp_path / "BTC-20260315T000000_000000Z.json"
@@ -719,7 +730,7 @@ def test_an_engine_failure_leaves_the_usage_sidecar_and_no_reports_sidecar(monke
 
 def test_a_drifted_engine_shape_leaves_the_same_pairing(monkeypatch, tmp_path):
     # The other api_failed exit — propagate returned, but not the
-    # (final_state, signal) pair — lands after the finally too: same pairing.
+    # (final_state, signal) pair — lands after drive's finally too: same pairing.
     import contrib.hyperliquid_perp.integration.trading_graph as tg
     from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 

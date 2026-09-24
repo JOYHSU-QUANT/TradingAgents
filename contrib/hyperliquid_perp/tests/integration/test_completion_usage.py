@@ -5,7 +5,7 @@ model, because the property under test is the seam itself: a handler attached
 to the MODEL's constructor (not passed per call) must still receive the node
 name langgraph stamps on the run's metadata, and the merged response metadata
 ``on_llm_end`` sees. A hand-invoked handler would pass whatever the test put
-in and prove nothing about the wiring the provider relies on.
+in and prove nothing about the wiring the engine run relies on.
 """
 
 from __future__ import annotations

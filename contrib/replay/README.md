@@ -279,11 +279,37 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
 「明顯」的門檻寫在 plan §5（2026-09-24）。那一步改 paper 的交易行為，要過 plan §5、走 RUNBOOK §4
 分段，不在這個套件裡。
 
+## 跨 run 合併與 block bootstrap（PR 2.2）
+
+```
+python -m contrib.replay pool --db paper_trading.db --replay-db replay.sqlite \
+    --variant current-sonnet --probe direction-v1 \
+    --run-id paper-BTC-3 --run-id paper-BTC-4 --run-id paper-BTC-6 --run-id paper-BTC-7 \
+    [--research-db PATH] [--include-pre-cutoff] [--block 6] [--draws 10000] [--seed 0]
+```
+
+一個 run 的 validation 段只有十幾題，判斷不了「skill 明顯 > 0」。plan §5 的門檻（2026-09-24 拍板，驗收
+run 之前寫死）看的是合併後的數字：**4h 主數字的 Brier skill score，block bootstrap 90% 區間的下界 > 0**；
+24h 相鄰題報酬重疊，只報不判；「有動時 up 對 down」一起報，不另設門檻。定義寫死在 `pool.py`：
+
+- **每個 run 照自己的標準打分**：題目＝`probe_score.headline_scores` 算出來的主數字（repeat 平均、替身
+  規則同上），對照**那個 run 自己**的 flat 門檻與 train 基準率；只合併一個 run 時，數字就等於那個 run
+  自己報告裡的主數字。
+- **合併的 skill**＝所有題 `1 − Σ Brier ÷ Σ 基準率 Brier`：每題權重相同，不管來自哪個 run。
+- **區間**：每個 run 的 validation 題照時間切成連續 6 題一塊（最後一塊可以較短，**不跨 run**），每次
+  有放回地抽跟塊數一樣多的塊；相鄰的 4h 題處在同一個盤勢，一題一題抽會假裝它們獨立、區間太窄。
+  取抽出來 skill 的第 5／95 百分位（順序統計量之間線性內插）；基準率 Brier 加總為 0 的那次抽樣沒有 skill，
+  扣掉並計數。`random.Random(seed)`，同樣的輸入印同樣的區間。
+- **只讀**：每個 run 都要已經在這個 `replay.sqlite` 釘過 split（沒釘的具名拒絕），用的是釘住的 split；
+  holdout 永遠不讀；不寫 ledger、不動 store。variant 沒填 `model_cutoff` 就拒絕，除非
+  `--include-pre-cutoff`；每個 run 會印出幾題落在 cutoff 當天或之前被排除。
+
+範例 variant `variants/current-sonnet.yaml` 的 `model_cutoff` 填的是 Anthropic 公布的 Claude Sonnet 4.6
+**訓練資料**截止（2026 年 1 月，取月底 2026-01-31；它的 reliable knowledge cutoff 是 2025 年 8 月，
+比較早，但洩漏看的是訓練資料）。paper 資料從 2026-08-28 起，全部在它之後。
+
 ## 還沒有的
 
-- 探針的跨 run 合併與信賴區間（下一張）：各 run 用自己釘住的 split，validation 題跨 run 合併，對
-  主數字的 skill score 做 block bootstrap（相鄰題的 24h 報酬重疊，要整段抽），印出 plan §5 門檻要的
-  區間下界。現在的 `score` 一次只看一個 run，只印點估計。
 - 帶模擬帳戶的回測（PR 3）：從 `.reports.json` 起跑下半段 graph，倉位一路帶下去。
 - plan §5 的驗收門檻（贏過四個對照組、`Penalty.threshold(n)`、配對 p < 0.05 且 ≥ 100 題、
   fail-closed 不高於現行）：成績單印出每一個原料，但門檻本身還沒寫成程式、也還沒拍板。
@@ -308,3 +334,7 @@ pytest -q contrib/replay/tests
 
 探針（`test_probe.py`）用同一個夾具：假模型對每題回固定的機率，`score` 那一段的 Brier、log loss、
 基準率、skill score、reliability 每個數字都從那 10 題的 mark 手算（算式寫在檔頭與斷言旁邊）。
+
+跨 run 合併（`test_pool.py`）把同一個夾具寫成同一個 store 裡的兩個 run、各用不同的固定機率回答，
+合併 skill 與 bootstrap 區間（兩塊時只有三種可能的抽樣結果）都手算；區間的分位點另用 20 塊近常態的
+例子對照解析值。

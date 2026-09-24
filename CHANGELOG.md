@@ -411,6 +411,29 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **The direction probe pooled over several runs, with a block-bootstrap
+  interval: `python -m contrib.replay pool --run-id A --run-id B ...
+  --replay-db PATH --variant NAME --probe NAME`** (replay plan PR 2.2). One
+  run's validation segment holds a dozen questions or so, too few to say
+  whether a Brier skill score is clearly above 0, so plan section 5 (written
+  before any run) sets the bar on the pooled figure: the 4h headline skill
+  over the validation questions of every run, each cut by the split pinned for
+  it in the replay store, with the lower end of a 90% block-bootstrap interval
+  above 0. Each run is scored on its own terms (its own flat band and train
+  base rate, through the headline of `score --replay-db`, now also available
+  one question at a time as `probe_score.headline_scores`), the pooled skill
+  weighs every question alike, and the interval resamples blocks of six
+  consecutive questions within a run (neighbouring 4h questions share a
+  regime; resampling them one by one would draw too narrow an interval),
+  seeded, so the same inputs print the same interval. 24h and
+  up-vs-down-given-a-move are reported, not judged. The command reads only: a
+  run without a pinned split, or not asked the named probe, is refused by
+  name, the holdout is never read, and nothing is written. `score`'s
+  research-store lookup moved into a helper the two commands share (unchanged,
+  but its warning now names the run). The example variant `current-sonnet` now
+  carries its `model_cutoff`: 2026-01-31, the last day of the training data
+  cutoff Anthropic publishes for Claude Sonnet 4.6 (January 2026).
+
 - **A direction probe for the past papers: `python -m contrib.replay replay
   ... --probe <file>`** (replay plan PR 2.1). The scorecard could see the
   model's sense of direction only through `confidence`, a number the gate

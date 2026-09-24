@@ -32,6 +32,10 @@ the books, which the store no longer holds as they were.
 The scores are comparable between variants, never with the paper trader's
 own (plan §3-3): one completion is not the graph it replaces.
 
+The direction probe (plan PR 2.1, :mod:`.probe`) is asked here too, by
+:func:`ask_probes`: the same questions, the same call discipline and
+resumption, one more completion per question and repeat, and no gate.
+
 What the model is does not matter here: :data:`Model` is any callable from
 ``(system, human)`` to a :class:`Completion`. The engine's client lives in
 :mod:`.model`, and the tests hand in a fake.
@@ -48,7 +52,8 @@ from pathlib import Path
 from typing import Final
 
 from .paper_store import InputFacts
-from .replay_store import ReplayStore, StoredAnswer
+from .probe import CLASSES, INVALID_PROBE, PROBE_KEYS, REFUSED, Probe, parse_probe
+from .replay_store import ReplayStore, StoredAnswer, StoredProbeAnswer
 from .score import Question, bar_open_ms, segment_of
 from .upstream import (
     DECIMAL_CONTEXT,
@@ -73,15 +78,20 @@ __all__ = [
     "Model",
     "Paper",
     "Prepared",
+    "ProbeReport",
+    "QuestionRefused",
     "ReplayError",
     "ReplayReport",
     "ask_all",
+    "ask_probes",
+    "call_model",
     "human_message",
     "inside",
     "judge",
     "pending",
     "position_state",
     "prepare",
+    "probe_message",
     "select",
 ]
 
@@ -431,7 +441,7 @@ def ask_all(
             return report(True)
         human = humans.setdefault(item.input_id, human_message(item, variant.extra_context))
         try:
-            completion = _call(
+            completion = call_model(
                 model,
                 variant.system_prompt,
                 human,
@@ -440,7 +450,7 @@ def ask_all(
                 sleep=sleep,
                 asked=asked,
             )
-        except _QuestionRefused as exc:
+        except QuestionRefused as exc:
             store.record_failure(
                 sha, run_id=run_id, input_id=item.input_id, repeat=repeat, error=str(exc), now=now()
             )
@@ -483,7 +493,7 @@ def ask_all(
     return report(False)
 
 
-class _QuestionRefused(Exception):
+class QuestionRefused(Exception):
     """The provider refused this question for its own sake; the text says how."""
 
 
@@ -497,7 +507,7 @@ def _status(exc: BaseException) -> int | None:
     return None
 
 
-def _call(
+def call_model(
     model: Model,
     system: str,
     human: str,
@@ -510,7 +520,8 @@ def _call(
     """One model call, sorted by what a failure says (see :func:`ask_all`).
 
     Raises :class:`ReplayError` to stop the replay, or
-    :class:`_QuestionRefused` for a question the caller records and passes.
+    :class:`QuestionRefused` for a question the caller records and passes.
+    The direction probe (:mod:`.probe`) makes its calls through it too.
     """
     for attempt, pause in enumerate((*BACKOFF_SECONDS, None)):
         try:
@@ -525,7 +536,7 @@ def _call(
                     "before it"
                 ) from exc
             if status is not None and 400 <= status < 500 and status not in _RETRY_CLIENT_STATUSES:
-                raise _QuestionRefused(f"{status} {type(exc).__name__}: {exc}") from exc
+                raise QuestionRefused(f"{status} {type(exc).__name__}: {exc}") from exc
             if pause is None:
                 raise ReplayError(
                     f"{item.input_id} repeat {repeat}: the model call failed {attempt + 1} time(s), "
@@ -538,3 +549,166 @@ def _call(
             raise ReplayError(f"the model returned a {type(completion).__name__}, not a Completion")
         return completion
     raise AssertionError("unreachable: the last pause is None, and a failure there raises")
+
+
+# -- the direction probe (plan PR 2.1) ------------------------------------------
+
+
+def probe_message(prepared: Prepared, probe: Probe, extra_context: str | None) -> str:
+    """The probe's human message: the decision replay's context, the probe's instructions last."""
+    context = prepared.context_text
+    if extra_context is not None:
+        context = f"{context}\n\n{extra_context}"
+    return inject_perp_context("", context, probe.instructions).lstrip("\n")
+
+
+@dataclass(frozen=True)
+class ProbeReport:
+    """What one ``replay --probe`` invocation did."""
+
+    asked: int
+    already_stored: int
+    invalid: int
+    input_tokens: int
+    output_tokens: int
+    unreported: int
+    refused: int
+    stopped_at_limit: bool
+
+    def describe(self) -> list[str]:
+        lines = [
+            f"probed: {self.asked} new answer(s); already stored, skipped: {self.already_stored}",
+            f"invalid_probe among the new answers: {self.invalid} (counted, not scored, not "
+            "asked again)",
+            f"tokens reported: {self.input_tokens} in, {self.output_tokens} out",
+        ]
+        if self.refused:
+            lines.append(
+                f"questions the provider refused for their own sake: {self.refused} (recorded; "
+                "not asked again unless --retry-failed)"
+            )
+        if self.unreported:
+            lines.append(
+                f"answers whose call the usage collector recorded nothing for: {self.unreported} "
+                "(truncation unknown, read as not truncated)"
+            )
+        if self.stopped_at_limit:
+            lines.append("stopped at --limit; the same command continues from here")
+        return lines
+
+
+def ask_probes(
+    prepared: Sequence[Prepared],
+    *,
+    variant: Variant,
+    probe: Probe,
+    model: Model,
+    store: ReplayStore,
+    run_id: str,
+    repeats: int,
+    now: Callable[[], datetime],
+    sleep: Callable[[float], None],
+    limit: int | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> ProbeReport:
+    """Ask the probe of every prepared question ``repeats`` times, as :func:`ask_all` asks decisions.
+
+    The same call discipline (:func:`call_model`: stop on 401/403/404,
+    record any other 4xx but 408/409/429 as refused, retry the rest), the
+    same resumption (a stored answer, valid or ``invalid_probe``, is never
+    asked again; a refusal is, once the caller clears it) and the same
+    ``limit`` count. No gate: a probe answer is a forecast, not a decision.
+    """
+    done, refused_before = store.probe_done(variant.sha, probe.sha, run_id)
+    todo = pending(prepared, answered=done | refused_before, repeats=repeats)
+    total = len(prepared) * repeats
+    skipped = total - len(todo)
+    asked = refused = invalid = tokens_in = tokens_out = unreported = 0
+
+    def report(stopped: bool) -> ProbeReport:
+        return ProbeReport(
+            asked=asked,
+            already_stored=skipped,
+            invalid=invalid,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            unreported=unreported,
+            refused=refused,
+            stopped_at_limit=stopped,
+        )
+
+    humans: dict[str, str] = {}
+    for item, repeat in todo:
+        if limit is not None and asked + refused >= limit:
+            return report(True)
+        human = humans.setdefault(item.input_id, probe_message(item, probe, variant.extra_context))
+        try:
+            completion = call_model(
+                model, probe.system, human, item=item, repeat=repeat, sleep=sleep, asked=asked
+            )
+        except QuestionRefused as exc:
+            store.write_probe_answer(
+                variant.sha,
+                probe.sha,
+                StoredProbeAnswer(
+                    run_id=run_id,
+                    input_id=item.input_id,
+                    repeat=repeat,
+                    asked_at=now(),
+                    segment=item.paper.segment.value,
+                    raw_response=None,
+                    truncated=False,
+                    invalid_reason=REFUSED,
+                    invalid_detail=str(exc),
+                    forecast=None,
+                ),
+            )
+            refused += 1
+            if progress is not None:
+                progress(
+                    f"[{skipped + asked + refused}/{total}] {item.input_id} repeat {repeat}: "
+                    f"probe refused ({exc}); recorded"
+                )
+            continue
+        reading = parse_probe(completion.text, truncated=completion.truncated)
+        store.write_probe_answer(
+            variant.sha,
+            probe.sha,
+            StoredProbeAnswer(
+                run_id=run_id,
+                input_id=item.input_id,
+                repeat=repeat,
+                asked_at=now(),
+                segment=item.paper.segment.value,
+                # A non-string response is kept as its repr: the row must say
+                # what came back, and the column holds text.
+                raw_response=(
+                    completion.text if isinstance(completion.text, str) else repr(completion.text)
+                ),
+                truncated=completion.truncated,
+                invalid_reason=None if reading.forecast is not None else INVALID_PROBE,
+                invalid_detail=reading.invalid_detail,
+                forecast=reading.forecast,
+                model_reported=completion.model,
+                input_tokens=completion.input_tokens,
+                output_tokens=completion.output_tokens,
+            ),
+        )
+        asked += 1
+        invalid += reading.forecast is None
+        tokens_in += completion.input_tokens or 0
+        tokens_out += completion.output_tokens or 0
+        unreported += not completion.usage_reported
+        if progress is not None:
+            said = (
+                "invalid_probe"
+                if reading.forecast is None
+                else " ".join(
+                    f"{key} " + "/".join(f"{reading.forecast[key][name]:.2f}" for name in CLASSES)
+                    for key in PROBE_KEYS
+                )
+            )
+            progress(
+                f"[{skipped + asked + refused}/{total}] {item.input_id} repeat {repeat}: {said}"
+            )
+    return report(False)

@@ -157,12 +157,15 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 
 ### replay.sqlite
 
-自有的 store，五張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
+自有的 store，七張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
 （`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、成績單讀的每個 gate 欄位）、
 `failures`（provider 因題目本身拒答的題，見下）、`splits`（每個 run 釘住的 split）、`ledger`
-（每次看 holdout 一列：誰、何時、哪個 variant 或 `paper`、`ask` 或 `score`）。版本在
-`PRAGMA user_version`；別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build 寫過的 store 也拒絕，
-舊 build 寫過的 store 同樣拒絕（沒有 migration）。
+（每次看 holdout 一列：誰、何時、哪個 variant 或 `paper`、`ask` 或 `score`；探針問 holdout 也記成
+那個 variant 的 `ask`），以及方向機率探針的 `probes` 與 `probe_answers`（見下面 PR 2.1 那一節）。
+版本在 `PRAGMA user_version`（現在是 v3）；別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build
+寫過的 store 也拒絕，v1 的 store 同樣拒絕（v1 沒出過 PR，沒有 migration）。**v2 的 store**（探針之前）
+由可能建 store 的指令（`replay`、`register`、看 paper 自己答案的 `score --holdout`）升到 v3：在一個
+transaction 裡補上探針兩張表，裡面原有的東西一概不動；其他指令照原樣讀它，當成沒有探針答案。
 
 **`register --variant FILE [--replay-db PATH]`** 只登記 variant（或更正已登記同名 variant 的
 `model_cutoff`），不建 client、不問任何題。
@@ -216,8 +219,71 @@ paper 交易員自己的答案比，`--against NAME` 改跟另一個 variant 的
 - `--holdout` 會先在 ledger 記一列 `score`，並列出這個 run 之前被看過幾次、誰看的。
 - `--out DIR` 寫 `<run-id>-<variant>-decisions.csv`（多一個 `repeat` 欄）與 `-summary.txt`。
 
+## 方向機率探針（PR 2.1）
+
+```
+python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-6 \
+    --variant contrib/replay/variants/current-sonnet.yaml \
+    --probe contrib/replay/probes/direction-v1.yaml [其他 replay 旗標同上]
+python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
+    --replay-db replay.sqlite --variant current-sonnet
+```
+
+要回答的問題：**模型對 BTC 的方向有沒有資訊量**，跟倉位大小、閘門分開量。成績單的信心校準只能算
+模型要了目標的題（2026-09-24 量 run 3–6：127 題只有 19 題），而 `confidence` 是閘門拿去比
+`min_confidence`／`resize_min_confidence` 的數字，不是「方向對的機率」。
+
+- **分開呼叫**（2026-09-24 拍板）：探針**不塞進決策 prompt**，塞進去就改了被量的交易員。`replay
+  --probe FILE` 對同一批題目**改問探針、不問決策**（要兩者都有就各跑一次），每題每個 repeat 一次
+  completion，用 variant 的模型、temperature、cap。system 訊息＝探針檔的 `system`（variant 的
+  system prompt 是 PM 的決策角色，問的是別的事）；human 訊息＝payload 的 `context_text`（variant 有
+  `extra_context` 就接在後面）放在引擎的同一個標題下，探針的 `instructions` 放最後，也就是決策重放放
+  format 區塊的位置；format 區塊本身不送。不過閘門。
+- **探針是資料**：一個 YAML，`name`／`system`／`instructions` 三個鍵（未知的鍵具名拒絕）。sha＝兩段
+  文字；改一個字就是新探針、要換名字（同名不同 sha 被拒），答案不混算。範例＝`probes/direction-v1.yaml`。
+- **要的答案**：一個 JSON 物件，`h4` 與 `h24` 各一組 `up`／`down`／`flat` 機率。其他頂層鍵忽略；
+  每組恰好這三個鍵、每個是 [0, 1] 的 JSON 數字、總和在 1±0.02 內才收，收下後正規化成總和 1。
+  其他一律記 `invalid_probe`：計數、不算分、**不重問**（重問會讓樣本偏向好答的題）。provider 因題目
+  本身拒答（同決策重放的 4xx 規則）記成 `refused`，`--retry-failed` 才重問。
+- **只在 4h 的 run 上問**：`h4`／`h24` 是成績單的兩個時距在 4h run 上的長度；其他 interval 具名拒絕。
+- 其餘紀律（split 釘住、holdout 兩個旗標＋ledger、先驗再花錢、可續跑、`--limit`、`--dry-run`、失敗
+  分類）與決策重放相同。
+
+`score --replay-db --variant NAME` 對這個 variant 在這個 run 問過的**每個探針**多印一段；只問過探針、
+沒問過決策的 variant 只印這一段（`--out` 只寫 summary、不寫 decisions CSV；`--against` 比的是決策，
+這種 variant 會被拒絕）。定義寫死在 `probe_score.py`：
+
+- **實際發生的是哪一類**：用成績單自己的事後 mark 與 flat 門檻（train＋validation 同時距的中位絕對
+  報酬），|報酬| 嚴格小於門檻（或剛好是 0）＝`flat`，否則照正負號是 `up`／`down`。沒有事後 mark 的
+  題只計數。
+- **Brier**＝三類 `(p − y)²` 的和（0 完美、2 是篤定又錯），取平均；**log loss**＝`−ln p(發生的那類)`，
+  p 下限 0.001。
+- **基準率**＝train 段有結果的題（不論有沒有答、有沒有過 cutoff）裡三類的比例，當成每題的固定答案。
+  **Brier skill score**＝`1 − Brier ÷ 基準率的 Brier`（同一批題），**≤ 0 就是沒有基準率以外的方向資訊**。
+- **主數字（headline，2026-09-24 拍板）**：每題**一個**預測＝該題各 repeat 有效預測逐類取平均。
+  沒有任何有效預測、但 repeat 裡有 `invalid_probe` 的題（其餘 repeat 被拒答也算），**當成回答了基準率**來算（skill 貢獻 0、n 不變；train 沒有
+  基準率時就只計數），旁邊另印「不含這些替身」的 n 與 skill；每個 repeat 都被拒答的題只計數。
+- **有動時 up 對 down（2026-09-24 拍板）**：只看實際 `up` 或 `down` 的題，把每個預測的
+  `up ÷ (up + down)` 用二元 Brier `(q − y)²` 打分，對照 train 段「動了的題裡 up 的比例」。它不受
+  flat 門檻位置影響（模型只從文字知道「典型波動」，不知道門檻的數字）。
+- **溫度校正**：用 train 段的主數字預測擬合一個溫度（最小化 log loss，搜尋 0.05–20；擬合用精確的
+  log-softmax，不用報表那個有下限的 log loss，否則銳化後會卡在平台上），只在 validation（與打開時的
+  holdout）報校正後的分數。
+- **reliability 表**：每個主數字預測照「最可能那一類」的機率分十桶（同分取 `up`、`down`、`flat` 的
+  前者），每桶印平均機率與那一類實際發生的比例，外加 ECE。
+- 最後是每個 repeat 各自一段（`invalid_probe` 不算），加上 skill score 跨 repeat 的中位數與區間：看
+  主數字穩不穩，不是第二個主數字。cutoff、holdout 鎖、釘住的 split 都與決策打分相同：同一批
+  eligible 題、holdout 段只有 `--holdout` 才算。
+
+**之後**：validation 段的 skill score 明顯 > 0，才考慮下一步（模型給機率、程式照機率決定倉位）。
+「明顯」的門檻寫在 plan §5（2026-09-24）。那一步改 paper 的交易行為，要過 plan §5、走 RUNBOOK §4
+分段，不在這個套件裡。
+
 ## 還沒有的
 
+- 探針的跨 run 合併與信賴區間（下一張）：各 run 用自己釘住的 split，validation 題跨 run 合併，對
+  主數字的 skill score 做 block bootstrap（相鄰題的 24h 報酬重疊，要整段抽），印出 plan §5 門檻要的
+  區間下界。現在的 `score` 一次只看一個 run，只印點估計。
 - 帶模擬帳戶的回測（PR 3）：從 `.reports.json` 起跑下半段 graph，倉位一路帶下去。
 - plan §5 的驗收門檻（贏過四個對照組、`Penalty.threshold(n)`、配對 p < 0.05 且 ≥ 100 題、
   fail-closed 不高於現行）：成績單印出每一個原料，但門檻本身還沒寫成程式、也還沒拍板。
@@ -239,3 +305,6 @@ pytest -q contrib/replay/tests
 假模型 `Echo` 對每題說 paper 當時的模型說過的話，於是兩件事可以直接驗：重放的答案過閘門的結果
 與記錄的**逐欄相同**（`test_replay.py`），以及 echo variant 的每張 repeat 卡與 paper 自己的成績單
 **逐行相同**（`test_replay_score.py`）。模型那一層（`model.py`）用假的引擎介面測，不需要金鑰或網路。
+
+探針（`test_probe.py`）用同一個夾具：假模型對每題回固定的機率，`score` 那一段的 Brier、log loss、
+基準率、skill score、reliability 每個數字都從那 10 題的 mark 手算（算式寫在檔頭與斷言旁邊）。

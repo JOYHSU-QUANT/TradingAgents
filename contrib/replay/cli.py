@@ -1119,7 +1119,12 @@ def _cmd_pool(args: argparse.Namespace) -> int:
                             )
                             for key in PROBE_KEYS
                         },
-                        left_out=len(run.decisions.questions) - len(scope.eligible),
+                        left_out=sum(
+                            1
+                            for row in card.rows
+                            if row.segment is SegmentName.VALIDATION
+                            and row.question.input_id not in scope.eligible
+                        ),
                     )
                 )
     except (ReplayStoreError, StoreError) as exc:

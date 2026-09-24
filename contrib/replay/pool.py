@@ -78,8 +78,8 @@ class RunScores:
     """One run's validation questions, scored, per probe key.
 
     ``scores[key]`` is ``None`` when the run has no train base rate at that
-    horizon. ``left_out`` counts the run's questions on or before the model
-    cutoff that were left out of it.
+    horizon. ``left_out`` counts the run's validation questions decided on or
+    before the model cutoff, which were left out of it.
     """
 
     run_id: str

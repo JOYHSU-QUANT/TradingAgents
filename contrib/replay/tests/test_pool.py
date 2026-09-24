@@ -313,7 +313,7 @@ def test_the_pool_leaves_out_the_questions_on_or_before_the_cutoff(
     late = tmp_path / "late"
     late.mkdir()
     # 2027-01-16: every question of the fixture (slots 0-9, the 15th and 16th)
-    # is decided on or before it, so the validation question is left out too.
+    # is decided on or before it; the report counts the validation ones, slots 6-7.
     variant_file = write_variant(late, "late", cutoff="2027-01-16")
     monkeypatch.setattr(cli, "_build_model", lambda _variant: Forecaster())
     for segment in ("train", "validation"):
@@ -324,9 +324,7 @@ def test_the_pool_leaves_out_the_questions_on_or_before_the_cutoff(
     capsys.readouterr()
     assert cli.main(_pool(store, "--run-id", RUN_ID, variant="late")) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[2].endswith(
-        "): h4 0 question(s), h24 0 question(s); 10 left out at the model cutoff"
-    )
+    assert out[2].endswith("): h4 0 question(s), h24 0 question(s); 2 left out at the model cutoff")
     assert cli.main(_pool(store, "--run-id", RUN_ID, "--include-pre-cutoff", variant="late")) == 0
     assert (
         capsys.readouterr().out.splitlines()[2].endswith("): h4 1 question(s), h24 0 question(s)")

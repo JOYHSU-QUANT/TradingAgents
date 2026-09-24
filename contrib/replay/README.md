@@ -302,7 +302,7 @@ run 之前寫死）看的是合併後的數字：**4h 主數字的 Brier skill s
   扣掉並計數。`random.Random(seed)`，同樣的輸入印同樣的區間。
 - **只讀**：每個 run 都要已經在這個 `replay.sqlite` 釘過 split（沒釘的具名拒絕），用的是釘住的 split；
   holdout 永遠不讀；不寫 ledger、不動 store。variant 沒填 `model_cutoff` 就拒絕，除非
-  `--include-pre-cutoff`；每個 run 會印出幾題落在 cutoff 當天或之前被排除。
+  `--include-pre-cutoff`；每個 run 會印出它的 validation 段有幾題落在 cutoff 當天或之前被排除。
 
 範例 variant `variants/current-sonnet.yaml` 的 `model_cutoff` 填的是 Anthropic 公布的 Claude Sonnet 4.6
 **訓練資料**截止（2026 年 1 月，取月底 2026-01-31；它的 reliable knowledge cutoff 是 2025 年 8 月，

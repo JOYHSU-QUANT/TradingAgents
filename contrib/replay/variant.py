@@ -139,8 +139,9 @@ class Variant:
     def cutoff_ms(self) -> int | None:
         """The first instant after the cutoff day (the next day's UTC midnight), or ``None``.
 
-        A question decided at or after it is ``post_cutoff``: the model's
-        training data cannot have held the price that followed (plan §6).
+        A question decided at or after it is past the cutoff (kept by default
+        in ``score --replay-db``): the model's training data cannot have held
+        the price that followed (plan §6).
         """
         if self.model_cutoff is None:
             return None

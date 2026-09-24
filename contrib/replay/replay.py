@@ -7,10 +7,13 @@ replay skips all of it and asks the variant's model once (plan §3-3):
 - the SYSTEM message is the variant's system prompt;
 - the HUMAN message is the recorded payload's ``context_text`` and
   ``format_instructions``, assembled by the engine's own
-  ``inject_perp_context``, so the context is headed and the format block
-  sits at the tail as the portfolio manager saw them. A variant's
+  ``inject_perp_context`` under the same heading, without the instrument
+  identity line the engine puts above it (the payload does not keep it).
+  The portfolio manager saw that block mid-prompt, before its rating
+  scale, the plans and the debate; here it is the whole message, so the
+  format block is the last thing the model reads. A variant's
   ``extra_context`` goes after the market context and before the format
-  block, which stays the last instruction the model reads.
+  block.
 
 The answer then goes through the same two functions the recorded one did:
 ``parse_target_decision`` (with the completion's own truncation verdict)
@@ -99,6 +102,10 @@ class Completion:
     ``invalid_output``, as it does for the daemon. ``truncated`` is the
     provider's own verdict that the completion hit its token cap: the one
     fact that turns a missing JSON block into ``truncated_output``.
+    ``usage_reported`` is false when the provider reported nothing about
+    the call; ``truncated`` is then ``False`` by default, the daemon's own
+    reading of a call it has no stop reason for, and the replay counts
+    such answers so the gap is visible.
     """
 
     text: object
@@ -106,6 +113,7 @@ class Completion:
     model: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    usage_reported: bool = True
 
 
 # ``(system, human) -> Completion``. A call that raises is a failed call, and is retried.
@@ -183,6 +191,12 @@ def position_state(facts: InputFacts, risk: RiskConfig) -> tuple[Decimal, Curren
         return facts.account_equity, CurrentPositionState.flat()
     if facts.size is None:
         raise ReplayError(f"{me}: a {facts.side.value} position with no recorded size")
+    if facts.margin_pct is None:
+        # The gate would take an unknown margin as "skip the deadband": a
+        # different gate from the one the recorded answer met. The daemon
+        # records none only when the account had no equity, a row the
+        # scorecard refuses too.
+        raise ReplayError(f"{me}: a {facts.side.value} position with no recorded margin")
     with localcontext(DECIMAL_CONTEXT):
         signed = facts.size * facts.mark
     try:
@@ -276,6 +290,7 @@ class ReplayReport:
     fail_closed: int
     input_tokens: int
     output_tokens: int
+    unreported: int
     stopped_at_limit: bool
 
     def describe(self) -> list[str]:
@@ -284,6 +299,11 @@ class ReplayReport:
             f"fail-closed among the new answers: {self.fail_closed}",
             f"tokens reported: {self.input_tokens} in, {self.output_tokens} out",
         ]
+        if self.unreported:
+            lines.append(
+                f"answers whose call the provider reported nothing about: {self.unreported} "
+                "(truncation unknown, read as not truncated, as the daemon reads it)"
+            )
         if self.stopped_at_limit:
             lines.append("stopped at --limit; the same command continues from here")
         return lines
@@ -326,18 +346,20 @@ def ask_all(
     so an interruption keeps every answer paid for, and the same command
     resumes where it stopped. A call that raises is tried again after each
     of :data:`BACKOFF_SECONDS`; after the last try it ends the replay by
-    name, and the answers stored so far stay. ``limit`` caps the NEW calls
-    this invocation makes.
+    name, and the answers stored so far stay. ``limit`` caps the NEW answers
+    this invocation stores; a call tried again counts once.
     """
     sha = variant.sha
     todo = pending(prepared, answered=store.answered(sha, run_id), repeats=repeats)
     total = len(prepared) * repeats
     skipped = total - len(todo)
-    asked = fail_closed = tokens_in = tokens_out = 0
+    asked = fail_closed = tokens_in = tokens_out = unreported = 0
     humans: dict[str, str] = {}
     for item, repeat in todo:
         if limit is not None and asked >= limit:
-            return ReplayReport(asked, skipped, fail_closed, tokens_in, tokens_out, True)
+            return ReplayReport(
+                asked, skipped, fail_closed, tokens_in, tokens_out, unreported, True
+            )
         human = humans.setdefault(item.input_id, human_message(item, variant.extra_context))
         completion = _call(
             model, variant.system_prompt, human, item=item, repeat=repeat, sleep=sleep, asked=asked
@@ -364,13 +386,14 @@ def ask_all(
         fail_closed += gate.risk_action is RiskAction.INVALID_FAIL_CLOSED
         tokens_in += completion.input_tokens or 0
         tokens_out += completion.output_tokens or 0
+        unreported += not completion.usage_reported
         if progress is not None:
             side = "" if gate.target_side is None else f" {gate.target_side.value}"
             progress(
                 f"[{skipped + asked}/{total}] {item.input_id} repeat {repeat}: "
                 f"{gate.decision_mode.value}{side} -> {gate.risk_action.value}"
             )
-    return ReplayReport(asked, skipped, fail_closed, tokens_in, tokens_out, False)
+    return ReplayReport(asked, skipped, fail_closed, tokens_in, tokens_out, unreported, False)
 
 
 def _call(

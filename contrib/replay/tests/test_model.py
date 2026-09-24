@@ -114,9 +114,12 @@ def test_the_completion_carries_the_text_the_tokens_and_the_truncation_verdict()
     assert (completion.input_tokens, completion.output_tokens) == (120, 30)
 
 
-def test_a_call_the_collector_did_not_see_is_not_truncated():
+def test_a_call_the_collector_did_not_see_is_not_truncated_and_says_so():
     completion = engine_model(make_variant(), engine=_Fake().engine())("s", "h")
     assert (completion.truncated, completion.model, completion.input_tokens) == (False, None, None)
+    assert completion.usage_reported is False
+    seen = engine_model(make_variant(), engine=_Fake(call=_Call("m", 1, 1, False)).engine())
+    assert seen("s", "h").usage_reported is True
 
 
 def test_the_real_engine_surface_loads_and_its_factory_refuses_an_unknown_provider():

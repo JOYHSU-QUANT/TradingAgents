@@ -153,7 +153,7 @@ def test_the_same_answer_cannot_be_stored_twice(tmp_path):
     with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
         store.register(variant, now=NOW)
         store.write_answer(variant.sha, answer)
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(ReplayStoreError, match="write failed, rolled back: UNIQUE constraint"):
             store.write_answer(variant.sha, answer)
         assert len(store.answers(variant.sha, "run")[0]) == 1
 
@@ -174,6 +174,14 @@ def test_a_look_reads_back_with_the_variants_name(tmp_path):
         "v",
         4,
     )
+
+
+def test_a_reader_does_not_create_the_tables_in_an_empty_file(tmp_path):
+    empty = tmp_path / "empty.sqlite"
+    empty.touch()
+    with pytest.raises(ReplayStoreError, match="holds no replay store"):
+        ReplayStore(empty)
+    assert empty.stat().st_size == 0
 
 
 def test_a_directory_is_not_a_store(tmp_path: Path):

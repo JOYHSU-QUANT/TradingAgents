@@ -61,6 +61,7 @@ def engine_model(variant: Variant, *, engine: Engine | None = None) -> Model:
             model=None if call is None else call.model,
             input_tokens=None if call is None else call.input_tokens,
             output_tokens=None if call is None else call.output_tokens,
+            usage_reported=call is not None,
         )
 
     return ask

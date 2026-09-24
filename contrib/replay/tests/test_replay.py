@@ -337,7 +337,7 @@ def test_a_dry_run_checks_everything_and_builds_and_writes_nothing(
     assert f"payloads checked: {len(TRAIN)}, each against the digest its input row recorded" in out
     assert (
         f"dry run: 0 answer(s) already stored, {len(TRAIN) * 3} to ask; this command would "
-        "make 5 model call(s)"
+        "ask for 5 of them"
     ) in out
     assert echo.built == []
     assert not (store.parent / "replay.sqlite").exists()
@@ -350,8 +350,50 @@ def test_a_dry_run_counts_what_is_already_stored(store, variant_file, echo, caps
     pending = len(TRAIN) * 3 - 4
     assert (
         f"dry run: 4 answer(s) already stored, {pending} to ask; this command would "
-        f"make {pending} model call(s)"
+        f"ask for {pending} of them"
     ) in capsys.readouterr().out.splitlines()
+
+
+def test_a_dry_run_does_not_turn_an_empty_file_into_a_store(store, variant_file, echo, capsys):
+    empty = store.parent / "replay.sqlite"
+    empty.touch()
+    assert cli.main(_replay(store, variant_file, "--dry-run")) == 1
+    assert "holds no replay store (the file has no tables)" in capsys.readouterr().err
+    assert empty.stat().st_size == 0
+
+
+def test_answers_the_provider_said_nothing_about_are_counted(
+    store, variant_file, monkeypatch, capsys
+):
+    def silent(system: str, human: str) -> Completion:
+        return Completion(text="no json", usage_reported=False)
+
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: silent)
+    assert cli.main(_replay(store, variant_file, "--repeats", "1", "--limit", "2")) == 0
+    assert (
+        "answers whose call the provider reported nothing about: 2 (truncation unknown, read "
+        "as not truncated, as the daemon reads it)"
+    ) in capsys.readouterr().out.splitlines()
+
+
+def test_the_replays_refusals_name_the_replay(tmp_path, variant_file, echo, capsys):
+    config = {**run_config(interval="1h"), "risk": papers.RISK, "decision": papers.DECISION}
+    path = write_paper_store(tmp_path / "hourly.db", payload_root=tmp_path / "p", config=config)
+    argv = [
+        "replay",
+        "--db",
+        str(path),
+        "--run-id",
+        FIXTURE_RUN,
+        "--variant",
+        str(variant_file),
+        "--replay-db",
+        str(tmp_path / "r.sqlite"),
+    ]
+    assert cli.main(argv) == 1
+    assert "was traded on 1h candles; the replay reads runs on 4h / 1d candles" in (
+        capsys.readouterr().err
+    )
 
 
 def test_a_changed_variant_under_its_old_name_is_refused(store, variant_file, echo, capsys):
@@ -457,8 +499,16 @@ def test_the_position_is_rebuilt_from_the_row():
             {"size": Decimal("-3")},
             "in-x: the recorded position cannot be put back through the gate",
         ),
+        ({"margin_pct": None}, "in-x: a long position with no recorded margin"),
     ],
-    ids=["no-equity", "foreign-leverage", "sized-flat", "unsized-long", "long-with-short-size"],
+    ids=[
+        "no-equity",
+        "foreign-leverage",
+        "sized-flat",
+        "unsized-long",
+        "long-with-short-size",
+        "unmargined-long",
+    ],
 )
 def test_a_row_the_gate_cannot_take_is_refused_by_name(overrides, message):
     with pytest.raises(ReplayError, match=message):

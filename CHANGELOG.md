@@ -414,8 +414,9 @@ Breaking changes within the 0.x line are called out explicitly.
 - **Past papers: put the paper trader's recorded questions to another model,
   `python -m contrib.replay replay --db paper_trading.db --run-id <run>
   --variant <file>`** (replay plan PR 2). Every paper cycle already kept the
-  exact prompt it was built from (the payload's `context_text` and
-  `format_instructions`, digest on the input row), and the scorecard already
+  perp context and format block its prompt was built from (the payload's
+  `context_text` and `format_instructions`, digest on the input row), and
+  the scorecard already
   graded a recorded answer against the price that followed; nothing could ask
   the same question twice. The new command asks each question of one segment
   of the run's split (train by default) to a *variant* — a YAML file naming a
@@ -447,9 +448,12 @@ Breaking changes within the 0.x line are called out explicitly.
   later of the two with `--against`) are left out unless
   `--include-pre-cutoff` (plan section 6), and `--holdout` records its look
   first. A dry run does not run on the holdout: it reads payloads and
-  records nothing. The simple version's scores compare variants with each other, not
-  with the paper trader's record: one completion is not the graph it
-  replaces. Two known differences from the daemon: the gate runs at the
+  records nothing. The simple version's scores compare variants with each
+  other, not with the paper trader's record: one completion is not the
+  graph it replaces. `score` itself now finds a payload's `.reports.json`
+  by the file name of a path recorded with either host's separators
+  (`PureWindowsPath`), so a store recorded on one platform and read on the
+  other counts its sidecars. Two known differences from the daemon: the gate runs at the
   input row's mark, where the daemon re-read the mark moments later, so a
   target on the deadband's edge can land either side; and the position is
   rebuilt from the row's size, margin and leverage, not the books. An example

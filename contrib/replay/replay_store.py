@@ -11,15 +11,18 @@ Three tables, and nothing here ever writes the paper store:
   resumable (an answer already stored is never asked for again). A row
   keeps the model's raw text, what the parse seam made of it, and every
   field the gate returned that the scorecard reads, in the gate's own
-  spelling: enum values as text, margins and confidence as ``Decimal``
-  text.
+  spelling: enum values as text, margins as integer text (the grid is
+  integral) and confidence as ``Decimal`` text.
 - ``ledger``: one row per look at a holdout (plan §3-9). ``ask`` is written
   before the first holdout payload is read, and ``score`` before a holdout
   answer is scored; either way the row exists even if what follows fails.
 
 The schema is versioned by ``PRAGMA user_version``. A file that holds
-tables but not ours is refused before anything writes to it, and a store
-a newer build wrote is refused rather than written through.
+tables but not ours is refused before anything writes to it, a store a
+newer build wrote is refused rather than written through, and a reader
+never creates the tables: an empty file opened to be read is refused. A
+write that fails raises :class:`ReplayStoreError` naming the store, after
+the transaction is rolled back.
 """
 
 from __future__ import annotations
@@ -157,6 +160,7 @@ class ReplayStore:
 
     def __init__(self, path: Path, *, create: bool = False) -> None:
         self.path = path
+        self._create = create
         if path.exists() and not path.is_file():
             raise ReplayStoreError(f"{path} is not a regular file")
         if not path.exists() and not create:
@@ -194,6 +198,11 @@ class ReplayStore:
                 f"v{SCHEMA_VERSION}"
             )
         if not names:
+            if not self._create:
+                raise ReplayStoreError(
+                    f"{self.path} holds no replay store (the file has no tables); a reader "
+                    "does not create one"
+                )
             with self.transaction() as conn:
                 for ddl in _DDL:
                     conn.execute(ddl)
@@ -213,15 +222,28 @@ class ReplayStore:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        """One write transaction, IMMEDIATE so the write lock is taken up front."""
-        self.conn.execute("BEGIN IMMEDIATE")
+        """One write transaction, IMMEDIATE so the write lock is taken up front.
+
+        A SQLite failure inside it (a lock, a constraint, a full disk) is
+        rolled back and raised as :class:`ReplayStoreError` naming the store:
+        the commands word it as a failed write, not as a failed read.
+        """
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise ReplayStoreError(f"{self.path}: write failed: {exc}") from exc
         try:
             yield self.conn
-        except BaseException:
+        except BaseException as exc:
             with suppress(sqlite3.Error):
                 self.conn.execute("ROLLBACK")
+            if isinstance(exc, sqlite3.Error):
+                raise ReplayStoreError(f"{self.path}: write failed, rolled back: {exc}") from exc
             raise
-        self.conn.execute("COMMIT")
+        try:
+            self.conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            raise ReplayStoreError(f"{self.path}: write failed at commit: {exc}") from exc
 
     # -- variants ------------------------------------------------------------
 

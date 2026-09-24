@@ -140,8 +140,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--out",
         metavar="DIR",
         help=(
-            "write <stem>-decisions.csv (one row per decision) and <stem>-summary.txt here; "
-            "the stem is the run id, or <run-id>-<variant> with --replay-db"
+            "write <stem>-decisions.csv (one row per decision; per decision and repeat with "
+            "--replay-db) and <stem>-summary.txt here; the stem is the run id, or "
+            "<run-id>-<variant> with --replay-db"
         ),
     )
     score.add_argument(
@@ -227,7 +228,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     replay.add_argument(
-        "--limit", type=int, metavar="N", help="make at most N new model calls this time"
+        "--limit",
+        type=int,
+        metavar="N",
+        help="store at most N new answers this time (a call tried again counts once)"
     )
     replay.add_argument(
         "--dry-run",
@@ -265,13 +269,16 @@ def _open_run(
     reports_root: Path | None,
     count_reports: bool = True,
     with_gate: bool = False,
+    noun: str = "scorecard",
 ) -> _Run:
     """Read the run's decisions and cut its split; every refusal is a :class:`_Refused`.
 
     One open of the store for everything a command reads from it.
     ``count_reports`` off skips the ``.reports.json`` lookups a command
-    will not print; ``with_gate`` also reads the run's gate.
+    will not print; ``with_gate`` also reads the run's gate. ``noun`` names
+    the command in the refusals.
     """
+    verb = "scores" if noun == "scorecard" else "reads"
     try:
         db = Database(db_path, migrate=False)
     except SchemaVersionError as exc:
@@ -282,7 +289,7 @@ def _open_run(
             raise _Refused(f"run {run_id!r} not found in {db_arg}")
         if facts.mode != "paper":
             raise _Refused(
-                f"run {run_id!r} is a {facts.mode} run; the scorecard reads paper runs "
+                f"run {run_id!r} is a {facts.mode} run; the {noun} reads paper runs "
                 "(their fill model is what the costs are taken from)"
             )
         if reports_root is None and count_reports:
@@ -296,7 +303,7 @@ def _open_run(
         # Said before the split is cut: the split would refuse the interval
         # too, but in a sentence about the run being too short.
         raise _Refused(
-            f"run {run_id!r} was traded on {facts.interval} candles; the scorecard scores "
+            f"run {run_id!r} was traded on {facts.interval} candles; the {noun} {verb} "
             f"runs on {' / '.join(STUDIED_INTERVALS)} candles (the research split's intervals)"
         )
     try:
@@ -304,7 +311,7 @@ def _open_run(
     except SplitError as exc:
         raise _Refused(
             f"run {run_id!r} is too short to cut into train / validation / holdout "
-            f"({exc}); the scorecard needs at least four {facts.interval} bars"
+            f"({exc}); the {noun} needs at least four {facts.interval} bars"
         ) from exc
     return _Run(facts, decisions, split, gate)
 
@@ -540,7 +547,13 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     except VariantError as exc:
         return _fail(str(exc))
     run = _open_run(
-        db_path, args.db, args.run_id, reports_root=None, count_reports=False, with_gate=True
+        db_path,
+        args.db,
+        args.run_id,
+        reports_root=None,
+        count_reports=False,
+        with_gate=True,
+        noun="replay",
     )
     assert run.gate is not None
     risk, decision = run.gate
@@ -581,18 +594,22 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             except ReplayStoreError as exc:
                 return _fail(str(exc))
         todo = pending(prepared, answered=stored, repeats=args.repeats)
-        calls = len(todo) if args.limit is None else min(len(todo), args.limit)
+        asks = len(todo) if args.limit is None else min(len(todo), args.limit)
+        unchecked = sum(1 for paper in papers if paper.facts.payload_hash is None)
         for line in header:
             print(line)
-        print(f"payloads checked: {len(prepared)}, each against the digest its input row recorded")
+        print(
+            f"payloads checked: {len(prepared)}, each against the digest its input row recorded"
+            + (f" ({unchecked} recorded none and were read unchecked)" if unchecked else "")
+        )
         print(
             f"dry run: {len(prepared) * args.repeats - len(todo)} answer(s) already stored, "
-            f"{len(todo)} to ask; this command would make {calls} model call(s)"
+            f"{len(todo)} to ask; this command would ask for {asks} of them"
         )
         return 0
     try:
-        # Built before anything is written or read: a client that cannot be
-        # built must not have spent a holdout look on the way.
+        # Built before the replay store is written or any payload is read: a
+        # client that cannot be built must not have spent a holdout look.
         model = _build_model(variant)
     except (ImportError, ValueError) as exc:
         return _fail(f"the {variant.provider}/{variant.model} client could not be built: {exc}")

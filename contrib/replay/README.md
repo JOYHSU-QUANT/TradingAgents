@@ -115,8 +115,10 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
 
 - system 訊息＝variant 指定的 system prompt；
 - human 訊息＝payload 的 `context_text`＋`format_instructions`，用引擎自己的
-  `inject_perp_context` 組起來（標題與 format 區塊在尾端，都跟 PM 當時看到的一樣）。variant 的
-  `extra_context`（例如一條教訓）插在市場 context 之後、format 區塊之前，format 永遠是最後一句。
+  `inject_perp_context` 組起來（同一個標題；少了引擎放在上面的商品識別那一行，payload 沒存）。
+  PM 當時看到的這一塊在 prompt 中段，後面還有評等表、計畫與辯論；這裡它就是整則訊息，所以
+  format 區塊是模型最後讀到的。variant 的 `extra_context`（例如一條教訓）插在市場 context
+  之後、format 區塊之前。
 
 回來的文字走**同一個** `parse_target_decision`（帶這次 completion 自己的截斷判定），再用**該 run
 genesis 記下的** `risk:`／`decision:` 區塊、從該列 `ai_inputs` 記錄的帳戶狀態（equity、倉位大小、
@@ -152,7 +154,7 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 ### replay.sqlite
 
 自有的 store，三張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
-（`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、gate 的每個欄位）、`ledger`
+（`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、成績單讀的每個 gate 欄位）、`ledger`
 （每次看 holdout 一列：誰、何時、哪個 variant、`ask` 或 `score`）。版本在 `PRAGMA user_version`；
 別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build 寫過的 store 也拒絕。
 
@@ -162,18 +164,21 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
   validation` 問 validation；問 holdout 要 `--segment holdout --holdout` **兩個都給**（缺一個具名
   拒絕），而且 ledger 那一列**在讀第一個 holdout payload 之前**就寫下。沒被選到的段落，payload
   **連打開都不打開**。
-- **先驗再花錢**：所有題目的 payload 先全部讀過、用 input 列記的 digest 比對（被改過的具名拒絕）、
-  閘門輸入全部重建成功，才建 client、才開始問。`--dry-run` 只做這一步並印出會問幾次，不建
-  client、不寫任何東西（連 `replay.sqlite` 都不建）。
+- **先驗再花錢**：先建 client（建不起來就在寫任何東西之前停下）；接著登記 variant、問 holdout
+  時寫 ledger；然後所有題目的 payload 讀過、用 input 列記的 digest 比對（被改過的具名拒絕；
+  input 列沒記 digest 的照讀不比）、閘門輸入全部重建成功，才開始問：第一次呼叫之前一毛不花。
+  `--dry-run` 只做讀與驗並印出會問幾題，不建 client、不寫任何東西（連 `replay.sqlite` 都不建，
+  已存在的空檔也不會被建表）。
 - **可續跑**：每個答案判完立刻寫入（各自一個 transaction）；已存的 `(題, repeat)` 永遠不再問。
-  呼叫失敗重試共 3 次（間隔 5 秒、20 秒），第三次仍失敗就具名停下、已存的答案保留，同一個指令
-  從停的地方接著跑。`--limit N` 限制這次最多花幾次呼叫。
+  一次呼叫最多試 3 次（失敗後隔 5 秒、20 秒再試），第三次仍失敗就具名停下、已存的答案保留，
+  同一個指令從停的地方接著跑。`--limit N` 限制這次最多存幾個新答案（重試的呼叫算一次）。
+  provider 沒回報用量的答案（無從判斷是否截斷，照 daemon 的讀法當作沒截斷）另外計數印出。
 - `--repeats N`（預設 3，plan §3-10）：每題每 variant 存 N 個答案。
 
 ### `score --replay-db`
 
 同一個 `score_run`，把 paper 的答案換成 variant 的答案：**每個 repeat 一張卡**（只算那個 repeat
-答過的題，沒問的題不會變成「沒答」），接著一行「跨 repeat 的中位數與區間」（模型命中、執行命中、
+答過的題，沒問的題不會變成「沒答」），接著「跨 repeat 的中位數與區間」（每個時距一行：模型命中、執行命中、
 每題平均執行損益——用平均不用總和，因為各 repeat 答的題數可能不同，plan §3-10），最後是**逐題配對比較**（模型讀法、McNemar 精確 p，plan §3-11）：預設跟
 paper 交易員自己的答案比，`--against NAME` 改跟另一個 variant 的同一個 repeat 比。
 

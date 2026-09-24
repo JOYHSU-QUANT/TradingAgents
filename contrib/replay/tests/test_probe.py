@@ -661,18 +661,18 @@ def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
         "base rate, train, 4h: up 50.0% / down 0.0% / flat 50.0% (n 6)",
         "base rate, train, 24h: up 50.0% / down 0.0% / flat 50.0% (n 2)",
         "base rate of up among the moves, train: 4h 100.0% (n 3), 24h 100.0% (n 1)",
-        "-- headline: each question's repeats averaged into one forecast; a question answered "
-        "only with invalid_probe is scored as the base rate --",
+        "-- headline: each question's repeats averaged into one forecast; a question with no "
+        "valid forecast but an invalid_probe among its repeats is scored as the base rate --",
         # Three ups at 0.26 and three flats at 0.86 average 0.56 against the base
         # rate's 0.5; log loss (3 x -ln .6 + 3 x -ln .3) / 6 = 0.857, base -ln .5.
-        "  4h train: n 6 scored (0 answered only invalid_probe, 0 refused, 0 without an "
+        "  4h train: n 6 scored (0 with no valid forecast but an invalid_probe, 0 refused on every repeat, 0 without an "
         "outcome); Brier 0.560 vs base 0.500, skill -0.120; log loss 0.857 vs base 0.693; "
         "without the base-rate stand-ins: n 6, skill -0.120",
         # Up given a move is .6 / .7; each of the three ups costs (1/7)² = 0.020.
         # Every train move was up, so the base rate is certain and scores 0.
         "  4h train, up vs down given a move: n 3, Brier 0.020 vs base 0.000, skill n/a",
         # Slot 6 is up (0.26); slot 7 has no mark before the holdout.
-        "  4h validation: n 1 scored (0 answered only invalid_probe, 0 refused, 1 without an "
+        "  4h validation: n 1 scored (0 with no valid forecast but an invalid_probe, 0 refused on every repeat, 1 without an "
         "outcome); Brier 0.260 vs base 0.500, skill +0.480; log loss 0.511 vs base 0.693; "
         "without the base-rate stand-ins: n 1, skill +0.480",
         "  4h validation, up vs down given a move: n 1, Brier 0.020 vs base 0.000, skill n/a",
@@ -680,12 +680,12 @@ def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
         f"{brier(scaled, 'up'):.3f}, skill {1 - brier(scaled, 'up') / 0.5:+.3f}; log loss "
         f"{log_loss(scaled, 'up'):.3f}",
         # Slot 0 up at (.2-1)² + .2² + .6² = 1.04, slot 1 flat at .2² + .2² + (.6-1)² = 0.24.
-        "  24h train: n 2 scored (0 answered only invalid_probe, 0 refused, 4 without an "
+        "  24h train: n 2 scored (0 with no valid forecast but an invalid_probe, 0 refused on every repeat, 4 without an "
         "outcome); Brier 0.640 vs base 0.500, skill -0.280; log loss 1.060 vs base 0.693; "
         "without the base-rate stand-ins: n 2, skill -0.280",
         # Up given a move is .2 / .4 = .5; slot 0 went up: (1 - .5)² = 0.25.
         "  24h train, up vs down given a move: n 1, Brier 0.250 vs base 0.000, skill n/a",
-        "  24h validation: n 0 scored (0 answered only invalid_probe, 0 refused, 2 without an "
+        "  24h validation: n 0 scored (0 with no valid forecast but an invalid_probe, 0 refused on every repeat, 2 without an "
         "outcome); Brier n/a vs base n/a, skill n/a; log loss n/a vs base n/a; without the "
         "base-rate stand-ins: n 0, skill n/a",
         "  24h validation, up vs down given a move: n 0, Brier n/a vs base n/a, skill n/a",
@@ -721,12 +721,12 @@ def test_an_invalid_answer_is_scored_as_the_base_rate_in_the_headline_only(
     capsys.readouterr()
     assert cli.main(_score(store)) == 0
     out = capsys.readouterr().out.splitlines()
-    # Slot 0 (an up) answered only invalid_probe. Left out, ups 2, 4 at 0.26 and
+    # Slot 0 (an up) has no valid forecast, only invalid_probe. Left out, ups 2, 4 at 0.26 and
     # flats 1, 3, 5 at 0.86 make 3.10 / 5 = 0.62 (skill -0.24); in the headline
     # it stands in as the base rate (0.5), so 3.60 / 6 = 0.60 (skill -0.20), and
     # the log loss adds -ln .5 to (2 x -ln .6 + 3 x -ln .3): 5.327 / 6 = 0.888.
     assert (
-        "  4h train: n 6 scored (1 answered only invalid_probe, 0 refused, 0 without an "
+        "  4h train: n 6 scored (1 with no valid forecast but an invalid_probe, 0 refused on every repeat, 0 without an "
         "outcome); Brier 0.600 vs base 0.500, skill -0.200; log loss 0.888 vs base 0.693; "
         "without the base-rate stand-ins: n 5, skill -0.240"
     ) in out
@@ -828,7 +828,9 @@ def test_each_repeat_is_scored_and_the_headline_averages_them(store, files, monk
         "Brier 0.760 vs base 0.500, skill -0.520",
     ]
     assert "  4h train: -0.320 (-0.520 to -0.120)" in out
-    [headline] = [line for line in out if line.startswith("  4h train: n 6 scored (0 answered")]
+    [headline] = [
+        line for line in out if line.startswith("  4h train: n 6 scored (0 with no valid")
+    ]
     assert "; Brier 0.640 vs base 0.500, skill -0.280; " in headline
     assert "  4h train: 0.7-0.8 n 6 predicted 70.0% happened 50.0%; ECE 0.200" in out
 
@@ -900,3 +902,73 @@ def test_one_probe_text_is_one_name(store, files, monkeypatch, capsys, tmp_path)
     same_text = write_probe(renamed, "direction-renamed")
     assert cli.main(_probe(store, (files[0], same_text))) == 1
     assert "is already stored as 'direction-t'; ask it under that name" in (capsys.readouterr().err)
+
+
+# -- exit check: the combinations the earlier tests did not reach -------------------------
+
+
+def test_a_variant_asked_both_decisions_and_the_probe_gets_both_sections(
+    store, files, monkeypatch, capsys, tmp_path
+):
+    from .papers import Echo
+
+    echo = Echo()
+    _use(monkeypatch, echo)
+    variant_file, _ = files
+    assert cli.main(replay_argv(store, variant_file, "--repeats", "1")) == 0
+    _use(monkeypatch, Forecaster())
+    assert cli.main(_probe(store, files)) == 0
+    capsys.readouterr()
+    out_dir = tmp_path / "out"
+    assert cli.main(_score(store, "--out", str(out_dir))) == 0
+    out = capsys.readouterr().out.splitlines()
+    decisions = out.index("== repeat 0: 6 question(s) scored ==")
+    probe = next(i for i, line in enumerate(out) if line.startswith("== direction probe "))
+    assert decisions < probe
+    assert any(line.startswith("-- paired with paper") for line in out[decisions:probe])
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        f"{RUN_ID}-echo-decisions.csv",
+        f"{RUN_ID}-echo-summary.txt",
+    ]
+
+
+def test_two_probes_asked_of_one_variant_get_a_section_each_in_name_order(
+    store, files, monkeypatch, capsys, tmp_path
+):
+    _use(monkeypatch, Forecaster())
+    variant_file, _ = files
+    other = tmp_path / "other"
+    other.mkdir()
+    for probe_file in (
+        write_probe(other, "zeta", instructions="Reply with the JSON block, zeta."),
+        write_probe(other, "alpha", instructions="Reply with the JSON block, alpha."),
+    ):
+        assert cli.main(_probe(store, (variant_file, probe_file), "--limit", "2")) == 0
+    capsys.readouterr()
+    assert cli.main(_score(store)) == 0
+    out = capsys.readouterr().out.splitlines()
+    sections = [line.split(" (")[0] for line in out if line.startswith("== direction probe ")]
+    assert sections == ["== direction probe alpha", "== direction probe zeta"]
+    # Each section scores its own two answers, not the other probe's.
+    assert sum(line.startswith("  4h train: n 2 scored (0 invalid_probe") for line in out) == 2
+
+
+def test_a_question_refused_on_every_repeat_is_counted_in_the_report(
+    store, files, monkeypatch, capsys
+):
+    _use(monkeypatch, _Refuses(TRAIN[1]))
+    assert cli.main(_probe(store, files)) == 0
+    capsys.readouterr()
+    assert cli.main(_score(store)) == 0
+    out = capsys.readouterr().out.splitlines()
+    # Slot 1 (a flat) is refused: ups 0, 2, 4 at 0.26 and flats 3, 5 at 0.86,
+    # 2.5 / 5 = 0.5, in both the headline and the repeat's own line.
+    assert (
+        "  4h train: n 5 scored (0 with no valid forecast but an invalid_probe, 1 refused on "
+        "every repeat, 0 without an outcome); Brier 0.500 vs base 0.500, skill +0.000; log loss "
+        "0.788 vs base 0.693; without the base-rate stand-ins: n 5, skill +0.000"
+    ) in out
+    assert (
+        "  4h train: n 5 scored (0 invalid_probe, 1 refused, 0 without an outcome); Brier 0.500 "
+        "vs base 0.500, skill +0.000; log loss 0.788 vs base 0.693"
+    ) in out

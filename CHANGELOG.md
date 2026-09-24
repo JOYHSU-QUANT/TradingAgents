@@ -438,9 +438,9 @@ Breaking changes within the 0.x line are called out explicitly.
   where its two horizons are the scorecard's. `score --replay-db --variant`
   prints one more section per probe, marked against the scorecard's own
   later marks and flat band. Its headline scores one forecast per question,
-  the mean of that question's valid repeats (a question answered only with
-  `invalid_probe` stands in as the base rate, and the skill without those
-  stand-ins is printed beside it): the multi-class Brier score and log loss
+  the mean of that question's valid repeats (a question with no valid
+  forecast but an `invalid_probe` among its repeats stands in as the base
+  rate, and the skill without those stand-ins is printed beside it): the multi-class Brier score and log loss
   against the base rate (the train segment's up / down / flat shares, the
   same answer to every question), the Brier skill score (0 or below: no
   direction beyond the base rate), the binary Brier score of up against

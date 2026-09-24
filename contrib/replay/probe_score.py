@@ -26,11 +26,11 @@ stores and prints, and everything between is here. The definitions, once:
   direction the base rate does not.
 - **The headline** (decided 2026-09-24) scores ONE forecast per question:
   the mean, class by class, of its valid repeats (:func:`ensemble`). A
-  question whose repeats answered only ``invalid_probe`` is scored as the
-  base rate (it adds no skill and keeps its place in ``n``; with no train
-  base rate it is only counted), and the skill
-  without those stand-ins is printed beside it; a question refused on every
-  repeat is counted, not scored.
+  question with no valid forecast but an ``invalid_probe`` among its
+  repeats (the others refused, if any) is scored as the base rate (it adds
+  no skill and keeps its place in ``n``; with no train base rate it is
+  only counted), and the skill without those stand-ins is printed beside
+  it; a question refused on every repeat is counted, not scored.
 - **Up against down given a move** (decided 2026-09-24) takes the questions
   that moved (``up`` or ``down``) and scores ``up / (up + down)`` of each
   forecast with the binary Brier score ``(q - y)²``, against the share of
@@ -329,8 +329,9 @@ def binary_figures(pairs: Sequence[Pair], base_up: float | None) -> Binary:
 class _Tally:
     """One set of answers, one segment, one horizon: the pairs scored, and what was not.
 
-    ``stand_ins`` holds the outcome of every question answered only with
-    ``invalid_probe``, for the headline to score as the base rate.
+    ``stand_ins`` holds the outcome of every question filed as
+    ``invalid_probe`` (no valid forecast, see :func:`ensemble`), for the
+    headline to score as the base rate.
     """
 
     pairs: list[Pair] = field(default_factory=list)
@@ -442,8 +443,8 @@ def describe_probe(
     lines.append("base rate of up among the moves, train: " + ", ".join(moves))
 
     lines.append(
-        "-- headline: each question's repeats averaged into one forecast; a question answered "
-        "only with invalid_probe is scored as the base rate --"
+        "-- headline: each question's repeats averaged into one forecast; a question with no "
+        "valid forecast but an invalid_probe among its repeats is scored as the base rate --"
     )
     headline = list(ensemble(answers).values())
     reliable: dict[tuple[str, SegmentName | None], list[Pair]] = {}
@@ -457,8 +458,9 @@ def describe_probe(
             own = figures(tally.pairs, base)
             reliable[(key, segment)] = tally.pairs
             lines.append(
-                f"  {label} {_label(segment)}: n {scored.n} scored ({tally.invalid} answered only "
-                f"invalid_probe, {tally.refused} refused, {tally.no_outcome} without an outcome); "
+                f"  {label} {_label(segment)}: n {scored.n} scored ({tally.invalid} with no valid "
+                f"forecast but an invalid_probe, {tally.refused} refused on every repeat, "
+                f"{tally.no_outcome} without an outcome); "
                 f"Brier {_num(scored.brier, '{:.3f}')} vs base "
                 f"{_num(scored.base_brier, '{:.3f}')}, skill {_num(scored.skill, '{:+.3f}')}; "
                 f"log loss {_num(scored.log_loss, '{:.3f}')} vs base "

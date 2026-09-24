@@ -261,7 +261,7 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
 - **基準率**＝train 段有結果的題（不論有沒有答、有沒有過 cutoff）裡三類的比例，當成每題的固定答案。
   **Brier skill score**＝`1 − Brier ÷ 基準率的 Brier`（同一批題），**≤ 0 就是沒有基準率以外的方向資訊**。
 - **主數字（headline，2026-09-24 拍板）**：每題**一個**預測＝該題各 repeat 有效預測逐類取平均。
-  各 repeat 都只答出 `invalid_probe` 的題，**當成回答了基準率**來算（skill 貢獻 0、n 不變；train 沒有
+  沒有任何有效預測、但 repeat 裡有 `invalid_probe` 的題（其餘 repeat 被拒答也算），**當成回答了基準率**來算（skill 貢獻 0、n 不變；train 沒有
   基準率時就只計數），旁邊另印「不含這些替身」的 n 與 skill；每個 repeat 都被拒答的題只計數。
 - **有動時 up 對 down（2026-09-24 拍板）**：只看實際 `up` 或 `down` 的題，把每個預測的
   `up ÷ (up + down)` 用二元 Brier `(q − y)²` 打分，對照 train 段「動了的題裡 up 的比例」。它不受

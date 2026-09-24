@@ -437,13 +437,21 @@ Breaking changes within the 0.x line are called out explicitly.
   failure classes are the decision replay's; the probe runs on 4h runs only,
   where its two horizons are the scorecard's. `score --replay-db --variant`
   prints one more section per probe, marked against the scorecard's own
-  later marks and flat band: the multi-class Brier score and log loss
+  later marks and flat band. Its headline scores one forecast per question,
+  the mean of that question's valid repeats (a question answered only with
+  `invalid_probe` stands in as the base rate, and the skill without those
+  stand-ins is printed beside it): the multi-class Brier score and log loss
   against the base rate (the train segment's up / down / flat shares, the
   same answer to every question), the Brier skill score (0 or below: no
-  direction beyond the base rate), a temperature fitted on train and scored
-  on validation, a reliability table of the most likely class with its
-  expected calibration error, and the skill's median and range across
-  repeats; a variant asked only the probe gets that section alone.
+  direction beyond the base rate), the binary Brier score of up against
+  down on the questions that moved (which does not depend on where the flat
+  band sits), a temperature fitted on the train headline and scored on
+  validation, and a reliability table of the most likely class with its
+  expected calibration error; then each repeat on its own and the skill's
+  median and range across repeats, as a stability check. A variant asked
+  only the probe gets that section alone. The acceptance bar ("clearly
+  above 0 on validation") is written into the plan before any run; pooling
+  runs and a bootstrap interval come next.
   `replay.sqlite` moves to schema v3 (`probes`, `probe_answers`): a v2 store
   gains the two tables when a command that may create a store opens it, and
   any other command reads it as written. Two ideas from the same comparison

@@ -45,13 +45,18 @@ from contrib.replay.probe import (
 )
 from contrib.replay.probe_score import (
     base_rates,
+    binary_figures,
     brier,
+    describe_probe,
+    ensemble,
     figures,
     fit_temperature,
     log_loss,
+    move_base_rate,
     outcome_class,
     reliability,
     tempered,
+    up_given_move,
 )
 from contrib.replay.replay import Completion, prepare, probe_message, select
 from contrib.replay.replay_store import SCHEMA_VERSION, ReplayStore, ReplayStoreError
@@ -532,22 +537,71 @@ def test_brier_and_log_loss_by_hand():
 
 
 def test_the_fitted_temperature_minimises_the_log_loss_it_was_fitted_on():
-    pairs = [(H4, "up"), (H4, "flat")] * 3
-    fitted = fit_temperature(pairs)
-    assert fitted is not None
-
-    def loss(temperature: float) -> float:
+    def loss(pairs, temperature: float) -> float:
         return math.fsum(log_loss(tempered(f, temperature), o) for f, o in pairs) / len(pairs)
 
-    assert loss(fitted) < loss(1.0)
-    assert loss(fitted) <= loss(fitted * 1.01)
-    assert loss(fitted) <= loss(fitted / 1.01)
+    # .7 / .1 / .2 over three ups and three flats: the floored loss is a plateau
+    # at the sharp end, where the first search settled on the edge (0.05, a log
+    # loss of 3.45 against 0.98 at a temperature of 1).
+    for forecast in (H4, {"up": 0.7, "down": 0.1, "flat": 0.2}):
+        pairs = [(forecast, "up"), (forecast, "flat")] * 3
+        fitted = fit_temperature(pairs)
+        assert fitted is not None
+        assert 0.5 < fitted < 2.0
+        assert loss(pairs, fitted) < loss(pairs, 1.0)
+        assert loss(pairs, fitted) <= loss(pairs, fitted * 1.01)
+        assert loss(pairs, fitted) <= loss(pairs, fitted / 1.01)
     assert fit_temperature([]) is None
     # A forecast that is always right is sharpened to the lowest temperature searched.
     always_right = [({"up": 0.5, "down": 0.25, "flat": 0.25}, "up")] * 3
     assert fit_temperature(always_right) == pytest.approx(0.05, rel=1e-3)
     uniform = {"up": 1 / 3, "down": 1 / 3, "flat": 1 / 3}
     assert tempered(uniform, 7.0) == pytest.approx(uniform)
+
+
+def test_the_repeats_of_a_question_are_averaged_into_one_answer():
+    sharper = {"up": 0.8, "down": 0.1, "flat": 0.1}
+    merged = ensemble(
+        {
+            0: [
+                ProbeAnswer("a", {"h4": H4, "h24": H24}, None),
+                ProbeAnswer("b", None, INVALID_PROBE),
+                ProbeAnswer("c", None, REFUSED),
+                ProbeAnswer("d", None, INVALID_PROBE),
+            ],
+            1: [
+                ProbeAnswer("a", {"h4": sharper, "h24": H24}, None),
+                ProbeAnswer("b", {"h4": sharper, "h24": H24}, None),
+                ProbeAnswer("c", None, REFUSED),
+                ProbeAnswer("d", None, REFUSED),
+            ],
+        }
+    )
+    # a: the two forecasts averaged; b: the one valid forecast, the invalid
+    # repeat left out; c: refused every time; d: invalid once, refused once.
+    assert merged["a"].forecast == {
+        "h4": pytest.approx({"up": 0.7, "down": 0.1, "flat": 0.2}),
+        "h24": pytest.approx(H24),
+    }
+    assert merged["b"].forecast == {"h4": sharper, "h24": H24}
+    assert (merged["c"].forecast, merged["c"].invalid_reason) == (None, REFUSED)
+    assert (merged["d"].forecast, merged["d"].invalid_reason) == (None, INVALID_PROBE)
+
+
+def test_up_against_down_given_a_move():
+    assert up_given_move(H4) == pytest.approx(0.6 / 0.7)
+    assert up_given_move({"up": 0.0, "down": 0.0, "flat": 1.0}) == 0.5
+    # Moves only: the flat outcome is left out. Up at q = 6/7 costs (1/7)², down
+    # at q = 0.5 costs 0.25; the base rate 0.5 costs 0.25 on either.
+    scored = binary_figures(
+        [(H4, "up"), ({"up": 0.3, "down": 0.3, "flat": 0.4}, "down"), (H4, "flat")], 0.5
+    )
+    assert scored.n == 2
+    assert scored.brier == pytest.approx(((1 / 7) ** 2 + 0.25) / 2)
+    assert scored.base_brier == pytest.approx(0.25)
+    assert scored.skill == pytest.approx(1 - ((1 / 7) ** 2 + 0.25) / 2 / 0.25)
+    assert binary_figures([(H4, "flat")], 0.5).n == 0
+    assert binary_figures([(H4, "up")], None).skill is None
 
 
 def test_reliability_files_the_most_likely_class():
@@ -577,12 +631,16 @@ def test_the_base_rate_is_read_from_the_train_questions_only(store):
     card = _card(store)
     assert base_rates(card, 1) == ({"up": 0.5, "down": 0.0, "flat": 0.5}, 6)
     assert base_rates(card, 6) == ({"up": 0.5, "down": 0.0, "flat": 0.5}, 2)
+    # Every train move is up: 3 at 4h, 1 at 24h.
+    assert move_base_rate(card, 1) == (1.0, 3)
+    assert move_base_rate(card, 6) == (1.0, 1)
     # Slot 7 at 102 turns slot 6's 4h move from +1.923% to -1.923%: a validation
     # label flips (up to down), the band (an absolute value) stays, and the base
     # rate, read from train only, stays what it was.
     flipped = _card(store, mark_7=102.0)
     assert flipped.flat_bands[1] == pytest.approx(card.flat_bands[1])
     assert base_rates(flipped, 1) == base_rates(card, 1)
+    assert move_base_rate(flipped, 1) == move_base_rate(card, 1)
 
 
 def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
@@ -593,68 +651,88 @@ def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
     assert cli.main(_score(store)) == 0
     out = capsys.readouterr().out.splitlines()
     start = next(i for i, line in enumerate(out) if line.startswith("== direction probe "))
-    section = out[start + 1 :]
-    assert section[:4] == [
-        "flat band (median |return| of the train and validation questions): 4h 1.923%, 24h 3.961%",
-        "base rate, train, 4h: up 50.0% / down 0.0% / flat 50.0% (n 6)",
-        "base rate, train, 24h: up 50.0% / down 0.0% / flat 50.0% (n 2)",
-        "-- probe repeat 0 --",
-    ]
-    # Three ups at 0.26 and three flats at 0.86 average 0.56 against the base
-    # rate's 0.5; log loss (3 x -ln .6 + 3 x -ln .3) / 6 = 0.857, base -ln .5.
-    assert section[4] == (
-        "  4h train: n 6 scored (0 invalid_probe, 0 refused, 0 without an outcome); Brier 0.560 "
-        "vs base 0.500, skill -0.120; log loss 0.857 vs base 0.693"
-    )
-    # Slot 6 is up (0.26); slot 7 has no mark before the holdout.
-    assert section[5] == (
-        "  4h validation: n 1 scored (0 invalid_probe, 0 refused, 1 without an outcome); Brier "
-        "0.260 vs base 0.500, skill +0.480; log loss 0.511 vs base 0.693"
-    )
-    # The temperature is fitted on the six train forecasts and applied to slot 6.
+    # One repeat, so the headline is that repeat. The temperature is fitted on
+    # the six train forecasts and applied to slot 6.
     fitted = fit_temperature([(H4, "up"), (H4, "flat")] * 3)
     assert fitted is not None
     scaled = tempered(H4, fitted)
-    assert section[6] == (
-        f"  4h validation, temperature {fitted:.2f} fitted on train: Brier "
+    assert out[start + 1 :] == [
+        "flat band (median |return| of the train and validation questions): 4h 1.923%, 24h 3.961%",
+        "base rate, train, 4h: up 50.0% / down 0.0% / flat 50.0% (n 6)",
+        "base rate, train, 24h: up 50.0% / down 0.0% / flat 50.0% (n 2)",
+        "base rate of up among the moves, train: 4h 100.0% (n 3), 24h 100.0% (n 1)",
+        "-- headline: each question's repeats averaged into one forecast; a question answered "
+        "only with invalid_probe is scored as the base rate --",
+        # Three ups at 0.26 and three flats at 0.86 average 0.56 against the base
+        # rate's 0.5; log loss (3 x -ln .6 + 3 x -ln .3) / 6 = 0.857, base -ln .5.
+        "  4h train: n 6 scored (0 answered only invalid_probe, 0 refused, 0 without an "
+        "outcome); Brier 0.560 vs base 0.500, skill -0.120; log loss 0.857 vs base 0.693; "
+        "without the base-rate stand-ins: n 6, skill -0.120",
+        # Up given a move is .6 / .7; each of the three ups costs (1/7)² = 0.020.
+        # Every train move was up, so the base rate is certain and scores 0.
+        "  4h train, up vs down given a move: n 3, Brier 0.020 vs base 0.000, skill n/a",
+        # Slot 6 is up (0.26); slot 7 has no mark before the holdout.
+        "  4h validation: n 1 scored (0 answered only invalid_probe, 0 refused, 1 without an "
+        "outcome); Brier 0.260 vs base 0.500, skill +0.480; log loss 0.511 vs base 0.693; "
+        "without the base-rate stand-ins: n 1, skill +0.480",
+        "  4h validation, up vs down given a move: n 1, Brier 0.020 vs base 0.000, skill n/a",
+        f"  4h validation, temperature {fitted:.2f} fitted on the train headline: Brier "
         f"{brier(scaled, 'up'):.3f}, skill {1 - brier(scaled, 'up') / 0.5:+.3f}; log loss "
-        f"{log_loss(scaled, 'up'):.3f}"
-    )
-    # Slot 0 up at (.2-1)² + .2² + .6² = 1.04, slot 1 flat at .2² + .2² + (.6-1)² = 0.24.
-    assert section[7] == (
+        f"{log_loss(scaled, 'up'):.3f}",
+        # Slot 0 up at (.2-1)² + .2² + .6² = 1.04, slot 1 flat at .2² + .2² + (.6-1)² = 0.24.
+        "  24h train: n 2 scored (0 answered only invalid_probe, 0 refused, 4 without an "
+        "outcome); Brier 0.640 vs base 0.500, skill -0.280; log loss 1.060 vs base 0.693; "
+        "without the base-rate stand-ins: n 2, skill -0.280",
+        # Up given a move is .2 / .4 = .5; slot 0 went up: (1 - .5)² = 0.25.
+        "  24h train, up vs down given a move: n 1, Brier 0.250 vs base 0.000, skill n/a",
+        "  24h validation: n 0 scored (0 answered only invalid_probe, 0 refused, 2 without an "
+        "outcome); Brier n/a vs base n/a, skill n/a; log loss n/a vs base n/a; without the "
+        "base-rate stand-ins: n 0, skill n/a",
+        "  24h validation, up vs down given a move: n 0, Brier n/a vs base n/a, skill n/a",
+        "-- headline reliability (the most likely class: its mean probability, and how often "
+        "it happened) --",
+        "  4h train: 0.6-0.7 n 6 predicted 60.0% happened 50.0%; ECE 0.100",
+        "  4h validation: 0.6-0.7 n 1 predicted 60.0% happened 100.0%; ECE 0.400",
+        "  24h train: 0.6-0.7 n 2 predicted 60.0% happened 50.0%; ECE 0.100",
+        "  24h validation: no forecast scored; ECE n/a",
+        "-- each repeat on its own, invalid_probe left out (how stable the headline is) --",
+        "-- probe repeat 0 --",
+        "  4h train: n 6 scored (0 invalid_probe, 0 refused, 0 without an outcome); Brier 0.560 "
+        "vs base 0.500, skill -0.120; log loss 0.857 vs base 0.693",
+        "  4h validation: n 1 scored (0 invalid_probe, 0 refused, 1 without an outcome); Brier "
+        "0.260 vs base 0.500, skill +0.480; log loss 0.511 vs base 0.693",
         "  24h train: n 2 scored (0 invalid_probe, 0 refused, 4 without an outcome); Brier 0.640 "
-        "vs base 0.500, skill -0.280; log loss 1.060 vs base 0.693"
-    )
-    assert section[8] == (
+        "vs base 0.500, skill -0.280; log loss 1.060 vs base 0.693",
         "  24h validation: n 0 scored (0 invalid_probe, 0 refused, 2 without an outcome); Brier "
-        "n/a vs base n/a, skill n/a; log loss n/a vs base n/a"
-    )
-    assert section[9:] == [
+        "n/a vs base n/a, skill n/a; log loss n/a vs base n/a",
         "-- probe across 1 repeat(s): Brier skill score, median (range) --",
         "  4h train: -0.120 (-0.120 to -0.120)",
         "  4h validation: +0.480 (+0.480 to +0.480)",
         "  24h train: -0.280 (-0.280 to -0.280)",
         "  24h validation: n/a (no repeat has a skill score)",
-        "-- probe reliability, repeats pooled (the most likely class: its mean probability, "
-        "and how often it happened) --",
-        "  4h train: 0.6-0.7 n 6 predicted 60.0% happened 50.0%; ECE 0.100",
-        "  4h validation: 0.6-0.7 n 1 predicted 60.0% happened 100.0%; ECE 0.400",
-        "  24h train: 0.6-0.7 n 2 predicted 60.0% happened 50.0%; ECE 0.100",
-        "  24h validation: no forecast scored; ECE n/a",
     ]
 
 
-def test_an_invalid_answer_is_counted_not_scored(store, files, monkeypatch, capsys):
-    _use(monkeypatch, Forecaster(text_for={TRAIN[1]: "no idea"}))
+def test_an_invalid_answer_is_scored_as_the_base_rate_in_the_headline_only(
+    store, files, monkeypatch, capsys
+):
+    _use(monkeypatch, Forecaster(text_for={TRAIN[0]: "no idea"}))
     assert cli.main(_probe(store, files)) == 0
     capsys.readouterr()
     assert cli.main(_score(store)) == 0
     out = capsys.readouterr().out.splitlines()
-    # Slot 1 (a flat) is left out: ups 0, 2, 4 at 0.26 and flats 3, 5 at 0.86 make
-    # (0.78 + 1.72) / 5 = 0.5, the base rate's own score.
+    # Slot 0 (an up) answered only invalid_probe. Left out, ups 2, 4 at 0.26 and
+    # flats 1, 3, 5 at 0.86 make 3.10 / 5 = 0.62 (skill -0.24); in the headline
+    # it stands in as the base rate (0.5), so 3.60 / 6 = 0.60 (skill -0.20), and
+    # the log loss adds -ln .5 to (2 x -ln .6 + 3 x -ln .3): 5.327 / 6 = 0.888.
     assert (
-        "  4h train: n 5 scored (1 invalid_probe, 0 refused, 0 without an outcome); Brier 0.500 "
-        "vs base 0.500, skill +0.000; log loss 0.788 vs base 0.693"
+        "  4h train: n 6 scored (1 answered only invalid_probe, 0 refused, 0 without an "
+        "outcome); Brier 0.600 vs base 0.500, skill -0.200; log loss 0.888 vs base 0.693; "
+        "without the base-rate stand-ins: n 5, skill -0.240"
+    ) in out
+    assert (
+        "  4h train: n 5 scored (1 invalid_probe, 0 refused, 0 without an outcome); Brier 0.620 "
+        "vs base 0.500, skill -0.240; log loss 0.927 vs base 0.693"
     ) in out
 
 
@@ -731,11 +809,11 @@ def test_the_base_rate_reads_every_train_question_not_only_the_ones_asked(
 # -- review round 1: the branches the first tests did not reach -----------------------
 
 
-def test_each_repeat_is_scored_and_the_summary_gives_the_median_and_range(
-    store, files, monkeypatch, capsys
-):
+def test_each_repeat_is_scored_and_the_headline_averages_them(store, files, monkeypatch, capsys):
     # Repeat 1 says h4 up .8 / down .1 / flat .1: an up costs .2² + .1² + .1² =
-    # 0.06, a flat .8² + .1² + .9² = 1.46; train averages 0.76, skill -0.52.
+    # 0.06, a flat .8² + .1² + .9² = 1.46; train averages 0.76, skill -0.52. The
+    # headline averages the two into .7 / .1 / .2: an up costs 0.14, a flat 1.14,
+    # train 0.64, skill -0.28 (not the -0.32 the two repeats' median gives).
     sharper = forecast_text({"up": 0.8, "down": 0.1, "flat": 0.1})
     _use(monkeypatch, Forecaster(second=sharper))
     assert cli.main(_probe(store, files, "--repeats", "2")) == 0
@@ -744,16 +822,15 @@ def test_each_repeat_is_scored_and_the_summary_gives_the_median_and_range(
     assert cli.main(_score(store)) == 0
     out = capsys.readouterr().out.splitlines()
     assert "-- probe repeat 0 --" in out and "-- probe repeat 1 --" in out
-    train = [line for line in out if line.startswith("  4h train: n 6 scored")]
+    train = [line for line in out if line.startswith("  4h train: n 6 scored (0 invalid_probe")]
     assert [line.split("; ")[1] for line in train] == [
         "Brier 0.560 vs base 0.500, skill -0.120",
         "Brier 0.760 vs base 0.500, skill -0.520",
     ]
     assert "  4h train: -0.320 (-0.520 to -0.120)" in out
-    assert (
-        "  4h train: 0.6-0.7 n 6 predicted 60.0% happened 50.0%; 0.8-0.9 n 6 predicted "
-        "80.0% happened 50.0%; ECE 0.200" in out
-    )
+    [headline] = [line for line in out if line.startswith("  4h train: n 6 scored (0 answered")]
+    assert "; Brier 0.640 vs base 0.500, skill -0.280; " in headline
+    assert "  4h train: 0.7-0.8 n 6 predicted 70.0% happened 50.0%; ECE 0.200" in out
 
 
 def test_with_no_train_forecast_the_temperature_is_not_fitted(store, files, monkeypatch, capsys):
@@ -767,8 +844,6 @@ def test_with_no_train_forecast_the_temperature_is_not_fitted(store, files, monk
 
 
 def test_without_a_split_there_is_no_base_rate(store):
-    from contrib.replay.probe_score import describe_probe
-
     with Database(store, migrate=False) as db:
         questions = load_decisions(db, RUN_ID).questions
     card = score_run(questions, [], step_ms=STEP_MS, costs=CostModel(), split=None)
@@ -780,6 +855,7 @@ def test_without_a_split_there_is_no_base_rate(store):
         eligible={first},
     )
     assert "base rate, train, 4h: n/a (no train question has an outcome)" in lines
+    assert "base rate of up among the moves, train: 4h n/a, 24h n/a" in lines
     assert (
         "  4h unsplit: n 1 scored (0 invalid_probe, 0 refused, 0 without an outcome); Brier "
         "0.260 vs base n/a, skill n/a; log loss 0.511 vs base n/a"

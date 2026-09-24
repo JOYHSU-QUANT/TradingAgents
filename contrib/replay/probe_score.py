@@ -24,19 +24,30 @@ stores and prints, and everything between is here. The definitions, once:
   **The Brier skill score** is ``1 - Brier / Brier of the base rate`` on the
   same questions: 0 or below says the model's probabilities carry no
   direction the base rate does not.
+- **The headline** (decided 2026-09-24) scores ONE forecast per question:
+  the mean, class by class, of its valid repeats (:func:`ensemble`). A
+  question whose repeats answered only ``invalid_probe`` is scored as the
+  base rate (it adds no skill and keeps its place in ``n``), and the skill
+  without those stand-ins is printed beside it; a question refused on every
+  repeat is counted, not scored.
+- **Up against down given a move** (decided 2026-09-24) takes the questions
+  that moved (``up`` or ``down``) and scores ``up / (up + down)`` of each
+  forecast with the binary Brier score ``(q - y)²``, against the share of
+  ``up`` among the train moves. It does not depend on where the flat band
+  sits, which the model is only told in words.
 - **Temperature scaling** (one parameter, fitted by minimising the log loss
-  on one repeat's train forecasts, searched over
+  of the train headline forecasts, searched over
   :data:`TEMPERATURE_BOUNDS`) is reported on the validation segment (and the
   holdout when it is read) only, where it was not fitted.
-- **The reliability table** files each forecast under the probability of
-  its most likely class (ties go to the class listed first in
+- **The reliability table** files each headline forecast under the
+  probability of its most likely class (ties go to the class listed first in
   :data:`~.probe.CLASSES`), ten buckets, and says how often that class
   happened; the expected calibration error is the question-weighted mean
   gap between the two.
 
-Each repeat is scored on its own (plan §3-10), and the skill scores are
-then summarised across repeats by their median and range; the reliability
-table pools the repeats, since each answer is a forecast of its own.
+Each repeat is then scored on its own, ``invalid_probe`` left out (plan
+§3-10), and the skill scores summarised across repeats by their median and
+range: how stable the headline is, not a second headline.
 """
 
 from __future__ import annotations
@@ -54,17 +65,22 @@ from .upstream import SegmentName
 __all__ = [
     "LOG_LOSS_FLOOR",
     "TEMPERATURE_BOUNDS",
+    "Binary",
     "Figures",
     "ReliabilityBucket",
     "base_rates",
+    "binary_figures",
     "brier",
     "describe_probe",
+    "ensemble",
     "figures",
     "fit_temperature",
     "log_loss",
+    "move_base_rate",
     "outcome_class",
     "reliability",
     "tempered",
+    "up_given_move",
 ]
 
 # The least probability the log loss reads a forecast as giving the class
@@ -111,14 +127,29 @@ def tempered(forecast: Mapping[str, float], temperature: float) -> dict[str, flo
 def fit_temperature(pairs: Sequence[Pair]) -> float | None:
     """The temperature within :data:`TEMPERATURE_BOUNDS` that minimises the mean log loss.
 
-    A golden-section search over the inverse temperature, over which the
-    mean log loss of a tempered forecast is convex. ``None`` with no pairs.
+    A golden-section search over the inverse temperature ``b``, minimising
+    the exact mean of ``logsumexp(b * l) - b * l[outcome]``, ``l`` being the
+    floored log-probabilities :func:`tempered` divides: that is convex in
+    ``b``. The reported log loss floors the TEMPERED probability too, and
+    that would flatten the search into a plateau once a sharpened forecast
+    puts the floor under a class that happens (a forecast of .7 / .1 / .2
+    over three ups and three flats was fitted at the search's edge).
+    ``None`` with no pairs.
     """
     if not pairs:
         return None
+    logged = [
+        ([math.log(max(f[name], LOG_LOSS_FLOOR)) for name in CLASSES], CLASSES.index(o))
+        for f, o in pairs
+    ]
 
     def loss(inverse: float) -> float:
-        return math.fsum(log_loss(tempered(f, 1 / inverse), o) for f, o in pairs) / len(pairs)
+        total = 0.0
+        for logs, happened in logged:
+            scaled = [inverse * value for value in logs]
+            top = max(scaled)
+            total += top + math.log(math.fsum(math.exp(v - top) for v in scaled)) - scaled[happened]
+        return total / len(logged)
 
     low, high = 1 / TEMPERATURE_BOUNDS[1], 1 / TEMPERATURE_BOUNDS[0]
     for _ in range(_SEARCH_STEPS):
@@ -211,14 +242,97 @@ def reliability(pairs: Sequence[Pair]) -> tuple[list[ReliabilityBucket], float |
     return buckets, ece
 
 
+# -- one forecast per question, and up against down -------------------------------
+
+
+def ensemble(answers: Mapping[int, Sequence[ProbeAnswer]]) -> dict[str, ProbeAnswer]:
+    """Each question's repeats as one answer: the mean of its valid forecasts, class by class.
+
+    A question with no valid forecast is ``invalid_probe`` if any repeat
+    answered with one, and ``refused`` if the provider refused every repeat.
+    """
+    by_input: dict[str, list[ProbeAnswer]] = {}
+    for given in answers.values():
+        for answer in given:
+            by_input.setdefault(answer.input_id, []).append(answer)
+    merged: dict[str, ProbeAnswer] = {}
+    for input_id, seen in by_input.items():
+        forecasts = [a.forecast for a in seen if a.forecast is not None]
+        if forecasts:
+            mean = {
+                key: {
+                    name: math.fsum(f[key][name] for f in forecasts) / len(forecasts)
+                    for name in CLASSES
+                }
+                for key in PROBE_KEYS
+            }
+            merged[input_id] = ProbeAnswer(input_id, mean, None)
+        elif any(a.invalid_reason == INVALID_PROBE for a in seen):
+            merged[input_id] = ProbeAnswer(input_id, None, INVALID_PROBE)
+        else:
+            merged[input_id] = ProbeAnswer(input_id, None, REFUSED)
+    return merged
+
+
+def up_given_move(forecast: Mapping[str, float]) -> float:
+    """The forecast's probability of ``up`` should the price move: ``up / (up + down)``, else 0.5."""
+    moving = forecast["up"] + forecast["down"]
+    return 0.5 if moving == 0 else forecast["up"] / moving
+
+
+def move_base_rate(card: Scorecard, bars: int) -> tuple[float, int] | None:
+    """``(share of up among the train moves, moves counted)``, ``None`` with no train move."""
+    found = base_rates(card, bars)
+    if found is None:
+        return None
+    shares, n = found
+    moving = shares["up"] + shares["down"]
+    if moving == 0:
+        return None
+    return shares["up"] / moving, round(n * moving)
+
+
+@dataclass(frozen=True)
+class Binary:
+    """Up against down on the questions that moved; the scores are ``None`` with none."""
+
+    n: int
+    brier: float | None
+    base_brier: float | None
+
+    @property
+    def skill(self) -> float | None:
+        if self.brier is None or not self.base_brier:
+            return None
+        return 1 - self.brier / self.base_brier
+
+
+def binary_figures(pairs: Sequence[Pair], base_up: float | None) -> Binary:
+    """The binary Brier score ``(q - y)²`` of :func:`up_given_move` on the pairs that moved."""
+    moved = [(up_given_move(f), o == "up") for f, o in pairs if o != "flat"]
+    if not moved:
+        return Binary(0, None, None)
+    n = len(moved)
+    return Binary(
+        n=n,
+        brier=math.fsum((q - y) ** 2 for q, y in moved) / n,
+        base_brier=None if base_up is None else math.fsum((base_up - y) ** 2 for _, y in moved) / n,
+    )
+
+
 # -- the report ------------------------------------------------------------------
 
 
 @dataclass
 class _Tally:
-    """One repeat, one segment, one horizon: the pairs scored, and what was not."""
+    """One set of answers, one segment, one horizon: the pairs scored, and what was not.
+
+    ``stand_ins`` holds the outcome of every question answered only with
+    ``invalid_probe``, for the headline to score as the base rate.
+    """
 
     pairs: list[Pair] = field(default_factory=list)
+    stand_ins: list[str] = field(default_factory=list)
     invalid: int = 0
     refused: int = 0
     no_outcome: int = 0
@@ -226,11 +340,11 @@ class _Tally:
 
 def _tallies(
     card: Scorecard,
-    answers: Sequence[ProbeAnswer],
+    answers: Iterable[ProbeAnswer],
     eligible: Collection[str],
     key: str,
 ) -> dict[SegmentName | None, _Tally]:
-    """Per segment the card keeps, this repeat's answers at one horizon, eligible questions only."""
+    """Per segment the card keeps, the answers at one horizon, eligible questions only."""
     bars = PROBE_KEYS[key]
     by_input = {a.input_id: a for a in answers}
     tallies: dict[SegmentName | None, _Tally] = {}
@@ -240,17 +354,18 @@ def _tallies(
         if answer is None or me not in eligible:
             continue
         tally = tallies.setdefault(row.segment, _Tally())
-        if answer.invalid_reason == INVALID_PROBE:
-            tally.invalid += 1
-        elif answer.invalid_reason == REFUSED:
+        outcome = outcome_class(row.outcomes[bars].ret, card.flat_bands[bars])
+        if answer.invalid_reason == REFUSED:
             tally.refused += 1
+        elif answer.invalid_reason == INVALID_PROBE:
+            tally.invalid += 1
+            if outcome is not None:
+                tally.stand_ins.append(outcome)
+        elif outcome is None:
+            tally.no_outcome += 1
         else:
             assert answer.forecast is not None
-            outcome = outcome_class(row.outcomes[bars].ret, card.flat_bands[bars])
-            if outcome is None:
-                tally.no_outcome += 1
-            else:
-                tally.pairs.append((answer.forecast[key], outcome))
+            tally.pairs.append((answer.forecast[key], outcome))
     return tallies
 
 
@@ -262,10 +377,24 @@ def _label(segment: SegmentName | None) -> str:
     return "unsplit" if segment is None else segment.value
 
 
+def _segment_order(segment: SegmentName | None) -> int:
+    return -1 if segment is None else list(SegmentName).index(segment)
+
+
 def _order(item: tuple[tuple[str, SegmentName | None], object]) -> tuple[int, int]:
     """Horizon first (in :data:`PROBE_KEYS` order), then segment (train, validation, holdout)."""
     key, segment = item[0]
-    return list(PROBE_KEYS).index(key), -1 if segment is None else list(SegmentName).index(segment)
+    return list(PROBE_KEYS).index(key), _segment_order(segment)
+
+
+def _reliability_line(label: str, pairs: Sequence[Pair]) -> str:
+    buckets, ece = reliability(pairs)
+    cells = "; ".join(
+        f"{b.low:.1f}-{b.low + 0.1:.1f} n {b.n} predicted {b.predicted:.1%} happened "
+        f"{b.happened:.1%}"
+        for b in buckets
+    )
+    return f"  {label}: " + (cells or "no forecast scored") + f"; ECE {_num(ece, '{:.3f}')}"
 
 
 def describe_probe(
@@ -275,7 +404,7 @@ def describe_probe(
     answers: Mapping[int, Sequence[ProbeAnswer]],
     eligible: Collection[str],
 ) -> list[str]:
-    """The probe's section of ``score --replay-db``.
+    """The probe's section of ``score --replay-db``: the headline, then each repeat on its own.
 
     ``card`` is the whole run scored with no answers, every question it
     keeps (so the base rate sees every train question); ``eligible`` is the
@@ -290,11 +419,14 @@ def describe_probe(
         ),
     ]
     bases: dict[str, dict[str, float] | None] = {}
+    move_bases: dict[str, float | None] = {}
+    moves: list[str] = []
     for key, bars in PROBE_KEYS.items():
+        label = card.horizon_label(bars)
         found = base_rates(card, bars)
         bases[key] = None if found is None else found[0]
         lines.append(
-            f"base rate, train, {card.horizon_label(bars)}: "
+            f"base rate, train, {label}: "
             + (
                 "n/a (no train question has an outcome)"
                 if found is None
@@ -302,20 +434,83 @@ def describe_probe(
                 + f" (n {found[1]})"
             )
         )
+        moved = move_base_rate(card, bars)
+        move_bases[key] = None if moved is None else moved[0]
+        moves.append(f"{label} n/a" if moved is None else f"{label} {moved[0]:.1%} (n {moved[1]})")
+    lines.append("base rate of up among the moves, train: " + ", ".join(moves))
+
+    lines.append(
+        "-- headline: each question's repeats averaged into one forecast; a question answered "
+        "only with invalid_probe is scored as the base rate --"
+    )
+    headline = list(ensemble(answers).values())
+    reliable: dict[tuple[str, SegmentName | None], list[Pair]] = {}
+    for key, bars in PROBE_KEYS.items():
+        label = card.horizon_label(bars)
+        base = bases[key]
+        tallies = _tallies(card, headline, eligible, key)
+        for segment, tally in sorted(tallies.items(), key=lambda kv: _segment_order(kv[0])):
+            stand_ins = [] if base is None else [(base, o) for o in tally.stand_ins]
+            scored = figures([*tally.pairs, *stand_ins], base)
+            own = figures(tally.pairs, base)
+            reliable[(key, segment)] = tally.pairs
+            lines.append(
+                f"  {label} {_label(segment)}: n {scored.n} scored ({tally.invalid} answered only "
+                f"invalid_probe, {tally.refused} refused, {tally.no_outcome} without an outcome); "
+                f"Brier {_num(scored.brier, '{:.3f}')} vs base "
+                f"{_num(scored.base_brier, '{:.3f}')}, skill {_num(scored.skill, '{:+.3f}')}; "
+                f"log loss {_num(scored.log_loss, '{:.3f}')} vs base "
+                f"{_num(scored.base_log_loss, '{:.3f}')}; without the base-rate stand-ins: n "
+                f"{own.n}, skill {_num(own.skill, '{:+.3f}')}"
+            )
+            binary = binary_figures([*tally.pairs, *stand_ins], move_bases[key])
+            lines.append(
+                f"  {label} {_label(segment)}, up vs down given a move: n {binary.n}, Brier "
+                f"{_num(binary.brier, '{:.3f}')} vs base {_num(binary.base_brier, '{:.3f}')}, "
+                f"skill {_num(binary.skill, '{:+.3f}')}"
+            )
+        fitted = fit_temperature(tallies.get(SegmentName.TRAIN, _Tally()).pairs)
+        for segment in (SegmentName.VALIDATION, SegmentName.HOLDOUT):
+            held_out = tallies.get(segment, _Tally())
+            if not held_out.pairs:
+                continue
+            if fitted is None:
+                lines.append(
+                    f"  {label} {segment.value}, temperature-scaled: n/a (no train forecast to fit "
+                    "it on)"
+                )
+                continue
+            stand_ins = [] if base is None else [(base, o) for o in held_out.stand_ins]
+            scaled = figures(
+                [*((tempered(f, fitted), o) for f, o in held_out.pairs), *stand_ins], base
+            )
+            lines.append(
+                f"  {label} {segment.value}, temperature {fitted:.2f} fitted on the train "
+                f"headline: Brier {_num(scaled.brier, '{:.3f}')}, skill "
+                f"{_num(scaled.skill, '{:+.3f}')}; log loss {_num(scaled.log_loss, '{:.3f}')}"
+            )
+    lines.append(
+        "-- headline reliability (the most likely class: its mean probability, and how often it "
+        "happened) --"
+    )
+    for (key, segment), pairs in sorted(reliable.items(), key=_order):
+        label = f"{card.horizon_label(PROBE_KEYS[key])} {_label(segment)}"
+        lines.append(_reliability_line(label, pairs))
+
+    lines.append(
+        "-- each repeat on its own, invalid_probe left out (how stable the headline is) --"
+    )
     skills: dict[tuple[str, SegmentName | None], list[float]] = {}
-    pooled: dict[tuple[str, SegmentName | None], list[Pair]] = {}
     for repeat, given in sorted(answers.items()):
         lines.append(f"-- probe repeat {repeat} --")
         for key, bars in PROBE_KEYS.items():
             label = card.horizon_label(bars)
             tallies = _tallies(card, given, eligible, key)
-            for (_, segment), tally in sorted(
-                (((key, segment), tally) for segment, tally in tallies.items()), key=_order
-            ):
+            for segment, tally in sorted(tallies.items(), key=lambda kv: _segment_order(kv[0])):
                 scored = figures(tally.pairs, bases[key])
+                values = skills.setdefault((key, segment), [])
                 if scored.skill is not None:
-                    skills.setdefault((key, segment), []).append(scored.skill)
-                pooled.setdefault((key, segment), []).extend(tally.pairs)
+                    values.append(scored.skill)
                 lines.append(
                     f"  {label} {_label(segment)}: n {scored.n} scored ({tally.invalid} "
                     f"invalid_probe, {tally.refused} refused, {tally.no_outcome} without an "
@@ -324,29 +519,11 @@ def describe_probe(
                     f"log loss {_num(scored.log_loss, '{:.3f}')} vs base "
                     f"{_num(scored.base_log_loss, '{:.3f}')}"
                 )
-            fitted = fit_temperature(tallies.get(SegmentName.TRAIN, _Tally()).pairs)
-            for segment in (SegmentName.VALIDATION, SegmentName.HOLDOUT):
-                held_out = tallies.get(segment, _Tally()).pairs
-                if not held_out:
-                    continue
-                if fitted is None:
-                    lines.append(
-                        f"  {label} {segment.value}, temperature-scaled: n/a (no train forecast "
-                        "to fit it on)"
-                    )
-                    continue
-                scaled = figures([(tempered(f, fitted), o) for f, o in held_out], bases[key])
-                lines.append(
-                    f"  {label} {segment.value}, temperature {fitted:.2f} fitted on train: Brier "
-                    f"{_num(scaled.brier, '{:.3f}')}, skill {_num(scaled.skill, '{:+.3f}')}; "
-                    f"log loss {_num(scaled.log_loss, '{:.3f}')}"
-                )
     lines.append(f"-- probe across {len(answers)} repeat(s): Brier skill score, median (range) --")
-    # Every horizon and segment that had an answer gets a line, as in the
-    # reliability table below: one where no repeat has a skill says so, rather
-    # than leaving the summary quietly shorter than the table above it.
-    for (key, segment), _ in sorted(pooled.items(), key=_order):
-        values = skills.get((key, segment), [])
+    # Every horizon and segment that had an answer gets a line: one where no
+    # repeat has a skill says so, rather than leaving the summary quietly
+    # shorter than the repeats above it.
+    for (key, segment), values in sorted(skills.items(), key=_order):
         lines.append(
             f"  {card.horizon_label(PROBE_KEYS[key])} {_label(segment)}: "
             + (
@@ -354,21 +531,5 @@ def describe_probe(
                 if values
                 else "n/a (no repeat has a skill score)"
             )
-        )
-    lines.append(
-        "-- probe reliability, repeats pooled (the most likely class: its mean probability, "
-        "and how often it happened) --"
-    )
-    for (key, segment), pairs in sorted(pooled.items(), key=_order):
-        buckets, ece = reliability(pairs)
-        cells = "; ".join(
-            f"{b.low:.1f}-{b.low + 0.1:.1f} n {b.n} predicted {b.predicted:.1%} happened "
-            f"{b.happened:.1%}"
-            for b in buckets
-        )
-        lines.append(
-            f"  {card.horizon_label(PROBE_KEYS[key])} {_label(segment)}: "
-            + (cells or "no forecast scored")
-            + f"; ECE {_num(ece, '{:.3f}')}"
         )
     return lines

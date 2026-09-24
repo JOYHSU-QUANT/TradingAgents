@@ -222,8 +222,11 @@ paper 交易員自己的答案比，`--against NAME` 改跟另一個 variant 的
 ## 方向機率探針（PR 2.1）
 
 ```
-python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-6     --variant contrib/replay/variants/current-sonnet.yaml     --probe contrib/replay/probes/direction-v1.yaml [其他 replay 旗標同上]
-python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6     --replay-db replay.sqlite --variant current-sonnet
+python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-6 \
+    --variant contrib/replay/variants/current-sonnet.yaml \
+    --probe contrib/replay/probes/direction-v1.yaml [其他 replay 旗標同上]
+python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
+    --replay-db replay.sqlite --variant current-sonnet
 ```
 
 要回答的問題：**模型對 BTC 的方向有沒有資訊量**，跟倉位大小、閘門分開量。成績單的信心校準只能算
@@ -257,18 +260,30 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6     --
   p 下限 0.001。
 - **基準率**＝train 段有結果的題（不論有沒有答、有沒有過 cutoff）裡三類的比例，當成每題的固定答案。
   **Brier skill score**＝`1 − Brier ÷ 基準率的 Brier`（同一批題），**≤ 0 就是沒有基準率以外的方向資訊**。
-- **溫度校正**：用同一個 repeat 的 train 預測擬合一個溫度（最小化 log loss，搜尋 0.05–20），只在
-  validation（與打開時的 holdout）報校正後的分數。
-- **reliability 表**：每個預測照「最可能那一類」的機率分十桶（同分取 `up`、`down`、`flat` 的前者），
-  每桶印平均機率與那一類實際發生的比例，外加 ECE；repeat 合併算。
-- 每個 repeat 各自一段，最後印 skill score 跨 repeat 的中位數與區間。cutoff、holdout 鎖、釘住的
-  split 都與決策打分相同：同一批 eligible 題、holdout 段只有 `--holdout` 才算。
+- **主數字（headline，2026-09-24 拍板）**：每題**一個**預測＝該題各 repeat 有效預測逐類取平均。
+  各 repeat 都只答出 `invalid_probe` 的題，**當成回答了基準率**來算（skill 貢獻 0、n 不變；train 沒有
+  基準率時就只計數），旁邊另印「不含這些替身」的 n 與 skill；每個 repeat 都被拒答的題只計數。
+- **有動時 up 對 down（2026-09-24 拍板）**：只看實際 `up` 或 `down` 的題，把每個預測的
+  `up ÷ (up + down)` 用二元 Brier `(q − y)²` 打分，對照 train 段「動了的題裡 up 的比例」。它不受
+  flat 門檻位置影響（模型只從文字知道「典型波動」，不知道門檻的數字）。
+- **溫度校正**：用 train 段的主數字預測擬合一個溫度（最小化 log loss，搜尋 0.05–20；擬合用精確的
+  log-softmax，不用報表那個有下限的 log loss，否則銳化後會卡在平台上），只在 validation（與打開時的
+  holdout）報校正後的分數。
+- **reliability 表**：每個主數字預測照「最可能那一類」的機率分十桶（同分取 `up`、`down`、`flat` 的
+  前者），每桶印平均機率與那一類實際發生的比例，外加 ECE。
+- 最後是每個 repeat 各自一段（`invalid_probe` 不算），加上 skill score 跨 repeat 的中位數與區間：看
+  主數字穩不穩，不是第二個主數字。cutoff、holdout 鎖、釘住的 split 都與決策打分相同：同一批
+  eligible 題、holdout 段只有 `--holdout` 才算。
 
 **之後**：validation 段的 skill score 明顯 > 0，才考慮下一步（模型給機率、程式照機率決定倉位）。
-那一步改 paper 的交易行為，要過 plan §5、走 RUNBOOK §4 分段，不在這個套件裡。
+「明顯」的門檻寫在 plan §5（2026-09-24）。那一步改 paper 的交易行為，要過 plan §5、走 RUNBOOK §4
+分段，不在這個套件裡。
 
 ## 還沒有的
 
+- 探針的跨 run 合併與信賴區間（下一張）：各 run 用自己釘住的 split，validation 題跨 run 合併，對
+  主數字的 skill score 做 block bootstrap（相鄰題的 24h 報酬重疊，要整段抽），印出 plan §5 門檻要的
+  區間下界。現在的 `score` 一次只看一個 run，只印點估計。
 - 帶模擬帳戶的回測（PR 3）：從 `.reports.json` 起跑下半段 graph，倉位一路帶下去。
 - plan §5 的驗收門檻（贏過四個對照組、`Penalty.threshold(n)`、配對 p < 0.05 且 ≥ 100 題、
   fail-closed 不高於現行）：成績單印出每一個原料，但門檻本身還沒寫成程式、也還沒拍板。

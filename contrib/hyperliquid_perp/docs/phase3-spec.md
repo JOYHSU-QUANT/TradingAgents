@@ -1273,7 +1273,7 @@ kill switch。注意 latch 站著時 §19.1 verdict 不過（含 `not safe_mode_
 orderStatus tiebreaker／settle、§18.2 shutdown 的 disarm 交叉檢查全部經它讀 orderStatus，
 transport 失敗中性（不計不清）、讀得懂只歸零**該 cloid** 的串。升級由握有 safe-mode 機器的三方
 各自在探測之後讀同一個 latch：engine 於 §17 sync 之後、`reconcile_and_apply` 於每輪對帳之後、
-CLI 於 shutdown sweep 之後——三處的 `enter` 都持久化（冪等），shutdown 那次是 process 結束前的
+`live.shutdown.sweep_on_exit` 於 shutdown sweep 之後——三處的 `enter` 都持久化（冪等），shutdown 那次是 process 結束前的
 最後一次機會；下一次開機 hydrate 回 manual 後照樣 arm 與對帳，但 verdict 不過、不開新 cycle，
 直到 §13.6 解除。列為 manual 而非 recoverable 的理由與
 「SL repair failed → emergency close」同一條：這種故障不自癒，recoverable 會在第一次

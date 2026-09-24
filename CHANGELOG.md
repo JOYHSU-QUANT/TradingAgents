@@ -59,7 +59,8 @@ Breaking changes within the 0.x line are called out explicitly.
   tests in `tests/cli/test_cli.py` now pin them: the pre-shutdown
   reconciliation, the keep decision reaching the kill switch's `shutdown`,
   exit 4 for a loop that latched safe mode, and exit 4 for SL/TP kept
-  behind a failed exit-time safe-mode read.
+  behind a failed exit-time safe-mode read. A fifth test pins that every
+  `ExitReason` has an entry in the CLI's last-line table.
 
 - **One engine run for both entry points** (refactor plan v2, T2-d — PR 7 of
   the plan). `main.run_engine` (the one-shot) and

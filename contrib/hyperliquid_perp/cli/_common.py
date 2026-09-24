@@ -196,9 +196,10 @@ def announce_engine_config_protection_only(exc, *, where: str, alive: str) -> No
     """The one wording for "the engine could not be built over live work".
 
     Both lanes (``paper``'s healthy restart, ``live --loop`` after the §19.1
-    verdict; issue #268) reach this from ``except EngineConfigError`` around
-    provider construction, and both must say the same thing: the cause, that
-    the position is guarded, that NEW cycles are halted, and the remedy.
+    verdict; issue #268) reach this when provider construction raised
+    ``EngineConfigError`` over live work, and both must say the same thing:
+    the cause, that the position is guarded, that NEW cycles are halted, and
+    the remedy.
     ``where`` names the run for the log ("on restart of r1", "for live run
     r1"); ``alive`` is the lane's list of what keeps running.
     """

@@ -83,11 +83,13 @@ class ShutdownVerdict:
 
 
 def classify_shutdown(flags: ShutdownFlags) -> ShutdownVerdict:
-    """Decide whether the §18.2 sweep keeps the resting SL/TP (decided 2026-07-22).
+    """Decide whether the §18.2 sweep keeps the resting SL/TP (decided 2026-07-16, revised 2026-07-22).
 
     An exit is unclean when the startup verdict did not pass, safe mode is
     active (or unreadable) at exit, the loop raised, or it ran protection-only
-    (issue #268). Over a live or unreadable position an unclean exit keeps the
+    (issue #268: the next start meets the same refusal, so stripping the SL/TP
+    on the operator's way to fixing the environment would leave the position
+    naked). Over a live or unreadable position an unclean exit keeps the
     SL/TP: the repair machinery that could re-cover a stripped position is
     what an unclean verdict refuses to start. A clean exit, or a flat book,
     cancels them with every other bot order.
@@ -135,6 +137,8 @@ class ExitReason(Enum):
     LOOP_CLEAN = ("loop_clean", 0)
     ONE_SHOT_PASSED = ("one_shot_passed", 0)
 
+    # The tag only keeps the values distinct: members sharing a code would
+    # otherwise become aliases of one another.
     def __init__(self, _tag: str, code: int) -> None:
         self.code = code
 
@@ -157,7 +161,8 @@ def classify_exit(
     was not protection-only). A settled one exits 1 like paper's settle-exit,
     so a supervisor restarts into the same named refusal; a stopped one exits
     4. Then safe mode latched at exit, then SL/TP kept behind a failed
-    safe-mode read. Exit 0 never reports a run that stopped unclean.
+    safe-mode read (a failed read over a flat book kept nothing, so the exit
+    follows the safe-mode state).
     """
     if not verdict_passed:
         return ExitReason.VERDICT_FAILED
@@ -221,9 +226,11 @@ def sweep_on_exit(session: LiveSession, *, keep_protective: bool) -> str | None:
     the bot-owned open orders (the SL/TP too unless ``keep_protective``) and
     disarms only when clean. After it, this holder escalates a latched §13.5
     venue-identity fault into manual safe mode (issue #80), and a latch makes
-    the exit unclean even over a clean sweep. Only over an armed switch: an
-    unarmed one ran no disarm cross-check, and the engine escalated any latch
-    from the loop on every tick.
+    the exit unclean even over a clean sweep. This is the process's last
+    write of that state, and the next boot hydrates it, so that boot's verdict
+    cannot pass until a §13.6 release. Only over an armed switch: an unarmed
+    one ran no disarm cross-check, and the engine escalated any latch from the
+    loop on every tick.
     """
     kill_switch = session.kill_switch
     if not kill_switch.armed:

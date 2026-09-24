@@ -740,7 +740,7 @@ protection 的兩個探測點、reconciliation 每張單的 orderStatus 查詢�
 disarm 交叉檢查，走的是同一個 `VenueIdentityMonitor`——所以故障在哪個消費者身上被問到都算同一串，
 `detail` 會寫出是哪一個站點跨過門檻的（計數**每個 cloid 一條**——venue 只誤路由其中一張單、
 其他答得好時，那張單自己的連續次數照樣累積到門檻）。升級成 manual 的時點有三個：engine 每 tick 在
-§17 sync 之後、`reconcile_and_apply` 每一輪對帳之後、CLI 在 shutdown sweep 之後——三處都會把升級
+§17 sync 之後、`reconcile_and_apply` 每一輪對帳之後、shutdown 的 `live.shutdown.sweep_on_exit` 在 sweep 之後——三處都會把升級
 寫進 SQLite（`enter` 冪等，同一 episode 不重複寫列），shutdown 那次只是 process 結束前的最後一次
 機會。下一次 `live --run-id` 開機會把 manual 狀態 hydrate 回來：照樣 arm、照樣對帳，但 verdict
 不會過、不開新 cycle，直到 §13.6 人工解除——而不是每次 shutdown 都只留一行 log、每次都擋住 disarm。

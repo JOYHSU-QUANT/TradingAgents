@@ -60,15 +60,19 @@ def _gate_refusal_wording(refusal: LiveGateRefusal) -> str:
 
 
 def _exit_line(reason: ExitReason) -> str | None:
-    """The last stderr line of ``live --run-id`` for each exit, or None when it prints none.
+    """The line ``live --run-id`` prints last for each exit, or None for none.
 
-    The reasons without a line already printed theirs: an unclean sweep's
-    ``error: §18.2 shutdown unclean`` and a protection-only ending's own line,
-    both inside the ``finally``.
+    The None reasons already printed theirs inside the ``finally``: an
+    unclean sweep's ``error: §18.2 shutdown unclean`` and a protection-only
+    ending's own line. Every reason has an entry, so a new one without
+    wording fails loudly.
     """
     from ..live.shutdown import ExitReason
 
-    wording = {
+    wording: dict[ExitReason, str | None] = {
+        ExitReason.SWEEP_UNCLEAN: None,
+        ExitReason.PROTECTION_ONLY_SETTLED: None,
+        ExitReason.PROTECTION_ONLY_STOPPED: None,
         ExitReason.VERDICT_FAILED: (
             "startup recovery did NOT pass — the run is in safe mode; see the "
             "reconciliation events / safe-mode state above (§19.1 step 15)."
@@ -89,7 +93,7 @@ def _exit_line(reason: ExitReason) -> str | None:
             "startup recovery passed — a live loop can start from this state (re-run with --loop)."
         ),
     }
-    return wording.get(reason)
+    return wording[reason]
 
 
 def _cmd_live(argv: list[str]) -> int:

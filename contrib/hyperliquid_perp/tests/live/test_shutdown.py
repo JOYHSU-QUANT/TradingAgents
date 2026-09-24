@@ -179,7 +179,8 @@ def test_each_exit_reason_and_its_code(overrides, reason, code):
             {"safe_mode_latched": True, "kept_on_unknown_safe_mode": True},
             ExitReason.LOOP_IN_SAFE_MODE,
         ),
-        # The one-shot never reads the loop-only facts.
+        # The one-shot's code follows its verdict and the sweep only, as it
+        # did before this module existed; the --loop lane alone exits 4 here.
         (
             {"loop": False, "safe_mode_latched": True, "kept_on_unknown_safe_mode": True},
             ExitReason.ONE_SHOT_PASSED,

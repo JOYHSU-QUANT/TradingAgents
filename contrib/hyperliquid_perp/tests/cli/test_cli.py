@@ -2486,8 +2486,9 @@ def test_paper_bad_engine_env_knob_with_no_live_work_is_a_named_exit_1(
     written (the key check's ordering rule, so the retry after fixing the
     .env is not bounced as "already exists"); the healthy-restart lane with
     an empty book exits by name instead of entering protection-only. The
-    test above pins the live-position half of ``except EngineConfigError``;
-    this pins the other half, for every env knob in the family.
+    test above pins the live-position half of the restart's
+    ``EngineConfigError`` decision (``gate_restart``); this pins the other
+    half, for every env knob in the family.
     """
     import contrib.hyperliquid_perp.cli as cli_mod
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -6189,7 +6190,7 @@ def test_cmd_live_flat_refusal_names_itself_when_the_shutdown_reread_fails(
     def _refuse(**kwargs):
         raise EngineConfigError("config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...")
 
-    live_seams.clearinghouse = None  # map_account_snapshot(None) raises → fresh_positions None
+    live_seams.clearinghouse = None  # map_account_snapshot(None) raises → positions unreadable
     rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_refuse)
     err = capsys.readouterr().err
     assert rc == 1
@@ -6421,6 +6422,20 @@ def test_cmd_live_loop_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mode_re
         "safe-mode read (unknown ≠ clean)"
     ) in captured.err
     assert "safe_mode: none" in captured.out
+
+
+def test_every_live_exit_reason_has_a_last_line_entry():
+    # A new ExitReason must get its wording (or an explicit None) here, not
+    # fall silent. The three None ones print their line inside the finally.
+    from contrib.hyperliquid_perp.cli.live import _exit_line
+    from contrib.hyperliquid_perp.live.shutdown import ExitReason
+
+    silent = {r for r in ExitReason if _exit_line(r) is None}
+    assert silent == {
+        ExitReason.SWEEP_UNCLEAN,
+        ExitReason.PROTECTION_ONLY_SETTLED,
+        ExitReason.PROTECTION_ONLY_STOPPED,
+    }
 
 
 @pytest.mark.parametrize("behind_version", _BEHIND_VERSIONS)

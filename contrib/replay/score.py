@@ -339,8 +339,9 @@ class Outcome:
 
     ``ret`` is ``None`` when no later mark exists (the run ended, the mark
     found is past the loadable bound, or neither the store nor the research
-    candles hold one within the tolerance); the model-side fields are
-    ``None`` on an unanswered or fail-closed row as well.
+    candles hold one within the tolerance). The model-side fields are
+    ``None`` on a fail-closed row; on an unanswered row both readings are
+    ``None`` — there was no decision to read, whatever the price did.
     """
 
     bars: int

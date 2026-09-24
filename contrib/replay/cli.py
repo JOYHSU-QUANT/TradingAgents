@@ -118,6 +118,11 @@ def _cmd_score(args: argparse.Namespace) -> int:
         reports_root = Path(args.payload_root)
         if not reports_root.is_dir():
             return _fail(f"--payload-root {args.payload_root!r} is not a directory")
+    if args.out is not None and not args.out:
+        # ``Path("")`` is the working directory; an unset shell variable
+        # must not quietly write there. Refused up front, like the other
+        # flags, not after the card has been printed.
+        return _fail("--out needs a directory, got ''")
     research_path: Path | None = None
     if args.research_db is not None:
         research_path = Path(args.research_db)
@@ -204,10 +209,6 @@ def _cmd_score(args: argparse.Namespace) -> int:
     for line in lines:
         print(line)
     if args.out is not None:
-        if not args.out:
-            # ``Path("")`` is the working directory; an unset shell variable
-            # must not quietly write there.
-            return _fail("--out needs a directory, got ''")
         out = Path(args.out)
         decisions_csv = out / f"{facts.run_id}-decisions.csv"
         summary = out / f"{facts.run_id}-summary.txt"

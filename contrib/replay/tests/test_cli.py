@@ -187,7 +187,7 @@ def test_cycles_that_are_not_decisions_are_counted_apart(store, capsys):
     assert out[1:5] == [
         "cycles that failed before an input row was written (not questions): 1",
         "cycles still in progress when the store was read (left out): 1",
-        "attempts retried: 1 (1 extra tries); the fail-closed rate below counts final answers only",
+        "attempts retried: 1 (2 extra tries); the fail-closed rate below counts final answers only",
         "decisions: 9 questions, 9 answered, 0 unanswered",
     ]
 

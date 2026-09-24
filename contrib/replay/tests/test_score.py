@@ -255,6 +255,23 @@ def test_the_last_row_has_no_later_mark():
     assert _row(_card(), 11).outcome(1) == Outcome(1, None, None, None, None, None, None, None)
 
 
+def test_an_unanswered_question_with_a_later_mark_is_read_on_neither_side():
+    """It has a return (the price moved) but no decision: nothing to score, on either reading."""
+    questions = [
+        _question(input_id="a", at_ms=at_ms(0)),
+        _question(input_id="b", at_ms=at_ms(1), mark=101.0),
+        _question(input_id="c", at_ms=at_ms(2), mark=103.0),
+    ]
+    card = score_run(questions, [_answer(input_id="a")], step_ms=STEP_MS, costs=TAKER)
+    unanswered = card.rows[1]
+    assert not unanswered.answered
+    assert unanswered.outcome(1).ret == pytest.approx(103 / 101 - 1)
+    assert (unanswered.outcome(1).executed_hit, unanswered.outcome(1).executed_pnl) == (None, None)
+    assert (unanswered.outcome(1).ai_hit, unanswered.outcome(1).ai_pnl) == (None, None)
+    horizon = card.summary().horizons[0]
+    assert (horizon.executed.n, horizon.executed_pnl.n) == (1, 1)
+
+
 def test_a_rejection_is_read_as_the_side_the_gate_refused():
     """The store's shape for a rejection: maintain_current with the refused target kept."""
     rejected = Answer(
@@ -773,6 +790,14 @@ def test_a_question_that_cannot_be_scored_is_refused(overrides):
         {"approved_margin_pct": 20.0},
         {"decision_mode": "maintain_current", "risk_action": "clamped", "order_created": False},
         {"decision_mode": "maintain_current", "order_created": False, "no_order_reason": "x"},
+        {
+            "decision_mode": "maintain_current",
+            "target_side": None,
+            "requested_margin_pct": None,
+            "approved_margin_pct": None,
+            "order_created": True,
+            "no_order_reason": None,
+        },
         {"risk_action": "rejected", "risk_reason": "low_confidence", "order_created": False},
         {"risk_action": "invalid_fail_closed", "risk_reason": "invalid_output"},
         {
@@ -805,6 +830,7 @@ def test_a_question_that_cannot_be_scored_is_refused(overrides):
         "approved-not-equal-requested",
         "clamped-maintain",
         "maintain-with-approved",
+        "maintain-with-order",
         "rejected-as-set-target",
         "fail-closed-as-set-target",
         "rejection-without-the-refused-target",

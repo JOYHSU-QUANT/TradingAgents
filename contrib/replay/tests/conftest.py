@@ -262,7 +262,8 @@ def write_paper_store(
             stamp = from_epoch_ms(at_ms(row.slot))
             tries = 1
             if row.slot in RETRY_INPUTS:
-                tries = 2
+                # Three tries, so ``extra_tries`` (2) and ``retried`` (1) differ.
+                tries = 3
                 _insert_input(
                     conn, row, retry_input_id(row.slot), RETRY_INPUTS[row.slot], payload_root,
                     run_id=run_id, mode=mode,
@@ -291,13 +292,22 @@ def write_paper_store(
                     order_created=answer["order_created"],
                     no_order_reason=answer["no_order_reason"],
                 )
+            # The daemon's own terminal vocabulary: ``invalid_output`` for a
+            # fail-closed answer, ``completed`` for any other, ``api_failed``
+            # when there is none.
+            if row.answer is None:
+                status = "api_failed"
+            elif row.answer["risk_action"] == "invalid_fail_closed":
+                status = "invalid_output"
+            else:
+                status = "completed"
             insert_attempt(
                 conn,
                 row.slot,
                 input_id=input_id(row.slot),
                 output_id=output_id,
                 tries=tries,
-                status="completed" if row.answer is not None else "api_failed",
+                status=status,
                 run_id=run_id,
                 mode=mode,
             )

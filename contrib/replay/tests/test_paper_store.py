@@ -101,7 +101,7 @@ def test_an_attempt_still_in_progress_is_counted_and_left_out(store):
         decisions = load_decisions(db, RUN_ID)
     assert decisions.in_progress == 1
     assert input_id(IN_PROGRESS_SLOT) not in {q.input_id for q in decisions.questions}
-    assert (decisions.retried, decisions.extra_tries) == (1, 1)
+    assert (decisions.retried, decisions.extra_tries) == (1, 2)
 
 
 def test_an_attempt_naming_an_input_the_store_lacks_is_refused(store):

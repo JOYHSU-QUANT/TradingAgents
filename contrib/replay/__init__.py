@@ -15,7 +15,9 @@ recorded payload, one completion from a variant's model, the answer gated
 by the run's own gate and kept in this package's own ``replay.sqlite``,
 never in the perp store. The model is reached through the engine's client
 factory, and only through :func:`~contrib.replay.upstream.load_engine`, so
-the scorecard never loads the engine.
+the scorecard never loads the engine. The direction probe (plan PR 2.1)
+asks the same brain, in a separate call, for up / down / flat
+probabilities on the same questions, scored against the base rate.
 
 It is the one package under ``contrib/`` that imports BOTH neighbours —
 ``contrib.hyperliquid_perp`` for the decision vocabulary, the store, the

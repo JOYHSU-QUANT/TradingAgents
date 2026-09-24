@@ -43,7 +43,10 @@ What is borrowed and why:
   hash its input row recorded before it is sent anywhere; the prompt
   assembly (``inject_perp_context``), so the replayed message spells the
   context the way the engine did; and the decimal context the books are
-  multiplied in.
+  multiplied in;
+- for the direction probe (plan PR 2.1): the decision parser's JSON
+  extraction (``extract_json_block``), so a probe answer's object is found
+  the way a decision's block is.
 
 The engine half (the LLM client factory, the message types, the
 completion collector) is borrowed LAZILY: it is listed in
@@ -82,6 +85,7 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
     DecisionConfig,
     DecisionMode,
     TargetSide,
+    extract_json_block,
     parse_target_decision,
 )
 from contrib.hyperliquid_perp.integration.trading_graph import inject_perp_context
@@ -119,6 +123,7 @@ __all__ = [
     "TargetSide",
     "epoch_ms",
     "evaluate",
+    "extract_json_block",
     "from_epoch_ms",
     "get_run",
     "inject_perp_context",
@@ -171,6 +176,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "DecisionConfig"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "DecisionMode"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "TargetSide"),
+    ("contrib.hyperliquid_perp.domains.perp.target_decision", "extract_json_block"),
     ("contrib.hyperliquid_perp.domains.perp.target_decision", "parse_target_decision"),
     ("contrib.hyperliquid_perp.integration.trading_graph", "inject_perp_context"),
     ("contrib.hyperliquid_perp.paper.config", "PaperTradingConfig"),

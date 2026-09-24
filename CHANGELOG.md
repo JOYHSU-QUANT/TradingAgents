@@ -411,6 +411,50 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **A direction probe for the past papers: `python -m contrib.replay replay
+  ... --probe <file>`** (replay plan PR 2.1). The scorecard could see the
+  model's sense of direction only through `confidence`, a number the gate
+  compares with `min_confidence` / `resize_min_confidence` rather than a
+  probability of being right, and only on the questions where the model
+  asked for a target (19 of run 3-6's 127, measured 2026-09-24). With
+  `--probe`, the replay puts the same questions to a *probe* instead of
+  asking for a decision: one more completion per question and repeat, from
+  the variant's model, temperature and cap, asking for up / down / flat
+  probabilities 4h and 24h ahead. It is a separate call and never part of
+  the decision prompt (decided 2026-09-24): folded in, it would change the
+  trader being measured. The system message is the probe's own text; the
+  human message is the payload's `context_text` (and the variant's
+  `extra_context`) under the engine's heading with the probe's instructions
+  last, and no format block. A probe is a YAML file (`name`, `system`,
+  `instructions`; `contrib/replay/probes/direction-v1.yaml` ships), keyed
+  by a digest of its two texts, one name per digest, as variants are. An
+  answer is taken when both horizons hold exactly `up` / `down` / `flat`,
+  each a JSON number in [0, 1], summing to within 0.02 of 1 (then
+  normalised); anything else is stored as `invalid_probe`, counted and never
+  asked again, so the scored sample does not lean towards the questions
+  that are easy to answer. The split pin, the holdout's two flags and
+  ledger row, the payload checks, resumption, `--limit`, `--dry-run` and the
+  failure classes are the decision replay's; the probe runs on 4h runs only,
+  where its two horizons are the scorecard's. `score --replay-db --variant`
+  prints one more section per probe, marked against the scorecard's own
+  later marks and flat band: the multi-class Brier score and log loss
+  against the base rate (the train segment's up / down / flat shares, the
+  same answer to every question), the Brier skill score (0 or below: no
+  direction beyond the base rate), a temperature fitted on train and scored
+  on validation, a reliability table of the most likely class with its
+  expected calibration error, and the skill's median and range across
+  repeats; a variant asked only the probe gets that section alone.
+  `replay.sqlite` moves to schema v3 (`probes`, `probe_answers`): a v2 store
+  gains the two tables when a command that may create a store opens it, and
+  any other command reads it as written. Two ideas from the same comparison
+  (buberlo/jev-trader) are not taken, and the plan says why: labelling each
+  decision's outcome while the run trades (the scorecard already labels
+  them offline, and live labels would write the paper store), and a rule
+  that decides in the model's place when the call fails (a 4h cycle that
+  fails only skips one decision, while an untested rule on a real position
+  would change how the trader trades; revisit if the scorecard's unanswered
+  count shows `api_failed` rounds clustering in large moves).
+
 - **Past papers: put the paper trader's recorded questions to another model,
   `python -m contrib.replay replay --db paper_trading.db --run-id <run>
   --variant <file>`** (replay plan PR 2). Every paper cycle already kept the

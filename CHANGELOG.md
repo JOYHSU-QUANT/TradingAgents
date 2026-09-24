@@ -415,10 +415,10 @@ Breaking changes within the 0.x line are called out explicitly.
   `python -m contrib.replay replay --db paper_trading.db --run-id <run>
   --variant <file>`** (replay plan PR 2). Every paper cycle already kept the
   perp context and format block its prompt was built from (the payload's
-  `context_text` and `format_instructions`, digest on the input row), and
-  the scorecard already
-  graded a recorded answer against the price that followed; nothing could ask
-  the same question twice. The new command asks each question of one segment
+  `context_text` and `format_instructions`, a digest on the input row where
+  one was recorded), and the scorecard already graded a recorded answer
+  against the price that followed; nothing could ask the same question
+  twice. The new command asks each question of one segment
   of the run's split (train by default) to a *variant* — a YAML file naming a
   provider and model, a system prompt file, an optional temperature, cap,
   extra context and training cutoff — as ONE completion (no analysts, no
@@ -454,15 +454,17 @@ Breaking changes within the 0.x line are called out explicitly.
   graph it replaces. `score` itself now finds a payload's `.reports.json`
   by the file name of a path recorded with either host's separators
   (`PureWindowsPath`), so a store recorded on one platform and read on the
-  other counts its sidecars. Two known differences from the daemon: the gate runs at the
-  input row's mark, where the daemon re-read the mark moments later, so a
+  other counts its sidecars. Two known differences from the daemon: the
+  gate runs at the input row's mark, where the daemon re-read the mark
+  moments later, so a
   target on the deadband's edge can land either side; and the position is
   rebuilt from the row's size, margin and leverage, not the books. An example
   variant ships as `contrib/replay/variants/current-sonnet.yaml` (paper-BTC-6's
   model, its training cutoff left for the operator to fill in). The engine
   half of the borrow is imported lazily (`upstream.load_engine`), so `score`
   still never loads `langchain_core`; a test holds that. `pyproject.toml`
-  lets mypy read PyYAML untyped, as it reads pandas.
+  lets mypy read PyYAML and `langchain_core` untyped, as it reads pandas
+  (CI's mypy job installs mypy alone).
 
 - **A scorecard for the paper trader's recorded decisions: `python -m
   contrib.replay score --db paper_trading.db --run-id <run>`** (new package

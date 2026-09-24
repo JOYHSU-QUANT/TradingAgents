@@ -174,8 +174,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "with --replay-db: also score the questions decided on or before the variant's "
-            "model_cutoff day, whose later prices the model may have been trained on "
-            "(plan section 6); left out by default"
+            "model_cutoff day (with --against, the later of the two), whose later prices the "
+            "model may have been trained on (plan section 6); left out by default"
         ),
     )
     score.set_defaults(func=_cmd_score)

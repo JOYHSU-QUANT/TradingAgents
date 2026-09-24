@@ -15,14 +15,16 @@ Three commands:
   replayed answers instead of the paper trader's own, one card per repeat,
   and compares them question by question with the paper trader's answers
   (or, with ``--against NAME``, with another variant's). With a replay
-  store, the run is scored under the split pinned there.
+  store, the run is scored under the split pinned there (or, if none is
+  pinned yet, as the run stands).
 - ``replay --db paper_trading.db --run-id paper-BTC-6 --variant FILE`` —
   the past papers (plan PR 2): put every question of one segment (train
   unless ``--segment`` says otherwise) to the variant's model ``--repeats``
   times, gate each answer through the run's own gate, and store it in
   ``--replay-db``. Resumable: an answer already stored is never asked for
   again. The first replay of a run (or the first ``score --holdout`` look)
-  pins its split in the store, once its checks have passed.
+  pins its split in the store (a replay only once its payload checks
+  have passed).
   ``--dry-run`` checks every payload and prints what would be asked,
   without building a client or writing anything.
 - ``register --variant FILE`` — store a variant, or correct its
@@ -736,7 +738,16 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 )
             prepared = prepare(papers, payload_root=payload_root, risk=risk)
             if pinned is None:
-                run = _pinned(run, *store.pin_split(args.run_id, run.split, now=_now()))
+                stood, pinned_at = store.pin_split(args.run_id, run.split, now=_now())
+                if stood != run.split:
+                    # Another command pinned the run between the read above
+                    # and here: the questions selected belong to a split that
+                    # does not stand.
+                    return _fail(
+                        f"run {args.run_id!r} had its split pinned by another command while "
+                        "this one ran; run it again to replay under that split"
+                    )
+                run = _pinned(run, stood, pinned_at)
             if args.retry_failed:
                 cleared = store.clear_failures(variant.sha, args.run_id)
                 print(f"note: {cleared} refused question(s) will be asked again", file=sys.stderr)

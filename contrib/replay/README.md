@@ -28,7 +28,7 @@ C1 那條「`hyperliquid_perp` 讀 autoresearch 只走 JSON 文件、不 import�
 ```
 python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
     [--research-db data/autoresearch.sqlite] [--payload-root DIR] [--out DIR] \
-    [--replay-db PATH --holdout]
+    [--replay-db PATH [--holdout]]
 ```
 
 只讀 `runs`，以及每個 `decision_attempts` 列與它指到的最後一列 `ai_inputs`（題目）和
@@ -161,7 +161,8 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 （`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、成績單讀的每個 gate 欄位）、
 `failures`（provider 因題目本身拒答的題，見下）、`splits`（每個 run 釘住的 split）、`ledger`
 （每次看 holdout 一列：誰、何時、哪個 variant 或 `paper`、`ask` 或 `score`）。版本在
-`PRAGMA user_version`；別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build 寫過的 store 也拒絕。
+`PRAGMA user_version`；別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build 寫過的 store 也拒絕，
+舊 build 寫過的 store 同樣拒絕（沒有 migration）。
 
 **`register --variant FILE [--replay-db PATH]`** 只登記 variant（或更正已登記同名 variant 的
 `model_cutoff`），不建 client、不問任何題。

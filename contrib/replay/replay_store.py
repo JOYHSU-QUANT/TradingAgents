@@ -15,8 +15,8 @@ Five tables, and nothing here ever writes the paper store:
   integral) and confidence as ``Decimal`` text.
 - ``failures``: one row per question, variant and repeat the provider
   refused for the question's own sake (a 4xx other than 401/403/404, the
-  key or the model, and 408/409/429, which are retried: the context too
-  long, a content filter). A question
+  key or the model, and other than 408/409/429, which are retried; for
+  instance the context too long, or a content filter). A question
   recorded here is not asked again unless the replay is told to, and the
   scorecard counts it as unanswered, as the daemon counts an ``api_failed``
   cycle.
@@ -36,7 +36,8 @@ Five tables, and nothing here ever writes the paper store:
 
 The schema is versioned by ``PRAGMA user_version``. A file that holds
 tables but not ours is refused before anything writes to it, a store a
-newer build wrote is refused rather than written through, and a reader
+newer build wrote is refused rather than written through, a store an
+older build wrote is refused too (there is no migration), and a reader
 never creates the tables: an empty file opened to be read is refused. A
 write that fails raises :class:`ReplayStoreError` naming the store, after
 whatever it had begun is rolled back.

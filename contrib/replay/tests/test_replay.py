@@ -685,6 +685,26 @@ def test_a_replay_refused_at_its_checks_pins_nothing(store, variant_file, echo, 
     assert echo.calls == []
 
 
+def test_a_split_pinned_by_another_replay_meanwhile_is_refused(
+    store, variant_file, echo, monkeypatch, capsys
+):
+    from contrib.replay.replay_store import ReplayStore
+
+    decisions, _, _, _ = _papers(store, SegmentName.TRAIN)
+    theirs = build_split(decisions.questions[:8], interval="4h", step_ms=STEP_MS)
+    assert theirs != build_split(decisions.questions, interval="4h", step_ms=STEP_MS)
+    pin = ReplayStore.pin_split
+
+    def raced(self, run_id, split, *, now):
+        pin(self, run_id, theirs, now=now)
+        return pin(self, run_id, split, now=now)
+
+    monkeypatch.setattr(ReplayStore, "pin_split", raced)
+    assert cli.main(_replay(store, variant_file)) == 1
+    assert "pinned by another command" in capsys.readouterr().err
+    assert echo.calls == []
+
+
 def test_a_question_before_the_pinned_split_is_refused(store):
     from contrib.replay.replay import inside
 

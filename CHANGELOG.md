@@ -446,7 +446,7 @@ Breaking changes within the 0.x line are called out explicitly.
   direction beyond the base rate), the binary Brier score of up against
   down on the questions that moved (which does not depend on where the flat
   band sits), a temperature fitted on the train headline and scored on
-  validation, and a reliability table of the most likely class with its
+  validation (and the holdout when it is read), and a reliability table of the most likely class with its
   expected calibration error; then each repeat on its own and the skill's
   median and range across repeats, as a stability check. A variant asked
   only the probe gets that section alone. The acceptance bar ("clearly

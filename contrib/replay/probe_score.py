@@ -27,7 +27,8 @@ stores and prints, and everything between is here. The definitions, once:
 - **The headline** (decided 2026-09-24) scores ONE forecast per question:
   the mean, class by class, of its valid repeats (:func:`ensemble`). A
   question whose repeats answered only ``invalid_probe`` is scored as the
-  base rate (it adds no skill and keeps its place in ``n``), and the skill
+  base rate (it adds no skill and keeps its place in ``n``; with no train
+  base rate it is only counted), and the skill
   without those stand-ins is printed beside it; a question refused on every
   repeat is counted, not scored.
 - **Up against down given a move** (decided 2026-09-24) takes the questions
@@ -302,6 +303,7 @@ class Binary:
 
     @property
     def skill(self) -> float | None:
+        """The binary skill score; ``None`` when the base rate is unknown or scores perfectly."""
         if self.brier is None or not self.base_brier:
             return None
         return 1 - self.brier / self.base_brier

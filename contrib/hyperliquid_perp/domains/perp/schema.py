@@ -298,7 +298,7 @@ def _require_venue_stamp(value: object, *, what: str) -> None:
     The two DTOs below carry the venue's time form as a bare ``int`` of UTC
     epoch milliseconds, and two call sites decode one downstream — the context
     builder's ``as_of`` (``from_epoch_ms(candles[-1].close_time)``) and
-    ``cli._provider``'s funding-rate lookup, which decodes EVERY point of a
+    ``exchanges.hyperliquid.funding_source``'s rate lookup, which decodes EVERY point of a
     fetched window outside its own ``except ExchangeError``. (The two windowed
     reads only ever compare these stamps as integers; they do not decode
     them.) ``from_epoch_ms`` answers a stamp it

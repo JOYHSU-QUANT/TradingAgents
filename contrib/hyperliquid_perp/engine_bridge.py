@@ -67,7 +67,7 @@ _DEFAULT_ANALYSTS = ("market", "social", "news")
 # through a gateway is a deterministic 400 on some upstreams (#177). Chosen
 # against the non-thinking deep-think model this ships with; the cap counts
 # reasoning tokens too, so a thinking model needs an explicit raise. Whether
-# it binds IS measured (issue #182, ``cli/_provider``): every engine run logs
+# it binds IS measured (issue #182, ``integration/decision_provider``): every engine run logs
 # its per-call output tokens against this cap and writes a ``.usage.json``
 # beside the input payload; a bound cap on the decision call is recorded as
 # ``truncated_output`` (not a plain ``invalid_output``), and a bound cap on
@@ -329,7 +329,7 @@ def _build_context(
     # analyst input the module itself documents as "Not a gate" and
     # "fail-closed as a WHOLE", and honouring that has to include the
     # transport. Left unguarded, a 429 or a malformed 1d response propagated
-    # out of here and ``cli/_provider`` filed it as ``connection`` /
+    # out of here and the decision provider filed it as ``connection`` /
     # ``malformed_response`` — a whole 4h cycle reaching no decision, with an
     # open position carried through unreassessed, because an optional backdrop
     # could not be drawn. Worse, ``call_sdk``'s message names no endpoint, so
@@ -355,7 +355,7 @@ def _build_context(
             # them apart: ``ExchangeThrottledError`` is a blip that heals by
             # itself, while ``MalformedResponseError`` (a misrouted response,
             # wire drift) recurs every cycle until a human acts. Collapsing
-            # them into one sentence is the defect ``cli/_provider`` exists to
+            # them into one sentence is the defect ``integration/decision_provider`` exists to
             # avoid (issue #47), and the type is the cheapest way to keep it
             # out of this seam too.
             logger.warning(

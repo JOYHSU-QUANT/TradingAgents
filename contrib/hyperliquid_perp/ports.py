@@ -55,8 +55,8 @@ class ExchangeMarketData(Protocol):
     reaching a consumer is a defect on our side, and it must be allowed to say
     so. Written down because prose was all that held it and the consumers had
     already drifted apart: ``engine_bridge`` caught nothing, ``cli.smoke``'s
-    mark read sits outside its own ``ExchangeError`` handler, ``cli._provider``'s
-    rate lookup caught the family, and ``paper.market_feed`` caught everything
+    mark read sits outside its own ``ExchangeError`` handler, the funding
+    source's rate lookup caught the family, and ``paper.market_feed`` caught everything
     — where a drifted call signature read as an exchange outage and left market
     data paused forever, one WARNING per tick, about an exchange that was
     answering (issues #157, #193). A scripted or backtest feed dropped in here owes the
@@ -66,7 +66,7 @@ class ExchangeMarketData(Protocol):
     The port records the WHOLE public read surface, not the needs of any one
     consumer. ``PortSnapshotProvider`` calls only ``get_market_snapshot``;
     the windowed reads' consumers are ``engine_bridge._build_context`` and
-    ``cli._provider``, which hold the concrete reader. Splitting a narrower
+    ``exchanges.hyperliquid.funding_source``, which hold the concrete reader. Splitting a narrower
     snapshot-only protocol out for the provider was considered and declined
     (issue #157): a scripted or backtest feed dropped in for the provider
     carries two methods it is never asked for — a type-hint obligation only,

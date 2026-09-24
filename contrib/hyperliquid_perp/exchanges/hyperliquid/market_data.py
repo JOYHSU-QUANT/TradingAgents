@@ -139,7 +139,7 @@ class HyperliquidMarketData:
         loses the newest funding points to a window that ended early (they
         fell between the host's clock and the newest candle's close, and the
         z-score sample silently lacked them). A caller that only needs a
-        PAST hour and can tolerate a miss (``cli._provider``'s rate lookup,
+        PAST hour and can tolerate a miss (``funding_source``'s rate lookup,
         where a miss is "pending", never a wrong rate) may pass its own
         clock, and says so at the call site.
         """

@@ -113,14 +113,13 @@ Exchange = live orders / fills / positions / account state 的事實來源
 
 1. Live 執行引擎放在 `contrib/hyperliquid_perp/live/`，與 `paper/` **平行**；
    已通過 Phase 2 驗收的 paper engine 零改動。
-2. 兩邊共用：`runtime/`（clock、market_feed、asset_spec、decision、position_facts、
-   run_identity、genesis、run_lock、no_decision、accounting——含 §6 帳務公式、兩種
-   fill effect、genesis 交易 `initialize_run` 與 spec §5 replay）與 `ports.py` 的四個 seam（`Clock`、`SnapshotProvider`、
+2. 兩邊共用：`runtime/` 整個套件（模組清單只列在 `runtime/__init__` 的 docstring）與 `ports.py` 的四個 seam（`Clock`、`SnapshotProvider`、
    `DecisionProvider`、`FundingSource`）、RiskGate（`domains/perp/risk_gate.py`）、
    persistence，以及純函式模組（`paper/twap.py` 的切片數學、`paper/stops.py` 的
    SL/TP 價格數學——皆無 I/O，直接 import）。live 從 `paper/` 借的只剩這兩個模組與
    `paper/validation.py::prompt_regime_lines`，由 `tests/common/test_layering.py`
-   的棘輪凍結（refactor plan v2 T1，2026-09-23 改寫本條）。
+   的棘輪凍結；`runtime/__init__` 的清單與磁碟上的模組也由它釘成一致（refactor plan v2 T1，
+   2026-09-23 改寫本條）。
 3. Live 特有的 reconciliation、safe mode 狀態機、protection order 生命週期、
    exchange client 都只存在於 `live/` 與 `exchanges/hyperliquid/`。
 

@@ -2,7 +2,7 @@
 
 Shared by the paper daemon and the live loop: both keep the same
 ``current_positions`` / ``current_account_state`` / ``fills`` tables, and the
-``cli._provider._EngineDecisionProvider`` that READS these books runs in
+``integration.decision_provider.EngineDecisionProvider`` that READS these books runs in
 both. The read happens once per cycle, before the market fetch: the provider
 hands the domain half (:class:`BookPosition`) to the context builder, which
 prices the ``Position:`` section, and carries the whole :class:`BookFacts` on

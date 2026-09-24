@@ -227,7 +227,7 @@ def build_position_context(
             unrealized = unrealized_pnl(size, mark, entry_price)
         equity = account_equity(book.wallet_balance, unrealized)
         if equity <= 0:
-            # Same prompt and context_shape as ``cli._provider``'s book-less
+            # Same prompt and context_shape as ``integration.decision_provider``'s book-less
             # omission, no store column (issue #161): the ``reason=`` handle
             # on this line is what tells them apart; rationale in RUNBOOK §7.
             logger.warning(

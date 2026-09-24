@@ -13,7 +13,7 @@ __all__ = ["json_bytes", "payload_digest"]
 def json_bytes(obj: Any, *, default: Callable[[Any], Any] | None = None) -> bytes:
     """The one spelling of "indented JSON as UTF-8 bytes" the artifacts are written in.
 
-    The input payload (``cli._provider``), the sidecars beside it
+    The input payload (``integration.decision_provider``), the sidecars beside it
     (``common.sidecar``) and the tests that fabricate payload files all write
     this shape; ``payload_digest`` hashes exactly these bytes. One function so
     an ``indent``/``sort_keys`` change for digest stability cannot land on one
@@ -29,7 +29,7 @@ def payload_digest(raw: bytes) -> str:
     """``sha256:<hex>`` of ``raw`` — the ``ai_inputs.input_payload_hash`` grammar.
 
     Over BYTES — the ones written to the file and read back from it — so the
-    daemon that records the digest (``cli._provider``) and the backfill that
+    daemon that records the digest (``integration.decision_provider``) and the backfill that
     verifies it (``persistence.backfill``) hash the same thing on every
     platform. Hashing the JSON *string* and then writing it in text mode let
     the OS rewrite the newlines in between (``\\r\\n`` on Windows), so the row

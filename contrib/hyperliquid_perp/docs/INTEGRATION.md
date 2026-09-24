@@ -61,7 +61,7 @@ contrib main.py（一次性）／ integration/decision_provider.py（daemon；�
    │        → PortfolioDecision (rating + thesis)
    │
    ├─ report_usage(...) 在 finally 寫 <payload>.usage.json  (integration/completion_usage.py；
-   │        兩條路徑都呼叫，main.py 傳 payload_path=None 所以只有 daemon 有檔)
+   │        drive 內唯一一處呼叫；main.py 給 drive 的 payload_path=None，所以只有 daemon 有檔)
    ├─ write_decision_reports(final_state, payload_path=…, selected_analysts=…)
    │     └─ <payload>.reports.json：schema、selected_analysts、九個報告 key 原樣落地，
    │        只記錄不消費；never raises（integration/decision_reports.py）。

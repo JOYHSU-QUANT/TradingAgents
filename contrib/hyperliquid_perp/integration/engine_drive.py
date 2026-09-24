@@ -2,10 +2,10 @@
 
 Both entry points drive the unmodified engine through here: ``main.run_engine``
 (the one-shot) and ``EngineDecisionProvider.request_decision`` (the paper and
-live daemons). They differ only in what a run that produced nothing to parse
-becomes — an ``error:`` line and exit 1 on the one-shot, a
-``RetryableDecisionError`` on the daemons — so :meth:`EngineRun.drive` raises
-the failure types below and each caller words them.
+live daemons). Each caller supplies its own ``trade_date`` and payload path,
+and words a run that produced nothing to parse its own way — an ``error:``
+line and exit 1 on the one-shot, a ``RetryableDecisionError`` on the daemons
+— so :meth:`EngineRun.drive` raises the failure types below.
 
 The engine-side imports stay inside the functions: ``main`` imports this
 module at load time, and ``--context-only`` must not pull in the engine tree

@@ -68,8 +68,8 @@ _DEFAULT_ANALYSTS = ("market", "social", "news")
 # against the non-thinking deep-think model this ships with; the cap counts
 # reasoning tokens too, so a thinking model needs an explicit raise. Whether
 # it binds IS measured (issue #182, ``integration/engine_drive``): every engine run logs
-# its per-call output tokens against this cap and writes a ``.usage.json``
-# beside the input payload; a bound cap on the decision call is recorded as
+# its per-call output tokens against this cap and, when it has an input
+# payload (the daemons), writes a ``.usage.json`` beside it; a bound cap on the decision call is recorded as
 # ``truncated_output`` (not a plain ``invalid_output``), and a bound cap on
 # an analyst call logs a WARNING naming the node. The effective value is
 # logged at build time so the number that actually applied is recoverable.

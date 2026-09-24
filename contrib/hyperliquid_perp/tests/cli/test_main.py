@@ -2933,7 +2933,7 @@ def test_run_engine_names_the_cap_when_a_cut_decision_is_followed_by_a_failed_ru
 
     assert rc == 1
     assert stderr_marker in capsys.readouterr().err
-    # main.py's own ``logger.exception`` on the raise path is a separate ERROR;
+    # main.py's own traceback ERROR on the raise path is a separate record;
     # the cap line is the usage module's.
     (error,) = [
         r.getMessage()

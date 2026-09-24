@@ -6108,7 +6108,22 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     assert "2026-07-20" in err  # names the oldest pass
 
 
-def _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, *, loop):
+def _latch_recoverable(db) -> None:
+    """Latch recoverable safe mode on run ``r1``, as a tick error inside the loop would."""
+    from contrib.hyperliquid_perp.live.safe_mode import (
+        REASON_LIVE_TICK_ERROR,
+        SAFE_MODE_RECOVERABLE,
+        SafeModeManager,
+    )
+
+    SafeModeManager(db=db, run_id="r1", gate=None).enter(
+        SAFE_MODE_RECOVERABLE, REASON_LIVE_TICK_ERROR, detail="scripted"
+    )
+
+
+def _drive_cmd_live_loop_to_its_exit(
+    tmp_path, monkeypatch, *, loop, reconcile=lambda self, *a, **kw: None
+):
     """``live --loop`` offline, up to and past ``_run_live_loop``'s call site.
 
     The smoke gate is seeded open, the §19.1 recovery is scripted as a pass
@@ -6117,17 +6132,15 @@ def _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, *, loop):
     the loop raises or returns: the exit line and the exit code (issue #268).
     The ``finally`` sweep runs over the seams' flat account with the switch
     never armed, which is the shape of a flat-book exit; its §12.2
-    pre-shutdown reconcile is scripted clean too, since the signed double has
-    no REST and an unclean pass would latch safe mode — the exit-4 lane this
-    drive must be able to tell apart from protection-only's.
+    pre-shutdown reconcile is scripted clean too (``reconcile``), since the
+    signed double has no REST and an unclean pass would latch safe mode — the
+    exit-4 lane this drive must be able to tell apart from protection-only's.
     """
     from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import reconcile as reconcile_mod, startup as startup_mod
     from contrib.hyperliquid_perp.live.startup import StartupResult
 
-    monkeypatch.setattr(
-        reconcile_mod.LiveReconciler, "reconcile_and_apply", lambda self, *a, **kw: None
-    )
+    monkeypatch.setattr(reconcile_mod.LiveReconciler, "reconcile_and_apply", reconcile)
 
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -6313,16 +6326,9 @@ def test_cmd_live_settled_protection_only_outranks_a_safe_mode_latch(
     # cause the operator has to fix and exit 1 (the ``safe_mode:`` line
     # printed above reports the latch), not vanish behind the safe-mode 4.
     from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
-    from contrib.hyperliquid_perp.live.safe_mode import (
-        REASON_LIVE_TICK_ERROR,
-        SAFE_MODE_RECOVERABLE,
-        SafeModeManager,
-    )
 
     def _latch_then_settle(**kwargs):
-        SafeModeManager(db=kwargs["db"], run_id="r1", gate=None).enter(
-            SAFE_MODE_RECOVERABLE, REASON_LIVE_TICK_ERROR, detail="scripted"
-        )
+        _latch_recoverable(kwargs["db"])
         return ProtectionOnlyExit(cause="config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...", settled=True)
 
     rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_latch_then_settle)
@@ -6331,6 +6337,90 @@ def test_cmd_live_settled_protection_only_outranks_a_safe_mode_latch(
     assert "nothing left to protect" in captured.err
     assert "TRADINGAGENTS_TEMPERATURE" in captured.err
     assert "safe_mode: recoverable" in captured.out  # the latch is still reported
+
+
+def test_cmd_live_loop_reconciles_once_more_before_the_shutdown_sweep(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # §12.2 rule 8: a --loop run has placed orders since the boot verdict, so
+    # the sweep works from a fresh "shutdown" pass (the one-shot's verdict
+    # pass is its last word, and the recovery here is scripted).
+    triggers: list[str] = []
+    rc = _drive_cmd_live_loop_to_its_exit(
+        tmp_path,
+        monkeypatch,
+        loop=lambda **kwargs: None,
+        reconcile=lambda self, trigger, **kw: triggers.append(trigger),
+    )
+    capsys.readouterr()
+    assert rc == 0
+    assert triggers == ["shutdown"]
+
+
+def test_cmd_live_hands_the_keep_decision_to_the_sweep(tmp_path, capsys, live_seams, monkeypatch):
+    # The keep decision must reach ``KillSwitchManager.shutdown``, not only
+    # the WARNING line: a raise out of the loop over a live position keeps
+    # the SL/TP, a clean loop exit over the same position does not.
+    from contrib.hyperliquid_perp.live import kill_switch as ks_mod
+
+    kept: list[bool] = []
+    monkeypatch.setattr(ks_mod.KillSwitchManager, "armed", property(lambda self: True))
+    monkeypatch.setattr(
+        ks_mod.KillSwitchManager,
+        "shutdown",
+        lambda self, *, keep_protective: kept.append(keep_protective),
+    )
+    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+
+    def _boom(**kwargs):
+        raise RuntimeError("a store read in the loop failed")
+
+    _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_boom)
+    control = tmp_path / "control"
+    control.mkdir()
+    _drive_cmd_live_loop_to_its_exit(control, monkeypatch, loop=lambda **kwargs: None)
+    capsys.readouterr()
+    assert kept == [True, False]
+
+
+def test_cmd_live_loop_that_latched_safe_mode_exits_4_naming_it(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # A latch taken mid-loop must not hand exit 0 ("all quiet") to the
+    # supervisor: the boot verdict is stale after a loop.
+    rc = _drive_cmd_live_loop_to_its_exit(
+        tmp_path, monkeypatch, loop=lambda **kwargs: _latch_recoverable(kwargs["db"])
+    )
+    captured = capsys.readouterr()
+    assert rc == 4
+    assert "live loop exited IN SAFE MODE — see safe_mode above" in captured.err
+    assert "safe_mode: recoverable" in captured.out
+
+
+def test_cmd_live_loop_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mode_read(
+    tmp_path, capsys, live_seams, monkeypatch
+):
+    # The exit-time safe-mode read fails, so the sweep keeps the SL/TP over
+    # the live position (unknown ≠ clean). A later read that finds no latch
+    # must not talk the exit code back down to 0 over those kept orders.
+    from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
+
+    def _unreadable(self):
+        raise RuntimeError("database is locked")
+
+    def _loop_then_break_the_read(**kwargs):
+        monkeypatch.setattr(SafeModeManager, "active", property(_unreadable))
+
+    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+    rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_loop_then_break_the_read)
+    captured = capsys.readouterr()
+    assert rc == 4
+    assert "the exit-time safe-mode state could NOT be read (unknown ≠ clean)" in captured.err
+    assert (
+        "live loop exited with protective orders kept behind a FAILED shutdown "
+        "safe-mode read (unknown ≠ clean)"
+    ) in captured.err
+    assert "safe_mode: none" in captured.out
 
 
 @pytest.mark.parametrize("behind_version", _BEHIND_VERSIONS)

@@ -33,6 +33,34 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The live shutdown's decisions are functions you can call** (refactor
+  plan v2, T2-e — PR 8 of the plan). The `finally` of `live --run-id` made
+  four decisions inline: whether the exit is unclean and why, whether the
+  §18.2 sweep keeps the resting SL/TP, what the sweep left behind, and the
+  exit code. Only a full CLI drive could reach them. They now live in
+  `live/shutdown.py`. `classify_shutdown(ShutdownFlags)` and
+  `classify_exit(...)` are pure. `read_exit_state` does the fresh position
+  and safe-mode reads, and `sweep_on_exit` runs the sweep and the
+  venue-identity escalation. `cli/live.py` keeps every stderr line and
+  prints them in the same order. No message, exit code or store write
+  changes. On the paper side, a restart that finds no OPENROUTER_API_KEY or
+  cannot build the engine now decides protection-only or exit through
+  `gate_restart` in `cli/paper.py`, with the same messages. It takes the
+  live-work read as a callable, so the book is read only when there is a
+  fault to decide, as before. Six log
+  lines now come from the `contrib.hyperliquid_perp.live.shutdown` logger
+  instead of `contrib.hyperliquid_perp.cli.live`: the pre-shutdown
+  reconciliation failure, the two failed shutdown reads (position, safe
+  mode), the sweep that raised, the sweep that left the switch armed, and
+  the failed venue-identity escalation write. Tests:
+  `tests/live/test_shutdown.py` and `tests/cli/test_paper_restart_gate.py`
+  test the decisions directly. Mutation probes found four ways the CLI
+  hands its facts to them that no test covered, so four `live --loop`
+  tests in `tests/cli/test_cli.py` now pin them: the pre-shutdown
+  reconciliation, the keep decision reaching the kill switch's `shutdown`,
+  exit 4 for a loop that latched safe mode, and exit 4 for SL/TP kept
+  behind a failed exit-time safe-mode read.
+
 - **One engine run for both entry points** (refactor plan v2, T2-d — PR 7 of
   the plan). `main.run_engine` (the one-shot) and
   `EngineDecisionProvider.request_decision` (the paper and live daemons)

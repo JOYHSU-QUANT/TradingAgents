@@ -444,9 +444,19 @@ def test_a_run_that_fails_after_a_cut_decision_still_names_the_cap(monkeypatch, 
     )
 
 
-def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch, caplog):
-    # The other no-parse exit: propagate returned, but not the (final_state,
-    # signal) pair. The cap still bound on the decision call and is still named.
+@pytest.mark.parametrize(
+    ("returned", "type_name"),
+    [
+        ({"final_trade_decision": ""}, "dict"),  # a single dict, not a 2-tuple
+        ((None, None), "tuple"),  # the pair, but its final_state is not a dict
+    ],
+)
+def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(
+    monkeypatch, caplog, returned, type_name
+):
+    # The other no-parse exit: propagate returned, but nothing the parse can
+    # read. Both shapes file as one server_error, and the cap still bound on
+    # the decision call and is still named.
     from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     provider = _usage_provider(
@@ -464,7 +474,7 @@ def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch
 
         def propagate(self, *a, **k):
             self._inner.propagate(*a, **k)  # drives the collector
-            return {"final_trade_decision": ""}  # a single dict, not a 2-tuple
+            return returned
 
     monkeypatch.setattr(tg, "build_graph", lambda **kw: _OneValue(built(**kw)))
     with (
@@ -473,7 +483,8 @@ def test_a_bad_engine_shape_after_a_cut_decision_still_names_the_cap(monkeypatch
     ):
         provider.request_decision(_decision_input())
     assert exc_info.value.error_type == "server_error"
-    assert exc_info.value.message.endswith(
+    assert exc_info.value.message == (
+        f"engine.propagate returned an unexpected shape ({type_name})"
         " (decision completion truncated: 4096 output tokens against cap 4096)"
     )
     (error,) = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]

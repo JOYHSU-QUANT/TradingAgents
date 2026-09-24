@@ -11,8 +11,11 @@ Patch targets follow the DEFINING module: main reaches every bridge symbol
 through ``engine_bridge.X`` attribute access and every guard through
 ``context_guards.X``, so each is ALWAYS patched on its own module — even when
 the test drives a main entry point — while main's own imports
-(``build_graph``, ``wallet_address``, …) are patched on ``main_mod``. The full
-``run_engine`` path needs a key + network and is left to integration testing.
+(``wallet_address``, ``render_market_context``, …) are patched on ``main_mod``.
+The engine run goes through ``integration.engine_drive``, which looks
+``build_graph`` up on ``integration.trading_graph`` at call time, so the graph
+is patched there, as ``tg_mod``. The full ``run_engine`` path needs a key +
+network and is left to integration testing.
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     ExchangeError,
     MalformedResponseError,
 )
+from contrib.hyperliquid_perp.integration import trading_graph as tg_mod
 
 
 def _assert_position_blind(result):
@@ -701,7 +705,7 @@ def _stub_engine(
         def propagate(self, *a, **k):
             return final_state or {"final_trade_decision": _VALID_DECISION_TEXT}, None
 
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _Graph())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: _Graph())
 
     if audit_error is not None:
 
@@ -717,7 +721,7 @@ def test_run_engine_reports_bad_config_as_config_error(monkeypatch, capsys):
     # engine build or LLM spend, not exit-2 "unexpected error".
     calls = []
     _stub_engine(monkeypatch)
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({"risk": {"max_target_margin_pct": 150}}, "BTC")
     assert rc == 1
     assert calls == []  # aborted before the engine was built
@@ -733,7 +737,7 @@ def test_run_engine_reports_bad_paper_trading_block_as_config_error(monkeypatch,
     # build_graph, this test fails.
     calls = []
     _stub_engine(monkeypatch)
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({"paper_trading": {"execution": {"taker_fee_rate": -1}}}, "BTC")
     assert rc == 1
     assert calls == []  # aborted before the engine was built
@@ -758,7 +762,7 @@ def test_run_engine_reports_engine_import_failure_as_named_error(monkeypatch, ca
     # "unexpected error" bucket.
     calls = []
     _stub_engine(monkeypatch)
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
 
     def _boom(config):
         raise bridge_mod.EngineImportError(
@@ -779,7 +783,7 @@ def test_run_engine_aborts_when_position_lookup_fails(monkeypatch, capsys):
     # exit non-zero — never trade against guessed-flat state.
     calls = []
     _stub_engine(monkeypatch, position_ok=False)
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built
@@ -804,7 +808,7 @@ def test_run_engine_aborts_on_insufficient_candles(monkeypatch, capsys):
         bridge_mod, "_build_context", lambda config, coin, **_kw: (_ThinCtx(), object())
     )
     calls = []
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built
@@ -1259,7 +1263,7 @@ def test_run_engine_aborts_when_all_indicators_fail(monkeypatch, capsys):
         bridge_mod, "_build_context", lambda config, coin, **_kw: (_DeadCtx(), object())
     )
     calls = []
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
@@ -1281,7 +1285,7 @@ def test_run_engine_aborts_when_only_atr_fails(monkeypatch, capsys):
         bridge_mod, "_build_context", lambda config, coin, **_kw: (_AtrDeadCtx(), object())
     )
     calls = []
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
@@ -1303,7 +1307,7 @@ def test_run_engine_aborts_when_atr_not_configured(monkeypatch, capsys):
         bridge_mod, "_build_context", lambda config, coin, **_kw: (_NoAtrCtx(), object())
     )
     calls = []
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
@@ -1342,7 +1346,7 @@ def test_run_engine_refuses_untradeable_regime_indicators(
     ctx = SimpleNamespace(candle_count=candle_count, indicators=ctx_indicators)
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
     calls = []
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine(config, "BTC")
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
@@ -2682,7 +2686,7 @@ def test_run_engine_aborts_on_a_stale_context(monkeypatch, capsys):
     ctx = _ctx_closing_at(datetime(2026, 3, 1, tzinfo=timezone.utc))
     monkeypatch.setattr(bridge_mod, "_build_context", lambda config, coin, **_kw: (ctx, object()))
     calls = []
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: calls.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: calls.append("built") or object())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert calls == []  # engine never built — no LLM spend
@@ -2715,25 +2719,31 @@ def test_run_engine_aborts_on_malformed_propagate_shape(monkeypatch, capsys):
         def propagate(self, *a, **k):
             return {"final_trade_decision": "**Rating**: Buy"}  # single dict, not a 2-tuple
 
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _BadShapeGraph())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: _BadShapeGraph())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert "unexpected shape" in capsys.readouterr().err
 
 
-def test_run_engine_reports_engine_failure_when_propagate_raises(monkeypatch, capsys):
+def test_run_engine_reports_engine_failure_when_propagate_raises(monkeypatch, capsys, caplog):
     # An engine-side exception (LLM rate-limit/timeout, a LangGraph crash) must be
     # classified as an engine-run failure: exit 1 with an actionable message, not fall
     # through to main's last-resort handler as an opaque exit-2 "unexpected error".
     _stub_engine(monkeypatch)
+    boom = RuntimeError("provider rate-limited (429)")
 
     class _RaisingGraph:
         def propagate(self, *a, **k):
-            raise RuntimeError("provider rate-limited (429)")
+            raise boom
 
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _RaisingGraph())
-    rc = main_mod.run_engine({}, "BTC")
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: _RaisingGraph())
+    with caplog.at_level(logging.ERROR, logger="contrib.hyperliquid_perp.main"):
+        rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
+    # The post-mortem traceback is the engine's own exception, on main's logger.
+    (record,) = [r for r in caplog.records if r.name == "contrib.hyperliquid_perp.main"]
+    assert record.getMessage() == "engine.propagate failed for BTC"
+    assert record.exc_info is not None and record.exc_info[1] is boom
     err = capsys.readouterr().err
     assert "engine run failed" in err
     # The original cause is surfaced, not swallowed; anchored on the type (issue #290).
@@ -2750,7 +2760,7 @@ def test_run_engine_aborts_on_non_dict_final_state(monkeypatch, capsys):
         def propagate(self, *a, **k):
             return None, None
 
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _BadGraph())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: _BadGraph())
     rc = main_mod.run_engine({}, "BTC")
     assert rc == 1
     assert "non-dict final_state" in capsys.readouterr().err
@@ -2863,7 +2873,7 @@ def test_run_engine_records_a_cut_decision_as_truncated_output(monkeypatch, caps
             )
             return {"final_trade_decision": "Reasoning that never reached the bl"}, None
 
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _CutGraph(k["callbacks"]))
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: _CutGraph(k["callbacks"]))
     with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.integration.completion_usage"):
         rc = main_mod.run_engine({}, "BTC")
 
@@ -2917,7 +2927,7 @@ def test_run_engine_names_the_cap_when_a_cut_decision_is_followed_by_a_failed_ru
                 return {"final_trade_decision": ""}
             return None, None
 
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: _CutThenFail(k["callbacks"]))
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: _CutThenFail(k["callbacks"]))
     with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.integration.completion_usage"):
         rc = main_mod.run_engine({}, "BTC")
 
@@ -2971,7 +2981,7 @@ def test_run_engine_aborts_before_llm_when_no_account_equity(monkeypatch, capsys
     built = []
     written = {}
     _stub_engine(monkeypatch, account_value=Decimal(0))
-    monkeypatch.setattr(main_mod, "build_graph", lambda **k: built.append("built") or object())
+    monkeypatch.setattr(tg_mod, "build_graph", lambda **k: built.append("built") or object())
     monkeypatch.setattr(
         main_mod,
         "log_target_decision",

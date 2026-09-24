@@ -13,9 +13,9 @@ exceptions (``raise_error`` is False, so a failing hook is logged by the
 callback manager and the run continues), the two places that do real work —
 ``on_llm_end``'s metadata read and ``report_usage`` — catch and log their
 own, and the collector holds no reference to the engine. One instance per
-``request_decision`` — the live lane runs that on a worker thread and the
-cycle's calls must not mix with another cycle's. That per-request instance is
-the whole isolation story: langchain's sync callback manager invokes handlers
+engine run (``engine_drive.build_engine_run``) — the live lane drives runs on
+a worker thread and the cycle's calls must not mix with another cycle's. That
+per-run instance is the whole isolation story: langchain's sync callback manager invokes handlers
 on the calling thread and the base graph runs its agents in sequence, so no
 lock guards the lists below.
 
@@ -134,7 +134,7 @@ class CompletionUsageCollector(BaseCallbackHandler):
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._forget_node(run_id)
 
-    # -- what the provider reads after propagate() -----------------------------------
+    # -- what the engine run reads after propagate() ---------------------------------
 
     @property
     def calls(self) -> tuple[CompletionCall, ...]:
@@ -163,7 +163,7 @@ class CompletionUsageCollector(BaseCallbackHandler):
         return sum(c.output_tokens or 0 for c in self.calls)
 
     def to_record(self, *, cap: int | None) -> dict[str, Any]:
-        """The cycle-level usage record the provider persists beside the payload.
+        """The cycle-level usage record ``report_usage`` persists beside the payload.
 
         ``truncated_nodes`` repeats what ``calls`` already says, on purpose: it
         is the field an operator greps a directory of sidecars for, without

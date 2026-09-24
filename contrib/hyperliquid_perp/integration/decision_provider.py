@@ -50,7 +50,7 @@ class EngineDecisionProvider:
     # never to AttributeError inside build_input, which the §6.2 classifier
     # would relabel as an API failure.
     _on_blocking_read = None
-    _position_source = None
+    _position_source: BookSource | None = None
     # The last ``(prompt_version, context_shape, format_fingerprint)`` this
     # instance logged (issue #163); ``None`` until the first prompt is built.
     _logged_regime = None
@@ -326,31 +326,15 @@ class EngineDecisionProvider:
         )
 
     def request_decision(self, decision_input):
-        from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
-
-        from ..domains.perp.target_decision import FINAL_TRADE_DECISION_KEY, parse_target_decision
         from ..runtime.decision import RetryableDecisionError
-        from .completion_usage import (
-            CompletionUsageCollector,
-            log_decision_truncation,
-            log_unparsed_decision_truncation,
-            report_usage,
-        )
-        from .decision_reports import write_decision_reports
-        from .trading_graph import build_graph
+        from .engine_drive import EngineOutputError, EngineRunFailed, build_engine_run
 
-        # One collector per request (issue #182): the live lane runs this on a
-        # worker thread, and a cycle's completions must not mix with another's.
-        usage = CompletionUsageCollector()
-        cap = self._engine_config.get("max_tokens")
-        graph = build_graph(
-            perp_context_text=self._context_text,
-            config=self._engine_config,
-            selected_analysts=self._analysts,
-            output_format_text=self._format_text,
-            callbacks=[usage],
+        run = build_engine_run(
+            engine_config=self._engine_config,
+            analysts=self._analysts,
+            context_text=self._context_text,
+            format_text=self._format_text,
         )
-        coin = decision_input.context.coin
         # Drive the base engine off the cycle's own as_of, not wall-clock now:
         # a late/recovery cycle (process was down across schedule points) must
         # feed the base news/sentiment analysts the same time base as the perp
@@ -358,58 +342,24 @@ class EngineDecisionProvider:
         # a UTC midnight between the two.
         trade_date = decision_input.context.as_of.strftime("%Y-%m-%d")
         try:
-            propagated = graph.propagate(coin, trade_date, asset_type="crypto")
-        except Exception as exc:  # noqa: BLE001 — engine-run failures are external (§3.1)
-            # The api_failed row this becomes carries the cap fact in its
-            # error_message, beside the failure that ended the run.
-            note = log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
-            raise RetryableDecisionError(_classify_engine_error(exc), str(exc) + note) from exc
-        finally:
-            # Paid for whether or not a decision came back: an engine run that
-            # raised after ten completions still spent them, so the usage line
-            # and sidecar are written on both exits. Never raises.
-            report_usage(
-                usage,
-                cap=cap,
+            return run.drive(
+                coin=decision_input.context.coin,
+                trade_date=trade_date,
+                decision_cfg=self._decision,
                 payload_path=decision_input.input_payload_path,
-                decision_node=PORTFOLIO_MANAGER_NODE,
             )
-        if (
-            not isinstance(propagated, (tuple, list))
-            or len(propagated) < 2
-            or not isinstance(propagated[0], dict)
-        ):
-            # A drifted return contract is indistinguishable from a broken
-            # response — retryable server_error, and api_failed after 3 tries.
-            note = log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
+        except EngineRunFailed as failed:
+            # Engine-run failures are external (§3.1). The api_failed row this
+            # becomes carries the cap fact in its error_message, beside the
+            # failure that ended the run.
             raise RetryableDecisionError(
-                "server_error",
-                f"engine.propagate returned an unexpected shape ({type(propagated).__name__}){note}",
-            )
-        # What the agents wrote on the way to the decision, beside the input
-        # payload (the replay plan's PR 0): before the parse, so a cycle whose
-        # target JSON fails closed still keeps the reports that led there.
-        # Never raises; the model saw no different text. Not reached on the
-        # two api_failed exits above — they have no final_state to record.
-        write_decision_reports(
-            propagated[0],
-            payload_path=decision_input.input_payload_path,
-            selected_analysts=self._analysts,
-        )
-        # The decision completion's own stop reason decides ONE verdict: a
-        # missing target JSON under a bound cap is recorded as truncated_output,
-        # not invalid_output (issue #182) — the operator audits the cap number,
-        # not the prompt contract. Parse first: a block that survived the cut
-        # met the contract and is accepted as it always was. The LAST decision
-        # completion, because only its text reached final_trade_decision.
-        decision_call = usage.last_call(PORTFOLIO_MANAGER_NODE)
-        truncated = decision_call is not None and decision_call.truncated
-        parsed = parse_target_decision(
-            propagated[0].get(FINAL_TRADE_DECISION_KEY), self._decision, truncated=truncated
-        )
-        if truncated:
-            log_decision_truncation(decision_call, parsed, cap=cap)
-        return parsed
+                _classify_engine_error(failed.cause), str(failed.cause) + failed.note
+            ) from failed.cause
+        except EngineOutputError as bad:
+            # A drifted return contract — either shape — is indistinguishable
+            # from a broken response: retryable server_error, and api_failed
+            # after 3 tries.
+            raise RetryableDecisionError("server_error", str(bad) + bad.note) from None
 
 
 def _classify_engine_error(exc: Exception) -> str:

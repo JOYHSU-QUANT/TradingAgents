@@ -10,6 +10,9 @@ The *entire* integration surface is one file (``docs/INTEGRATION.md``):
   ``<payload>.usage.json`` sidecar (issue #182).
 - :mod:`.decision_provider` — the daemons' :class:`~..ports.DecisionProvider`:
   builds each cycle's input payload and drives the engine to a parsed target.
+- :mod:`.engine_drive` — one engine run, from the assembled prompt to a parsed
+  target; the daemons' provider and the one-shot ``main.run_engine`` both run
+  the engine through it.
 - :mod:`.decision_reports` — the ``<payload>.reports.json`` sidecar: the
   analyst reports, debates and trader plan the engine produced on the way to
   ``final_trade_decision``, kept so a decision can be replayed later.

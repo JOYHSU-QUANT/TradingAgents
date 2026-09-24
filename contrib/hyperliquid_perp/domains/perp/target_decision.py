@@ -58,8 +58,8 @@ INVALID_OUTPUT = "invalid_output"
 TRUNCATED_OUTPUT = "truncated_output"
 
 # The ``final_state`` key this seam parses — upstream ``AgentState``'s field
-# name, spelled ONCE here for the two callers (``main.py``, ``integration/decision_provider``)
-# and the reports sidecar, and pinned to upstream by
+# name, spelled ONCE here for the parse (``integration/engine_drive``) and the
+# reports sidecar, and pinned to upstream by
 # ``tests/test_upstream_names.py``: a rename there must fail a test, not make
 # ``.get()`` return ``None`` and every cycle fail closed.
 FINAL_TRADE_DECISION_KEY = "final_trade_decision"

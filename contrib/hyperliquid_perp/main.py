@@ -14,8 +14,9 @@ Two paths:
     python -m contrib.hyperliquid_perp.main --coin BTC
 
 The plumbing this shell and the subcommand CLI share — context build, the
-pre-LLM guards, the engine-config overlay — lives in :mod:`.engine_bridge`;
-this module keeps only what is legacy-entry-point specific.
+pre-LLM guards, the engine-config overlay — lives in :mod:`.engine_bridge`,
+and the engine run itself in :mod:`.integration.engine_drive`; this module
+keeps only what is legacy-entry-point specific.
 """
 
 from __future__ import annotations
@@ -40,14 +41,10 @@ from .config import dotenv_diagnosis, load_dotenv_files, wallet_address
 from .domains.perp import context_guards, risk_gate
 from .domains.perp.market_data_config import MarketDataConfig
 from .domains.perp.prompt_context import context_shape, render_market_context
-from .domains.perp.target_decision import (
-    FINAL_TRADE_DECISION_KEY,
-    decision_format_instructions,
-    format_fingerprint,
-    parse_target_decision,
-)
+from .domains.perp.target_decision import decision_format_instructions, format_fingerprint
 from .exchanges.hyperliquid.errors import ExchangeError
-from .integration.trading_graph import build_graph, inject_perp_context
+from .integration import engine_drive
+from .integration.trading_graph import inject_perp_context
 
 logger = logging.getLogger(__name__)
 
@@ -331,30 +328,11 @@ def run_engine(config: dict, coin: str) -> int:
         # "unexpected error" bucket; see _build_engine_config for the causes.
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    # Imported here, not at module top: the collector carries langchain_core,
-    # and ``--context-only`` must stay importable without the engine tree.
-    from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
-
-    from .integration.completion_usage import (
-        CompletionUsageCollector,
-        log_decision_truncation,
-        log_unparsed_decision_truncation,
-        report_usage,
-    )
-
-    # The same truncation signal the daemon lanes record (issue #182): an
-    # operator reproducing a paper ``truncated_output`` cycle with this
-    # one-shot must see the same tag and the same usage line, or the two
-    # lanes disagree about one physical condition. No payload file here, so
-    # no ``.usage.json`` sidecar — the INFO line is the record.
-    usage = CompletionUsageCollector()
-    cap = engine_config.get("max_tokens")
-    graph = build_graph(
-        perp_context_text=ctx_text,
-        config=engine_config,
-        selected_analysts=selected_analysts,
-        output_format_text=output_format_text,
-        callbacks=[usage],
+    run = engine_drive.build_engine_run(
+        engine_config=engine_config,
+        analysts=selected_analysts,
+        context_text=ctx_text,
+        format_text=output_format_text,
     )
 
     trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -363,31 +341,46 @@ def run_engine(config: dict, coin: str) -> int:
         f"(analysts: {', '.join(selected_analysts)})...",
         file=sys.stderr,
     )
+    # Phase 2 contract: ``drive`` parses the structured target JSON out of the
+    # engine's final_trade_decision. Any invalid output — no JSON, bad schema,
+    # illegal cross-field combination — fails closed to maintain_current inside
+    # the parse seam; the raw response is preserved for the audit record either
+    # way.
     try:
-        propagated = graph.propagate(coin, trade_date, asset_type="crypto")
-    except Exception as exc:  # noqa: BLE001 — classify engine-side failures distinctly
+        parsed = run.drive(
+            coin=coin, trade_date=trade_date, decision_cfg=decision_cfg, payload_path=None
+        )
+    except engine_drive.EngineRunFailed as failed:
         # ``propagate`` drives the unmodified engine (LLM calls, LangGraph state machine).
         # A failure here (provider rate-limit/timeout, an agent raising, a LangGraph error)
         # is an *engine run* failure, not a bug in this adapter — surface it with an
         # actionable message and exit 1 like every other external call, rather than letting
         # it fall through to main's last-resort handler as an opaque exit-2 "unexpected
         # error". The full traceback is still logged for a post-mortem.
-        logger.exception("engine.propagate failed for %s", coin)
-        log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
+        cause = failed.cause
+        logger.error("engine.propagate failed for %s", coin, exc_info=cause)
         print(
-            f"error: engine run failed ({type(exc).__name__}: {exc}) — check the LLM "
+            f"error: engine run failed ({type(cause).__name__}: {cause}) — check the LLM "
             "provider status/credentials and retry. No decision was produced or logged.",
             file=sys.stderr,
         )
         return 1
-    finally:
-        report_usage(usage, cap=cap, payload_path=None, decision_node=PORTFOLIO_MANAGER_NODE)
-    if not isinstance(propagated, (tuple, list)) or len(propagated) < 2:
-        log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
+    except engine_drive.NonDictFinalState as bad:
+        # The parse seam reads ``final_state`` as a dict; a non-dict (e.g.
+        # ``None`` from an engine crash) would otherwise surface as an opaque
+        # ``AttributeError`` in the last-resort handler. Fail clean instead.
+        print(
+            f"error: engine returned a non-dict final_state ({type(bad.final_state).__name__}) "
+            "— aborting before decision mapping",
+            file=sys.stderr,
+        )
+        return 1
+    except engine_drive.EngineOutputError as bad:
         # ``propagate`` is the seam to the unmodified engine — the most likely place
         # for a version drift to change the return contract. A bad shape would
         # otherwise blow up as an opaque unpack ``ValueError`` in the last-resort
         # handler; name the seam instead.
+        propagated = bad.returned
         shape = len(propagated) if isinstance(propagated, (tuple, list)) else "n/a"
         print(
             f"error: engine.propagate returned an unexpected shape "
@@ -395,30 +388,6 @@ def run_engine(config: dict, coin: str) -> int:
             file=sys.stderr,
         )
         return 1
-    final_state, _signal = propagated[0], propagated[1]
-    if not isinstance(final_state, dict):
-        log_unparsed_decision_truncation(usage.last_call(PORTFOLIO_MANAGER_NODE), cap=cap)
-        # The parse seam reads ``final_state`` as a dict; a non-dict (e.g.
-        # ``None`` from an engine crash) would otherwise surface as an opaque
-        # ``AttributeError`` in the last-resort handler. Fail clean instead.
-        print(
-            f"error: engine returned a non-dict final_state ({type(final_state).__name__}) "
-            "— aborting before decision mapping",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Phase 2 contract: parse the structured target JSON out of the engine's
-    # final_trade_decision. Any invalid output — no JSON, bad schema, illegal
-    # cross-field combination — fails closed to maintain_current inside the
-    # parse seam; the raw response is preserved for the audit record either way.
-    decision_call = usage.last_call(PORTFOLIO_MANAGER_NODE)
-    truncated = decision_call is not None and decision_call.truncated
-    parsed = parse_target_decision(
-        final_state.get(FINAL_TRADE_DECISION_KEY), decision_cfg, truncated=truncated
-    )
-    if truncated:
-        log_decision_truncation(decision_call, parsed, cap=cap)
     if not parsed.is_valid:
         # Repeated contract failures are the model-drift signal alerting must
         # see: the cycle still completes fail-closed (gate + audit record

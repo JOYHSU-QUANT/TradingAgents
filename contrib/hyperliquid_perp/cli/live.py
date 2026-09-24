@@ -6,7 +6,6 @@ under ``--loop`` (PR 5).
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -17,7 +16,7 @@ from typing import TYPE_CHECKING
 from ..common import store_layout
 from ._common import (
     _migrate_owned_store,
-    _open_owned_store,
+    _open_run_or_exit,
     _raise_keyboard_interrupt,
     _require_agent_key,
     _require_api_key,
@@ -421,9 +420,7 @@ def _live_startup_recovery(
     from ..live.venue_identity import EscalationHolder, escalate_identity_fault
     from ..live.wiring import build_live_session, build_signed_client
     from ..persistence import repository as repo
-    from ..persistence.models import PositionState
-    from ..persistence.schema import SCHEMA_VERSION
-    from ..runtime import accounting
+    from ..runtime.genesis import write_genesis
     from ..runtime.run_lock import (
         RunLockError,
         acquire_run_lock,
@@ -483,8 +480,8 @@ def _live_startup_recovery(
         )
         return 1
 
-    # Opened as-is (issue #129 — see _open_owned_store). Unlike paper, this
-    # command cannot take its lease before the upgrade: the drift and
+    # Opened as-is (issue #129 — see runtime.run_identity.open_run). Unlike
+    # paper, this command cannot take its lease before the upgrade: the drift and
     # off-coin checks between here and the lock read tables later migrations
     # have altered, and --create writes the run row before the lock. So the
     # refusals that need only what ``schema.LEASE_READABLE_SINCE`` declares
@@ -497,26 +494,12 @@ def _live_startup_recovery(
     # reason ``run_lock.peek_run_lock`` gives for refusing ANY fresh holder —
     # this process included, if a lease still carries a pid the OS recycled to
     # us after a hard kill.
-    db = _open_owned_store(db_path)
-    if db is None:
+    opened = _open_run_or_exit(db_path, run_id, create=args.create)
+    if opened is None:
         return 1
-    with db:
-        existing_run = repo.get_run(db.conn, run_id)
-        is_restart = existing_run is not None
-        if not is_restart and not args.create:
-            print(
-                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
-                "to start it, or fix --run-id / --db to resume the intended run.",
-                file=sys.stderr,
-            )
-            return 1
-        if is_restart and args.create:
-            print(
-                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
-                "to resume it, or pick a new --run-id for a fresh run.",
-                file=sys.stderr,
-            )
-            return 1
+    with opened.db as db:
+        existing_run = opened.existing_run
+        is_restart = opened.is_restart
         # BEFORE --create writes the run row and before any wire action: a
         # refusal taken later left a half-created run behind, and the operator's
         # corrected re-run was then rejected as "already exists" (2026-07-31
@@ -548,7 +531,8 @@ def _live_startup_recovery(
                 file=sys.stderr,
             )
             return 1
-        if existing_run is not None and existing_run["mode"] != "live":
+        foreign_mode = opened.foreign_mode("live")
+        if foreign_mode is not None:
             # Resume validates the run's IDENTITY before any side effect (the
             # lock, arming the wallet-wide kill switch, reconciliation writes)
             # — the same discipline as the paper daemon's resume (decided
@@ -558,9 +542,9 @@ def _live_startup_recovery(
             # runs before the migration too: a typo must not upgrade a paper
             # store on its way to being refused.
             print(
-                f"error: run {run_id!r} in {db_path} is a {existing_run['mode']} "
+                f"error: run {run_id!r} in {db_path} is a {foreign_mode} "
                 "run — resuming it here would arm the kill switch and "
-                f"reconcile a {existing_run['mode']} ledger against the live "
+                f"reconcile a {foreign_mode} ledger against the live "
                 "exchange. Fix --run-id / --db.",
                 file=sys.stderr,
             )
@@ -665,20 +649,15 @@ def _live_startup_recovery(
             # routed to unmapped/cross-run audit by the PR 3 processor — they
             # can never double-book onto this genesis.
             unrealized = sum((p.unrealized_pnl for p in snapshot.positions), Decimal(0))
-            seeds = [
-                PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
-                for p in snapshot.positions
-            ]
             subset = _run_config_subset(config, coin)
             subset["live"] = raw_live
-            accounting.initialize_run(
+            write_genesis(
                 db,
                 run_id=run_id,
                 mode="live",
                 initial_balance_usdc=snapshot.account_value - unrealized,
-                schema_version=SCHEMA_VERSION,
-                initial_positions=seeds,
-                config_json=json.dumps(subset, ensure_ascii=False, default=str),
+                seeds=snapshot.positions,
+                config_subset=subset,
                 created_at=now,
             )
             print(f"created live run {run_id!r} in {db_path}", file=sys.stderr)

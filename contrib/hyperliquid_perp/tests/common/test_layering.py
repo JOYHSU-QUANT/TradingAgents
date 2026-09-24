@@ -905,7 +905,6 @@ _CLI_PRIVATE_REEXPORTS = frozenset(
         "_migrate_owned_store",
         "_norm_network",
         "_open_existing_db",
-        "_open_owned_store",
         "_paper_loop",
         "_post_cycle_export",
         "_print_smoke_gate",

@@ -7,8 +7,10 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
+from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeError
 from contrib.hyperliquid_perp.runtime.asset_spec import (
     AssetSpec,
+    build_asset_spec,
     price_tick_from_sz_decimals,
     qty_step_from_sz_decimals,
 )
@@ -52,3 +54,39 @@ def test_asset_spec_refuses_a_blank_coin(coin):
 def test_asset_spec_refuses_another_assets_margin_schedule():
     with pytest.raises(ValueError, match="AssetSpec.margin_schedule is for 'ETH', not 'BTC'"):
         AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=_schedule("ETH"))
+
+
+class _Market:
+    """The one read ``build_asset_spec`` makes, scripted."""
+
+    def __init__(self, meta):
+        self._meta = meta
+        self.calls: list[str] = []
+
+    def get_asset_meta(self, coin):
+        self.calls.append(coin)
+        if isinstance(self._meta, Exception):
+            raise self._meta
+        return self._meta
+
+
+def test_build_asset_spec_reads_one_meta_and_builds_the_spec():
+    market = _Market((5, _schedule()))
+    spec = build_asset_spec(market, "BTC")
+    assert spec == AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=_schedule())
+    assert spec.qty_step == D("0.00001")
+    assert market.calls == ["BTC"]
+
+
+def test_build_asset_spec_lets_the_venue_failure_through_unchanged():
+    # The callers own the ``ExchangeError`` lane (a named exit 1); nothing
+    # here catches or rewraps it.
+    market = _Market(ExchangeError("meta endpoint down"))
+    with pytest.raises(ExchangeError, match="meta endpoint down"):
+        build_asset_spec(market, "BTC")
+
+
+def test_build_asset_spec_refuses_a_schedule_for_another_coin():
+    market = _Market((5, _schedule("ETH")))
+    with pytest.raises(ValueError, match="AssetSpec.margin_schedule is for 'ETH', not 'BTC'"):
+        build_asset_spec(market, "BTC")

@@ -8,7 +8,6 @@ after every completed cycle and on shutdown (via :mod:`.paper_export`).
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -21,7 +20,7 @@ from ..config import dotenv_diagnosis
 from . import _provider, paper_export
 from ._common import (
     _migrate_owned_store,
-    _open_owned_store,
+    _open_run_or_exit,
     _raise_keyboard_interrupt,
     _require_api_key,
     announce_engine_config_protection_only,
@@ -99,8 +98,7 @@ def _cmd_paper(argv: list[str]) -> int:
     from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
     from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
     from ..paper.config import PaperTradingConfig
-    from ..persistence import repository as repo
-    from ..runtime.asset_spec import AssetSpec
+    from ..runtime.asset_spec import build_asset_spec
     from ..runtime.clock import WallClock
     from ..runtime.run_lock import RunLockError, acquire_run_lock, release_run_lock
 
@@ -120,11 +118,10 @@ def _cmd_paper(argv: list[str]) -> int:
     try:
         client = HyperliquidClient.from_config(config)
         market = HyperliquidMarketData(client)
-        sz_decimals, schedule = market.get_asset_meta(coin)
+        asset = build_asset_spec(market, coin)
     except ExchangeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    asset = AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)
 
     run_id = args.run_id or f"paper-{coin}"
     export_dir = (
@@ -133,34 +130,16 @@ def _cmd_paper(argv: list[str]) -> int:
     funding_source = _provider._HistoryFundingSource(market)
 
     # Opened as-is: the upgrade is owed once the lease is ours, in _run_locked
-    # (issue #129 — see _open_owned_store).
-    db = _open_owned_store(db_path)
-    if db is None:
+    # (issue #129 — see runtime.run_identity.open_run).
+    opened = _open_run_or_exit(db_path, run_id, create=args.create)
+    if opened is None:
         return 1
-    with db:
-        existing_run = repo.get_run(db.conn, run_id)
-        is_restart = existing_run is not None
+    with opened.db as db:
+        existing_run = opened.existing_run
+        is_restart = opened.is_restart
         now = clock.now()
-        if not is_restart and not args.create:
-            print(
-                f"error: run {run_id!r} does not exist in {db_path}. Pass --create "
-                "to start it, or fix --run-id / --db to resume the intended run.",
-                file=sys.stderr,
-            )
-            return 1
-        if is_restart and args.create:
-            # The flag exists to make store identity explicit in BOTH
-            # directions: silently resuming here would append to an old run
-            # (old position, old ledger, old schedule) when the operator
-            # plausibly meant a fresh acceptance run — contaminating every
-            # §5 metric without a word.
-            print(
-                f"error: run {run_id!r} already exists in {db_path}. Drop --create "
-                "to resume it, or pick a new --run-id for a fresh run.",
-                file=sys.stderr,
-            )
-            return 1
-        if existing_run is not None and existing_run["mode"] != "paper":
+        foreign_mode = opened.foreign_mode("paper")
+        if foreign_mode is not None:
             # Same identity discipline as the live resume (decided
             # 2026-07-17): a live run's genesis carries the same coin, so the
             # drift check alone would wave a typo'd --run-id/--db through —
@@ -168,7 +147,7 @@ def _cmd_paper(argv: list[str]) -> int:
             # Checked before the run lock touches the row.
             print(
                 f"error: run {run_id!r} in {db_path} is a "
-                f"{existing_run['mode']} run — the paper daemon would trade "
+                f"{foreign_mode} run — the paper daemon would trade "
                 "over its books. Fix --run-id / --db.",
                 file=sys.stderr,
             )
@@ -196,9 +175,7 @@ def _cmd_paper(argv: list[str]) -> int:
             from ..paper.reconcile import ReconciliationError, reconcile_on_restart
             from ..paper.scheduler import PaperScheduler
             from ..persistence import repository as repo
-            from ..persistence.models import PositionState
-            from ..persistence.schema import SCHEMA_VERSION
-            from ..runtime import accounting
+            from ..runtime.genesis import write_genesis
             from ..runtime.market_feed import PortSnapshotProvider
 
             trading_halted = False
@@ -257,21 +234,14 @@ def _cmd_paper(argv: list[str]) -> int:
                 except EngineConfigError as exc:
                     print(f"error: {exc}", file=sys.stderr)
                     return 1
-                seeds = [
-                    PositionState(coin=p.coin, size=p.size, entry_price=p.entry_price)
-                    for p in paper_cfg.account.initial_positions
-                ]
-                accounting.initialize_run(
+                write_genesis(
                     db,
                     run_id=run_id,
                     mode="paper",
                     initial_balance_usdc=paper_cfg.account.initial_balance_usdc,
-                    schema_version=SCHEMA_VERSION,
-                    initial_positions=seeds,
+                    seeds=paper_cfg.account.initial_positions,
                     # Only the behaviour-defining blocks — never network/wallet keys.
-                    config_json=json.dumps(
-                        _run_config_subset(config, coin), ensure_ascii=False, default=str
-                    ),
+                    config_subset=_run_config_subset(config, coin),
                     created_at=now,
                 )
                 print(f"created paper run {run_id!r} in {db_path}", file=sys.stderr)

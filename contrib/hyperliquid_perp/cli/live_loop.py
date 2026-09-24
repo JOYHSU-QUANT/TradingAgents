@@ -277,7 +277,7 @@ def _run_live_loop(
     from ..live.ws_stream import LiveWsStream
     from ..paper.stops import StopConfig
     from ..persistence import repository as repo
-    from ..runtime.asset_spec import AssetSpec
+    from ..runtime.asset_spec import build_asset_spec
     from ..runtime.clock import WallClock
     from ..runtime.market_feed import PortSnapshotProvider
     from ..runtime.position_facts import read_books
@@ -289,8 +289,7 @@ def _run_live_loop(
     risk_cfg, decision_cfg = cfgs
     clock = WallClock()
     market = HyperliquidMarketData(client)
-    sz_decimals, schedule = market.get_asset_meta(coin)
-    asset = AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)
+    asset = build_asset_spec(market, coin)
     provider = PortSnapshotProvider(market, clock)
     submitter = LiveOrderSubmitter(
         client=signed, gate=gate, db=db, run_id=run_id, payload_dir=payload_dir, clock=clock

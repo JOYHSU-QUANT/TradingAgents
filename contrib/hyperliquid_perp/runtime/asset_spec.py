@@ -1,17 +1,26 @@
 """The per-asset metadata an engine needs, and the precision steps behind it.
 
 :class:`AssetSpec` serves both lanes. Its two derived steps come from
-``szDecimals`` and nothing else, so their definitions live beside it.
+``szDecimals`` and nothing else, so their definitions live beside it, and
+so does :func:`build_asset_spec`, the one way a running lane reads it off
+the venue.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Protocol
 
 from ..domains.perp.margin import MarginSchedule
 
-__all__ = ["AssetSpec", "price_tick_from_sz_decimals", "qty_step_from_sz_decimals"]
+__all__ = [
+    "AssetMetaSource",
+    "AssetSpec",
+    "build_asset_spec",
+    "price_tick_from_sz_decimals",
+    "qty_step_from_sz_decimals",
+]
 
 # Perp price precision on Hyperliquid: a price may carry up to (6 - szDecimals)
 # decimal places, so the tick is 10 ** -(6 - szDecimals).
@@ -56,3 +65,22 @@ class AssetSpec:
             )
         object.__setattr__(self, "qty_step", qty_step_from_sz_decimals(self.sz_decimals))
         object.__setattr__(self, "tick_size", price_tick_from_sz_decimals(self.sz_decimals))
+
+
+class AssetMetaSource(Protocol):
+    """The one venue read :func:`build_asset_spec` needs (the ``meta`` request)."""
+
+    def get_asset_meta(self, coin: str) -> tuple[int, MarginSchedule]:
+        """``(szDecimals, MarginSchedule)`` for ``coin``."""
+        ...
+
+
+def build_asset_spec(market: AssetMetaSource, coin: str) -> AssetSpec:
+    """The :class:`AssetSpec` for ``coin`` as the venue reports it.
+
+    One ``meta`` read, then the constructor; a venue failure propagates as the
+    reader raises it (the callers' ``ExchangeError`` lanes), and a mismatched
+    schedule as the constructor's ``ValueError``.
+    """
+    sz_decimals, schedule = market.get_asset_meta(coin)
+    return AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)

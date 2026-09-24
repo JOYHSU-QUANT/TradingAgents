@@ -432,9 +432,9 @@ Breaking changes within the 0.x line are called out explicitly.
   question, variant and repeat (`--repeats`, default 3), written as each is
   judged, so an interrupted replay resumes without re-asking; a failing call
   is tried three times, 5 s and 20 s apart, then stops by name. Before the
-  first call every payload is read and checked against its row's digest,
-  and `--dry-run` stops there. Questions outside the chosen segment are never
-  opened; the holdout needs `--segment holdout --holdout`, and the ledger row
+  first call every payload is read and checked against its row's digest (a
+  row that recorded none is read unchecked), and `--dry-run` stops there.
+  Questions outside the chosen segment are never opened; the holdout needs `--segment holdout --holdout`, and the ledger row
   saying who asked it is written before its first payload is read. A
   variant's identity is a digest of what reaches the model (the prompt TEXT,
   not its path), and a name stands for one variant for the life of the

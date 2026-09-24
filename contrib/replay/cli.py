@@ -599,7 +599,8 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         for line in header:
             print(line)
         print(
-            f"payloads checked: {len(prepared)}, each against the digest its input row recorded"
+            f"payloads read: {len(prepared)}, each checked against its input row's digest where "
+            "one was recorded"
             + (f" ({unchecked} recorded none and were read unchecked)" if unchecked else "")
         )
         print(

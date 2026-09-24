@@ -167,12 +167,12 @@ provider、model id、system prompt 的**文字**（不是路徑）、temperatur
 - **先驗再花錢**：先建 client（建不起來就在寫任何東西之前停下）；接著登記 variant、問 holdout
   時寫 ledger；然後所有題目的 payload 讀過、用 input 列記的 digest 比對（被改過的具名拒絕；
   input 列沒記 digest 的照讀不比）、閘門輸入全部重建成功，才開始問：第一次呼叫之前一毛不花。
-  `--dry-run` 只做讀與驗並印出會問幾題，不建 client、不寫任何東西（連 `replay.sqlite` 都不建，
-  已存在的空檔也不會被建表）。
+  `--dry-run` 只做讀與驗並印出會存幾個答案（題數×repeat，扣掉已存的），不建 client、不寫任何
+  東西（連 `replay.sqlite` 都不建；已存在的空檔會被具名拒絕，不會被建表）。
 - **可續跑**：每個答案判完立刻寫入（各自一個 transaction）；已存的 `(題, repeat)` 永遠不再問。
   一次呼叫最多試 3 次（失敗後隔 5 秒、20 秒再試），第三次仍失敗就具名停下、已存的答案保留，
   同一個指令從停的地方接著跑。`--limit N` 限制這次最多存幾個新答案（重試的呼叫算一次）。
-  provider 沒回報用量的答案（無從判斷是否截斷，照 daemon 的讀法當作沒截斷）另外計數印出。
+  usage collector 沒記到這次呼叫的答案（無從判斷是否截斷，照 daemon 的讀法當作沒截斷）另外計數印出。
 - `--repeats N`（預設 3，plan §3-10）：每題每 variant 存 N 個答案。
 
 ### `score --replay-db`

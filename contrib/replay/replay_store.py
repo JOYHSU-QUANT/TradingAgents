@@ -22,7 +22,7 @@ tables but not ours is refused before anything writes to it, a store a
 newer build wrote is refused rather than written through, and a reader
 never creates the tables: an empty file opened to be read is refused. A
 write that fails raises :class:`ReplayStoreError` naming the store, after
-the transaction is rolled back.
+whatever it had begun is rolled back.
 """
 
 from __future__ import annotations
@@ -243,6 +243,10 @@ class ReplayStore:
         try:
             self.conn.execute("COMMIT")
         except sqlite3.Error as exc:
+            # A failed COMMIT can leave the transaction open on the
+            # connection; close it, or the next write fails on BEGIN.
+            with suppress(sqlite3.Error):
+                self.conn.execute("ROLLBACK")
             raise ReplayStoreError(f"{self.path}: write failed at commit: {exc}") from exc
 
     # -- variants ------------------------------------------------------------

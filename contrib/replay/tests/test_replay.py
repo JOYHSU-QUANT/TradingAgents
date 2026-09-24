@@ -334,7 +334,10 @@ def test_a_dry_run_checks_everything_and_builds_and_writes_nothing(
 ):
     assert cli.main(_replay(store, variant_file, "--dry-run", "--limit", "5")) == 0
     out = capsys.readouterr().out.splitlines()
-    assert f"payloads checked: {len(TRAIN)}, each against the digest its input row recorded" in out
+    assert (
+        f"payloads read: {len(TRAIN)}, each checked against its input row's digest where one "
+        "was recorded"
+    ) in out
     assert (
         f"dry run: 0 answer(s) already stored, {len(TRAIN) * 3} to ask; this command would "
         "ask for 5 of them"
@@ -371,8 +374,8 @@ def test_answers_the_provider_said_nothing_about_are_counted(
     monkeypatch.setattr(cli, "_build_model", lambda _variant: silent)
     assert cli.main(_replay(store, variant_file, "--repeats", "1", "--limit", "2")) == 0
     assert (
-        "answers whose call the provider reported nothing about: 2 (truncation unknown, read "
-        "as not truncated, as the daemon reads it)"
+        "answers whose call the usage collector recorded nothing for: 2 (truncation unknown, "
+        "read as not truncated, as the daemon reads it)"
     ) in capsys.readouterr().out.splitlines()
 
 

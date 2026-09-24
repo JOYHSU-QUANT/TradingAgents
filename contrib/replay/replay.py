@@ -102,10 +102,11 @@ class Completion:
     ``invalid_output``, as it does for the daemon. ``truncated`` is the
     provider's own verdict that the completion hit its token cap: the one
     fact that turns a missing JSON block into ``truncated_output``.
-    ``usage_reported`` is false when the provider reported nothing about
-    the call; ``truncated`` is then ``False`` by default, the daemon's own
-    reading of a call it has no stop reason for, and the replay counts
-    such answers so the gap is visible.
+    ``usage_reported`` is false when the usage collector recorded no
+    completion for the call (its callback never fired, or the metadata
+    could not be read); ``truncated`` is then ``False`` by default, the
+    daemon's own reading of a call it has no record of, and the replay
+    counts such answers so the gap is visible.
     """
 
     text: object
@@ -301,7 +302,7 @@ class ReplayReport:
         ]
         if self.unreported:
             lines.append(
-                f"answers whose call the provider reported nothing about: {self.unreported} "
+                f"answers whose call the usage collector recorded nothing for: {self.unreported} "
                 "(truncation unknown, read as not truncated, as the daemon reads it)"
             )
         if self.stopped_at_limit:

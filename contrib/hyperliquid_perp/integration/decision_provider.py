@@ -32,7 +32,7 @@ class EngineDecisionProvider:
     :class:`RetryableDecisionError`; contract violations are NOT errors — they
     come back as an invalid ``ParsedDecision`` (fail-closed downstream).
 
-    NOT a pure function of its argument (PR 6 hazard): ``request_decision``
+    NOT a pure function of its argument (Phase 3 PR 6 hazard): ``request_decision``
     reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
     call stashed on the instance, not fields of ``decision_input`` — and the
     one shared instance is handed to both the background worker thread and the
@@ -449,7 +449,7 @@ def build_decision_provider(
 ) -> EngineDecisionProvider:
     """The provider a daemon runs, reading the books of ``run_id`` in ``db``.
 
-    The books are bound now and read once per cycle, so a provider built
+    The books are bound now and read in each ``build_input``, so a provider built
     before ``initialize_run`` seeds them (the paper lane's fresh-run
     pre-flight) renders no ``Position:`` section until they exist. The live
     store keeps the same books (its reconciler mirrors the exchange onto

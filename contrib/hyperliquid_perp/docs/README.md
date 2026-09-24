@@ -127,7 +127,7 @@ TradingAgents/
         ├── integration/                 # bridge to the unmodified engine
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── persistence/                 # Phase 2 SQLite source of truth
-        ├── runtime/                     # paper／live 共用的執行核心（ports 四個 seam Clock／SnapshotProvider／DecisionProvider／FundingSource 的實作與資料型別；模組清單見 `runtime/__init__`）
+        ├── runtime/                     # paper／live 共用的執行核心（模組清單見 `runtime/__init__`）
         ├── paper/                       # Phase 2 paper accounting + execution engine
         ├── live/                        # Phase 3 live execution（平行於 paper/，PR 1 起）
         ├── risk/
@@ -158,7 +158,7 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 
 | 檔案 | 狀態 | 說明 |
 |---|---|---|
-| `ports.py` | ✅ | `ExchangeMarketData` / `OrderGate` 介面定義——最先寫這個。兩個引擎被驅動的四個 seam 也住這裡：`Clock`、`FundingSource`、`SnapshotProvider`、`DecisionProvider`（實作與資料型別在 `runtime/`）。 |
+| `ports.py` | ✅ | `ExchangeMarketData` / `OrderGate` 介面定義——最先寫這個。兩個引擎被驅動的四個 seam 也住這裡：`Clock`、`FundingSource`、`SnapshotProvider`、`DecisionProvider`（生產實作的位置見 `ports.py` 模組 docstring）。 |
 | `exchanges/hyperliquid/sdk_client.py` | ✅ | 官方 SDK 初始化、testnet/mainnet 設定載入。 |
 | `exchanges/hyperliquid/market_data.py` | ✅ | SDK Info → market snapshot。 |
 | `exchanges/hyperliquid/account.py` | ✅ | SDK Info → account / position snapshot。 |

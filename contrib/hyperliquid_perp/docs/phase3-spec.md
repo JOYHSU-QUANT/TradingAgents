@@ -118,8 +118,10 @@ Exchange = live orders / fills / positions / account state 的事實來源
    persistence，以及純函式模組（`paper/twap.py` 的切片數學、`paper/stops.py` 的
    SL/TP 價格數學——皆無 I/O，直接 import）。live 從 `paper/` 借的只剩這兩個模組與
    `paper/validation.py::prompt_regime_lines`，由 `tests/common/test_layering.py`
-   的棘輪凍結；`runtime/__init__` 的清單與磁碟上的模組也由它釘成一致（refactor plan v2 T1，
-   2026-09-23 改寫本條）。
+   的棘輪凍結（refactor plan v2 T1，2026-09-23 改寫本條）。同一檔也釘住
+   `runtime/__init__` 的模組清單與磁碟一致，並凍結 `integration/` 從兩個 lane 借的
+   名字——只有 `paper.config.PaperTradingConfig`（live 沿用 paper 的成本假設，
+   issue #161）（refactor plan v2 T2-c，2026-09-24）。
 3. Live 特有的 reconciliation、safe mode 狀態機、protection order 生命週期、
    exchange client 都只存在於 `live/` 與 `exchanges/hyperliquid/`。
 

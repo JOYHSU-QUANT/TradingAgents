@@ -11,8 +11,10 @@ faces the other way: it is the application-layer contract the exchange
 adapter's signed client judges every mutation against, so the adapter never
 imports the application layer for a type hint. The four that follow —
 ``Clock``, ``FundingSource``, ``SnapshotProvider``, ``DecisionProvider`` —
-are the seams the paper and live engines are driven through; their
-implementations live in ``runtime/``.
+are the seams the paper and live engines are driven through. The clocks and
+snapshot providers live in ``runtime/``, which also holds ``DecisionInput``;
+the production ``DecisionProvider`` is ``integration.decision_provider`` and
+the production ``FundingSource`` is ``exchanges.hyperliquid.funding_source``.
 
 Structural typing: an implementation does not subclass these — it just needs
 matching method signatures.

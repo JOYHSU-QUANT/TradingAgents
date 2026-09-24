@@ -113,7 +113,10 @@ def test_a_flag_pointing_nowhere_is_a_named_exit_1(
 ):
     monkeypatch.chdir(tmp_path)
     assert main(_score(store, *extra)) == 1
-    assert f"error: {message}" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert f"error: {message}" in captured.err
+    # Refused up front: nothing of the card is printed before the refusal.
+    assert captured.out == ""
     assert not (tmp_path / "missing.sqlite").exists()  # never created on the way to refusing
 
 

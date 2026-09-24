@@ -97,6 +97,13 @@ warn_unused_ignores = true
 module = ["pandas", "pandas.*", "stockstats", "stockstats.*"]
 ignore_missing_imports = true
 
+# The replay package reads its variant files with PyYAML (replay plan PR 2),
+# which ships no type information; the CI job installs mypy alone, so the
+# import is neither found nor typed there. Read as ``Any``, as pandas is.
+[[tool.mypy.overrides]]
+module = ["yaml", "yaml.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

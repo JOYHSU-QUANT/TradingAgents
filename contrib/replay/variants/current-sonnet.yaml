@@ -1,0 +1,21 @@
+# The paper trader's current brain, asked the simple way (replay plan PR 2):
+# the model paper-BTC-6 recorded in its genesis ``engine`` block, one
+# completion, the portfolio manager's own instructions minus the debate it
+# no longer sees. The first variant to run, so the gap between it and the
+# paper trader's recorded answers can be measured ("the simple version's
+# bias", plan section 4 PR 2).
+#
+#   python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-6 \
+#       --variant contrib/replay/variants/current-sonnet.yaml --dry-run
+name: current-sonnet
+model:
+  provider: openrouter
+  id: anthropic/claude-sonnet-4-6
+system_prompt_path: current_system.md
+# No temperature: the perp engine block has no such key, so unless the
+# daemon's host sets TRADINGAGENTS_TEMPERATURE each call takes the
+# provider's default. So does this variant.
+# max_tokens: 8192 is the default, the paper trader's completion cap.
+# model_cutoff: set it to the model's published training cutoff before
+# scoring, so questions the model may have seen the answer to are left out
+# (plan section 6). Left unset here rather than guessed.

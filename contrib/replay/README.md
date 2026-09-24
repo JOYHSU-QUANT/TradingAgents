@@ -3,8 +3,8 @@
 重放不是另一條交易路徑。
 
 它不下單、不寫 `contrib/hyperliquid_perp/` 的 store、不動 `PROMPT_VERSION`。它只做一件事：
-把 paper 交易員**已經記下**的每個決策拿出來對答案（成績單），之後再把當時的題目原樣重問
-一顆別的腦袋（考古題，PR 2）。上面那句話就是這個套件的 scope 判準：任何需要把它放寬的
+把 paper 交易員**已經記下**的每個決策拿出來對答案（成績單），再把當時的題目原樣重問
+一顆別的腦袋（考古題）。上面那句話就是這個套件的 scope 判準：任何需要把它放寬的
 改動都是 scope creep，不是更大的功能。
 
 完整設計在 local-only 的 `.claude/replay-plan-2026-09-23.md`；方向拍板在 memory
@@ -21,7 +21,7 @@
 C1 那條「`hyperliquid_perp` 讀 autoresearch 只走 JSON 文件、不 import」的否決是針對
 **交易路徑**（prompt 段落）；一個永遠碰不到 prompt 的離線工具不是那條路徑。
 
-## 現況（PR 1＝成績單）
+## 成績單（PR 1）
 
 ```
 python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
@@ -85,8 +85,9 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-7 \
 （否則 validation 最後一天的分數會偷看 holdout 第一天）。`--holdout` 才把它打開，摘要會印
 `HOLDOUT READ`。太短切不出三段的 run 會被具名拒絕（exit 1）。
 
-> PR 1 還沒有 ledger 可以記「誰、何時看了 holdout」——那張表隨 `replay.sqlite` 在 PR 2 來。
-> 現在成績單看的是 paper 交易員自己的實際決策，鎖住的是「人挑 variant 時別對著 holdout 挑」。
+> 這裡看的是 paper 交易員自己的實際決策，沒有 ledger：鎖住的是「人挑 variant 時別對著 holdout
+> 挑」。variant 的答案看 holdout 時（`replay`／`score --replay-db`），ledger 會記「誰、何時、哪個
+> variant」，見下面的考古題。
 
 ### 輸出
 
@@ -98,12 +99,98 @@ stdout 印摘要（一行一個事實）。第一行說成本與 interval 來自
 就有 daemon 的 `payloads/<run-id>/`）時，摘要多一行「幾題已有 `.reports.json`」——那是 PR 3
 題庫完整度的計數。
 
-### 還沒有的
+## 考古題（PR 2＝重放）
 
-- `--replay-db`：讀 `replay.sqlite`、對 variant 做配對比較。配對檢定（`score.paired_hits`，
-  McNemar 精確版）與 `Answer` 記錄型別已在，PR 2 只要把自己的答案建成同一種記錄。
-- `pre_cutoff`／`post_cutoff` 標記（plan §6）：要有 variant 的 `model_cutoff` 才算得出來，PR 2。
-- 帶模擬帳戶的回測（PR 3）。
+```
+python -m contrib.replay replay --db paper_trading.db --run-id paper-BTC-6 \
+    --variant contrib/replay/variants/current-sonnet.yaml [--replay-db replay.sqlite] \
+    [--repeats 3] [--segment train|validation|holdout] [--holdout] \
+    [--payload-root DIR] [--limit N] [--dry-run]
+python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
+    --replay-db replay.sqlite --variant current-sonnet [--against OTHER] [--include-pre-cutoff]
+```
+
+把 paper 交易員**當時被問的題目**原樣拿出來，換一顆腦袋重問一次。一題＝一次 completion，
+**不跑分析師、不跑辯論**（plan §3-3）：
+
+- system 訊息＝variant 指定的 system prompt；
+- human 訊息＝payload 的 `context_text`＋`format_instructions`，用引擎自己的
+  `inject_perp_context` 組起來（標題與 format 區塊在尾端，都跟 PM 當時看到的一樣）。variant 的
+  `extra_context`（例如一條教訓）插在市場 context 之後、format 區塊之前，format 永遠是最後一句。
+
+回來的文字走**同一個** `parse_target_decision`（帶這次 completion 自己的截斷判定），再用**該 run
+genesis 記下的** `risk:`／`decision:` 區塊、從該列 `ai_inputs` 記錄的帳戶狀態（equity、倉位大小、
+margin、leverage）重建 `CurrentPositionState`，走**同一個** `risk_gate.evaluate`。倉位不帶
+（plan §3-4）：每題都從 paper 當時實際持有的倉位問。genesis 沒有 `risk`／`decision` 區塊的 run
+具名拒絕（用預設值會拿 variant 去比一個那個 run 從沒有過的閘門）。
+
+**已知且接受的兩個差異**：daemon 在答案回來後重讀一次即時 mark 才過閘門，重放用的是 input 列記
+的 mark，所以剛好壓在 deadband 邊上的目標可能落到另一邊；閘門的倉位輸入從該列記的 size／margin／
+leverage 重建，不是從帳本（store 已經不保留當時的帳本）。**簡單版的分數只能在 variant 之間比，
+不能拿去跟 paper 的實際成績比**（形狀不同：一次 completion 不是它取代的那整張 graph）。
+
+### variant（plan §3-5）
+
+variant 是資料不是程式，一個 YAML（範例：`variants/current-sonnet.yaml`＝paper-BTC-6 genesis
+記的模型、PM 自己的指示去掉它已經看不到的辯論）：
+
+| 鍵 | 必填 | 意思 |
+|---|---|---|
+| `name` | 是 | 給人看的名字；在同一個 `replay.sqlite` 裡與 sha 一對一 |
+| `model.provider`／`model.id` | 是 | 走 `tradingagents` 的 `create_llm_client`，不自己接 SDK |
+| `system_prompt_path` | 是 | 相對於 YAML 檔 |
+| `temperature` | 否 | 沒給＝provider 預設（跟 graph 一樣只在有設時才送） |
+| `max_tokens` | 否 | 預設 8192＝paper daemon 的 completion cap；Gemini 自動換成 `max_output_tokens` |
+| `extra_context` | 否 | 見上 |
+| `model_cutoff` | 否 | 模型訓練截止日（YYYY-MM-DD），給 plan §6 用 |
+
+未知的鍵具名拒絕（打錯的 `temprature` 不能被默默當成 provider 預設）。**sha＝會送到模型的東西**：
+provider、model id、system prompt 的**文字**（不是路徑）、temperature、cap、extra context；改了
+任何一個就是新 variant，要換名字（舊名字指向別的 sha 會被拒絕）。`model_cutoff` 不進 sha：它是
+模型的事實、不是模型看到的東西，更正它不必丟掉已經付錢買到的答案（store 會更新並在 stderr 說）。
+
+### replay.sqlite
+
+自有的 store，三張表，**永遠不寫 paper store**：`variants`（sha 為鍵，name UNIQUE）、`answers`
+（`(variant_sha, run_id, input_id, repeat)` 為鍵；存原文、parse 結果、gate 的每個欄位）、`ledger`
+（每次看 holdout 一列：誰、何時、哪個 variant、`ask` 或 `score`）。版本在 `PRAGMA user_version`；
+別人的 SQLite 檔在寫入任何東西之前就具名拒絕，新 build 寫過的 store 也拒絕。
+
+### 重放的紀律
+
+- **Split 與鎖**：同一個 `Split.by_shares`（60/20/20）切整個 run。預設只問 train；`--segment
+  validation` 問 validation；問 holdout 要 `--segment holdout --holdout` **兩個都給**（缺一個具名
+  拒絕），而且 ledger 那一列**在讀第一個 holdout payload 之前**就寫下。沒被選到的段落，payload
+  **連打開都不打開**。
+- **先驗再花錢**：所有題目的 payload 先全部讀過、用 input 列記的 digest 比對（被改過的具名拒絕）、
+  閘門輸入全部重建成功，才建 client、才開始問。`--dry-run` 只做這一步並印出會問幾次，不建
+  client、不寫任何東西（連 `replay.sqlite` 都不建）。
+- **可續跑**：每個答案判完立刻寫入（各自一個 transaction）；已存的 `(題, repeat)` 永遠不再問。
+  呼叫失敗重試共 3 次（間隔 5 秒、20 秒），第三次仍失敗就具名停下、已存的答案保留，同一個指令
+  從停的地方接著跑。`--limit N` 限制這次最多花幾次呼叫。
+- `--repeats N`（預設 3，plan §3-10）：每題每 variant 存 N 個答案。
+
+### `score --replay-db`
+
+同一個 `score_run`，把 paper 的答案換成 variant 的答案：**每個 repeat 一張卡**（只算那個 repeat
+答過的題，沒問的題不會變成「沒答」），接著一行「跨 repeat 的中位數與區間」（模型命中、執行命中、
+每題平均執行損益——用平均不用總和，因為各 repeat 答的題數可能不同，plan §3-10），最後是**逐題配對比較**（模型讀法、McNemar 精確 p，plan §3-11）：預設跟
+paper 交易員自己的答案比，`--against NAME` 改跟另一個 variant 的同一個 repeat 比。
+
+- **cutoff（plan §6）**：variant 有 `model_cutoff` 時，決策時刻落在截止日當天或之前的題目**預設
+  排除**（摘要開頭說排掉幾題），`--include-pre-cutoff` 才算進來；沒有 cutoff 就明說沒有分。
+  有 `--against` 時取**兩個 variant 中較晚的**截止日：對手可能看過答案的題，配對的哪一邊都不算；
+  沒填 cutoff 的那個 variant 另印一行說它沒被排除。
+- `replay --dry-run` 不能用在 holdout：dry run 會讀它檢查的每個 payload，卻什麼都不寫（連 ledger
+  都不寫），在 holdout 上就是一次沒記錄的偷看。
+- `--holdout` 會先在 ledger 記一列 `score`，並列出這個 run 之前被看過幾次、誰看的。
+- `--out DIR` 寫 `<run-id>-<variant>-decisions.csv`（多一個 `repeat` 欄）與 `-summary.txt`。
+
+## 還沒有的
+
+- 帶模擬帳戶的回測（PR 3）：從 `.reports.json` 起跑下半段 graph，倉位一路帶下去。
+- plan §5 的驗收門檻（贏過四個對照組、`Penalty.threshold(n)`、配對 p < 0.05 且 ≥ 100 題、
+  fail-closed 不高於現行）：成績單印出每一個原料，但門檻本身還沒寫成程式、也還沒拍板。
 
 ## 測試
 
@@ -116,3 +203,9 @@ pytest -q contrib/replay/tests
 同一張表也透過 perp 的 repository 寫進真的 store，讓讀取器對著 daemon 的編碼方式測；
 另有一個往返測試把真的 gate（`parse_target_decision` → `evaluate` → `write_ai_output`）寫出來的
 四種答案讀回來，釘住夾具的手寫形狀與 gate 的真形狀不會分家。
+
+考古題另有一個夾具（`tests/papers.py`）：一個 10 題的 run，**每個答案都是真的 gate 寫的**
+（從 genesis 記的 run-6 閘門、各題自己的倉位），每題的 payload 檔都在、digest 記在 input 列上。
+假模型 `Echo` 對每題說 paper 當時的模型說過的話，於是兩件事可以直接驗：重放的答案過閘門的結果
+與記錄的**逐欄相同**（`test_replay.py`），以及 echo variant 的每張 repeat 卡與 paper 自己的成績單
+**逐行相同**（`test_replay_score.py`）。模型那一層（`model.py`）用假的引擎介面測，不需要金鑰或網路。

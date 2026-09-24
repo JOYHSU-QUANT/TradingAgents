@@ -55,9 +55,11 @@ later mark past the loadable bound is treated as unavailable rather than
 read — the same lock the evaluator keeps.
 
 Everything here is a pure function of :class:`Question` / :class:`Answer`
-records, so the past-papers command (plan PR 2) scores its answers through
-the same code by building the same records; :func:`paired_hits` is the
-comparison it will use (plan §3-11).
+records. The past-papers command (plan PR 2) stores its answers in its own
+``replay.sqlite`` and reads them back as the same records, so a replayed
+answer and a recorded one score through this one module; ``score_run``'s
+``only`` scores the subset a variant was asked, and :func:`paired_hits` is
+the question-by-question comparison ``score --replay-db`` prints (plan §3-11).
 """
 
 from __future__ import annotations
@@ -66,7 +68,7 @@ import math
 import statistics
 from bisect import bisect_left
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final, TypeVar
@@ -106,6 +108,7 @@ __all__ = [
     "csv_table",
     "paired_hits",
     "score_run",
+    "segment_of",
     "sign_test",
 ]
 
@@ -135,9 +138,9 @@ class ScoreError(ValueError):
 def _number(value: object, what: str) -> float:
     """A finite number — the research package's one numeric guard, in this module's error.
 
-    A ``Decimal`` is taken as its float first: the gate's own results carry
-    ``Decimal`` margins and confidences, and the past-papers command (plan
-    PR 2) builds these records from them in-process.
+    A ``Decimal`` is taken as its float first, so a record can be built
+    straight from the gate's own results, which carry ``Decimal`` margins
+    and confidences.
     """
     if isinstance(value, Decimal):
         value = float(value)
@@ -231,7 +234,7 @@ class Question:
 class Answer:
     """One ``ai_outputs`` row: what the model said and what the gate did with it.
 
-    The same record the past-papers command will build from its own store
+    The same record the past-papers command reads back from its own store
     (plan PR 2), so a replayed answer and a recorded one score through one
     function. The shape is the gate's (``RiskGateResult.__post_init__`` and
     ``_no_target_result``), and the checks below mirror what it guarantees
@@ -415,7 +418,7 @@ def build_split(questions: Sequence[Question], *, interval: str, step_ms: int) -
     return Split.by_shares(interval, start_ms=min(opens), end_ms=max(opens) + step_ms)
 
 
-def _segment_of(split: Split | None, at_ms: int, step_ms: int) -> SegmentName | None:
+def segment_of(split: Split | None, at_ms: int, step_ms: int) -> SegmentName | None:
     """The segment holding the question's bar, or ``None`` without a split.
 
     A row no segment claims is refused rather than scored: with a split
@@ -594,6 +597,7 @@ def score_run(
     split: Split | None = None,
     holdout: bool = False,
     tolerance_ms: int | None = None,
+    only: Collection[str] | None = None,
 ) -> Scorecard:
     """Score every question of a run. The one entry point.
 
@@ -604,6 +608,12 @@ def score_run(
     ``holdout`` is set, and later marks past the loadable bound are
     unavailable either way — read them and the validation score of the last
     day leaks the holdout's first day.
+
+    ``only`` names the questions to score, by ``input_id``: the past papers
+    (plan PR 2) answer a subset, and a question nobody put to the variant
+    must not read as one it left unanswered. Every question still supplies
+    the later marks and still counts toward the flat band, so a subset is
+    scored against the same prices and the same band as the whole run.
     """
     if step_ms <= 0:
         raise ScoreError(f"step_ms must be > 0, got {step_ms!r}")
@@ -633,7 +643,7 @@ def score_run(
 
     store = _Series.of({q.at_ms: q.mark for q in ordered})
     research = _Series.of(research_closes or {})
-    segments = {q.input_id: _segment_of(split, q.at_ms, step_ms) for q in ordered}
+    segments = {q.input_id: segment_of(split, q.at_ms, step_ms) for q in ordered}
     locked_rows = [q for q in ordered if segments[q.input_id] is not SegmentName.HOLDOUT]
     locked = _later_marks(
         locked_rows,
@@ -670,6 +680,8 @@ def score_run(
         )
     else:
         kept, later = locked_rows, locked
+    if only is not None:
+        kept = [q for q in kept if q.input_id in only]
 
     rows: list[Scored] = []
     for question in kept:

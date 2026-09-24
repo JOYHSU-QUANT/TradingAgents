@@ -411,6 +411,54 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Past papers: put the paper trader's recorded questions to another model,
+  `python -m contrib.replay replay --db paper_trading.db --run-id <run>
+  --variant <file>`** (replay plan PR 2). Every paper cycle already kept the
+  exact prompt it was built from (the payload's `context_text` and
+  `format_instructions`, digest on the input row), and the scorecard already
+  graded a recorded answer against the price that followed; nothing could ask
+  the same question twice. The new command asks each question of one segment
+  of the run's split (train by default) to a *variant* — a YAML file naming a
+  provider and model, a system prompt file, an optional temperature, cap,
+  extra context and training cutoff — as ONE completion (no analysts, no
+  debate), through the engine's own `create_llm_client`. The answer goes
+  through the same `parse_target_decision` (with the completion's own
+  truncation verdict) and the same `risk_gate.evaluate`, under the run's
+  genesis `risk:` / `decision:` blocks and the account state its input row
+  recorded; a run whose genesis lacks those blocks is refused rather than
+  gated at the defaults. Answers go to the package's own `replay.sqlite`
+  (`variants`, `answers`, `ledger`), never to the paper store, one row per
+  question, variant and repeat (`--repeats`, default 3), written as each is
+  judged, so an interrupted replay resumes without re-asking; a failing call
+  is tried three times, 5 s and 20 s apart, then stops by name. Before the
+  first call every payload is read and checked against its row's digest,
+  and `--dry-run` stops there. Questions outside the chosen segment are never
+  opened; the holdout needs `--segment holdout --holdout`, and the ledger row
+  saying who asked it is written before its first payload is read. A
+  variant's identity is a digest of what reaches the model (the prompt TEXT,
+  not its path), and a name stands for one variant for the life of the
+  store. `score` gains `--replay-db PATH --variant NAME`: one card per
+  repeat through the same `score_run` (only the questions that repeat
+  answered; `score_run(only=...)`), the median and range across repeats
+  (the P&L as a mean per decision, since repeats can answer different
+  numbers of questions), and a question-by-question McNemar comparison with
+  the paper trader's own answers (or `--against` another variant);
+  questions decided on or before the variant's `model_cutoff` day (the
+  later of the two with `--against`) are left out unless
+  `--include-pre-cutoff` (plan section 6), and `--holdout` records its look
+  first. A dry run does not run on the holdout: it reads payloads and
+  records nothing. The simple version's scores compare variants with each other, not
+  with the paper trader's record: one completion is not the graph it
+  replaces. Two known differences from the daemon: the gate runs at the
+  input row's mark, where the daemon re-read the mark moments later, so a
+  target on the deadband's edge can land either side; and the position is
+  rebuilt from the row's size, margin and leverage, not the books. An example
+  variant ships as `contrib/replay/variants/current-sonnet.yaml` (paper-BTC-6's
+  model, its training cutoff left for the operator to fill in). The engine
+  half of the borrow is imported lazily (`upstream.load_engine`), so `score`
+  still never loads `langchain_core`; a test holds that. `pyproject.toml`
+  lets mypy read PyYAML untyped, as it reads pandas.
+
 - **A scorecard for the paper trader's recorded decisions: `python -m
   contrib.replay score --db paper_trading.db --run-id <run>`** (new package
   `contrib/replay/`, replay plan PR 1). The store already held every decision

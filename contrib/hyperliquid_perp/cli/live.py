@@ -33,6 +33,7 @@ from .live_shared import (
 
 if TYPE_CHECKING:
     from ..live.config import LiveGateRefusal
+    from ..live.shutdown import ExitReason
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,43 @@ def _gate_refusal_wording(refusal: LiveGateRefusal) -> str:
         ),
     }
     return wording[refusal.stage]
+
+
+def _exit_line(reason: ExitReason) -> str | None:
+    """The line ``live --run-id`` prints last for each exit, or None for none.
+
+    The None reasons already printed theirs inside the ``finally``: an
+    unclean sweep's ``error: §18.2 shutdown unclean`` and a protection-only
+    ending's own line. Every reason has an entry, so a new one without
+    wording fails loudly.
+    """
+    from ..live.shutdown import ExitReason
+
+    wording: dict[ExitReason, str | None] = {
+        ExitReason.SWEEP_UNCLEAN: None,
+        ExitReason.PROTECTION_ONLY_SETTLED: None,
+        ExitReason.PROTECTION_ONLY_STOPPED: None,
+        ExitReason.VERDICT_FAILED: (
+            "startup recovery did NOT pass — the run is in safe mode; see the "
+            "reconciliation events / safe-mode state above (§19.1 step 15)."
+        ),
+        ExitReason.LOOP_IN_SAFE_MODE: (
+            "live loop exited IN SAFE MODE — see safe_mode above; "
+            "resolve it (manual release if required) before resuming."
+        ),
+        ExitReason.LOOP_KEPT_ON_UNKNOWN_SAFE_MODE: (
+            "live loop exited with protective orders kept behind "
+            "a FAILED shutdown safe-mode read (unknown ≠ clean) — "
+            "inspect the run store before resuming."
+        ),
+        ExitReason.LOOP_CLEAN: (
+            "live loop exited — §18.2 shutdown sweep done; re-run with --loop to resume this run."
+        ),
+        ExitReason.ONE_SHOT_PASSED: (
+            "startup recovery passed — a live loop can start from this state (re-run with --loop)."
+        ),
+    }
+    return wording[reason]
 
 
 def _cmd_live(argv: list[str]) -> int:
@@ -415,9 +453,15 @@ def _live_startup_recovery(
     from decimal import Decimal
 
     from ..engine_bridge import EngineConfigError
-    from ..exchanges.hyperliquid.mapper import map_account_snapshot
     from ..exchanges.hyperliquid.sdk_client import call_sdk
-    from ..live.venue_identity import EscalationHolder, escalate_identity_fault
+    from ..live.shutdown import (
+        ShutdownFlags,
+        ShutdownVerdict,
+        classify_exit,
+        classify_shutdown,
+        read_exit_state,
+        sweep_on_exit,
+    )
     from ..live.wiring import build_live_session, build_signed_client
     from ..persistence import repository as repo
     from ..runtime.genesis import write_genesis
@@ -737,26 +781,14 @@ def _live_startup_recovery(
                 payload_dir=payload_dir,
                 max_tick_gap_seconds=_RECOVERY_MAX_TICK_GAP_SECONDS,
             )
-            identity = session.identity
-            kill_switch = session.kill_switch
-            safe_mode = session.safe_mode
-            processor = session.processor
-            reconciler = session.reconciler
             shutdown_problem: str | None = None
             superseded = False
             # False until the §19.1 verdict PASSES — a recovery that raised
-            # counts as unclean too. The ``finally`` sweep below keys its
-            # keep-the-SL/TP decision off this OR'd with the EXIT-TIME safe
-            # mode (both decided 2026-07-22): over a --loop run the boot
-            # verdict goes stale, and safe mode latched mid-loop means the
-            # next boot's verdict will refuse to start — exactly the
-            # "no repair machinery" case the keep exists for.
+            # counts as unclean too (live.shutdown.classify_shutdown).
             verdict_passed = False
-            # True when the shutdown-time safe-mode read RAISED: the keep
-            # decision then acted on unknown ≠ clean, and the exit code below
-            # must not let a luckier later read report "all quiet" over
-            # deliberately-kept orders.
-            exit_safe_mode_unknown = False
+            # The ``finally``'s keep decision; stays None when a lost lease
+            # skipped the sweep.
+            shutdown_verdict: ShutdownVerdict | None = None
             # What a --loop run reports on the way out: None for an ordinary
             # stop, a ProtectionOnlyExit when the loop ran without a decision
             # provider (issue #268) — read after the sweep to pick the exit line.
@@ -792,13 +824,13 @@ def _live_startup_recovery(
                         client=client,
                         signed=signed,
                         gate=gate,
-                        kill_switch=kill_switch,
-                        safe_mode=safe_mode,
-                        reconciler=reconciler,
-                        processor=processor,
+                        kill_switch=session.kill_switch,
+                        safe_mode=session.safe_mode,
+                        reconciler=session.reconciler,
+                        processor=session.processor,
                         payload_dir=payload_dir,
                         fetch_clearinghouse=fetch_clearinghouse,
-                        identity=identity,
+                        identity=session.identity,
                     )
                     loop_raised = False
             except RunLockError as exc:
@@ -864,94 +896,26 @@ def _live_startup_recovery(
                     # release runs (and no-ops).
                     logger.info("lease takeover — §18.2 shutdown sweep skipped")
                 else:
-                    # §12.2 rule 8 (the --loop path): the loop has been placing
-                    # orders since the startup verdict pass — reconcile once
-                    # more so the sweep below works from fresh exchange state.
-                    # Runs FIRST, before the position/safe-mode reads below:
-                    # this pass can itself ENTER safe mode (an unclean final
-                    # reconcile), and a keep decision computed from the
-                    # pre-reconcile snapshot would strip SL/TP at exactly the
-                    # moment the problem was found. Best-effort: a failure must
-                    # not block the sweep.
-                    if args.loop:
-                        try:
-                            reconciler.reconcile_and_apply(
-                                "shutdown",
-                                safe_mode=safe_mode,
-                                ws_restored=True,
-                                kill_switch_active=not kill_switch.stop_new_orders,
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "§12.2 pre-shutdown reconciliation failed (sweep proceeds)"
-                            )
-                    # Decided 2026-07-16, revised 2026-07-22: on a PASSING
-                    # verdict the §18.2 semantics stand (shutdown cancels ALL
-                    # bot-owned orders, the §19.3-kept SL/TP included), but
-                    # never silently over a live position. On an UNCLEAN exit
-                    # (verdict failed, recovery raised, or safe mode active at
-                    # exit — the boot verdict goes stale over a loop) the sweep
-                    # now KEEPS
-                    # the resting SL/TP over a live — or unreadable, and
-                    # unreadable ≠ flat is the startup sweep's own rule —
-                    # position: stripping reduce-only protection trades an
-                    # unclean verdict for a naked position, and the repair
-                    # machinery that could re-cover it is exactly what an
-                    # unclean verdict refuses to start. The position that
-                    # decides both the warning and the keep is read FRESH here
-                    # (decided 2026-07-17): the boot snapshot can be minutes
-                    # stale after arming/backfill/two reconcile passes, and a
-                    # position acquired mid-recovery would otherwise lose its
-                    # protection to the sweep below without a word.
-                    # None = could not read (unknown ≠ flat), the same sentinel
-                    # convention as ``_safe_fetch_open_orders``.
-                    fresh_positions: list | None
-                    try:
-                        fresh_positions = map_account_snapshot(fetch_clearinghouse()).positions
-                    except Exception:  # noqa: BLE001 — the warning must not mask the verdict
-                        logger.exception("shutdown position re-read failed")
-                        fresh_positions = None
-                    # Exit-time safe mode is read FRESH for the same reason the
-                    # position is: the boot verdict is stale after a loop. A
-                    # failed read is unknown ≠ clean — fail toward keeping.
-                    try:
-                        exit_safe_mode = safe_mode.active
-                    except Exception:  # noqa: BLE001
-                        logger.exception("shutdown safe-mode read failed")
-                        exit_safe_mode = True
-                        exit_safe_mode_unknown = True
-                    # A protection-only loop (issue #268) counts as unclean
-                    # too: the environment is wrong, the next start meets
-                    # the same refusal, and only a protection-only start (or
-                    # a fixed one) re-covers the position — stripping the
-                    # SL/TP on the operator's way to fixing .env would be
-                    # the front-gate hole the mode exists to close.
-                    keep_protective = (
-                        not verdict_passed or exit_safe_mode or loop_raised or loop_exit is not None
-                    ) and (fresh_positions is None or bool(fresh_positions))
-                    # Six distinct causes, six truthful notes: a FAILED
-                    # read is not "safe mode is active" — claiming so would
-                    # contradict the fresh `safe_mode:` line printed later
-                    # when the second read succeeds and finds none.
-                    if not verdict_passed:
-                        unclean_note = "the startup verdict did not pass"
-                    elif loop_refused:
-                        unclean_note = "the engine could not be built (see the error above)"
-                    elif loop_raised:
-                        unclean_note = "the live loop raised instead of returning"
-                    elif loop_exit is not None:
-                        unclean_note = "the loop ran in protection-only mode"
-                    elif exit_safe_mode_unknown:
-                        unclean_note = (
-                            "the exit-time safe-mode state could NOT be read (unknown ≠ clean)"
+                    # The fresh reads the keep decision needs (a --loop run
+                    # reconciles first — see live.shutdown.read_exit_state),
+                    # then the decision itself.
+                    exit_state = read_exit_state(session, reconcile_first=args.loop)
+                    shutdown_verdict = classify_shutdown(
+                        ShutdownFlags(
+                            verdict_passed=verdict_passed,
+                            loop_raised=loop_raised,
+                            loop_refused=loop_refused,
+                            protection_only=loop_exit is not None,
+                            exit_state=exit_state,
                         )
-                    else:
-                        unclean_note = "safe mode is active at exit"
-                    if fresh_positions is None:
+                    )
+                    keep_protective = shutdown_verdict.keep_protective
+                    positions = exit_state.positions
+                    if positions is None:
                         if keep_protective:
                             print(
                                 "WARNING: positions could NOT be re-read at shutdown "
-                                f"(unknown ≠ flat) and {unclean_note} "
+                                f"(unknown ≠ flat) and {shutdown_verdict.unclean_note} "
                                 "— the §18.2 shutdown sweep leaves the bot's resting "
                                 "SL/TP STANDING (reduce-only) and cancels other bot "
                                 "orders. Re-run `live --run-id ...` (--loop only once the §20.2 smoke gate is open), or intervene manually.",
@@ -968,12 +932,12 @@ def _live_startup_recovery(
                                 "manual action re-covers it.",
                                 file=sys.stderr,
                             )
-                    elif fresh_positions:
-                        held = ", ".join(f"{p.coin} {p.size}" for p in fresh_positions)
+                    elif positions:
+                        held = ", ".join(f"{p.coin} {p.size}" for p in positions)
                         if keep_protective:
                             print(
                                 f"WARNING: the account holds a live position ({held}) "
-                                f"and {unclean_note} — the §18.2 "
+                                f"and {shutdown_verdict.unclean_note} — the §18.2 "
                                 "shutdown sweep leaves the bot's resting SL/TP "
                                 "STANDING (reduce-only) and cancels other bot orders. "
                                 "Re-run `live --run-id ...` (--loop only once the §20.2 smoke gate is open), or intervene manually.",
@@ -988,178 +952,59 @@ def _live_startup_recovery(
                                 "or manual action re-covers it.",
                                 file=sys.stderr,
                             )
-                    # Leave nothing resting behind a dead man's switch nobody
-                    # will refresh — except the deliberately-kept SL/TP when
-                    # ``keep_protective`` is set (reduce-only; the disarm below
-                    # is what lets them outlive the wallet-wide trigger). The
-                    # §18.2 shutdown sweep cancels the rest of the bot-owned
-                    # open orders and disarms only on a clean sweep.
-                    # (The §12.2 "before shutdown" reconciliation: for the
-                    # one-shot command it is the verdict pass that just ran — no
-                    # orders are placed after it; the --loop path runs the fresh
-                    # pass above.)
-                    if kill_switch.armed:
-                        # Guarded because a raise inside this ``finally`` would
-                        # DISCARD the computed verdict (nothing prints, the
-                        # documented 0/4/1 contract becomes a generic exit 2) —
-                        # shutdown()'s audit writes are fail-loud by design, so a
-                        # busy DB here is a realistic raise, not an edge case.
-                        try:
-                            kill_switch.shutdown(keep_protective=keep_protective)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.exception("§18.2 shutdown sweep raised")
-                            shutdown_problem = f"shutdown sweep raised: {exc}"
-                        else:
-                            if kill_switch.armed:
-                                # shutdown() disarms only on a clean sweep: still
-                                # armed means bot orders may rest and the
-                                # wallet-wide scheduleCancel WILL fire at the
-                                # deadline — taking out non-bot orders §25 says
-                                # never to touch. Loud, and never exit 0.
-                                shutdown_problem = (
-                                    "shutdown sweep left the kill switch armed — bot "
-                                    "orders may still rest and the wallet-wide "
-                                    "scheduleCancel will fire at the deadline"
-                                )
-                                logger.error("§18.2 %s", shutdown_problem)
-                        # §13.5 (issue #80): the sweep's disarm cross-check just
-                        # probed orderStatus through the shared monitor, and
-                        # this is the LAST holder of the safe-mode machine to
-                        # run — so it reads the latch (inside the armed branch
-                        # on purpose: an unarmed switch ran no cross-check, and
-                        # a latch from the loop was escalated by the engine
-                        # every tick). Every holder's enter persists the same
-                        # durable state; this call is the last chance before
-                        # the process exits, and that state is what the next
-                        # boot hydrates — its verdict then cannot pass until
-                        # §13.6 releases, instead of every shutdown blocking
-                        # its disarm with only a log line. Fed into
-                        # ``shutdown_problem`` so the one-shot lane exits 4 the
-                        # way it does for an armed switch — a run that just
-                        # latched manual safe mode must never hand exit 0 to
-                        # its supervisor. Best-effort like every other write in
-                        # this finally: a busy DB must not discard the verdict.
-                        try:
-                            if escalate_identity_fault(
-                                identity, safe_mode, holder=EscalationHolder.SHUTDOWN
-                            ):
-                                shutdown_problem = (
-                                    "venue identity fault latched — the exchange kept "
-                                    "answering orderStatus about orders that are not "
-                                    "ours; manual safe mode entered (see "
-                                    "identity_fault_latched in protection_order_events "
-                                    "and payloads/orderStatus-*.json)"
-                                    + (f"; also: {shutdown_problem}" if shutdown_problem else "")
-                                )
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "could not persist the venue-identity escalation at shutdown"
-                            )
-                        if shutdown_problem is not None:
-                            # Surfaced HERE, inside the ``finally``: when the body
-                            # above raised (the except path already returned 1),
-                            # the summary prints below never run — and "the
-                            # wallet-wide trigger is still armed" is the one fact
-                            # that must never exit silently, on any path.
+                    shutdown_problem = sweep_on_exit(session, keep_protective=keep_protective)
+                    if shutdown_problem is not None:
+                        # Surfaced HERE, inside the ``finally``: when the body
+                        # above raised (the except path already returned 1),
+                        # the summary prints below never run — and "the
+                        # wallet-wide trigger is still armed" is the one fact
+                        # that must never exit silently, on any path.
+                        print(
+                            f"error: §18.2 shutdown unclean — {shutdown_problem}",
+                            file=sys.stderr,
+                        )
+                        if keep_protective and session.kill_switch.armed:
+                            # The calm "left STANDING" warning above and the
+                            # armed trigger are the SAME orders' fate — say
+                            # so, or the operator reads two disconnected
+                            # facts and misses that the kept SL/TP die at
+                            # the scheduleCancel deadline.
                             print(
-                                f"error: §18.2 shutdown unclean — {shutdown_problem}",
+                                "NOTE: the SL/TP described above as kept "
+                                "STANDING are NOT safe while the wallet-wide "
+                                "scheduleCancel stays armed — it cancels them "
+                                "too at its deadline. Re-run `live --run-id ...`: its "
+                                "clean shutdown sweep disarms the switch on "
+                                "exit. The recovery itself ARMS the switch, and "
+                                "a --loop run is refused while the §20.2 gate is "
+                                "shut — or clear the trigger manually.",
                                 file=sys.stderr,
                             )
-                            if keep_protective and kill_switch.armed:
-                                # The calm "left STANDING" warning above and the
-                                # armed trigger are the SAME orders' fate — say
-                                # so, or the operator reads two disconnected
-                                # facts and misses that the kept SL/TP die at
-                                # the scheduleCancel deadline.
-                                print(
-                                    "NOTE: the SL/TP described above as kept "
-                                    "STANDING are NOT safe while the wallet-wide "
-                                    "scheduleCancel stays armed — it cancels them "
-                                    "too at its deadline. Re-run `live --run-id ...`: its "
-                                    "clean shutdown sweep disarms the switch on "
-                                    "exit. The recovery itself ARMS the switch, and "
-                                    "a --loop run is refused while the §20.2 gate is "
-                                    "shut — or clear the trigger manually.",
-                                    file=sys.stderr,
-                                )
 
             print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
             print(f"canceled_stale_orders: {len(result.canceled_stale)}")
             print(f"kept_orders: {len(result.kept_orders)}")
-            state = safe_mode.current()
+            state = session.safe_mode.current()
             print(f"safe_mode: {'none' if state is None else state.safe_mode_type}")
             if state is not None:
                 print(f"safe_mode_reason: {state.reason}")
             if result.sweep_failures:
                 for failure in result.sweep_failures:
                     print(f"error: stale-order sweep — {failure}", file=sys.stderr)
-            if result.passed:
-                if shutdown_problem is not None:
-                    # Decided 2026-07-17: exit 0 means "all quiet" to a
-                    # supervisor — a passing verdict with an unclean shutdown
-                    # sweep is NOT that; it folds into the same
-                    # executed-but-unclean code 4 the verdict path uses (the
-                    # "§18.2 shutdown unclean" line above carries the detail).
-                    return 4
-                if args.loop:
-                    if loop_exit is not None:
-                        # Protection-only's exit code, BEFORE the safe-mode
-                        # lane below (its line was printed at the top of the
-                        # ``finally``, and the ``safe_mode:`` line already
-                        # reports a latch). Two
-                        # endings, the paper lane's two codes: the position
-                        # closed and the loop ended itself — exit 1, like
-                        # paper's settle-exit, so a supervisor restarts into
-                        # the same named refusal (now over a flat book: exit
-                        # 1 again, no zombie) until the environment is fixed;
-                        # or the operator stopped it — "executed, not clean",
-                        # the same 4 as a stop in safe mode, never 0 ("all
-                        # quiet") for a run that was not trading.
-                        return 1 if loop_exit.settled else 4
-                    if state is not None or (exit_safe_mode_unknown and keep_protective):
-                        # Sibling of the keep decision (2026-07-22): the boot
-                        # verdict is stale after a loop, and a run that latched
-                        # safe mode mid-loop must not hand exit 0 ("all quiet")
-                        # to its supervisor. Same executed-but-unclean code 4
-                        # the one-shot path returns when ITS verdict finds safe
-                        # mode active. A FAILED shutdown safe-mode read that
-                        # actually KEPT orders counts too — the sweep just
-                        # acted on unknown ≠ clean, and a luckier later read
-                        # must not talk the exit code back down to 0 over
-                        # deliberately-kept orders. (Unknown read over a
-                        # confirmed-flat book kept nothing and changed nothing:
-                        # exit stays state-driven, no supervisor false alarm.)
-                        print(
-                            "live loop exited IN SAFE MODE — see safe_mode above; "
-                            "resolve it (manual release if required) before resuming."
-                            if state is not None
-                            else "live loop exited with protective orders kept behind "
-                            "a FAILED shutdown safe-mode read (unknown ≠ clean) — "
-                            "inspect the run store before resuming.",
-                            file=sys.stderr,
-                        )
-                        return 4
-                    print(
-                        "live loop exited — §18.2 shutdown sweep done; re-run "
-                        "with --loop to resume this run.",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(
-                        "startup recovery passed — a live loop can start from "
-                        "this state (re-run with --loop).",
-                        file=sys.stderr,
-                    )
-                return 0
-            print(
-                "startup recovery did NOT pass — the run is in safe mode; see the "
-                "reconciliation events / safe-mode state above (§19.1 step 15).",
-                file=sys.stderr,
+            exit_reason = classify_exit(
+                verdict_passed=result.passed,
+                sweep_unclean=shutdown_problem is not None,
+                loop=args.loop,
+                protection_only_settled=None if loop_exit is None else loop_exit.settled,
+                safe_mode_latched=state is not None,
+                kept_on_unknown_safe_mode=(
+                    shutdown_verdict is not None and shutdown_verdict.kept_on_unknown_safe_mode
+                ),
             )
-            # Exit 4, not 1: "executed fine, verdict unclean" is an operator
-            # signal distinct from a hard failure — same multi-code convention
-            # as validate's 4/5 (decided 2026-07-16).
-            return 4
+            line = _exit_line(exit_reason)
+            if line is not None:
+                print(line, file=sys.stderr)
+            return exit_reason.code
         finally:
             # Guarded: the release opens its own transaction (BEGIN IMMEDIATE),
             # which can raise on a busy store — and a raise in this ``finally``

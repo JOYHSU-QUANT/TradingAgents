@@ -12,6 +12,8 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -32,6 +34,47 @@ from ._common import (
 from ._drift import _HARD_DRIFT_KINDS, _config_drift_report, _run_config_subset
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RestartGate:
+    """How a restart proceeds once reconciliation has let it run.
+
+    ``halt_reason`` is None to trade, else the reason NEW cycles stay halted
+    (``_paper_loop``'s ``halt_reason``). With ``exits`` the process exits 1
+    over a flat book instead, and ``halt_reason`` names the fault.
+    """
+
+    halt_reason: str | None
+    exits: bool
+
+
+def gate_restart(
+    *,
+    replay_mismatch: bool,
+    key_present: bool,
+    engine_failed: bool,
+    holds_live_work: Callable[[], bool],
+) -> RestartGate:
+    """Decide a restart's mode: trade, protection-only, or a named exit.
+
+    A replay mismatch halts on ``"replay"``; reconciliation already refused
+    one over a flat book. Otherwise the first operator-fixable fault, a missing
+    OPENROUTER_API_KEY and then an ``EngineConfigError`` from building the
+    provider, halts over live work and exits over a flat book. Exiting over
+    live work would leave the position with nobody watching SL/TP, since
+    reconciliation already canceled its plans. ``holds_live_work`` is called
+    only when there is a fault to decide.
+    """
+    if replay_mismatch:
+        return RestartGate(halt_reason="replay", exits=False)
+    if not key_present:
+        fault = "missing-key"
+    elif engine_failed:
+        fault = "engine-config-error"
+    else:
+        return RestartGate(halt_reason=None, exits=False)
+    return RestartGate(halt_reason=fault, exits=not holds_live_work())
 
 
 def _cmd_paper(argv: list[str]) -> int:
@@ -342,61 +385,55 @@ def _cmd_paper(argv: list[str]) -> int:
                 # labels a first SL trigger; arming it over a flat book is
                 # harmless, and the read raising must not end the restart).
                 engine.flag_restart_gap()
-            halt_reason = "replay" if trading_halted else None
-            if not trading_halted and not os.environ.get("OPENROUTER_API_KEY"):
-                # Only the restart lane reaches here keyless — a fresh run
-                # demanded the key before writing the run row. A keyless
-                # healthy restart over live work must NOT exit: reconcile
-                # already canceled its plans, so exiting would leave the
-                # position with nobody watching SL/TP — the exact harm
-                # protection-only mode exists to prevent (a replay-mismatch
-                # restart, with *less* trustworthy books, already gets that
-                # protection). Flat, there is nothing to protect and the
-                # plain abort stands.
-                if holds_live_work(engine):
-                    trading_halted = True
-                    halt_reason = "missing-key"
-                    logger.error(
-                        "OPENROUTER_API_KEY missing on restart of %s with a live "
-                        "position — entering protection-only mode",
-                        run_id,
-                    )
-                    print(
-                        "ERROR: OPENROUTER_API_KEY is not set but this run holds "
-                        "a live position — running in protection-only mode: SL/TP "
-                        "protection and the market monitor stay live, NEW decision "
-                        "cycles stay halted. Set the key and restart to resume "
-                        f"trading. ({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
-                        file=sys.stderr,
-                    )
-                else:
-                    _require_api_key()  # prints the standard abort message
-                    return 1
-            if not trading_halted and provider is None:
-                # Only the healthy restart lane reaches here without a provider
-                # — the fresh lane built it pre-flight. Same protection-only
-                # rule as the keyless restart above: an EngineConfigError is
-                # operator-fixable (see _build_engine_config for the causes),
-                # so over live work exiting would leave the position with
-                # nobody watching SL/TP; flat, the named exit 1 stands. Catch
-                # the base, not EngineImportError: a bad completion cap is the
-                # same class of operator mistake, and letting it through here
-                # would kill the process over a live position.
+            # Only the healthy restart lane reaches here keyless or without a
+            # provider: the fresh lane demanded the key and built the provider
+            # before writing the run row.
+            key_present = bool(os.environ.get("OPENROUTER_API_KEY"))
+            engine_error: EngineConfigError | None = None
+            if not trading_halted and key_present and provider is None:
+                # Catch the base, not EngineImportError: a bad completion cap
+                # is the same operator-fixable mistake (see
+                # _build_engine_config for the causes).
                 try:
                     provider = _build_provider()
                 except EngineConfigError as exc:
-                    if holds_live_work(engine):
-                        trading_halted = True
-                        halt_reason = "engine-config-error"
-                        halt_cause = str(exc)
-                        announce_engine_config_protection_only(
-                            exc,
-                            where=f"on restart of {run_id}",
-                            alive="SL/TP protection and the market monitor",
-                        )
-                    else:
-                        print(f"error: {exc}", file=sys.stderr)
-                        return 1
+                    engine_error = exc
+            gate = gate_restart(
+                replay_mismatch=trading_halted,
+                key_present=key_present,
+                engine_failed=engine_error is not None,
+                holds_live_work=lambda: holds_live_work(engine),
+            )
+            if gate.exits:
+                if gate.halt_reason == "missing-key":
+                    _require_api_key()  # prints the standard abort message
+                else:
+                    print(f"error: {engine_error}", file=sys.stderr)
+                return 1
+            if gate.halt_reason == "missing-key":
+                logger.error(
+                    "OPENROUTER_API_KEY missing on restart of %s with a live "
+                    "position — entering protection-only mode",
+                    run_id,
+                )
+                print(
+                    "ERROR: OPENROUTER_API_KEY is not set but this run holds "
+                    "a live position — running in protection-only mode: SL/TP "
+                    "protection and the market monitor stay live, NEW decision "
+                    "cycles stay halted. Set the key and restart to resume "
+                    f"trading. ({dotenv_diagnosis('OPENROUTER_API_KEY')}.)",
+                    file=sys.stderr,
+                )
+            elif gate.halt_reason == "engine-config-error":
+                assert engine_error is not None  # gate_restart names it only then
+                halt_cause = str(engine_error)
+                announce_engine_config_protection_only(
+                    engine_error,
+                    where=f"on restart of {run_id}",
+                    alive="SL/TP protection and the market monitor",
+                )
+            trading_halted = gate.halt_reason is not None
+            halt_reason = gate.halt_reason
             if trading_halted:
                 # Protection-only never polls the AI, and nothing ever un-halts
                 # a protection-only process — the loop never touches the

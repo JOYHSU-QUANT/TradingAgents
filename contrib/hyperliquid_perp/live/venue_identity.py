@@ -36,11 +36,12 @@ question we happened to ask"). This module is that shared counter:
 - The latch is derived from the streak and read by whoever holds the
   :class:`SafeModeManager` after a probe site ran: the engine's tick (after
   the §17 sync), ``LiveReconciler.reconcile_and_apply`` (after a pass) and
-  the CLI's §18.2 shutdown ``finally`` (after the disarm cross-check) — via
-  :func:`escalate_identity_fault`. The monitor itself never escalates: the
-  reconciler and the kill switch have no safe-mode machine in hand, and
-  giving the monitor one would put a durable state transition inside a
-  shutdown path whose write ordering the CLI owns.
+  the §18.2 shutdown's :func:`~.shutdown.sweep_on_exit` (after the disarm
+  cross-check) — via :func:`escalate_identity_fault`. The monitor itself
+  never escalates: the reconciler and the kill switch have no safe-mode
+  machine in hand, and giving the monitor one would put a durable state
+  transition inside a shutdown path whose write ordering ``sweep_on_exit``
+  owns.
 """
 
 from __future__ import annotations

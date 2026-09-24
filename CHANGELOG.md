@@ -33,6 +33,42 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The run-identity gate, the genesis write and the asset-spec read move
+  out of `cli/` into `runtime/`** (refactor plan v2, T2-b — PR 5 of the
+  plan). `paper` and `live --run-id` opened the store, read the run row and
+  refused the two `--create` mismatches in near-verbatim copies; both wrote
+  the run genesis through the same `initialize_run` call with the same seed
+  and JSON shaping; and `paper`, `live --loop` and `live-smoke` each read
+  the asset meta and built the `AssetSpec` by hand. Three seams replace the
+  copies. `runtime.run_identity.open_run` does the first and replaces
+  `cli._common._open_owned_store`, which is gone; a refusal is a
+  `RunIdentityRefusal` carrying a `RunIdentityStage`.
+  `cli._common._open_run_or_exit` prints that refusal, or the text of the
+  `SchemaVersionError` `Database` raises at open, and returns `None`, so
+  each lane makes one call and one `if`. `runtime.genesis.write_genesis`
+  does the second and `runtime.asset_spec.build_asset_spec(market, coin)`
+  the third. Two placements differ from the plan's table. The run-mode
+  check is `OpenedRun.foreign_mode(lane)`, called by each lane where its
+  check stood, rather than a rung inside `open_run`: in `live` the
+  wallet-sibling lease check sits between the `--create` checks and the
+  mode check. And `build_asset_spec` sits beside `AssetSpec` and takes the
+  market reader rather than the config, because the two live callers hold
+  a client pinned to `live.network` and every caller keeps the reader for
+  its own reads. That is the spec half of the plan's D2 chain; the
+  client-and-reader lines stay at each site. The lease, its SIGTERM handler
+  and the deferred migration stay in the lanes, whose order differs.
+  `write_genesis` reads `accounting.initialize_run` at call time, so the one
+  CLI test that patches it still reaches the patch, and the existing CLI
+  tests pass unchanged but for one comment. No behaviour changes: every
+  line a command can print is the same bytes, in the same order.
+  `cli/__init__.py` no longer re-exports `_open_owned_store`, and the
+  layering ratchet's re-export list shrinks by that one name. Tests:
+  `tests/runtime/test_run_identity.py` and `tests/runtime/test_genesis.py`
+  are new, `tests/runtime/test_asset_spec.py` covers `build_asset_spec`,
+  and `tests/cli/test_cli.py` gains the test the live lane's run-mode
+  refusal never had (a mutation that disabled it passed every existing
+  test).
+
 - **The live lane's composition root moves out of `cli/`: `live/wiring.py`
   builds the signed client and the recovery session, `live/config.py`
   climbs the config ladder** (refactor plan v2, T2-a — PR 4 of the plan).

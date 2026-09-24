@@ -127,7 +127,7 @@ TradingAgents/
         ├── integration/                 # bridge to the unmodified engine
         │   └── trading_graph.py         #   HyperliquidTradingGraph subclass
         ├── persistence/                 # Phase 2 SQLite source of truth
-        ├── runtime/                     # paper／live 共用的執行核心（ports 四個 seam Clock／SnapshotProvider／DecisionProvider／FundingSource 的實作與資料型別：clock · market_feed · asset_spec · decision · position_facts · run_lock · no_decision · accounting）
+        ├── runtime/                     # paper／live 共用的執行核心（ports 四個 seam Clock／SnapshotProvider／DecisionProvider／FundingSource 的實作與資料型別：clock · market_feed · asset_spec · decision · position_facts · run_identity · genesis · run_lock · no_decision · accounting）
         ├── paper/                       # Phase 2 paper accounting + execution engine
         ├── live/                        # Phase 3 live execution（平行於 paper/，PR 1 起）
         ├── risk/
@@ -207,9 +207,11 @@ gate 區塊（mode / allow_real_orders / safety 等，見 phase3-spec §24）—
 | `runtime/` | ✅ | paper／live 共用的執行核心（refactor plan v2 T1）：住在 `persistence` 之上、兩個引擎之下；兩個引擎只從這裡與 `ports.py` 借共用碼；共用清單只寫在 phase3-spec §2.1，由 `tests/common/test_layering.py` 的棘輪凍結。 |
 | `runtime/accounting.py` | ✅ | §6 account 公式 · `compute_fill_effect`（模型 fee/realized）與 `compute_live_fill_effect`（交易所 closedPnl/fee，phase3-spec §15）· `initialize_run` genesis · accounting replay（**依 run mode 分流**：paper 用模型 fee/realized；live 用交易所 closedPnl/fee、依交易所時間排序、並折算 accounting adjustments——`adjustment_ledger_delta` 是 live posting 與 replay 共用的唯一定義）（phase2-execution §6、phase3-spec §15）。 |
 | `runtime/clock.py`＋`runtime/market_feed.py` | ✅ | `WallClock`／`ManualClock`（`ports.Clock` 的兩個實作）；`PortSnapshotProvider`／`ScriptedSnapshotProvider` 與 `SnapshotResult` 家族（`ports.SnapshotProvider` 的實作與回傳型別）：市場快照的新鮮度記帳（execution §1.1／§5.2）。 |
-| `runtime/asset_spec.py` | ✅ | `AssetSpec`（coin／szDecimals／margin schedule，qty step 與 price tick 建構時算好）與兩個精度 helper `qty_step_from_sz_decimals`／`price_tick_from_sz_decimals`。 |
+| `runtime/asset_spec.py` | ✅ | `AssetSpec`（coin／szDecimals／margin schedule，qty step 與 price tick 建構時算好）、兩個精度 helper `qty_step_from_sz_decimals`／`price_tick_from_sz_decimals`，與 `build_asset_spec(market, coin)`（從 venue 讀 meta 建出 spec 的唯一入口）。 |
 | `runtime/decision.py` | ✅ | `DecisionInput`（一次 AI 呼叫看到的全部：context、K 線窗、payload path＋hash、三個切段鍵、books）與 `RetryableDecisionError`（§3.1 可重試失敗，建構時 `check_enum` 驗 §6.2 詞彙）：`ports.DecisionProvider` seam 的資料半邊。 |
 | `runtime/position_facts.py` | ✅ | `read_books` → `BookFacts`：每 cycle 讀一次帳本／倉位／最新 fill 戳，同時餵 prompt 的 Position 段與 `ai_inputs` 列；`BookSource` 是 wiring 綁 store 的 callable 型別。 |
+| `runtime/run_identity.py` | ✅ | `open_run(db_path, run_id, *, create)`：`paper` 與 `live --run-id` 開 run 所屬的 store、判定新 run 還是重啟；拒絕是 `RunIdentityRefusal`，措辭在 cli（`_open_run_or_exit`）；run-mode 檢查是 `OpenedRun.foreign_mode`，由各 lane 自己呼叫。 |
+| `runtime/genesis.py` | ✅ | `write_genesis(...)`：把 lane 的 `--create` 輸入（開帳餘額、seed 倉位、config subset）轉成那一次 `accounting.initialize_run` 呼叫。 |
 | `runtime/run_lock.py` | ✅ | 單實例 lease（`scheduler_state` 的 pid + heartbeat）：同一 run 同時只允許一個 process（paper daemon 或 live loop），防重複啟動互相取消活單、雙倍 AI 花費。 |
 | `runtime/no_decision.py` | ✅ | no-decision 升級政策（issue #50／#122）：streak 門檻、`decision_attempts` 查詢、shortfall 措辭、每 cycle 的 log 升級；兩個 validator 與兩個 running loop 共用。從 `common/` 搬來——它認得 store 的表形狀，不該住在 import 圖最底層。 |
 | `cli/` + `__main__.py` | ✅ | `python -m contrib.hyperliquid_perp paper / export / validate`；空 argv／旗標式呼叫原樣委派 legacy `main.py`（`--context-only` 不變），未知裸字具名報錯 exit 1；迴圈運行中 SIGTERM 與 Ctrl-C 同樣走收尾 export（啟動／reconciliation 階段收到則 exit 130、無收尾 export）。 |

@@ -8,16 +8,22 @@ by design: the kernel may name the Hyperliquid adapter's error family
 sort a raise into ERROR or DEFECT; a second venue is not in scope.
 
 - :mod:`.accounting` — the §6 account formulas, the two fill effects (modelled
-  and exchange-basis), the run genesis and the spec §5 accounting replay;
+  and exchange-basis), the genesis transaction (``initialize_run``) and the
+  spec §5 accounting replay;
 - :mod:`.clock` — the two clocks behind the :class:`~..ports.Clock` seam;
 - :mod:`.market_feed` — market-data snapshots with freshness accounting, the
   providers behind :class:`~..ports.SnapshotProvider`;
-- :mod:`.asset_spec` — the per-asset metadata an engine needs, and the two
-  precision steps derived from ``szDecimals``;
+- :mod:`.asset_spec` — the per-asset metadata an engine needs, the two
+  precision steps derived from ``szDecimals``, and the venue read that
+  builds it;
 - :mod:`.decision` — what one AI call sees (``DecisionInput``) and the
   retryable-failure type of the :class:`~..ports.DecisionProvider` seam;
 - :mod:`.position_facts` — the one read of the books behind the prompt's
   position section and the ``ai_inputs`` row;
+- :mod:`.run_identity` — opening the store of a command that owns a run, and
+  settling which run it is (fresh under ``--create``, or a restart);
+- :mod:`.genesis` — turning a lane's ``--create`` inputs into the one
+  ``initialize_run`` call;
 - :mod:`.run_lock` — the single-instance lease per run;
 - :mod:`.no_decision` — the no-decision escalation policy both validators
   and both running loops apply.

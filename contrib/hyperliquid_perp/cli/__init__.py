@@ -75,7 +75,6 @@ from ._common import (
     _existing_run_row,
     _migrate_owned_store,
     _open_existing_db,
-    _open_owned_store,
     _raise_keyboard_interrupt,
     _require_agent_key,
     _require_api_key,

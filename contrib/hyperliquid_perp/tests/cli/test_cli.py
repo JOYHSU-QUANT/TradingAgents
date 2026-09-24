@@ -1920,7 +1920,8 @@ def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams)
         reached.append(True)
         raise RuntimeError("stop right after the key check")
 
-    # cli lazy-imports `from ..runtime import accounting`; patch the module itself.
+    # cli reaches initialize_run through runtime.genesis, which reads it off
+    # `accounting` at call time; patch the module itself.
     monkeypatch.setattr(accounting, "initialize_run", _stop)
     # The provider pre-flight sits between the key check and initialize_run;
     # stub it so this test stays off the real tradingagents import.
@@ -6385,6 +6386,29 @@ def test_live_create_into_a_newer_store_is_refused_before_the_run_row(
     assert "NEWER build" in capsys.readouterr().err
     probe = connect(dbp)
     assert probe.execute("SELECT COUNT(*) FROM runs WHERE run_id = 'r2'").fetchone()[0] == 0
+    probe.close()
+
+
+def test_live_resume_refuses_a_paper_mode_run(tmp_path, capsys, live_seams, monkeypatch):
+    # The live mirror of test_paper_resume_refuses_a_live_mode_run: a typo'd
+    # --run-id/--db pointing at a paper run is refused by name before the
+    # lease, the kill switch or any reconciliation write touches it.
+    monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
+    cfg = _live_yaml(
+        tmp_path,
+        live_lines="  mode: testnet_live\n  network: testnet\n  allow_real_orders: true\n",
+    )
+    dbp = tmp_path / "paper_store.db"
+    db = Database(dbp)
+    accounting.initialize_run(
+        db, run_id="r1", mode="paper", initial_balance_usdc=D(1000), schema_version=SCHEMA_VERSION
+    )
+    db.close()
+    rc = cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
+    assert rc == 1
+    assert "is a paper run — resuming it here would arm the kill switch" in capsys.readouterr().err
+    probe = connect(dbp)
+    assert repo.get_scheduler_state(probe, "r1") is None  # no lease stamped
     probe.close()
 
 

@@ -481,7 +481,7 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     from ..live.authorization import AgentAuthorizationError, verify_agent_authorization
     from ..live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE, SmokeContext
     from ..live.wiring import build_signed_client
-    from ..runtime.asset_spec import AssetSpec
+    from ..runtime.asset_spec import build_asset_spec
 
     if not live_cfg.allow_real_orders:
         print(
@@ -536,11 +536,10 @@ def _build_real_smoke_session(args, *, config, live_cfg, coin, clock, db):
     try:
         signed.health_check()
         market = HyperliquidMarketData(client)
-        sz_decimals, schedule = market.get_asset_meta(coin)
+        asset = build_asset_spec(market, coin)
     except ExchangeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    asset = AssetSpec(coin=coin, sz_decimals=sz_decimals, margin_schedule=schedule)
 
     def _mark() -> Decimal:
         return market.get_market_snapshot(coin).mark_price

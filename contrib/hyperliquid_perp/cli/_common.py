@@ -17,6 +17,7 @@ from pathlib import Path
 from ..config import dotenv_diagnosis
 from ..persistence import repository as repo
 from ..persistence.db import Database, SchemaVersionError
+from ..runtime.run_identity import OpenedRun, RunIdentityRefusal, RunIdentityStage, open_run
 
 logger = logging.getLogger(__name__)
 
@@ -68,41 +69,38 @@ def _open_existing_db(
         return None
 
 
-def _open_owned_store(path: str | Path) -> Database | None:
-    """Open a store for a command that OWNS it (``paper``, ``live``), or refuse.
+def _open_run_or_exit(db_path: str | Path, run_id: str, *, create: bool) -> OpenedRun | None:
+    """:func:`~..runtime.run_identity.open_run`, or ``None`` after printing why.
 
-    An existing store may be owned by a running daemon — this run's previous
-    process, or a sibling run in the same file — and the run lease that
-    proves otherwise lives inside the store being opened. Migrating at open
-    therefore upgraded the schema underneath that daemon on the way to
-    refusing (issue #129). So a populated store is opened AS-IS and the
-    upgrade is owed to :func:`_migrate_owned_store`, which the caller runs at
-    the point it owns the store. :class:`Database`'s deferred policy settles
-    the edge cases at open: an EMPTY store (no file, a file holding no objects
-    of its own, or one holding nothing but this project's empty bookkeeping
-    table) has no owner and is built in full — unless a ``-wal`` or
-    ``-journal`` beside it holds the database the main file has none of, which
-    is refused rather than built into and destroyed (issue #236); a SQLite
-    file holding
-    objects that are NOT this project's is refused by name rather than built
-    into, so a mistyped ``--db`` cannot open a daemon's books inside another
-    application's database (issue #174); a store migrated by a
-    NEWER build is refused before anything is written; and a populated store
-    OLDER than ``schema.LEASE_READABLE_SINCE`` — the floor below which the
-    lease columns the caller reads next do not exist — is refused by name
-    rather than left to die on that read (issue #147). The latter two are the
-    same refusals the real ``live-smoke`` run gets through
-    :func:`_open_existing_db`. Returns ``None`` after printing one.
+    A refusal prints its stage's wording, which ``paper`` and ``live --run-id``
+    share; a ``SchemaVersionError`` prints its own text, as
+    :func:`_open_existing_db` prints it.
     """
     try:
-        return Database(path, migrate=False, defer_migration=True)
+        return open_run(db_path, run_id, create=create)
     except SchemaVersionError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return None
+    except RunIdentityRefusal as refusal:
+        wording = {
+            RunIdentityStage.MISSING_RUN: (
+                f"run {run_id!r} does not exist in {db_path}. Pass --create "
+                "to start it, or fix --run-id / --db to resume the intended run."
+            ),
+            RunIdentityStage.RUN_EXISTS: (
+                f"run {run_id!r} already exists in {db_path}. Drop --create "
+                "to resume it, or pick a new --run-id for a fresh run."
+            ),
+        }
+        print(f"error: {wording[refusal.stage]}", file=sys.stderr)
         return None
 
 
 def _migrate_owned_store(db: Database, *, run_id: str, now: datetime) -> bool:
-    """Pay the upgrade :func:`_open_owned_store` deferred; True if it was REFUSED.
+    """Pay the upgrade a deferred open owes; True if it was REFUSED.
+
+    The deferred opens are :func:`~..runtime.run_identity.open_run` and
+    :func:`_open_existing_db` with ``defer_migration=True``.
 
     A no-op when nothing is owed (the store was built on open, or a dry run
     opened it read-only), so every owning command calls it unconditionally at

@@ -69,8 +69,16 @@ import logging
 import sys
 
 from ..common.entry_argv import is_legacy_argv
+from ..common.prompt_regime import PROMPT_VERSION
 from ..config import load_dotenv_files
-from . import _provider, paper_export
+from ..exchanges.hyperliquid.funding_source import (
+    HistoryFundingSource as _HistoryFundingSource,
+)
+from ..integration.decision_provider import (
+    EngineDecisionProvider as _EngineDecisionProvider,
+    _classify_engine_error,
+)
+from . import paper_export
 from ._common import (
     _existing_run_row,
     _migrate_owned_store,
@@ -85,12 +93,6 @@ from ._drift import (
     _config_drift_report,
     _norm_network,
     _run_config_subset,
-)
-from ._provider import (
-    PROMPT_VERSION,
-    _classify_engine_error,
-    _EngineDecisionProvider,
-    _HistoryFundingSource,
 )
 from .live import _cmd_live, _live_startup_recovery
 from .live_loop import (

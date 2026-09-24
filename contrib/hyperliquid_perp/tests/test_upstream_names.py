@@ -23,7 +23,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 
 
 def test_the_final_state_keys_the_contrib_reads_are_agent_state_fields():
-    # The parse seam (main.py / cli/_provider.py) and the reports sidecar.
+    # The parse seam (main.py / integration/decision_provider.py) and the reports sidecar.
     ours = {FINAL_TRADE_DECISION_KEY, *REPORT_KEYS}
     missing = ours - set(AgentState.__annotations__)
     assert not missing, f"no longer AgentState fields: {sorted(missing)}"

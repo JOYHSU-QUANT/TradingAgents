@@ -17,7 +17,8 @@ from pathlib import Path
 
 from ..common import store_layout
 from ..config import dotenv_diagnosis
-from . import _provider, paper_export
+from ..integration.decision_provider import build_decision_provider
+from . import paper_export
 from ._common import (
     _migrate_owned_store,
     _open_run_or_exit,
@@ -95,6 +96,7 @@ def _cmd_paper(argv: list[str]) -> int:
     # engine/scheduler stack is imported by _run_locked once the lease is in
     # hand).
     from ..exchanges.hyperliquid.errors import ExchangeError
+    from ..exchanges.hyperliquid.funding_source import HistoryFundingSource
     from ..exchanges.hyperliquid.market_data import HyperliquidMarketData
     from ..exchanges.hyperliquid.sdk_client import HyperliquidClient
     from ..paper.config import PaperTradingConfig
@@ -127,7 +129,7 @@ def _cmd_paper(argv: list[str]) -> int:
     export_dir = (
         Path(args.export_dir) if args.export_dir else db_path.resolve().parent / "exports" / run_id
     )
-    funding_source = _provider._HistoryFundingSource(market)
+    funding_source = HistoryFundingSource(market)
 
     # Opened as-is: the upgrade is owed once the lease is ours, in _run_locked
     # (issue #129 — see runtime.run_identity.open_run).
@@ -185,19 +187,14 @@ def _cmd_paper(argv: list[str]) -> int:
             provider = None
 
             def _build_provider():
-                from functools import partial
-
-                from ..runtime.position_facts import read_books
-
-                return _provider._EngineDecisionProvider(
+                return build_decision_provider(
                     config,
+                    db=db,
+                    run_id=run_id,
+                    coin=coin,
                     risk_cfg=risk_cfg,
                     decision_cfg=decision_cfg,
                     payload_dir=store_layout.payload_dir(db_path, run_id),
-                    # Bound now, read per cycle: the fresh-run provider is
-                    # built before initialize_run seeds the books, and the
-                    # read degrades to "no section" until they exist.
-                    position_source=partial(read_books, db, run_id, coin),
                 )
 
             if not is_restart:

@@ -16,7 +16,10 @@ None of these invariants is exercised anywhere else:
   engines (issue #122);
 - ``runtime/``, the kernel both lanes share, keeps its load-time closure on
   the store, the ports and the floor, and reaches neither ``paper`` nor
-  ``live`` at any depth (refactor plan v2, T1);
+  ``live`` at any depth (refactor plan v2, T1); its ``__init__`` docstring
+  lists exactly the modules on disk, the one list the docs point to;
+- ``integration/`` borrows exactly one name from the lanes, the paper cost
+  model the decision provider prices the position section with;
 - the layering debt measured on 2026-09-22 is frozen so it can only shrink
   (refactor plan v2, T0 — the Ratchets section at the end of this file).
 """
@@ -34,6 +37,7 @@ import pytest
 from contrib import hyperliquid_perp as perp_pkg
 from contrib.hyperliquid_perp import (
     common as common_pkg,
+    integration as integration_pkg,
     live as live_pkg,
     persistence as persistence_pkg,
     runtime as runtime_pkg,
@@ -250,6 +254,13 @@ def test_the_runtime_package_reaches_neither_engine_at_any_depth():
         for symbol in _symbols_imported_from(source, pkg)
     }
     assert not found, f"runtime/ imports from an engine: {sorted(found)}"
+
+
+def test_the_runtime_docstring_lists_exactly_the_modules_on_disk():
+    # Compared as sorted lists, so a bullet written twice fails too.
+    listed = sorted(re.findall(r"^- :mod:`\.(\w+)`", runtime_pkg.__doc__, flags=re.MULTILINE))
+    on_disk = sorted(p.stem for p in package_sources(runtime_pkg) if p.name != "__init__.py")
+    assert listed == on_disk, f"runtime/__init__ lists {listed}, runtime/ holds {on_disk}"
 
 
 def test_the_closure_walk_reaches_an_import_two_hops_away(tmp_path):
@@ -768,6 +779,24 @@ def test_ports_names_exactly_the_runtime_types_frozen_on_2026_09_23():
     )
 
 
+# The engine adapter borrows one name from the lanes: the decision provider
+# prices the prompt's position section with the paper fill model's cost
+# assumptions on both lanes (PR #160, issue #161).
+_INTEGRATION_LANE_IMPORTS = frozenset({"paper.config.PaperTradingConfig"})
+
+
+def test_integration_borrows_exactly_the_lane_names_frozen_on_2026_09_24():
+    found = {
+        symbol
+        for source in package_sources(integration_pkg)
+        for pkg in ("paper", "live")
+        for symbol in _symbols_imported_from(source, pkg)
+    }
+    assert found == _INTEGRATION_LANE_IMPORTS, _ratchet_message(
+        "integration's lane imports", found, _INTEGRATION_LANE_IMPORTS
+    )
+
+
 def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
     # No live module is written in the absolute or plain-``import`` forms
     # today, so the shapes are pinned on a synthetic tree.
@@ -908,7 +937,6 @@ _CLI_PRIVATE_REEXPORTS = frozenset(
         "_paper_loop",
         "_post_cycle_export",
         "_print_smoke_gate",
-        "_provider",
         "_raise_keyboard_interrupt",
         "_require_agent_key",
         "_require_api_key",

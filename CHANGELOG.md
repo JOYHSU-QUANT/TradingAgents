@@ -33,6 +33,40 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The decision provider and the funding-rate source move out of `cli/`**
+  (refactor plan v2, T2-c — PR 6 of the plan). `cli/_provider.py` is gone.
+  `_EngineDecisionProvider` is now
+  `integration.decision_provider.EngineDecisionProvider`, with
+  `_classify_engine_error` beside it, and `_HistoryFundingSource` is now
+  `exchanges.hyperliquid.funding_source.HistoryFundingSource`. Apart from
+  the two class names, import lines and comments, the code moves
+  unchanged. The two daemons
+  built the provider in near-identical blocks, and both now call
+  `integration.decision_provider.build_decision_provider(...)`, which binds
+  the run's books as the position source. The live lane also passes its
+  kill-switch refresh. `cli/__init__.py` still re-exports the three names
+  for the tests that import them, and takes `PROMPT_VERSION` straight from
+  `common.prompt_regime`. It no longer binds `_provider`, so the layering
+  ratchet's re-export list shrinks by that one name. The plan kept a
+  `cli/_provider.py` re-export for tests to patch. A patch on a re-export
+  cannot reach the factory's lookup, so the nine places in
+  `tests/cli/test_cli.py` that stubbed the constructor now patch
+  `integration.decision_provider.EngineDecisionProvider`, and nothing reads
+  the old path. Three log lines change logger name, a
+  deliberate exception to the no-changed-strings rule. The `prompt_regime:`
+  INFO line and the `position section omitted (reason=no_books)` WARNING
+  now log as `contrib.hyperliquid_perp.integration.decision_provider`. The
+  `funding history fetch failed` WARNING and ERROR now log as
+  `contrib.hyperliquid_perp.exchanges.hyperliquid.funding_source`. Their
+  message text is unchanged, and journald shows the new name before each
+  message. Nothing else a command prints changes. The same PR makes
+  `runtime/__init__`'s docstring the one list of the kernel's modules.
+  phase3-spec §2.1 and the README directory tree now point to it instead of
+  naming the modules, and `tests/common/test_layering.py` pins that list to
+  the modules on disk. A second new test there freezes what `integration/`
+  imports from `paper/` and `live/`: one name, `paper.config.PaperTradingConfig`,
+  which the provider reads for the position section's cost assumptions.
+
 - **The run-identity gate, the genesis write and the asset-spec read move
   out of `cli/` into `runtime/`** (refactor plan v2, T2-b — PR 5 of the
   plan). `paper` and `live --run-id` opened the store, read the run row and

@@ -64,7 +64,7 @@ def test_the_position_omission_line_is_one_template_over_a_closed_reason_vocabul
     # section render the same prompt and the same ``context_shape`` and get
     # no store column; issue #197 made the WARNING that records which one
     # happened a shared template with a ``reason=`` grep handle rather than
-    # two hand-written English lines. Both callers (``cli._provider`` for
+    # two hand-written English lines. Both callers (``integration.decision_provider`` for
     # ``no_books``, ``domains.perp.marginal_cost`` for ``non_positive_equity``)
     # are pinned at their sites; this pins the template and the vocabulary
     # they share.

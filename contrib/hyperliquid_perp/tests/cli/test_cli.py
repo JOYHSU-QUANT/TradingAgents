@@ -34,6 +34,7 @@ from contrib.hyperliquid_perp.cli import (
 from contrib.hyperliquid_perp.common import store_layout
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext, TopOfBook
+from contrib.hyperliquid_perp.integration import decision_provider as decision_provider_mod
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -1122,7 +1123,7 @@ def test_build_input_logs_the_prompt_regime_once_and_again_only_when_it_flips(
         _payload_dir=tmp_path / "payloads", _engine_config={"deep_think_llm": "model-x"}
     )
 
-    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli._provider"):
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.integration.decision_provider"):
         first = provider.build_input(coin="BTC", as_of=as_of)
         provider.build_input(coin="BTC", as_of=as_of + timedelta(hours=4))
     expected = prompt_regime_line(first.prompt_version, first.context_shape, first.format_fingerprint)
@@ -1131,7 +1132,7 @@ def test_build_input_logs_the_prompt_regime_once_and_again_only_when_it_flips(
     # A section appears mid-run (here: an indicator joins the set) — the
     # bucket flips, and the log says so exactly once more.
     contexts.append(dataclasses.replace(ctx, indicators={**ctx.indicators, "macd": 1.0}))
-    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli._provider"):
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.integration.decision_provider"):
         flipped = provider.build_input(coin="BTC", as_of=as_of + timedelta(hours=8))
     assert flipped.context_shape != first.context_shape
     assert _regime_log_lines(caplog) == [
@@ -1171,7 +1172,7 @@ def test_build_input_logs_the_regime_only_for_a_cycle_that_reached_its_payload(
 
     monkeypatch.setattr(Path, "write_bytes", disk_full_once)
 
-    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.cli._provider"):
+    with caplog.at_level(logging.INFO, logger="contrib.hyperliquid_perp.integration.decision_provider"):
         with pytest.raises(RetryableDecisionError, match="payload write failed"):
             provider.build_input(coin="BTC", as_of=as_of)
         assert _regime_log_lines(caplog) == []  # nothing reached the store; nothing claimed
@@ -1193,7 +1194,7 @@ def test_the_bookless_omission_is_worded_apart_from_the_pricers(caplog):
     from contrib.hyperliquid_perp.common.prompt_regime import position_section_omitted
 
     provider = _stub_provider(_position_source=lambda: None)
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli._provider"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.integration.decision_provider"):
         assert provider._read_books() is None
     [message] = [
         r.getMessage() for r in caplog.records if r.getMessage().startswith("position section omitted")
@@ -1925,7 +1926,7 @@ def test_paper_key_check_satisfied_by_dotenv(tmp_path, monkeypatch, paper_seams)
     monkeypatch.setattr(accounting, "initialize_run", _stop)
     # The provider pre-flight sits between the key check and initialize_run;
     # stub it so this test stays off the real tradingagents import.
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", lambda *a, **kw: object())
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", lambda *a, **kw: object())
     rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
 
     # Reaching initialize_run proves the key check passed on the .env value;
@@ -2096,7 +2097,7 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     def _forbid_provider(*args, **kwargs):
         raise AssertionError("keyless protection-only must not build the decision provider")
 
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _forbid_provider)
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _forbid_provider)
     # Sentinel pins the dotenv_diagnosis wiring in the protection-only message
     # (same contract as the fresh-run abort's sentinel above).
     monkeypatch.setattr(cli_mod.paper, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
@@ -2140,7 +2141,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
             "read a repo .env file"
         )
 
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _boom)
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _boom)
     path = tmp_path / "new.db"
     rc = cli_main(_paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 1
@@ -2151,7 +2152,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
 
     # The operator fixes the environment and retries the SAME command: the
     # provider now builds and --create must not hit "already exists".
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", lambda *a, **kw: object())
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", lambda *a, **kw: object())
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -2174,7 +2175,6 @@ def test_paper_restart_provider_import_failure_exits_1_named(
     # exit 1, not the exit-2 last-resort handler. This is the FLAT case —
     # nothing to protect, so the abort stands; a restart holding live work
     # degrades to protection-only instead (companion test below).
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.engine_bridge import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
@@ -2202,7 +2202,7 @@ def test_paper_restart_provider_import_failure_exits_1_named(
             "read a repo .env file"
         )
 
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _boom)
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _boom)
     rc = cli_main(_paper_argv(path, run_id="r", config=paper_seams))
     assert rc == 1
     assert "error: importing tradingagents failed" in capsys.readouterr().err
@@ -2257,7 +2257,7 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
             "read a repo .env file"
         )
 
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _boom)
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _boom)
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -3018,7 +3018,7 @@ def test_history_funding_source_escalates_after_consecutive_failures(caplog):
     source = _HistoryFundingSource(_BrokenMarket())
     threshold = source._FAILURE_ESCALATION_THRESHOLD
     when = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
-    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.cli._provider"):
+    with caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.exchanges.hyperliquid.funding_source"):
         for _ in range(threshold):
             assert source.rate_at("BTC", when) is None
     failures = [r for r in caplog.records if "funding history fetch failed" in r.getMessage()]
@@ -5040,7 +5040,7 @@ def test_paper_protection_only_restart_skips_provider_and_stamps_failed(
     def _forbid_provider(*args, **kwargs):
         raise AssertionError("protection-only must not build the decision provider")
 
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _forbid_provider)
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _forbid_provider)
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -7260,7 +7260,7 @@ def _drive_live_loop_construction(
             # Nothing calls it — the tick sentinel fires before the first pump.
 
     monkeypatch.setattr(md_mod, "HyperliquidMarketData", _FakeMarket)
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _RecordingProvider)
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _RecordingProvider)
     _recorder(prot_mod, "ProtectionManager", "protection")
     _recorder(lg_mod, "LossGuards", "guards")
 
@@ -7729,9 +7729,9 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
 
 
 def test_the_live_loop_wires_the_books_as_the_provider_position_source(tmp_path, monkeypatch):
-    # Prompt v4 on the live lane: the same read_books binding the paper
-    # daemon makes, over THIS run's store — dropped, None, or bound to the
-    # wrong run/coin would leave the live prompt silently position-blind.
+    # Prompt v4 on the live lane: build_decision_provider binds read_books
+    # over THIS run's store, as it does for paper — dropped, None, or bound
+    # to the wrong run/coin would leave the live prompt silently position-blind.
     built = _drive_live_loop_construction(
         tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
     )
@@ -7981,7 +7981,6 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     included — see the RUNBOOK), then update the digest here.
     """
     from contrib.hyperliquid_perp import cli as _cli
-    from contrib.hyperliquid_perp.cli import _provider
     from contrib.hyperliquid_perp.common import prompt_regime
     from contrib.hyperliquid_perp.domains.perp.target_decision import (
         DecisionConfig,
@@ -8002,10 +8001,10 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # v6 (2026-09-22) bumped for the CONTEXT again — the Last fill: line's
     # age unit (issue #288) — so v6's digest is v5's.
     assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v6", "947e85a9b7b750f1")
-    # The two ``cli`` spellings are the same object, not a second declaration
-    # that would keep equal today and fork the next time one side moves: the
-    # daemon stamps through ``_provider``, the preview through ``common``.
-    assert _provider.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
+    # The daemon's spelling (``integration.decision_provider``) and the ``cli``
+    # re-export are the same object, not a second declaration that would keep
+    # equal today and fork the next time one side moves.
+    assert decision_provider_mod.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
     assert _cli.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
 
 
@@ -8167,12 +8166,10 @@ def assert_position_source_binds(source, *, run_id: str, coin: str) -> None:
 def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
     tmp_path, monkeypatch, paper_seams
 ):
-    # The paper lane: _build_provider binds read_books over the run's
+    # The paper lane: build_decision_provider binds read_books over the run's
     # store, so a fresh run's very first prompt already carries the section
     # (the books are seeded before the first cycle). The recorder stops the
     # command right at the provider pre-flight, before initialize_run.
-    from contrib.hyperliquid_perp import cli as cli_mod
-
     captured = {}
 
     class _Recording:
@@ -8185,7 +8182,7 @@ def test_the_paper_daemon_wires_the_books_as_the_provider_position_source(
             captured["payload_dir"] = kwargs["payload_dir"]
             raise _StopBeforeTheLoop
 
-    monkeypatch.setattr(cli_mod._provider, "_EngineDecisionProvider", _Recording)
+    monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _Recording)
     rc = cli_main(_paper_argv(tmp_path / "new.db", run_id="fresh", config=paper_seams, create=True))
     assert rc == 2  # the sentinel surfaces as the top-level "unexpected error"
     assert captured["book"] is None

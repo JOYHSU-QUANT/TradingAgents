@@ -7,7 +7,7 @@ Three surfaces print them and an operator greps across all three:
 - ``validate`` — one line per bucket, with its cycle count (both validators,
   through ``paper.validation.prompt_regime_lines``);
 - the running daemons — one INFO line the first time a cycle's prompt is
-  built, and again whenever the triple flips (``cli._provider``), so a YAML
+  built, and again whenever the triple flips (``integration.decision_provider``), so a YAML
   edit + restart shows which bucket it landed in without a store query
   (issue #163);
 - ``--context-only`` — the keyless preview of the bucket a config edit lands
@@ -107,7 +107,7 @@ def prompt_regime_line(
 # vocabulary the way ``persistence.backfill.Reason`` is: the type is the
 # guard, both callers pass a literal.
 #
-# - ``no_books``: the run's ledger does not exist yet (``cli._provider``
+# - ``no_books``: the run's ledger does not exist yet (``integration.decision_provider``
 #   reading the books) — unreachable on the production wirings, so seeing it
 #   means a wiring or store problem;
 # - ``non_positive_equity``: the pricer refused an account with equity <= 0

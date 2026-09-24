@@ -887,7 +887,7 @@ class PaperScheduler:
 
         The account side comes from the books the provider read for the
         prompt's position section and carried on the input (issue #134): one
-        read per cycle feeds both the prompt and this row, so the two cannot
+        read per ``build_input`` feeds both the prompt and this row, so the two cannot
         describe different books. A provider that carries none (a test double,
         a replay harness) gets the pre-#134 read here instead.
         """

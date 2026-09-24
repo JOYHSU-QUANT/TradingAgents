@@ -48,7 +48,7 @@ extension points 負責把 perp 資料送*進去*、把引擎的決策讀*出來
 ## 執行流程
 
 ```
-contrib main.py（一次性）／ cli/_provider.py（daemon；同一條流程，多兩個 sidecar）
+contrib main.py（一次性）／ integration/decision_provider.py（daemon；同一條流程，多兩個 sidecar）
    │
    ├─ build PerpMarketContext + PerpPosition         (domains/perp)
    │

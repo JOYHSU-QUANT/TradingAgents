@@ -11,7 +11,7 @@ from decimal import Decimal
 from functools import partial
 from pathlib import Path
 
-from . import _provider
+from ..integration.decision_provider import build_decision_provider
 from ._common import (
     announce_engine_config_protection_only,
     holds_live_work,
@@ -280,7 +280,6 @@ def _run_live_loop(
     from ..runtime.asset_spec import build_asset_spec
     from ..runtime.clock import WallClock
     from ..runtime.market_feed import PortSnapshotProvider
-    from ..runtime.position_facts import read_books
 
     # ``cfgs`` was validated by _cmd_live's front gate (decided 2026-07-22): a
     # bad risk:/decision:/paper_trading: block is an exit-1 up front, so this
@@ -392,8 +391,11 @@ def _run_live_loop(
     # active leg or pending flip; unreadable counts as live).
     protection_only: ProtectionOnlyExit | None = None
     try:
-        decision_provider = _provider._EngineDecisionProvider(
+        decision_provider = build_decision_provider(
             config,
+            db=db,
+            run_id=run_id,
+            coin=coin,
             risk_cfg=risk_cfg,
             decision_cfg=decision_cfg,
             payload_dir=payload_dir,
@@ -405,10 +407,6 @@ def _run_live_loop(
             on_blocking_read=partial(
                 refresh_across_blocking_work, kill_switch, what="decision market data"
             ),
-            # The live store keeps the same books the paper daemon reads (the
-            # reconciler mirrors the exchange onto them), so the prompt's
-            # ``Position:`` section comes from the same read on both lanes.
-            position_source=partial(read_books, db, run_id, coin),
         )
     except EngineConfigError as exc:
         if not holds_live_work(engine):

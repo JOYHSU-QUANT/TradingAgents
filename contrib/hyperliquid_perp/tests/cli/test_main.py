@@ -2434,7 +2434,7 @@ def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monk
     ``macro_trend`` documents itself as "Not a gate" and "fail-closed as a
     WHOLE", which held for its three compute refusals and not for the read
     that feeds them: unguarded, a 429 or a malformed 1d response propagated
-    out of ``_build_context``, ``cli/_provider`` filed it as
+    out of ``_build_context``, the decision provider filed it as
     ``connection`` / ``malformed_response``, and a whole 4h cycle reached no
     decision — carrying an open position through unreassessed — because an
     optional backdrop could not be drawn. ``call_sdk``'s message names no
@@ -2499,7 +2499,7 @@ def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monk
     # and the venue answering with something the mapper cannot use. They are
     # NOT the same news — a throttle heals by itself, a misrouted or drifted
     # response recurs every cycle until a human acts — so the line has to tell
-    # them apart. Collapsing them is the defect cli/_provider exists to avoid
+    # them apart. Collapsing them is the defect integration/decision_provider exists to avoid
     # (issue #47), and this cycle no longer passes through that classifier.
     seen = []
     for failure in (ExchangeThrottledError("429 slow down"), MalformedResponseError("bad echo")):
@@ -2788,7 +2788,7 @@ def test_run_engine_prompt_carries_no_gate_threshold_number(monkeypatch):
     # The context half is a stub here (``_stub_engine`` replaces
     # render_market_context), so the context sections are NOT covered by
     # this test: they are pinned by gate word in test_prompt_context, and the
-    # daemon lanes compose the same two functions (cli/_provider.py).
+    # daemon lanes compose the same two functions (integration/decision_provider.py).
     written = {}
     _stub_engine(monkeypatch)
     monkeypatch.setattr(

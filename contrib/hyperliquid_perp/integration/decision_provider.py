@@ -1,18 +1,19 @@
-"""Production seams: funding-rate history + the AI decision provider."""
+"""The production decision provider: the TradingAgents engine behind ``ports.DecisionProvider``.
+
+Built through :func:`build_decision_provider`.
+"""
 
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 # The one in-package import this module takes at load time: ``common`` sits at
 # the bottom of the graph and imports nothing, so it costs no closure. Every
-# other in-package import here stays function-local. ``PROMPT_VERSION`` is
-# used below AND re-exported through ``cli/__init__`` (issue #197: it moved
-# to ``common``; the ``cli`` spellings are pinned to be the same object).
+# other in-package import here stays function-local: ``cli/__init__`` imports
+# this module at load time for its re-exports.
 from ..common.prompt_regime import PROMPT_VERSION, position_section_omitted, prompt_regime_line
 
 if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function-local
@@ -21,96 +22,8 @@ if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function
 logger = logging.getLogger(__name__)
 
 
-class _HistoryFundingSource:
-    """Funding rates from the public fundingHistory endpoint (execution §6.5).
-
-    Serves the engine's hourly settlements and the pending-event backfill
-    (restart + every cycle boundary). Responses are cached briefly so a
-    backfill loop over many pending hours does not re-fetch per event; the
-    fetch window widens to cover however old the requested settlement is, so a
-    long-pending event can always resolve. A missing hour returns ``None``
-    (the caller records/keeps a ``pending`` event — never a fabricated rate).
-    """
-
-    _MIN_WINDOW_DAYS = 7
-    _CACHE_TTL_SECONDS = 900
-    # After this many consecutive fetch failures the log escalates to ERROR: a
-    # chronic integration break (auth, endpoint drift) must read differently
-    # from the ordinary "rate not published yet" warning it otherwise mimics —
-    # events would pile up pending forever behind an easy-to-miss line.
-    _FAILURE_ESCALATION_THRESHOLD = 3
-
-    def __init__(self, market) -> None:
-        self._market = market
-        # coin -> (fetched_at_monotonic, window_days_fetched, {hour: rate})
-        self._cache: dict[str, tuple[float, int, dict[datetime, object]]] = {}
-        self._consecutive_failures: dict[str, int] = {}
-
-    def rate_at(self, coin: str, funding_timestamp: datetime):
-        from ..common.instants import from_epoch_ms
-        from ..exchanges.hyperliquid.errors import ExchangeError
-
-        hour = funding_timestamp.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        now = datetime.now(timezone.utc)
-        age = now - hour
-        needed_days = max(self._MIN_WINDOW_DAYS, age.days + 2)
-        cached = self._cache.get(coin)
-        if (
-            cached is None
-            or time.monotonic() - cached[0] > self._CACHE_TTL_SECONDS
-            or cached[1] < needed_days
-        ):
-            try:
-                # The HOST clock cuts this window, deliberately — the one
-                # windowed read that does not take the exchange's (issue
-                # #124). This looks up a PAST hour, and the only thing a host
-                # clock offset can do to it is a miss: a host behind by S has
-                # no points for the last S, so a fresh hour reads ``None``
-                # and the event stays pending until a later poll — never a
-                # wrong rate. Reading the exchange's clock here would add a
-                # REST call per refresh to buy nothing the caller can use.
-                points = self._market.get_funding_history(coin, needed_days, end=now)
-            except ExchangeError as exc:
-                # A VENUE failure means "pending" — the endpoint refused,
-                # throttled, or answered malformed; the event waits for a
-                # later poll. Only that family is caught: a ``TypeError``
-                # from a call site that drifted from the reader's signature,
-                # or a ``ValueError`` from a naive ``end``, is a programmer
-                # error and propagates out of this lookup — counted as a
-                # fetch failure it would log three WARNINGs and an ERROR that
-                # read as an outage, while every settlement stayed pending
-                # forever (issue #157). What the callers make of it is theirs:
-                # the engine tick lets it end the run; the cycle-boundary
-                # backfill contains it in a lane of its own, which says the
-                # READER failed rather than blaming the stored row (issue
-                # #193 — it used to land in the corrupt-row lane and send an
-                # operator to SQLite to hunt a fault that is in the code).
-                failures = self._consecutive_failures.get(coin, 0) + 1
-                self._consecutive_failures[coin] = failures
-                log = (
-                    logger.error
-                    if failures >= self._FAILURE_ESCALATION_THRESHOLD
-                    else logger.warning
-                )
-                log(
-                    "funding history fetch failed for %s (%d consecutive): %s",
-                    coin,
-                    failures,
-                    exc,
-                )
-                return None
-            self._consecutive_failures.pop(coin, None)
-            by_hour = {}
-            for point in points:
-                stamp = from_epoch_ms(point.time)
-                by_hour[stamp.replace(minute=0, second=0, microsecond=0)] = point.rate
-            cached = (time.monotonic(), needed_days, by_hour)
-            self._cache[coin] = cached
-        return cached[2].get(hour)
-
-
-class _EngineDecisionProvider:
-    """Production :class:`~.ports.DecisionProvider`: the TradingAgents engine.
+class EngineDecisionProvider:
+    """Production :class:`~..ports.DecisionProvider`: the TradingAgents engine.
 
     ``build_input`` fetches market data and persists the full payload JSON
     (phase2-data §5: SQLite keeps summary + path + hash); ``request_decision``
@@ -119,7 +32,7 @@ class _EngineDecisionProvider:
     :class:`RetryableDecisionError`; contract violations are NOT errors — they
     come back as an invalid ``ParsedDecision`` (fail-closed downstream).
 
-    NOT a pure function of its argument (PR 6 hazard): ``request_decision``
+    NOT a pure function of its argument (Phase 3 PR 6 hazard): ``request_decision``
     reads ``_context_text`` / ``_format_text`` that the LAST ``build_input``
     call stashed on the instance, not fields of ``decision_input`` — and the
     one shared instance is handed to both the background worker thread and the
@@ -160,14 +73,14 @@ class _EngineDecisionProvider:
         self._decision = decision_cfg
         self._payload_dir = payload_dir
         # Live only: ``build_input`` runs on the single-threaded tick and makes
-        # the longest unrefreshed REST chain in the system, so the live wiring
-        # passes a kill-switch refresh here. ``None`` for paper and the one-shot
-        # CLI paths, which hold no dead man's switch (2026-08-01 lifecycle review).
+        # the longest unrefreshed REST chain in the system, so the live lane
+        # passes a kill-switch refresh here. ``None`` for paper, which holds no
+        # dead man's switch (2026-08-01 lifecycle review).
         self._on_blocking_read = on_blocking_read
-        # ``position_facts.BookSource`` — the run's books, read at build
-        # time (``runtime.position_facts.read_books``, bound by the paper
-        # and live wirings). REQUIRED, with no default: both wirings pass one,
-        # and a new one that forgot to would produce a silently position-blind
+        # ``position_facts.BookSource`` — the run's books, read in each
+        # ``build_input`` (``runtime.position_facts.read_books``, bound by
+        # ``build_decision_provider``). REQUIRED, with no default: a wiring
+        # that forgot it would produce a silently position-blind
         # prompt (prompt v4's section simply absent, the ``|position`` token
         # missing from ``context_shape``) with nothing raising. The class-level
         # ``_position_source = None`` above still serves the tests that skip
@@ -416,15 +329,15 @@ class _EngineDecisionProvider:
         from tradingagents.node_names import PORTFOLIO_MANAGER_NODE
 
         from ..domains.perp.target_decision import FINAL_TRADE_DECISION_KEY, parse_target_decision
-        from ..integration.completion_usage import (
+        from ..runtime.decision import RetryableDecisionError
+        from .completion_usage import (
             CompletionUsageCollector,
             log_decision_truncation,
             log_unparsed_decision_truncation,
             report_usage,
         )
-        from ..integration.decision_reports import write_decision_reports
-        from ..integration.trading_graph import build_graph
-        from ..runtime.decision import RetryableDecisionError
+        from .decision_reports import write_decision_reports
+        from .trading_graph import build_graph
 
         # One collector per request (issue #182): the live lane runs this on a
         # worker thread, and a cycle's completions must not mix with another's.
@@ -521,3 +434,36 @@ def _classify_engine_error(exc: Exception) -> str:
     if "connection" in text or "connect" in text or "network" in text:
         return "connection"
     return "server_error"
+
+
+def build_decision_provider(
+    config: dict,
+    *,
+    db,
+    run_id: str,
+    coin: str,
+    risk_cfg,
+    decision_cfg,
+    payload_dir: Path,
+    on_blocking_read=None,
+) -> EngineDecisionProvider:
+    """The provider a daemon runs, reading the books of ``run_id`` in ``db``.
+
+    The books are bound now and read in each ``build_input``, so a provider built
+    before ``initialize_run`` seeds them (the paper lane's fresh-run
+    pre-flight) renders no ``Position:`` section until they exist. The live
+    store keeps the same books (its reconciler mirrors the exchange onto
+    them), so the section comes from the same read on both lanes.
+    """
+    from functools import partial
+
+    from ..runtime.position_facts import read_books
+
+    return EngineDecisionProvider(
+        config,
+        risk_cfg=risk_cfg,
+        decision_cfg=decision_cfg,
+        payload_dir=payload_dir,
+        on_blocking_read=on_blocking_read,
+        position_source=partial(read_books, db, run_id, coin),
+    )

@@ -28,9 +28,10 @@ stores and prints, and everything between is here. The definitions, once:
   the mean, class by class, of its valid repeats (:func:`ensemble`). A
   question with no valid forecast but an ``invalid_probe`` among its
   repeats (the others refused, if any) is scored as the base rate (it adds
-  no skill and keeps its place in ``n``; with no train base rate it is
-  only counted), and the skill without those stand-ins is printed beside
-  it; a question refused on every repeat is counted, not scored.
+  no skill and keeps its place in ``n``; with no outcome, or no train base
+  rate, it is only counted), and the skill without those stand-ins is
+  printed beside it; a question refused on every repeat is counted, not
+  scored.
 - **Up against down given a move** (decided 2026-09-24) takes the questions
   that moved (``up`` or ``down``) and scores ``up / (up + down)`` of each
   forecast with the binary Brier score ``(q - y)²``, against the share of
@@ -330,8 +331,9 @@ class _Tally:
     """One set of answers, one segment, one horizon: the pairs scored, and what was not.
 
     ``stand_ins`` holds the outcome of every question filed as
-    ``invalid_probe`` (no valid forecast, see :func:`ensemble`), for the
-    headline to score as the base rate.
+    ``invalid_probe`` (no valid forecast, see :func:`ensemble`) that has an
+    outcome, for the headline to score as the base rate; one with none is
+    only counted in ``invalid``.
     """
 
     pairs: list[Pair] = field(default_factory=list)

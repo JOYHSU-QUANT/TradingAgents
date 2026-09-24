@@ -972,3 +972,44 @@ def test_a_question_refused_on_every_repeat_is_counted_in_the_report(
         "  4h train: n 5 scored (0 invalid_probe, 1 refused, 0 without an outcome); Brier 0.500 "
         "vs base 0.500, skill +0.000; log loss 0.788 vs base 0.693"
     ) in out
+
+
+def test_a_held_out_stand_in_reaches_the_temperature_and_binary_lines(
+    store, files, monkeypatch, capsys
+):
+    _use(monkeypatch, Forecaster(text_for={VALIDATION[0]: "no idea"}))
+    assert cli.main(_probe(store, files)) == 0
+    assert cli.main(_probe(store, files, "--segment", "validation")) == 0
+    assert cli.main(_probe(store, files, "--segment", "holdout", "--holdout")) == 0
+    capsys.readouterr()
+    assert cli.main(_score(store, "--holdout")) == 0
+    out = capsys.readouterr().out.splitlines()
+    # With the holdout read, slot 7's 4h mark is slot 8's: 108 / 106 - 1 = +1.887%,
+    # under the 1.923% band, so flat. Validation: slot 6 (up) stands in as the base
+    # rate (0.5), slot 7 is the model's flat at 0.86: (0.86 + 0.5) / 2 = 0.68.
+    assert (
+        "  4h validation: n 2 scored (1 with no valid forecast but an invalid_probe, 0 refused "
+        "on every repeat, 0 without an outcome); Brier 0.680 vs base 0.500, skill -0.360; log "
+        "loss 0.949 vs base 0.693; without the base-rate stand-ins: n 1, skill -0.720"
+    ) in out
+    # Only slot 6 moved, and it is the stand-in: up given a move is the base's own 1.0.
+    assert (
+        "  4h validation, up vs down given a move: n 1, Brier 0.000 vs base 0.000, skill n/a" in out
+    )
+    base = {"up": 0.5, "down": 0.0, "flat": 0.5}
+    fitted = fit_temperature([(H4, "up"), (H4, "flat")] * 3)
+    assert fitted is not None
+    scaled = tempered(H4, fitted)
+    # The stand-in is scored as the base rate, untempered, beside the tempered flat.
+    held = (brier(scaled, "flat") + brier(base, "up")) / 2
+    assert (
+        f"  4h validation, temperature {fitted:.2f} fitted on the train headline: Brier "
+        f"{held:.3f}, skill {1 - held / 0.5:+.3f}; log loss "
+        f"{(log_loss(scaled, 'flat') + log_loss(base, 'up')) / 2:.3f}"
+    ) in out
+    # Holdout: slot 8 -> 9 is 107 / 108 - 1 = -0.926%, flat; slot 9 has no later mark.
+    assert (
+        f"  4h holdout, temperature {fitted:.2f} fitted on the train headline: Brier "
+        f"{brier(scaled, 'flat'):.3f}, skill {1 - brier(scaled, 'flat') / 0.5:+.3f}; log loss "
+        f"{log_loss(scaled, 'flat'):.3f}"
+    ) in out

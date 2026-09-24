@@ -61,7 +61,7 @@ jobs:
         run: ruff check .
 
   typecheck:
-    name: mypy (perp lower layers)
+    name: mypy (perp lower layers + replay)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,11 +74,11 @@ jobs:
         # exactly because ``warn_unused_ignores`` turns a newer mypy's better
         # narrowing into a red job; bump it on purpose, with the pins.
         run: pip install "mypy==2.3.1"
-      - name: Type-check the perp module's lower layers
+      - name: Type-check the perp module's lower layers and the replay package
         run: mypy
 
   autoresearch:
-    name: autoresearch tests (py3.12)
+    name: autoresearch + replay tests (py3.12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,11 +89,12 @@ jobs:
         # contrib/autoresearch borrows read-only from contrib/hyperliquid_perp,
         # and its pin tests import the venue reader, which needs the Hyperliquid
         # SDK that requirements.txt declares and pyproject does not.
+        # contrib/replay borrows from both packages and shares this install.
         # requirements.txt also lists ".", which would rebuild and replace the
         # editable install just made; that line is filtered out.
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
           grep -v '^\.$' requirements.txt | pip install -r /dev/stdin
-      - name: Run the research radar's suite
-        run: pytest -q contrib/autoresearch/tests
+      - name: Run the research radar's and the replay package's suites
+        run: pytest -q contrib/autoresearch/tests contrib/replay/tests

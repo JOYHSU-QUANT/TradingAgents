@@ -77,14 +77,18 @@ filterwarnings = [
 # is checked silently. The 15 errors these layers had
 # on 2026-09-22 are pinned where they sit with ``# type: ignore[code]``, and
 # ``warn_unused_ignores`` fails the job once one is fixed, so a pin can only
-# be removed.
+# be removed. ``contrib/replay`` (the offline scorecard, replay plan PR 1)
+# joined clean on 2026-09-23 with no pins; its tests are excluded because
+# the CI job installs mypy alone and the suites import pytest.
 files = [
     "contrib/hyperliquid_perp/common",
     "contrib/hyperliquid_perp/domains",
     "contrib/hyperliquid_perp/persistence",
     "contrib/hyperliquid_perp/ports.py",
     "contrib/hyperliquid_perp/runtime",
+    "contrib/replay",
 ]
+exclude = ["^contrib/replay/tests/"]
 python_version = "3.10"
 follow_imports = "silent"
 warn_unused_ignores = true

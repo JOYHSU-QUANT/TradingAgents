@@ -342,10 +342,18 @@ def describe_probe(
                     f"log loss {_num(scaled.log_loss, '{:.3f}')}"
                 )
     lines.append(f"-- probe across {len(answers)} repeat(s): Brier skill score, median (range) --")
-    for (key, segment), values in sorted(skills.items(), key=_order):
+    # Every horizon and segment that had an answer gets a line, as in the
+    # reliability table below: one where no repeat has a skill says so, rather
+    # than leaving the summary quietly shorter than the table above it.
+    for (key, segment), _ in sorted(pooled.items(), key=_order):
+        values = skills.get((key, segment), [])
         lines.append(
             f"  {card.horizon_label(PROBE_KEYS[key])} {_label(segment)}: "
-            f"{statistics.median(values):+.3f} ({min(values):+.3f} to {max(values):+.3f})"
+            + (
+                f"{statistics.median(values):+.3f} ({min(values):+.3f} to {max(values):+.3f})"
+                if values
+                else "n/a (no repeat has a skill score)"
+            )
         )
     lines.append(
         "-- probe reliability, repeats pooled (the most likely class: its mean probability, "

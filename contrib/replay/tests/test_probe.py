@@ -85,22 +85,41 @@ def forecast_text(h4: dict = H4, h24: dict = H24) -> str:
 
 
 class Forecaster:
-    """A fake model that answers every probe with ``text``, or ``text_for[slot]`` for a slot."""
+    """A fake model that answers every probe with ``text``, or ``text_for[slot]`` for a slot.
 
-    def __init__(self, text: str | None = None, text_for: dict[int, str] | None = None) -> None:
+    ``second`` is what it says the second time it is asked the same question
+    (repeat 1, since the repeats of a question are asked one after another).
+    """
+
+    def __init__(
+        self,
+        text: str | None = None,
+        text_for: dict[int, str] | None = None,
+        *,
+        second: str | None = None,
+        usage_reported: bool = True,
+    ) -> None:
         self.text = forecast_text() if text is None else text
         self.text_for = text_for or {}
+        self.second = second
+        self.usage_reported = usage_reported
         self.calls: list[tuple[str, str]] = []
+        self.asked: dict[int, int] = {}
 
     def __call__(self, system: str, human: str) -> Completion:
         self.calls.append((system, human))
         for paper in PAPERS:
             if context_text(paper.slot) in human:
+                self.asked[paper.slot] = self.asked.get(paper.slot, 0) + 1
+                text = self.text_for.get(paper.slot, self.text)
+                if self.second is not None and self.asked[paper.slot] == 2:
+                    text = self.second
                 return Completion(
-                    text=self.text_for.get(paper.slot, self.text),
+                    text=text,
                     model="forecaster-1",
                     input_tokens=50,
                     output_tokens=20,
+                    usage_reported=self.usage_reported,
                 )
         raise AssertionError(f"no fixture question in {human!r}")
 
@@ -615,6 +634,7 @@ def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
         "  4h train: -0.120 (-0.120 to -0.120)",
         "  4h validation: +0.480 (+0.480 to +0.480)",
         "  24h train: -0.280 (-0.280 to -0.280)",
+        "  24h validation: n/a (no repeat has a skill score)",
         "-- probe reliability, repeats pooled (the most likely class: its mean probability, "
         "and how often it happened) --",
         "  4h train: 0.6-0.7 n 6 predicted 60.0% happened 50.0%; ECE 0.100",
@@ -706,3 +726,101 @@ def test_the_base_rate_reads_every_train_question_not_only_the_ones_asked(
         "  4h train: n 3 scored (0 invalid_probe, 0 refused, 0 without an outcome); Brier 0.460 "
         "vs base 0.500, skill +0.080; log loss 0.742 vs base 0.693"
     ) in out
+
+
+# -- review round 1: the branches the first tests did not reach -----------------------
+
+
+def test_each_repeat_is_scored_and_the_summary_gives_the_median_and_range(
+    store, files, monkeypatch, capsys
+):
+    # Repeat 1 says h4 up .8 / down .1 / flat .1: an up costs .2² + .1² + .1² =
+    # 0.06, a flat .8² + .1² + .9² = 1.46; train averages 0.76, skill -0.52.
+    sharper = forecast_text({"up": 0.8, "down": 0.1, "flat": 0.1})
+    _use(monkeypatch, Forecaster(second=sharper))
+    assert cli.main(_probe(store, files, "--repeats", "2")) == 0
+    assert len(_rows(store)) == 2 * len(TRAIN)
+    capsys.readouterr()
+    assert cli.main(_score(store)) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "-- probe repeat 0 --" in out and "-- probe repeat 1 --" in out
+    train = [line for line in out if line.startswith("  4h train: n 6 scored")]
+    assert [line.split("; ")[1] for line in train] == [
+        "Brier 0.560 vs base 0.500, skill -0.120",
+        "Brier 0.760 vs base 0.500, skill -0.520",
+    ]
+    assert "  4h train: -0.320 (-0.520 to -0.120)" in out
+    assert (
+        "  4h train: 0.6-0.7 n 6 predicted 60.0% happened 50.0%; 0.8-0.9 n 6 predicted "
+        "80.0% happened 50.0%; ECE 0.200" in out
+    )
+
+
+def test_with_no_train_forecast_the_temperature_is_not_fitted(store, files, monkeypatch, capsys):
+    _use(monkeypatch, Forecaster())
+    assert cli.main(_probe(store, files, "--segment", "validation")) == 0
+    capsys.readouterr()
+    assert cli.main(_score(store)) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "  4h validation, temperature-scaled: n/a (no train forecast to fit it on)" in out
+    assert not any(line.startswith("  4h train: n ") for line in out)
+
+
+def test_without_a_split_there_is_no_base_rate(store):
+    from contrib.replay.probe_score import describe_probe
+
+    with Database(store, migrate=False) as db:
+        questions = load_decisions(db, RUN_ID).questions
+    card = score_run(questions, [], step_ms=STEP_MS, costs=CostModel(), split=None)
+    first = input_id(TRAIN[0])
+    lines = describe_probe(
+        card=card,
+        probe=Probe("p", "s", "i"),
+        answers={0: [ProbeAnswer(first, {"h4": H4, "h24": H24}, None)]},
+        eligible={first},
+    )
+    assert "base rate, train, 4h: n/a (no train question has an outcome)" in lines
+    assert (
+        "  4h unsplit: n 1 scored (0 invalid_probe, 0 refused, 0 without an outcome); Brier "
+        "0.260 vs base n/a, skill n/a; log loss 0.511 vs base n/a"
+    ) in lines
+    assert "  4h unsplit: n/a (no repeat has a skill score)" in lines
+
+
+def test_answers_whose_usage_went_unreported_are_counted(store, files, monkeypatch, capsys):
+    _use(monkeypatch, Forecaster(usage_reported=False))
+    assert cli.main(_probe(store, files, "--limit", "2")) == 0
+    assert (
+        "answers whose call the usage collector recorded nothing for: 2 (truncation unknown, "
+        "read as not truncated)"
+    ) in capsys.readouterr().out.splitlines()
+
+
+def test_the_limit_counts_a_refusal(store, files, monkeypatch, capsys):
+    _use(monkeypatch, _Refuses(TRAIN[0]))
+    assert cli.main(_probe(store, files, "--limit", "2")) == 0
+    assert "stopped at --limit; the same command continues from here" in (
+        capsys.readouterr().out.splitlines()
+    )
+    assert [(r["input_id"], r["invalid_reason"]) for r in _rows(store)] == [
+        (input_id(TRAIN[0]), REFUSED),
+        (input_id(TRAIN[1]), None),
+    ]
+
+
+def test_each_answer_is_reported_on_stderr(store, files, monkeypatch, capsys):
+    _use(monkeypatch, Forecaster(text_for={TRAIN[1]: "no idea"}))
+    assert cli.main(_probe(store, files, "--limit", "2")) == 0
+    err = capsys.readouterr().err.splitlines()
+    assert f"[1/6] {input_id(TRAIN[0])} repeat 0: h4 0.60/0.10/0.30 h24 0.20/0.20/0.60" in err
+    assert f"[2/6] {input_id(TRAIN[1])} repeat 0: invalid_probe" in err
+
+
+def test_one_probe_text_is_one_name(store, files, monkeypatch, capsys, tmp_path):
+    _use(monkeypatch, Forecaster())
+    assert cli.main(_probe(store, files, "--limit", "1")) == 0
+    renamed = tmp_path / "renamed"
+    renamed.mkdir()
+    same_text = write_probe(renamed, "direction-renamed")
+    assert cli.main(_probe(store, (files[0], same_text))) == 1
+    assert "is already stored as 'direction-t'; ask it under that name" in (capsys.readouterr().err)

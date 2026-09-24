@@ -187,7 +187,7 @@ class CompletionUsageCollector(BaseCallbackHandler):
         return self._node_by_run.pop(run_id, None)
 
 
-# -- what both lanes (daemon provider, one-shot main) do with a collector -------------
+# -- what the engine run (integration/engine_drive) does with a collector ------------
 
 
 def report_usage(

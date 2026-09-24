@@ -33,24 +33,27 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **One engine run for both entry points** (refactor plan v2, T2-d — PR 7
-  of the plan). `main.run_engine` (the one-shot) and
+- **One engine run for both entry points** (refactor plan v2, T2-d — PR 7 of
+  the plan). `main.run_engine` (the one-shot) and
   `EngineDecisionProvider.request_decision` (the paper and live daemons)
   each carried a copy of the same engine run: collector, graph, `propagate`
-  with the usage report, the return-shape checks, the reports sidecar and
-  the parse. It now lives once, in `integration/engine_drive.py`
-  (`build_engine_run(...)` then `EngineRun.drive(...)`). When nothing can be
-  parsed, `drive` raises `EngineRunFailed`, `NonDictFinalState` or
-  `EngineOutputError`, and each caller words it as before: the daemon's
-  `RetryableDecisionError` and the one-shot's `error:` lines and exit 1 are
-  unchanged. No logger changes name.
-  One difference, on the one-shot only and only when `propagate` raises:
-  the order of its stderr lines. The cap ERROR (when the cap bound) and the
+  with the usage report, the return-shape checks and the parse, plus the
+  reports sidecar on the daemon side. The one-shot now reaches that call
+  too, and it writes nothing there, as there is no input payload. It now
+  lives once, in `integration/engine_drive.py` (`build_engine_run(...)` then
+  `EngineRun.drive(...)`). When nothing can be parsed, `drive` raises
+  `EngineRunFailed`, `NonDictFinalState` or `EngineOutputError`, and each
+  caller words it as before: the daemon's `RetryableDecisionError` and the
+  one-shot's `error:` lines and exit 1 are unchanged. No logger changes
+  name.
+  One difference, on the one-shot only and only when `propagate` raises: the
+  order of its stderr lines. The cap ERROR (when the cap bound) and the
   usage report now come before main's traceback and `error:` line, because
-  they run inside `drive` before the failure reaches `run_engine`. The
-  lines themselves are unchanged. Build and drive stay two calls so the
-  one-shot's `Running TradingAgents engine ...` line still prints after the
-  graph is built, and not when building it fails.
+  they run inside `drive` before the failure reaches `run_engine`. Their
+  words are unchanged. The traceback is still the engine's own exception on
+  main's logger, and its frames now start in `engine_drive`. Build and drive
+  stay two calls so the one-shot's `Running TradingAgents engine ...` line
+  still prints after the graph is built, and not when building it fails.
   Tests: `tests/cli/test_main.py` now patches `build_graph` on
   `integration.trading_graph`. Two paths no test covered, found by mutation
   probes, are now pinned: the daemon filing a non-dict final state as

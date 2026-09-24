@@ -2751,8 +2751,8 @@ def test_run_engine_reports_engine_failure_when_propagate_raises(monkeypatch, ca
 
 
 def test_run_engine_aborts_on_non_dict_final_state(monkeypatch, capsys):
-    # A crashed engine can return a non-dict final_state (e.g. None); to_perp_decision
-    # indexes it as a dict, so run_engine must fail clean (exit 1) with a clear message
+    # A crashed engine can return a non-dict final_state (e.g. None); the parse reads
+    # it as a dict, so run_engine must fail clean (exit 1) with a clear message
     # rather than crash with an opaque AttributeError under the last-resort handler.
     _stub_engine(monkeypatch)
 

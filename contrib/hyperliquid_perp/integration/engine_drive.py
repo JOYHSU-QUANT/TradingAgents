@@ -133,7 +133,7 @@ class EngineRun:
         # payload (the replay plan's PR 0): before the parse, so a cycle whose
         # target JSON fails closed still keeps the reports that led there.
         # Never raises; the model saw no different text. Not reached on the
-        # three failures above — they have no final_state to record.
+        # three failures above — they have no dict final_state to record.
         write_decision_reports(
             final_state,
             payload_path=payload_path,

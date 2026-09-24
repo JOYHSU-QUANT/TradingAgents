@@ -255,7 +255,7 @@ def _usage_provider(
     The stub reaches the collector the way the real engine does — through the
     ``callbacks`` kwarg ``build_graph`` receives — and drives it with the
     handler API (start with the node's ``langgraph_node`` metadata, end with an
-    ``LLMResult``), so the test exercises the provider's reading of the
+    ``LLMResult``), so the test exercises how the engine run reads the
     collector, not a hand-set attribute. The engine returns ``final_state``
     whole when given one (the reports-sidecar tests), else a state holding
     just ``decision_text``.
@@ -705,9 +705,9 @@ def test_a_failure_in_the_usage_reporting_itself_is_the_wrappers_own_line(monkey
 
 def test_an_engine_failure_leaves_the_usage_sidecar_and_no_reports_sidecar(monkeypatch, tmp_path):
     # The operator's pairing rule (RUNBOOK §5): usage without reports means
-    # the engine failed. It rests on two placements — report_usage in
-    # request_decision's finally, write_decision_reports after the shape
-    # guard — so pin the pairing on disk, not the placements.
+    # the engine failed. It rests on two placements in EngineRun.drive —
+    # report_usage in its finally, write_decision_reports after the shape
+    # guards — so pin the pairing on disk, not the placements.
     from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 
     payload = tmp_path / "BTC-20260315T000000_000000Z.json"
@@ -730,7 +730,7 @@ def test_an_engine_failure_leaves_the_usage_sidecar_and_no_reports_sidecar(monke
 
 def test_a_drifted_engine_shape_leaves_the_same_pairing(monkeypatch, tmp_path):
     # The other api_failed exit — propagate returned, but not the
-    # (final_state, signal) pair — lands after the finally too: same pairing.
+    # (final_state, signal) pair — lands after drive's finally too: same pairing.
     import contrib.hyperliquid_perp.integration.trading_graph as tg
     from contrib.hyperliquid_perp.runtime.decision import RetryableDecisionError
 

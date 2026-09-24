@@ -27,7 +27,8 @@ class EngineDecisionProvider:
 
     ``build_input`` fetches market data and persists the full payload JSON
     (phase2-data §5: SQLite keeps summary + path + hash); ``request_decision``
-    drives the unmodified engine and parses the structured target. External
+    drives the unmodified engine to a parsed structured target through
+    :mod:`.engine_drive`. External
     failures are classified into the §6.2 retry vocabulary and raised as
     :class:`RetryableDecisionError`; contract violations are NOT errors — they
     come back as an invalid ``ParsedDecision`` (fail-closed downstream).

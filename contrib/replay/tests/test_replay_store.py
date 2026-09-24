@@ -201,3 +201,33 @@ def test_a_variant_row_edited_after_it_was_stored_is_refused(tmp_path):
         ReplayStoreError, match="the row was changed after it was stored"
     ):
         store.variant("v")
+
+
+class _CommitFailsOnce:
+    """The store's connection, except that the first COMMIT raises: a SQLITE_BUSY at commit."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self.failed = False
+
+    def execute(self, sql: str, *args):
+        if sql == "COMMIT" and not self.failed:
+            self.failed = True
+            raise sqlite3.OperationalError("database is locked")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
+def test_a_failed_commit_is_rolled_back_so_the_next_write_can_begin(tmp_path):
+    with ReplayStore(tmp_path / "r.sqlite", create=True) as store:
+        real = store.conn
+        store.conn = _CommitFailsOnce(real)  # type: ignore[assignment]
+        with pytest.raises(ReplayStoreError, match="write failed at commit: database is locked"):
+            store.register(make_variant(), now=NOW)
+        store.conn = real
+        # Without the rollback the first transaction would still be open,
+        # and this BEGIN would fail inside it.
+        assert store.register(make_variant(), now=NOW) == []
+        assert store.variant("v").name == "v"

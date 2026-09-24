@@ -1,6 +1,6 @@
 """``python -m contrib.replay`` — the offline exam's commands.
 
-Three commands:
+Four commands:
 
 - ``score --db paper_trading.db --run-id paper-BTC-7`` — the scorecard
   (plan PR 1): read the run's decisions, mark each against the price that
@@ -33,6 +33,10 @@ Three commands:
   a decision (plan PR 2.1, :mod:`.probe`), under the same discipline.
 - ``register --variant FILE`` — store a variant, or correct its
   ``model_cutoff``, without asking anything.
+- ``pool --run-id A --run-id B ... --replay-db PATH --variant NAME --probe
+  NAME`` — the direction probe pooled over several runs' validation
+  segments (plan PR 2.2): the headline skill per horizon with a 90%
+  block-bootstrap interval, and the plan section 5 bar. Reads only.
 
 Exit codes, kept in step with the two neighbouring packages' CLIs: ``0`` the
 command did what it says, ``1`` a named operator, store, config, split,
@@ -63,8 +67,9 @@ from .paper_store import (
     load_research_closes,
     run_facts,
 )
-from .probe import PROBE_STEP_MS, Probe, ProbeAnswer, ProbeError, load_probe
-from .probe_score import describe_probe
+from .pool import BLOCK, DRAWS, JUDGED_KEY, RunScores, describe_pool
+from .probe import PROBE_KEYS, PROBE_STEP_MS, Probe, ProbeAnswer, ProbeError, load_probe
+from .probe_score import describe_probe, headline_scores
 from .replay import (
     ProbeReport,
     ReplayError,
@@ -289,6 +294,56 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     replay.set_defaults(func=_cmd_replay)
+
+    pool = subparsers.add_parser(
+        "pool",
+        help="the direction probe pooled over several runs, with a block-bootstrap interval",
+        description=(
+            "Pool one variant's answers to one direction probe over the validation segments "
+            "of several paper runs, each cut by the split pinned for it in the replay store, "
+            "and print the headline Brier skill score per horizon with a 90 percent "
+            "interval from a circular block bootstrap within each run, and whether the plan "
+            "section 5 bar (4h, lower end above 0, blocks of 6, at least 5 blocks) is met. A "
+            "run with no 4h train base rate is refused. Reads only; the holdout is never read."
+        ),
+    )
+    pool.add_argument("--db", default="paper_trading.db", help="the paper store (SQLite path)")
+    pool.add_argument(
+        "--run-id",
+        action="append",
+        required=True,
+        help="a run to pool; give it once per run",
+    )
+    pool.add_argument("--replay-db", required=True, metavar="PATH", help="the replay store")
+    pool.add_argument("--variant", required=True, metavar="NAME", help="the variant to score")
+    pool.add_argument("--probe", required=True, metavar="NAME", help="the probe, by name")
+    pool.add_argument(
+        "--research-db",
+        metavar="PATH",
+        help="an existing autoresearch.sqlite whose closes fill a missing cycle's later mark",
+    )
+    pool.add_argument(
+        "--include-pre-cutoff",
+        action="store_true",
+        help=(
+            "also pool the questions decided on or before the variant's model_cutoff day; a "
+            "variant with no model_cutoff is refused without this flag"
+        ),
+    )
+    pool.add_argument(
+        "--block",
+        type=int,
+        default=BLOCK,
+        help=(
+            f"consecutive questions per bootstrap block, within a run (default: {BLOCK}); the "
+            "plan section 5 bar is read only at the default"
+        ),
+    )
+    pool.add_argument(
+        "--draws", type=int, default=DRAWS, help=f"bootstrap draws (default: {DRAWS})"
+    )
+    pool.add_argument("--seed", type=int, default=0, help="the bootstrap's seed (default: 0)")
+    pool.set_defaults(func=_cmd_pool)
 
     register = subparsers.add_parser(
         "register",
@@ -528,30 +583,11 @@ def _cmd_score(args: argparse.Namespace) -> int:
     research: Mapping[int, float] = {}
     if research_path is not None:
         try:
-            with ResearchStore(research_path) as store:
-                # Only the bars this run can pair: the lock at the I/O seam,
-                # so a locked run never reads a holdout bar off disk. The
-                # first question is decided at or after the train start, so
-                # no bar opening before it is within a half-bar tolerance of
-                # any later mark it wants.
-                window = (split.train.start_ms, split.loadable_until(holdout=args.holdout))
-                research = load_research_closes(
-                    store,
-                    coin=facts.coin,
-                    interval=facts.interval,
-                    since_ms=window[0],
-                    until_ms=window[1],
-                )
+            research = _research_closes(
+                research_path, args.research_db, facts, split, holdout=args.holdout
+            )
         except StoreError as exc:
             return _fail(str(exc))
-        if not research:
-            print(
-                f"warning: --research-db {args.research_db} holds no {facts.coin} "
-                f"{facts.interval} candles opening between {from_epoch_ms(window[0]):%Y-%m-%d %H:%M} "
-                f"and {from_epoch_ms(window[1]):%Y-%m-%d %H:%M}; no missing cycle can be filled "
-                "from it",
-                file=sys.stderr,
-            )
     header = (
         f"scorecard: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; costs and "
         f"interval from {facts.describe_source()})"
@@ -626,6 +662,36 @@ def _cmd_score(args: argparse.Namespace) -> int:
     if args.out is not None:
         return _write_out(Path(args.out), args.out, stem, lines, table)
     return 0
+
+
+def _research_closes(
+    path: Path, path_arg: str, facts: RunFacts, split: Split, *, holdout: bool
+) -> Mapping[int, float]:
+    """The research store's closes this run can pair, and a warning when there are none.
+
+    Only the bars this run can pair: the lock at the I/O seam, so a locked
+    run never reads a holdout bar off disk. The first question is decided at
+    or after the train start, so no bar opening before it is within a
+    half-bar tolerance of any later mark it wants. Raises ``StoreError``.
+    """
+    window = (split.train.start_ms, split.loadable_until(holdout=holdout))
+    with ResearchStore(path) as store:
+        closes = load_research_closes(
+            store,
+            coin=facts.coin,
+            interval=facts.interval,
+            since_ms=window[0],
+            until_ms=window[1],
+        )
+    if not closes:
+        print(
+            f"warning: --research-db {path_arg} holds no {facts.coin} "
+            f"{facts.interval} candles opening between {from_epoch_ms(window[0]):%Y-%m-%d %H:%M} "
+            f"and {from_epoch_ms(window[1]):%Y-%m-%d %H:%M}; no missing cycle of run "
+            f"{facts.run_id} can be filled from it",
+            file=sys.stderr,
+        )
+    return closes
 
 
 def _read_replay_store(
@@ -969,6 +1035,116 @@ def _dry_run(
         f"dry run: {len(wanted & stored)} answer(s) already stored, "
         f"{len(todo)} to ask; this command would ask for {asks} of them"
     )
+    return 0
+
+
+# -- pool --------------------------------------------------------------------------
+
+
+def _cmd_pool(args: argparse.Namespace) -> int:
+    """The direction probe pooled over several runs' validation segments (plan PR 2.2)."""
+    db_path = Path(args.db)
+    if not db_path.is_file():
+        return _fail(f"database {args.db!r} does not exist")
+    if args.block < 1:
+        return _fail(f"--block must be at least 1, got {args.block}")
+    if args.draws < 1:
+        return _fail(f"--draws must be at least 1, got {args.draws}")
+    repeated = sorted({r for r in args.run_id if args.run_id.count(r) > 1})
+    if repeated:
+        return _fail(f"--run-id names {', '.join(repeated)} more than once")
+    replay_path = Path(args.replay_db)
+    if not replay_path.is_file():
+        # A reader never creates the store behind a typo.
+        return _fail(f"--replay-db {args.replay_db!r} does not exist")
+    research_path: Path | None = None
+    if args.research_db is not None:
+        research_path = Path(args.research_db)
+        if not research_path.is_file():
+            return _fail(f"--research-db {args.research_db!r} does not exist")
+    runs = [
+        _open_run(db_path, args.db, run_id, reports_root=None, count_reports=False, noun="pool")
+        for run_id in args.run_id
+    ]
+    parts: list[RunScores] = []
+    try:
+        with ReplayStore(replay_path) as store:
+            variant = store.variant(args.variant)
+            if variant.model_cutoff is None and not args.include_pre_cutoff:
+                raise _Refused(
+                    f"{variant.name!r} records no model_cutoff, so the questions the model may "
+                    "have been trained on cannot be left out (plan section 6): set model_cutoff "
+                    "in the variant file and run `register`, or pass --include-pre-cutoff"
+                )
+            for run in runs:
+                run_id = run.facts.run_id
+                pinned = store.pinned_split(run_id)
+                if pinned is None:
+                    raise _Refused(
+                        f"run {run_id!r} has no split pinned in {replay_path}: the pooled bar "
+                        "reads each run's validation segment under its own pinned split, so "
+                        "replay or probe the run through this store first"
+                    )
+                run = _pinned(run, *pinned)
+                asked = {
+                    probe.name: answers
+                    for probe, answers in store.probe_answers(variant.sha, run_id)
+                }
+                if args.probe not in asked:
+                    raise _Refused(
+                        f"variant {variant.name!r} was not asked the probe {args.probe!r} on run "
+                        f"{run_id!r} in {replay_path}"
+                        + (f" (it was asked {', '.join(sorted(asked))})" if asked else "")
+                    )
+                research: Mapping[int, float] = {}
+                if research_path is not None:
+                    research = _research_closes(
+                        research_path, args.research_db, run.facts, run.split, holdout=False
+                    )
+                card = score_run(
+                    run.decisions.questions,
+                    [],
+                    step_ms=run.facts.step_ms,
+                    costs=run.facts.costs,
+                    research_closes=research,
+                    split=run.split,
+                )
+                scope = cutoff_scope(
+                    run.decisions.questions, variant, include_pre_cutoff=args.include_pre_cutoff
+                )
+                assert run.pinned_at is not None
+                scores = {
+                    key: headline_scores(
+                        card, asked[args.probe], scope.eligible, key, SegmentName.VALIDATION
+                    )
+                    for key in PROBE_KEYS
+                }
+                if scores[JUDGED_KEY] is None:
+                    # Decided 2026-09-24: which runs count is the operator's
+                    # call, not something the pool settles by leaving one out.
+                    raise _Refused(
+                        f"run {run_id!r} has no {JUDGED_KEY} train base rate (no train question "
+                        "has an outcome at that horizon), so its questions have nothing to be "
+                        "held against; leave it out of --run-id"
+                    )
+                parts.append(
+                    RunScores(
+                        run_id=run_id,
+                        pinned_at=run.pinned_at,
+                        scores=scores,
+                        left_out=sum(
+                            1
+                            for row in card.rows
+                            if row.segment is SegmentName.VALIDATION
+                            and row.question.input_id not in scope.eligible
+                        ),
+                    )
+                )
+    except (ReplayStoreError, StoreError) as exc:
+        return _fail(str(exc))
+    print(f"direction probe {args.probe!r}, {variant.describe()}")
+    for line in describe_pool(parts, block=args.block, draws=args.draws, seed=args.seed):
+        print(line)
     return 0
 
 

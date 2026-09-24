@@ -157,5 +157,11 @@ def test_the_shipped_example_loads():
         "openrouter",
         "anthropic/claude-sonnet-4-6",
     )
-    assert (variant.temperature, variant.max_tokens, variant.model_cutoff) == (None, 8192, None)
+    # The training data cutoff Anthropic publishes for Claude Sonnet 4.6 (Jan 2026),
+    # read as the month's last day.
+    assert (variant.temperature, variant.max_tokens, variant.model_cutoff) == (
+        None,
+        8192,
+        date(2026, 1, 31),
+    )
     assert variant.system_prompt.startswith("As the Portfolio Manager,")

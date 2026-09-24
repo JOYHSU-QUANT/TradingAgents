@@ -289,17 +289,23 @@ python -m contrib.replay pool --db paper_trading.db --replay-db replay.sqlite \
 ```
 
 一個 run 的 validation 段只有十幾題，判斷不了「skill 明顯 > 0」。plan §5 的門檻（2026-09-24 拍板，驗收
-run 之前寫死）看的是合併後的數字：**4h 主數字的 Brier skill score，block bootstrap 90% 區間的下界 > 0**；
-24h 相鄰題報酬重疊，只報不判；「有動時 up 對 down」一起報，不另設門檻。定義寫死在 `pool.py`：
+run 之前寫死）看的是合併後的數字：**4h 主數字的 Brier skill score，block bootstrap 90% 區間的下界 > 0，
+用 6 題一塊、而且各 run 合起來至少 5 塊才判**；24h 相鄰題報酬重疊，只報不判；「有動時 up 對 down」一起報，
+不另設門檻。定義寫死在 `pool.py`（標「拍板」的是 2026-09-24 使用者「照建議」定的）：
 
 - **每個 run 照自己的標準打分**：題目＝`probe_score.headline_scores` 算出來的主數字（repeat 平均、替身
   規則同上），對照**那個 run 自己**的 flat 門檻與 train 基準率；只合併一個 run 時，數字就等於那個 run
-  自己報告裡的主數字。
-- **合併的 skill**＝所有題 `1 − Σ Brier ÷ Σ 基準率 Brier`：每題權重相同，不管來自哪個 run。
-- **區間**：每個 run 的 validation 題照時間切成連續 6 題一塊（最後一塊可以較短，**不跨 run**），每次
-  有放回地抽跟塊數一樣多的塊；相鄰的 4h 題處在同一個盤勢，一題一題抽會假裝它們獨立、區間太窄。
+  自己報告裡的主數字。沒有 4h train 基準率的 run **整次具名拒絕**（拍板），不默默丟掉：哪些 run 算進來
+  是操作的人決定的，要排除就從 `--run-id` 拿掉。
+- **合併的 skill**＝所有題 `1 − Σ Brier ÷ Σ 基準率 Brier`：每題權重相同，不管來自哪個 run（拍板）。
+- **區間＝每個 run 各自做循環 block bootstrap**（拍板）：一個有 `n` 題 validation 的 run，照時間排成一圈，
+  每次抽 `ceil(n ÷ 6)` 塊、每塊從隨機一題起連續 6 題（走到最後一題就接回第一題），再裁回 `n` 題；每個 run
+  在每次抽樣都保持自己的題數，**塊不跨 run**。相鄰的 4h 題處在同一個盤勢，一題一題抽會假裝它們獨立、
+  區間太窄；繞成一圈讓每一段連續 6 題都抽得到，也不會有剩下一兩題的短塊被抽得跟整塊一樣頻繁。
   取抽出來 skill 的第 5／95 百分位（順序統計量之間線性內插）；基準率 Brier 加總為 0 的那次抽樣沒有 skill，
   扣掉並計數。`random.Random(seed)`，同樣的輸入印同樣的區間。
+- **門檻只在兩個條件下判**（拍板）：塊長是預設的 6，而且各 run 合起來至少 5 塊（`Σ ceil(n ÷ 6)`）；只有
+  一塊時每次抽樣都一樣、區間縮成點估計，會太容易印 met。不符合時那一行說為什麼不判；判定那行印出 seed。
 - **只讀**：每個 run 都要已經在這個 `replay.sqlite` 釘過 split（沒釘的具名拒絕），用的是釘住的 split；
   holdout 永遠不讀；不寫 ledger、不動 store。variant 沒填 `model_cutoff` 就拒絕，除非
   `--include-pre-cutoff`；每個 run 會印出它的 validation 段有幾題落在 cutoff 當天或之前被排除。

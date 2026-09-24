@@ -6,31 +6,43 @@ whether a Brier skill score is "clearly above 0". Plan §5 (decided
 
     the 4h headline Brier skill score over the validation questions of
     every run, each run cut by the split pinned for it in the replay
-    store, with the lower end of a 90% block-bootstrap interval above 0.
-    24h is reported, not judged (its returns overlap from question to
-    question); up against down given a move is reported beside it.
+    store, with the lower end of a 90% block-bootstrap interval above 0,
+    read with blocks of six questions and only when the runs make at
+    least five blocks. 24h is reported, not judged (its returns overlap
+    from question to question); up against down given a move is reported
+    beside it.
 
-The definitions, once:
+The definitions, once (the choices marked were decided 2026-09-24):
 
 - **Each run is scored on its own terms.** Its questions are the headline
   forecasts of :func:`~.probe_score.headline_scores`, against that run's own
   flat band and train base rate, so pooling adds up per-question Brier
   scores that were each measured the way a single run's report measures
-  them; pooled over one run, the figure is that run's headline figure.
+  them; pooled over one run, the figure is that run's headline figure. A
+  run with no 4h train base rate is refused by the command rather than
+  left out quietly (decided): which runs count is the operator's call.
 - **The pooled skill** is ``1 - sum(Brier) / sum(Brier of the base rate)``
   over every pooled question: questions weigh equally, whichever run they
-  came from.
-- **The interval** resamples blocks, not questions: each run's validation
-  questions, in time order, are cut into blocks of :data:`BLOCK`
-  consecutive questions (the last block of a run may be shorter; no block
-  crosses runs), and each draw takes as many blocks as there are, with
-  replacement. Neighbouring 4h questions share a market regime, so
-  resampling them one by one would pretend they are independent and draw
-  too narrow an interval. The 5th and 95th percentiles of the drawn
-  skills (linear interpolation between order statistics) bound the 90%
-  interval; a draw whose base-rate Brier sums to 0 has no skill and is
-  left out, and counted. The draws come from ``random.Random(seed)``, so
-  the same inputs print the same interval.
+  came from (decided).
+- **The interval** is a circular block bootstrap run within each run
+  (decided): a run of ``n`` validation questions, in time order, is
+  redrawn as ``ceil(n / block)`` blocks of ``block`` consecutive
+  questions, each starting at a random question and wrapping from the
+  run's last question to its first, cut back to ``n``. Every run keeps its
+  own size in every draw, and no block crosses runs. Neighbouring 4h
+  questions share a market regime, so resampling them one by one would
+  pretend they are independent and draw too narrow an interval; the
+  circle means every window of ``block`` questions can be drawn and no
+  short leftover block is drawn as often as a full one. The 5th and 95th
+  percentiles of the drawn skills (linear interpolation between order
+  statistics) bound the 90% interval; a draw whose base-rate Brier sums
+  to 0 has no skill and is left out, and counted. The draws come from
+  ``random.Random(seed)``, so the same inputs print the same interval.
+- **The bar is read** only with the default block size (:data:`BLOCK`)
+  and when the runs make at least :data:`MIN_BLOCKS` blocks between them
+  (``sum(ceil(n / block))``, decided): with one block every draw is the
+  same sample and the interval collapses onto the point. Otherwise the
+  line says why it is not judged. The seed is printed on the line.
 """
 
 from __future__ import annotations
@@ -49,16 +61,21 @@ __all__ = [
     "DRAWS",
     "JUDGED_KEY",
     "LEVEL",
+    "MIN_BLOCKS",
     "Interval",
     "RunScores",
-    "blocks_of",
+    "block_count",
     "bootstrap",
+    "circular_draw",
     "describe_pool",
     "pooled_skill",
 ]
 
 # Questions per block: six 4h questions are a day.
 BLOCK: Final = 6
+
+# The fewest blocks, over all runs, the bar is read with.
+MIN_BLOCKS: Final = 5
 
 # Bootstrap draws by default.
 DRAWS: Final = 10_000
@@ -78,8 +95,8 @@ class RunScores:
     """One run's validation questions, scored, per probe key.
 
     ``scores[key]`` is ``None`` when the run has no train base rate at that
-    horizon. ``left_out`` counts the run's validation questions decided on or
-    before the model cutoff, which were left out of it.
+    horizon. ``left_out`` counts the run's validation questions decided on
+    or before the model cutoff, which were left out of it.
     """
 
     run_id: str
@@ -96,11 +113,21 @@ def pooled_skill(pairs: Sequence[Pair]) -> float | None:
     return 1 - math.fsum(m for m, _ in pairs) / base
 
 
-def blocks_of(pairs: Sequence[Pair], size: int) -> list[list[Pair]]:
-    """Consecutive blocks of ``size`` (the last may be shorter), in the order given."""
+def block_count(runs: Sequence[Sequence[Pair]], size: int) -> int:
+    """How many blocks of ``size`` the runs are redrawn in: ``sum(ceil(n / size))``."""
     if size < 1:
         raise ValueError(f"a block holds at least one question, got {size}")
-    return [list(pairs[i : i + size]) for i in range(0, len(pairs), size)]
+    return sum(math.ceil(len(run) / size) for run in runs)
+
+
+def circular_draw(run: Sequence[Pair], size: int, rng: random.Random) -> list[Pair]:
+    """One redraw of a run: ``ceil(n / size)`` wrapping blocks from random starts, cut to ``n``."""
+    n = len(run)
+    drawn: list[Pair] = []
+    for _ in range(math.ceil(n / size)):
+        start = rng.randrange(n)
+        drawn.extend(run[(start + step) % n] for step in range(size))
+    return drawn[:n]
 
 
 @dataclass(frozen=True)
@@ -124,31 +151,41 @@ def _quantile(ordered: Sequence[float], q: float) -> float:
 
 
 def bootstrap(
-    blocks: Sequence[Sequence[Pair]], *, draws: int, seed: int, level: float = LEVEL
+    runs: Sequence[Sequence[Pair]],
+    *,
+    block: int,
+    draws: int,
+    seed: int,
+    level: float = LEVEL,
 ) -> Interval:
-    """The pooled skill of ``blocks`` and its ``level`` interval by resampling whole blocks."""
+    """The pooled skill of ``runs`` and its ``level`` interval, each run redrawn on its circle.
+
+    ``runs`` holds each run's pairs in time order; an empty run adds nothing.
+    """
     if draws < 1:
         raise ValueError(f"at least one draw, got {draws}")
-    pooled = [pair for block in blocks for pair in block]
+    runs = [run for run in runs if run]
+    blocks = block_count(runs, block)
+    pooled = [pair for run in runs for pair in run]
     skill = pooled_skill(pooled)
     if skill is None:
-        return Interval(len(pooled), len(blocks), None, None, None, 0)
+        return Interval(len(pooled), blocks, None, None, None, 0)
     rng = random.Random(seed)
     drawn: list[float] = []
     dropped = 0
     for _ in range(draws):
-        sample = [pair for _ in blocks for pair in blocks[rng.randrange(len(blocks))]]
+        sample = [pair for run in runs for pair in circular_draw(run, block, rng)]
         value = pooled_skill(sample)
         if value is None:
             dropped += 1
         else:
             drawn.append(value)
     if not drawn:
-        return Interval(len(pooled), len(blocks), skill, None, None, dropped)
+        return Interval(len(pooled), blocks, skill, None, None, dropped)
     drawn.sort()
     tail = (1 - level) / 2
     return Interval(
-        len(pooled), len(blocks), skill, _quantile(drawn, tail), _quantile(drawn, 1 - tail), dropped
+        len(pooled), blocks, skill, _quantile(drawn, tail), _quantile(drawn, 1 - tail), dropped
     )
 
 
@@ -166,13 +203,26 @@ def _interval_text(found: Interval, draws: int) -> str:
     return text
 
 
+def _verdict(judged: Interval, *, block: int, seed: int) -> str:
+    if block != BLOCK:
+        return f"not judged: the bar is read with blocks of {BLOCK}, this report used {block}"
+    if judged.blocks < MIN_BLOCKS:
+        return (
+            f"cannot be judged: {judged.blocks} block(s), fewer than the {MIN_BLOCKS} the bar needs"
+        )
+    if judged.low is None:
+        return "cannot be judged (no interval)"
+    return ("met" if judged.low > 0 else "not met") + f" (seed {seed})"
+
+
 def describe_pool(
     runs: Sequence[RunScores], *, block: int = BLOCK, draws: int = DRAWS, seed: int = 0
 ) -> list[str]:
     """The pooled report: each run's share, then each horizon's skill and interval, then the bar."""
     lines = [
         f"pooled over {len(runs)} run(s), the validation segment of each run's pinned split; "
-        f"blocks of {block} consecutive question(s) within a run, {draws} draws, seed {seed}"
+        f"circular blocks of {block} consecutive question(s) within each run, {draws} draws, "
+        f"seed {seed}"
     ]
     by_key: dict[str, list[list[Pair]]] = {key: [] for key in PROBE_KEYS}
     binary_by_key: dict[str, list[list[Pair]]] = {key: [] for key in PROBE_KEYS}
@@ -189,34 +239,29 @@ def describe_pool(
                 + (f" ({stand_ins} standing in as the base rate)" if stand_ins else "")
             )
             ordered = sorted(scored, key=lambda s: s.at_ms)
-            by_key[key].extend(blocks_of([(s.brier, s.base_brier) for s in ordered], block))
-            binary_by_key[key].extend(
-                blocks_of([s.binary for s in ordered if s.binary is not None], block)
-            )
+            by_key[key].append([(s.brier, s.base_brier) for s in ordered])
+            binary_by_key[key].append([s.binary for s in ordered if s.binary is not None])
         cutoff = f"; {run.left_out} left out at the model cutoff" if run.left_out else ""
         lines.append(
             f"  run {run.run_id} (split pinned {run.pinned_at}): " + ", ".join(shares) + cutoff
         )
     judged: Interval | None = None
     for key in PROBE_KEYS:
-        found = bootstrap(by_key[key], draws=draws, seed=seed)
+        found = bootstrap(by_key[key], block=block, draws=draws, seed=seed)
         if key == JUDGED_KEY:
             judged = found
             note = ""
         else:
             note = " (reported only: its returns overlap from question to question)"
         lines.append(f"{key} headline: {_interval_text(found, draws)}{note}")
-        moved = bootstrap(binary_by_key[key], draws=draws, seed=seed)
+        moved = bootstrap(binary_by_key[key], block=block, draws=draws, seed=seed)
         lines.append(
             f"{key} up vs down given a move: {_interval_text(moved, draws)} (reported only)"
         )
     assert judged is not None
-    if judged.low is None:
-        verdict = "cannot be judged (no interval)"
-    else:
-        verdict = "met" if judged.low > 0 else "not met"
     lines.append(
         f"plan section 5 bar ({JUDGED_KEY} headline skill, lower end of the {LEVEL:.0%} interval "
-        f"above 0): {verdict}"
+        f"above 0, blocks of {BLOCK}, at least {MIN_BLOCKS} blocks): "
+        + _verdict(judged, block=block, seed=seed)
     )
     return lines

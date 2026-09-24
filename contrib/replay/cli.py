@@ -67,7 +67,7 @@ from .paper_store import (
     load_research_closes,
     run_facts,
 )
-from .pool import BLOCK, DRAWS, RunScores, describe_pool
+from .pool import BLOCK, DRAWS, JUDGED_KEY, RunScores, describe_pool
 from .probe import PROBE_KEYS, PROBE_STEP_MS, Probe, ProbeAnswer, ProbeError, load_probe
 from .probe_score import describe_probe, headline_scores
 from .replay import (
@@ -302,8 +302,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Pool one variant's answers to one direction probe over the validation segments "
             "of several paper runs, each cut by the split pinned for it in the replay store, "
             "and print the headline Brier skill score per horizon with a 90 percent "
-            "block-bootstrap interval, and whether the plan section 5 bar (4h, lower end "
-            "above 0) is met. Reads only; the holdout is never read."
+            "interval from a circular block bootstrap within each run, and whether the plan "
+            "section 5 bar (4h, lower end above 0, blocks of 6, at least 5 blocks) is met. A "
+            "run with no 4h train base rate is refused. Reads only; the holdout is never read."
         ),
     )
     pool.add_argument("--db", default="paper_trading.db", help="the paper store (SQLite path)")
@@ -333,7 +334,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--block",
         type=int,
         default=BLOCK,
-        help=f"consecutive questions per bootstrap block, within a run (default: {BLOCK})",
+        help=(
+            f"consecutive questions per bootstrap block, within a run (default: {BLOCK}); the "
+            "plan section 5 bar is read only at the default"
+        ),
     )
     pool.add_argument(
         "--draws", type=int, default=DRAWS, help=f"bootstrap draws (default: {DRAWS})"
@@ -1109,16 +1113,25 @@ def _cmd_pool(args: argparse.Namespace) -> int:
                     run.decisions.questions, variant, include_pre_cutoff=args.include_pre_cutoff
                 )
                 assert run.pinned_at is not None
+                scores = {
+                    key: headline_scores(
+                        card, asked[args.probe], scope.eligible, key, SegmentName.VALIDATION
+                    )
+                    for key in PROBE_KEYS
+                }
+                if scores[JUDGED_KEY] is None:
+                    # Decided 2026-09-24: which runs count is the operator's
+                    # call, not something the pool settles by leaving one out.
+                    raise _Refused(
+                        f"run {run_id!r} has no {JUDGED_KEY} train base rate (no train question "
+                        "has an outcome at that horizon), so its questions have nothing to be "
+                        "held against; leave it out of --run-id"
+                    )
                 parts.append(
                     RunScores(
                         run_id=run_id,
                         pinned_at=run.pinned_at,
-                        scores={
-                            key: headline_scores(
-                                card, asked[args.probe], scope.eligible, key, SegmentName.VALIDATION
-                            )
-                            for key in PROBE_KEYS
-                        },
+                        scores=scores,
                         left_out=sum(
                             1
                             for row in card.rows

@@ -145,7 +145,11 @@ def position(paper: Paper) -> CurrentPositionState:
 
 
 def write_gate_store(
-    path: Path, *, papers: tuple[Paper, ...] = PAPERS, grow: bool = False
+    path: Path,
+    *,
+    papers: tuple[Paper, ...] = PAPERS,
+    grow: bool = False,
+    run_id: str = RUN_ID,
 ) -> Path:
     """The fixture run, every answer produced by the real gate, every payload on disk.
 
@@ -153,16 +157,22 @@ def write_gate_store(
     the store), so the ``replay`` command finds them without a flag; the
     input rows name them by the daemon host's absolute path, as the real
     store does, and are matched by file name. ``grow`` adds ``papers`` to a
-    store this function already wrote: the run trading on.
+    store this function already wrote: the run trading on. ``run_id`` writes
+    another run into the same store, its ids prefixed with the run id.
     """
     risk, decision = RiskConfig.from_dict(RISK), DecisionConfig.from_dict(DECISION)
-    root = payload_dir(path, RUN_ID)
+
+    def ids(slot: int) -> tuple[str, str]:
+        prefix = "" if run_id == RUN_ID else f"{run_id}-"
+        return f"{prefix}{input_id(slot)}", f"{prefix}gate-out-{slot:02d}"
+
+    root = payload_dir(path, run_id)
     root.mkdir(parents=True, exist_ok=True)
     with Database(path) as db, db.transaction() as conn:
         if not grow:
             repo.insert_run(
                 conn,
-                run_id=RUN_ID,
+                run_id=run_id,
                 mode="paper",
                 initial_balance_usdc=EQUITY,
                 schema_version=SCHEMA_VERSION,
@@ -176,10 +186,10 @@ def write_gate_store(
             side = "flat" if state.side is None else state.side.value
             repo.insert_ai_input(
                 conn,
-                input_id=input_id(paper.slot),
+                input_id=ids(paper.slot)[0],
                 timestamp=stamp,
                 mode="paper",
-                run_id=RUN_ID,
+                run_id=run_id,
                 symbol=COIN,
                 candle_end=stamp,
                 mark_price=Decimal(paper.mark),
@@ -189,7 +199,7 @@ def write_gate_store(
                 current_margin_pct=state.margin_pct,
                 configured_leverage=LEVERAGE,
                 max_target_margin_pct=Decimal(MAX_MARGIN_PCT),
-                input_payload_path=f"/home/trader/data/payloads/{RUN_ID}/{payload_name(paper.slot)}",
+                input_payload_path=f"/home/trader/data/payloads/{run_id}/{payload_name(paper.slot)}",
                 input_payload_hash=payload_digest(raw),
                 prompt_version="phase2-target-v6",
                 model="recorded-model",
@@ -199,15 +209,15 @@ def write_gate_store(
             gate = evaluate(
                 parsed, account_equity=EQUITY, current=state, risk=risk, decision_cfg=decision
             )
-            output_id = f"gate-out-{paper.slot:02d}"
+            output_id = ids(paper.slot)[1]
             write_ai_output(
                 conn,
                 now=stamp,
                 output_id=output_id,
-                input_id=input_id(paper.slot),
-                decision_attempt_id=decision_attempt_id(RUN_ID, stamp),
+                input_id=ids(paper.slot)[0],
+                decision_attempt_id=decision_attempt_id(run_id, stamp),
                 mode="paper",
-                run_id=RUN_ID,
+                run_id=run_id,
                 symbol=COIN,
                 gate=gate,
                 parsed=parsed,
@@ -217,10 +227,10 @@ def write_gate_store(
             insert_attempt(
                 conn,
                 paper.slot,
-                input_id=input_id(paper.slot),
+                input_id=ids(paper.slot)[0],
                 output_id=output_id,
                 status="completed" if parsed.is_valid else "invalid_output",
-                run_id=RUN_ID,
+                run_id=run_id,
             )
     return path
 

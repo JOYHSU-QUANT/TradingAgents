@@ -443,20 +443,27 @@ Breaking changes within the 0.x line are called out explicitly.
   answer can no longer meet the bar. Every line of a horizon is now read off
   the same bootstrap draws: up against down takes the questions in each
   drawn sample that moved, so its blocks are the headline's blocks of six
-  consecutive questions rather than six moved ones. Both skills against the
-  base rate are still printed, as reported-only lines; a base-rate stand-in
+  consecutive questions rather than six moved ones, and it is judged only
+  when its moved questions sit in at least five of those blocks (each run
+  cut from its first question): a handful of moves in one or two blocks
+  would be drawn over and over, collapsing the interval as one block does;
+  a line printed with fewer says how many blocks hold its questions. Both
+  skills against the base rate are still printed, as reported-only lines;
+  a base-rate stand-in
   (an `invalid_probe` question) is scored as the prior on the own-prior
   lines, so it adds no skill there either. A run with fewer than six valid
   4h train forecasts is refused by name, as a run with no base rate is, and
   the refusal says how many more the model cutoff left out. That makes the
   per-run "N left out at the model cutoff" note unreachable (a validation
   question on or before the cutoff leaves every train question out with
-  it), so it is gone. The verdict says "not met" whenever one skill's lower
-  end is at or below 0, naming the other if it has no interval. The
-  single-run probe report (`score --replay-db`) prints the prior per
-  horizon and, on the validation and holdout segments, both skills against
-  it. On the acceptance data: headline -0.012 [-0.025, +0.002], up against
-  down +0.001 [-0.061, +0.060], both on six blocks; not met.
+  it), so it is gone. On at least five blocks, the verdict says "not met"
+  when one skill that can be read has its lower end at or below 0, naming
+  the other if it cannot be read; on fewer blocks it says "cannot be
+  judged". The single-run probe report (`score --replay-db`) prints the
+  prior per horizon and, on the validation and holdout segments, both
+  skills against it. On the acceptance data: headline -0.012 [-0.025,
+  +0.002] on six blocks, up against down +0.001 [-0.061, +0.060] with its
+  moves in five of them; not met.
 
 ### Added
 
@@ -482,8 +489,9 @@ Breaking changes within the 0.x line are called out explicitly.
   seed is printed on the verdict line. A run with no 4h train base rate is
   refused rather than left out. 24h and up-vs-down-given-a-move are reported,
   not judged. (The bar was revised on 2026-09-29, after the first acceptance
-  run: see the entry under Changed.) The command reads only: a run without a pinned split, or not
-  asked the named probe, is refused by name, the holdout is never read, and
+  run: see the entry under Changed.) The command reads only: a run without a
+  pinned split, or not asked the named probe, is refused by name, the
+  holdout is never read, and
   nothing is written. `score`'s research-store lookup moved into a helper the
   two commands share (unchanged, but its warning now names the run). The
   example variant `current-sonnet` now carries its `model_cutoff`: 2026-01-31,

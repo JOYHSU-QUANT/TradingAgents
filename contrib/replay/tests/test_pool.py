@@ -132,7 +132,7 @@ def test_each_run_is_redrawn_on_its_own_circle():
     # Two one-question runs: each draw keeps each run's only question.
     apart = bootstrap([[A], [B]], block=6, draws=500, seed=1)
     assert apart == Interval(
-        2, 2, pytest.approx(-0.24), pytest.approx(-0.24), pytest.approx(-0.24), 0
+        2, 2, pytest.approx(-0.24), pytest.approx(-0.24), pytest.approx(-0.24), 0, 2
     )
     # Runs of one and two questions, blocks of 1: run one always redraws A, run
     # two only B's, so every draw is 1 - (0.26 + 0.98 x 2) / 1.5 = -0.48; one
@@ -211,15 +211,15 @@ def test_draws_whose_base_scores_perfectly_are_left_out_and_counted():
     assert 150 < found.dropped < 350
     assert found.low is not None
     assert found.high == pytest.approx(0.48)
-    assert bootstrap([], block=6, draws=10, seed=0) == Interval(0, 0, None, None, None, 0)
+    assert bootstrap([], block=6, draws=10, seed=0) == Interval(0, 0, None, None, None, 0, 0)
     assert bootstrap([[], [A]], block=6, draws=10, seed=0).blocks == 1  # an empty run adds none
     with pytest.raises(ValueError, match="at least one draw"):
         bootstrap([[A]], block=6, draws=0, seed=0)
 
 
 def test_the_verdict():
-    def interval(low: float | None) -> Interval:
-        return Interval(30, 5, 0.3, low, 0.9, 0)
+    def interval(low: float | None, carried: int = 5) -> Interval:
+        return Interval(30, 5, 0.3, low, 0.9, 0, carried)
 
     ok = interval(0.01)
 
@@ -238,6 +238,13 @@ def test_the_verdict():
     )
     # Nothing fails and something has no interval: the bar cannot be judged.
     assert verdict([("a", ok), ("b", interval(None))]) == "cannot be judged: b has no interval"
+    # A line whose questions sit in fewer than five blocks is not read, even
+    # with its lower end below 0; one that fails beside it still says "not met".
+    few = "b has its questions in 4 of the 5 block(s), fewer than the 5 the bar needs"
+    assert verdict([("a", ok), ("b", interval(-0.3, carried=4))]) == f"cannot be judged: {few}"
+    assert verdict([("a", interval(-0.01)), ("b", interval(0.2, carried=4))]) == (
+        f"not met: a lower end -0.010; {few} (seed 4)"
+    )
     # The blocks are the questions', shared by every line.
     assert verdict([("a", ok), ("b", ok)], blocks=4) == (
         "cannot be judged: 4 block(s), fewer than the 5 the bar needs"
@@ -271,10 +278,10 @@ def test_the_report_names_each_run_and_judges_the_4h_skills_against_the_own_prio
         # Two B pairs: 1 - 1.96 / 1.0.
         "h4 headline against the model's own train prior: n 2 in 2 block(s); skill -0.960, 90% "
         "interval [-0.960, -0.960]",
-        "h4 up vs down given a move, against the train base rate: n 0 in 2 block(s); skill "
-        "n/a, 90% interval [n/a, n/a] (reported only)",
-        "h4 up vs down given a move, against the model's own train prior: n 1 in 2 block(s); "
-        "skill +0.480, 90% interval [+0.480, +0.480]",
+        "h4 up vs down given a move, against the train base rate: n 0 in 2 block(s), 0 holding "
+        "its questions; skill n/a, 90% interval [n/a, n/a] (reported only)",
+        "h4 up vs down given a move, against the model's own train prior: n 1 in 2 block(s), 1 "
+        "holding its questions; skill +0.480, 90% interval [+0.480, +0.480]",
         f"h24 headline against the train base rate: {none}{overlap}",
         f"h24 headline against the model's own train prior: {none}{overlap}",
         f"h24 up vs down given a move, against the train base rate: {none}{overlap}",
@@ -303,16 +310,29 @@ def test_the_bar_needs_five_blocks_of_six():
         ": cannot be judged: 4 block(s), fewer than the 5 the bar needs"
     )
     # Up against down reads the questions that moved off the same blocks of
-    # consecutive questions: twelve of thirty is enough.
-    report = describe_pool([_run_of(30, base=A, own=A, moved=12)], draws=100, seed=2)
+    # consecutive questions: every third of thirty, ten in all, one or more
+    # in each of the five blocks, is enough.
+    moved = [_score(i, *A, own=A, own_binary=A if i % 3 == 0 else None) for i in range(30)]
+    report = describe_pool([RunScores("r", "t", {"h4": moved, "h24": []})], draws=100, seed=2)
     assert report[5].startswith(
-        "h4 up vs down given a move, against the model's own train prior: n 12 in 5 block(s); "
+        "h4 up vs down given a move, against the model's own train prior: n 10 in 5 block(s); "
         "skill +0.480"
     )
     assert report[-1].endswith(": met (seed 2)")
-    # None moved: up against down has no interval.
-    assert describe_pool([_run_of(30, base=A, own=A, moved=0)], draws=100)[-1].endswith(
-        ": cannot be judged: up vs down has no interval"
+    # The first twelve moved: two of the five blocks hold them, too few.
+    report = describe_pool([_run_of(30, base=A, own=A, moved=12)], draws=100, seed=2)
+    assert report[5].startswith(
+        "h4 up vs down given a move, against the model's own train prior: n 12 in 5 block(s), 2 "
+        "holding its questions; skill +0.480"
+    )
+    assert report[-1].endswith(
+        ": cannot be judged: up vs down has its questions in 2 of the 5 block(s), fewer than the "
+        "5 the bar needs"
+    )
+    # One moved: its interval would collapse onto that question.
+    assert describe_pool([_run_of(30, base=A, own=A, moved=1)], draws=100)[-1].endswith(
+        ": cannot be judged: up vs down has its questions in 1 of the 5 block(s), fewer than the "
+        "5 the bar needs"
     )
     assert describe_pool(
         [_run_of(30, base=A, own=A, moved=30)], block=3, draws=100
@@ -646,6 +666,31 @@ def test_a_run_whose_train_answers_fall_before_the_cutoff_is_refused_by_that(
         "of --run-id"
     ) in capsys.readouterr().err
     assert cli.main(_pool(store, "--run-id", RUN_ID, "--include-pre-cutoff", variant="early")) == 0
+
+
+def test_the_cutoff_is_not_offered_when_it_would_not_be_enough(
+    two_runs, tmp_path, capsys, monkeypatch
+):
+    store, _, probe_file = two_runs
+    early = tmp_path / "early"
+    early.mkdir()
+    # The 2027-01-15 cutoff again, and train slot 5, the only one after it,
+    # answered with no valid forecast: 0 counted, 5 before the cutoff, short
+    # of six even with them.
+    variant_file = write_variant(early, "shy", cutoff="2027-01-15")
+    model = Forecaster(text_for={TRAIN[5]: "no idea"})
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: model)
+    for segment in ("train", "validation"):
+        argv = _probe_argv(store, variant_file, probe_file, RUN_ID)
+        assert cli.main([*argv, "--segment", segment]) == 0
+    capsys.readouterr()
+    assert cli.main(_pool(store, "--run-id", RUN_ID, variant="shy")) == 1
+    assert (
+        f"run {RUN_ID!r} has 0 valid h4 train forecast(s) from 'shy' for the probe "
+        "'direction-t', fewer than the 6 the model's own prior is formed from; 5 more were left "
+        "out at the model cutoff, still short of it; probe the run's train segment, or leave it "
+        "out of --run-id"
+    ) in capsys.readouterr().err
 
 
 def test_a_run_without_a_pinned_split_or_the_probe_is_refused(two_runs, tmp_path, capsys):

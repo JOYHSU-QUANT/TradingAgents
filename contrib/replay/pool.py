@@ -65,11 +65,16 @@ The definitions, once (the choices marked were decided 2026-09-24, or
 - **The bar is read** only with the default block size (:data:`BLOCK`)
   and when the runs make at least :data:`MIN_BLOCKS` blocks between them
   (``sum(ceil(n / block))``, decided): with one block every draw is the
-  same sample and the interval collapses onto the point. Otherwise the
-  verdict says why it is not judged. It says "not met" as soon as one
-  judged skill's lower end is at or below 0, naming a skill with no
-  interval beside it, and "cannot be judged" when a judged skill has no
-  interval and none fails. The seed is printed with "met" and "not met".
+  same sample and the interval collapses onto the point. For the same
+  reason each judged skill must have its questions in at least
+  :data:`MIN_BLOCKS` of those blocks, each run cut into blocks from its
+  first question (decided 2026-09-29): up against down reads only the
+  questions that moved. Otherwise the verdict says why it is not judged.
+  It says "not met" as soon as one judged skill read on enough blocks has
+  its lower end at or below 0, naming a skill that cannot be read beside
+  it, and "cannot be judged" when one cannot be read and none fails. The
+  seed is printed with "met" and "not met". A line whose questions sit in
+  fewer blocks than there are says how many hold them.
 """
 
 from __future__ import annotations
@@ -185,6 +190,7 @@ class Interval:
     low: float | None
     high: float | None
     dropped: int  # draws with no skill (no question on the line, or a reference summing to 0)
+    carried: int  # blocks holding at least one of the line's questions
 
 
 def _quantile(ordered: Sequence[float], q: float) -> float:
@@ -197,6 +203,15 @@ def _quantile(ordered: Sequence[float], q: float) -> float:
 
 def _pairs(items: Sequence[_T], line: Callable[[_T], Pair | None]) -> list[Pair]:
     return [pair for pair in map(line, items) if pair is not None]
+
+
+def _carried(runs: Sequence[Sequence[_T]], line: Callable[[_T], Pair | None], size: int) -> int:
+    """How many blocks, each run cut from its first question, hold one of the line's questions."""
+    return sum(
+        any(line(item) is not None for item in run[start : start + size])
+        for run in runs
+        for start in range(0, len(run), size)
+    )
 
 
 def bootstrap_lines(
@@ -238,11 +253,14 @@ def bootstrap_lines(
                     drawn[index].append(value)
     tail = (1 - level) / 2
     intervals = []
-    for pairs, skill, values, missed in zip(found, skills, drawn, dropped, strict=True):
+    for line, pairs, skill, values, missed in zip(
+        lines, found, skills, drawn, dropped, strict=True
+    ):
         values.sort()
         low = _quantile(values, tail) if values else None
         high = _quantile(values, 1 - tail) if values else None
-        intervals.append(Interval(len(pairs), blocks, skill, low, high, missed))
+        carried = _carried(runs, line, block)
+        intervals.append(Interval(len(pairs), blocks, skill, low, high, missed, carried))
     return intervals
 
 
@@ -269,8 +287,9 @@ def _num(value: float | None, form: str) -> str:
 
 
 def _interval_text(found: Interval, draws: int) -> str:
+    held = f", {found.carried} holding its questions" if found.carried != found.blocks else ""
     text = (
-        f"n {found.n} in {found.blocks} block(s); skill {_num(found.skill, '{:+.3f}')}, "
+        f"n {found.n} in {found.blocks} block(s){held}; skill {_num(found.skill, '{:+.3f}')}, "
         f"{LEVEL:.0%} interval [{_num(found.low, '{:+.3f}')}, {_num(found.high, '{:+.3f}')}]"
     )
     if found.dropped:
@@ -283,21 +302,31 @@ def _verdict(
 ) -> str:
     """Met when every judged interval's lower end is above 0, on enough blocks.
 
-    One judged interval with its lower end at or below 0 is enough to say
-    "not met", whatever the others can say; one with no interval is named
-    beside it.
+    Each judged line must also have its questions in at least
+    :data:`MIN_BLOCKS` of the blocks (decided 2026-09-29): up against down
+    reads only the questions that moved, and a handful of them in one or two
+    blocks would be drawn over and over, collapsing its interval as one
+    block does. One judged interval read on enough blocks with its lower end
+    at or below 0 is enough to say "not met", whatever the others can say;
+    one that cannot be read is named beside it.
     """
     assert judged, "the bar judges at least one interval"
     if block != BLOCK:
         return f"not judged: the bar is read with blocks of {BLOCK}, this report used {block}"
     if blocks < MIN_BLOCKS:
         return f"cannot be judged: {blocks} block(s), fewer than the {MIN_BLOCKS} the bar needs"
-    failing = [
-        f"{name} lower end {found.low:+.3f}"
-        for name, found in judged
-        if found.low is not None and found.low <= 0
-    ]
-    unread = [f"{name} has no interval" for name, found in judged if found.low is None]
+    failing: list[str] = []
+    unread: list[str] = []
+    for name, found in judged:
+        if found.carried < MIN_BLOCKS:
+            unread.append(
+                f"{name} has its questions in {found.carried} of the {blocks} block(s), fewer "
+                f"than the {MIN_BLOCKS} the bar needs"
+            )
+        elif found.low is None:
+            unread.append(f"{name} has no interval")
+        elif found.low <= 0:
+            failing.append(f"{name} lower end {found.low:+.3f}")
     if failing:
         also = "".join(f"; {reason}" for reason in unread)
         return "not met: " + ", ".join(failing) + also + f" (seed {seed})"

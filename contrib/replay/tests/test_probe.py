@@ -667,7 +667,8 @@ def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
         "the model's own prior (its train headline forecasts averaged), 24h: up 20.0% / down "
         "20.0% / flat 60.0% (n 6)",
         "-- headline: each question's repeats averaged into one forecast; a question with no "
-        "valid forecast but an invalid_probe among its repeats is scored as the base rate --",
+        "valid forecast but an invalid_probe among its repeats is scored as the base rate (as "
+        "the prior on the lines against it) --",
         # Three ups at 0.26 and three flats at 0.86 average 0.56 against the base
         # rate's 0.5; log loss (3 x -ln .6 + 3 x -ln .3) / 6 = 0.857, base -ln .5.
         "  4h train: n 6 scored (0 with no valid forecast but an invalid_probe, 0 refused on every repeat, 0 without an "

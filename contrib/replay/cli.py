@@ -1147,12 +1147,17 @@ def _cmd_pool(args: argparse.Namespace) -> int:
                     everyone = {row.question.input_id for row in card.rows}
                     every = own_prior(card, merged, everyone, JUDGED_KEY)
                     cut = (0 if every is None else every[1]) - counted
-                    remedy = (
-                        f"{cut} more were left out at the model cutoff: pass --include-pre-cutoff "
-                        "to count them, or leave the run out of --run-id"
-                        if cut
-                        else "probe the run's train segment, or leave it out of --run-id"
-                    )
+                    if counted + cut >= PRIOR_MIN_FORECASTS:
+                        remedy = (
+                            f"{cut} more were left out at the model cutoff: pass "
+                            "--include-pre-cutoff to count them, or leave the run out of --run-id"
+                        )
+                    else:
+                        remedy = (
+                            f"{cut} more were left out at the model cutoff, still short of it; "
+                            if cut
+                            else ""
+                        ) + "probe the run's train segment, or leave it out of --run-id"
                     raise _Refused(
                         f"run {run_id!r} has {counted} valid {JUDGED_KEY} train forecast(s) from "
                         f"{variant.name!r} for the probe {args.probe!r}, fewer than the "

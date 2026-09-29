@@ -479,7 +479,8 @@ def describe_probe(
 
     lines.append(
         "-- headline: each question's repeats averaged into one forecast; a question with no "
-        "valid forecast but an invalid_probe among its repeats is scored as the base rate --"
+        "valid forecast but an invalid_probe among its repeats is scored as the base rate (as "
+        "the prior on the lines against it) --"
     )
     headline = list(merged.values())
     reliable: dict[tuple[str, SegmentName | None], list[Pair]] = {}

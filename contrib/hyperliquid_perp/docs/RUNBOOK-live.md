@@ -161,6 +161,13 @@ python -m contrib.hyperliquid_perp live \
 exit 0＝recovery 判定通過（可進 cycles）；exit 4＝執行了但判定 unclean（run 進了
 safe mode，見 §6）；exit 1＝硬失敗（config／arming／建立）。
 
+exit 4 還有兩個判定通過之後的成因，都發生在收尾：§18.2 sweep 不乾淨（stderr 印
+`§18.2 shutdown unclean`），以及收尾時 safe-mode 狀態**讀不到**而帳上有倉（或倉位也
+讀不到），sweep 因此留下 SL/TP（stderr 最後一行是 `startup recovery passed, but
+protective orders were kept behind a FAILED shutdown safe-mode read`）。後者先查 run
+store 為什麼讀不到（例如 SQLite 被鎖），再重跑一次本指令。收尾讀不到 safe mode
+但帳本確認 flat 時沒有單被留下，仍是 exit 0。
+
 > **genesis 之後，錢包只屬於 bot（§11／§12.3）**：live 帳本以交易所帳單為唯一基準，
 > run 建立後任何**手動**成交（UI 下單、轉倉）都會變成本地無單可掛的
 > `fill_unmapped`／`exchange_position_mismatch` case——`fill_unmapped` 無法用

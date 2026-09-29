@@ -135,6 +135,7 @@ class ExitReason(Enum):
     LOOP_IN_SAFE_MODE = ("loop_in_safe_mode", 4)
     LOOP_KEPT_ON_UNKNOWN_SAFE_MODE = ("loop_kept_on_unknown_safe_mode", 4)
     LOOP_CLEAN = ("loop_clean", 0)
+    ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE = ("one_shot_kept_on_unknown_safe_mode", 4)
     ONE_SHOT_PASSED = ("one_shot_passed", 0)
 
     # The tag only keeps the values distinct: members sharing a code would
@@ -156,19 +157,23 @@ def classify_exit(
 
     First match wins: a failed verdict (4, not 1: a verdict is not a hard
     failure, decided 2026-07-16), then an unclean sweep (the wallet-wide
-    trigger may still be armed, decided 2026-07-17), then on ``--loop`` a
-    protection-only ending (``protection_only_settled`` is None when the loop
-    was not protection-only). A settled one exits 1 like paper's settle-exit,
-    so a supervisor restarts into the same named refusal; a stopped one exits
-    4. Then safe mode latched at exit, then SL/TP kept behind a failed
-    safe-mode read (a failed read over a flat book kept nothing, so the exit
-    follows the safe-mode state).
+    trigger may still be armed, decided 2026-07-17). The one-shot then exits
+    4 when SL/TP were kept behind a failed safe-mode read (issue #303), else
+    0; it does not read ``safe_mode_latched``. On ``--loop`` a
+    protection-only ending comes next (``protection_only_settled`` is None
+    when the loop was not protection-only). A settled one exits 1 like
+    paper's settle-exit, so a supervisor restarts into the same named
+    refusal; a stopped one exits 4. Then safe mode latched at exit, then
+    SL/TP kept behind a failed safe-mode read. On either lane a failed read
+    over a flat book kept nothing and adds no 4 of its own.
     """
     if not verdict_passed:
         return ExitReason.VERDICT_FAILED
     if sweep_unclean:
         return ExitReason.SWEEP_UNCLEAN
     if not loop:
+        if kept_on_unknown_safe_mode:
+            return ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE
         return ExitReason.ONE_SHOT_PASSED
     if protection_only_settled is not None:
         return (

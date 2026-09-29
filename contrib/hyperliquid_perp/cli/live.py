@@ -89,6 +89,11 @@ def _exit_line(reason: ExitReason) -> str | None:
         ExitReason.LOOP_CLEAN: (
             "live loop exited — §18.2 shutdown sweep done; re-run with --loop to resume this run."
         ),
+        ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE: (
+            "startup recovery passed, but protective orders were kept behind "
+            "a FAILED shutdown safe-mode read (unknown ≠ clean) — "
+            "inspect the run store before starting a live loop."
+        ),
         ExitReason.ONE_SHOT_PASSED: (
             "startup recovery passed — a live loop can start from this state (re-run with --loop)."
         ),

@@ -155,6 +155,11 @@ def _exit(**overrides) -> ExitReason:
         ({"protection_only_settled": False}, ExitReason.PROTECTION_ONLY_STOPPED, 4),
         ({"safe_mode_latched": True}, ExitReason.LOOP_IN_SAFE_MODE, 4),
         ({"kept_on_unknown_safe_mode": True}, ExitReason.LOOP_KEPT_ON_UNKNOWN_SAFE_MODE, 4),
+        (
+            {"loop": False, "kept_on_unknown_safe_mode": True},
+            ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE,
+            4,
+        ),
     ],
 )
 def test_each_exit_reason_and_its_code(overrides, reason, code):
@@ -179,12 +184,16 @@ def test_each_exit_reason_and_its_code(overrides, reason, code):
             {"safe_mode_latched": True, "kept_on_unknown_safe_mode": True},
             ExitReason.LOOP_IN_SAFE_MODE,
         ),
-        # The one-shot's code follows its verdict and the sweep only, as it
-        # did before this module existed; the --loop lane alone exits 4 here.
+        (
+            {"loop": False, "sweep_unclean": True, "kept_on_unknown_safe_mode": True},
+            ExitReason.SWEEP_UNCLEAN,
+        ),
+        # The one-shot does not read the latch, so it cannot name one.
         (
             {"loop": False, "safe_mode_latched": True, "kept_on_unknown_safe_mode": True},
-            ExitReason.ONE_SHOT_PASSED,
+            ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE,
         ),
+        ({"loop": False, "safe_mode_latched": True}, ExitReason.ONE_SHOT_PASSED),
     ],
 )
 def test_the_first_exit_reason_in_order_wins(overrides, reason):

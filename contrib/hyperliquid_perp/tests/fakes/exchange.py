@@ -34,8 +34,8 @@ class FakeSignedClient:
         self.schedule_calls: list[datetime] = []
         self.schedule_attempts: int = 0
         self.schedule_error: Exception | None = None
-        # Seconds ``schedule_cancel`` consumes before it answers, advanced on
-        # ``clock``.
+        # Seconds ``schedule_cancel`` advances ``clock`` by before it answers;
+        # without a clock it advances nothing.
         self.schedule_duration_s: float = 0
         self.clear_calls: int = 0
         self.clear_error: Exception | None = None

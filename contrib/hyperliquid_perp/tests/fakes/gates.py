@@ -1,9 +1,4 @@
-"""Builders for the §4.1 real-order gate, one per check ``RealOrderGate`` offers.
-
-Called without arguments, each returns the narrowest testnet BTC gate that
-passes the check it is named after. Keyword arguments go to the constructor
-and can build a gate that passes nothing.
-"""
+"""Builders for the §4.1 real-order gate, one per check ``RealOrderGate`` offers."""
 
 from __future__ import annotations
 
@@ -16,7 +11,7 @@ _NEW_TARGET = {**_ORDER, "risk_gate_approved": True}
 
 
 def exchange_action_gate(**conditions) -> RealOrderGate:
-    """Passes ``check_exchange_action``."""
+    """Without ``conditions``, passes ``check_exchange_action``."""
     kwargs = {
         "allow_real_orders": True,
         "mode": ExecutionMode.TESTNET_LIVE,
@@ -38,7 +33,7 @@ def order_gate() -> RealOrderGate:
 
 
 def new_target_gate(**overrides) -> RealOrderGate:
-    """Passes ``check_new_target``.
+    """Without ``overrides``, passes ``check_new_target``.
 
     Overrides go through the constructor — the config trio is pinned after
     construction, so a variant gate is built, never mutated into shape.

@@ -1,4 +1,4 @@
-"""The BTC mark, margin schedule and price snapshot the engine tests run on."""
+"""A mark price, a one-tier margin schedule and a (mark, mid) snapshot."""
 
 from __future__ import annotations
 

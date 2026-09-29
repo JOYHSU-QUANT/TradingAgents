@@ -1011,8 +1011,8 @@ def _live_startup_recovery(
                 print(
                     "WARNING: the safe-mode state could NOT be read after the "
                     f"§18.2 shutdown sweep ({type(exc).__name__}: {exc}) — "
-                    "unknown ≠ none; inspect the run store before starting "
-                    "or resuming a live loop.",
+                    "inspect the run store before starting or resuming a "
+                    "live loop.",
                     file=sys.stderr,
                 )
             else:

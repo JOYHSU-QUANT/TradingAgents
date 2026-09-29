@@ -1891,7 +1891,7 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    讀不到）即保留 SL / TP，且因此保留了單者同樣 exit 4（--loop 與一次性路徑皆然；
    一次性路徑於 2026-09-29 補上，issue #303）——事後較幸運的第二
    次讀取不得把 exit code 講回 0；sweep 之前的讀取失敗但已確認 flat（無單被保留）者
-   不因此回 4（--loop 的 exit 由 sweep 之後那次讀取決定），不對 supervisor 誤報。
+   不因此回 4，不對 supervisor 誤報。
    sweep 之後印 `safe_mode:` 行的那次讀取也失敗時（issue #308，2026-09-29，使用者
    拍板），該行印 `unknown`，stderr 印一行帶失敗原因的 WARNING；--loop 不得回 0
    （flat 亦然，unknown ≠ clean），一次性路徑不讀 latch，exit code 不因這次讀取

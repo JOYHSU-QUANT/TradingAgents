@@ -661,8 +661,14 @@ def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
         "base rate, train, 4h: up 50.0% / down 0.0% / flat 50.0% (n 6)",
         "base rate, train, 24h: up 50.0% / down 0.0% / flat 50.0% (n 2)",
         "base rate of up among the moves, train: 4h 100.0% (n 3), 24h 100.0% (n 1)",
+        # Every train answer is the same, so the model's own prior is that answer.
+        "the model's own prior (its train headline forecasts averaged), 4h: up 60.0% / down "
+        "10.0% / flat 30.0% (n 6)",
+        "the model's own prior (its train headline forecasts averaged), 24h: up 20.0% / down "
+        "20.0% / flat 60.0% (n 6)",
         "-- headline: each question's repeats averaged into one forecast; a question with no "
-        "valid forecast but an invalid_probe among its repeats is scored as the base rate --",
+        "valid forecast but an invalid_probe among its repeats is scored as the base rate (as "
+        "the prior on the lines against it) --",
         # Three ups at 0.26 and three flats at 0.86 average 0.56 against the base
         # rate's 0.5; log loss (3 x -ln .6 + 3 x -ln .3) / 6 = 0.857, base -ln .5.
         "  4h train: n 6 scored (0 with no valid forecast but an invalid_probe, 0 refused on every repeat, 0 without an "
@@ -676,6 +682,11 @@ def test_the_probe_section_of_score_by_hand(store, files, monkeypatch, capsys):
         "outcome); Brier 0.260 vs base 0.500, skill +0.480; log loss 0.511 vs base 0.693; "
         "without the base-rate stand-ins: n 1, skill +0.480",
         "  4h validation, up vs down given a move: n 1, Brier 0.020 vs base 0.000, skill n/a",
+        # Slot 6 answered with the prior itself: no skill against it. The 24h
+        # validation questions have no outcome, so they get no such line.
+        "  4h validation, against the model's own train prior: n 1, Brier 0.260 vs prior "
+        "0.260, skill +0.000; up vs down given a move: n 1, Brier 0.020 vs prior 0.020, skill "
+        "+0.000",
         f"  4h validation, temperature {fitted:.2f} fitted on the train headline: Brier "
         f"{brier(scaled, 'up'):.3f}, skill {1 - brier(scaled, 'up') / 0.5:+.3f}; log loss "
         f"{log_loss(scaled, 'up'):.3f}",

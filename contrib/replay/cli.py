@@ -35,8 +35,9 @@ Four commands:
   ``model_cutoff``, without asking anything.
 - ``pool --run-id A --run-id B ... --replay-db PATH --variant NAME --probe
   NAME`` — the direction probe pooled over several runs' validation
-  segments (plan PR 2.2): the headline skill per horizon with a 90%
-  block-bootstrap interval, and the plan section 5 bar. Reads only.
+  segments (plan PR 2.2): the headline and up-vs-down skills per horizon,
+  against the base rate and against the model's own prior, with 90%
+  block-bootstrap intervals, and the plan section 5 bar. Reads only.
 
 Exit codes, kept in step with the two neighbouring packages' CLIs: ``0`` the
 command did what it says, ``1`` a named operator, store, config, split,
@@ -69,7 +70,13 @@ from .paper_store import (
 )
 from .pool import BLOCK, DRAWS, JUDGED_KEY, RunScores, describe_pool
 from .probe import PROBE_KEYS, PROBE_STEP_MS, Probe, ProbeAnswer, ProbeError, load_probe
-from .probe_score import describe_probe, headline_scores
+from .probe_score import (
+    PRIOR_MIN_FORECASTS,
+    describe_probe,
+    ensemble,
+    headline_scores,
+    own_prior,
+)
 from .replay import (
     ProbeReport,
     ReplayError,
@@ -301,10 +308,15 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Pool one variant's answers to one direction probe over the validation segments "
             "of several paper runs, each cut by the split pinned for it in the replay store, "
-            "and print the headline Brier skill score per horizon with a 90 percent "
-            "interval from a circular block bootstrap within each run, and whether the plan "
-            "section 5 bar (4h, lower end above 0, blocks of 6, at least 5 blocks) is met. A "
-            "run with no 4h train base rate is refused. Reads only; the holdout is never read."
+            "and print the headline and up-vs-down Brier skill scores per horizon, against "
+            "the train base rate and against the model's own train prior, each with a 90 "
+            "percent interval from a circular block bootstrap within each run, and whether the "
+            "plan section 5 bar (4h, both skills against the own prior, each lower end above "
+            "0, blocks of 6, each skill's questions in at least 5 of them) is met. A run with "
+            "no 4h train base rate, or "
+            f"fewer than {PRIOR_MIN_FORECASTS} valid 4h train forecasts to form the prior from, "
+            "is refused. Reads "
+            "only; the holdout is never read."
         ),
     )
     pool.add_argument("--db", default="paper_trading.db", help="the paper store (SQLite path)")
@@ -1127,17 +1139,36 @@ def _cmd_pool(args: argparse.Namespace) -> int:
                         "has an outcome at that horizon), so its questions have nothing to be "
                         "held against; leave it out of --run-id"
                     )
+                merged = ensemble(asked[args.probe])
+                found_prior = own_prior(card, merged, scope.eligible, JUDGED_KEY)
+                counted = 0 if found_prior is None else found_prior[1]
+                if counted < PRIOR_MIN_FORECASTS:
+                    # The bar reads each run against the model's own prior
+                    # (plan section 5, revised 2026-09-29), from its train answers.
+                    everyone = {row.question.input_id for row in card.rows}
+                    every = own_prior(card, merged, everyone, JUDGED_KEY)
+                    cut = (0 if every is None else every[1]) - counted
+                    if counted + cut >= PRIOR_MIN_FORECASTS:
+                        remedy = (
+                            f"{cut} more were left out at the model cutoff: pass "
+                            "--include-pre-cutoff to count them, or leave the run out of --run-id"
+                        )
+                    else:
+                        remedy = (
+                            f"{cut} more were left out at the model cutoff, still short of it; "
+                            if cut
+                            else ""
+                        ) + "probe the run's train segment, or leave it out of --run-id"
+                    raise _Refused(
+                        f"run {run_id!r} has {counted} valid {JUDGED_KEY} train forecast(s) from "
+                        f"{variant.name!r} for the probe {args.probe!r}, fewer than the "
+                        f"{PRIOR_MIN_FORECASTS} the model's own prior is formed from; {remedy}"
+                    )
                 parts.append(
                     RunScores(
                         run_id=run_id,
                         pinned_at=run.pinned_at,
                         scores=scores,
-                        left_out=sum(
-                            1
-                            for row in card.rows
-                            if row.segment is SegmentName.VALIDATION
-                            and row.question.input_id not in scope.eligible
-                        ),
                     )
                 )
     except (ReplayStoreError, StoreError) as exc:

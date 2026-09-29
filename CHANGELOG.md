@@ -15,12 +15,12 @@ Breaking changes within the 0.x line are called out explicitly.
   The read behind the `safe_mode:` summary line had no guard, so a raise
   there reached the last-resort handler: exit 2, `fatal: unexpected error`,
   no `safe_mode:` line and no exit line. The read is now guarded. When it
-  fails the line reads `safe_mode: unknown` and the exit is classified as
-  usual. `--loop` exits 4 with a new reason,
-  `ExitReason.LOOP_SAFE_MODE_UNREADABLE`, unless an earlier reason in
-  `classify_exit` already applies. The one-shot does not read the latch, so
-  its exit code is what it would have been with the read answered.
-  phase3-spec §18.2 rule 8 says so.
+  fails the line reads `safe_mode: unknown`, stderr gets a WARNING that
+  carries the exception, and the exit is classified as usual. `--loop`
+  exits 4 with a new reason, `ExitReason.LOOP_SAFE_MODE_UNREADABLE`, unless
+  an earlier reason in `classify_exit` already applies. The one-shot does
+  not read the latch, so its exit code is what it would have been with the
+  read answered. phase3-spec §18.2 rule 8 and RUNBOOK-live §2 and §4 say so.
 
 - **`live --run-id` without `--loop` no longer exits 0 after keeping SL/TP
   behind a failed exit-time safe-mode read** (`contrib/hyperliquid_perp/live/shutdown.py`,

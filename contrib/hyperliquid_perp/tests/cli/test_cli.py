@@ -6441,6 +6441,7 @@ def test_cmd_live_loop_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mode_re
         "safe-mode read (unknown ≠ clean)"
     ) in captured.err
     assert "safe_mode: none" in captured.out
+    assert "could NOT be read after the §18.2 shutdown sweep" not in captured.err
 
 
 @pytest.mark.parametrize(
@@ -6522,6 +6523,10 @@ def test_cmd_live_loop_exits_4_by_name_when_safe_mode_stays_unreadable(
     assert rc == 4
     assert last_line in captured.err
     assert "fatal: unexpected error" not in captured.err
+    assert (
+        "WARNING: the safe-mode state could NOT be read after the §18.2 shutdown "
+        "sweep (RuntimeError: database is locked)"
+    ) in captured.err
     assert "safe_mode: unknown" in captured.out
     assert "safe_mode: none" not in captured.out
 
@@ -6559,6 +6564,10 @@ def test_cmd_live_one_shot_keeps_its_exit_when_safe_mode_stays_unreadable(
     assert rc == code
     assert last_line in captured.err
     assert "fatal: unexpected error" not in captured.err
+    assert (
+        "WARNING: the safe-mode state could NOT be read after the §18.2 shutdown "
+        "sweep (RuntimeError: database is locked)"
+    ) in captured.err
     assert "safe_mode: unknown" in captured.out
 
 

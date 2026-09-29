@@ -166,6 +166,9 @@ exit 4 還有兩個判定通過之後的成因，都發生在收尾：§18.2 swe
 讀不到），sweep 因此留下 SL/TP（stderr 最後一行是 `startup recovery passed, but
 protective orders were kept behind a FAILED shutdown safe-mode read`）。收尾讀不到
 safe mode 但帳戶讀到 flat 時沒有單被留下，這件事本身不會讓 exit 變成 4。
+stdout 的 `safe_mode:` 行印 `unknown`、stderr 有一行 `WARNING: the safe-mode state
+could NOT be read after the §18.2 shutdown sweep` 時，開 `--loop` 之前先查 run store
+為什麼讀不到。
 
 後者的處置：先查 run store 為什麼讀不到（例如 SQLite 被鎖）。重跑時拿掉
 `--create` 與 `--adopt-positions`（兩者只用在建 run 的那一次）。不帶 `--loop` 重跑若判定通過、
@@ -423,7 +426,9 @@ python -m contrib.hyperliquid_perp live \
   不會套用到本地倉位，所以連這道守衛都解不開。
 - 迴圈每 ~10s tick（在 30s kill-switch 預算內）：排空 WS queue → 刷 kill switch →
   reconciliation → SL/TP protection → 到期切片；4h AI decision 在背景 thread。
-- Ctrl-C／SIGTERM 安全停止並跑 §18.2 shutdown sweep。
+- Ctrl-C／SIGTERM 安全停止並跑 §18.2 shutdown sweep。sweep 之後讀不到 safe-mode 狀態時
+  stdout 印 `safe_mode: unknown`、stderr 的 WARNING 帶讀取失敗的原因，exit 不會是 0；
+  先查 run store 為什麼讀不到（例如 SQLite 被鎖），再重跑 `--loop`。
 - **Protection-only 模式**（issue #268；與 paper 的同名模式同一條規則）：`--loop` 在
   recovery 通過後建構 decision provider，這一步會跑 engine 的啟動閘門——`.env` 裡壞的
   `TRADINGAGENTS_MAX_TOKENS`／`TRADINGAGENTS_LLM_MAX_RETRIES`／`TRADINGAGENTS_TEMPERATURE`、

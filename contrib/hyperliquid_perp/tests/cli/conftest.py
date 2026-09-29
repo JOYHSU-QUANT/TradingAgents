@@ -271,9 +271,9 @@ def live_seams(monkeypatch):
             if state.signed_error is not None:
                 raise state.signed_error
 
-        # The recovery components BIND these at construction. The real
-        # client has all of them; this
-        # double has no REST behaviour UNLESS a test opts in via
+        # The recovery components BIND these at construction. The real client
+        # has all of them; this double has no REST behaviour UNLESS a test opts
+        # in via
         # ``state.rest_enabled`` — reaching one while opted out is a broken
         # test rather than a scenario — recorded, so that claim is checkable
         # instead of being a comment (2026-08-19 review; opt-in 2026-08-27).

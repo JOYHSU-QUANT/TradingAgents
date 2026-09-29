@@ -6135,7 +6135,8 @@ def _drive_cmd_live_loop_to_its_exit(
     (its real arming needs a live exchange), and the loop itself is replaced
     by ``loop`` — so what runs for real is ``_cmd_live``'s handling of what
     the loop raises or returns: the exit line and the exit code (issue #268).
-    Unless the test sets a position or arms the switch, the ``finally``
+    Unless the test sets a position, breaks the position read or arms the
+    switch, the ``finally``
     sweep runs over the seams' flat account with the switch
     never armed, which is the shape of a flat-book exit; on ``--loop`` its §12.2
     pre-shutdown reconcile is scripted clean too (``reconcile``), since the

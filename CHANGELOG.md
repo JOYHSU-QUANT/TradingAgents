@@ -20,7 +20,7 @@ Breaking changes within the 0.x line are called out explicitly.
   `LOOP_KEPT_ON_UNKNOWN_SAFE_MODE`, a 4. The one-shot now has one too,
   `ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE`, also a 4, and its last
   stderr line names the failed read. A failed read over a book read flat
-  keeps nothing and still exits 0. phase3-spec §18.2 rule 8 and
+  keeps nothing and adds no 4 of its own. phase3-spec §18.2 rule 8 and
   RUNBOOK-live §2 say so; RUNBOOK-live §2 also says what a re-run does to
   the kept SL/TP.
 

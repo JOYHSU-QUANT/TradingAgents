@@ -165,16 +165,11 @@ exit 4 還有兩個判定通過之後的成因，都發生在收尾：§18.2 swe
 `§18.2 shutdown unclean`），以及收尾時 safe-mode 狀態**讀不到**而帳上有倉（或倉位也
 讀不到），sweep 因此留下 SL/TP（stderr 最後一行是 `startup recovery passed, but
 protective orders were kept behind a FAILED shutdown safe-mode read`）。收尾讀不到
-safe mode 但帳本確認 flat 時沒有單被留下，仍是 exit 0。
+safe mode 但帳本確認 flat 時沒有單被留下，這件事本身不會讓 exit 變成 4。
 
-後者的處置：先查 run store 為什麼讀不到（例如 SQLite 被鎖）。留下的 SL/TP 是
-reduce-only、沒有人看管。重跑本指令要**拿掉 `--create`**（run 已經建好，帶著
-`--create` 會被 `already exists` 具名拒絕、exit 1）；重跑若判定通過、收尾也讀得到
-safe mode，§18.2 sweep 會把這些 SL/TP 連同其他 bot 單一起取消，倉位到 `--loop`
-接手之前沒有保護。§20.2 smoke gate 已開的話直接跑 `--loop`。
-
-store 到印 `safe_mode:` 那一行時仍讀不到的話，指令以 exit 2 結束（stderr 是
-`fatal: unexpected error`），上面那一行不會印；SL/TP 照樣留著。
+後者的處置：先查 run store 為什麼讀不到（例如 SQLite 被鎖）。重跑時拿掉
+`--create` 與 `--adopt-positions`（兩者只用在建 run 的那一次）。重跑若判定通過、
+收尾也讀得到 safe mode，§18.2 sweep 會把留下的 SL/TP 連同其他 bot 單一起取消。
 
 > **genesis 之後，錢包只屬於 bot（§11／§12.3）**：live 帳本以交易所帳單為唯一基準，
 > run 建立後任何**手動**成交（UI 下單、轉倉）都會變成本地無單可掛的

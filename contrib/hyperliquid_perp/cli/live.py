@@ -441,10 +441,12 @@ def _live_startup_recovery(
     exits; with --loop a passing verdict hands off to :func:`_run_live_loop`
     (which keeps the kill switch refreshed) before the same sweep runs on the
     way out. Exit codes: 0 = the §19.1 step-16 verdict allows a new AI cycle
-    and the way out added no 4 of its own;
+    and the way out added no 4 or 1 of its own;
     4 = recovery executed but the verdict is unclean (the run is in safe
     mode), or SL/TP were kept behind a failed exit-time safe-mode read
-    (issue #303), or a --loop run ended with safe mode latched, or a
+    (on the one-shot since issue #303), or a --loop run ended with safe
+    mode latched, or --loop was refused because the §20.2 smoke gate is
+    not open, or a
     --loop run was stopped while in protection-only mode (issue
     #268: the engine could not be built over a live position, so the loop
     ran tick-only — see :func:`_run_live_loop`); 1 = hard failure

@@ -155,6 +155,7 @@ def _exit(**overrides) -> ExitReason:
         ({"protection_only_settled": False}, ExitReason.PROTECTION_ONLY_STOPPED, 4),
         ({"safe_mode_latched": True}, ExitReason.LOOP_IN_SAFE_MODE, 4),
         ({"kept_on_unknown_safe_mode": True}, ExitReason.LOOP_KEPT_ON_UNKNOWN_SAFE_MODE, 4),
+        ({"safe_mode_latched": None}, ExitReason.LOOP_SAFE_MODE_UNREADABLE, 4),
         (
             {"loop": False, "kept_on_unknown_safe_mode": True},
             ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE,
@@ -194,6 +195,20 @@ def test_each_exit_reason_and_its_code(overrides, reason, code):
             ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE,
         ),
         ({"loop": False, "safe_mode_latched": True}, ExitReason.ONE_SHOT_PASSED),
+        # Issue #308: the latch could not be read after the sweep.
+        (
+            {"safe_mode_latched": None, "kept_on_unknown_safe_mode": True},
+            ExitReason.LOOP_KEPT_ON_UNKNOWN_SAFE_MODE,
+        ),
+        (
+            {"safe_mode_latched": None, "protection_only_settled": True},
+            ExitReason.PROTECTION_ONLY_SETTLED,
+        ),
+        (
+            {"loop": False, "safe_mode_latched": None, "kept_on_unknown_safe_mode": True},
+            ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE,
+        ),
+        ({"loop": False, "safe_mode_latched": None}, ExitReason.ONE_SHOT_PASSED),
     ],
 )
 def test_the_first_exit_reason_in_order_wins(overrides, reason):

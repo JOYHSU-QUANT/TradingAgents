@@ -134,6 +134,7 @@ class ExitReason(Enum):
     PROTECTION_ONLY_STOPPED = ("protection_only_stopped", 4)
     LOOP_IN_SAFE_MODE = ("loop_in_safe_mode", 4)
     LOOP_KEPT_ON_UNKNOWN_SAFE_MODE = ("loop_kept_on_unknown_safe_mode", 4)
+    LOOP_SAFE_MODE_UNREADABLE = ("loop_safe_mode_unreadable", 4)
     LOOP_CLEAN = ("loop_clean", 0)
     ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE = ("one_shot_kept_on_unknown_safe_mode", 4)
     ONE_SHOT_PASSED = ("one_shot_passed", 0)
@@ -150,7 +151,7 @@ def classify_exit(
     sweep_unclean: bool,
     loop: bool,
     protection_only_settled: bool | None,
-    safe_mode_latched: bool,
+    safe_mode_latched: bool | None,
     kept_on_unknown_safe_mode: bool,
 ) -> ExitReason:
     """Pick the exit after the sweep: 0 = all quiet, 4 = executed but unclean, 1 = settle-exit.
@@ -164,8 +165,8 @@ def classify_exit(
     when the loop was not protection-only). A settled one exits 1 like
     paper's settle-exit, so a supervisor restarts into the same named
     refusal; a stopped one exits 4. Then safe mode latched at exit, then
-    SL/TP kept behind a failed safe-mode read. On either lane a failed read
-    over a flat book kept nothing and adds no 4 of its own.
+    SL/TP kept behind a failed safe-mode read, then a latch that could not
+    be read after the sweep (``safe_mode_latched`` is None, issue #308).
     """
     if not verdict_passed:
         return ExitReason.VERDICT_FAILED
@@ -185,6 +186,8 @@ def classify_exit(
         return ExitReason.LOOP_IN_SAFE_MODE
     if kept_on_unknown_safe_mode:
         return ExitReason.LOOP_KEPT_ON_UNKNOWN_SAFE_MODE
+    if safe_mode_latched is None:
+        return ExitReason.LOOP_SAFE_MODE_UNREADABLE
     return ExitReason.LOOP_CLEAN
 
 

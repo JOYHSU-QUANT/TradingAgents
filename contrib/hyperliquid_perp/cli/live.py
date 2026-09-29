@@ -86,6 +86,11 @@ def _exit_line(reason: ExitReason) -> str | None:
             "a FAILED shutdown safe-mode read (unknown ≠ clean) — "
             "inspect the run store before resuming."
         ),
+        ExitReason.LOOP_SAFE_MODE_UNREADABLE: (
+            "live loop exited, but the safe-mode state could NOT be read "
+            "after the §18.2 shutdown sweep (unknown ≠ clean) — "
+            "inspect the run store before resuming."
+        ),
         ExitReason.LOOP_CLEAN: (
             "live loop exited — §18.2 shutdown sweep done; re-run with --loop to resume this run."
         ),
@@ -994,10 +999,27 @@ def _live_startup_recovery(
             print(f"startup_reconciliation_passed: {'true' if result.passed else 'false'}")
             print(f"canceled_stale_orders: {len(result.canceled_stale)}")
             print(f"kept_orders: {len(result.kept_orders)}")
-            state = session.safe_mode.current()
-            print(f"safe_mode: {'none' if state is None else state.safe_mode_type}")
-            if state is not None:
-                print(f"safe_mode_reason: {state.reason}")
+            # Guarded (issue #308): a raise here would skip classify_exit and
+            # surface as a generic exit 2.
+            safe_mode_latched: bool | None
+            try:
+                state = session.safe_mode.current()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("safe-mode read after the shutdown sweep failed")
+                safe_mode_latched = None
+                print("safe_mode: unknown")
+                print(
+                    "WARNING: the safe-mode state could NOT be read after the "
+                    f"§18.2 shutdown sweep ({type(exc).__name__}: {exc}) — "
+                    "inspect the run store before starting or resuming a "
+                    "live loop.",
+                    file=sys.stderr,
+                )
+            else:
+                safe_mode_latched = state is not None
+                print(f"safe_mode: {'none' if state is None else state.safe_mode_type}")
+                if state is not None:
+                    print(f"safe_mode_reason: {state.reason}")
             if result.sweep_failures:
                 for failure in result.sweep_failures:
                     print(f"error: stale-order sweep — {failure}", file=sys.stderr)
@@ -1006,7 +1028,7 @@ def _live_startup_recovery(
                 sweep_unclean=shutdown_problem is not None,
                 loop=args.loop,
                 protection_only_settled=None if loop_exit is None else loop_exit.settled,
-                safe_mode_latched=state is not None,
+                safe_mode_latched=safe_mode_latched,
                 kept_on_unknown_safe_mode=(
                     shutdown_verdict is not None and shutdown_verdict.kept_on_unknown_safe_mode
                 ),

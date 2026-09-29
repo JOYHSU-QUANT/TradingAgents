@@ -12,7 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import (
     CurrentPositionState,
     RiskConfig,
@@ -36,6 +35,7 @@ from contrib.hyperliquid_perp.runtime.clock import ManualClock
 from contrib.hyperliquid_perp.runtime.decision import DecisionInput, RetryableDecisionError
 
 from ..conftest import arm_lock_fault, poison_stored_parse
+from ..fakes.market import margin_schedule
 
 
 def _decision() -> ParsedDecision:
@@ -129,10 +129,6 @@ def test_retryable_error_reraised_on_poll():
 # -- LiveDecisionDriver -----------------------------------------------------
 
 _T0 = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
-
-
-def _schedule() -> MarginSchedule:
-    return MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
 
 
 def _gate_result():
@@ -254,7 +250,7 @@ def _driver(
         db=db,
         run_id="r",
         coin="BTC",
-        asset=AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=_schedule()),
+        asset=AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=margin_schedule()),
         risk_config=RiskConfig(leverage=Decimal(1), max_target_margin_pct=60),
         decision_config=DecisionConfig(),
         engine=engine,
@@ -1352,7 +1348,7 @@ def test_salvage_shutdown_persists_completed_unpolled_decision(tmp_path):
         db=db,
         run_id="r",
         coin="BTC",
-        asset=AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=_schedule()),
+        asset=AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=margin_schedule()),
         risk_config=RiskConfig(leverage=Decimal(1), max_target_margin_pct=60),
         decision_config=DecisionConfig(),
         engine=engine,

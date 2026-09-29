@@ -34,23 +34,12 @@ from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
 from contrib.hyperliquid_perp.ports import OrderGate
 
+from ..fakes.gates import new_target_gate
+
 _KEY = "0x" + "11" * 32
 _WALLET = "0x" + "aa" * 20
 _SEAM = "contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client.Exchange"
 _CLOID = "0x" + "ab" * 16
-
-
-def _open_gate() -> RealOrderGate:
-    return RealOrderGate(
-        allow_real_orders=True,
-        mode=ExecutionMode.TESTNET_LIVE,
-        allowed_symbols=("BTC",),
-        agent_authorized=True,
-        startup_reconciliation_passed=True,
-        kill_switch_active=True,
-        state_reconciled=True,
-        risk_gate_approved=True,
-    )
 
 
 def _closed_gate() -> RealOrderGate:
@@ -70,7 +59,7 @@ def test_real_order_gate_satisfies_order_gate_port():
 def _client(network="testnet", *, key=_KEY, gate=None, **kwargs) -> HyperliquidSignedClient:
     """A client with the (now construction-bound) §4.1 gate defaulted open."""
     return HyperliquidSignedClient(
-        network, key, wallet_address=_WALLET, gate=gate or _open_gate(), **kwargs
+        network, key, wallet_address=_WALLET, gate=gate or new_target_gate(), **kwargs
     )
 
 
@@ -283,7 +272,7 @@ def test_place_trigger_order_rides_the_protective_gate_in_safe_mode(fake_exchang
     # dropped state_reconciled and raised manual_safe_mode, unlike a risk-adding
     # order — else the SL repair that heals a §12.3 SL-missing safe mode can never
     # send and the position rides unprotected.
-    gate = _open_gate()
+    gate = new_target_gate()
     gate.state_reconciled = False
     gate.manual_safe_mode = True
     client = _client(gate=gate)
@@ -303,7 +292,7 @@ def test_modify_trigger_order_wire_shape_and_protective_gate(fake_exchange):
     # §17.4 modify-before-cancel: the wire call carries the TARGET oid, the new
     # trigger shape and a FRESH cloid — and it rides the protective gate, so an
     # SL move still lands while a safe mode has the ordinary gate closed.
-    gate = _open_gate()
+    gate = new_target_gate()
     gate.state_reconciled = False
     gate.manual_safe_mode = True
     client = _client(gate=gate)
@@ -329,7 +318,7 @@ def test_modify_trigger_order_wire_shape_and_protective_gate(fake_exchange):
 def test_place_ioc_limit_protective_flag_routes_to_the_protective_gate(fake_exchange):
     # The §17.2 emergency close (protective=True) clears in safe mode; the same
     # IOC without the flag is refused — the exemption is opt-in per order.
-    gate = _open_gate()
+    gate = new_target_gate()
     gate.state_reconciled = False
     client = _client(gate=gate)
     ack = client.place_ioc_limit(
@@ -464,7 +453,7 @@ def test_every_mutation_is_gated(fake_exchange):
 def test_gate_flags_flipped_after_construction_are_honoured(fake_exchange):
     # The bound gate is judged live at each call, not snapshotted: the kill
     # switch manager flips flags on the SAME instance the client holds.
-    gate = _open_gate()
+    gate = new_target_gate()
     client = _client(gate=gate)
     gate.kill_switch_active = False
     with pytest.raises(LiveOrderGateRejected, match="kill switch"):
@@ -474,7 +463,7 @@ def test_gate_flags_flipped_after_construction_are_honoured(fake_exchange):
 
 def test_order_gate_blocks_full_list_but_cancel_needs_only_the_base(fake_exchange):
     # §13.1: cancels stay allowed in safe-mode-like states.
-    gate = _open_gate()
+    gate = new_target_gate()
     gate.manual_safe_mode = True
     client = _client(gate=gate)
     with pytest.raises(LiveOrderGateRejected):
@@ -1039,7 +1028,7 @@ def test_modify_limit_wire_shape_and_order_gate(fake_exchange):
     assert cloid.to_raw() == _CLOID  # the replacement carries its own fresh cloid
     # A requote is a risk-adding order: the ORDER gate, not the protective one —
     # unless the caller says protective, exactly as place_limit reads the flag.
-    gate = _open_gate()
+    gate = new_target_gate()
     gate.state_reconciled = False
     closed = _client(gate=gate)
     with pytest.raises(LiveOrderGateRejected):

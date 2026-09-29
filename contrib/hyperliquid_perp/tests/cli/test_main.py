@@ -50,6 +50,16 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
 from contrib.hyperliquid_perp.integration import trading_graph as tg_mod
 
 
+class _BridgeClient:
+    """What ``engine_bridge`` reads off ``HyperliquidClient``."""
+
+    network = "testnet"
+
+    @classmethod
+    def from_config(cls, config):
+        return cls()
+
+
 def _assert_position_blind(result):
     """A ``_build_context`` stand-in that pins the one-shot lane's ``position=None``.
 
@@ -1015,14 +1025,7 @@ def test_context_only_renders_the_macro_block_end_to_end_when_the_switch_is_on(
         def get_exchange_time(self, coin):
             return now
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(main_mod, "wallet_address", lambda config: "")  # skip position block
 
@@ -2191,14 +2194,7 @@ def test_build_context_fails_closed_when_the_exchange_clock_is_unreadable(monkey
         def get_exchange_time(self, coin):
             raise MalformedResponseError("l2Book 'time' is unusable as epoch ms (None): ...")
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     with pytest.raises(MalformedResponseError, match="'time' is unusable"):
         bridge_mod._build_context({}, "BTC", position=None)
@@ -2237,19 +2233,12 @@ def test_build_context_reads_the_exchange_clock_and_hands_it_to_the_builder(monk
             stamps["clock_returned"] = datetime.now(timezone.utc)
             return exchange_clock
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
     def _builder(*args, **kwargs):
         handed["exchange_time"] = kwargs.get("exchange_time")
         handed["host_at_read"] = kwargs.get("host_time_at_exchange_read")
         return object()
 
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
     bridge_mod._build_context({}, "BTC", position=None)
@@ -2305,18 +2294,11 @@ def test_build_context_hands_the_parsed_market_data_block_to_the_fetch_and_the_b
         def get_exchange_time(self, coin):
             return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
     def _builder(*args, **kwargs):
         handed["market_data"] = kwargs.get("market_data")
         return object()
 
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
 
@@ -2399,20 +2381,13 @@ def test_build_context_reads_the_daily_series_last_and_only_when_the_switch_is_o
             order.append("clock")
             return clock
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
     handed = {}
 
     def _builder(*args, **kwargs):
         handed.update(kwargs)
         return object()
 
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
 
@@ -2483,18 +2458,11 @@ def test_a_failed_daily_read_omits_the_section_instead_of_killing_the_cycle(monk
         def get_exchange_time(self, coin):
             return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
     def _builder(*args, **kwargs):
         handed.update(kwargs)
         return object()
 
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
     config = {"market_data": {"macro_trend_daily_lookback": 260}}
@@ -2559,20 +2527,13 @@ def test_no_candles_means_no_daily_read_at_all(monkeypatch):
         def get_exchange_time(self, coin):
             return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
     handed = {}
 
     def _builder(*args, **kwargs):
         handed.update(kwargs)
         return object()
 
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
     bridge_mod._build_context(
@@ -2610,18 +2571,11 @@ def test_build_context_forwards_the_position_inputs_to_the_builder_verbatim(monk
         def get_exchange_time(self, coin):
             return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
     def _builder(*args, **kwargs):
         handed["position"] = kwargs.get("position", "ABSENT")
         return object()
 
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "build_market_context", _builder)
 
@@ -3235,20 +3189,13 @@ def test_build_context_reads_the_research_signal_only_when_the_switch_names_one(
         def get_exchange_time(self, coin):
             return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
     sentinel = object()
 
     def _reader(path, *, coin, as_of_ms, candle_interval_ms):
         asked.append((path, coin, as_of_ms, candle_interval_ms))
         return sentinel
 
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(bridge_mod, "load_research_signal", _reader)
     monkeypatch.setattr(
@@ -3309,14 +3256,7 @@ def test_build_context_does_not_ask_about_a_research_signal_without_candles(monk
         def get_exchange_time(self, coin):
             return datetime(2026, 8, 22, 8, 0, tzinfo=timezone.utc)
 
-    class _Client:
-        network = "testnet"
-
-        @classmethod
-        def from_config(cls, config):
-            return cls()
-
-    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _Client)
+    monkeypatch.setattr(bridge_mod, "HyperliquidClient", _BridgeClient)
     monkeypatch.setattr(bridge_mod, "HyperliquidMarketData", _Market)
     monkeypatch.setattr(
         bridge_mod,

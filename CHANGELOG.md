@@ -59,6 +59,30 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The perp tests share their doubles through `tests/fakes/`** (refactor
+  plan v2, T5-a — PR 9 of the plan; tests only, no production code). Six
+  modules under `contrib/hyperliquid_perp/tests/fakes/`: `gates.py` builds
+  one §4.1 gate per check `RealOrderGate` offers (`exchange_action_gate`,
+  `protective_order_gate`, `order_gate`, `new_target_gate`), `exchange.py`
+  holds `FakeSignedClient`, `payloads.py` the clearinghouse payloads,
+  `market.py` the mark, margin schedule and snapshot, `decisions.py` the
+  market context and set-target decision, `seeds.py` the accounting seeds.
+  The test modules that defined these locally import them instead.
+  `cli/test_cli.py` and `cli/test_smoke.py` no longer import from
+  `live/test_startup.py`; `cli/test_smoke.py` still imports one helper
+  each from `live/test_validation.py` and `cli/test_cli.py`.
+  `tests/live/conftest.py` gains the in-memory `db` fixture. A double is
+  shared only where every consumer scripts it the same way; doubles that
+  only share a name stay where they are. Three things the tests now do
+  differently: the four CLI wiring pins that recorded constructor kwargs
+  record them after the real constructor accepts them
+  (`record_constructor_kwargs`) rather than before; the decisions built in
+  `paper/test_validation.py` and `paper/test_reconcile.py` carry the
+  rationale `"test rationale"` and the risk `"a risk"` where they carried
+  `"r"` and `"k"`; and the startup tests' signed client counts its calls.
+  The tests that ran before still run and pass; `tests/fakes/test_gates.py`
+  adds four, one per gate builder.
+
 - **The live shutdown's decisions are functions you can call** (refactor
   plan v2, T2-e — PR 8 of the plan). The `finally` of `live --run-id` made
   four decisions inline: whether the exit is unclean and why, whether the

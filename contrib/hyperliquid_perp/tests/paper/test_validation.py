@@ -8,15 +8,7 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
-from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
-from contrib.hyperliquid_perp.domains.perp.target_decision import (
-    DecisionMode,
-    ParsedDecision,
-    TargetDecision,
-    TargetSide,
-)
 from contrib.hyperliquid_perp.paper import accounting as paper_accounting
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
@@ -37,43 +29,11 @@ from contrib.hyperliquid_perp.runtime.no_decision import (
 )
 
 from ..conftest import insert_decision_attempts, stamp_prompt_regimes
+from ..fakes.decisions import market_ctx, set_target
+from ..fakes.market import MARK as _MARK, margin_schedule
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
-_MARK = D(50000)
-
-
-def _ctx(as_of: datetime) -> PerpMarketContext:
-    return PerpMarketContext(
-        coin="BTC",
-        as_of=as_of,
-        candle_interval="4h",
-        candle_count=200,
-        mark_price=_MARK,
-        oracle_price=_MARK,
-        prev_day_price=_MARK,
-        mid_price=_MARK,
-        day_change_pct=0.0,  # prev == mark: a reference exists, so 0, not None
-        open_interest=D(0),
-        day_ntl_volume=D(0),
-        funding_rate=D("0.0001"),
-        funding_premium=None,
-        funding_zscore_30d=None,
-        funding_window_days=30,
-        funding_sample_count=0,
-    )
-
-
-def _decision(side: str, margin: int) -> ParsedDecision:
-    dec = TargetDecision(
-        decision_mode=DecisionMode.SET_TARGET,
-        target_side=TargetSide(side),
-        requested_target_margin_pct=margin,
-        confidence=D("0.8"),
-        rationale="r",
-        key_risks=("k",),
-    )
-    return ParsedDecision(decision=dec, is_valid=True, invalid_reason=None, raw_response="{}")
 
 
 class _OneShotProvider:
@@ -81,7 +41,7 @@ class _OneShotProvider:
         self._parsed = parsed
 
     def build_input(self, *, coin, as_of):
-        return DecisionInput(context=_ctx(as_of))
+        return DecisionInput(context=market_ctx(as_of))
 
     def request_decision(self, decision_input):
         return self._parsed
@@ -97,7 +57,7 @@ def _run_one_cycle_with_fill(tmp_path):
     asset = AssetSpec(
         coin="BTC",
         sz_decimals=3,
-        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+        margin_schedule=margin_schedule(),
     )
     risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
     engine = PaperExecutionEngine(
@@ -115,7 +75,7 @@ def _run_one_cycle_with_fill(tmp_path):
         run_id="r",
         engine=engine,
         clock=clock,
-        provider=_OneShotProvider(_decision("long", 1)),
+        provider=_OneShotProvider(set_target("long", 1)),
         asset=asset,
         risk_config=risk,
         decision_config=DecisionConfig(),

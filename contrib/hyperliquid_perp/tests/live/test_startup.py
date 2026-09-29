@@ -8,10 +8,8 @@ from decimal import Decimal
 import pytest
 
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
-from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck
-from contrib.hyperliquid_perp.live.config import ExecutionMode, KillSwitchConfig
+from contrib.hyperliquid_perp.live.config import KillSwitchConfig
 from contrib.hyperliquid_perp.live.kill_switch import KillSwitchManager
-from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
 from contrib.hyperliquid_perp.live.safe_mode import REASON_NON_BOT_OWNED_ORDER, SafeModeManager
 from contrib.hyperliquid_perp.live.startup import run_startup_recovery
@@ -22,93 +20,15 @@ from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
-from ..conftest import echo_order_status_cloid
+from ..fakes.exchange import FakeSignedClient
+from ..fakes.gates import exchange_action_gate
+from ..fakes.payloads import btc_position, clearinghouse
 from .conftest import StubBackfiller
 
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
 _HEX_ENTRY = "0x" + "ab" * 16
 _HEX_CLOSE = "0x" + "cd" * 16
 _HEX_SL = "0x" + "ef" * 16
-
-
-def _clearinghouse(
-    *, account_value: str = "100", maintenance: str = "0", positions: list[dict] | None = None
-) -> dict:
-    return {
-        "marginSummary": {
-            "accountValue": account_value,
-            "totalMarginUsed": "0",
-            "totalNtlPos": "0",
-        },
-        "withdrawable": account_value,
-        "crossMaintenanceMarginUsed": maintenance,
-        "assetPositions": [{"position": p} for p in (positions or [])],
-    }
-
-
-def _btc_position(szi: str = "0.001", upnl: str = "1", value: str = "51") -> dict:
-    return {
-        "coin": "BTC",
-        "szi": szi,
-        "entryPx": "50000",
-        "unrealizedPnl": upnl,
-        "positionValue": value,
-        "marginUsed": value,
-    }
-
-
-class _FakeSigned:
-    """The signed-client surface startup touches; cancels mutate open_orders."""
-
-    def __init__(self, gate, clock):
-        self._gate = gate
-        self._clock = clock
-        self.open_orders_result: list = []
-        self.cancel_results: dict[str, CancelAck | Exception] = {}
-        self.cancel_calls: list[tuple[str, str]] = []
-        self.schedule_error: Exception | None = None
-        self.schedule_calls: list[datetime] = []
-        self.clear_calls = 0
-        self.order_status: dict[str, object] = {}
-
-    def schedule_cancel(self, *, cancel_at):
-        self._gate.require_exchange_action(None)
-        if self.schedule_error is not None:
-            raise self.schedule_error
-        self.schedule_calls.append(cancel_at)
-
-    def clear_scheduled_cancel(self):
-        self._gate.require_exchange_action(None)
-        self.clear_calls += 1
-
-    def exchange_time(self):
-        return self._clock.now()
-
-    def open_orders(self):
-        return list(self.open_orders_result)
-
-    def query_order_by_cloid(self, cloid_hex):
-        result = self.order_status.get(cloid_hex, {"status": "unknownOid"})
-        if isinstance(result, Exception):
-            raise result
-        return echo_order_status_cloid(result, cloid_hex)
-
-    def cancel_by_cloid(self, *, coin, cloid_hex):
-        self._gate.require_exchange_action(None)
-        self.cancel_calls.append((coin, cloid_hex))
-        result = self.cancel_results.get(cloid_hex, CancelAck(success=True))
-        if isinstance(result, Exception):
-            raise result
-        if result.success:
-            self.open_orders_result = [
-                o
-                for o in self.open_orders_result
-                # A non-dict entry (the exchange returning junk) is never the
-                # order being cancelled, and must survive the filter — the fake
-                # must not fail where the real client would not.
-                if not isinstance(o, dict) or o.get("cloid") != cloid_hex
-            ]
-        return result
 
 
 class _Env:
@@ -122,15 +42,10 @@ class _Env:
             schema_version=SCHEMA_VERSION,
             created_at=_NOW - timedelta(days=1),
         )
-        self.gate = RealOrderGate(
-            allow_real_orders=True,
-            mode=ExecutionMode.TESTNET_LIVE,
-            allowed_symbols=("BTC",),
-            agent_authorized=True,
-        )
+        self.gate = exchange_action_gate()
         self.clock = ManualClock(_NOW)
-        self.client = _FakeSigned(self.gate, self.clock)
-        self.clearinghouse = _clearinghouse()
+        self.client = FakeSignedClient(self.gate, self.clock, cancel_removes_order=True)
+        self.clearinghouse = clearinghouse()
         self.payload_dir = tmp_path / "payloads"
         self.kill_switch = KillSwitchManager(
             client=self.client,
@@ -233,8 +148,8 @@ def test_an_existing_position_with_a_valid_sl_passes_after_reconciliation(env):
             updated_at=_NOW,
         )
     env.register_order(order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position()]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position()]
     )
     env.client.open_orders_result = [
         {"oid": 5, "coin": "BTC", "cloid": _HEX_SL, "side": "A", "sz": "0.001", "reduceOnly": True}
@@ -273,8 +188,8 @@ def test_a_close_order_that_still_closes_the_position_is_kept(env):
         )
     env.register_order(order_id="o-c", hex_id=_HEX_CLOSE, logical="log-c", role="close")
     env.register_order(order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position()]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position()]
     )
     env.client.open_orders_result = [
         {
@@ -320,8 +235,8 @@ def test_an_invalid_sl_is_kept_but_the_run_stays_unprotected(env):
             updated_at=_NOW,
         )
     env.register_order(order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position(szi="0.002", value="102")]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position(szi="0.002", value="102")]
     )
     env.client.open_orders_result = [
         {"oid": 5, "coin": "BTC", "cloid": _HEX_SL, "side": "A", "sz": "0.001", "reduceOnly": True}
@@ -360,8 +275,8 @@ def test_a_failed_positions_read_keeps_close_orders_instead_of_cancelling(env):
     # position; ONLY the sweep's positions read — the flaky fetch handed to
     # run_startup_recovery — fails. A real position exists, so cancelling the
     # close order off the failed read would strip live close intent.
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position()]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position()]
     )
 
     def flaky_fetch():
@@ -475,8 +390,8 @@ def test_split_sl_legs_and_a_partial_tp_are_not_falsely_flagged(env, caplog):
     env.register_order(order_id="o-sl1", hex_id=_HEX_SL, logical="log-sl1", role="stop_loss")
     env.register_order(order_id="o-sl2", hex_id=_HEX_SL2, logical="log-sl2", role="stop_loss")
     env.register_order(order_id="o-tp", hex_id=_HEX_TP, logical="log-tp", role="take_profit")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position(szi="0.002", value="102")]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position(szi="0.002", value="102")]
     )
     env.client.open_orders_result = [
         {
@@ -522,8 +437,8 @@ def test_a_plain_limit_stop_loss_still_warns_structurally(env, caplog):
             updated_at=_NOW,
         )
     env.register_order(order_id="o-sl", hex_id=_HEX_SL, logical="log-sl", role="stop_loss")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position()]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position()]
     )
     env.client.open_orders_result = [
         {"oid": 5, "coin": "BTC", "cloid": _HEX_SL, "side": "A", "sz": "0.001", "reduceOnly": True}
@@ -552,8 +467,8 @@ def test_an_oversized_close_order_is_kept_not_cancelled(env):
             updated_at=_NOW,
         )
     env.register_order(order_id="o-c", hex_id=_HEX_CLOSE, logical="log-c", role="close")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position()]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position()]
     )
     env.client.open_orders_result = [
         {
@@ -582,8 +497,8 @@ def test_a_short_position_keeps_its_bid_side_close_order(env):
             updated_at=_NOW,
         )
     env.register_order(order_id="o-c", hex_id=_HEX_CLOSE, logical="log-c", role="close")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position(szi="-0.001")]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position(szi="-0.001")]
     )
     env.client.open_orders_result = [
         {
@@ -611,8 +526,8 @@ def test_a_short_position_cancels_an_ask_side_close_order(env):
             updated_at=_NOW,
         )
     env.register_order(order_id="o-c", hex_id=_HEX_CLOSE, logical="log-c", role="close")
-    env.clearinghouse = _clearinghouse(
-        account_value="101", maintenance="1", positions=[_btc_position(szi="-0.001")]
+    env.clearinghouse = clearinghouse(
+        account_value="101", maintenance="1", positions=[btc_position(szi="-0.001")]
     )
     env.client.open_orders_result = [
         {

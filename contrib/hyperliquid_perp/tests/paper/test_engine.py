@@ -13,13 +13,11 @@ from decimal import Decimal, InvalidOperation
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
     DecisionMode,
     ParsedDecision,
     TargetDecision,
-    TargetSide,
 )
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import (
@@ -40,25 +38,11 @@ from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
 
+from ..fakes.decisions import set_target
+from ..fakes.market import MARK as _MARK, margin_schedule, snap
+
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
-_MARK = D(50000)
-
-
-def _schedule() -> MarginSchedule:
-    return MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),))
-
-
-def _decision(side: str | None, margin: int | None, conf: str = "0.8") -> ParsedDecision:
-    dec = TargetDecision(
-        decision_mode=DecisionMode.SET_TARGET,
-        target_side=None if side is None else TargetSide(side),
-        requested_target_margin_pct=margin,
-        confidence=D(conf),
-        rationale="test rationale",
-        key_risks=("a risk",),
-    )
-    return ParsedDecision(decision=dec, is_valid=True, invalid_reason=None, raw_response="{}")
 
 
 def _engine(
@@ -81,7 +65,7 @@ def _engine(
         initial_positions=seed,
     )
     clock = ManualClock(_T0)
-    asset = AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=_schedule())
+    asset = AssetSpec(coin="BTC", sz_decimals=3, margin_schedule=margin_schedule())
     execution: dict = {}
     if min_notional:
         execution["min_notional_usdc"] = min_notional
@@ -105,10 +89,6 @@ def _engine(
 
 def _provider(engine, script):
     engine._provider = ScriptedSnapshotProvider("BTC", script)
-
-
-def _snap(mark=_MARK, mid=_MARK):
-    return (D(mark), D(mid))
 
 
 def _size(db) -> Decimal:
@@ -146,8 +126,8 @@ class _ConstFunding:
 def test_paper_market_fill_opens_position(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     # 1% margin @ 5x, equity 1000 -> notional 50 -> size 0.001 = one min_order_qty
-    _provider(engine, [_snap(), _snap()])
-    start = engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap()])
+    start = engine.start_plan(set_target("long", 1))
     assert start.plan_id is not None
     clock.advance(30)
     result = engine.tick()
@@ -167,8 +147,8 @@ def test_paper_market_fill_opens_position(tmp_path):
 def test_twap_two_slices_execute_on_cadence(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     # 2% margin -> notional 100 -> size 0.002 -> 2 slices of 0.001
-    _provider(engine, [_snap(), _snap(), _snap()])
-    start = engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), snap(), snap()])
+    start = engine.start_plan(set_target("long", 2))
     assert start.disposition.value == "twap"
     clock.advance(30)
     r1 = engine.tick()
@@ -184,8 +164,8 @@ def test_twap_two_slices_execute_on_cadence(tmp_path):
 
 def test_slice_not_due_before_thirty_seconds(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 2))
     clock.advance(10)  # only 10s -> no slice due yet
     r = engine.tick()
     assert not r.has(TickEvent.SLICE_FILL)
@@ -203,8 +183,8 @@ def test_stop_loss_triggers_before_slice_and_cancels_plan(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     # 2-slice TWAP; after slice 1 an SL is set (~ entry * 0.925). Next tick's mark
     # dives below the SL: SL (event step 4) fires before the slice (step 6).
-    _provider(engine, [_snap(), _snap(), _snap(mark=40000, mid=40000)])
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), snap(), snap(mark=40000, mid=40000)])
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()  # slice 0 fills, SL set
     assert engine._protection.stop_loss is not None
@@ -223,8 +203,8 @@ def test_stop_loss_triggers_before_slice_and_cancels_plan(tmp_path):
 
 def test_timeout_skips_slice_without_filling(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT])
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), SnapshotOutcome.TIMEOUT])
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     r = engine.tick()
     assert r.outcome is SnapshotOutcome.TIMEOUT
@@ -238,9 +218,9 @@ def test_three_failures_pause_then_resume_no_catchup(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     # size 0.005 -> 5 slices; three consecutive failures pause the plan, then a
     # valid snapshot resumes without re-running the missed slices.
-    script = [_snap()] + [SnapshotOutcome.TIMEOUT] * 3 + [_snap()]
+    script = [snap()] + [SnapshotOutcome.TIMEOUT] * 3 + [snap()]
     _provider(engine, script)
-    engine.start_plan(_decision("long", 5))
+    engine.start_plan(set_target("long", 5))
     for _ in range(3):
         clock.advance(30)
         engine.tick()
@@ -259,9 +239,9 @@ def test_gap_stop_fill_on_resume_when_mark_crossed_sl(tmp_path):
     # mark has crossed the SL -> immediate gap_stop_fill (execution §1.1).
     _provider(
         engine,
-        [_snap(), _snap()] + [SnapshotOutcome.TIMEOUT] * 3 + [_snap(mark=40000, mid=40000)],
+        [snap(), snap()] + [SnapshotOutcome.TIMEOUT] * 3 + [snap(mark=40000, mid=40000)],
     )
-    engine.start_plan(_decision("long", 1))
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # paper_market fill, SL set
     assert engine._protection.stop_loss is not None
@@ -284,7 +264,7 @@ def test_gap_stop_fill_on_resume_when_mark_crossed_sl(tmp_path):
 def test_start_plan_pending_when_no_snapshot(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     _provider(engine, [SnapshotOutcome.TIMEOUT])
-    start = engine.start_plan(_decision("long", 2))
+    start = engine.start_plan(set_target("long", 2))
     assert start.plan_id is None
     assert start.reason == "pending_market_data"
     # No snapshot -> no gate ran at all: nothing is priced at a fabricated mark
@@ -297,7 +277,7 @@ def test_start_plan_pending_when_no_snapshot(tmp_path):
 
 def test_start_plan_no_order_on_maintain_current(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap()])
+    _provider(engine, [snap()])
     maintain = ParsedDecision(
         decision=TargetDecision(
             decision_mode=DecisionMode.MAINTAIN_CURRENT,
@@ -324,8 +304,8 @@ def test_start_plan_no_order_on_maintain_current(tmp_path):
 
 def test_funding_posted_within_tick(tmp_path):
     db, clock, engine, _ = _engine(tmp_path, funding=_ConstFunding(D("0.0001")))
-    _provider(engine, [_snap(), _snap(), _snap()])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap(), snap()])
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # opens position; establishes funding baseline hour
     clock.advance(3600)  # cross one funding hour
@@ -347,8 +327,8 @@ def test_flip_closes_then_opens_reverse(tmp_path):
     # Long 0.001 -> short 5% target: close leg (sell to flat, one min slice) then a
     # larger open leg (short ~0.005). The open target is comfortably above one step
     # so fee-driven equity shrink can't floor it below a legal slice.
-    _provider(engine, [_snap()] * 10)
-    start = engine.start_plan(_decision("short", 5))
+    _provider(engine, [snap()] * 10)
+    start = engine.start_plan(set_target("short", 5))
     assert start.plan_id is not None
     went_short = False
     for _ in range(8):
@@ -366,8 +346,8 @@ def test_flip_incomplete_when_open_leg_has_no_legal_slice(tmp_path):
     # after fees, so the reverse position never opens (execution §1.3).
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
-    _provider(engine, [_snap()] * 4)
-    engine.start_plan(_decision("short", 1))
+    _provider(engine, [snap()] * 4)
+    engine.start_plan(set_target("short", 1))
     clock.advance(30)
     engine.tick()  # close leg fills to flat; open leg cannot fund a slice
     assert engine._flip is None
@@ -387,8 +367,8 @@ def test_flip_incomplete_when_open_leg_has_no_legal_slice(tmp_path):
 def test_plan_rejected_when_qty_below_min_slice(tmp_path):
     # leverage 1, 1% margin -> notional 10 -> size 0.0002 < min_order_qty 0.001.
     db, clock, engine, _ = _engine(tmp_path, leverage="1")
-    _provider(engine, [_snap()])
-    start = engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap()])
+    start = engine.start_plan(set_target("long", 1))
     assert start.disposition.value == "reject"
     assert start.reason == "no_legal_slice"
     assert _size(db) == D(0)
@@ -403,8 +383,8 @@ def test_plan_rejected_when_qty_below_min_slice(tmp_path):
 def test_take_profit_created_at_terminal_then_triggers(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     # paper_market opens long -> plan terminal -> TP created (entry * 1.2 ~ 60030).
-    _provider(engine, [_snap(), _snap(), _snap(mark=61000, mid=61000)])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap(), snap(mark=61000, mid=61000)])
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # open + terminal
     assert engine._protection.take_profit is not None
@@ -417,8 +397,8 @@ def test_take_profit_created_at_terminal_then_triggers(tmp_path):
 
 def test_stop_loss_close_is_atomic_clears_protection_and_cancels_plan(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap(), _snap(mark=40000, mid=40000)])
-    engine.start_plan(_decision("long", 2))  # 2-slice TWAP
+    _provider(engine, [snap(), snap(), snap(mark=40000, mid=40000)])
+    engine.start_plan(set_target("long", 2))  # 2-slice TWAP
     clock.advance(30)
     engine.tick()  # slice 0 fills, SL set
     plan_id = engine._leg.plan_id
@@ -444,12 +424,12 @@ def test_gap_stop_flag_does_not_stick_to_later_normal_stop(tmp_path):
     # labeled a plain stop_loss, not gap_stop_fill (the one-shot flag must reset).
     _provider(
         engine,
-        [_snap(), _snap()]  # plan 1: start_plan + open fill (paper_market)
+        [snap(), snap()]  # plan 1: start_plan + open fill (paper_market)
         + [SnapshotOutcome.TIMEOUT] * 3
-        + [_snap(mark=40000, mid=40000)]  # resume -> gap stop
-        + [_snap(), _snap(), _snap(mark=40000, mid=40000)],  # plan 2: start + slice0 + SL
+        + [snap(mark=40000, mid=40000)]  # resume -> gap stop
+        + [snap(), snap(), snap(mark=40000, mid=40000)],  # plan 2: start + slice0 + SL
     )
-    engine.start_plan(_decision("long", 1))
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # open, SL set
     for _ in range(3):
@@ -460,7 +440,7 @@ def test_gap_stop_flag_does_not_stick_to_later_normal_stop(tmp_path):
     assert r_gap.has(TickEvent.GAP_STOP_FILL)
     # Second position (2% -> multi-slice; fee-shrunk equity still funds >1 slice),
     # no outage this time.
-    engine.start_plan(_decision("long", 2))
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()  # slice 0 fills, SL set
     clock.advance(30)
@@ -473,8 +453,8 @@ def test_gap_stop_flag_does_not_stick_to_later_normal_stop(tmp_path):
 def test_has_active_work_reflects_state(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     assert not engine.has_active_work()
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 1))
     assert engine.has_active_work()  # active plan
     clock.advance(30)
     engine.tick()
@@ -494,8 +474,8 @@ def test_liquidation_close_during_active_plan(tmp_path):
     # plan is mid-flight when the mark dives to 40000 — liquidation (step 3)
     # must close everything before the SL (step 4) or the due slice (step 6).
     db, clock, engine, _ = _engine(tmp_path, seed=_BIG_SEED)
-    _provider(engine, [_snap(), _snap(), _snap(mark=40000, mid=40000)])
-    start = engine.start_plan(_decision("long", 10))  # reduce toward 10% margin
+    _provider(engine, [snap(), snap(), snap(mark=40000, mid=40000)])
+    start = engine.start_plan(set_target("long", 10))  # reduce toward 10% margin
     assert start.plan_id is not None
     plan_id = engine._leg.plan_id
     order_id = engine._leg.order_id
@@ -524,8 +504,8 @@ def test_emergency_close_when_no_safe_sl(tmp_path):
     db, clock, engine, _ = _engine(
         tmp_path, seed=_BIG_SEED, stop_config=StopConfig(liq_buffer=D("0.2"))
     )
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 10))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 10))
     plan_id = engine._leg.plan_id
     clock.advance(30)
     r = engine.tick()  # slice 0 fills -> recompute -> no safe SL -> emergency close
@@ -553,8 +533,8 @@ def test_emergency_close_when_no_safe_sl(tmp_path):
 
 def test_plan_expires_at_deadline_with_tp_and_order_canceled(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap(), _snap()])
-    engine.start_plan(_decision("long", 5))  # 5 slices
+    _provider(engine, [snap(), snap(), snap()])
+    engine.start_plan(set_target("long", 5))  # 5 slices
     plan_id = engine._leg.plan_id
     order_id = engine._leg.order_id
     clock.advance(30)
@@ -578,8 +558,8 @@ def test_plan_expiry_during_outage_still_creates_tp(tmp_path):
     # the TP (its math needs only entry price + tick size), or the surviving
     # position would run without one for the rest of the process's life.
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap(), SnapshotOutcome.TIMEOUT])
-    engine.start_plan(_decision("long", 5))
+    _provider(engine, [snap(), snap(), SnapshotOutcome.TIMEOUT])
+    engine.start_plan(set_target("long", 5))
     plan_id = engine._leg.plan_id
     clock.advance(30)
     engine.tick()  # slice 0 fills -> non-flat position
@@ -603,8 +583,8 @@ def test_flip_incomplete_close_leg_leaves_position_with_tp(tmp_path):
     # surviving 0.001 position must regain a TP (it was cancelled at plan start).
     seed = (PositionState(coin="BTC", size=D("0.002"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
-    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT, _snap()])
-    engine.start_plan(_decision("short", 5))
+    _provider(engine, [snap(), SnapshotOutcome.TIMEOUT, snap()])
+    engine.start_plan(set_target("short", 5))
     clock.advance(30)
     engine.tick()  # slice 0 missed
     clock.advance(30)
@@ -626,10 +606,10 @@ def test_flip_incomplete_when_open_leg_gate_rejected(tmp_path):
     # must never open and the flip records open_leg_gate_rejected.
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("short", 5))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("short", 5))
     assert engine._flip is not None
-    engine._flip.parsed = _decision("short", 5, conf="0.1")  # below min_confidence
+    engine._flip.parsed = set_target("short", 5, conf="0.1")  # below min_confidence
     clock.advance(30)
     engine.tick()  # close leg fills to flat; open-leg gate declines
     assert _size(db) == D(0)
@@ -646,8 +626,8 @@ def test_flip_open_leg_inherits_close_leg_deadline(tmp_path):
     # hour at close-leg terminal.
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
-    _provider(engine, [_snap()] * 4)
-    engine.start_plan(_decision("short", 5))
+    _provider(engine, [snap()] * 4)
+    engine.start_plan(set_target("short", 5))
     clock.advance(30)
     engine.tick()  # close leg fills to flat; open leg registers the same tick
     rows = db.conn.execute(
@@ -666,8 +646,8 @@ def test_flip_open_leg_inherits_close_leg_deadline(tmp_path):
 
 def test_multi_hour_funding_catchup_posts_each_hour(tmp_path):
     db, clock, engine, _ = _engine(tmp_path, funding=_ConstFunding(D("0.0001")))
-    _provider(engine, [_snap(), _snap(), _snap()])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap(), snap()])
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # opens position; establishes the funding baseline hour
     clock.advance(3 * 3600)  # jump three settlement hours in one gap
@@ -688,8 +668,8 @@ def test_funding_post_refreshes_stop_loss(tmp_path):
         funding=_ConstFunding(D("0.01")),  # long pays 1%/h -> ~50 USDC on 5000 notional
         stop_config=StopConfig(liq_buffer=D("0.15")),
     )
-    _provider(engine, [_snap(), _snap(), _snap()])
-    engine.start_plan(_decision("long", 10))  # reduce plan, many slices
+    _provider(engine, [snap(), snap(), snap()])
+    engine.start_plan(set_target("long", 10))  # reduce plan, many slices
     clock.advance(30)
     engine.tick()  # slice 0 fills -> liq-bound SL placed
     sl_before = engine._protection.stop_loss
@@ -709,8 +689,8 @@ def test_funding_post_refreshes_stop_loss(tmp_path):
 
 def test_snapshots_written_on_fills_not_idle_ticks(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap(), _snap()])
-    engine.start_plan(_decision("long", 2))  # 2-slice TWAP: nothing due before 30s
+    _provider(engine, [snap(), snap(), snap()])
+    engine.start_plan(set_target("long", 2))  # 2-slice TWAP: nothing due before 30s
     clock.advance(10)
     r_idle = engine.tick()
     assert r_idle.has(TickEvent.IDLE)
@@ -735,13 +715,13 @@ def test_snapshots_written_on_fills_not_idle_ticks(tmp_path):
 
 def test_new_plan_supersedes_active_plan(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap(), _snap()])
-    engine.start_plan(_decision("long", 5))  # 5-slice plan A
+    _provider(engine, [snap(), snap(), snap()])
+    engine.start_plan(set_target("long", 5))  # 5-slice plan A
     plan_a = engine._leg.plan_id
     order_a = engine._leg.order_id
     clock.advance(30)
     engine.tick()  # slice 0 fills
-    start_b = engine.start_plan(_decision("long", 30))
+    start_b = engine.start_plan(set_target("long", 30))
     assert start_b.plan_id is not None and start_b.plan_id != plan_a
     assert _plan_status(db, plan_a) == ("canceled", "superseded")
     residual = db.conn.execute(
@@ -758,17 +738,17 @@ def test_supersede_by_rejected_plan_restores_tp(tmp_path):
     # REJECT supersedes B with nothing replacing it — the surviving position
     # must regain its TP (§4.1: canceled is a TP-reconciled terminal).
     db, clock, engine, _ = _engine(tmp_path, leverage="1")
-    _provider(engine, [_snap()] * 4)
-    engine.start_plan(_decision("long", 5))  # notional 50 -> one min slice
+    _provider(engine, [snap()] * 4)
+    engine.start_plan(set_target("long", 5))  # notional 50 -> one min slice
     clock.advance(30)
     engine.tick()  # paper_market open -> terminal -> TP created
     assert engine._protection.take_profit is not None
-    engine.start_plan(_decision("long", 30))  # plan B: TP cancelled for the plan
+    engine.start_plan(set_target("long", 30))  # plan B: TP cancelled for the plan
     plan_b = engine._leg.plan_id
     assert engine._protection.take_profit is None
     # 7% vs current ~5%: outside the 1-point deadband, but the delta (~0.0004)
     # floors below one 0.001 step -> REJECT, superseding B.
-    start_c = engine.start_plan(_decision("long", 7))
+    start_c = engine.start_plan(set_target("long", 7))
     assert start_c.disposition is not None and start_c.disposition.value == "reject"
     assert _plan_status(db, plan_b) == ("canceled", "superseded")
     assert engine._protection.take_profit is not None
@@ -781,11 +761,11 @@ def test_non_flip_decision_clears_stale_flip(tmp_path):
     # has_active_work can go quiet once everything later closes.
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("short", 5))  # flip: close leg active
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("short", 5))  # flip: close leg active
     assert engine._flip is not None
     old_plan = engine._leg.plan_id
-    engine.start_plan(_decision("long", 30))  # same-side vs current long -> not a flip
+    engine.start_plan(set_target("long", 30))  # same-side vs current long -> not a flip
     assert engine._flip is None
     assert _plan_status(db, old_plan) == ("canceled", "superseded")
     db.close()
@@ -798,8 +778,8 @@ def test_non_flip_decision_clears_stale_flip(tmp_path):
 
 def test_engine_rebuild_hydrates_protection_and_continues_ids(tmp_path):
     db, clock, engine, asset = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # open + terminal -> SL and TP live on current_positions
     sl, tp = engine._protection.stop_loss, engine._protection.take_profit
@@ -811,7 +791,7 @@ def test_engine_rebuild_hydrates_protection_and_continues_ids(tmp_path):
         run_id="r",
         asset=asset,
         clock=ManualClock(clock.now()),
-        provider=ScriptedSnapshotProvider("BTC", [_snap()]),
+        provider=ScriptedSnapshotProvider("BTC", [snap()]),
         risk_config=RiskConfig(leverage=D("5"), max_target_margin_pct=60),
         decision_config=DecisionConfig(),
         paper_config=PaperTradingConfig.from_dict(None),
@@ -819,7 +799,7 @@ def test_engine_rebuild_hydrates_protection_and_continues_ids(tmp_path):
     assert engine2._protection.stop_loss == sl
     assert engine2._protection.take_profit == tp
     assert engine2.has_active_work()
-    start = engine2.start_plan(_decision("long", 30))  # would IntegrityError on seq reset
+    start = engine2.start_plan(set_target("long", 30))  # would IntegrityError on seq reset
     assert start.plan_id is not None
     db.close()
 
@@ -844,7 +824,7 @@ def test_engine_fail_stops_after_escaped_exception(tmp_path):
     with pytest.raises(EngineHaltedError):
         engine.tick()
     with pytest.raises(EngineHaltedError):
-        engine.start_plan(_decision("long", 1))
+        engine.start_plan(set_target("long", 1))
     with pytest.raises(EngineHaltedError):
         engine.has_active_work()
     db.close()
@@ -855,8 +835,8 @@ def test_all_slices_missed_terminates_plan_as_residual(tmp_path):
     # fill again: it terminates as residual immediately instead of sitting
     # "active" until the 1h deadline.
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT])
-    start = engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), SnapshotOutcome.TIMEOUT])
+    start = engine.start_plan(set_target("long", 1))
     plan_id = start.plan_id
     order_id = engine._leg.order_id
     clock.advance(30)
@@ -880,11 +860,11 @@ def test_gap_flag_cleared_when_liquidation_preempts_stop_check(tmp_path):
     db, clock, engine, _ = _engine(tmp_path, seed=_BIG_SEED)
     _provider(
         engine,
-        [_snap(), _snap()]
+        [snap(), snap()]
         + [SnapshotOutcome.TIMEOUT] * 3
-        + [_snap(mark=40000, mid=40000)],  # resume: liquidatable near 40400
+        + [snap(mark=40000, mid=40000)],  # resume: liquidatable near 40400
     )
-    engine.start_plan(_decision("long", 10))  # reduce plan, slices to spare
+    engine.start_plan(set_target("long", 10))  # reduce plan, slices to spare
     clock.advance(30)
     engine.tick()  # slice 0 fills, SL set
     for _ in range(3):
@@ -903,8 +883,8 @@ def test_rejected_plan_writes_rejected_order_row(tmp_path):
     # §5.2: a validation failure before the fill flow still writes an orders
     # row (status="rejected") — orders is the exported audit trail.
     db, clock, engine, _ = _engine(tmp_path, leverage="1")
-    _provider(engine, [_snap()])
-    start = engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap()])
+    start = engine.start_plan(set_target("long", 1))
     assert start.disposition.value == "reject"
     row = db.conn.execute(
         "SELECT status, status_reason, side, type, active_from FROM orders WHERE run_id='r'"
@@ -928,15 +908,15 @@ def test_reject_after_missed_out_flip_close_leg_still_reconciles_tp(tmp_path):
         min_notional="60",
         seed=(PositionState(coin="BTC", size=D("-0.002"), entry_price=_MARK),),
     )
-    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT, _snap()])
-    start = engine.start_plan(_decision("long", 1))  # flip; 1-slice close leg
+    _provider(engine, [snap(), SnapshotOutcome.TIMEOUT, snap()])
+    start = engine.start_plan(set_target("long", 1))  # flip; 1-slice close leg
     assert start.plan_id is not None
     assert engine._flip is not None
     clock.advance(30)
     r = engine.tick()  # the close leg's only slice is missed -> terminal residual
     assert r.has(TickEvent.PLAN_TERMINAL)
     assert engine._flip is not None  # flip still pending, close leg terminal
-    start2 = engine.start_plan(_decision("short", 1))  # delta 50 < min_notional 60
+    start2 = engine.start_plan(set_target("short", 1))  # delta 50 < min_notional 60
     assert start2.reason == "no_legal_slice"
     assert engine._flip is None  # stale flip dropped at registration
     assert engine._protection.take_profit is not None  # steady state restored
@@ -986,7 +966,7 @@ def test_internal_state_guards_reject_invalid_construction():
         _FlipState(
             flip_plan_id="f",
             output_id=None,
-            parsed=_decision("long", 1),
+            parsed=set_target("long", 1),
             open_budget=0,
             deadline=_T0,
         )
@@ -994,7 +974,7 @@ def test_internal_state_guards_reject_invalid_construction():
         _FlipState(
             flip_plan_id="",
             output_id=None,
-            parsed=_decision("long", 1),
+            parsed=set_target("long", 1),
             open_budget=1,
             deadline=_T0,
         )
@@ -1008,8 +988,8 @@ def test_internal_state_guards_reject_invalid_construction():
 def test_flag_restart_gap_labels_first_tick_stop_as_gap(tmp_path):
     # Process 1 opens a position; its SL persists on current_positions.
     db, clock, engine1, asset = _engine(tmp_path)
-    _provider(engine1, [_snap(), _snap()])
-    engine1.start_plan(_decision("long", 1))
+    _provider(engine1, [snap(), snap()])
+    engine1.start_plan(set_target("long", 1))
     clock.advance(30)
     engine1.tick()  # fill + SL persisted
     sl = engine1._protection.stop_loss
@@ -1023,7 +1003,7 @@ def test_flag_restart_gap_labels_first_tick_stop_as_gap(tmp_path):
         run_id="r",
         asset=asset,
         clock=clock,
-        provider=ScriptedSnapshotProvider("BTC", [_snap(mark=40000, mid=40000)]),
+        provider=ScriptedSnapshotProvider("BTC", [snap(mark=40000, mid=40000)]),
         risk_config=RiskConfig(leverage=D(5), max_target_margin_pct=60),
         decision_config=DecisionConfig(),
         paper_config=PaperTradingConfig.from_dict(None),
@@ -1044,8 +1024,8 @@ def test_flag_restart_gap_labels_first_tick_stop_as_gap(tmp_path):
 
 def test_write_cycle_snapshot_records_position_row(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # fill -> position 0.001 @ 50025
     before = db.conn.execute("SELECT COUNT(*) FROM position_snapshots").fetchone()[0]
@@ -1068,8 +1048,8 @@ def test_write_cycle_snapshot_is_best_effort_on_write_failure(tmp_path, monkeypa
     # strand live SL/TP monitoring: it is logged, returns False, and a later
     # snapshot re-takes cleanly (the api_failed path shares the same helper).
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 1))
     clock.advance(30)
     engine.tick()  # opens a position -> there is live protection to keep alive
 
@@ -1094,8 +1074,8 @@ def test_flat_restart_reports_no_active_work_for_gap_arming(tmp_path):
     # flag would mislabel a NEW position's first SL (opened by the forced
     # immediate cycle before any tick) as a restart gap fill.
     db, clock, engine1, asset = _engine(tmp_path)
-    _provider(engine1, [_snap(), _snap(), _snap(mark=40000, mid=40000)])
-    engine1.start_plan(_decision("long", 1))
+    _provider(engine1, [snap(), snap(), snap(mark=40000, mid=40000)])
+    engine1.start_plan(set_target("long", 1))
     clock.advance(30)
     engine1.tick()  # open
     clock.advance(30)
@@ -1125,8 +1105,8 @@ def test_cancel_active_plans_terminates_inflight_leg_and_restores_tp(tmp_path):
     # in-flight TWAP leg stops filling, its rows terminate as canceled with the
     # halt reason, and the surviving position regains its TP.
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap(), _snap()])
-    engine.start_plan(_decision("long", 2))  # 2-slice TWAP
+    _provider(engine, [snap(), snap(), snap()])
+    engine.start_plan(set_target("long", 2))  # 2-slice TWAP
     plan_id = engine._leg.plan_id
     order_id = engine._leg.order_id
     clock.advance(30)
@@ -1150,8 +1130,8 @@ def test_cancel_active_plans_records_pending_flip_incomplete(tmp_path):
     # flip_incomplete — the same outcome a kill-and-restart would produce.
     seed = (PositionState(coin="BTC", size=D("0.001"), entry_price=D(50000)),)
     db, clock, engine, _ = _engine(tmp_path, seed=seed)
-    _provider(engine, [_snap()] * 3)
-    engine.start_plan(_decision("short", 5))  # flip: close leg registered
+    _provider(engine, [snap()] * 3)
+    engine.start_plan(set_target("short", 5))  # flip: close leg registered
     assert engine._flip is not None
     close_plan_id = engine._leg.plan_id
 
@@ -1173,8 +1153,8 @@ def test_cancel_active_plans_records_pending_flip_incomplete(tmp_path):
 def test_cancel_active_plans_with_nothing_inflight_is_a_noop(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
     assert engine.cancel_active_plans() is False  # nothing ever started
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 1))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 1))
     plan_id = engine._leg.plan_id
     clock.advance(30)
     engine.tick()  # paper_market fill completes the plan
@@ -1240,8 +1220,8 @@ def test_maker_slice_posts_at_the_modelled_touch_and_fills_only_through_it(tmp_p
 
     db, clock, engine, asset = _maker(tmp_path)
     tick = asset.tick_size
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 2))  # 2 slices of 0.001
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 2))  # 2 slices of 0.001
     clock.advance(30)
     r1 = engine.tick()
     assert r1.has(TickEvent.SLICE_POSTED) and not r1.has(TickEvent.SLICE_FILL)
@@ -1250,12 +1230,12 @@ def test_maker_slice_posts_at_the_modelled_touch_and_fills_only_through_it(tmp_p
     assert post < _MARK and _size(db) == D(0)
     # The mid touches the post: still no fill (queue position is unknowable).
     clock.advance(10)
-    _provider(engine, [_snap(_MARK, post)])
+    _provider(engine, [snap(_MARK, post)])
     r2 = engine.tick()
     assert not r2.has(TickEvent.SLICE_FILL) and engine._leg.resting is not None
     # The mid trades through by a tick: filled at the POSTED price, maker fee.
     clock.advance(10)
-    _provider(engine, [_snap(_MARK, post - tick)])
+    _provider(engine, [snap(_MARK, post - tick)])
     r3 = engine.tick()
     assert r3.has(TickEvent.SLICE_FILL) and engine._leg.resting is None
     assert _size(db) == D("0.001")
@@ -1266,8 +1246,8 @@ def test_maker_slice_posts_at_the_modelled_touch_and_fills_only_through_it(tmp_p
 
 def test_maker_rest_timeout_reposts_then_crosses_as_a_taker(tmp_path):
     db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=1)
-    _provider(engine, [_snap()] * 4)
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap()] * 4)
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()  # posted
     clock.advance(30)
@@ -1285,15 +1265,15 @@ def test_maker_rest_timeout_reposts_then_crosses_as_a_taker(tmp_path):
 
 def test_a_resting_maker_slice_blocks_the_next_due_slice_until_it_fills(tmp_path):
     db, clock, engine, asset = _maker(tmp_path, maker_max_requotes=2, maker_rest_seconds=600)
-    _provider(engine, [_snap()] * 3)
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap()] * 3)
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()  # slice 0 posted
     clock.advance(30)
     r2 = engine.tick()  # slice 1 due, but slice 0 still rests
     assert engine._leg.consumed == 1 and not r2.has(TickEvent.SLICE_POSTED)
     clock.advance(30)
-    _provider(engine, [_snap(_MARK, engine._leg.resting.price - asset.tick_size)])
+    _provider(engine, [snap(_MARK, engine._leg.resting.price - asset.tick_size)])
     r3 = engine.tick()  # slice 0 fills; slice 1 (long due) posts in the same tick
     assert r3.has(TickEvent.SLICE_FILL) and r3.has(TickEvent.SLICE_POSTED)
     assert engine._leg.consumed == 2 and engine._leg.executed == 1
@@ -1302,8 +1282,8 @@ def test_a_resting_maker_slice_blocks_the_next_due_slice_until_it_fills(tmp_path
 
 def test_plan_expiry_drops_the_resting_maker_slice_as_residual(tmp_path):
     db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=9)
-    _provider(engine, [_snap()] * 3)
-    start = engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap()] * 3)
+    start = engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()
     clock.advance(3600)
@@ -1320,14 +1300,14 @@ def test_plan_expiry_drops_the_resting_maker_slice_as_residual(tmp_path):
 
 def test_a_single_slice_plan_under_maker_posts_then_fills_as_paper_market(tmp_path):
     db, clock, engine, asset = _maker(tmp_path)
-    _provider(engine, [_snap(), _snap()])
-    start = engine.start_plan(_decision("long", 1))  # one 0.001 clip
+    _provider(engine, [snap(), snap()])
+    start = engine.start_plan(set_target("long", 1))  # one 0.001 clip
     assert start.disposition.value == "paper_market"
     clock.advance(30)
     r1 = engine.tick()
     assert r1.has(TickEvent.SLICE_POSTED) and not r1.has(TickEvent.PAPER_MARKET_FILL)
     clock.advance(10)
-    _provider(engine, [_snap(_MARK, engine._leg.resting.price - asset.tick_size)])
+    _provider(engine, [snap(_MARK, engine._leg.resting.price - asset.tick_size)])
     r2 = engine.tick()
     assert r2.has(TickEvent.PAPER_MARKET_FILL) and r2.has(TickEvent.PLAN_TERMINAL)
     assert _plan_status(db, start.plan_id) == ("completed", None)
@@ -1336,8 +1316,8 @@ def test_a_single_slice_plan_under_maker_posts_then_fills_as_paper_market(tmp_pa
 
 def test_the_taker_style_never_posts(tmp_path):
     db, clock, engine, _ = _engine(tmp_path)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     r = engine.tick()
     assert r.has(TickEvent.SLICE_FILL) and not r.has(TickEvent.SLICE_POSTED)
@@ -1349,17 +1329,17 @@ def test_the_taker_style_never_posts(tmp_path):
 def test_short_leg_posts_above_mid_and_fills_only_when_mid_trades_up_through(tmp_path):
     db, clock, engine, asset = _maker(tmp_path, maker_rest_seconds=600)
     tick = asset.tick_size
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("short", 2))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("short", 2))
     clock.advance(30)
     engine.tick()
     post = engine._leg.resting.price
     assert post > _MARK
     clock.advance(10)
-    _provider(engine, [_snap(_MARK, post - tick)])  # below the ask: nothing
+    _provider(engine, [snap(_MARK, post - tick)])  # below the ask: nothing
     assert not engine.tick().has(TickEvent.SLICE_FILL)
     clock.advance(10)
-    _provider(engine, [_snap(_MARK, post + tick)])
+    _provider(engine, [snap(_MARK, post + tick)])
     r = engine.tick()
     assert r.has(TickEvent.SLICE_FILL) and _size(db) == D("-0.001")
     assert repo.get_current_position(db.conn, "r", "BTC").entry_price == post
@@ -1368,8 +1348,8 @@ def test_short_leg_posts_above_mid_and_fills_only_when_mid_trades_up_through(tmp
 
 def test_requote_gets_a_fresh_rest(tmp_path):
     db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=1)
-    _provider(engine, [_snap()] * 4)
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap()] * 4)
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()  # posted at t=30
     clock.advance(30)
@@ -1385,8 +1365,8 @@ def test_requote_moves_to_the_new_touch(tmp_path):
     from contrib.hyperliquid_perp.paper.fill_model import maker_post_price
 
     db, clock, engine, asset = _maker(tmp_path)
-    _provider(engine, [_snap(), _snap(), _snap(50100, 50100)])
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), snap(), snap(50100, 50100)])
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     r1 = engine.tick()
     old = engine._leg.resting.price
@@ -1401,8 +1381,8 @@ def test_requote_moves_to_the_new_touch(tmp_path):
 
 def test_zero_requotes_crosses_on_the_first_timeout(tmp_path):
     db, clock, engine, _ = _maker(tmp_path, maker_max_requotes=0)
-    _provider(engine, [_snap()] * 3)
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap()] * 3)
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()
     clock.advance(30)
@@ -1414,8 +1394,8 @@ def test_zero_requotes_crosses_on_the_first_timeout(tmp_path):
 
 def test_an_outage_leaves_the_resting_maker_slice_in_place(tmp_path):
     db, clock, engine, asset = _maker(tmp_path, maker_rest_seconds=600, maker_max_requotes=1)
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 2))
     plan_id = engine._leg.plan_id
     clock.advance(30)
     engine.tick()
@@ -1427,7 +1407,7 @@ def test_an_outage_leaves_the_resting_maker_slice_in_place(tmp_path):
     assert not r2.has(TickEvent.SLICE_MISSED) and not r2.has(TickEvent.PLAN_TERMINAL)
     assert engine._leg.resting is not None and engine._leg.consumed == 1
     clock.advance(30)
-    _provider(engine, [_snap(_MARK, post - asset.tick_size)])
+    _provider(engine, [snap(_MARK, post - asset.tick_size)])
     r3 = engine.tick()  # data is back: the post fills, slice 1 posts
     assert r3.has(TickEvent.SLICE_FILL) and r3.has(TickEvent.SLICE_POSTED)
     assert _size(db) == D("0.001") and _plan_status(db, plan_id)[0] == "active"
@@ -1436,13 +1416,13 @@ def test_an_outage_leaves_the_resting_maker_slice_in_place(tmp_path):
 
 def test_the_deadline_tick_neither_fills_nor_reposts_a_maker_slice(tmp_path):
     db, clock, engine, asset = _maker(tmp_path, maker_max_requotes=9)
-    _provider(engine, [_snap(), _snap()])
-    start = engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), snap()])
+    start = engine.start_plan(set_target("long", 2))
     clock.advance(30)
     engine.tick()
     post = engine._leg.resting.price
     clock.advance(3570)  # now == deadline, and the mid is through the post
-    _provider(engine, [_snap(_MARK, post - asset.tick_size)])
+    _provider(engine, [snap(_MARK, post - asset.tick_size)])
     r = engine.tick()
     assert r.has(TickEvent.PLAN_TERMINAL)
     assert not r.has(TickEvent.SLICE_FILL) and not r.has(TickEvent.SLICE_REQUOTED)
@@ -1463,8 +1443,8 @@ def test_emergency_close_after_a_maker_fill_posts_nothing_on_the_canceled_plan(t
             "maker_max_requotes": 9,
         },
     )
-    _provider(engine, [_snap(), _snap()])
-    engine.start_plan(_decision("long", 10))
+    _provider(engine, [snap(), snap()])
+    engine.start_plan(set_target("long", 10))
     leg = engine._leg
     assert leg.planned >= 2
     plan_id = leg.plan_id
@@ -1473,7 +1453,7 @@ def test_emergency_close_after_a_maker_fill_posts_nothing_on_the_canceled_plan(t
     post = leg.resting.price
     through = post + asset.tick_size if leg.side is Side.SELL else post - asset.tick_size
     clock.advance(30)  # slice 1 is due; the fill's SL recompute finds no safe SL
-    _provider(engine, [_snap(_MARK, through)])
+    _provider(engine, [snap(_MARK, through)])
     r = engine.tick()
     assert r.has(TickEvent.SLICE_FILL) and r.has(TickEvent.LIQUIDATION_CLOSE)
     assert r.has(TickEvent.PLAN_TERMINAL) and not r.has(TickEvent.SLICE_POSTED)
@@ -1484,8 +1464,8 @@ def test_emergency_close_after_a_maker_fill_posts_nothing_on_the_canceled_plan(t
 
 def test_a_slice_missed_before_the_first_post_does_not_halt_the_maker_leg(tmp_path):
     db, clock, engine, _ = _maker(tmp_path)
-    _provider(engine, [_snap(), SnapshotOutcome.TIMEOUT, _snap()])
-    engine.start_plan(_decision("long", 2))
+    _provider(engine, [snap(), SnapshotOutcome.TIMEOUT, snap()])
+    engine.start_plan(set_target("long", 2))
     clock.advance(30)
     r1 = engine.tick()  # slice 0 is missed (execution 1.1) with nothing resting
     assert r1.has(TickEvent.SLICE_MISSED) and engine._leg.consumed == 1

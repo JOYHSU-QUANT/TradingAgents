@@ -58,13 +58,14 @@ from ..conftest import (
     insert_decision_attempts,
     migrations_up_to,
     misrouted_order_status,
+    record_constructor_kwargs,
     record_reconciliation_sweep_wiring,
     stamp_prompt_regimes,
     unreadable,
     unwritable,
     write_payload,
 )
-from ..live.test_startup import _btc_position, _clearinghouse
+from ..fakes.payloads import btc_position, clearinghouse
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -6267,7 +6268,7 @@ def test_cmd_live_keeps_sl_tp_standing_when_the_loop_raises_over_a_live_position
     The control below — the same position, a loop that returns — shows the
     flag is what flips the outcome.
     """
-    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+    live_seams.clearinghouse = clearinghouse(positions=[btc_position()])
 
     def _boom(**kwargs):
         raise RuntimeError("a REST read in loop construction timed out")
@@ -6302,7 +6303,7 @@ def test_cmd_live_protection_only_stop_keeps_sl_tp_standing(
     # .env would be the front-gate hole the mode exists to close.
     from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
 
-    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+    live_seams.clearinghouse = clearinghouse(positions=[btc_position()])
     stopped = ProtectionOnlyExit(cause="config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...", settled=False)
     rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=lambda **kwargs: stopped)
     err = capsys.readouterr().err
@@ -6390,7 +6391,7 @@ def test_cmd_live_hands_the_keep_decision_to_the_sweep(tmp_path, capsys, live_se
         "shutdown",
         lambda self, *, keep_protective: kept.append(keep_protective),
     )
-    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+    live_seams.clearinghouse = clearinghouse(positions=[btc_position()])
 
     def _boom(**kwargs):
         raise RuntimeError("a store read in the loop failed")
@@ -6431,7 +6432,7 @@ def test_cmd_live_loop_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mode_re
     def _loop_then_break_the_read(**kwargs):
         monkeypatch.setattr(SafeModeManager, "active", property(_unreadable))
 
-    live_seams.clearinghouse = _clearinghouse(positions=[_btc_position()])
+    live_seams.clearinghouse = clearinghouse(positions=[btc_position()])
     rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_loop_then_break_the_read)
     captured = capsys.readouterr()
     assert rc == 4
@@ -6448,7 +6449,7 @@ def test_cmd_live_loop_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mode_re
     ("positions", "code", "last_line"),
     [
         (
-            [_btc_position()],
+            [btc_position()],
             4,
             "startup recovery passed, but protective orders were kept behind a "
             "FAILED shutdown safe-mode read (unknown ≠ clean)",
@@ -6473,7 +6474,7 @@ def test_cmd_live_one_shot_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mod
         raise AssertionError("the one-shot entered the live loop")
 
     monkeypatch.setattr(SafeModeManager, "active", property(_unreadable))
-    live_seams.clearinghouse = _clearinghouse(positions=positions)
+    live_seams.clearinghouse = clearinghouse(positions=positions)
     rc = _drive_cmd_live_loop_to_its_exit(
         tmp_path, monkeypatch, loop=_loop_must_not_run, one_shot=True
     )
@@ -6498,7 +6499,7 @@ def _break_every_safe_mode_read(monkeypatch):
     ("positions", "last_line"),
     [
         (
-            [_btc_position()],
+            [btc_position()],
             "live loop exited with protective orders kept behind a FAILED shutdown "
             "safe-mode read (unknown ≠ clean)",
         ),
@@ -6515,7 +6516,7 @@ def test_cmd_live_loop_exits_4_by_name_when_safe_mode_stays_unreadable(
 ):
     # Issue #308: the store never answers the safe-mode question again, so
     # the read after the sweep fails like the one before it.
-    live_seams.clearinghouse = _clearinghouse(positions=positions)
+    live_seams.clearinghouse = clearinghouse(positions=positions)
     rc = _drive_cmd_live_loop_to_its_exit(
         tmp_path, monkeypatch, loop=lambda **kwargs: _break_every_safe_mode_read(monkeypatch)
     )
@@ -6535,7 +6536,7 @@ def test_cmd_live_loop_exits_4_by_name_when_safe_mode_stays_unreadable(
     ("positions", "code", "last_line"),
     [
         (
-            [_btc_position()],
+            [btc_position()],
             4,
             "startup recovery passed, but protective orders were kept behind a "
             "FAILED shutdown safe-mode read (unknown ≠ clean)",
@@ -6552,7 +6553,7 @@ def test_cmd_live_one_shot_keeps_its_exit_when_safe_mode_stays_unreadable(
     def _loop_must_not_run(**kwargs):
         raise AssertionError("the one-shot entered the live loop")
 
-    live_seams.clearinghouse = _clearinghouse(positions=positions)
+    live_seams.clearinghouse = clearinghouse(positions=positions)
     rc = _drive_cmd_live_loop_to_its_exit(
         tmp_path,
         monkeypatch,
@@ -6927,14 +6928,7 @@ def test_the_daemon_writes_unmarked_rows(tmp_path, live_seams, monkeypatch):
     from contrib.hyperliquid_perp.live import kill_switch as ks_mod
 
     seen: list[dict] = []
-    real = ks_mod.KillSwitchManager
-
-    class _Recording(real):  # type: ignore[misc, valid-type]
-        def __init__(self, **kwargs):
-            seen.append(kwargs)
-            super().__init__(**kwargs)
-
-    monkeypatch.setattr(ks_mod, "KillSwitchManager", _Recording)
+    record_constructor_kwargs(monkeypatch, ks_mod, "KillSwitchManager", seen)
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = _live_yaml(
@@ -6978,15 +6972,8 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
     # is the SOURCE module, not a cli attribute.
     from contrib.hyperliquid_perp.live import fills as fills_mod
 
-    seen: list[object] = []
-    real = fills_mod.LiveFillProcessor
-
-    class _Recording(real):  # type: ignore[misc, valid-type]
-        def __init__(self, **kwargs):
-            seen.append(kwargs.get("wallet_address"))
-            super().__init__(**kwargs)
-
-    monkeypatch.setattr(fills_mod, "LiveFillProcessor", _Recording)
+    seen: list[dict] = []
+    record_constructor_kwargs(monkeypatch, fills_mod, "LiveFillProcessor", seen)
     monkeypatch.setenv(_LIVE_ENV, _LIVE_KEY)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     cfg = _live_yaml(
@@ -6998,7 +6985,7 @@ def test_the_daemon_hands_the_fill_processor_the_signed_wallet(tmp_path, live_se
     # the reasons the sibling pin above states.
     assert cli_main(["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 1
     assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
-    assert all(value == _LIVE_WALLET for value in seen), seen
+    assert all(kwargs.get("wallet_address") == _LIVE_WALLET for kwargs in seen), seen
 
 
 def _drive_the_daemon_recovery(tmp_path, monkeypatch):
@@ -7207,7 +7194,7 @@ def test_a_locked_store_at_startup_adoption_still_reaches_the_loop(tmp_path, mon
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         adoption_raises=sqlite3.OperationalError("database is locked"),
     )
     assert built.ticks == 1, "the loop body never ran — the daemon stopped at adoption"
@@ -7245,7 +7232,7 @@ def test_an_unhealable_startup_adoption_latches_manual_safe_mode(tmp_path, monke
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         adoption_raises=ValueError("run 'r1' has 2 in-progress attempts (a, b)"),
     )
     assert built.ticks == 1, "the loop body never ran — the position stopped being watched"
@@ -7281,7 +7268,7 @@ def test_an_unclassified_startup_adoption_raise_still_reaches_the_loop(tmp_path,
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         adoption_raises=RuntimeError("the fail record's own write blew up"),
         arm_pending_fail=True,
     )
@@ -7326,7 +7313,7 @@ def test_a_raising_pump_is_contained_as_the_pump_and_not_as_the_tick(tmp_path, m
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         tick_results=(did_something,),
         pump_raises=sqlite3.OperationalError("database is locked"),
     )
@@ -7352,7 +7339,7 @@ def test_a_raising_tick_is_still_contained_as_the_tick(tmp_path, monkeypatch):
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         tick_results=(sqlite3.OperationalError("database is locked"),),
     )
     assert built.ticks == 2, "the contained tick raise ended the loop instead of ticking again"
@@ -7665,7 +7652,7 @@ def test_the_live_loop_hands_protection_the_kill_switch(tmp_path, monkeypatch):
     (2026-08-17 issue #45).
     """
     built = _drive_live_loop_construction(
-        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: clearinghouse()
     )
     assert built.protection.get("kill_switch") is built.kill_switch
 
@@ -7682,7 +7669,7 @@ def test_the_live_loop_hands_protection_the_shared_identity_monitor(tmp_path, mo
     as the kill-switch pin above, for the same reason.
     """
     built = _drive_live_loop_construction(
-        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: clearinghouse()
     )
     assert built.protection.get("identity") is built.identity
 
@@ -7707,7 +7694,7 @@ def test_the_live_loop_takes_the_day_baseline_from_the_clearinghouse(tmp_path, m
 
     def _fetch():
         reads.append("clearinghouse")
-        return _clearinghouse(account_value="4242")
+        return clearinghouse(account_value="4242")
 
     built = _drive_live_loop_construction(tmp_path, monkeypatch, fetch_clearinghouse=_fetch)
     source = built.guards.get("day_baseline_source")
@@ -7767,7 +7754,7 @@ def test_the_live_loop_enters_protection_only_when_the_engine_cannot_be_built_ov
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         provider_raises=_refused_knob(key, env),
         initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
         # Two clean ticks, then the sentinel: the loop must survive an
@@ -7797,7 +7784,7 @@ def test_the_live_loop_raises_the_engine_refusal_over_a_flat_book(tmp_path, monk
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         provider_raises=_refused_knob("llm_max_retries", "TRADINGAGENTS_LLM_MAX_RETRIES"),
     )
     # The harness pinned the raise's type (the bridge's own, unwrapped).
@@ -7841,7 +7828,7 @@ def test_the_live_loop_protection_only_ends_itself_once_the_position_closes(
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         provider_raises=_refused_knob("temperature", "TRADINGAGENTS_TEMPERATURE"),
         initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
         tick_results=(quiet,),
@@ -7869,7 +7856,7 @@ def test_the_live_loop_treats_an_unreadable_book_as_live_work(tmp_path, monkeypa
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         provider_raises=_refused_knob("temperature", "TRADINGAGENTS_TEMPERATURE"),
         initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
         tick_results=(quiet,),
@@ -7898,7 +7885,7 @@ def test_the_live_loop_protection_only_survives_a_broken_stranded_attempt_lookup
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         provider_raises=_refused_knob("max_tokens", "TRADINGAGENTS_MAX_TOKENS"),
         initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
     )
@@ -7925,7 +7912,7 @@ def test_a_raising_settle_check_is_contained_under_its_own_phase(tmp_path, monke
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         provider_raises=_refused_knob("llm_max_retries", "TRADINGAGENTS_LLM_MAX_RETRIES"),
         initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
         tick_results=(quiet,),
@@ -7955,7 +7942,7 @@ def test_the_live_loop_protection_only_reports_an_operator_stop(tmp_path, monkey
     built = _drive_live_loop_construction(
         tmp_path,
         monkeypatch,
-        fetch_clearinghouse=lambda: _clearinghouse(),
+        fetch_clearinghouse=lambda: clearinghouse(),
         provider_raises=_refused_knob("max_tokens", "TRADINGAGENTS_MAX_TOKENS"),
         initial_positions=[PositionState(coin="BTC", size=D("0.01"), entry_price=D(50000))],
         tick_results=(KeyboardInterrupt(),),
@@ -7982,7 +7969,7 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
     hands it a hook at all, and that the hook drives THIS run's switch.
     """
     built = _drive_live_loop_construction(
-        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: clearinghouse()
     )
     hook = built.provider.get("on_blocking_read")
     assert hook is not None, "a whole decision cycle of market reads refreshes nothing (§18.2)"
@@ -7996,7 +7983,7 @@ def test_the_live_loop_wires_the_books_as_the_provider_position_source(tmp_path,
     # over THIS run's store, as it does for paper — dropped, None, or bound
     # to the wrong run/coin would leave the live prompt silently position-blind.
     built = _drive_live_loop_construction(
-        tmp_path, monkeypatch, fetch_clearinghouse=lambda: _clearinghouse()
+        tmp_path, monkeypatch, fetch_clearinghouse=lambda: clearinghouse()
     )
     source = built.provider.get("position_source")
     assert source is not None, "the live prompt would be position-blind"

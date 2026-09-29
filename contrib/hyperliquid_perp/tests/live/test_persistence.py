@@ -44,12 +44,6 @@ _HEX = "0x" + "ab" * 16
 _HEX2 = "0x" + "cd" * 16
 
 
-@pytest.fixture
-def db():
-    with Database(":memory:") as database:
-        yield database
-
-
 def _columns(conn, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 

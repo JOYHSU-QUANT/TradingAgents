@@ -20,12 +20,10 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
 )
 from contrib.hyperliquid_perp.live.config import (
-    ExecutionMode,
     KillSwitchConfig,
     LiveProtectionConfig,
 )
 from contrib.hyperliquid_perp.live.kill_switch import KillSwitchManager
-from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.protection import ProtectionManager
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
 from contrib.hyperliquid_perp.live.safe_mode import REASON_IDENTITY_FAULT, SafeModeManager
@@ -45,6 +43,8 @@ from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import doc_text, identity_latch_rows, misrouted_order_status
+from ..fakes.gates import protective_order_gate
+from ..fakes.payloads import clearinghouse
 
 _NOW = datetime(2026, 8, 26, 8, 0, tzinfo=timezone.utc)
 _OURS = "0x" + "ab" * 16
@@ -295,19 +295,8 @@ def test_the_failure_clause_separates_the_two_families():
 # -- the escalation helper --------------------------------------------------------
 
 
-def _gate() -> RealOrderGate:
-    return RealOrderGate(
-        allow_real_orders=True,
-        mode=ExecutionMode.TESTNET_LIVE,
-        allowed_symbols=("BTC",),
-        agent_authorized=True,
-        startup_reconciliation_passed=True,
-        kill_switch_active=True,
-    )
-
-
 def test_escalation_enters_manual_only_once_the_latch_is_up_and_is_idempotent(db):
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     monitor = _monitor(db, _Venue([misrouted_order_status() for _ in range(K)]))
 
@@ -347,10 +336,10 @@ def test_a_persisted_shutdown_escalation_is_what_the_next_boot_hydrates(db):
     for _ in range(K):
         _probe_expecting_unreadable(monitor)
     escalate_identity_fault(
-        monitor, SafeModeManager(db=db, run_id="r", gate=_gate()), holder=EscalationHolder.SHUTDOWN
+        monitor, SafeModeManager(db=db, run_id="r", gate=protective_order_gate()), holder=EscalationHolder.SHUTDOWN
     )
 
-    next_boot_gate = _gate()
+    next_boot_gate = protective_order_gate()
     restored = SafeModeManager(db=db, run_id="r", gate=next_boot_gate).hydrate_gate()
     assert restored is not None and restored.is_manual
     assert restored.reason == REASON_IDENTITY_FAULT
@@ -358,15 +347,6 @@ def test_a_persisted_shutdown_escalation_is_what_the_next_boot_hydrates(db):
 
 
 # -- the three consumers, one streak ----------------------------------------------
-
-
-def _clearinghouse() -> dict:
-    return {
-        "marginSummary": {"accountValue": "100", "totalMarginUsed": "0", "totalNtlPos": "0"},
-        "withdrawable": "100",
-        "crossMaintenanceMarginUsed": "0",
-        "assetPositions": [],
-    }
 
 
 class _Client(_Venue):
@@ -438,7 +418,7 @@ def _reconciler(db, client, monitor, tmp_path) -> LiveReconciler:
         run_id="r",
         coin="BTC",
         fetch_open_orders=client.open_orders,
-        fetch_clearinghouse=_clearinghouse,
+        fetch_clearinghouse=clearinghouse,
         fetch_fills=lambda start_ms, end_ms: [],
         payload_dir=tmp_path / "payloads",
         clock=ManualClock(_NOW),
@@ -456,7 +436,7 @@ def test_the_reconciler_takes_the_seam_from_exactly_one_place(db, tmp_path):
         "run_id": "r",
         "coin": "BTC",
         "fetch_open_orders": client.open_orders,
-        "fetch_clearinghouse": _clearinghouse,
+        "fetch_clearinghouse": clearinghouse,
         "clock": ManualClock(_NOW),
     }
     with pytest.raises(ValueError, match="EITHER"):
@@ -472,7 +452,7 @@ def test_the_reconciler_takes_the_seam_from_exactly_one_place(db, tmp_path):
 def _kill_switch(db, client, monitor, clock, tmp_path) -> KillSwitchManager:
     return KillSwitchManager(
         client=client,
-        gate=_gate(),
+        gate=protective_order_gate(),
         db=db,
         run_id="r",
         config=KillSwitchConfig(),
@@ -490,7 +470,7 @@ def _protection(db, client, monitor) -> ProtectionManager:
         run_id="r",
         coin="BTC",
         client=client,
-        gate=_gate(),
+        gate=protective_order_gate(),
         tick_size=Decimal("1"),
         qty_step=Decimal("0.001"),
         stop_config=StopConfig(),
@@ -579,7 +559,7 @@ def test_a_reconcile_pass_escalates_the_latch_under_its_own_reason(db, tmp_path)
     monitor = _monitor(db, client, payload_dir=tmp_path / "payloads")
     _live_order(db, order_id="o1", cloid_hex=_OURS)
     reconciler = _reconciler(db, client, monitor, tmp_path)
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
 
     def _identity_reason_recorded() -> bool:
@@ -634,7 +614,7 @@ def test_the_reconciler_escalates_after_its_own_safe_mode_bookkeeping(db, tmp_pa
             entered.append((safe_mode_type, reason))
             return super().enter(safe_mode_type, reason, detail=detail)
 
-    safe_mode = _Recording(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    safe_mode = _Recording(db=db, run_id="r", gate=protective_order_gate(), clock=ManualClock(_NOW))
     _reconciler(db, client, monitor, tmp_path).reconcile_and_apply(
         "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
     )
@@ -691,7 +671,7 @@ def test_a_reconcile_pass_that_latches_first_enters_manual_with_the_identity_rea
     for _ in range(K - 1):
         _probe_expecting_unreadable(monitor, site=ProbeSite.PROTECTION_NOOP_GUARD, role="stop_loss")
     _live_order(db, order_id="o1", cloid_hex=_OURS)
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
 
     _reconciler(db, client, monitor, tmp_path).reconcile_and_apply(
@@ -714,7 +694,7 @@ def test_a_private_monitor_bounds_a_consumer_built_without_the_shared_one(db, tm
         run_id="r",
         coin="BTC",
         fetch_open_orders=client.open_orders,
-        fetch_clearinghouse=_clearinghouse,
+        fetch_clearinghouse=clearinghouse,
         query_order_by_cloid=client.query_order_by_cloid,
         fetch_fills=lambda start_ms, end_ms: [],
         payload_dir=tmp_path / "payloads",
@@ -762,7 +742,7 @@ def test_a_sites_dynamic_field_must_pair_with_its_member(db):
 
 
 def test_an_unregistered_escalation_holder_is_refused_even_with_nothing_latched(db):
-    safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=protective_order_gate(), clock=ManualClock(_NOW))
     monitor = _monitor(db, _Venue())
     with pytest.raises(ValueError):
         escalate_identity_fault(monitor, safe_mode, holder="§18.2 shutdown")  # not a member
@@ -788,7 +768,7 @@ def test_a_string_spelled_exactly_as_a_member_is_accepted_by_value(db):
     assert monitor.probe(_OURS, site="reconcile absent-order settle") is None  # unknownOid, read
     assert venue.asked == [_OURS]  # the round-trip happened: not refused at the call
     assert monitor.unreadable_streak == 0
-    safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=protective_order_gate(), clock=ManualClock(_NOW))
     assert (
         escalate_identity_fault(monitor, safe_mode, holder="§18.2 shutdown disarm cross-check")
         is False

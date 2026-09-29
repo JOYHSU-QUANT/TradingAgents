@@ -25,7 +25,6 @@ from contrib.hyperliquid_perp.live.ws_stream import (
     bind_user_subscriptions,
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
@@ -331,12 +330,6 @@ def test_supervisor_note_closed_then_reconnect_requests_backfill():
 # ---------------------------------------------------------------------------
 # FillBackfiller — REST trailing window, converging with WS
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def db():
-    with Database(":memory:") as database:
-        yield database
 
 
 def _live_run_with_order(db):

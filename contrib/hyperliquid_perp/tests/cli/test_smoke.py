@@ -44,9 +44,10 @@ from ..conftest import (
     assert_payload_dir,
     doc_text,
     echo_order_status_cloid,
+    record_constructor_kwargs,
     record_reconciliation_sweep_wiring,
 )
-from ..live.test_startup import _clearinghouse
+from ..fakes.payloads import clearinghouse
 from ..live.test_validation import _healthy
 from .test_cli import _seed_live_run_with_genesis_subset as _seed_genesis_run
 
@@ -120,7 +121,7 @@ def smoke_seams(monkeypatch):
     state = SimpleNamespace(
         # The flat 200-USDC clearinghouse matches the seeded ledger, so every
         # recovery's equity leg reconciles.
-        clearinghouse=_clearinghouse(account_value="200"),
+        clearinghouse=clearinghouse(account_value="200"),
         mark=_D(50000),
         auth_error=None,
         auth_calls=[],
@@ -393,15 +394,8 @@ def test_the_cli_hands_the_manager_the_clients_own_timeout(tmp_path, monkeypatch
     """
     from contrib.hyperliquid_perp.live import kill_switch as ks_mod
 
-    seen: list[object] = []
-    real = ks_mod.KillSwitchManager
-
-    class _Recording(real):  # type: ignore[misc, valid-type]
-        def __init__(self, **kwargs):
-            seen.append(kwargs.get("network_timeout_s"))
-            super().__init__(**kwargs)
-
-    monkeypatch.setattr(ks_mod, "KillSwitchManager", _Recording)
+    seen: list[dict] = []
+    record_constructor_kwargs(monkeypatch, ks_mod, "KillSwitchManager", seen)
     # An explicit, RUNBOOK §1.5-shaped timeout: relying on the default would let
     # the assertion pass against None, which is the very value being guarded.
     cfg = _smoke_yaml(tmp_path, network_timeout_s=8)
@@ -410,7 +404,7 @@ def test_the_cli_hands_the_manager_the_clients_own_timeout(tmp_path, monkeypatch
     assert seen, "no KillSwitchManager was constructed — the pin proves nothing"
     # The number the failed attempt would actually burn, not None: the whole point
     # is that the constructor and the CLI preflight now read the SAME value.
-    assert all(value == 8 for value in seen), seen
+    assert all(kwargs.get("network_timeout_s") == 8 for kwargs in seen), seen
 
 
 def test_the_cli_hands_the_fill_processor_the_signed_wallet(tmp_path, monkeypatch, smoke_seams):
@@ -426,20 +420,13 @@ def test_the_cli_hands_the_fill_processor_the_signed_wallet(tmp_path, monkeypatc
     # is the SOURCE module, not a cli attribute.
     from contrib.hyperliquid_perp.live import fills as fills_mod
 
-    seen: list[object] = []
-    real = fills_mod.LiveFillProcessor
-
-    class _Recording(real):  # type: ignore[misc, valid-type]
-        def __init__(self, **kwargs):
-            seen.append(kwargs.get("wallet_address"))
-            super().__init__(**kwargs)
-
-    monkeypatch.setattr(fills_mod, "LiveFillProcessor", _Recording)
+    seen: list[dict] = []
+    record_constructor_kwargs(monkeypatch, fills_mod, "LiveFillProcessor", seen)
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)
     assert cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]) == 0
     assert seen, "no LiveFillProcessor was constructed - the pin proves nothing"
-    assert all(value == _SMOKE_WALLET for value in seen), seen
+    assert all(kwargs.get("wallet_address") == _SMOKE_WALLET for kwargs in seen), seen
 
 
 def _drive_a_full_smoke_suite(tmp_path):

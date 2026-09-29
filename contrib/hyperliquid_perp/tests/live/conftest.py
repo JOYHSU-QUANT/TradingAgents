@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK, BackfillSummary
+from contrib.hyperliquid_perp.persistence.db import Database
+
+
+@pytest.fixture
+def db():
+    with Database(":memory:") as database:
+        yield database
 
 
 class StubBackfiller:

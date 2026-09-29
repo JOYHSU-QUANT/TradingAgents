@@ -29,7 +29,6 @@ from contrib.hyperliquid_perp.live.fills import (
     post_live_fill,
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
-from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.ids import live_fill_id
 from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
@@ -40,12 +39,6 @@ from contrib.hyperliquid_perp.runtime.clock import ManualClock
 _NOW = datetime(2026, 7, 14, 8, 0, tzinfo=timezone.utc)
 _HEX = "0x" + "ab" * 16
 _TIME_MS = int(_NOW.timestamp() * 1000)
-
-
-@pytest.fixture
-def db():
-    with Database(":memory:") as database:
-        yield database
 
 
 @pytest.fixture

@@ -26,8 +26,7 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
     MalformedResponseError,
 )
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import OrderAck
-from contrib.hyperliquid_perp.live.config import ExecutionMode
-from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
+from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected
 from contrib.hyperliquid_perp.live.orders import (
     LiveOrderSubmitter,
     SubmitOutcome,
@@ -44,6 +43,7 @@ from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import echo_order_status_cloid
+from ..fakes.gates import new_target_gate
 
 _NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 _LOGICAL = "hta_r_BTC_out1_plan1_open_000_entry"
@@ -87,19 +87,6 @@ class _FakeClient:
         return echo_order_status_cloid(result, cloid_hex)
 
 
-def _open_gate() -> RealOrderGate:
-    return RealOrderGate(
-        allow_real_orders=True,
-        mode=ExecutionMode.TESTNET_LIVE,
-        allowed_symbols=("BTC",),
-        agent_authorized=True,
-        startup_reconciliation_passed=True,
-        kill_switch_active=True,
-        state_reconciled=True,
-        risk_gate_approved=True,
-    )
-
-
 _RESTING_ACK = OrderAck(
     status="resting", exchange_order_id="111", raw={"status": "ok", "kind": "resting"}
 )
@@ -126,7 +113,7 @@ _UNKNOWN_STATUS = {"status": "unknownOid"}
 def env(tmp_path: Path):
     db = Database(":memory:")
     client = _FakeClient()
-    gate = _open_gate()
+    gate = new_target_gate()
     submitter = LiveOrderSubmitter(
         client=client,
         gate=gate,

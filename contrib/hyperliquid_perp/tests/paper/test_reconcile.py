@@ -9,14 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
-from contrib.hyperliquid_perp.domains.perp.target_decision import (
-    DecisionMode,
-    ParsedDecision,
-    TargetDecision,
-    TargetSide,
-)
 from contrib.hyperliquid_perp.paper import (
     accounting as paper_accounting,
     reconcile as reconcile_module,
@@ -36,9 +29,11 @@ from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider
 
+from ..fakes.decisions import market_ctx, set_target
+from ..fakes.market import MARK as _MARK, margin_schedule
+
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
-_MARK = D(50000)
 
 
 def _init(tmp_path):
@@ -49,25 +44,13 @@ def _init(tmp_path):
     return db
 
 
-def _decision(side: str, margin: int) -> ParsedDecision:
-    dec = TargetDecision(
-        decision_mode=DecisionMode.SET_TARGET,
-        target_side=TargetSide(side),
-        requested_target_margin_pct=margin,
-        confidence=D("0.8"),
-        rationale="r",
-        key_risks=("k",),
-    )
-    return ParsedDecision(decision=dec, is_valid=True, invalid_reason=None, raw_response="{}")
-
-
 def _engine_with_plan(db, *, slices_filled: int):
     """Start a 2-slice TWAP and fill ``slices_filled`` of it, then 'crash'."""
     clock = ManualClock(_T0)
     asset = AssetSpec(
         coin="BTC",
         sz_decimals=3,
-        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+        margin_schedule=margin_schedule(),
     )
     script = [(_MARK, _MARK)] * (1 + slices_filled)
     engine = PaperExecutionEngine(
@@ -80,7 +63,7 @@ def _engine_with_plan(db, *, slices_filled: int):
         decision_config=DecisionConfig(),
         paper_config=PaperTradingConfig.from_dict(None),
     )
-    start = engine.start_plan(_decision("long", 2), output_id="out-1")
+    start = engine.start_plan(set_target("long", 2), output_id="out-1")
     assert start.plan_id is not None
     for _ in range(slices_filled):
         clock.advance(30)
@@ -391,7 +374,6 @@ def test_unknown_run_raises(tmp_path):
 
 
 def test_forced_cycle_fires_immediately_via_scheduler(tmp_path):
-    from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PaperScheduler
     from contrib.hyperliquid_perp.runtime.decision import DecisionInput
 
@@ -410,28 +392,11 @@ def test_forced_cycle_fires_immediately_via_scheduler(tmp_path):
     class _Provider:
         def build_input(self, *, coin, as_of):
             return DecisionInput(
-                context=PerpMarketContext(
-                    coin="BTC",
-                    as_of=as_of,
-                    candle_interval="4h",
-                    candle_count=200,
-                    mark_price=_MARK,
-                    oracle_price=_MARK,
-                    prev_day_price=_MARK,
-                    mid_price=_MARK,
-                    day_change_pct=0.0,  # prev == mark: a reference exists, so 0, not None
-                    open_interest=D(0),
-                    day_ntl_volume=D(0),
-                    funding_rate=D("0.0001"),
-                    funding_premium=None,
-                    funding_zscore_30d=None,
-                    funding_window_days=30,
-                    funding_sample_count=0,
-                )
+                context=market_ctx(as_of)
             )
 
         def request_decision(self, decision_input):
-            return _decision("long", 5)
+            return set_target("long", 5)
 
     from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
     from contrib.hyperliquid_perp.runtime.asset_spec import AssetSpec
@@ -440,7 +405,7 @@ def test_forced_cycle_fires_immediately_via_scheduler(tmp_path):
     asset = AssetSpec(
         coin="BTC",
         sz_decimals=3,
-        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+        margin_schedule=margin_schedule(),
     )
     risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
     engine = PaperExecutionEngine(
@@ -485,7 +450,7 @@ def test_engine_pending_funding_backfills_via_reconcile(tmp_path):
     asset = AssetSpec(
         coin="BTC",
         sz_decimals=3,
-        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+        margin_schedule=margin_schedule(),
     )
     engine = PaperExecutionEngine(
         db=db,
@@ -498,7 +463,7 @@ def test_engine_pending_funding_backfills_via_reconcile(tmp_path):
         paper_config=PaperTradingConfig.from_dict(None),
         funding_source=_NoRate(),  # rate unavailable -> engine records pending
     )
-    engine.start_plan(_decision("long", 1), output_id="o")
+    engine.start_plan(set_target("long", 1), output_id="o")
     clock.advance(30)
     engine.tick()  # fill; funding baseline established at the first tick's hour
     clock.set(_T0 + timedelta(hours=2))

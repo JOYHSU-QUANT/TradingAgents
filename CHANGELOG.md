@@ -73,17 +73,17 @@ Breaking changes within the 0.x line are called out explicitly.
   each from `live/test_validation.py` and `cli/test_cli.py`.
   `tests/live/conftest.py` gains the in-memory `db` fixture, and
   `cli/test_main.py` folds its ten identical nested client classes into
-  one. A double is
-  shared only where every consumer scripts it the same way; doubles that
-  only share a name stay where they are. `FakeSignedClient` is the one
-  exception: its `cancel_removes_order` flag is set by the startup tests
-  and not by the kill-switch tests. What the tests now do
-  differently: the four CLI wiring pins that recorded constructor kwargs
-  record them after the real constructor accepts them
+  one. A double is shared only where every consumer scripts it the same
+  way; doubles that only share a name stay where they are.
+  `FakeSignedClient` is the one exception: its `cancel_removes_order` flag
+  is set by the startup tests and not by the kill-switch tests. What the
+  tests now do differently: the four CLI wiring pins that recorded
+  constructor kwargs record them after the real constructor accepts them
   (`record_constructor_kwargs`) rather than before; the decisions built in
   `paper/test_validation.py` and `paper/test_reconcile.py` carry the
   rationale `"test rationale"` and the risk `"a risk"` where they carried
-  `"r"` and `"k"`; the startup tests' signed client counts its calls; and
+  `"r"` and `"k"`; the startup tests' signed client also records
+  `open_orders_calls`, `order_status_calls` and `schedule_attempts`; and
   one test each in `live/test_safe_mode.py` and `live/test_loss_guards.py`
   asserts `state_reconciled` is true before the call that has to drop it.
   The tests that ran before still run and pass; `tests/fakes/test_gates.py`

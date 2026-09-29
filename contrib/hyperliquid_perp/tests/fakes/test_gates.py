@@ -33,7 +33,8 @@ from .gates import exchange_action_gate, new_target_gate, order_gate, protective
 def test_a_gate_builder_stops_at_the_check_it_is_named_after(build, passes, wider, reason):
     gate = build()
     assert getattr(gate, passes)("BTC") is None
-    assert reason in getattr(gate, wider)("BTC")
+    refusal = getattr(gate, wider)("BTC")
+    assert refusal is not None and reason in refusal
 
 
 def test_the_new_target_gate_passes_the_widest_check():

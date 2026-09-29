@@ -62,10 +62,11 @@ Breaking changes within the 0.x line are called out explicitly.
 - **`tests/cli/test_cli.py` is split into thirteen files** (refactor plan
   v2, T5-b and the `getsource` item of T5-c — PR 10 of the plan; tests
   only, plus one comment in `common/prompt_regime.py`). Its 263 test
-  functions now live in `tests/cli/test_paper.py`, `test_paper_loop.py`, `test_paper_export.py`,
-  `test_live.py`, `test_live_loop.py`, `test_smoke_command.py`,
-  `test_export.py`, `test_validate.py`, `test_config_drift.py`,
-  `test_dispatch.py` and `test_common.py`; the decision provider's tests
+  functions now live in `tests/cli/test_paper.py`, `test_paper_loop.py`,
+  `test_paper_export.py`, `test_live.py`, `test_live_loop.py`,
+  `test_smoke_command.py`, `test_export.py`, `test_validate.py`,
+  `test_config_drift.py`, `test_dispatch.py` and `test_common.py`; the
+  decision provider's tests
   in `tests/integration/test_decision_provider.py`; the funding source's
   in `tests/exchanges/test_funding_source.py`. The fixtures and builders
   more than one of them uses are in `tests/cli/conftest.py`, under names

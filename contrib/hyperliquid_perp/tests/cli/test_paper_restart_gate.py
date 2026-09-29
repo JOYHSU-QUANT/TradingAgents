@@ -1,7 +1,8 @@
 """``cli.paper.gate_restart`` — a paper restart's mode, decided directly.
 
-The daemon drives in ``tests/cli/test_cli.py`` pin what each mode prints and
-runs; this file pins the decision.
+The daemon drives in ``tests/cli/test_paper.py`` and
+``tests/cli/test_paper_loop.py`` pin what each mode prints and runs; this
+file pins the decision.
 """
 
 from __future__ import annotations

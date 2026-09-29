@@ -3143,7 +3143,7 @@ def test_main_loads_dotenv_before_key_check(tmp_path, monkeypatch):
 
 
 def test_main_loads_dotenv_unconditionally_first(monkeypatch):
-    # The companion of test_cli's every-invocation pin: main() performs the
+    # The companion of test_dispatch's every-invocation pin: main() performs the
     # load as its very first act, before argv parsing — a regression moving it
     # into run_engine (still "before the key check") would silently stop
     # loading .env for --context-only and argv-error runs.

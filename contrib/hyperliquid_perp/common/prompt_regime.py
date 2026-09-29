@@ -60,7 +60,7 @@ __all__ = [
 # #288); the format block is unchanged (v6's digest is v5's).
 # The text this versions is rendered in ``domains/perp/target_decision``; a
 # test pins this value to that block's digest so an edit there that forgot
-# the bump fails (tests/cli/test_cli.py).
+# the bump fails (tests/integration/test_decision_provider.py).
 PROMPT_VERSION = "phase2-target-v6"
 
 # The grep handle. ``validate`` has printed it since schema v11 (issue #129,

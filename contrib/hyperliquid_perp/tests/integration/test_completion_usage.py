@@ -152,7 +152,7 @@ def test_a_call_outside_any_graph_node_is_recorded_with_no_node():
 
 def test_to_record_is_the_usage_record_the_sidecar_stamps():
     # What lands in <payload>.usage.json is this plus common.sidecar's
-    # ``"schema"`` stamp (pinned on disk in tests/cli/test_cli.py).
+    # ``"schema"`` stamp (pinned on disk in test_decision_provider.py).
     collector = CompletionUsageCollector()
     _run_two_node_graph(
         collector,

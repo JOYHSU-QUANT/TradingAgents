@@ -4,7 +4,7 @@ Every existing live-smoke CLI test either passes ``--dry-run`` or monkeypatches
 ``_build_smoke_session`` away, so ``_build_real_smoke_session`` — the §6.1/§4.1
 guard ladder, the signed-client + market-data wiring, and the ``run_recovery``
 seam that drives one real §19.1 startup recovery — had no coverage at all.
-The ``smoke_seams`` fixture here mirrors test_cli.py's ``live_seams``: it fakes
+The ``smoke_seams`` fixture here mirrors conftest.py's ``live_seams``: it fakes
 the module-level network seams (the CLI's function-local imports bind at call
 time) with a consistent, clean exchange — no open orders, no fills, a flat
 account whose value matches the seeded ledger — so the CLI drives the REAL
@@ -28,7 +28,6 @@ from types import SimpleNamespace
 import pytest
 
 from contrib.hyperliquid_perp.cli import main as cli_main
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck, OrderAck
 from contrib.hyperliquid_perp.live.authorization import (
@@ -47,9 +46,10 @@ from ..conftest import (
     record_constructor_kwargs,
     record_reconciliation_sweep_wiring,
 )
+from ..fakes.market import margin_schedule
 from ..fakes.payloads import clearinghouse
 from ..live.test_validation import _healthy
-from .test_cli import _seed_live_run_with_genesis_subset as _seed_genesis_run
+from .conftest import seed_live_run_with_genesis_subset as _seed_genesis_run
 
 _D = Decimal
 _T0 = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
@@ -102,7 +102,7 @@ def _smoke_yaml(
 def smoke_seams(monkeypatch):
     """Fake every network seam ``_build_real_smoke_session`` touches; return knobs.
 
-    Same discipline as test_cli.py's ``live_seams``: the read-only client, the
+    Same discipline as conftest.py's ``live_seams``: the read-only client, the
     §6.1 authorization check, the signed client, and the market-data reads are
     patched at their module seams, so the CLI drives the real smoke runner AND
     the real §19.1 recovery (pre-flight + restart tests 15-17) fully offline.
@@ -159,7 +159,7 @@ def smoke_seams(monkeypatch):
             pass
 
         def get_asset_meta(self, coin):
-            return 3, MarginSchedule(coin=coin, tiers=(MarginTier(_D(0), _D(50)),))
+            return 3, margin_schedule(coin)
 
         def get_market_snapshot(self, coin):
             return SimpleNamespace(mark_price=state.mark)
@@ -350,7 +350,7 @@ def test_live_smoke_missing_agent_key_carries_the_dotenv_diagnosis(
 ):
     # Issue #82: this was the key-check refusal without the "why the .env did
     # not satisfy it" suffix the others carry. Sentinel pins the wiring the
-    # way test_cli.py does for the paper refusals: the message must embed
+    # way test_paper.py does for the paper refusals: the message must embed
     # the diagnosis for the ACTUAL variable — dropping the interpolation, or
     # diagnosing the wrong var, is invisible to the substring check above.
     import contrib.hyperliquid_perp.cli as cli_mod

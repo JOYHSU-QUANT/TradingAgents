@@ -1,6 +1,6 @@
 """``live.shutdown`` — the §18.2 shutdown decisions of ``live --run-id``, tested directly.
 
-The CLI drives in ``tests/cli/test_cli.py`` pin the wording each decision
+The CLI drives in ``tests/cli/test_live.py`` pin the wording each decision
 prints; this file pins the decisions themselves.
 """
 

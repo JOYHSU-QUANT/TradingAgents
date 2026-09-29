@@ -35,8 +35,9 @@ Four commands:
   ``model_cutoff``, without asking anything.
 - ``pool --run-id A --run-id B ... --replay-db PATH --variant NAME --probe
   NAME`` — the direction probe pooled over several runs' validation
-  segments (plan PR 2.2): the headline skill per horizon with a 90%
-  block-bootstrap interval, and the plan section 5 bar. Reads only.
+  segments (plan PR 2.2): the headline and up-vs-down skills per horizon,
+  against the base rate and against the model's own prior, with 90%
+  block-bootstrap intervals, and the plan section 5 bar. Reads only.
 
 Exit codes, kept in step with the two neighbouring packages' CLIs: ``0`` the
 command did what it says, ``1`` a named operator, store, config, split,
@@ -301,10 +302,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Pool one variant's answers to one direction probe over the validation segments "
             "of several paper runs, each cut by the split pinned for it in the replay store, "
-            "and print the headline Brier skill score per horizon with a 90 percent "
-            "interval from a circular block bootstrap within each run, and whether the plan "
-            "section 5 bar (4h, lower end above 0, blocks of 6, at least 5 blocks) is met. A "
-            "run with no 4h train base rate is refused. Reads only; the holdout is never read."
+            "and print the headline and up-vs-down Brier skill scores per horizon, against "
+            "the train base rate and against the model's own train prior, each with a 90 "
+            "percent interval from a circular block bootstrap within each run, and whether the "
+            "plan section 5 bar (4h, both skills against the own prior, each lower end above "
+            "0, blocks of 6, at least 5 blocks each) is met. A run with no 4h train base rate, "
+            "or no valid 4h train forecast, is refused. Reads only; the holdout is never read."
         ),
     )
     pool.add_argument("--db", default="paper_trading.db", help="the paper store (SQLite path)")
@@ -1126,6 +1129,15 @@ def _cmd_pool(args: argparse.Namespace) -> int:
                         f"run {run_id!r} has no {JUDGED_KEY} train base rate (no train question "
                         "has an outcome at that horizon), so its questions have nothing to be "
                         "held against; leave it out of --run-id"
+                    )
+                if any(s.own is None for s in scores[JUDGED_KEY]):
+                    # The bar reads each run against the model's own prior
+                    # (plan section 5, revised 2026-09-29), from its train answers.
+                    raise _Refused(
+                        f"run {run_id!r} has no valid {JUDGED_KEY} train forecast from "
+                        f"{variant.name!r} for the probe {args.probe!r}, so the model's own "
+                        "prior is unknown and its questions have nothing to be held against; "
+                        "probe the run's train segment, or leave it out of --run-id"
                     )
                 parts.append(
                     RunScores(

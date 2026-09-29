@@ -10,6 +10,12 @@ costs 0.5 on either. Pooled: 1 - (0.26 + 0.98) / (0.5 + 0.5) = -0.24. Each
 run is redrawn on its own circle, and a circle of one question always
 redraws that question: every draw is -0.24, and two blocks are fewer than
 the bar's five.
+
+Each run's forecaster gives every question the same answer, so the mean of
+its train forecasts, the model's own prior, is that answer too: against it
+each run scores exactly 0, as any fixed forecast does (plan section 5,
+revised 2026-09-29). The own-prior cases that need a forecast that varies
+build a run of their own (:func:`_varied`).
 """
 
 from __future__ import annotations
@@ -35,22 +41,36 @@ from contrib.replay.pool import (
     describe_pool,
     pooled_skill,
 )
-from contrib.replay.probe_score import QuestionScore, headline_scores
+from contrib.replay.probe_score import QuestionScore, ensemble, headline_scores, own_prior
 from contrib.replay.replay_store import ReplayStore
 from contrib.replay.score import build_split, score_run
 from contrib.replay.upstream import CostModel, Database, SegmentName
 from contrib.replay.variant import load_variant
 
-from .papers import RUN_ID, VALIDATION, input_id, replay_argv, write_gate_store, write_variant
-from .test_probe import Forecaster, forecast_text, write_probe
+from .papers import (
+    RUN_ID,
+    TRAIN,
+    VALIDATION,
+    input_id,
+    replay_argv,
+    write_gate_store,
+    write_variant,
+)
+from .test_probe import H4, Forecaster, forecast_text, write_probe
 
 OTHER_RUN = "paper-GATE2"
 STEP_MS = 4 * 3_600_000
 A, B = (0.26, 0.5), (0.98, 0.5)  # an up forecast at .6 and one at .2, against the base rate
 
 
-def _score(i: int, brier: float, base: float) -> QuestionScore:
-    return QuestionScore(f"q{i}", i, brier, base, False, None)
+def _score(
+    i: int,
+    brier: float,
+    base: float,
+    own: tuple[float, float] | None = None,
+    own_binary: tuple[float, float] | None = None,
+) -> QuestionScore:
+    return QuestionScore(f"q{i}", i, brier, base, False, None, own, own_binary)
 
 
 class _Starts(random.Random):
@@ -148,59 +168,118 @@ def test_draws_whose_base_scores_perfectly_are_left_out_and_counted():
 
 
 def test_the_verdict():
-    def interval(blocks: int, skill: float, low: float | None) -> Interval:
-        return Interval(30, blocks, skill, low, 0.9, 0)
+    def interval(blocks: int, low: float | None) -> Interval:
+        return Interval(30, blocks, 0.3, low, 0.9, 0)
 
-    assert _verdict(interval(5, 0.3, 0.01), block=6, seed=4) == "met (seed 4)"
-    # A positive skill whose interval reaches zero does not meet the bar.
-    assert _verdict(interval(5, 0.3, -0.01), block=6, seed=4) == "not met (seed 4)"
-    assert _verdict(interval(5, 0.3, 0.0), block=6, seed=4) == "not met (seed 4)"
-    assert _verdict(interval(4, 0.3, 0.2), block=6, seed=4) == (
-        "cannot be judged: 4 block(s), fewer than the 5 the bar needs"
+    ok = interval(5, 0.01)
+    assert _verdict([("a", ok), ("b", ok)], block=6, seed=4) == "met (seed 4)"
+    # Every judged interval must clear 0; one that reaches it is named.
+    assert _verdict([("a", ok), ("b", interval(5, 0.0))], block=6, seed=4) == (
+        "not met: b lower end +0.000 (seed 4)"
     )
-    assert _verdict(interval(5, 0.3, 0.2), block=3, seed=4) == (
+    assert _verdict([("a", interval(5, -0.01)), ("b", interval(5, -0.02))], block=6, seed=4) == (
+        "not met: a lower end -0.010, b lower end -0.020 (seed 4)"
+    )
+    # One that fails says "not met" even when another cannot be read, named beside it.
+    assert _verdict([("a", interval(5, -0.01)), ("b", interval(4, 0.2))], block=6, seed=4) == (
+        "not met: a lower end -0.010; b has 4 block(s), fewer than the 5 the bar needs (seed 4)"
+    )
+    # Nothing fails and something cannot be read: the bar cannot be judged.
+    assert _verdict([("a", ok), ("b", interval(4, 0.2))], block=6, seed=4) == (
+        "cannot be judged: b has 4 block(s), fewer than the 5 the bar needs"
+    )
+    assert _verdict([("a", interval(5, None)), ("b", interval(0, None))], block=6, seed=4) == (
+        "cannot be judged: a has no interval; b has 0 block(s), fewer than the 5 the bar needs"
+    )
+    assert _verdict([("a", ok), ("b", ok)], block=3, seed=4) == (
         "not judged: the bar is read with blocks of 6, this report used 3"
     )
-    assert _verdict(interval(5, 0.3, None), block=6, seed=4) == "cannot be judged (no interval)"
 
 
-def test_the_report_names_each_run_and_judges_only_the_4h_headline():
+def test_the_report_names_each_run_and_judges_the_4h_skills_against_the_own_prior():
     runs = [
-        RunScores("r1", "2027-02-01T00:00:00+00:00", {"h4": [_score(1, *A)], "h24": []}),
+        RunScores(
+            "r1", "2027-02-01T00:00:00+00:00", {"h4": [_score(1, *A, own=B)], "h24": []}
+        ),
         RunScores(
             "r2",
             "2027-02-01T00:00:00+00:00",
-            {"h4": [_score(2, *B)], "h24": None},
+            {"h4": [_score(2, *B, own=B, own_binary=A)], "h24": None},
             left_out=3,
         ),
     ]
+    none = "n 0 in 0 block(s); skill n/a, 90% interval [n/a, n/a]"
+    overlap = " (reported only: its returns overlap from question to question)"
     assert describe_pool(runs, draws=400, seed=7) == [
         "pooled over 2 run(s), the validation segment of each run's pinned split; circular "
         "blocks of 6 consecutive question(s) within each run, 400 draws, seed 7",
         "  run r1 (split pinned 2027-02-01T00:00:00+00:00): h4 1 question(s), h24 0 question(s)",
         "  run r2 (split pinned 2027-02-01T00:00:00+00:00): h4 1 question(s), h24 n/a (no train "
         "base rate); 3 left out at the model cutoff",
-        "h4 headline: n 2 in 2 block(s); skill -0.240, 90% interval [-0.240, -0.240]",
-        "h4 up vs down given a move: n 0 in 0 block(s); skill n/a, 90% interval [n/a, n/a] "
-        "(reported only)",
-        "h24 headline: n 0 in 0 block(s); skill n/a, 90% interval [n/a, n/a] (reported only: its "
-        "returns overlap from question to question)",
-        "h24 up vs down given a move: n 0 in 0 block(s); skill n/a, 90% interval [n/a, n/a] "
-        "(reported only)",
-        "plan section 5 bar (h4 headline skill, lower end of the 90% interval above 0, blocks "
-        "of 6, at least 5 blocks): cannot be judged: 2 block(s), fewer than the 5 the bar needs",
+        "h4 headline against the train base rate: n 2 in 2 block(s); skill -0.240, 90% interval "
+        "[-0.240, -0.240] (reported only)",
+        # Two B pairs: 1 - 1.96 / 1.0.
+        "h4 headline against the model's own train prior: n 2 in 2 block(s); skill -0.960, 90% "
+        "interval [-0.960, -0.960]",
+        f"h4 up vs down given a move, against the train base rate: {none} (reported only)",
+        "h4 up vs down given a move, against the model's own train prior: n 1 in 1 block(s); "
+        "skill +0.480, 90% interval [+0.480, +0.480]",
+        f"h24 headline against the train base rate: {none}{overlap}",
+        f"h24 headline against the model's own train prior: {none}{overlap}",
+        f"h24 up vs down given a move, against the train base rate: {none}{overlap}",
+        f"h24 up vs down given a move, against the model's own train prior: {none}{overlap}",
+        "plan section 5 bar (revised 2026-09-29: the h4 headline skill and the h4 up-vs-down "
+        "skill, each against the model's own train prior, the lower end of each 90% interval "
+        "above 0, blocks of 6, at least 5 blocks each): cannot be judged: the headline has 2 "
+        "block(s), fewer than the 5 the bar needs; up vs down has 1 block(s), fewer than the 5 "
+        "the bar needs",
     ]
 
 
-def test_the_bar_needs_five_blocks_of_six():
-    thirty = [RunScores("r", "t", {"h4": [_score(i, *A) for i in range(30)], "h24": []})]
-    assert describe_pool(thirty, draws=100, seed=2)[-1].endswith(": met (seed 2)")
-    twenty_four = [RunScores("r", "t", {"h4": [_score(i, *A) for i in range(24)], "h24": []})]
-    assert describe_pool(twenty_four, draws=100)[-1].endswith(
-        ": cannot be judged: 4 block(s), fewer than the 5 the bar needs"
+def _run_of(n: int, *, base: tuple[float, float], own: tuple[float, float], moved: int) -> RunScores:
+    """``n`` questions scored ``base`` against the base rate and ``own`` against the prior;
+    the first ``moved`` of them moved and score ``own`` up against down too."""
+    scores = [
+        _score(i, *base, own=own, own_binary=own if i < moved else None) for i in range(n)
+    ]
+    return RunScores("r", "t", {"h4": scores, "h24": []})
+
+
+def test_the_bar_needs_five_blocks_of_six_for_each_skill():
+    assert describe_pool([_run_of(30, base=A, own=A, moved=30)], draws=100, seed=2)[-1].endswith(
+        ": met (seed 2)"
     )
-    assert describe_pool(thirty, block=3, draws=100)[-1].endswith(
-        ": not judged: the bar is read with blocks of 6, this report used 3"
+    assert describe_pool([_run_of(24, base=A, own=A, moved=24)], draws=100)[-1].endswith(
+        ": cannot be judged: the headline has 4 block(s), fewer than the 5 the bar needs; up vs "
+        "down has 4 block(s), fewer than the 5 the bar needs"
+    )
+    # Up against down counts only the questions that moved.
+    assert describe_pool([_run_of(30, base=A, own=A, moved=24)], draws=100)[-1].endswith(
+        ": cannot be judged: up vs down has 4 block(s), fewer than the 5 the bar needs"
+    )
+    assert describe_pool(
+        [_run_of(30, base=A, own=A, moved=30)], block=3, draws=100
+    )[-1].endswith(": not judged: the bar is read with blocks of 6, this report used 3")
+
+
+def test_beating_the_base_rate_without_beating_the_own_prior_is_not_met():
+    # The first acceptance run's shape: better than the base rate on every
+    # question (A), no better than the model's own fixed forecast (B).
+    report = describe_pool([_run_of(30, base=A, own=B, moved=30)], draws=100, seed=2)
+    assert report[2].startswith(
+        "h4 headline against the train base rate: n 30 in 5 block(s); skill +0.480"
+    )
+    assert report[-1].endswith(
+        ": not met: the headline lower end -0.960, up vs down lower end -0.960 (seed 2)"
+    )
+    # Beating the prior on the headline alone is not enough either.
+    mixed = RunScores(
+        "r",
+        "t",
+        {"h4": [_score(i, *A, own=A, own_binary=B) for i in range(30)], "h24": []},
+    )
+    assert describe_pool([mixed], draws=100, seed=2)[-1].endswith(
+        ": not met: up vs down lower end -0.960 (seed 2)"
     )
 
 
@@ -265,7 +344,97 @@ def test_one_run_pooled_is_that_runs_headline(two_runs):
     )
     # Up given a move is .6 / .7 against a train base that only went up.
     assert only.binary == (pytest.approx((1 - 0.6 / 0.7) ** 2), pytest.approx(0.0))
+    # Every train answer is the same, so the prior is that answer: no skill against it.
+    assert only.own == (pytest.approx(0.26), pytest.approx(0.26))
+    assert only.own_binary == (pytest.approx((1 / 7) ** 2), pytest.approx((1 / 7) ** 2))
     assert headline_scores(card, answers, eligible, "h24", SegmentName.VALIDATION) == []
+
+
+# -- the model's own prior, on a forecast that varies ------------------------------
+
+# Train slots 1, 3 and 5 answer h4 up .2 / down .2 / flat .6; the others,
+# and the validation slots, answer the default up .6 / down .1 / flat .3. The
+# prior is the mean over the six train slots: up .4 / down .15 / flat .45.
+LOW = {"up": 0.2, "down": 0.2, "flat": 0.6}
+PRIOR = {"up": 0.4, "down": 0.15, "flat": 0.45}
+
+
+def _varied(tmp_path: Path, monkeypatch, *, text_for: dict[int, str] | None = None):
+    """A run probed on its train and validation segments.
+
+    Returns ``(card, answers, eligible, store)``: the scorecard, the probe's
+    answers, every question's input id, and the paper store's path.
+    """
+    store = write_gate_store(tmp_path / "paper_trading.db")
+    variant_file = write_variant(tmp_path, "echo")
+    probe_file = write_probe(tmp_path)
+    monkeypatch.setattr(cli, "_sleep", lambda _seconds: None)
+    answers_for = {slot: forecast_text(LOW) for slot in TRAIN[1::2]} | (text_for or {})
+    model = Forecaster(text_for=answers_for)
+    monkeypatch.setattr(cli, "_build_model", lambda _variant: model)
+    for segment in ("train", "validation"):
+        argv = _probe_argv(store, variant_file, probe_file, RUN_ID)
+        assert cli.main([*argv, "--segment", segment]) == 0
+    with Database(store, migrate=False) as db:
+        questions = load_decisions(db, RUN_ID).questions
+    split = build_split(questions, interval="4h", step_ms=STEP_MS)
+    card = score_run(questions, [], step_ms=STEP_MS, costs=CostModel(), split=split)
+    with ReplayStore(store.parent / "replay.sqlite") as replay:
+        [(_, answers)] = replay.probe_answers(load_variant(variant_file).sha, RUN_ID)
+    return card, answers, {q.input_id for q in questions}, store
+
+
+def test_the_own_prior_is_the_mean_of_the_eligible_train_forecasts(tmp_path, monkeypatch):
+    card, answers, eligible, _ = _varied(tmp_path, monkeypatch)
+    merged = ensemble(answers)
+    assert own_prior(card, merged, eligible, "h4") == pytest.approx(PRIOR)
+    # Only the eligible train questions count: without the three low ones, the
+    # prior is the default answer. The validation answers never count.
+    high = eligible - {input_id(slot) for slot in TRAIN[1::2]}
+    assert own_prior(card, merged, high, "h4") == pytest.approx(H4)
+    assert own_prior(card, merged, {input_id(slot) for slot in VALIDATION}, "h4") is None
+
+
+def test_each_question_is_scored_against_the_own_prior(tmp_path, monkeypatch):
+    card, answers, eligible, _ = _varied(tmp_path, monkeypatch)
+    [only] = headline_scores(card, answers, eligible, "h4", SegmentName.VALIDATION)
+    # Slot 6 went up: the forecast costs 0.26; the prior (.4-1)² + .15² + .45²
+    # = 0.585. Up given a move: 6/7 against the prior's .4 / .55 = 8/11.
+    assert only.own == (pytest.approx(0.26), pytest.approx(0.585))
+    assert only.own_binary == (pytest.approx((1 / 7) ** 2), pytest.approx((3 / 11) ** 2))
+    # The base-rate pair is untouched by the prior.
+    assert (only.brier, only.base_brier) == (pytest.approx(0.26), pytest.approx(0.5))
+    # Only a question that moved is scored up against down: train slots 1, 3
+    # and 5 stayed flat.
+    train = headline_scores(card, answers, eligible, "h4", SegmentName.TRAIN)
+    assert [s.own_binary is None for s in train] == [False, True, False, True, False, True]
+
+
+def test_the_pool_prints_the_skill_against_the_own_prior(tmp_path, monkeypatch, capsys):
+    _, _, _, store = _varied(tmp_path, monkeypatch)
+    capsys.readouterr()
+    assert cli.main(_pool(store, "--run-id", RUN_ID, "--draws", "50")) == 0
+    out = capsys.readouterr().out.splitlines()
+    # 1 - 0.26 / 0.585 = 5/9; up against down 1 - (1/7)² / (3/11)² = 1 - 121/441.
+    assert (
+        "h4 headline against the model's own train prior: n 1 in 1 block(s); skill +0.556, 90% "
+        "interval [+0.556, +0.556]"
+    ) in out
+    assert (
+        "h4 up vs down given a move, against the model's own train prior: n 1 in 1 block(s); "
+        "skill +0.726, 90% interval [+0.726, +0.726]"
+    ) in out
+
+
+def test_a_stand_in_is_scored_as_the_own_prior(tmp_path, monkeypatch):
+    card, answers, eligible, _ = _varied(
+        tmp_path, monkeypatch, text_for={VALIDATION[0]: "no idea"}
+    )
+    [only] = headline_scores(card, answers, eligible, "h4", SegmentName.VALIDATION)
+    assert only.stand_in
+    assert (only.brier, only.base_brier) == (pytest.approx(0.5), pytest.approx(0.5))
+    assert only.own == (pytest.approx(0.585), pytest.approx(0.585))
+    assert only.own_binary == (pytest.approx((3 / 11) ** 2), pytest.approx((3 / 11) ** 2))
 
 
 # -- the command ---------------------------------------------------------------------
@@ -281,8 +450,14 @@ def test_the_pool_command_pools_two_runs(two_runs, capsys):
     assert out[2].startswith(f"  run {RUN_ID} (split pinned ")
     assert out[2].endswith("): h4 1 question(s), h24 0 question(s)")
     assert out[3].startswith(f"  run {OTHER_RUN} (split pinned ")
-    assert "h4 headline: n 2 in 2 block(s); skill -0.240, 90% interval [-0.240, -0.240]" in out
-    assert out[-1].endswith(": cannot be judged: 2 block(s), fewer than the 5 the bar needs")
+    assert (
+        "h4 headline against the train base rate: n 2 in 2 block(s); skill -0.240, 90% interval "
+        "[-0.240, -0.240] (reported only)"
+    ) in out
+    assert out[-1].endswith(
+        ": cannot be judged: the headline has 2 block(s), fewer than the 5 the bar needs; up vs "
+        "down has 2 block(s), fewer than the 5 the bar needs"
+    )
 
 
 def test_the_pool_command_writes_nothing(two_runs, capsys):
@@ -331,6 +506,21 @@ def test_a_run_without_a_4h_base_rate_is_refused_not_left_out(two_runs, capsys, 
         "horizon)"
     ) in capsys.readouterr().err
     assert cli.main(_pool(store, "--run-id", RUN_ID)) == 0
+
+
+def test_a_run_without_a_train_forecast_is_refused_not_left_out(two_runs, capsys):
+    store, variant_file, probe_file = two_runs
+    third = "paper-GATE3"
+    write_gate_store(store, run_id=third)
+    # Probed on its validation segment only: no train answer, so no prior.
+    argv = _probe_argv(store, variant_file, probe_file, third)
+    assert cli.main([*argv, "--segment", "validation"]) == 0
+    capsys.readouterr()
+    assert cli.main(_pool(store, "--run-id", RUN_ID, "--run-id", third)) == 1
+    assert (
+        f"run {third!r} has no valid h4 train forecast from 'echo' for the probe 'direction-t', "
+        "so the model's own prior is unknown"
+    ) in capsys.readouterr().err
 
 
 def test_a_run_without_a_pinned_split_or_the_probe_is_refused(two_runs, tmp_path, capsys):

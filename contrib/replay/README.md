@@ -276,7 +276,7 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
   eligible 題、holdout 段只有 `--holdout` 才算。
 
 **之後**：validation 段的 skill score 明顯 > 0，才考慮下一步（模型給機率、程式照機率決定倉位）。
-「明顯」的門檻寫在 plan §5（2026-09-24）。那一步改 paper 的交易行為，要過 plan §5、走 RUNBOOK §4
+「明顯」的門檻寫在 plan §5（2026-09-24 定、2026-09-29 修訂，見下一節）。那一步改 paper 的交易行為，要過 plan §5、走 RUNBOOK §4
 分段，不在這個套件裡。
 
 ## 跨 run 合併與 block bootstrap（PR 2.2）
@@ -288,24 +288,40 @@ python -m contrib.replay pool --db paper_trading.db --replay-db replay.sqlite \
     [--research-db PATH] [--include-pre-cutoff] [--block 6] [--draws 10000] [--seed 0]
 ```
 
-一個 run 的 validation 段只有十幾題，判斷不了「skill 明顯 > 0」。plan §5 的門檻（2026-09-24 拍板，驗收
-run 之前寫死）看的是合併後的數字：**4h 主數字的 Brier skill score，block bootstrap 90% 區間的下界 > 0，
-用 6 題一塊、而且各 run 合起來至少 5 塊才判**；24h 相鄰題報酬重疊，只報不判；「有動時 up 對 down」一起報，
-不另設門檻。定義寫死在 `pool.py`（標「拍板」的是 2026-09-24 使用者「照建議」定的）：
+一個 run 的 validation 段只有十幾題，判斷不了「skill 明顯 > 0」。plan §5 的門檻看的是合併後的數字
+（2026-09-24 拍板、驗收 run 之前寫死；**2026-09-29 驗收 run 之後修訂**）：**4h 主數字與 4h「有動時 up 對
+down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 block bootstrap 90% 區間的下界都 > 0，用 6 題
+一塊、而且各 run 合起來每一項都至少 5 塊才判**；24h 相鄰題報酬重疊，只報不判；兩項對 train 基準率的 skill
+照印、標 reported only。
 
+**為什麼改**：原本的門檻是主數字對 train 基準率。第一次驗收 run（run 3／4／6，27 題）判了 met
+（+0.065，區間 [+0.042, +0.088]），但裡面沒有方向資訊：把模型在 train 段的平均預測當成一個固定答案
+回答每一題，對同一個基準率就有 +0.076；模型的 up 對 down 是 −0.076、整段區間在 0 以下。對基準率比，
+「比較準的固定預測」和「逐題更準」一樣會拿分；對模型自己的先驗比，任何固定預測都剛好是 0。
+
+定義寫死在 `pool.py`（標「拍板」的是 2026-09-24 使用者「照建議」定的；改成對先驗比是 2026-09-29
+使用者「照建議」定的）：
+
+- **模型自己的先驗**（`probe_score.own_prior`）：那個 run 的 train 段裡、cutoff 之後的題目，每題主數字
+  預測（repeat 平均）逐類平均。有沒有 outcome 都算（這是模型答案的事實，不是價格的事實）；validation 的
+  答案永遠不算。替身題（`invalid_probe`）在對先驗那兩行以先驗計分，一樣不加 skill。沒有任何有效 4h train
+  預測的 run 沒有先驗，**整次具名拒絕**，跟沒有基準率一樣。
 - **每個 run 照自己的標準打分**：題目＝`probe_score.headline_scores` 算出來的主數字（repeat 平均、替身
-  規則同上），對照**那個 run 自己**的 flat 門檻與 train 基準率；只合併一個 run 時，數字就等於那個 run
-  自己報告裡的主數字。沒有 4h train 基準率的 run **整次具名拒絕**（拍板），不默默丟掉：哪些 run 算進來
-  是操作的人決定的，要排除就從 `--run-id` 拿掉。
-- **合併的 skill**＝所有題 `1 − Σ Brier ÷ Σ 基準率 Brier`：每題權重相同，不管來自哪個 run（拍板）。
+  規則同上），對照**那個 run 自己**的 flat 門檻與 train 基準率；只合併一個 run 時，對基準率那一行就等於
+  那個 run 自己報告裡的主數字（單一 run 的報告不印對先驗的數字）。沒有 4h train 基準率的 run **整次具名
+  拒絕**（拍板），不默默丟掉：哪些 run 算進來是操作的人決定的，要排除就從 `--run-id` 拿掉。
+- **合併的 skill**＝所有題 `1 − Σ Brier ÷ Σ 對照 Brier`（對照＝train 基準率或模型自己的先驗）：每題權重相同，
+  不管來自哪個 run（拍板）。
 - **區間＝每個 run 各自做循環 block bootstrap**（拍板）：一個有 `n` 題 validation 的 run，照時間排成一圈，
   每次抽 `ceil(n ÷ 6)` 塊、每塊從隨機一題起連續 6 題（走到最後一題就接回第一題），再裁回 `n` 題；每個 run
   在每次抽樣都保持自己的題數，**塊不跨 run**。相鄰的 4h 題處在同一個盤勢，一題一題抽會假裝它們獨立、
   區間太窄；繞成一圈讓每一段連續 6 題都抽得到，也不會有剩下一兩題的短塊被抽得跟整塊一樣頻繁。
-  取抽出來 skill 的第 5／95 百分位（順序統計量之間線性內插）；基準率 Brier 加總為 0 的那次抽樣沒有 skill，
+  取抽出來 skill 的第 5／95 百分位（順序統計量之間線性內插）；對照 Brier 加總為 0 的那次抽樣沒有 skill，
   扣掉並計數。`random.Random(seed)`，同樣的輸入印同樣的區間。
-- **門檻只在兩個條件下判**（拍板）：塊長是預設的 6，而且各 run 合起來至少 5 塊（`Σ ceil(n ÷ 6)`）；只有
-  一塊時每次抽樣都一樣、區間縮成點估計，會太容易印 met。不符合時那一行說為什麼不判；判定那行印出 seed。
+- **門檻只在兩個條件下判**（拍板）：塊長是預設的 6，而且各 run 合起來至少 5 塊（`Σ ceil(n ÷ 6)`），兩項
+  各自算（up 對 down 只數有動的題，所以可能主數字夠塊、它不夠）；只有一塊時每次抽樣都一樣、區間縮成點
+  估計，會太容易印 met。有一項塊數夠、下界 ≤ 0 就印 not met（另一項讀不了的原因寫在旁邊）；沒有失敗但有
+  一項讀不了才印 cannot be judged。判定那行印出 seed。
 - **只讀**：每個 run 都要已經在這個 `replay.sqlite` 釘過 split（沒釘的具名拒絕），用的是釘住的 split；
   holdout 永遠不讀；不寫 ledger、不動 store。variant 沒填 `model_cutoff` 就拒絕，除非
   `--include-pre-cutoff`；每個 run 會印出它的 validation 段有幾題落在 cutoff 當天或之前被排除。
@@ -343,4 +359,6 @@ pytest -q contrib/replay/tests
 
 跨 run 合併（`test_pool.py`）把同一個夾具寫成同一個 store 裡的兩個 run、各用不同的固定機率回答，
 合併 skill 與 bootstrap 區間（兩塊時只有三種可能的抽樣結果）都手算；區間的分位點另用 20 塊近常態的
-例子對照解析值。
+例子對照解析值。模型自己的先驗另用一個 train 段答案有高有低的 run（三題 up .2／down .2／flat .6、三題預設答案）
+手算：先驗 up .4／down .15／flat .45，slot 6 對它的 Brier 0.26 vs 0.585、skill 5/9；固定答案的 run
+對自己的先驗剛好是 0。

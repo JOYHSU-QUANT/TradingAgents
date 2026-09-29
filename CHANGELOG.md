@@ -423,6 +423,31 @@ Breaking changes within the 0.x line are called out explicitly.
   other way (`SHIPPED_OFF_CATEGORIES` shrinks to `whale_positioning`, which
   still awaits its own flip).
 
+- **The direction probe's pooled bar now holds the model against its own
+  prior, not the train base rate** (`contrib/replay/pool.py`,
+  `probe_score.own_prior`; replay plan section 5, revised 2026-09-29). The
+  first acceptance run (runs 3, 4 and 6, 27 validation questions) met the
+  2026-09-24 bar, 4h headline skill +0.065 with a 90% interval of [+0.042,
+  +0.088], with no direction in it: the mean of the model's own train
+  forecasts, given as one fixed answer to every question, scored +0.076
+  against the same base rate, and the model's up-against-down skill was
+  -0.076 with its whole interval below 0. A skill against the base rate
+  credits a better fixed forecast as much as a better forecast per question.
+  The bar now reads two skills, each against the model's own prior (the
+  class-by-class mean of its headline forecasts over the run's eligible
+  train questions): the 4h headline and the 4h up against down given a move,
+  and is met only when the lower end of each 90% block-bootstrap interval is
+  above 0, each read on at least five blocks of six. A fixed forecast scores
+  exactly 0 against itself, so it can no longer meet the bar. Both skills
+  against the base rate are still printed, as reported-only lines; a
+  base-rate stand-in (an `invalid_probe` question) is scored as the prior on
+  the own-prior lines, so it adds no skill there either. A run with no valid
+  4h train forecast has no prior and is refused by name, as a run with no
+  base rate is. The verdict line now says "not met" whenever one skill fails
+  on enough blocks, naming the other if it cannot be read. On the acceptance
+  data: headline -0.012 [-0.025, +0.002], up against down +0.001 on 4
+  blocks; not met.
+
 ### Added
 
 - **The direction probe pooled over several runs, with a block-bootstrap

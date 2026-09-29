@@ -82,6 +82,7 @@ __all__ = [
     "log_loss",
     "move_base_rate",
     "outcome_class",
+    "own_prior",
     "reliability",
     "tempered",
     "up_given_move",
@@ -553,6 +554,13 @@ class QuestionScore:
     ``binary`` is ``(model, base)`` squared errors of up against down, on a
     question that moved and a run whose train segment moved; ``None``
     otherwise. ``stand_in`` marks a question scored as the base rate.
+
+    ``own`` and ``own_binary`` hold the same two scores against the model's
+    own prior (:func:`own_prior`) instead of the base rate, ``(model,
+    prior)``; ``None`` when the run has no valid train forecast at this
+    horizon, and ``own_binary`` also on a question that did not move. A
+    stand-in is scored as the prior there, so it adds no skill against it
+    either.
     """
 
     input_id: str
@@ -561,6 +569,38 @@ class QuestionScore:
     base_brier: float
     stand_in: bool
     binary: tuple[float, float] | None
+    own: tuple[float, float] | None = None
+    own_binary: tuple[float, float] | None = None
+
+
+def own_prior(
+    card: Scorecard,
+    merged: Mapping[str, ProbeAnswer],
+    eligible: Collection[str],
+    key: str,
+) -> dict[str, float] | None:
+    """The model's own fixed forecast: its train headline forecasts averaged, class by class.
+
+    Every eligible train question with a valid headline forecast counts,
+    whether or not it has an outcome: it is a fact about the model's answers,
+    not about the prices. ``None`` when there is none. Decided 2026-09-29,
+    after the first acceptance run: a skill against the base rate also
+    credits a better fixed forecast (one answer given to every question),
+    which carries no direction for any question; against this prior, a fixed
+    forecast scores 0.
+    """
+    forecasts = [
+        answer.forecast[key]
+        for row in card.rows
+        if row.segment is SegmentName.TRAIN and row.question.input_id in eligible
+        for answer in [merged.get(row.question.input_id)]
+        if answer is not None and answer.forecast is not None
+    ]
+    if not forecasts:
+        return None
+    return {
+        name: math.fsum(f[name] for f in forecasts) / len(forecasts) for name in CLASSES
+    }
 
 
 def headline_scores(
@@ -575,7 +615,8 @@ def headline_scores(
     The same forecasts and the same stand-ins :func:`describe_probe` scores,
     so a pooled figure over one run is that run's headline figure. ``None``
     when the run has no train base rate at this horizon: its questions have
-    nothing to be held against.
+    nothing to be held against. Each question also carries its scores
+    against the model's own prior (:func:`own_prior`).
     """
     bars = PROBE_KEYS[key]
     found = base_rates(card, bars)
@@ -585,6 +626,7 @@ def headline_scores(
     moved = move_base_rate(card, bars)
     base_up = None if moved is None else moved[0]
     merged = ensemble(answers)
+    prior = own_prior(card, merged, eligible, key)
     scores: list[QuestionScore] = []
     for row in card.rows:
         me = row.question.input_id
@@ -602,10 +644,19 @@ def headline_scores(
         else:
             assert answer.forecast is not None
             forecast = answer.forecast[key]
+        went_up = outcome == "up"
         binary = None
         if outcome != "flat" and base_up is not None:
-            went_up = outcome == "up"
             binary = ((up_given_move(forecast) - went_up) ** 2, (base_up - went_up) ** 2)
+        own = own_binary = None
+        if prior is not None:
+            mine = prior if stand_in else forecast
+            own = (brier(mine, outcome), brier(prior, outcome))
+            if outcome != "flat":
+                own_binary = (
+                    (up_given_move(mine) - went_up) ** 2,
+                    (up_given_move(prior) - went_up) ** 2,
+                )
         scores.append(
             QuestionScore(
                 input_id=me,
@@ -614,6 +665,8 @@ def headline_scores(
                 base_brier=brier(base, outcome),
                 stand_in=stand_in,
                 binary=binary,
+                own=own,
+                own_binary=own_binary,
             )
         )
     return scores

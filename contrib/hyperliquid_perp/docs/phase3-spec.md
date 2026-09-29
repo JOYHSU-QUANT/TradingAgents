@@ -1891,7 +1891,10 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    讀不到）即保留 SL / TP，且因此保留了單者同樣 exit 4（--loop 與一次性路徑皆然；
    一次性路徑於 2026-09-29 補上，issue #303）——事後較幸運的第二
    次讀取不得把 exit code 講回 0；讀取失敗但已確認 flat（無單被保留）者不因此
-   回 4（--loop 維持 state-driven exit），不對 supervisor 誤報。警語文字須誠實區分「safe mode 確認
+   回 4（--loop 維持 state-driven exit），不對 supervisor 誤報。sweep 之後印
+   `safe_mode:` 行的那次讀取也失敗時（issue #308，2026-09-29），該行印 `unknown`；
+   --loop 讀不到 latch 即 exit 4（unknown ≠ clean），一次性路徑不讀 latch，exit code
+   不因這次讀取而變。警語文字須誠實區分「safe mode 確認
    active」與「讀取失敗（unknown）」兩種情況；disarm 被擋（trigger 仍 armed）而又有
    保留單時，必須明說保留的 SL / TP 也會在 scheduleCancel deadline 被掃掉。
 9. **Lease 被接管的 process 不執行 shutdown sweep（PR 5 修訂，2026-07-21）**：

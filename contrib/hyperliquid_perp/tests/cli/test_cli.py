@@ -6123,13 +6123,20 @@ def _latch_recoverable(db) -> None:
 
 
 def _drive_cmd_live_loop_to_its_exit(
-    tmp_path, monkeypatch, *, loop, reconcile=lambda self, *a, **kw: None, one_shot=False
+    tmp_path,
+    monkeypatch,
+    *,
+    loop,
+    reconcile=lambda self, *a, **kw: None,
+    one_shot=False,
+    on_recovery=lambda: None,
 ):
     """``live --loop`` offline, up to and past ``_run_live_loop``'s call site.
 
     With ``one_shot`` the command runs without ``--loop``: ``loop`` is never
     called, the scripted recovery goes straight to the ``finally``, and that
-    lane runs no §12.2 pre-shutdown reconcile.
+    lane runs no §12.2 pre-shutdown reconcile. ``on_recovery`` runs inside
+    the scripted recovery, after the session is built.
 
     The smoke gate is seeded open, the §19.1 recovery is scripted as a pass
     (its real arming needs a live exchange), and the loop itself is replaced
@@ -6158,7 +6165,12 @@ def _drive_cmd_live_loop_to_its_exit(
     dbp = _seed_live_run_with_genesis_subset(tmp_path, cfg)
     _open_smoke_gate(dbp)
     passed = StartupResult(report=SimpleNamespace(clean=True), safe_mode_active=False)
-    monkeypatch.setattr(startup_mod, "run_startup_recovery", lambda **kwargs: passed)
+
+    def _recovery(**kwargs):
+        on_recovery()
+        return passed
+
+    monkeypatch.setattr(startup_mod, "run_startup_recovery", _recovery)
     monkeypatch.setattr(cli_mod.live, "_run_live_loop", loop)
     argv = ["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]
     return cli_main(argv if one_shot else [*argv, "--loop"])
@@ -6470,6 +6482,84 @@ def test_cmd_live_one_shot_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mod
     warned = "the exit-time safe-mode state could NOT be read (unknown ≠ clean)" in captured.err
     assert warned is (code == 4)
     assert "safe_mode: none" in captured.out
+
+
+def _break_every_safe_mode_read(monkeypatch):
+    from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
+
+    def _unreadable(self):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(SafeModeManager, "current", _unreadable)
+
+
+@pytest.mark.parametrize(
+    ("positions", "last_line"),
+    [
+        (
+            [_btc_position()],
+            "live loop exited with protective orders kept behind a FAILED shutdown "
+            "safe-mode read (unknown ≠ clean)",
+        ),
+        (
+            [],
+            "live loop exited, but the safe-mode state could NOT be read after the "
+            "§18.2 shutdown sweep (unknown ≠ clean)",
+        ),
+    ],
+    ids=["live", "flat"],
+)
+def test_cmd_live_loop_exits_4_by_name_when_safe_mode_stays_unreadable(
+    tmp_path, capsys, live_seams, monkeypatch, positions, last_line
+):
+    # Issue #308: the store never answers the safe-mode question again, so
+    # the read after the sweep fails like the one before it.
+    live_seams.clearinghouse = _clearinghouse(positions=positions)
+    rc = _drive_cmd_live_loop_to_its_exit(
+        tmp_path, monkeypatch, loop=lambda **kwargs: _break_every_safe_mode_read(monkeypatch)
+    )
+    captured = capsys.readouterr()
+    assert rc == 4
+    assert last_line in captured.err
+    assert "fatal: unexpected error" not in captured.err
+    assert "safe_mode: unknown" in captured.out
+    assert "safe_mode: none" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("positions", "code", "last_line"),
+    [
+        (
+            [_btc_position()],
+            4,
+            "startup recovery passed, but protective orders were kept behind a "
+            "FAILED shutdown safe-mode read (unknown ≠ clean)",
+        ),
+        ([], 0, "startup recovery passed — a live loop can start from this state"),
+    ],
+    ids=["live", "flat"],
+)
+def test_cmd_live_one_shot_keeps_its_exit_when_safe_mode_stays_unreadable(
+    tmp_path, capsys, live_seams, monkeypatch, positions, code, last_line
+):
+    # Issue #308, the one-shot: it does not read the latch, so the read that
+    # fails after the sweep changes the ``safe_mode:`` line and not the code.
+    def _loop_must_not_run(**kwargs):
+        raise AssertionError("the one-shot entered the live loop")
+
+    live_seams.clearinghouse = _clearinghouse(positions=positions)
+    rc = _drive_cmd_live_loop_to_its_exit(
+        tmp_path,
+        monkeypatch,
+        loop=_loop_must_not_run,
+        one_shot=True,
+        on_recovery=lambda: _break_every_safe_mode_read(monkeypatch),
+    )
+    captured = capsys.readouterr()
+    assert rc == code
+    assert last_line in captured.err
+    assert "fatal: unexpected error" not in captured.err
+    assert "safe_mode: unknown" in captured.out
 
 
 def test_every_live_exit_reason_has_a_last_line_entry():

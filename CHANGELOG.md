@@ -10,6 +10,18 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`live --run-id` no longer exits 2 when the safe-mode read after the
+  shutdown sweep fails** (`contrib/hyperliquid_perp/cli/live.py`, issue #308).
+  The read behind the `safe_mode:` summary line had no guard, so a raise
+  there reached the last-resort handler: exit 2, `fatal: unexpected error`,
+  no `safe_mode:` line and no exit line. The read is now guarded. When it
+  fails the line reads `safe_mode: unknown` and the exit is classified as
+  usual. `--loop` exits 4 with a new reason,
+  `ExitReason.LOOP_SAFE_MODE_UNREADABLE`, unless an earlier reason in
+  `classify_exit` already applies. The one-shot does not read the latch, so
+  its exit code is what it would have been with the read answered.
+  phase3-spec §18.2 rule 8 says so.
+
 - **`live --run-id` without `--loop` no longer exits 0 after keeping SL/TP
   behind a failed exit-time safe-mode read** (`contrib/hyperliquid_perp/live/shutdown.py`,
   issue #303). When the startup verdict passed, the exit-time safe-mode read

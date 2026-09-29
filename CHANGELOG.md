@@ -430,39 +430,39 @@ Breaking changes within the 0.x line are called out explicitly.
   2026-09-24 bar, 4h headline skill +0.065 with a 90% interval of [+0.042,
   +0.088], with no direction in it: the mean of the model's own train
   forecasts, given as one fixed answer to every question, scored +0.076
-  against the same base rate, and the model's up-against-down skill was
-  -0.076 with its whole interval below 0. A skill against the base rate
-  credits a better fixed forecast as much as a better forecast per question.
-  The bar now reads two skills, each against the model's own prior (the
-  class-by-class mean of its headline forecasts over the run's eligible
-  train questions, formed only from at least `PRIOR_MIN_FORECASTS` = 6 of
-  them): the 4h headline and the 4h up against down given a move, and is
-  met only when the lower end of each 90% block-bootstrap interval is above
-  0, on at least five blocks of six. The model giving its usual answer to
-  every question scores exactly 0 against that prior, so a better fixed
-  answer can no longer meet the bar. Every line of a horizon is now read off
-  the same bootstrap draws: up against down takes the questions in each
-  drawn sample that moved, so its blocks are the headline's blocks of six
-  consecutive questions rather than six moved ones, and it is judged only
-  when its moved questions sit in at least five of those blocks (each run
-  cut from its first question): a handful of moves in one or two blocks
-  would be drawn over and over, collapsing the interval as one block does;
-  a line printed with fewer says how many blocks hold its questions. Both
-  skills against the base rate are still printed, as reported-only lines; a
-  base-rate stand-in (an `invalid_probe` question) is scored as the prior on
-  the own-prior lines, so it adds no skill there either. A run with fewer than six valid
-  4h train forecasts is refused by name, as a run with no base rate is, and
-  the refusal says how many more the model cutoff left out. That makes the
-  per-run "N left out at the model cutoff" note unreachable (a validation
-  question on or before the cutoff leaves every train question out with
-  it), so it is gone. The verdict says "not met" when one skill that can be
-  read has its lower end at or below 0, naming the other if it cannot be
-  read, and "cannot be judged" when the runs make fewer than five blocks or,
-  with none failing, a skill cannot be read. The single-run probe report (`score --replay-db`) prints the
-  prior per horizon and, on the validation and holdout segments, both
-  skills against it. On the acceptance data: headline -0.012 [-0.025,
-  +0.002] on six blocks, up against down +0.001 [-0.061, +0.060] with its
-  moves in five of them; not met.
+  against the same base rate, and the model's up-against-down skill was -0.076
+  with its whole interval below 0. A skill against the base rate credits a
+  better fixed forecast as much as a better forecast per question. The bar now
+  reads two skills, each against the model's own prior (the class-by-class
+  mean of its headline forecasts over the run's eligible train questions,
+  formed only from at least `PRIOR_MIN_FORECASTS` = 6 of them): the 4h
+  headline and the 4h up against down given a move, and is met only when the
+  lower end of each 90% block-bootstrap interval is above 0, on at least five
+  blocks of six. The model giving its usual answer to every question scores
+  exactly 0 against that prior, so a better fixed answer can no longer meet
+  the bar. Every line of a horizon is now read off the same bootstrap draws:
+  up against down takes the questions in each drawn sample that moved, so its
+  blocks are the headline's blocks of six consecutive questions rather than
+  six moved ones, and it is judged only when its moved questions sit in at
+  least five of those blocks (each run cut from its first question): a handful
+  of moves in one or two blocks would be drawn over and over, collapsing the
+  interval as one block does; a line printed with fewer says how many blocks
+  hold its questions. Both skills against the base rate are still printed, as
+  reported-only lines; a base-rate stand-in (an `invalid_probe` question) is
+  scored as the prior on the own-prior lines, so it adds no skill there
+  either. A run with fewer than six valid 4h train forecasts is refused by
+  name, as a run with no base rate is, and the refusal says how many more the
+  model cutoff left out, if any. That makes the per-run "N left out at the
+  model cutoff" note unreachable (a validation question on or before the
+  cutoff leaves every train question out with it), so it is gone. The verdict
+  says "not met" when one skill that can be read has its lower end at or below
+  0, naming the other if it cannot be read, and "cannot be judged" when the
+  runs make fewer than five blocks or, with none failing, a skill cannot be
+  read. The single-run probe report (`score --replay-db`) prints the prior per
+  horizon and, on the validation and holdout segments, both skills against it.
+  On the acceptance data: headline -0.012 [-0.025, +0.002] on six blocks, up
+  against down +0.001 [-0.061, +0.060] with its moves in five of them; not
+  met.
 
 ### Added
 
@@ -490,8 +490,9 @@ Breaking changes within the 0.x line are called out explicitly.
   not judged. (The bar was revised on 2026-09-29, after the first acceptance
   run: see the entry under Changed.) The command reads only: a run without a
   pinned split, or not asked the named probe, is refused by name, the
-  holdout is never read, and nothing is written. `score`'s research-store lookup moved into a helper the
-  two commands share (unchanged, but its warning now names the run). The
+  holdout is never read, and nothing is written. `score`'s research-store
+  lookup moved into a helper the two commands share (unchanged, but its
+  warning now names the run). The
   example variant `current-sonnet` now carries its `model_cutoff`: 2026-01-31,
   the last day of the training data cutoff Anthropic publishes for Claude
   Sonnet 4.6 (January 2026).

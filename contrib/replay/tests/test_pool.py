@@ -547,6 +547,18 @@ def test_the_single_run_report_prints_the_skill_against_the_own_prior(tmp_path, 
         "forecast(s), fewer than the 6 it is formed from)"
     ) in report
     assert not any("against the model's own train prior" in line for line in report)
+    # The model cutoff says so when it is what left the prior short: train
+    # slots 0-4 left out, slot 5 the one counted.
+    cut = tmp_path / "cut"
+    cut.mkdir()
+    card, answers, eligible, _ = _varied(cut, monkeypatch)
+    after = eligible - {input_id(slot) for slot in TRAIN[:5]}
+    report = describe_probe(card=card, probe=probe, answers=answers, eligible=after)
+    assert (
+        "the model's own prior (its train headline forecasts averaged), 4h: n/a (1 valid train "
+        "forecast(s), fewer than the 6 it is formed from; 5 more were left out at the model "
+        "cutoff)"
+    ) in report
 
 
 def test_a_stand_in_is_scored_as_the_own_prior(tmp_path, monkeypatch):

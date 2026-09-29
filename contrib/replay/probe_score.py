@@ -466,6 +466,9 @@ def describe_probe(
         found_prior = own_prior(card, merged, eligible, key)
         priors[key] = _usable_prior(card, merged, eligible, key)
         count = 0 if found_prior is None else found_prior[1]
+        every = own_prior(card, merged, {row.question.input_id for row in card.rows}, key)
+        cut = (0 if every is None else every[1]) - count
+        cutoff = f"; {cut} more were left out at the model cutoff" if cut else ""
         lines.append(
             f"the model's own prior (its train headline forecasts averaged), {label}: "
             + (
@@ -473,7 +476,7 @@ def describe_probe(
                 + f" (n {count})"
                 if found_prior is not None and priors[key] is not None
                 else f"n/a ({count} valid train forecast(s), fewer than the "
-                f"{PRIOR_MIN_FORECASTS} it is formed from)"
+                f"{PRIOR_MIN_FORECASTS} it is formed from{cutoff})"
             )
         )
 

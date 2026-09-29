@@ -283,7 +283,7 @@ python -m contrib.replay score --db paper_trading.db --run-id paper-BTC-6 \
   主數字穩不穩，不是第二個主數字。cutoff、holdout 鎖、釘住的 split 都與決策打分相同：同一批
   eligible 題、holdout 段只有 `--holdout` 才算。
 
-**之後**：跨 run 合併後、validation 段對模型自己先驗的 skill 明顯 > 0，才考慮下一步（模型給機率、
+**之後**：跨 run 合併後、validation 段主數字與「有動時 up 對 down」對模型自己先驗的 skill 都明顯 > 0，才考慮下一步（模型給機率、
 程式照機率決定倉位）。「明顯」的門檻寫在 plan §5（2026-09-24 定、2026-09-29 修訂，見下一節）。那一步
 改 paper 的交易行為，要過 plan §5、走 RUNBOOK §4 分段，不在這個套件裡。
 
@@ -335,7 +335,7 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
 - **只讀**：每個 run 都要已經在這個 `replay.sqlite` 釘過 split（沒釘的具名拒絕），用的是釘住的 split；
   holdout 永遠不讀；不寫 ledger、不動 store。variant 沒填 `model_cutoff` 就拒絕，除非
   `--include-pre-cutoff`。cutoff 排除掉的 train 題不進先驗；因此剩不到 6 題時，拒絕訊息會說另有幾題是被
-  cutoff 排除的：加上它們夠 6 題才建議改用 `--include-pre-cutoff` 或把 run 拿掉，不夠就說還是不足、建議補探
+  cutoff 排除的（有的話）：加上它們夠 6 題才建議改用 `--include-pre-cutoff` 或把 run 拿掉，不夠就說還是不足、建議補探
   train 段或把 run 拿掉（validation 題落在 cutoff 之前時，train 題一定也全在之前，那個 run 會先因此被拒絕，
   所以合併裡不會有被 cutoff 排除的 validation 題）。
 

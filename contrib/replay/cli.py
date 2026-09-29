@@ -70,7 +70,13 @@ from .paper_store import (
 )
 from .pool import BLOCK, DRAWS, JUDGED_KEY, RunScores, describe_pool
 from .probe import PROBE_KEYS, PROBE_STEP_MS, Probe, ProbeAnswer, ProbeError, load_probe
-from .probe_score import describe_probe, headline_scores
+from .probe_score import (
+    PRIOR_MIN_FORECASTS,
+    describe_probe,
+    ensemble,
+    headline_scores,
+    own_prior,
+)
 from .replay import (
     ProbeReport,
     ReplayError,
@@ -306,8 +312,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "the train base rate and against the model's own train prior, each with a 90 "
             "percent interval from a circular block bootstrap within each run, and whether the "
             "plan section 5 bar (4h, both skills against the own prior, each lower end above "
-            "0, blocks of 6, at least 5 blocks each) is met. A run with no 4h train base rate, "
-            "or no valid 4h train forecast, is refused. Reads only; the holdout is never read."
+            "0, blocks of 6, at least 5 blocks) is met. A run with no 4h train base rate, or "
+            f"fewer than {PRIOR_MIN_FORECASTS} valid 4h train forecasts to form the prior from, "
+            "is refused. Reads "
+            "only; the holdout is never read."
         ),
     )
     pool.add_argument("--db", default="paper_trading.db", help="the paper store (SQLite path)")
@@ -1130,26 +1138,31 @@ def _cmd_pool(args: argparse.Namespace) -> int:
                         "has an outcome at that horizon), so its questions have nothing to be "
                         "held against; leave it out of --run-id"
                     )
-                if any(s.own is None for s in scores[JUDGED_KEY]):
+                merged = ensemble(asked[args.probe])
+                found_prior = own_prior(card, merged, scope.eligible, JUDGED_KEY)
+                counted = 0 if found_prior is None else found_prior[1]
+                if counted < PRIOR_MIN_FORECASTS:
                     # The bar reads each run against the model's own prior
                     # (plan section 5, revised 2026-09-29), from its train answers.
+                    everyone = {row.question.input_id for row in card.rows}
+                    every = own_prior(card, merged, everyone, JUDGED_KEY)
+                    cut = (0 if every is None else every[1]) - counted
+                    remedy = (
+                        f"{cut} more were left out at the model cutoff: pass --include-pre-cutoff "
+                        "to count them, or leave the run out of --run-id"
+                        if cut
+                        else "probe the run's train segment, or leave it out of --run-id"
+                    )
                     raise _Refused(
-                        f"run {run_id!r} has no valid {JUDGED_KEY} train forecast from "
-                        f"{variant.name!r} for the probe {args.probe!r}, so the model's own "
-                        "prior is unknown and its questions have nothing to be held against; "
-                        "probe the run's train segment, or leave it out of --run-id"
+                        f"run {run_id!r} has {counted} valid {JUDGED_KEY} train forecast(s) from "
+                        f"{variant.name!r} for the probe {args.probe!r}, fewer than the "
+                        f"{PRIOR_MIN_FORECASTS} the model's own prior is formed from; {remedy}"
                     )
                 parts.append(
                     RunScores(
                         run_id=run_id,
                         pinned_at=run.pinned_at,
                         scores=scores,
-                        left_out=sum(
-                            1
-                            for row in card.rows
-                            if row.segment is SegmentName.VALIDATION
-                            and row.question.input_id not in scope.eligible
-                        ),
                     )
                 )
     except (ReplayStoreError, StoreError) as exc:

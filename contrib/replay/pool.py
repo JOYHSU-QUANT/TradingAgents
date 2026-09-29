@@ -10,9 +10,10 @@ the pooled figure instead (decided 2026-09-24, before any run; revised
     questions of every run, each run cut by the split pinned for it in
     the replay store, with the lower end of each one's 90%
     block-bootstrap interval above 0, read with blocks of six questions
-    and only when the runs make at least five blocks. 24h is reported,
-    not judged (its returns overlap from question to question); both
-    skills against the train base rate are reported beside them.
+    and only when the runs make at least five blocks and each skill has
+    its questions in at least five of them. 24h is reported, not judged
+    (its returns overlap from question to question); both skills against
+    the train base rate are reported beside them.
 
 The 2026-09-24 bar held the headline against the train base rate. The first
 acceptance run met it (+0.065, interval [+0.042, +0.088]) with no direction
@@ -383,7 +384,8 @@ def describe_pool(
     lines.append(
         f"plan section 5 bar (revised 2026-09-29: the {JUDGED_KEY} headline skill and the "
         f"{JUDGED_KEY} up-vs-down skill, each against the model's own train prior, the lower end "
-        f"of each {LEVEL:.0%} interval above 0, blocks of {BLOCK}, at least {MIN_BLOCKS} "
-        "blocks): " + _verdict(judged, blocks=judged_blocks, block=block, seed=seed)
+        f"of each {LEVEL:.0%} interval above 0, blocks of {BLOCK}, each skill's questions in at "
+        f"least {MIN_BLOCKS} of them): "
+        + _verdict(judged, blocks=judged_blocks, block=block, seed=seed)
     )
     return lines

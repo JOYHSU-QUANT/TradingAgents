@@ -326,7 +326,7 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
   塊跟主數字是同一批「連續 6 題（一天）」，不是另外拿有動的題湊 6 題一塊。每一行取自己抽出來 skill 的
   第 5／95 百分位（順序統計量之間線性內插）；某次抽樣裡那一行沒有題、或對照 Brier 加總為 0，那一行那次
   沒有 skill，扣掉並計數。`random.Random(seed)`，同樣的輸入印同樣的區間。
-- **門檻只在兩個條件下判**（拍板）：塊長是預設的 6，而且各 run 合起來至少 5 塊（`Σ ceil(n ÷ 6)`，n＝題數，
+- **門檻只在下列條件下判**（拍板）：塊長是預設的 6，而且各 run 合起來至少 5 塊（`Σ ceil(n ÷ 6)`，n＝題數，
   四行共用）；只有一塊時每次抽樣都一樣、區間縮成點估計，會太容易印 met。同樣的理由，**被判的兩項各自的題
   也要落在至少 5 塊裡**（2026-09-29；每個 run 從第一題起切 6 題一塊，數含有那一項題目的塊）：up 對 down 只看
   有動的題，少數幾題擠在一兩塊裡會被一再抽到、區間一樣縮成點。落在比總塊數少的塊裡時，那一行會印
@@ -335,8 +335,9 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
 - **只讀**：每個 run 都要已經在這個 `replay.sqlite` 釘過 split（沒釘的具名拒絕），用的是釘住的 split；
   holdout 永遠不讀；不寫 ledger、不動 store。variant 沒填 `model_cutoff` 就拒絕，除非
   `--include-pre-cutoff`。cutoff 排除掉的 train 題不進先驗；因此剩不到 6 題時，拒絕訊息會說另有幾題是被
-  cutoff 排除的、改用 `--include-pre-cutoff` 或把 run 拿掉（validation 題落在 cutoff 之前時，train 題一定
-  也全在之前，那個 run 會先因此被拒絕，所以合併裡不會有被 cutoff 排除的 validation 題）。
+  cutoff 排除的：加上它們夠 6 題才建議改用 `--include-pre-cutoff` 或把 run 拿掉，不夠就說還是不足、建議補探
+  train 段或把 run 拿掉（validation 題落在 cutoff 之前時，train 題一定也全在之前，那個 run 會先因此被拒絕，
+  所以合併裡不會有被 cutoff 排除的 validation 題）。
 
 範例 variant `variants/current-sonnet.yaml` 的 `model_cutoff` 填的是 Anthropic 公布的 Claude Sonnet 4.6
 **訓練資料**截止（2026 年 1 月，取月底 2026-01-31；它的 reliable knowledge cutoff 是 2025 年 8 月，

@@ -288,8 +288,8 @@ def test_the_report_names_each_run_and_judges_the_4h_skills_against_the_own_prio
         f"h24 up vs down given a move, against the model's own train prior: {none}{overlap}",
         "plan section 5 bar (revised 2026-09-29: the h4 headline skill and the h4 up-vs-down "
         "skill, each against the model's own train prior, the lower end of each 90% interval "
-        "above 0, blocks of 6, at least 5 blocks): cannot be judged: 2 block(s), fewer than the "
-        "5 the bar needs",
+        "above 0, blocks of 6, each skill's questions in at least 5 of them): cannot be judged: "
+        "2 block(s), fewer than the 5 the bar needs",
     ]
 
 

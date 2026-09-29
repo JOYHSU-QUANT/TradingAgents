@@ -59,6 +59,33 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **`tests/cli/test_cli.py` is split into thirteen files** (refactor plan
+  v2, T5-b and the `getsource` item of T5-c — PR 10 of the plan; tests
+  only, plus one comment in `common/prompt_regime.py`). Its 263 test
+  functions now live in `tests/cli/test_paper.py`, `test_paper_loop.py`,
+  `test_paper_export.py`, `test_live.py`, `test_live_loop.py`,
+  `test_smoke_command.py`, `test_export.py`, `test_validate.py`,
+  `test_config_drift.py`, `test_dispatch.py` and `test_common.py`; the
+  decision provider's tests
+  in `tests/integration/test_decision_provider.py`; the funding source's
+  in `tests/exchanges/test_funding_source.py`. The fixtures and builders
+  more than one of them uses are in `tests/cli/conftest.py`, under names
+  without the leading underscore (`seed_db`, `live_yaml`, `make_live_run`,
+  …). The provider and funding-source tests import
+  `EngineDecisionProvider` and `HistoryFundingSource` from the modules
+  that define them, not from the `cli` re-export. In `test_paper_loop.py`
+  the nested `_Engine` and `_Scheduler` stubs with the same body are four
+  module-level classes (13 of the 19 copies); the six with a body of their
+  own stay in their tests. Five inline copies of `tests/fakes/` builders
+  (three margin schedules, one gate, one clearinghouse payload) use the
+  builders. `live/test_kill_switch.py` no longer parses the source
+  of `_run_live_loop` to find the refresh between `engine.tick()` and
+  `driver.pump()`:
+  `test_the_live_loop_refreshes_the_switch_between_the_tick_and_the_pump`
+  drives the loop and counts it. Three tests are new beside it: `live-smoke`
+  over a config without `risk:`, and one per command that every
+  `LiveGateStage` the command can hit has its wording.
+
 - **The perp tests share their doubles through `tests/fakes/`** (refactor
   plan v2, T5-a — PR 9 of the plan; tests only, no production code). The
   doubles live in `contrib/hyperliquid_perp/tests/fakes/`: `gates.py` builds

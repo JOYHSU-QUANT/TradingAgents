@@ -1752,67 +1752,12 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     chains meet must refresh at the seam**, or the real maximum becomes their sum
     rather than the max this constant records (2026-08-01 lifecycle review).
     """
-    import inspect
-
-    from contrib.hyperliquid_perp import cli as cli_mod
-
-    loop_src = inspect.getsource(cli_mod._run_live_loop)
-
     # 1. The loop body must refresh between its two blocking halves. Without this
     #    the submit chain (3) and the build_context chain (4) run back to back and
-    #    the real maximum is their SUM.
-    # Anchor on the STATEMENTS, not the words: the surrounding comments name both
-    # calls, and matching those would let a comment satisfy the assertion.
-    #    Parsed, not string-searched, and the ARGUMENT is what gets asserted: the
-    #    substring form stayed green with the call mutated to
-    #    ``refresh_across_blocking_work(None, ...)`` — text identical, refresh gone
-    #    (mutation-verified, 2026-08-01 round-13 review). ``_run_live_loop`` needs
-    #    a whole live session to drive, so this checks the wiring structurally
-    #    instead; its sibling seam in engine.tick() IS driven, in
+    #    the real maximum is their SUM. Driven, in
+    #    cli/test_live_loop.py::test_the_live_loop_refreshes_the_switch_between_the_tick_and_the_pump;
+    #    its sibling seam in engine.tick() is driven in
     #    live/test_engine.py::test_the_market_snapshot_read_refreshes_the_switch_across_itself.
-    import ast
-    import textwrap
-
-    loop_ast = ast.parse(textwrap.dedent(loop_src))
-
-    def _method_call_line(obj: str, attr: str) -> int:
-        lines = [
-            node.lineno
-            for node in ast.walk(loop_ast)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == attr
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == obj
-        ]
-        assert len(lines) == 1, f"expected exactly one {obj}.{attr}() in the loop, got {lines}"
-        return lines[0]
-
-    tick_line = _method_call_line("engine", "tick")
-    pump_line = _method_call_line("driver", "pump")
-    seams = [
-        node
-        for node in ast.walk(loop_ast)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "refresh_across_blocking_work"
-        and node.args
-    ]
-    # POSITION and ARGUMENT both. Checking only that some seam call exists let the
-    # refresh be hoisted ABOVE engine.tick() — the two chains adjacent again, real
-    # unrefreshed max 7 — with the whole suite green; checking only position let it
-    # be passed None (both mutation-verified, 2026-08-01 round-13).
-    between = [node for node in seams if tick_line < node.lineno < pump_line]
-    assert between, (
-        "engine.tick() and driver.pump() are adjacent again — the two chains are "
-        "consecutive, so the real unrefreshed run is their sum, not the max"
-    )
-    for node in between:
-        assert not isinstance(node.args[0], ast.Constant), (
-            "_run_live_loop passes a literal (None?) as the kill switch — the "
-            "helper no-ops and the seam refreshes nothing"
-        )
-
     # 2. The day-roll baseline read is a bare REST call on the same thread, so it
     #    refreshes across itself rather than joining whatever chain it lands in.
     #    CALL IT, do not inspect it: the first version of this check searched the
@@ -1822,6 +1767,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     #    Only exercising it proves anything (2026-08-01 exit check).
     from types import SimpleNamespace
 
+    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper as mapper_mod
 
     ticks: list[str] = []

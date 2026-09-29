@@ -1,7 +1,7 @@
 """``live.wiring`` — the one place both live-mode CLIs build their components (issue #224).
 
 The CLI drives pin what each command builds and hands its components
-(``tests/cli/test_cli.py``, ``tests/cli/test_smoke.py``, over the shared
+(``tests/cli/test_live.py``, ``tests/cli/test_smoke.py``, over the shared
 recorder in ``tests/conftest.py``); this file pins what the factories
 themselves bind.
 """

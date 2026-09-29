@@ -6127,15 +6127,17 @@ def _drive_cmd_live_loop_to_its_exit(
 ):
     """``live --loop`` offline, up to and past ``_run_live_loop``'s call site.
 
-    With ``one_shot`` the command runs without ``--loop``, so ``loop`` is
-    never called and the scripted recovery goes straight to the ``finally``.
+    With ``one_shot`` the command runs without ``--loop``: ``loop`` is never
+    called, the scripted recovery goes straight to the ``finally``, and that
+    lane runs no §12.2 pre-shutdown reconcile.
 
     The smoke gate is seeded open, the §19.1 recovery is scripted as a pass
     (its real arming needs a live exchange), and the loop itself is replaced
     by ``loop`` — so what runs for real is ``_cmd_live``'s handling of what
     the loop raises or returns: the exit line and the exit code (issue #268).
-    The ``finally`` sweep runs over the seams' flat account with the switch
-    never armed, which is the shape of a flat-book exit; its §12.2
+    Unless the test sets a position or arms the switch, the ``finally``
+    sweep runs over the seams' flat account with the switch
+    never armed, which is the shape of a flat-book exit; on ``--loop`` its §12.2
     pre-shutdown reconcile is scripted clean too (``reconcile``), since the
     signed double has no REST and an unclean pass would latch safe mode — the
     exit-4 lane this drive must be able to tell apart from protection-only's.
@@ -6445,8 +6447,9 @@ def test_cmd_live_one_shot_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mod
     tmp_path, capsys, live_seams, monkeypatch, positions, code, last_line
 ):
     # Issue #303: the one-shot's exit-time safe-mode read fails. Over a live
-    # position the sweep keeps the SL/TP and the exit is 4, as on --loop;
-    # over a flat book nothing was kept and the exit stays 0.
+    # position the keep decision holds the SL/TP and the exit is 4; over a
+    # flat book nothing is kept and the exit stays 0. The switch is never
+    # armed here, so no sweep runs: this pins the decision reaching the code.
     from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
 
     def _unreadable(self):
@@ -6463,6 +6466,8 @@ def test_cmd_live_one_shot_exits_4_when_sl_tp_were_kept_behind_a_failed_safe_mod
     captured = capsys.readouterr()
     assert rc == code
     assert last_line in captured.err
+    warned = "the exit-time safe-mode state could NOT be read (unknown ≠ clean)" in captured.err
+    assert warned is (code == 4)
     assert "safe_mode: none" in captured.out
 
 

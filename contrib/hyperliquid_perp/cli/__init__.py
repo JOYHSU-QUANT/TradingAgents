@@ -45,7 +45,9 @@ not-yet-at-the-gate outcomes (``validate``: short of the 30-cycle gate or a
 red/missing smoke test — curable by a ``live-smoke`` re-run;
 ``live-smoke``: the §20.2 gate is not satisfied, incl. a pre-flight abort;
 ``live --loop``: the §20.2 smoke gate is not open on this run;
-``live`` without ``--loop``: recovery ran but judged unclean; ``safe-mode
+``live --run-id``, with or without ``--loop``: the recovery ran and the
+exit was not clean — each ``live.shutdown.ExitReason`` whose code is 4 names
+one way; ``safe-mode
 --status``: a safe mode is latched, recoverable OR manual — 4 means "latched",
 not "human action required"), ``5`` (``validate`` only) the
 run has integrity failures — orphans, snapshot or replay mismatches, or a

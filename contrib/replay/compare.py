@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from .score import HORIZONS, Answer, Question, Scorecard, Summary, csv_table, paired_hits
 from .variant import Variant
 
-__all__ = ["Card", "Comparison", "Table", "compare"]
+__all__ = ["Card", "Comparison", "Scope", "Table", "compare", "cutoff_scope"]
 
 # One CSV: its header and its rows.
 Table = tuple[list[str], list[list[object]]]
@@ -47,23 +47,26 @@ class Comparison:
     table: Table
 
 
-def compare(
-    *,
-    questions: Sequence[Question],
-    card: Card,
-    variant: Variant,
-    answers: Mapping[int, Sequence[Answer]],
-    paper_answers: Sequence[Answer],
-    against: Variant | None = None,
-    against_answers: Mapping[int, Sequence[Answer]] | None = None,
-    include_pre_cutoff: bool = False,
-    failed: Mapping[int, Collection[str]] | None = None,
-    against_failed: Mapping[int, Collection[str]] | None = None,
-) -> Comparison:
-    """Score ``variant``'s repeats and compare them with the paper trader, or with ``against``.
+@dataclass(frozen=True)
+class Scope:
+    """Which questions a variant's answers are scored on, and the lines that say so."""
 
-    ``failed`` (and ``against_failed``) name, per repeat, the questions the
-    provider refused: scored as unanswered, as the daemon's ``api_failed``.
+    eligible: frozenset[str]
+    preamble: list[str]
+
+
+def cutoff_scope(
+    questions: Sequence[Question],
+    variant: Variant,
+    against: Variant | None = None,
+    *,
+    include_pre_cutoff: bool = False,
+) -> Scope:
+    """The questions past the model cutoff (all of them with ``include_pre_cutoff``), and why.
+
+    The later of the two cutoffs decides when there is a second variant
+    (module docstring). The decision comparison and the direction probe
+    (:mod:`.probe_score`) are scored on the same questions.
     """
     compared = [variant] if against is None else [variant, against]
     known = [v for v in compared if v.cutoff_ms is not None]
@@ -92,6 +95,29 @@ def compare(
             for v in compared
             if v.cutoff_ms is None
         )
+    return Scope(frozenset(eligible), preamble)
+
+
+def compare(
+    *,
+    questions: Sequence[Question],
+    card: Card,
+    variant: Variant,
+    answers: Mapping[int, Sequence[Answer]],
+    paper_answers: Sequence[Answer],
+    against: Variant | None = None,
+    against_answers: Mapping[int, Sequence[Answer]] | None = None,
+    include_pre_cutoff: bool = False,
+    failed: Mapping[int, Collection[str]] | None = None,
+    against_failed: Mapping[int, Collection[str]] | None = None,
+) -> Comparison:
+    """Score ``variant``'s repeats and compare them with the paper trader, or with ``against``.
+
+    ``failed`` (and ``against_failed``) name, per repeat, the questions the
+    provider refused: scored as unanswered, as the daemon's ``api_failed``.
+    """
+    scope = cutoff_scope(questions, variant, against, include_pre_cutoff=include_pre_cutoff)
+    eligible = scope.eligible
 
     def answered(given: Sequence[Answer], refused: Collection[str]) -> Scorecard:
         return card(given, ({a.input_id for a in given} | set(refused)) & eligible)
@@ -124,7 +150,7 @@ def compare(
         assert against_answers is not None
         theirs = by_repeat(against_answers, against_failed)
         body.extend(_paired(cards, theirs.get, variant.name, against.name))
-    return Comparison(preamble, body, (header, rows))
+    return Comparison(scope.preamble, body, (header, rows))
 
 
 def _spread(cards: Mapping[int, Scorecard], summaries: Mapping[int, Summary]) -> list[str]:

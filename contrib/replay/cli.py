@@ -16,7 +16,9 @@ Three commands:
   and compares them question by question with the paper trader's answers
   (or, with ``--against NAME``, with another variant's). With a replay
   store, the run is scored under the split pinned there (or, if none is
-  pinned yet, as the run stands).
+  pinned yet, as the run stands). A variant asked the direction probe gets
+  one more section per probe (plan PR 2.1, :mod:`.probe_score`); a
+  variant asked only the probe gets that section alone.
 - ``replay --db paper_trading.db --run-id paper-BTC-6 --variant FILE`` —
   the past papers (plan PR 2): put every question of one segment (train
   unless ``--segment`` says otherwise) to the variant's model ``--repeats``
@@ -26,7 +28,9 @@ Three commands:
   pins its split in the store (a replay only once its payload checks
   have passed).
   ``--dry-run`` checks every payload and prints what would be asked,
-  without building a client or writing anything.
+  without building a client or writing anything. With ``--probe FILE``
+  the same questions are put to the direction probe instead of asked for
+  a decision (plan PR 2.1, :mod:`.probe`), under the same discipline.
 - ``register --variant FILE`` — store a variant, or correct its
   ``model_cutoff``, without asking anything.
 
@@ -49,7 +53,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .compare import Table, compare
+from .compare import Table, compare, cutoff_scope
 from .model import engine_model
 from .paper_store import (
     Decisions,
@@ -59,7 +63,19 @@ from .paper_store import (
     load_research_closes,
     run_facts,
 )
-from .replay import ReplayError, ask_all, inside, pending, prepare, select
+from .probe import PROBE_STEP_MS, Probe, ProbeAnswer, ProbeError, load_probe
+from .probe_score import describe_probe
+from .replay import (
+    ProbeReport,
+    ReplayError,
+    ReplayReport,
+    ask_all,
+    ask_probes,
+    inside,
+    pending,
+    prepare,
+    select,
+)
 from .replay_store import HoldoutLook, ReplayStore, ReplayStoreError
 from .score import (
     Answer,
@@ -149,8 +165,9 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help=(
             "write <stem>-decisions.csv (one row per decision; per decision and repeat with "
-            "--replay-db) and <stem>-summary.txt here; the stem is the run id, or "
-            "<run-id>-<variant> with --replay-db"
+            "--replay-db, and not written for a variant with probe answers only) and "
+            "<stem>-summary.txt here; the stem is the run id, or <run-id>-<variant> with "
+            "--replay-db"
         ),
     )
     score.add_argument(
@@ -261,6 +278,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="check every payload and print what would be asked; no client, no writes",
     )
+    replay.add_argument(
+        "--probe",
+        metavar="FILE",
+        help=(
+            "ask the direction probe in this YAML file instead of a decision (plan PR 2.1): "
+            "one more completion per question and repeat for up / down / flat probabilities "
+            "at 4h and 24h, stored beside the variant's answers and scored by score "
+            "--replay-db; only on runs traded on 4h candles"
+        ),
+    )
     replay.set_defaults(func=_cmd_replay)
 
     register = subparsers.add_parser(
@@ -280,6 +307,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     register.set_defaults(func=_cmd_register)
     return parser
+
+
+def _progress(line: str) -> None:
+    print(line, file=sys.stderr)
 
 
 def _fail(message: str) -> int:
@@ -410,7 +441,11 @@ def _holdout_questions(run: _Run) -> int:
 
 @dataclass(frozen=True)
 class _Replayed:
-    """What ``score`` read from a replay store: the variants, their answers and failures, the looks."""
+    """What ``score`` read from a replay store: the variants, their answers and failures, the looks.
+
+    ``probes`` is every direction probe the scored variant was asked on the
+    run, with its answers by repeat.
+    """
 
     variant: Variant | None
     against: Variant | None
@@ -419,6 +454,7 @@ class _Replayed:
     against_answers: Mapping[int, Sequence[Answer]] | None
     against_failed: Mapping[int, Collection[str]] | None
     looks: Sequence[HoldoutLook]
+    probes: Sequence[tuple[Probe, Mapping[int, Sequence[ProbeAnswer]]]] = ()
 
 
 def _cmd_score(args: argparse.Namespace) -> int:
@@ -543,21 +579,42 @@ def _cmd_score(args: argparse.Namespace) -> int:
             f"({look.questions} question(s))"
             for look in replayed.looks
         )
+    table: Table | None
     if replayed is not None and replayed.variant is not None:
-        report = compare(
-            questions=run.decisions.questions,
-            card=card,
-            variant=replayed.variant,
-            answers=replayed.answers,
-            paper_answers=run.decisions.answers,
-            against=replayed.against,
-            against_answers=replayed.against_answers,
+        scope = cutoff_scope(
+            run.decisions.questions,
+            replayed.variant,
+            replayed.against,
             include_pre_cutoff=args.include_pre_cutoff,
-            failed=replayed.failed,
-            against_failed=replayed.against_failed,
         )
-        lines = [header, *report.preamble, *before, *report.body]
-        table = report.table
+        body: list[str] = []
+        table = None
+        if replayed.answers or replayed.failed:
+            report = compare(
+                questions=run.decisions.questions,
+                card=card,
+                variant=replayed.variant,
+                answers=replayed.answers,
+                paper_answers=run.decisions.answers,
+                against=replayed.against,
+                against_answers=replayed.against_answers,
+                include_pre_cutoff=args.include_pre_cutoff,
+                failed=replayed.failed,
+                against_failed=replayed.against_failed,
+            )
+            body.extend(report.body)
+            table = report.table
+        if replayed.probes:
+            # Every question the card keeps, none answered: the base rate
+            # reads every train question, whoever was asked it.
+            whole = card([])
+            for probe, probe_answers in replayed.probes:
+                body.extend(
+                    describe_probe(
+                        card=whole, probe=probe, answers=probe_answers, eligible=scope.eligible
+                    )
+                )
+        lines = [header, *scope.preamble, *before, *body]
         stem = f"{facts.run_id}-{args.variant}"
     else:
         paper = card(run.decisions.answers)
@@ -617,34 +674,48 @@ def _read_replay_store(
             failed = {} if variant is None else store.failed(variant.sha, run_id)
             against_answers = None if against is None else store.answers(against.sha, run_id)
             against_failed = None if against is None else store.failed(against.sha, run_id)
+            probes = [] if variant is None else store.probe_answers(variant.sha, run_id)
     except ReplayStoreError as exc:
         raise _Refused(str(exc)) from exc
-    if variant is not None and not answers and not failed:
+    decided = bool(answers or failed)
+    if variant is not None and not decided and not probes:
         raise _Refused(
             f"variant {variant.name!r} has no answers for run {run_id!r} in {replay_path}"
+        )
+    if against is not None and not decided:
+        raise _Refused(
+            f"--against compares decisions, and variant {args.variant!r} was asked only the "
+            f"direction probe on run {run_id!r}"
         )
     if against is not None and not against_answers and not against_failed:
         raise _Refused(
             f"variant {against.name!r} has no answers for run {run_id!r} to compare with"
         )
     return run, _Replayed(
-        variant, against, answers, failed, against_answers, against_failed, looks
+        variant, against, answers, failed, against_answers, against_failed, looks, probes
     )
 
 
-def _write_out(out: Path, out_arg: str, stem: str, lines: Sequence[str], table: Table) -> int:
+def _write_out(
+    out: Path, out_arg: str, stem: str, lines: Sequence[str], table: Table | None
+) -> int:
+    """The summary, and the decisions CSV unless there are no decisions (a probe-only variant)."""
     decisions_csv = out / f"{stem}-decisions.csv"
     summary = out / f"{stem}-summary.txt"
+    written = []
     try:
         out.mkdir(parents=True, exist_ok=True)
-        with decisions_csv.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(table[0])
-            writer.writerows(table[1])
+        if table is not None:
+            with decisions_csv.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(table[0])
+                writer.writerows(table[1])
+            written.append(decisions_csv)
         summary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        written.append(summary)
     except OSError as exc:
         return _fail(f"could not write under --out {out_arg!r}: {exc}")
-    for path in (decisions_csv, summary):
+    for path in written:
         print(f"wrote {path}", file=sys.stderr)
     return 0
 
@@ -674,9 +745,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         return _fail("--payload-root needs a directory, got ''")
     if not args.replay_db:
         return _fail("--replay-db needs a path, got ''")
+    if args.probe is not None and not args.probe:
+        return _fail("--probe needs a file, got ''")
     try:
         variant = load_variant(Path(args.variant))
-    except VariantError as exc:
+        probe = None if args.probe is None else load_probe(Path(args.probe))
+    except (VariantError, ProbeError) as exc:
         return _fail(str(exc))
     run = _open_run(
         db_path,
@@ -687,6 +761,11 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         with_gate=True,
         noun="replay",
     )
+    if probe is not None and run.facts.step_ms != PROBE_STEP_MS:
+        return _fail(
+            f"run {args.run_id!r} was traded on {run.facts.interval} candles; the direction "
+            "probe asks for 4h and 24h, the scorecard's horizons on a 4h run only"
+        )
     assert run.gate is not None
     risk, decision = run.gate
     payload_root = (
@@ -699,7 +778,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         )
     replay_path = Path(args.replay_db)
     if args.dry_run:
-        return _dry_run(args, run, variant, segment, payload_root, replay_path)
+        return _dry_run(args, run, variant, probe, segment, payload_root, replay_path)
     try:
         # Built before the replay store is written or any payload is read: a
         # client that cannot be built must not have spent a holdout look.
@@ -710,6 +789,8 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         with ReplayStore(replay_path, create=True) as store:
             for note in store.register(variant, now=_now()):
                 print(f"note: {note}", file=sys.stderr)
+            if probe is not None:
+                store.register_probe(probe, now=_now())
             # The split pinned for the run if there is one; otherwise the one
             # it would pin, which is pinned below only once every check has
             # passed: a replay refused on the way (no question in the segment,
@@ -749,25 +830,44 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     )
                 run = _pinned(run, stood, pinned_at)
             if args.retry_failed:
-                cleared = store.clear_failures(variant.sha, args.run_id)
+                cleared = (
+                    store.clear_failures(variant.sha, args.run_id)
+                    if probe is None
+                    else store.clear_probe_refusals(variant.sha, probe.sha, args.run_id)
+                )
                 print(f"note: {cleared} refused question(s) will be asked again", file=sys.stderr)
-            for line in _replay_header(run, variant, segment, len(papers), args.repeats):
+            for line in _replay_header(run, variant, probe, segment, len(papers), args.repeats):
                 print(line)
             print(run.split_line(replay_path))
-            report = ask_all(
-                prepared,
-                variant=variant,
-                model=model,
-                store=store,
-                run_id=args.run_id,
-                repeats=args.repeats,
-                risk=risk,
-                decision=decision,
-                now=_now,
-                sleep=_sleep,
-                limit=args.limit,
-                progress=lambda line: print(line, file=sys.stderr),
-            )
+            if probe is None:
+                report: ReplayReport | ProbeReport = ask_all(
+                    prepared,
+                    variant=variant,
+                    model=model,
+                    store=store,
+                    run_id=args.run_id,
+                    repeats=args.repeats,
+                    risk=risk,
+                    decision=decision,
+                    now=_now,
+                    sleep=_sleep,
+                    limit=args.limit,
+                    progress=_progress,
+                )
+            else:
+                report = ask_probes(
+                    prepared,
+                    variant=variant,
+                    probe=probe,
+                    model=model,
+                    store=store,
+                    run_id=args.run_id,
+                    repeats=args.repeats,
+                    now=_now,
+                    sleep=_sleep,
+                    limit=args.limit,
+                    progress=_progress,
+                )
     except ReplayStoreError as exc:
         return _fail(str(exc))
     for line in report.describe():
@@ -776,25 +876,39 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 
 def _replay_header(
-    run: _Run, variant: Variant, segment: SegmentName, questions: int, repeats: int
+    run: _Run,
+    variant: Variant,
+    probe: Probe | None,
+    segment: SegmentName,
+    questions: int,
+    repeats: int,
 ) -> list[str]:
     assert run.gate is not None
     risk, decision = run.gate
-    return [
+    lines = [
         f"replay: run {run.facts.run_id} ({run.facts.coin}, {run.facts.interval} cycle), "
         f"{segment.value} segment: {questions} question(s) x {repeats} repeat(s)",
         variant.describe(),
+    ]
+    if probe is not None:
+        lines.append(
+            f"{probe.describe()}: asked instead of a decision, with the variant's model; no gate"
+        )
+        return lines
+    lines.append(
         f"gate: the run's genesis risk/decision blocks (leverage {risk.leverage}, max target "
         f"margin {risk.max_target_margin_pct}%, deadband {decision.rebalance_deadband_pct}%, "
         f"min_confidence {decision.min_confidence}, resize_min_confidence "
-        f"{decision.resize_min_confidence})",
-    ]
+        f"{decision.resize_min_confidence})"
+    )
+    return lines
 
 
 def _dry_run(
     args: argparse.Namespace,
     run: _Run,
     variant: Variant,
+    probe: Probe | None,
     segment: SegmentName,
     payload_root: Path,
     replay_path: Path,
@@ -808,12 +922,15 @@ def _dry_run(
                 pinned = store.pinned_split(args.run_id)
                 if pinned is not None:
                     run = _pinned(run, *pinned)
-                stored = store.answered(variant.sha, args.run_id)
-                refused = {
-                    (input_id, repeat)
-                    for repeat, input_ids in store.failed(variant.sha, args.run_id).items()
-                    for input_id in input_ids
-                }
+                if probe is not None:
+                    stored, refused = store.probe_done(variant.sha, probe.sha, args.run_id)
+                else:
+                    stored = store.answered(variant.sha, args.run_id)
+                    refused = {
+                        (input_id, repeat)
+                        for repeat, input_ids in store.failed(variant.sha, args.run_id).items()
+                        for input_id in input_ids
+                    }
         except ReplayStoreError as exc:
             return _fail(str(exc))
     papers = select(
@@ -831,7 +948,7 @@ def _dry_run(
     todo = pending(prepared, answered=skip, repeats=args.repeats)
     asks = len(todo) if args.limit is None else min(len(todo), args.limit)
     unchecked = sum(1 for paper in papers if paper.facts.payload_hash is None)
-    for line in _replay_header(run, variant, segment, len(papers), args.repeats):
+    for line in _replay_header(run, variant, probe, segment, len(papers), args.repeats):
         print(line)
     print(run.split_line(replay_path))
     if run.pinned_at is None:

@@ -310,7 +310,7 @@ def test_position_valuation_rejects_non_positive_mark():
 
 
 def test_position_valuation_rejects_coin_mismatch():
-    # _long is a BTC position; pairing it with an ETH schedule would value it
+    # The position is BTC; pairing it with an ETH schedule would value it
     # against the wrong asset's tier table — rejected at construction.
     sched = MarginSchedule(coin="ETH", tiers=(MarginTier(Decimal(0), Decimal(50)),))
     with pytest.raises(ValueError, match="must be the same asset"):

@@ -131,6 +131,7 @@ def test_daily_loss_breach_enters_recoverable_safe_mode(env):
     ok = guards.evaluate_daily_loss(account_equity=Decimal(981), now=_NOW + timedelta(minutes=1))
     assert ok.breached is False
     assert safe_mode.active is False
+    assert gate.state_reconciled is True
 
     hit = guards.evaluate_daily_loss(account_equity=Decimal(979), now=_NOW + timedelta(minutes=2))
     assert hit.breached is True

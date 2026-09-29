@@ -73,7 +73,9 @@ Breaking changes within the 0.x line are called out explicitly.
   each from `live/test_validation.py` and `cli/test_cli.py`.
   `tests/live/conftest.py` gains the in-memory `db` fixture. A double is
   shared only where every consumer scripts it the same way; doubles that
-  only share a name stay where they are. Three things the tests now do
+  only share a name stay where they are. `FakeSignedClient` is the one
+  exception: its `cancel_removes_order` flag is set by the startup tests
+  and not by the kill-switch tests. Three things the tests now do
   differently: the four CLI wiring pins that recorded constructor kwargs
   record them after the real constructor accepts them
   (`record_constructor_kwargs`) rather than before; the decisions built in
@@ -81,7 +83,9 @@ Breaking changes within the 0.x line are called out explicitly.
   rationale `"test rationale"` and the risk `"a risk"` where they carried
   `"r"` and `"k"`; and the startup tests' signed client counts its calls.
   The tests that ran before still run and pass; `tests/fakes/test_gates.py`
-  adds four, one per gate builder.
+  adds four, one per gate builder, and two safe-mode tests now assert the
+  gate starts reconciled before they assert that entering safe mode drops
+  it.
 
 - **The live shutdown's decisions are functions you can call** (refactor
   plan v2, T2-e — PR 8 of the plan). The `finally` of `live --run-id` made

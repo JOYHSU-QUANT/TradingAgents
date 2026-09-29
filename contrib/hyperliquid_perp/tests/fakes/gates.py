@@ -1,7 +1,8 @@
 """Builders for the §4.1 real-order gate, one per check ``RealOrderGate`` offers.
 
-Each returns the narrowest testnet BTC gate that passes the check it is named
-after, and so refuses the wider ones.
+Called without arguments, each returns the narrowest testnet BTC gate that
+passes the check it is named after. Keyword arguments go to the constructor
+and can build a gate that passes nothing.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ _NEW_TARGET = {**_ORDER, "risk_gate_approved": True}
 
 
 def exchange_action_gate(**conditions) -> RealOrderGate:
-    """Passes ``check_exchange_action``; ``conditions`` go to the constructor."""
+    """Passes ``check_exchange_action``."""
     kwargs = {
         "allow_real_orders": True,
         "mode": ExecutionMode.TESTNET_LIVE,

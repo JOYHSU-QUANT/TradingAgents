@@ -21,8 +21,8 @@ class FakeSignedClient:
         self._gate = gate
         self._clock = clock
         self._cancel_removes_order = cancel_removes_order
-        # The exchange's clock. Defaults to agreeing with ours (zero skew), so
-        # arm()'s skew guard passes; tests that care set it explicitly.
+        # The exchange's clock. Left at None it answers with ``clock``'s time
+        # (zero skew), or with None when no clock was given.
         self.exchange_time_result: datetime | None | Exception = None
         # orderStatus answers for the disarm cross-check. Default: the exchange
         # has never heard of the cloid.
@@ -34,9 +34,8 @@ class FakeSignedClient:
         self.schedule_calls: list[datetime] = []
         self.schedule_attempts: int = 0
         self.schedule_error: Exception | None = None
-        # Seconds this call consumes before it answers, advanced on the manager's
-        # own clock. The backoff is charged from the attempt's real duration, so a
-        # test about it has to be able to say "this one burned the timeout".
+        # Seconds ``schedule_cancel`` consumes before it answers, advanced on
+        # ``clock``.
         self.schedule_duration_s: float = 0
         self.clear_calls: int = 0
         self.clear_error: Exception | None = None

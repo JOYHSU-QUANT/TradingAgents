@@ -58,6 +58,7 @@ def _events(db):
 
 def test_entering_recoverable_persists_state_and_history_and_shuts_the_gate(env):
     db, gate, manager = env
+    assert gate.state_reconciled is True
     assert manager.enter("recoverable", REASON_WS_DISCONNECT) is True
 
     state = manager.current()
@@ -203,7 +204,7 @@ def test_a_restart_does_not_clear_safe_mode_and_hydrate_restores_the_gate(env):
     db, _, manager = env
     manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
 
-    fresh_gate = order_gate()  # a new process: fail-closed flags, no memory
+    fresh_gate = order_gate()  # a new process: no memory of the safe mode
     fresh_gate.manual_safe_mode = False
     fresh = SafeModeManager(db=db, run_id="r", gate=fresh_gate, clock=ManualClock(_NOW))
     state = fresh.hydrate_gate()

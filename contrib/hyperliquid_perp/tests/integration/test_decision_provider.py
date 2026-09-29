@@ -1,4 +1,4 @@
-"""Tests for the engine decision provider: ``build_input`` and ``request_decision``."""
+"""Tests for the engine decision provider."""
 
 from __future__ import annotations
 

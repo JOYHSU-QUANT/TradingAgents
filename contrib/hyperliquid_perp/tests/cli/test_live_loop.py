@@ -403,8 +403,9 @@ def _drive_live_loop_construction(
     disown it, and ``engine.tick()`` raises :class:`_StopTheLoop` to end the
     drive. ``built.ticks`` then counts the tick calls the loop actually reached
     and ``built.db_path`` locates the store for the durable assertions.
-    ``built.refreshes_at_tick`` and ``built.refreshes_at_pump`` hold the
-    switch's refresh count as each of those calls began.
+    ``built.refreshes_at_tick`` holds the switch's refresh count as each
+    ``engine.tick()`` began; under ``pump_raises``, ``built.refreshes_at_pump``
+    holds it as each ``driver.pump()`` began.
 
     ``adoption_raises`` makes the driver's ``_adopt`` raise it, so the real
     ``resume_startup`` classification and the real containment both run.

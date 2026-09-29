@@ -10,6 +10,20 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **`live --run-id` without `--loop` no longer exits 0 after keeping SL/TP
+  behind a failed exit-time safe-mode read** (`contrib/hyperliquid_perp/live/shutdown.py`,
+  issue #303). When the startup verdict passed, the exit-time safe-mode read
+  failed and the account held a position (or the position could not be read
+  either), the §18.2 sweep kept the resting SL/TP and the command still
+  exited 0 with "startup recovery passed — a live loop can start from this
+  state". `--loop` has its own reason for this,
+  `LOOP_KEPT_ON_UNKNOWN_SAFE_MODE`, a 4. The one-shot now has one too,
+  `ExitReason.ONE_SHOT_KEPT_ON_UNKNOWN_SAFE_MODE`, also a 4, and its last
+  stderr line names the failed read. A failed read over a book read flat
+  keeps nothing and adds no 4 of its own. phase3-spec §18.2 rule 8 and
+  RUNBOOK-live §2 say so; RUNBOOK-live §2 also says what a re-run does to
+  the kept SL/TP.
+
 - **The prompt's last-fill age no longer prints `0.0 hours` for a fill under
   three minutes old** (`contrib/hyperliquid_perp/domains/perp/prompt_context.py`,
   issue #288). The Position section's `Last fill: ... (N before the as-of time

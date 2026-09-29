@@ -15,14 +15,10 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
-from contrib.hyperliquid_perp.domains.perp.schema import PerpMarketContext
 from contrib.hyperliquid_perp.domains.perp.target_decision import (
-    DecisionMode,
     ParsedDecision,
     TargetDecision,
-    TargetSide,
 )
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
 from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
@@ -43,43 +39,11 @@ from contrib.hyperliquid_perp.runtime.decision import DecisionInput, RetryableDe
 from contrib.hyperliquid_perp.runtime.market_feed import ScriptedSnapshotProvider, SnapshotOutcome
 
 from ..conftest import arm_lock_fault, poison_stored_parse
+from ..fakes.decisions import market_ctx, set_target
+from ..fakes.market import MARK as _MARK, margin_schedule, snap
 
 D = Decimal
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
-_MARK = D(50000)
-
-
-def _ctx(as_of: datetime) -> PerpMarketContext:
-    return PerpMarketContext(
-        coin="BTC",
-        as_of=as_of,
-        candle_interval="4h",
-        candle_count=200,
-        mark_price=_MARK,
-        oracle_price=_MARK,
-        prev_day_price=_MARK,
-        mid_price=_MARK,
-        day_change_pct=0.0,  # prev == mark: a reference exists, so 0, not None
-        open_interest=D(0),
-        day_ntl_volume=D(0),
-        funding_rate=D("0.0001"),
-        funding_premium=None,
-        funding_zscore_30d=None,
-        funding_window_days=30,
-        funding_sample_count=0,
-    )
-
-
-def _decision(side: str, margin: int, conf: str = "0.8") -> ParsedDecision:
-    dec = TargetDecision(
-        decision_mode=DecisionMode.SET_TARGET,
-        target_side=TargetSide(side),
-        requested_target_margin_pct=margin,
-        confidence=D(conf),
-        rationale="test rationale",
-        key_risks=("a risk",),
-    )
-    return ParsedDecision(decision=dec, is_valid=True, invalid_reason=None, raw_response="{}")
 
 
 def _invalid_decision(reason: str = "no json block") -> ParsedDecision:
@@ -101,7 +65,7 @@ class _FakeProvider:
 
     def build_input(self, *, coin: str, as_of: datetime) -> DecisionInput:
         self.build_calls += 1
-        return DecisionInput(context=_ctx(as_of))
+        return DecisionInput(context=market_ctx(as_of))
 
     def request_decision(self, decision_input: DecisionInput) -> ParsedDecision:
         item = self._outcomes[self.decide_calls]  # IndexError = under-scripted test
@@ -120,7 +84,7 @@ def _setup(tmp_path, outcomes, script):
     asset = AssetSpec(
         coin="BTC",
         sz_decimals=3,
-        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+        margin_schedule=margin_schedule(),
     )
     risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
     engine = PaperExecutionEngine(
@@ -166,10 +130,6 @@ def _restart(db, clock, engine, provider):
     )
 
 
-def _snap(mark=_MARK, mid=_MARK):
-    return (D(mark), D(mid))
-
-
 def _attempt_row(db, attempt_id):
     return repo.get_decision_attempt(db.conn, attempt_id)
 
@@ -197,7 +157,7 @@ def test_a_retryable_error_outside_the_vocabulary_fails_at_construction():
 
 
 def test_fresh_run_executes_immediately_and_persists_cycle(tmp_path):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     result = scheduler.poll()
     assert result is not None and result.event is CycleEvent.COMPLETED
     assert result.scheduled_at == _T0
@@ -244,7 +204,7 @@ def test_finalize_clears_pending_before_snapshot_so_a_raising_snapshot_cant_doub
     # write_cycle_snapshot swallows only (sqlite3.Error, OSError); a non-DB error
     # (mark<=0, halted engine, corrupt Decimal) must not strand self._pending and
     # re-finalize the already-committed cycle into a duplicate plan/output.
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
 
     def _boom(_mark):
         raise ValueError("snapshot boom")
@@ -271,7 +231,7 @@ def test_delayed_cycle_runs_under_original_schedule_then_rolls_from_actual(tmp_p
     # Spec §3's example: due 14:15-style boundary missed; recovery at 16:00-style
     # instant runs once and the next boundary keys off the actual decision time.
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [_decision("long", 1), _decision("long", 1)], [_snap(), _snap()]
+        tmp_path, [set_target("long", 1), set_target("long", 1)], [snap(), snap()]
     )
     scheduler.poll()  # cycle 1 at T0 -> next due T0+4h
     late = _T0 + timedelta(hours=5, minutes=45)
@@ -287,7 +247,7 @@ def test_delayed_cycle_runs_under_original_schedule_then_rolls_from_actual(tmp_p
 
 
 def test_not_due_polls_return_none(tmp_path):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     scheduler.poll()
     clock.advance(3600)  # only 1h of 4h elapsed
     assert scheduler.poll() is None
@@ -352,8 +312,8 @@ def test_stale_api_failed_cycle_anchors_next_on_terminal_instant(tmp_path):
     # failed cycles — the completed path already anchors on completion).
     db, clock, engine, scheduler, provider = _setup(
         tmp_path,
-        [_decision("long", 1), _err("timeout"), _err("connection"), _err("server_error")],
-        [_snap(), SnapshotOutcome.ERROR],
+        [set_target("long", 1), _err("timeout"), _err("connection"), _err("server_error")],
+        [snap(), SnapshotOutcome.ERROR],
     )
     scheduler.poll()  # cycle 1 completes at T0 -> next due T0+4h
     late = _T0 + timedelta(hours=28)  # outage across six schedule points
@@ -391,8 +351,8 @@ class _SlowFailingProvider(_FakeProvider):
 def test_retry_backoff_counts_from_failure_instant(tmp_path):
     # §3.1's ladder counts from when the try FAILED, not when it started: a
     # 45s in-flight timeout must still be followed by a full 10s wait.
-    db, clock, engine, _scheduler, _ = _setup(tmp_path, [], [_snap()])
-    provider = _SlowFailingProvider([_err("timeout"), _decision("long", 1)], clock, 45)
+    db, clock, engine, _scheduler, _ = _setup(tmp_path, [], [snap()])
+    provider = _SlowFailingProvider([_err("timeout"), set_target("long", 1)], clock, 45)
     scheduler = _restart(db, clock, engine, provider)
     r1 = scheduler.poll()
     assert r1.event is CycleEvent.RETRY_SCHEDULED
@@ -420,8 +380,8 @@ def test_retry_counter_survives_restart(tmp_path):
 
     # "Restart": a new scheduler over the same store continues the SAME attempt
     # with the counter intact (spec §3.1 — never reset, never double-decide).
-    provider2 = _FakeProvider([_decision("long", 1)])
-    engine._provider = ScriptedSnapshotProvider("BTC", [_snap()])
+    provider2 = _FakeProvider([set_target("long", 1)])
+    engine._provider = ScriptedSnapshotProvider("BTC", [snap()])
     scheduler2 = _restart(db, clock, engine, provider2)
     assert scheduler2.poll() is None  # 10s backoff still pending across restart
     clock.advance(10)
@@ -435,7 +395,7 @@ def test_retry_counter_survives_restart(tmp_path):
 def test_interrupted_final_attempt_terminalizes_without_new_call(tmp_path):
     # Market data IS available here — the api_failed terminal still writes the
     # best-effort §11.1 cycle-end snapshot at the fresh mark.
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [], [snap()])
     # Simulate a crash after try 3's counter was persisted but before its outcome.
     with db.transaction() as conn:
         repo.insert_decision_attempt(
@@ -467,7 +427,7 @@ def test_interrupted_final_attempt_terminalizes_without_new_call(tmp_path):
 
 
 def test_invalid_output_completes_cycle_fail_closed(tmp_path):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_invalid_decision()], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [_invalid_decision()], [snap()])
     result = scheduler.poll()
     assert result.event is CycleEvent.INVALID_OUTPUT
     assert result.next_decision_at == _T0 + CYCLE_INTERVAL
@@ -494,8 +454,8 @@ def test_invalid_output_completes_cycle_fail_closed(tmp_path):
 def test_pending_market_data_retries_gate_without_second_ai_call(tmp_path):
     db, clock, engine, scheduler, provider = _setup(
         tmp_path,
-        [_decision("long", 1)],
-        [SnapshotOutcome.TIMEOUT, _snap()],
+        [set_target("long", 1)],
+        [SnapshotOutcome.TIMEOUT, snap()],
     )
     r1 = scheduler.poll()
     assert r1.event is CycleEvent.PENDING_MARKET_DATA
@@ -519,7 +479,7 @@ def test_pending_market_data_retries_gate_without_second_ai_call(tmp_path):
 
 
 def test_decision_input_rejects_half_candle_window():
-    ctx = _ctx(_T0)
+    ctx = market_ctx(_T0)
     # The candle boundaries are one §5 audit pair — one without the other is
     # malformed, not narrower.
     with pytest.raises(ValueError, match="candle_start"):
@@ -565,12 +525,12 @@ def test_the_audit_row_is_written_from_the_books_the_provider_carried(tmp_path):
     # than only showing up as a second scan in a profile.
     from contrib.hyperliquid_perp.runtime.position_facts import read_books
 
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     carried = {}
 
     def build_input(*, coin, as_of):
         carried["books"] = read_books(db, "r", coin)
-        return DecisionInput(context=_ctx(as_of), books=carried["books"])
+        return DecisionInput(context=market_ctx(as_of), books=carried["books"])
 
     provider.build_input = build_input
     statements = _trace_audit_prologue(db, scheduler)
@@ -590,7 +550,7 @@ def test_the_audit_row_falls_back_to_its_own_read_for_a_provider_without_books(t
     # The retained path: a provider that carries no books (every scripted
     # double here, a replay harness) still gets a correct row — from the one
     # read the prologue makes itself, the way it did before #134.
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     statements = _trace_audit_prologue(db, scheduler)
     result = scheduler.poll()
     assert result is not None and result.event is CycleEvent.COMPLETED
@@ -612,7 +572,7 @@ def test_a_bug_in_build_input_fails_the_cycle_closed_without_a_ladder(tmp_path, 
     # Snapshots: the failed cycle's best-effort cycle-end snapshot, then the
     # recovered cycle's gate and ITS cycle-end snapshot.
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [_decision("long", 1)], [_snap(), _snap(), _snap()]
+        tmp_path, [set_target("long", 1)], [snap(), snap(), snap()]
     )
 
     def broken(*, coin, as_of):
@@ -649,7 +609,7 @@ def test_a_bug_in_the_engine_call_fails_the_cycle_closed_after_the_input_row(tmp
     # stays (it describes what the AI was about to see), the attempt is
     # api_failed with no class, and nothing is re-asked.
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [RuntimeError("engine bug")], [_snap()]
+        tmp_path, [RuntimeError("engine bug")], [snap()]
     )
     result = scheduler.poll()
     assert result is not None and result.event is CycleEvent.API_FAILED
@@ -664,7 +624,7 @@ def test_a_bug_in_the_engine_call_fails_the_cycle_closed_after_the_input_row(tmp
 
 
 def test_decision_input_rejects_a_partial_segmentation_key_set():
-    ctx = _ctx(_T0)
+    ctx = market_ctx(_T0)
     # prompt_version, context_shape and format_fingerprint are the three
     # segmentation keys of one ai_inputs row (issues #97, #129): a row carrying
     # some but not all would be filed with pre-v10 / pre-v11 history, which the
@@ -686,7 +646,7 @@ def test_decision_input_rejects_a_partial_segmentation_key_set():
 
 
 def test_decision_input_rejects_inverted_candle_window():
-    ctx = _ctx(_T0)
+    ctx = market_ctx(_T0)
     # An inverted [start, end] is malformed the same way a half-present pair is.
     with pytest.raises(ValueError, match="after candle_end"):
         DecisionInput(
@@ -775,7 +735,7 @@ def test_restart_resumes_persisted_decision_without_reask(tmp_path):
     parsed = parse_target_decision(_RAW_LONG_1, DecisionConfig())
     assert parsed.is_valid
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [parsed], [SnapshotOutcome.TIMEOUT, _snap()]
+        tmp_path, [parsed], [SnapshotOutcome.TIMEOUT, snap()]
     )
     r1 = scheduler.poll()
     assert r1.event is CycleEvent.PENDING_MARKET_DATA
@@ -799,7 +759,7 @@ def test_restart_resumes_persisted_decision_without_reask(tmp_path):
 
 def test_completed_cycle_clears_stale_error_fields(tmp_path):
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [_err("timeout"), _decision("long", 1)], [_snap()]
+        tmp_path, [_err("timeout"), set_target("long", 1)], [snap()]
     )
     scheduler.poll()  # try 1 fails, error fields recorded
     clock.advance(10)
@@ -834,7 +794,7 @@ def _arm_flaky_response_store(monkeypatch, *, shots=1):
 
 
 def test_response_store_failure_retries_the_store_never_the_ai(tmp_path, monkeypatch):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     _arm_flaky_response_store(monkeypatch)
     # The paid-for decision lives only in memory: the poll reports "nothing
     # terminal yet" instead of letting the exception exit the daemon.
@@ -850,14 +810,14 @@ def test_response_store_failure_retries_the_store_never_the_ai(tmp_path, monkeyp
 
 
 def test_crash_during_store_retry_never_resumes_the_unstored_decision(tmp_path, monkeypatch):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     _arm_flaky_response_store(monkeypatch)
     assert scheduler.poll() is None  # decision held in memory, store pending
     # "Crash + restart": the in-memory decision is gone and was never durable,
     # so §3.1 fails closed — the new process re-enters the retry ladder (a
     # fresh AI call within budget); it must NOT gate a decision whose raw
     # response never landed.
-    provider2 = _FakeProvider([_decision("long", 1)])
+    provider2 = _FakeProvider([set_target("long", 1)])
     scheduler2 = _restart(db, clock, engine, provider2)
     assert scheduler2.poll() is None  # 10s backoff from the spent try-1 counter
     clock.advance(10)
@@ -873,7 +833,7 @@ def test_a_persist_fault_that_outlives_the_budget_escalates_to_the_supervisor(
 ):
     from contrib.hyperliquid_perp.paper.scheduler import _MAX_PERSIST_FAILURES
 
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     # A fault that never heals is not the transient lock the retry lane exists
     # for: containing it forever would leave the attempt row in_progress —
     # invisible to the §3.1 streak and to validate's exit 4 — while the lease
@@ -891,7 +851,7 @@ def test_a_persist_fault_that_outlives_the_budget_escalates_to_the_supervisor(
 def test_a_persist_that_lands_clears_the_failure_streak(tmp_path, monkeypatch):
     from contrib.hyperliquid_perp.paper.scheduler import _MAX_PERSIST_FAILURES
 
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     # The bound measures an unbroken streak, not the cycle's lifetime total:
     # a store that lands after near-fatal contention must hand the audit
     # commit a full budget, and the escalation log must not claim a run of
@@ -914,7 +874,7 @@ def test_resume_with_a_poisoned_stored_response_fails_the_cycle_closed(
 
     parsed = parse_target_decision(_RAW_LONG_1, DecisionConfig())
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [parsed], [SnapshotOutcome.TIMEOUT, _snap()]
+        tmp_path, [parsed], [SnapshotOutcome.TIMEOUT, snap()]
     )
     r1 = scheduler.poll()
     assert r1.event is CycleEvent.PENDING_MARKET_DATA  # response persisted, gate blocked
@@ -974,7 +934,7 @@ def test_an_invalid_answer_is_never_stored_as_resumable(tmp_path, caplog):
 
     # TIMEOUT first: the gate is blocked, so the post-store row is observable.
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [invalid], [SnapshotOutcome.TIMEOUT, _snap()]
+        tmp_path, [invalid], [SnapshotOutcome.TIMEOUT, snap()]
     )
     from contrib.hyperliquid_perp.paper import scheduler as sched_mod
 
@@ -1016,7 +976,7 @@ def test_the_reask_window_never_exceeds_the_try_budget(tmp_path):
     # One TIMEOUT per gate (the AI answers, the store is skipped, the gate
     # blocks), then a fresh mark for the terminal's best-effort snapshot.
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [invalid], [SnapshotOutcome.TIMEOUT] * MAX_DECISION_ATTEMPTS + [_snap()]
+        tmp_path, [invalid], [SnapshotOutcome.TIMEOUT] * MAX_DECISION_ATTEMPTS + [snap()]
     )
     assert scheduler.poll().event is CycleEvent.PENDING_MARKET_DATA
     attempt_id = repo.find_in_progress_attempt(db.conn, "r")["decision_attempt_id"]
@@ -1058,7 +1018,7 @@ def test_a_valid_answer_blocked_at_the_gate_is_still_stored(tmp_path):
     same TIMEOUT-first setup with a VALID answer still lands the §3.1 store, so
     a restart resumes it without a second AI call (the discriminator)."""
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [_decision("long", 1)], [SnapshotOutcome.TIMEOUT, _snap()]
+        tmp_path, [set_target("long", 1)], [SnapshotOutcome.TIMEOUT, snap()]
     )
     assert scheduler.poll().event is CycleEvent.PENDING_MARKET_DATA
     assert repo.find_in_progress_attempt(db.conn, "r")["pending_raw_response"] == "{}"
@@ -1066,7 +1026,7 @@ def test_a_valid_answer_blocked_at_the_gate_is_still_stored(tmp_path):
 
 
 def test_a_start_plan_bug_still_exits_the_daemon(tmp_path, monkeypatch):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
 
     def blown(parsed, *, output_id):
         raise RuntimeError("engine bug")
@@ -1082,7 +1042,7 @@ def test_a_start_plan_bug_still_exits_the_daemon(tmp_path, monkeypatch):
 
 
 def test_audit_persist_failure_retries_the_persist_never_the_gate(tmp_path, monkeypatch):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     real_start = engine.start_plan
     calls = {"n": 0}
 
@@ -1250,7 +1210,7 @@ def test_the_pending_decision_is_the_shared_inflight_state_machine(tmp_path):
     from contrib.hyperliquid_perp.common.inflight import InFlightDecision, inflight_ids
 
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [_decision("long", 1)], [SnapshotOutcome.TIMEOUT]
+        tmp_path, [set_target("long", 1)], [SnapshotOutcome.TIMEOUT]
     )
     r = scheduler.poll()
     assert r.event is CycleEvent.PENDING_MARKET_DATA  # stored, gate blocked: pending stands
@@ -1282,7 +1242,7 @@ def test_the_gate_rule_is_checked_where_the_gate_runs(tmp_path, monkeypatch):
     start_plan can commit anything."""
     from contrib.hyperliquid_perp.common.inflight import InFlightDecision
 
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [], [snap()])
     calls = {"n": 0}
     real_start = engine.start_plan
 
@@ -1291,7 +1251,7 @@ def test_the_gate_rule_is_checked_where_the_gate_runs(tmp_path, monkeypatch):
         return real_start(parsed, output_id=output_id)
 
     monkeypatch.setattr(engine, "start_plan", counting)
-    armed = InFlightDecision.for_try("r|armed", _T0, 1, parsed=_decision("long", 1))
+    armed = InFlightDecision.for_try("r|armed", _T0, 1, parsed=set_target("long", 1))
     armed.raw_stored = True  # as the store step settles it
     armed.arm_fail("timeout", "boom")
     scheduler._pending = armed
@@ -1308,7 +1268,7 @@ def test_a_terminal_verdict_never_arms_over_a_standing_decision(tmp_path, monkey
     the api_failed record contradict a plan the engine has committed."""
     from contrib.hyperliquid_perp.paper.scheduler import _Pending
 
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     arm_lock_fault(monkeypatch, scheduler, "_insert_ai_output")
     assert scheduler.poll() is None  # gated, plan committed, audit persist missed
     standing = scheduler._pending
@@ -1344,7 +1304,7 @@ def _count_attempt_reads(monkeypatch):
 
 
 def test_an_idle_tick_reads_the_in_progress_attempt_once(tmp_path, monkeypatch):
-    db, clock, engine, scheduler, provider = _setup(tmp_path, [_decision("long", 1)], [_snap()])
+    db, clock, engine, scheduler, provider = _setup(tmp_path, [set_target("long", 1)], [snap()])
     assert scheduler.poll().event is CycleEvent.COMPLETED
     reads = _count_attempt_reads(monkeypatch)
     # The loop's tick: poll, then size the sleep. Each used to issue the same
@@ -1357,7 +1317,7 @@ def test_an_idle_tick_reads_the_in_progress_attempt_once(tmp_path, monkeypatch):
 
 def test_every_poll_answers_next_due_at_itself(tmp_path, monkeypatch):
     db, clock, engine, scheduler, provider = _setup(
-        tmp_path, [_err("timeout"), _decision("long", 1)], [_snap()]
+        tmp_path, [_err("timeout"), set_target("long", 1)], [snap()]
     )
     reads = _count_attempt_reads(monkeypatch)
     assert scheduler.next_due_at() is None  # no poll yet: a fresh run decides at once
@@ -1400,7 +1360,7 @@ def test_ai_input_reports_open_position_and_active_plan(tmp_path):
     asset = AssetSpec(
         coin="BTC",
         sz_decimals=3,
-        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+        margin_schedule=margin_schedule(),
     )
     risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
     engine = PaperExecutionEngine(
@@ -1408,7 +1368,7 @@ def test_ai_input_reports_open_position_and_active_plan(tmp_path):
         run_id="r",
         asset=asset,
         clock=clock,
-        provider=ScriptedSnapshotProvider("BTC", [_snap()]),
+        provider=ScriptedSnapshotProvider("BTC", [snap()]),
         risk_config=risk,
         decision_config=DecisionConfig(),
         paper_config=PaperTradingConfig.from_dict(None),
@@ -1428,7 +1388,7 @@ def test_ai_input_reports_open_position_and_active_plan(tmp_path):
         run_id="r",
         engine=engine,
         clock=clock,
-        provider=_FakeProvider([_decision("long", 5)]),
+        provider=_FakeProvider([set_target("long", 5)]),
         asset=asset,
         risk_config=risk,
         decision_config=DecisionConfig(),
@@ -1505,7 +1465,7 @@ def _cycle_with_context(tmp_path, name, ctx):
     asset = AssetSpec(
         coin="BTC",
         sz_decimals=3,
-        margin_schedule=MarginSchedule(coin="BTC", tiers=(MarginTier(D(0), D(50)),)),
+        margin_schedule=margin_schedule(),
     )
     risk = RiskConfig(leverage=D(5), max_target_margin_pct=60)
     scheduler = PaperScheduler(
@@ -1516,13 +1476,13 @@ def _cycle_with_context(tmp_path, name, ctx):
             run_id="r",
             asset=asset,
             clock=clock,
-            provider=ScriptedSnapshotProvider("BTC", [_snap()]),
+            provider=ScriptedSnapshotProvider("BTC", [snap()]),
             risk_config=risk,
             decision_config=DecisionConfig(),
             paper_config=PaperTradingConfig.from_dict(None),
         ),
         clock=clock,
-        provider=_Provider([_decision("long", 5)]),
+        provider=_Provider([set_target("long", 5)]),
         asset=asset,
         risk_config=risk,
         decision_config=DecisionConfig(),
@@ -1541,7 +1501,7 @@ def test_ai_input_records_the_rule_and_side_the_prompt_actually_printed(tmp_path
 
     from contrib.hyperliquid_perp.domains.perp.prompt_context import render_market_context
 
-    ctx = dataclasses.replace(_ctx(_T0), research_signal=_research_signal())
+    ctx = dataclasses.replace(market_ctx(_T0), research_signal=_research_signal())
     db, inp = _cycle_with_context(tmp_path, "s-signal.db", ctx)
     # Compared against the RENDERED lines rather than against the literals the
     # signal was built from: a column that disagreed with the words the model
@@ -1564,7 +1524,7 @@ def test_ai_input_leaves_both_research_columns_null_when_the_prompt_had_no_secti
     # The common case — the switch is off by default, so most rows look like
     # this. The NULL here means "no section in this cycle's prompt", and the
     # row's own ``context_shape`` is what separates it from a pre-v13 NULL.
-    db, inp = _cycle_with_context(tmp_path, "s-nosignal.db", _ctx(_T0))
+    db, inp = _cycle_with_context(tmp_path, "s-nosignal.db", market_ctx(_T0))
     assert inp["autoresearch_bias"] is None
     assert inp["autoresearch_strategy_id"] is None
     assert "autoresearch" not in inp["context_shape"]

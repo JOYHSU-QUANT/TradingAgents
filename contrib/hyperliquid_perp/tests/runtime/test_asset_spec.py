@@ -6,7 +6,6 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.domains.perp.margin import MarginSchedule, MarginTier
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeError
 from contrib.hyperliquid_perp.runtime.asset_spec import (
     AssetSpec,
@@ -15,11 +14,9 @@ from contrib.hyperliquid_perp.runtime.asset_spec import (
     qty_step_from_sz_decimals,
 )
 
+from ..fakes.market import margin_schedule
+
 D = Decimal
-
-
-def _schedule(coin: str = "BTC") -> MarginSchedule:
-    return MarginSchedule(coin=coin, tiers=(MarginTier(D(0), D(50)),))
 
 
 def test_qty_step_from_sz_decimals():
@@ -40,7 +37,7 @@ def test_a_negative_sz_decimals_is_refused_by_both_steps(step):
 
 
 def test_asset_spec_derives_both_steps_from_sz_decimals():
-    spec = AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=_schedule())
+    spec = AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=margin_schedule())
     assert spec.qty_step == D("0.00001")
     assert spec.tick_size == D("0.1")
 
@@ -48,12 +45,12 @@ def test_asset_spec_derives_both_steps_from_sz_decimals():
 @pytest.mark.parametrize("coin", ["", "   "])
 def test_asset_spec_refuses_a_blank_coin(coin):
     with pytest.raises(ValueError, match="AssetSpec.coin must be a non-empty string"):
-        AssetSpec(coin=coin, sz_decimals=5, margin_schedule=_schedule())
+        AssetSpec(coin=coin, sz_decimals=5, margin_schedule=margin_schedule())
 
 
 def test_asset_spec_refuses_another_assets_margin_schedule():
     with pytest.raises(ValueError, match="AssetSpec.margin_schedule is for 'ETH', not 'BTC'"):
-        AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=_schedule("ETH"))
+        AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=margin_schedule("ETH"))
 
 
 class _Market:
@@ -71,9 +68,9 @@ class _Market:
 
 
 def test_build_asset_spec_reads_one_meta_and_builds_the_spec():
-    market = _Market((5, _schedule()))
+    market = _Market((5, margin_schedule()))
     spec = build_asset_spec(market, "BTC")
-    assert spec == AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=_schedule())
+    assert spec == AssetSpec(coin="BTC", sz_decimals=5, margin_schedule=margin_schedule())
     assert spec.qty_step == D("0.00001")
     assert market.calls == ["BTC"]
 
@@ -87,6 +84,6 @@ def test_build_asset_spec_lets_the_venue_failure_through_unchanged():
 
 
 def test_build_asset_spec_refuses_a_schedule_for_another_coin():
-    market = _Market((5, _schedule("ETH")))
+    market = _Market((5, margin_schedule("ETH")))
     with pytest.raises(ValueError, match="AssetSpec.margin_schedule is for 'ETH', not 'BTC'"):
         build_asset_spec(market, "BTC")

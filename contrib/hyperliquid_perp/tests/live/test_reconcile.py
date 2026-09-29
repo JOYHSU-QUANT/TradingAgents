@@ -15,9 +15,7 @@ import pytest
 
 from contrib.hyperliquid_perp.common.instants import whole_hours_label
 from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
-from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK, FillBackfiller
-from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
 from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -29,6 +27,7 @@ from contrib.hyperliquid_perp.runtime import accounting
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import echo_order_status_cloid
+from ..fakes.gates import protective_order_gate
 from .conftest import StubBackfiller
 
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
@@ -251,17 +250,6 @@ def test_the_fill_cross_check_ladder_refreshes_between_pages(env, tmp_path, monk
     keys = reconciler._fetch_window_fill_keys(fetch_fills, window_start, _NOW, errors)
     assert keys is None  # budget exhausted, window unproven — the paging really ran
     assert len(refreshes) == 3  # one per page, not one per leg
-
-
-def _gate() -> RealOrderGate:
-    return RealOrderGate(
-        allow_real_orders=True,
-        mode=ExecutionMode.TESTNET_LIVE,
-        allowed_symbols=("BTC",),
-        agent_authorized=True,
-        startup_reconciliation_passed=True,
-        kill_switch_active=True,
-    )
 
 
 def _insert_local_order(
@@ -519,7 +507,7 @@ def test_a_non_bot_owned_order_is_a_manual_case(env):
 def test_reconcile_and_apply_routes_a_non_bot_order_to_manual_safe_mode(env):
     db, seams, reconciler = env
     seams.open_orders = [{"oid": 9, "coin": "BTC", "cloid": None, "sz": "1"}]
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     reconciler.reconcile_and_apply(
         "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
@@ -1259,7 +1247,7 @@ def test_a_failed_exchange_read_is_an_unclean_verdict_not_a_crash(env):
 
 def test_a_mismatch_enters_recoverable_safe_mode_and_a_clean_pass_recovers_it(env):
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     # §13.4 auto-release demands a FULLY wired reconciler (no legs_skipped):
     # bind the backfill seam the shared fixture leaves out.
@@ -1285,7 +1273,7 @@ def test_a_mismatch_enters_recoverable_safe_mode_and_a_clean_pass_recovers_it(en
 
 def test_a_clean_pass_with_no_safe_mode_reproves_the_gate(env):
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     reconciler.reconcile_and_apply(
         "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
@@ -1503,7 +1491,7 @@ def test_an_sl_only_mismatch_enters_safe_mode_under_its_own_reason(env):
     seams.clearinghouse = _clearinghouse(
         account_value="101", positions=[_btc_position()], maintenance="1"
     )
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     report = reconciler.reconcile_and_apply(
         "heartbeat", safe_mode=safe_mode, ws_restored=True, kill_switch_active=True
@@ -1671,7 +1659,7 @@ def test_a_clean_pass_does_not_reopen_the_gate_while_release_conditions_are_unme
     # NOT fall through to set_state_reconciled(True): for recoverable safe
     # mode that flag is the gate's only blocking line.
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     # Fully wired (no legs_skipped): this test's subject is the §13.4
     # attestation conditions, not the wiring gate.
@@ -1707,7 +1695,7 @@ def test_manual_reason_mapping_reaches_the_safe_mode_record(env):
     # missing there now fails loud at construction, and the safe-mode record
     # must carry the specific reason end to end.
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     eth = {
         "coin": "ETH",
@@ -1877,7 +1865,7 @@ def test_a_clean_pass_with_skipped_legs_never_auto_releases(env):
     # 2026-07-17; the tempting PR 5 shape is a cheap heartbeat wiring
     # without the fill seams).
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     seams.clearinghouse = _clearinghouse(account_value="90")  # mismatch → recoverable
     reconciler.reconcile_and_apply(
@@ -2828,7 +2816,7 @@ def test_the_persisted_diff_clips_the_strings_it_does_not_author(env):
     # A leg that recorded a failed read: the fill cross-check, deliberately not
     # the open-orders read, which would abort the very loop that mints the case.
     seams.fills = RuntimeError("y" * 5000)  # → an errors entry
-    safe_mode = SafeModeManager(db=db, run_id="r", gate=_gate(), clock=ManualClock(_NOW))
+    safe_mode = SafeModeManager(db=db, run_id="r", gate=protective_order_gate(), clock=ManualClock(_NOW))
     reconciler.reconcile_and_apply(
         "heartbeat",
         safe_mode=safe_mode,
@@ -2860,7 +2848,7 @@ def test_an_unmapped_backlog_enters_safe_mode_with_a_named_detail(env):
     # pass, and the reason survives all the way into the safe-mode entry detail
     # (and the persisted diff) instead of entering with detail="".
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     with db.transaction() as conn:
         repo.insert_exchange_reconciliation_event(
@@ -2889,7 +2877,7 @@ def test_sweep_failures_make_the_pass_unclean_without_a_release_flap(env):
     # can neither auto-release the latch nor re-anchor the episode — and the
     # entry names the sweep, not the generic mismatch.
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     reconciler._backfiller = StubBackfiller()
     safe_mode.enter("recoverable", "ws_disconnect")  # a latch a clean pass would lift
@@ -2928,7 +2916,7 @@ def test_a_compound_failure_names_every_cause_in_the_safe_mode_detail(env):
     # surface: an operator reading "equity_mismatch" would never learn that
     # exchange fills are also unbooked and a stale order is still resting.
     db, seams, reconciler = env
-    gate = _gate()
+    gate = protective_order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     seams.clearinghouse = _clearinghouse(account_value="90")  # equity mismatch (a case)
     with db.transaction() as conn:

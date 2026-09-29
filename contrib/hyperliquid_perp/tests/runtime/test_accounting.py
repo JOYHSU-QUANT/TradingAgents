@@ -13,17 +13,14 @@ from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState
 from contrib.hyperliquid_perp.runtime import accounting as acc
 
+from ..fakes.market import margin_schedule
+from ..fakes.seeds import init_paper_run, long_position
+
 _FEE = Decimal("0.00045")
 
 
 def _flat(coin="BTC") -> PositionState:
     return PositionState.flat(coin)
-
-
-def _long(size, entry, realized="0") -> PositionState:
-    return PositionState(
-        coin="BTC", size=Decimal(size), entry_price=Decimal(entry), realized_pnl=Decimal(realized)
-    )
 
 
 def _db() -> Database:
@@ -48,7 +45,7 @@ def test_open_long_from_flat():
 
 def test_add_to_long_averages_entry():
     e = acc.compute_fill_effect(
-        _long("0.02", "100"),
+        long_position("0.02", "100"),
         side="buy",
         qty=Decimal("0.02"),
         price=Decimal("110"),
@@ -61,7 +58,7 @@ def test_add_to_long_averages_entry():
 
 def test_reduce_long_realizes_and_keeps_entry():
     e = acc.compute_fill_effect(
-        _long("0.05", "100"),
+        long_position("0.05", "100"),
         side="sell",
         qty=Decimal("0.02"),
         price=Decimal("110"),
@@ -74,7 +71,7 @@ def test_reduce_long_realizes_and_keeps_entry():
 
 def test_close_long_goes_flat():
     e = acc.compute_fill_effect(
-        _long("0.05", "100"),
+        long_position("0.05", "100"),
         side="sell",
         qty=Decimal("0.05"),
         price=Decimal("90"),
@@ -100,7 +97,7 @@ def test_open_short_and_reduce():
 
 def test_flip_in_one_fill_opens_remainder_at_fill_price():
     e = acc.compute_fill_effect(
-        _long("0.02", "100"),
+        long_position("0.02", "100"),
         side="sell",
         qty=Decimal("0.05"),
         price=Decimal("120"),
@@ -153,10 +150,10 @@ def test_funding_pnl_sign():
 
 
 def test_summarize_account():
-    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = margin_schedule()
     ledger = AccountLedger(wallet_balance=Decimal("1000"))
     val = acc.PositionValuation(
-        position=_long("0.05", "60000"), mark_price=Decimal("61000"), schedule=sched
+        position=long_position("0.05", "60000"), mark_price=Decimal("61000"), schedule=sched
     )
     m = acc.summarize_account(ledger, [val], leverage=Decimal("1"))
     assert m.total_position_notional == Decimal("3050")  # 0.05 * 61000
@@ -171,30 +168,19 @@ def test_summarize_account():
 # --------------------------------------------------------------------------
 
 
-def _init(db, balance="1000", positions=()):
-    acc.initialize_run(
-        db,
-        run_id="r1",
-        mode="paper",
-        initial_balance_usdc=Decimal(balance),
-        schema_version=1,
-        initial_positions=positions,
-    )
-
-
 def test_initialize_run_seeds_ledger_and_positions():
     db = _db()
-    _init(db, "1000", positions=[_long("0.01", "60000")])
+    init_paper_run(db, "1000", positions=[long_position("0.01", "60000")])
     assert repo.get_current_account_state(db.conn, "r1").wallet_balance == Decimal("1000")
-    assert repo.get_current_position(db.conn, "r1", "BTC") == _long("0.01", "60000")
+    assert repo.get_current_position(db.conn, "r1", "BTC") == long_position("0.01", "60000")
     db.close()
 
 
 def test_summarize_account_reports_none_leverage_when_insolvent():
-    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = margin_schedule()
     ledger = AccountLedger(wallet_balance=Decimal("-100"))
     val = acc.PositionValuation(
-        position=_long("0.05", "60000"), mark_price=Decimal("60000"), schedule=sched
+        position=long_position("0.05", "60000"), mark_price=Decimal("60000"), schedule=sched
     )
     m = acc.summarize_account(ledger, [val], leverage=Decimal("1"))
     assert m.account_equity < 0
@@ -204,7 +190,7 @@ def test_summarize_account_reports_none_leverage_when_insolvent():
 def test_fill_effect_enforces_wallet_identity():
     with pytest.raises(ValueError, match="wallet_delta"):
         acc.FillEffect(
-            position=_long("0.01", "100"),
+            position=long_position("0.01", "100"),
             realized_pnl_delta=Decimal("1"),
             fee=Decimal("0.1"),
             fill_notional=Decimal("1"),
@@ -217,7 +203,7 @@ def test_fill_effect_rejects_negative_fee_and_notional():
     # notional is a magnitude) reject a hand-built instance that disagrees.
     with pytest.raises(ValueError, match="fee must be >= 0"):
         acc.FillEffect(
-            position=_long("0.01", "100"),
+            position=long_position("0.01", "100"),
             realized_pnl_delta=Decimal("0"),
             fee=Decimal("-0.1"),
             fill_notional=Decimal("1"),
@@ -225,7 +211,7 @@ def test_fill_effect_rejects_negative_fee_and_notional():
         )
     with pytest.raises(ValueError, match="fill_notional must be >= 0"):
         acc.FillEffect(
-            position=_long("0.01", "100"),
+            position=long_position("0.01", "100"),
             realized_pnl_delta=Decimal("0"),
             fee=Decimal("0"),
             fill_notional=Decimal("-1"),
@@ -267,8 +253,8 @@ def test_initialize_run_warns_on_nonpositive_balance(caplog):
 
 def test_replay_with_initial_positions():
     db = _db()
-    seed = _long("0.01", "50000")
-    _init(db, positions=[seed])
+    seed = long_position("0.01", "50000")
+    init_paper_run(db, positions=[seed])
     # No fills: replay rebuilds the seed position and opening balance from the
     # run's own committed genesis rows — no caller-supplied config involved.
     result = acc.replay(db, run_id="r1")
@@ -318,17 +304,17 @@ def test_account_metrics_invariants_enforced():
 
 
 def test_position_valuation_rejects_non_positive_mark():
-    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = margin_schedule()
     with pytest.raises(ValueError, match="mark_price must be > 0"):
-        acc.PositionValuation(_long("0.01", "60000"), Decimal("0"), sched)
+        acc.PositionValuation(long_position("0.01", "60000"), Decimal("0"), sched)
 
 
 def test_position_valuation_rejects_coin_mismatch():
-    # _long is a BTC position; pairing it with an ETH schedule would value it
+    # The position is BTC; pairing it with an ETH schedule would value it
     # against the wrong asset's tier table — rejected at construction.
     sched = MarginSchedule(coin="ETH", tiers=(MarginTier(Decimal(0), Decimal(50)),))
     with pytest.raises(ValueError, match="must be the same asset"):
-        acc.PositionValuation(_long("0.01", "60000"), Decimal("60000"), sched)
+        acc.PositionValuation(long_position("0.01", "60000"), Decimal("60000"), sched)
 
 
 # --------------------------------------------------------------------------
@@ -339,9 +325,9 @@ def test_position_valuation_rejects_coin_mismatch():
 def test_summarize_account_is_immune_to_ambient_decimal_context():
     import decimal
 
-    sched = MarginSchedule(coin="BTC", tiers=(MarginTier(Decimal(0), Decimal(50)),))
+    sched = margin_schedule()
     ledger = AccountLedger(wallet_balance=Decimal("1234.56789"))
-    vals = [acc.PositionValuation(_long("0.0123", "61234.5"), Decimal("61999.875"), sched)]
+    vals = [acc.PositionValuation(long_position("0.0123", "61234.5"), Decimal("61999.875"), sched)]
     baseline = acc.summarize_account(ledger, vals, leverage=Decimal("3"))
     original = decimal.getcontext().prec
     try:
@@ -359,7 +345,7 @@ def test_summarize_account_is_immune_to_ambient_decimal_context():
 
 def test_initialize_run_rejects_duplicate_run_id_and_rolls_back():
     db = _db()
-    _init(db, "1000", positions=[_long("0.01", "60000")])
+    init_paper_run(db, "1000", positions=[long_position("0.01", "60000")])
     # Re-initializing an existing run is a lifecycle error surfaced as a clean
     # domain error (not a raw sqlite3.IntegrityError), matching the missing-run path.
     with pytest.raises(ValueError, match="already initialized"):
@@ -378,7 +364,7 @@ def test_initialize_run_rejects_duplicate_run_id_and_rolls_back():
 
 def test_initialize_run_rejects_duplicate_seed_coins_atomically():
     db = _db()
-    dup = [_long("0.01", "60000"), _long("0.02", "50000")]  # both BTC
+    dup = [long_position("0.01", "60000"), long_position("0.02", "50000")]  # both BTC
     with pytest.raises(sqlite3.IntegrityError):
         acc.initialize_run(
             db,

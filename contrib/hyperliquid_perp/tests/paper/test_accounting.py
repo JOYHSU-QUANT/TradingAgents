@@ -15,14 +15,10 @@ from contrib.hyperliquid_perp.persistence.ids import funding_event_id, slice_id
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.runtime import accounting as runtime_accounting
 
+from ..fakes.seeds import init_paper_run, long_position
+
 _FEE = Decimal("0.00045")
 _TS = datetime(2026, 7, 1, tzinfo=timezone.utc)
-
-
-def _long(size, entry, realized="0") -> PositionState:
-    return PositionState(
-        coin="BTC", size=Decimal(size), entry_price=Decimal(entry), realized_pnl=Decimal(realized)
-    )
 
 
 def _db() -> Database:
@@ -34,20 +30,9 @@ def _db() -> Database:
 # --------------------------------------------------------------------------
 
 
-def _init(db, balance="1000", positions=()):
-    runtime_accounting.initialize_run(
-        db,
-        run_id="r1",
-        mode="paper",
-        initial_balance_usdc=Decimal(balance),
-        schema_version=1,
-        initial_positions=positions,
-    )
-
-
 def test_post_fill_updates_position_and_ledger():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     acc.post_fill(
         db,
         run_id="r1",
@@ -85,7 +70,7 @@ def test_apply_fill_rejects_autocommit_connection():
     # apply_fill's atomicity contract is caller-owned: a bare connection still
     # in autocommit would commit each write separately, so it is rejected.
     db = _db()
-    _init(db)
+    init_paper_run(db)
     with pytest.raises(ValueError, match="open transaction"):
         acc.apply_fill(
             db.conn,
@@ -123,7 +108,7 @@ def test_post_fill_requires_initialized_run():
 
 def test_duplicate_slice_fill_rolls_back_ledger():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     sid = slice_id("r1", "plan1", None, 0)
     acc.post_fill(
         db,
@@ -166,7 +151,7 @@ def test_duplicate_slice_fill_rolls_back_ledger():
 
 def test_funding_posts_once_and_retry_is_noop():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     r1 = acc.record_funding(
         db,
         run_id="r1",
@@ -198,7 +183,7 @@ def test_funding_posts_once_and_retry_is_noop():
 
 def test_funding_pending_then_backfilled_posts_once():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     pend = acc.record_funding(
         db,
         run_id="r1",
@@ -243,7 +228,7 @@ def test_funding_pending_then_backfilled_posts_once():
 
 def test_funding_requires_mark_when_rate_known():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     with pytest.raises(ValueError, match="mark_price is required"):
         acc.record_funding(
             db,
@@ -259,7 +244,7 @@ def test_funding_requires_mark_when_rate_known():
 
 def test_funding_backfill_uses_pending_row_basis():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     # Settlement captured pending: long 0.05 @ mark 60000.
     acc.record_funding(
         db,
@@ -293,7 +278,7 @@ def test_funding_backfill_uses_pending_row_basis():
 
 def test_funding_rejects_naive_timestamp():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     with pytest.raises(ValueError, match="timezone-aware"):
         acc.record_funding(
             db,
@@ -311,7 +296,7 @@ def test_funding_rejects_naive_timestamp():
 def test_funding_pending_requires_mark():
     # The pending row is the stored settlement basis; it must be captured complete.
     db = _db()
-    _init(db)
+    init_paper_run(db)
     with pytest.raises(ValueError, match="pending funding event must record"):
         acc.record_funding(
             db,
@@ -330,7 +315,7 @@ def test_funding_rejects_nonpositive_mark():
     # never enter the settlement basis. A zero mark would post pnl=0 once, permanently
     # dropping the real settlement; a negative mark posts a wrong-sign consistent pnl.
     db = _db()
-    _init(db)
+    init_paper_run(db)
     with pytest.raises(ValueError, match="mark_price must be > 0"):  # pending-store path
         acc.record_funding(
             db,
@@ -362,7 +347,7 @@ def test_funding_negative_wallet_warns(caplog):
     import logging
 
     db = _db()
-    _init(db, "1")  # small positive balance -> no init-time warn
+    init_paper_run(db, "1")  # small positive balance -> no init-time warn
     with caplog.at_level(logging.WARNING):
         result = acc.record_funding(
             db,
@@ -397,7 +382,7 @@ def test_funding_dedups_same_instant_across_utc_offsets():
     # The same settlement expressed in a +05:00 offset must hit the same
     # exactly-once key — the wallet moves once, not twice.
     db = _db()
-    _init(db)
+    init_paper_run(db)
     first = _record_btc_funding(db, _TS)
     assert first.status == "posted"
     wallet_after = repo.get_current_account_state(db.conn, "r1").wallet_balance
@@ -413,7 +398,7 @@ def test_funding_floors_to_settlement_hour():
     # A backfill stamped a few seconds past the hour (fundingHistory ms epochs)
     # is the same settlement as the scheduler's top-of-hour instant.
     db = _db()
-    _init(db)
+    init_paper_run(db)
     first = _record_btc_funding(db, _TS)
     skewed = _TS + timedelta(seconds=37, microseconds=250)
     second = _record_btc_funding(db, skewed)
@@ -430,7 +415,7 @@ def test_funding_backfill_refuses_legacy_pending_without_mark():
     # insert_funding_event itself now rejects creating such a row, so the
     # legacy/corrupt store is simulated with raw SQL.
     db = _db()
-    _init(db)
+    init_paper_run(db)
     with db.transaction() as conn:
         from contrib.hyperliquid_perp.persistence.ids import funding_event_id
 
@@ -460,7 +445,7 @@ def test_funding_backfill_stamps_updated_at_and_keeps_recorded_at():
     # posting instant, so a live posting and an hours-later backfill stay
     # distinguishable (and backfill latency stays measurable).
     db = _db()
-    _init(db)
+    init_paper_run(db)
     pending = acc.record_funding(
         db,
         run_id="r1",
@@ -556,7 +541,7 @@ def test_post_fill_warns_when_equity_underwater_but_wallet_positive(caplog):
     # A tiny reduce at a crushed price keeps the wallet positive but leaves the
     # residual position deeply underwater at that price — exercises the
     # equity_at_fill_price <= 0 disjunct, distinct from the wallet < 0 one.
-    _init(db, balance="10", positions=[_long("1", "100")])
+    init_paper_run(db, balance="10", positions=[long_position("1", "100")])
     with caplog.at_level(logging.WARNING):
         acc.post_fill(
             db,
@@ -580,7 +565,7 @@ def test_post_fill_warns_when_wallet_goes_negative(caplog):
     import logging
 
     db = _db()
-    _init(db, balance="0.1")  # fee 0.27 on the fill below exceeds the wallet
+    init_paper_run(db, balance="0.1")  # fee 0.27 on the fill below exceeds the wallet
     with caplog.at_level(logging.WARNING):
         acc.post_fill(
             db,
@@ -606,7 +591,7 @@ def test_post_fill_warns_when_wallet_goes_negative(caplog):
 
 
 def _run_series(db):
-    _init(db)
+    init_paper_run(db)
     acc.post_fill(
         db,
         run_id="r1",
@@ -679,7 +664,7 @@ def test_replay_detects_corrupted_position():
 
 def test_funding_events_across_timestamps_are_distinct():
     db = _db()
-    _init(db)
+    init_paper_run(db)
     later = _TS + timedelta(hours=1)
     a = acc.record_funding(
         db,

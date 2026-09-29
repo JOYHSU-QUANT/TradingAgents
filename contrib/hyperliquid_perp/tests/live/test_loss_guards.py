@@ -7,9 +7,8 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.live.config import ExecutionMode, LiveSafetyConfig
+from contrib.hyperliquid_perp.live.config import LiveSafetyConfig
 from contrib.hyperliquid_perp.live.loss_guards import LossGuards
-from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.safe_mode import (
     REASON_CONSECUTIVE_LOSS,
     REASON_DAILY_LOSS,
@@ -19,19 +18,9 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
+from ..fakes.gates import order_gate
+
 _NOW = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
-
-
-def _gate() -> RealOrderGate:
-    return RealOrderGate(
-        allow_real_orders=True,
-        mode=ExecutionMode.TESTNET_LIVE,
-        allowed_symbols=("BTC",),
-        agent_authorized=True,
-        startup_reconciliation_passed=True,
-        kill_switch_active=True,
-        state_reconciled=True,
-    )
 
 
 def _safety(**overrides) -> LiveSafetyConfig:
@@ -60,7 +49,7 @@ def env():
             created_at=_NOW,
         )
     clock = ManualClock(_NOW)
-    gate = _gate()
+    gate = order_gate()
     safe_mode = SafeModeManager(db=db, run_id="r", gate=gate, clock=clock)
     yield db, gate, safe_mode, clock
     db.close()
@@ -142,6 +131,7 @@ def test_daily_loss_breach_enters_recoverable_safe_mode(env):
     ok = guards.evaluate_daily_loss(account_equity=Decimal(981), now=_NOW + timedelta(minutes=1))
     assert ok.breached is False
     assert safe_mode.active is False
+    assert gate.state_reconciled is True
 
     hit = guards.evaluate_daily_loss(account_equity=Decimal(979), now=_NOW + timedelta(minutes=2))
     assert hit.breached is True

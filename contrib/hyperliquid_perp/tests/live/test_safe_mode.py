@@ -7,8 +7,6 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.live.config import ExecutionMode
-from contrib.hyperliquid_perp.live.order_gate import RealOrderGate
 from contrib.hyperliquid_perp.live.safe_mode import (
     REASON_DAILY_LOSS,
     REASON_INVALID_LOCAL_FILL,
@@ -25,19 +23,9 @@ from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
+from ..fakes.gates import order_gate
+
 _NOW = datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc)
-
-
-def _gate() -> RealOrderGate:
-    return RealOrderGate(
-        allow_real_orders=True,
-        mode=ExecutionMode.TESTNET_LIVE,
-        allowed_symbols=("BTC",),
-        agent_authorized=True,
-        startup_reconciliation_passed=True,
-        kill_switch_active=True,
-        state_reconciled=True,
-    )
 
 
 @pytest.fixture
@@ -52,7 +40,7 @@ def env():
             schema_version=6,
             created_at=_NOW,
         )
-    gate = _gate()
+    gate = order_gate()
     manager = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     yield db, gate, manager
     db.close()
@@ -70,6 +58,7 @@ def _events(db):
 
 def test_entering_recoverable_persists_state_and_history_and_shuts_the_gate(env):
     db, gate, manager = env
+    assert gate.state_reconciled is True
     assert manager.enter("recoverable", REASON_WS_DISCONNECT) is True
 
     state = manager.current()
@@ -215,7 +204,7 @@ def test_a_restart_does_not_clear_safe_mode_and_hydrate_restores_the_gate(env):
     db, _, manager = env
     manager.enter("manual", REASON_NON_BOT_OWNED_ORDER)
 
-    fresh_gate = _gate()  # a new process: fail-closed flags, no memory
+    fresh_gate = order_gate()  # a new process: no memory of the safe mode
     fresh_gate.manual_safe_mode = False
     fresh = SafeModeManager(db=db, run_id="r", gate=fresh_gate, clock=ManualClock(_NOW))
     state = fresh.hydrate_gate()
@@ -225,7 +214,7 @@ def test_a_restart_does_not_clear_safe_mode_and_hydrate_restores_the_gate(env):
 
 def test_hydrate_on_a_clean_run_clears_a_stale_manual_flag(env):
     db, _, _ = env
-    gate = _gate()
+    gate = order_gate()
     gate.manual_safe_mode = True  # a mis-set flag must be reconciled to the store
     manager = SafeModeManager(db=db, run_id="r", gate=gate, clock=ManualClock(_NOW))
     assert manager.hydrate_gate() is None

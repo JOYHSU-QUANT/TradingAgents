@@ -12,10 +12,9 @@ from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeReques
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck, OrderAck
 from contrib.hyperliquid_perp.live.config import (
     AGGRESSIVE_FILL_BAND_PCT,
-    ExecutionMode,
     LiveProtectionConfig,
 )
-from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected, RealOrderGate
+from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected
 from contrib.hyperliquid_perp.live.protection import ProtectionManager, ProtectionOutcome
 from contrib.hyperliquid_perp.paper.stops import StopConfig, round_to_tick
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -24,6 +23,7 @@ from contrib.hyperliquid_perp.persistence.models import PositionState, Side
 from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
 from ..conftest import echo_order_status_cloid, identity_latch_rows, misrouted_order_status
+from ..fakes.gates import order_gate
 
 _NOW = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
 _TICK = Decimal("1")
@@ -98,18 +98,6 @@ class _FakeClient:
         return {"status": "unknownOid"}
 
 
-def _gate() -> RealOrderGate:
-    return RealOrderGate(
-        allow_real_orders=True,
-        mode=ExecutionMode.TESTNET_LIVE,
-        allowed_symbols=("BTC",),
-        agent_authorized=True,
-        startup_reconciliation_passed=True,
-        kill_switch_active=True,
-        state_reconciled=True,
-    )
-
-
 @pytest.fixture
 def env():
     db = Database(":memory:")
@@ -137,7 +125,7 @@ def test_a_switch_that_cannot_report_firings_fails_loud(env):
     book — the exact §17.3 check this method exists to run. Absent switch: quiet.
     Broken switch: loud (2026-08-01 round-14 concept scan).
     """
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
 
     class _Mute:  # switch-shaped, minus the one attribute that matters
         pass
@@ -199,7 +187,7 @@ def _long_position(size=Decimal("0.1"), entry=Decimal(50000)) -> PositionState:
 def _all_fail_client():
     client = _FakeClient()
     client.place_script = ["error", "error", "error"]
-    return client, _gate()
+    return client, order_gate()
 
 
 # -- SL placement / modify --------------------------------------------------
@@ -208,7 +196,7 @@ def _all_fail_client():
 def test_sl_placed_on_new_long(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     outcome = mgr.sync(
         position=_long_position(),
@@ -238,7 +226,7 @@ def test_sl_placed_on_new_long(env):
 def test_sl_modified_when_already_resting(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(),
@@ -264,7 +252,7 @@ def test_sl_modified_when_already_resting(env):
 def test_sl_noop_when_unchanged(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(),
@@ -292,7 +280,7 @@ def test_sl_side_mismatch_is_not_treated_as_a_noop(env):
     short = PositionState(coin="BTC", size=Decimal("-0.1"), entry_price=Decimal(50000))
     with db.transaction() as conn:
         repo.upsert_current_position(conn, "r", short, updated_at=_NOW)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=short, liquidation_price=Decimal(60000), mark=Decimal(50000), plan_active=True
@@ -322,7 +310,7 @@ def test_sl_side_mismatch_is_not_treated_as_a_noop(env):
 def test_sl_repair_retries_then_succeeds(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["error", "raise", "ok"]  # third attempt lands
     sleeps: list[float] = []
     mgr = _manager(db, client, gate, sleeps=sleeps)
@@ -367,7 +355,7 @@ def test_the_repair_backoff_is_capped_to_leave_room_for_two_timeouts(env):
     three lines below the constant (2026-08-01 round-13 concept scan).
     """
     db = env
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     sleeps: list[float] = []
     mgr = _manager(db, client, gate, sleeps=sleeps)
     # delay 5 x backoff 10 = 50s of nominal backoff, clamped to the slot.
@@ -400,7 +388,7 @@ def test_sl_repair_recovers_landed_order_from_order_status(env):
     an already-protected position."""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["raise"]  # the first attempt's ack is lost
     client.status_script = [
         {"status": "order", "order": {"order": {"oid": 4242}, "status": "open"}}
@@ -428,7 +416,7 @@ def test_sl_recovery_of_canceled_order_is_not_treated_as_protected(env):
     Canceled family slipped through as a false 'protected'.)"""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["raise", "raise", "raise"]  # every ack lost
     client.status_script = [
         {"status": "order", "order": {"order": {"oid": 7}, "status": "reduceOnlyCanceled"}}
@@ -453,7 +441,7 @@ def test_sl_recovery_of_filled_order_persists_filled_not_open(env):
     the no-op guard skip re-arming."""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["raise"]  # ack lost; the order actually filled
     client.status_script = [
         {"status": "order", "order": {"order": {"oid": 99}, "status": "filled"}}
@@ -482,7 +470,7 @@ def test_cancel_refused_by_exchange_does_not_mark_row_canceled(env):
     gate's failure line up, and retries the cancel next sync."""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     # Place an SL first (a resting stop_loss row to clear later).
     mgr.sync(
@@ -525,7 +513,7 @@ def test_degraded_protection_cleared_event_on_recovery(env):
     only that degradation was entered."""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     # First sync: SL placed, TP fails all 3 attempts -> DEGRADED.
     client.place_script = ["ok", "error", "error", "error"]
     mgr = _manager(db, client, gate)
@@ -623,7 +611,7 @@ def test_the_orderstatus_confirmation_read_refreshes_across_itself(env):
     row = {"cloid_hex": "0x" + "a" * 32}
 
     # Failure path: the read rode its timeout and resolved nothing.
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [ExchangeRequestError("status endpoint down")]
     ks = _FakeKillSwitch(fired_total=1)  # latched: rows are suspect
     mgr = _manager(db, client, gate, kill_switch=ks)
@@ -632,7 +620,7 @@ def test_the_orderstatus_confirmation_read_refreshes_across_itself(env):
 
     # Success path: a confirmed-resting row refreshes too — it cost the same
     # round-trip, and returning early past the refresh is what caused the bug.
-    client2, gate2 = _FakeClient(), _gate()
+    client2, gate2 = _FakeClient(), order_gate()
     client2.status_script = [_resting_status_payload("777")]
     ks2 = _FakeKillSwitch(fired_total=1)
     mgr2 = _manager(db, client2, gate2, kill_switch=ks2)
@@ -657,7 +645,7 @@ def test_an_unclassifiable_status_word_is_not_proof_that_a_stop_still_rests(env)
     _seed_long(db)
     row = {"cloid_hex": "0x" + "a" * 32}
 
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [
         {"status": "order", "order": {"order": {"oid": "1001"}, "status": "someFutureWord"}}
     ]
@@ -670,7 +658,7 @@ def test_an_unclassifiable_status_word_is_not_proof_that_a_stop_still_rests(env)
 
     # Narrowness: a KNOWN resting word still confirms, so nothing normal is
     # blocked by the stricter reading.
-    client2, gate2 = _FakeClient(), _gate()
+    client2, gate2 = _FakeClient(), order_gate()
     client2.status_script = [_resting_status_payload("777")]
     mgr2 = _manager(db, client2, gate2, kill_switch=_FakeKillSwitch(fired_total=1))
     assert mgr2._row_still_rests(row, role="stop_loss") is True
@@ -692,7 +680,7 @@ def test_confirming_the_stop_loss_does_not_vouch_for_the_take_profit(env):
     sl_row = {"cloid_hex": "0x" + "5" * 32}
     tp_row = {"cloid_hex": "0x" + "7" * 32}
 
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     # First read confirms the SL; the second — for the TP — says it is gone.
     client.status_script = [
         _resting_status_payload("111"),
@@ -726,7 +714,7 @@ def test_a_fresh_placement_vouches_for_itself_without_an_extra_read(env):
     """
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
     mgr.sync(
@@ -757,7 +745,7 @@ def test_lost_ack_recovery_does_not_book_an_unclassifiable_word_as_live(env):
     """
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [
         {"status": "order", "order": {"order": {"oid": "4242"}, "status": "someFutureWord"}}
     ]
@@ -784,7 +772,7 @@ def test_tp_cancel_failure_during_plan_degrades(env):
     PROTECTED — the stale reduce-only TP can still fire against the plan."""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     # No plan yet: establishes both SL and TP.
     mgr.sync(
@@ -811,7 +799,7 @@ def test_tp_cancel_failure_during_plan_degrades(env):
 def test_no_safe_sl_band_needs_emergency_close(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     # Liquidation right at entry: no safe band → CLOSE_NOW → emergency close.
     outcome = mgr.sync(
@@ -832,7 +820,7 @@ def test_sl_fire_band_floored_at_the_aggressive_band_while_tp_keeps_routine(env)
     missed TP is opportunity cost, a missed SL is an uncapped loss."""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)  # max_slippage_pct = 0.005
     outcome = mgr.sync(
         position=_long_position(),
@@ -863,7 +851,7 @@ def test_sl_fire_band_floored_at_the_aggressive_band_while_tp_keeps_routine(env)
 def test_tp_placed_when_no_plan(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     outcome = mgr.sync(
         position=_long_position(),
@@ -882,7 +870,7 @@ def test_tp_placed_when_no_plan(env):
 def test_tp_suspended_during_plan_cancels_resting(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(),
@@ -916,7 +904,7 @@ def test_an_unsuspendable_tp_keeps_its_recorded_price(env):
     # Truthfulness runs both ways.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(),
@@ -941,7 +929,7 @@ def test_an_unsuspendable_tp_keeps_its_recorded_price(env):
 def test_tp_failure_is_degraded_not_close(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["ok", "error", "error", "error"]  # SL lands, every TP fails
     mgr = _manager(db, client, gate)
     outcome = mgr.sync(
@@ -963,7 +951,7 @@ def test_tp_failure_is_degraded_not_close(env):
 def test_flat_cancels_resting_protection(env):
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(),
@@ -995,7 +983,7 @@ def test_clearing_a_flat_position_refreshes_across_each_cancel(env):
     """
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     ks = _FakeKillSwitch()
     mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
@@ -1022,7 +1010,7 @@ def test_short_position_sl_is_a_buy(env):
     short = PositionState(coin="BTC", size=Decimal("-0.1"), entry_price=Decimal(50000))
     with db.transaction() as conn:
         repo.upsert_current_position(conn, "r", short, updated_at=_NOW)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=short, liquidation_price=Decimal(60000), mark=Decimal(50000), plan_active=True
@@ -1042,7 +1030,7 @@ def test_all_gate_rejected_sl_ladder_is_blocked_not_emergency_close(env):
     # never escalates: one stop_loss_repair_blocked event, no exhaustion.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["gate", "gate", "gate"]
     outcome = _manager(db, client, gate).sync(
         position=_long_position(),
@@ -1077,7 +1065,7 @@ def test_a_gate_blocked_modify_records_the_still_resting_sl(env):
     # healthy 30-cycle acceptance run on one kill-switch refresh blip.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(),
@@ -1118,7 +1106,7 @@ def test_a_gate_blocked_resize_does_not_claim_the_undersized_sl_covers(env):
     # seconds (an exit-5 metric) would read 0 over a genuinely exposed run.
     db = env
     _seed_long(db, size=Decimal("0.1"))
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(size=Decimal("0.1")),
@@ -1158,7 +1146,7 @@ def test_a_rate_limited_ladder_holds_instead_of_emergency_closing(env):
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
 
     def _throttle(**_kw):
         raise ExchangeThrottledError("429 Too Many Requests")
@@ -1191,7 +1179,7 @@ def test_one_real_rejection_among_throttles_still_exhausts(env):
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     calls = {"n": 0}
     real_place = client.place_trigger_order
 
@@ -1233,7 +1221,7 @@ def test_a_blocked_sl_does_not_claim_coverage_from_a_row_the_switch_invalidated(
     # refuses and why the exchange has already emptied the book — the real shape.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     ks = _FakeKillSwitch()
     mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
@@ -1272,7 +1260,7 @@ def test_a_blocked_sl_still_stamps_a_row_orderstatus_confirms_is_resting(env):
     # must stay suppressed, or one blip fails a healthy 30-cycle acceptance run.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     ks = _FakeKillSwitch()
     mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
@@ -1308,7 +1296,7 @@ def test_an_unreadable_orderstatus_does_not_let_a_stale_row_claim_coverage(env):
     # None open_orders as False. A transport error is not evidence of coverage.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     ks = _FakeKillSwitch()
     mgr = _manager(db, client, gate, kill_switch=ks)
     mgr.sync(
@@ -1348,7 +1336,7 @@ def test_a_fired_switch_makes_the_no_op_guard_re_place_the_cancelled_sl(env):
     # re-placed. The no-op actively fights its own recovery.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     ks = _FakeKillSwitch()
     mgr = _manager(db, client, gate, kill_switch=ks)
     position = _long_position()
@@ -1403,7 +1391,7 @@ def test_a_refresh_blip_does_not_invalidate_the_rows(env):
     # carve-out exists to prevent. Suspicion now keys on the FIRING count.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     ks = _FakeKillSwitch()  # fired_total stays 0: the switch never went off
     mgr = _manager(db, client, gate, kill_switch=ks)
     position = _long_position()
@@ -1434,7 +1422,7 @@ def test_a_healthy_run_never_pays_for_an_orderstatus_confirmation(env):
     # local row stands on its own and the no-op shortcut must stay free.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     position = _long_position()
     mgr.sync(
@@ -1462,7 +1450,7 @@ def test_a_wrong_side_resting_sl_does_not_count_as_coverage(env):
     # the qty test alone would pass here and suppress the window.
     db = env
     _seed_long(db, size=Decimal("0.1"))
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     mgr.sync(
         position=_long_position(size=Decimal("0.1")),
@@ -1502,7 +1490,7 @@ def test_mixed_gate_and_real_failures_still_exhaust_to_emergency_close(env):
     # semantics and escalates to the emergency close.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["gate", "raise", "error"]
     outcome = _manager(db, client, gate).sync(
         position=_long_position(),
@@ -1524,7 +1512,7 @@ def test_blocked_sl_ladder_recovers_on_a_later_sync_when_the_gate_reopens(env):
     # line, and the audit trail records the restoration.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["gate", "gate", "gate"]
     mgr = _manager(db, client, gate)
     first = mgr.sync(
@@ -1557,7 +1545,7 @@ def test_duplicate_cloid_ack_recovers_resting_order_without_resend(env):
     # resting recovers it — PROTECTED, no resend, no burned repair attempts.
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["duplicate"]
     client.status_script = [
         {"status": "order", "order": {"order": {"oid": 4343}, "status": "open"}}
@@ -1585,7 +1573,7 @@ def test_recovery_query_failure_counts_as_failed_attempt_not_a_crash(env):
     # out of sync() (the tick must survive).
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["raise", "raise", "raise"]
     client.status_script = [RuntimeError("orderStatus down") for _ in range(3)]
     outcome = _manager(db, client, gate).sync(
@@ -1608,7 +1596,7 @@ def test_orders_changed_last_sync_tracks_real_order_changes(env):
     reports False — the engine keys its protection_change reconcile off this."""
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _manager(db, client, gate)
     outcome = mgr.sync(
         position=_long_position(),
@@ -1648,7 +1636,7 @@ def test_an_unreadable_recovery_answer_is_recorded_under_its_own_cause(env):
     """
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.place_script = ["raise"]  # ack lost -> recovery probe runs
     # The venue answers, but for ANOTHER order: parse_order_status raises
     # MalformedResponseError rather than handing back a stranger's status.
@@ -1687,7 +1675,7 @@ def test_an_unreadable_recovery_reason_does_not_leak_into_later_attempt_rows(env
     """
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     # Three attempts: only the FIRST one's recovery probe answers unusably.
     client.place_script = ["raise", "raise", "raise"]
     client.status_script = [
@@ -1739,7 +1727,7 @@ def test_the_identity_fault_latches_on_the_kth_consecutive_unreadable_answer(env
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [misrouted_order_status() for _ in range(K)]
     # fired_total=1 latches row-suspicion, which is what makes the no-op guard
     # ask the exchange at all; an unreadable answer never caches, so every one
@@ -1773,7 +1761,7 @@ def test_the_latched_identity_fault_writes_one_audit_row_per_episode(env):
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [misrouted_order_status() for _ in range(K + 6)]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
@@ -1795,7 +1783,7 @@ def test_a_readable_answer_ends_the_unreadable_streak(env):
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [
         *[misrouted_order_status() for _ in range(K - 1)],
         {"status": "unknownOid"},
@@ -1823,7 +1811,7 @@ def test_a_transport_failure_neither_counts_toward_nor_resets_the_identity_fault
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [
         *[misrouted_order_status() for _ in range(K - 1)],
         ExchangeRequestError("status endpoint down"),
@@ -1860,7 +1848,7 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [misrouted_order_status() for _ in range(K)]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
@@ -1924,7 +1912,7 @@ def test_the_no_op_guards_alone_cannot_latch_within_one_sync(env):
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _established(db, client, gate)
 
     before = len(client.status_queries)
@@ -1962,7 +1950,7 @@ def test_a_persistently_misrouting_venue_latches_within_a_few_syncs(env):
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     mgr = _established(db, client, gate)
 
     client.status_script = [misrouted_order_status() for _ in range(200)]
@@ -1999,7 +1987,7 @@ def test_a_failed_latch_audit_write_neither_crashes_the_tick_nor_drops_the_latch
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [misrouted_order_status() for _ in range(K)]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch(fired_total=1))
 
@@ -2029,7 +2017,7 @@ def test_a_recovered_venue_lowers_the_latch_so_a_recurrence_is_visible_again(env
 
     db = env
     _seed_long(db)
-    client, gate = _FakeClient(), _gate()
+    client, gate = _FakeClient(), order_gate()
     client.status_script = [
         *[misrouted_order_status() for _ in range(K)],
         {"status": "unknownOid"},

@@ -69,6 +69,7 @@ __all__ = [
     "TEMPERATURE_BOUNDS",
     "Binary",
     "Figures",
+    "QuestionScore",
     "ReliabilityBucket",
     "base_rates",
     "binary_figures",
@@ -77,6 +78,7 @@ __all__ = [
     "ensemble",
     "figures",
     "fit_temperature",
+    "headline_scores",
     "log_loss",
     "move_base_rate",
     "outcome_class",
@@ -539,3 +541,79 @@ def describe_probe(
             )
         )
     return lines
+
+
+# -- per question, for pooling runs (plan PR 2.2) -----------------------------------
+
+
+@dataclass(frozen=True)
+class QuestionScore:
+    """One headline forecast's Brier score and the base rate's, on one question.
+
+    ``binary`` is ``(model, base)`` squared errors of up against down, on a
+    question that moved and a run whose train segment moved; ``None``
+    otherwise. ``stand_in`` marks a question scored as the base rate.
+    """
+
+    input_id: str
+    at_ms: int
+    brier: float
+    base_brier: float
+    stand_in: bool
+    binary: tuple[float, float] | None
+
+
+def headline_scores(
+    card: Scorecard,
+    answers: Mapping[int, Sequence[ProbeAnswer]],
+    eligible: Collection[str],
+    key: str,
+    segment: SegmentName,
+) -> list[QuestionScore] | None:
+    """The headline's questions of one segment, in time order, scored one by one.
+
+    The same forecasts and the same stand-ins :func:`describe_probe` scores,
+    so a pooled figure over one run is that run's headline figure. ``None``
+    when the run has no train base rate at this horizon: its questions have
+    nothing to be held against.
+    """
+    bars = PROBE_KEYS[key]
+    found = base_rates(card, bars)
+    if found is None:
+        return None
+    base = found[0]
+    moved = move_base_rate(card, bars)
+    base_up = None if moved is None else moved[0]
+    merged = ensemble(answers)
+    scores: list[QuestionScore] = []
+    for row in card.rows:
+        me = row.question.input_id
+        answer = merged.get(me)
+        if row.segment is not segment or answer is None or me not in eligible:
+            continue
+        if answer.invalid_reason == REFUSED:
+            continue
+        outcome = outcome_class(row.outcomes[bars].ret, card.flat_bands[bars])
+        if outcome is None:
+            continue
+        stand_in = answer.invalid_reason == INVALID_PROBE
+        if stand_in:
+            forecast: Mapping[str, float] = base
+        else:
+            assert answer.forecast is not None
+            forecast = answer.forecast[key]
+        binary = None
+        if outcome != "flat" and base_up is not None:
+            went_up = outcome == "up"
+            binary = ((up_given_move(forecast) - went_up) ** 2, (base_up - went_up) ** 2)
+        scores.append(
+            QuestionScore(
+                input_id=me,
+                at_ms=row.question.at_ms,
+                brier=brier(forecast, outcome),
+                base_brier=brier(base, outcome),
+                stand_in=stand_in,
+                binary=binary,
+            )
+        )
+    return scores

@@ -90,10 +90,9 @@ def build_signed_client(
 class LiveSession:
     """The components one live-mode process runs its §19.1 recovery over.
 
-    Built by :func:`build_live_session`. The daemon reads the components back
-    off its session for the ``--loop`` hand-off and the §18.2 shutdown sweep;
-    the smoke suite builds one per recovery it runs (the pre-flight and
-    restart tests 15–17).
+    Built by :func:`build_live_session`. The daemon hands its session whole to
+    the ``--loop`` and to the §18.2 shutdown sweep; the smoke suite builds one
+    per recovery it runs (the pre-flight and restart tests 15–17).
     """
 
     signed: HyperliquidSignedClient

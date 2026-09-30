@@ -1191,14 +1191,13 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     RUNBOOK §4's A/B exception deliberately lets one run straddle a
     prompt-only deploy and segments the before/after populations on
     ``ai_inputs.prompt_version`` — which makes this stamp the ONLY thing
-    separating them. It lives in ``common/prompt_regime.py`` (issue #197; the
-    ``cli`` names below are re-exports of it) while the text it versions
-    lives in ``domains/perp/target_decision.py``, and nothing makes the
-    constant track the text — no assertion but this one relates them (the
-    suite's other reference, in test_main, only echoes the value). So a
-    prompt edit that forgot the bump would merge the two populations into
-    one bucket and the merge would be invisible in the data: the query still
-    returns a clean two-value split.
+    separating them. It lives in ``common/prompt_regime.py`` (issue #197)
+    while the text it versions lives in ``domains/perp/target_decision.py``,
+    and nothing makes the constant track the text — no assertion but this
+    one relates them (the suite's other reference, in test_main, only echoes
+    the value). So a prompt edit that forgot the bump would merge the two
+    populations into one bucket and the merge would be invisible in the
+    data: the query still returns a clean two-value split.
 
     The digest covers the block as rendered from ``DecisionConfig()``, so a
     changed config DEFAULT trips it too. That is the intended reading rather
@@ -1209,7 +1208,6 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     ``PROMPT_VERSION`` to a value that has never been used before (rollbacks
     included — see the RUNBOOK), then update the digest here.
     """
-    from contrib.hyperliquid_perp import cli as _cli
     from contrib.hyperliquid_perp.common import prompt_regime
     from contrib.hyperliquid_perp.domains.perp.target_decision import (
         DecisionConfig,
@@ -1230,11 +1228,10 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # v6 (2026-09-22) bumped for the CONTEXT again — the Last fill: line's
     # age unit (issue #288) — so v6's digest is v5's.
     assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v6", "947e85a9b7b750f1")
-    # The daemon's spelling (``integration.decision_provider``) and the ``cli``
-    # re-export are the same object, not a second declaration that would keep
-    # equal today and fork the next time one side moves.
+    # The daemon's spelling (``integration.decision_provider``) is the same
+    # object, not a second declaration that would keep equal today and fork
+    # the next time one side moves.
     assert decision_provider_mod.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
-    assert _cli.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
 
 
 def _book(**overrides):

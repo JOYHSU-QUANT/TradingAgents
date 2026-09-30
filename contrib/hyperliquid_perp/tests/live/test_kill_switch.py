@@ -1767,7 +1767,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     #    Only exercising it proves anything (2026-08-01 exit check).
     from types import SimpleNamespace
 
-    from contrib.hyperliquid_perp import cli as cli_mod
+    from contrib.hyperliquid_perp.cli import live_loop as live_loop_mod
     from contrib.hyperliquid_perp.exchanges.hyperliquid import mapper as mapper_mod
 
     ticks: list[str] = []
@@ -1783,7 +1783,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
             "map_account_snapshot",
             lambda snap: SimpleNamespace(account_value="account-value"),
         )
-        baseline = cli_mod._day_baseline_from_exchange(lambda: object(), _Switch())
+        baseline = live_loop_mod._day_baseline_from_exchange(lambda: object(), _Switch())
         assert baseline == "account-value"  # it really read the exchange
         assert ticks == ["refresh"]  # ...and refreshed across the read
 
@@ -1794,7 +1794,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
             raise RuntimeError("clearinghouse down")
 
         with pytest.raises(RuntimeError):
-            cli_mod._day_baseline_from_exchange(_boom, _Switch())
+            live_loop_mod._day_baseline_from_exchange(_boom, _Switch())
         assert ticks == ["refresh"]
     finally:
         patch.undo()

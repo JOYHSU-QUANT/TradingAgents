@@ -10,7 +10,12 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import main as cli_main
+from contrib.hyperliquid_perp.cli import (
+    _common as common_mod,
+    main as cli_main,
+    paper as paper_mod,
+    paper_export as paper_export_mod,
+)
 from contrib.hyperliquid_perp.common import store_layout
 from contrib.hyperliquid_perp.integration import decision_provider as decision_provider_mod
 from contrib.hyperliquid_perp.paper import accounting as paper_accounting
@@ -71,14 +76,13 @@ def test_paper_fresh_run_missing_api_key_exits_1(tmp_path, capsys, monkeypatch, 
     # A fresh run always drives the AI, so a missing key still refuses — but the
     # check now fires in the fresh-run branch, BEFORE the run row is written, so a
     # retry with the key still sees a clean --create (no half-created run).
-    import contrib.hyperliquid_perp.cli as cli_mod
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     # Sentinel pins the dotenv_diagnosis wiring: the abort message must embed
     # the diagnosis for the actual variable — dropping the interpolation (or
     # diagnosing the wrong var) is invisible to the substring check alone.
     # (The message is printed by _common._require_api_key — patch its module.)
-    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    monkeypatch.setattr(common_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     path = tmp_path / "new.db"
     rc = cli_main(paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 1
@@ -251,7 +255,6 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     replay-mismatch restart, with *less* trustworthy books, already gets it).
     Same construction contract as the mismatch fork: scheduler/provider never
     built, and the settle-exit messaging carries the missing-key reason."""
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
 
@@ -287,7 +290,7 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
     monkeypatch.setattr(decision_provider_mod, "EngineDecisionProvider", _forbid_provider)
     # Sentinel pins the dotenv_diagnosis wiring in the protection-only message
     # (same contract as the fresh-run abort's sentinel above).
-    monkeypatch.setattr(cli_mod.paper, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    monkeypatch.setattr(paper_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     seen: dict[str, object] = {}
 
     def fake_loop(db_, run_id, engine, scheduler, *args, **kwargs):
@@ -297,7 +300,7 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
         seen["halt_reason"] = kwargs["halt_reason"]
         return 0
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", fake_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert seen["scheduler"] is None
     assert seen["engine_active"] is True  # the seeded live position
@@ -310,14 +313,13 @@ def test_paper_keyless_healthy_restart_with_live_work_enters_protection_only(
 
 
 def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypatch, paper_seams):
-    # _EngineDecisionProvider construction runs _build_engine_config, whose
+    # EngineDecisionProvider construction runs _build_engine_config, whose
     # named RuntimeError must map to the documented exit 1 (see
     # _build_engine_config for the causes), not the exit-2 last-resort handler.
     # On a fresh run it fires pre-flight, BEFORE the run row is written — same
     # ordering rule as the key check — so fixing the cause (e.g. re-saving the
     # .env as UTF-8) lets the SAME --create succeed instead of bouncing off
     # "already exists".
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.engine_bridge import EngineImportError
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -346,7 +348,7 @@ def test_paper_provider_import_failure_exits_1_named(tmp_path, capsys, monkeypat
         seen["run_id"] = run_id
         return 0
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", fake_loop)
     rc = cli_main(paper_argv(path, run_id="fresh", config=paper_seams, create=True))
     assert rc == 0
     assert seen["run_id"] == "fresh"
@@ -407,7 +409,6 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
     other halted forks: no scheduler, and the loop messaging carries the
     engine-config-error reason (shared with every other operator-fixable
     engine build failure, e.g. a rejected completion cap)."""
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.engine_bridge import EngineImportError
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
@@ -454,7 +455,7 @@ def test_paper_restart_import_failure_with_live_work_enters_protection_only(
         seen["halt_reason"] = kwargs["halt_reason"]
         return 0
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", fake_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert seen["scheduler"] is None
     assert seen["engine_active"] is True  # the seeded live position
@@ -480,7 +481,6 @@ def test_paper_restart_bad_engine_env_knob_with_live_work_enters_protection_only
     crash-loop with no protection at all. This pins the lane, not just the
     validator: it is what the raise's error TYPE buys.
     """
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -522,7 +522,7 @@ def test_paper_restart_bad_engine_env_knob_with_live_work_enters_protection_only
         seen["halt_cause"] = kwargs["halt_cause"]
         return 0
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", fake_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert seen["scheduler"] is None
     assert seen["engine_active"] is True  # the seeded live position
@@ -544,7 +544,6 @@ def test_paper_restart_treats_an_unreadable_book_as_live_work(
     test_the_live_loop_treats_an_unreadable_book_as_live_work. The keyless
     restart makes the same call, so it is driven too.
     """
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
@@ -576,7 +575,7 @@ def test_paper_restart_treats_an_unreadable_book_as_live_work(
         seen["halt_reason"] = kwargs["halt_reason"]
         return 0
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", fake_loop)
     # Engine-config-error restart.
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setitem(DEFAULT_CONFIG, "temperature", "abc")
@@ -598,8 +597,6 @@ def test_paper_protection_only_survives_a_broken_stranded_attempt_lookup(
     # review): a store holding two in-progress rows makes it raise by design,
     # and before the shared helper that raise crashed the restart over the
     # live position it was about to guard.
-    import contrib.hyperliquid_perp.cli as cli_mod
-    from contrib.hyperliquid_perp.cli import _common as common_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -635,7 +632,7 @@ def test_paper_protection_only_survives_a_broken_stranded_attempt_lookup(
         raise ValueError(f"run {run_id!r} has 2 in-progress attempts")
 
     monkeypatch.setattr(common_mod.repo, "find_in_progress_attempt", _wedged)
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", lambda *a, **kw: 0)
+    monkeypatch.setattr(paper_mod, "_paper_loop", lambda *a, **kw: 0)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     err = capsys.readouterr().err
     assert "protection-only" in err
@@ -656,13 +653,12 @@ def test_paper_bad_engine_env_knob_with_no_live_work_is_a_named_exit_1(
     ``EngineConfigError`` decision (``gate_restart``); this pins the other
     half, for every env knob in the family.
     """
-    import contrib.hyperliquid_perp.cli as cli_mod
     from tradingagents.default_config import DEFAULT_CONFIG
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setitem(DEFAULT_CONFIG, key, bad)
     monkeypatch.setattr(
-        cli_mod.paper, "_paper_loop", lambda *a, **kw: pytest.fail("the loop must not start")
+        paper_mod, "_paper_loop", lambda *a, **kw: pytest.fail("the loop must not start")
     )
     # Fresh --create: refused before genesis.
     fresh = tmp_path / "fresh.db"
@@ -705,7 +701,6 @@ def test_paper_resume_stamps_drift_breadcrumb(tmp_path, monkeypatch, capsys, pap
     # Drive the real resume path (lease -> drift check -> reconcile) and stop
     # at the loop seam: parameter drift must survive in the store, not only on
     # a possibly-uncaptured stderr stream.
-    import contrib.hyperliquid_perp.cli as cli_mod
 
     path = tmp_path / "cli.db"
     db = Database(path)
@@ -724,7 +719,7 @@ def test_paper_resume_stamps_drift_breadcrumb(tmp_path, monkeypatch, capsys, pap
     def stop_loop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", stop_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert "config drift on resume" in capsys.readouterr().err
 
@@ -749,7 +744,6 @@ def test_paper_resume_stamps_drift_breadcrumb(tmp_path, monkeypatch, capsys, pap
 def test_paper_resume_stamps_the_breadcrumb_on_the_value_not_the_new_key(
     tmp_path, monkeypatch, capsys, paper_seams, window, expected_status
 ):
-    import contrib.hyperliquid_perp.cli as cli_mod
 
     path = tmp_path / "cli.db"
     db = Database(path)
@@ -775,7 +769,7 @@ def test_paper_resume_stamps_the_breadcrumb_on_the_value_not_the_new_key(
     def stop_loop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", stop_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert ("config drift on resume" in capsys.readouterr().err) == (expected_status == "drift")
 
@@ -788,7 +782,6 @@ def test_paper_resume_stamps_the_breadcrumb_on_the_value_not_the_new_key(
 def test_paper_resume_clean_stamps_ok_breadcrumb(tmp_path, monkeypatch, paper_seams):
     # A clean resume overwrites any earlier "drift" verdict: a reverted config
     # must not leave a stale drift as the store's last word.
-    import contrib.hyperliquid_perp.cli as cli_mod
 
     path, db = seed_db(tmp_path)  # no genesis config record -> nothing drifts
     db.close()
@@ -796,7 +789,7 @@ def test_paper_resume_clean_stamps_ok_breadcrumb(tmp_path, monkeypatch, paper_se
     def stop_loop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", stop_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
 
     db = Database(path)
@@ -811,7 +804,6 @@ def test_paper_ctrl_c_shutdown_retries_pending_funding_before_final_export(
 ):
     # The Ctrl-C/SIGTERM lane is the other "last word" export: drive a real
     # KeyboardInterrupt through _cmd_paper and pin backfill-before-export.
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
@@ -851,12 +843,12 @@ def test_paper_ctrl_c_shutdown_retries_pending_funding_before_final_export(
         lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
     )
     monkeypatch.setattr(
-        cli_mod.paper_export,
+        paper_export_mod,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
     monkeypatch.setattr(
-        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt())
+        paper_mod.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt())
     )
 
     rc = cli_main(paper_argv(path, run_id="r", config=paper_seams))
@@ -874,7 +866,6 @@ def test_paper_protection_only_startup_notes_stranded_in_progress_attempt(
     lifetime. Deliberately kept that way — only a healthy restart may resume
     the SAME attempt — but the operator must be told, not left to find a
     perpetually-open cycle in a post-mortem."""
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
@@ -907,10 +898,10 @@ def test_paper_protection_only_startup_notes_stranded_in_progress_attempt(
     )
     monkeypatch.setattr(PaperExecutionEngine, "tick", lambda self: None)
     monkeypatch.setattr(
-        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+        paper_export_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
     monkeypatch.setattr(
-        cli_mod.paper.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt())
+        paper_mod.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt())
     )
 
     rc = cli_main(paper_argv(path, run_id="r", config=paper_seams))
@@ -942,7 +933,6 @@ def test_paper_lease_takeover_exits_1_without_export_and_preserves_successor(
     release must NOT clear the successor's fresh lease."""
     import os
 
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.engine import PaperExecutionEngine
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
@@ -978,11 +968,11 @@ def test_paper_lease_takeover_exits_1_without_export_and_preserves_successor(
     monkeypatch.setattr(PaperExecutionEngine, "tick", lambda self: None)
     exports: list[str] = []
     monkeypatch.setattr(
-        cli_mod.paper_export,
+        paper_export_mod,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", lambda s: None)
+    monkeypatch.setattr(paper_mod.time, "sleep", lambda s: None)
 
     real_heartbeat = run_lock_mod.heartbeat_run_lock
     our_pid = os.getpid()
@@ -1285,11 +1275,10 @@ def test_paper_protection_only_restart_skips_provider_and_stamps_failed(
     tmp_path, monkeypatch, paper_seams
 ):
     """A protection-only restart must not require the decision stack at all: no
-    API key (settled), and — same principle — no ``_EngineDecisionProvider``
+    API key (settled), and — same principle — no ``EngineDecisionProvider``
     construction (its deep tradingagents import could only add failure modes to
     a startup whose one job is keeping SL/TP alive). The replay-raise lane also
     stamps the "failed" breadcrumb, mirroring the mid-run verify."""
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.reconcile import RestartReconciliation
 
@@ -1320,7 +1309,7 @@ def test_paper_protection_only_restart_skips_provider_and_stamps_failed(
         seen["scheduler"] = scheduler
         return 0
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", fake_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", fake_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert seen["scheduler"] is None
 
@@ -1337,7 +1326,6 @@ def test_paper_corrupt_genesis_config_json_resumes_with_drift_warning(
     # A genesis config_json this process cannot parse makes the homogeneity
     # check impossible — that is breadcrumb-grade (warn like parameter drift),
     # never a startup abort that would fire before the protection-only fork.
-    import contrib.hyperliquid_perp.cli as cli_mod
 
     path, db = seed_db(tmp_path)
     with db.transaction() as conn:
@@ -1347,7 +1335,7 @@ def test_paper_corrupt_genesis_config_json_resumes_with_drift_warning(
     def stop_loop(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper, "_paper_loop", stop_loop)
+    monkeypatch.setattr(paper_mod, "_paper_loop", stop_loop)
     assert cli_main(paper_argv(path, run_id="r", config=paper_seams)) == 0
     assert "could not verify config drift" in capsys.readouterr().err
 

@@ -831,21 +831,11 @@ def _live_startup_recovery(
                     loop_raised = True
                     loop_exit = _run_live_loop(
                         cfgs=loop_cfgs,
-                        db=db,
-                        run_id=run_id,
                         coin=coin,
                         config=config,
                         live_cfg=live_cfg,
                         client=client,
-                        signed=signed,
-                        gate=gate,
-                        kill_switch=session.kill_switch,
-                        safe_mode=session.safe_mode,
-                        reconciler=session.reconciler,
-                        processor=session.processor,
-                        payload_dir=payload_dir,
-                        fetch_clearinghouse=fetch_clearinghouse,
-                        identity=session.identity,
+                        session=session,
                     )
                     loop_raised = False
             except RunLockError as exc:

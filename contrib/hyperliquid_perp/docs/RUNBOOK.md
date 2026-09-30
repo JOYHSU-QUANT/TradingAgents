@@ -149,8 +149,8 @@ pending funding、accounting replay 驗證、gap SL 檢查；若這次重啟真�
 （prompt v5 起 `format_fingerprint` 也不再跟著門檻走，所以門檻的 code 預設值改動在
 `ai_inputs`、drift 戳、`prompt_regime:` 三處**都看不到**——只剩 run-id 這一道。）
 prompt 的 context／format 契約改形狀**或改措辭**時（v5 就是純措辭的改版），另要 bump
-`common/prompt_regime.py` 的 `PROMPT_VERSION`（issue #197 起住這裡，與 `prompt_regime:` 行的渲染同檔；
-`cli.PROMPT_VERSION` 是它的 re-export），讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
+`common/prompt_regime.py` 的 `PROMPT_VERSION`（issue #197 起住這裡，與 `prompt_regime:` 行的渲染同檔），
+讓 `ai_inputs.prompt_version` 在資料裡標出改版點。
 **凡是跨越量測邊界的部署都要 bump，回滾也算**：回滾到舊 prompt 不算「改 shape」，
 但沿用已退役的舊值會讓 `GROUP BY prompt_version` 把 v3 之前與回滾之後併成同一桶，
 正好污染要拿來比的基線。退役過的值一律不得重用（回滾就給**下一個從未用過的值**，

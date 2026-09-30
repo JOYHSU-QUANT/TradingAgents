@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import _run_config_subset
+from contrib.hyperliquid_perp.cli._drift import _run_config_subset
 from contrib.hyperliquid_perp.persistence.db import Database, connect, stored_schema_version
 from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE, MIGRATIONS
 from contrib.hyperliquid_perp.runtime import accounting

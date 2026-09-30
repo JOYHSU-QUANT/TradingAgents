@@ -27,7 +27,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import main as cli_main
+from contrib.hyperliquid_perp.cli import _common as common_mod, main as cli_main
+from contrib.hyperliquid_perp.cli.live_shared import _conflicting_run_lease
+from contrib.hyperliquid_perp.cli.smoke import _build_smoke_session
 from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck, OrderAck
 from contrib.hyperliquid_perp.live.authorization import (
@@ -353,11 +355,10 @@ def test_live_smoke_missing_agent_key_carries_the_dotenv_diagnosis(
     # way test_paper.py does for the paper refusals: the message must embed
     # the diagnosis for the ACTUAL variable — dropping the interpolation, or
     # diagnosing the wrong var, is invisible to the substring check above.
-    import contrib.hyperliquid_perp.cli as cli_mod
 
     monkeypatch.delenv(_SMOKE_ENV, raising=False)
     # Printed by _common._require_agent_key since issue #126 — patch its module.
-    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    monkeypatch.setattr(common_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)
     rc = cli_main(["live-smoke", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)])
@@ -694,7 +695,6 @@ def test_conflicting_run_lease_reports_a_fresh_sibling(tmp_path):
     # THIS run_id. But the kill-switch arm/clear, updateLeverage and the §19.3
     # sweep are per-WALLET, and a sibling run in the same store shares the
     # wallet — so the sibling has to be found by a separate read.
-    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
 
     now = datetime.now(timezone.utc)
     dbp = tmp_path / "sib.db"
@@ -708,7 +708,6 @@ def test_conflicting_run_lease_ignores_a_stale_sibling_at_the_boundary(tmp_path)
     # LOCK_STALE_SECONDS old is the one acquire_run_lock itself treats as
     # takeable (the holder is presumed dead), so refusing on it would ground the
     # smoke suite on the corpse of a crashed run forever.
-    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
     from contrib.hyperliquid_perp.runtime.run_lock import LOCK_STALE_SECONDS
 
     now = datetime.now(timezone.utc)
@@ -740,7 +739,6 @@ def test_a_sibling_on_the_other_network_is_not_a_conflict(tmp_path):
     # testnet scheduleCancel cannot reach a mainnet order. Keying the refusal on
     # "same store" told the operator to stop a REAL-MONEY run in order to smoke
     # a testnet one (exit check 2026-07-31), so the network decides.
-    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
 
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)  # r1, testnet (the suite's own run)
@@ -763,7 +761,6 @@ def test_a_sibling_whose_network_differs_only_in_case_is_still_a_conflict(tmp_pa
     # strings made them look like different networks and sent this guard
     # fail-OPEN — the one direction its docstring forbids, since the cost of a
     # false pass is a stripped dead-man switch on a live wallet.
-    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
 
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)  # r1, "testnet"
@@ -781,7 +778,6 @@ def test_a_paper_sibling_is_not_a_conflict(tmp_path):
     # telling the operator to stop a run to protect a dead-man cover it never had.
     import json
 
-    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
     from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
     from contrib.hyperliquid_perp.runtime import accounting
 
@@ -805,7 +801,6 @@ def test_a_sibling_whose_genesis_network_is_unreadable_is_treated_as_a_conflict(
     # Fail-closed on a corrupt genesis: an unreadable network is not evidence of
     # safety, and the cost of a false refusal is one operator message against a
     # stripped dead-man switch on a live wallet.
-    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
 
     cfg = _smoke_yaml(tmp_path)
     dbp = _seed_genesis_run(tmp_path, cfg)
@@ -821,7 +816,6 @@ def test_conflicting_run_lease_never_reports_the_runs_own_lease(tmp_path):
     # Negative control, and the one that matters most: an ordinary `live-smoke`
     # re-run against a store where this run's own lease row is still populated
     # must not refuse itself — that would break every invocation.
-    from contrib.hyperliquid_perp.cli import _conflicting_run_lease
 
     now = datetime.now(timezone.utc)
     dbp = tmp_path / "sib.db"
@@ -883,7 +877,6 @@ def test_real_smoke_session_takes_the_kill_switch_deadline_from_config(tmp_path,
     # fire and cancel the resting probe — the exact failure the refresh exists
     # to prevent. 600 is deliberately off-default: a probe asserting 120 would
     # have passed against the bug.
-    from contrib.hyperliquid_perp.cli import _build_smoke_session
     from contrib.hyperliquid_perp.live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE, SmokeContext
 
     assert (
@@ -909,7 +902,6 @@ def test_a_short_configured_cover_is_floored_not_inherited(tmp_path, smoke_seams
     # before the value was wired from config at all: the switch fires mid-test
     # and cancels the resting probe, recorded as "the exchange refused" — which
     # sends the operator to check config and market state, not the clock.
-    from contrib.hyperliquid_perp.cli import _build_smoke_session
     from contrib.hyperliquid_perp.live.smoke import SMOKE_MIN_KILL_SWITCH_DEADLINE
 
     # 80/5, not 40/5: since the timing invariant started counting the failed

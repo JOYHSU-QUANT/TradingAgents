@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import _live_heartbeat, _still_owns_run
+from contrib.hyperliquid_perp.cli import live_loop as live_loop_mod
+from contrib.hyperliquid_perp.cli.live_loop import _live_heartbeat, _still_owns_run
 from contrib.hyperliquid_perp.domains.perp.risk_gate import DecisionConfig, RiskConfig
 from contrib.hyperliquid_perp.domains.perp.schema import TopOfBook
 from contrib.hyperliquid_perp.integration import decision_provider as decision_provider_mod
@@ -420,7 +421,7 @@ def _drive_live_loop_construction(
 
     The construction block is straight-line, it is where the three safety kwargs
     below are decided, and it can simply be driven. The drive stops at
-    ``_EngineDecisionProvider``, the last of the three. It is not pure
+    ``EngineDecisionProvider``, the last of the three. It is not pure
     construction by then: the block reads the store from the ledger lookup
     onwards, runs ``ensure_settlement_anchor``, and builds the real
     ``LiveExecutionEngine`` (whose own ``__init__`` reads the position) before
@@ -431,17 +432,17 @@ def _drive_live_loop_construction(
     The recorders subclass the real classes and construct THROUGH them wherever
     the real constructor runs offline, so a call site that drifts from a
     signature dies here instead of being recorded as fine. The exception is
-    ``_EngineDecisionProvider``, whose ``__init__`` builds a whole engine
+    ``EngineDecisionProvider``, whose ``__init__`` builds a whole engine
     config: its arguments are bound against the real signature instead.
     """
     import inspect
 
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.exchanges.hyperliquid import market_data as md_mod
     from contrib.hyperliquid_perp.live import loss_guards as lg_mod, protection as prot_mod
     from contrib.hyperliquid_perp.live.config import LiveConfig
     from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
     from contrib.hyperliquid_perp.live.venue_identity import VenueIdentityMonitor
+    from contrib.hyperliquid_perp.live.wiring import LiveSession
 
     reach_loop_body = (
         adoption_raises is not None
@@ -501,7 +502,7 @@ def _drive_live_loop_construction(
 
         monkeypatch.setattr(module, name, _Recording)
 
-    real_provider = cli_mod._EngineDecisionProvider
+    real_provider = decision_provider_mod.EngineDecisionProvider
 
     class _RecordingProvider:
         def __init__(self, *args, **kwargs):
@@ -575,7 +576,7 @@ def _drive_live_loop_construction(
         monkeypatch.setattr(LiveExecutionEngine, "tick", _stop)
         # The body sleeps out the rest of the cadence after each contained tick,
         # so a drive that survives its first tick would wait the real 10s.
-        monkeypatch.setattr(cli_mod.live_loop, "_LIVE_TICK_SECONDS", 0.0)
+        monkeypatch.setattr(live_loop_mod, "_LIVE_TICK_SECONDS", 0.0)
         # The loop heartbeats BEFORE its first tick and treats a lost lease as
         # fatal, so an unseeded lock_pid would end the drive for an unrelated
         # reason and read as "the loop body never ran".
@@ -609,23 +610,26 @@ def _drive_live_loop_construction(
         stop_at = _StopTheLoop if reach_loop_body else StopBeforeTheLoop
 
     def _drive():
-        return cli_mod._run_live_loop(
+        return live_loop_mod._run_live_loop(
             cfgs=(RiskConfig(leverage=D(1), max_target_margin_pct=60), DecisionConfig()),
-            db=db,
-            run_id="r1",
             coin="BTC",
             config={},
             live_cfg=live_cfg,
             client=SimpleNamespace(),
-            signed=SimpleNamespace(open_orders=lambda: []),
-            gate=gate,
-            kill_switch=built.kill_switch,
-            safe_mode=SafeModeManager(db=db, run_id="r1", gate=gate),
-            reconciler=SimpleNamespace(),
-            processor=SimpleNamespace(),
-            payload_dir=tmp_path / "payloads",
-            fetch_clearinghouse=fetch_clearinghouse,
-            identity=built.identity,
+            session=LiveSession(
+                signed=SimpleNamespace(open_orders=lambda: []),
+                gate=gate,
+                db=db,
+                run_id="r1",
+                payload_dir=tmp_path / "payloads",
+                fetch_clearinghouse=fetch_clearinghouse,
+                identity=built.identity,
+                kill_switch=built.kill_switch,
+                safe_mode=SafeModeManager(db=db, run_id="r1", gate=gate),
+                processor=SimpleNamespace(),
+                backfiller=SimpleNamespace(),
+                reconciler=SimpleNamespace(),
+            ),
         )
 
     try:
@@ -959,7 +963,7 @@ def test_the_live_loop_protection_only_reports_an_operator_stop(tmp_path, monkey
 def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_path, monkeypatch):
     """§18.2: the longest REST chain in the system refreshes between its reads.
 
-    ``_EngineDecisionProvider.on_blocking_read`` defaults to None, and
+    ``EngineDecisionProvider.on_blocking_read`` defaults to None, and
     ``_build_context``'s ``_between_reads`` simply returns when it is — so the
     four back-to-back full-timeout reads of a decision cycle run entirely
     unrefreshed. That chain is what ``_MAX_UNREFRESHED_REST_CALLS`` is reasoned

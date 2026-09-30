@@ -269,7 +269,7 @@ _TRIGGER_PROBE_IS_BUY = False
 class SmokeContext:
     """Everything a smoke test needs, injected so the harness is fake-able.
 
-    The CLI builds this from the live components (``cli._build_smoke_session`` /
+    The CLI builds this from the live components (``cli.smoke._build_smoke_session`` /
     ``_build_real_smoke_session``, both driven by ``_cmd_live_smoke`` — NOT
     ``_cmd_live``); the unit tests build it from fakes. ``run_recovery`` runs
     one §19.1 startup recovery and returns an object exposing ``.passed`` (the

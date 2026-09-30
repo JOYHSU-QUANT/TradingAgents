@@ -59,17 +59,17 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **`cli/__init__.py` binds no private name but its six dispatch targets**
+- **`cli/__init__.py` imports no private name but its six dispatch targets**
   (refactor plan v2, T2-f — PR 11 of the plan; no behaviour change). The
   package re-exported thirty-eight underscore names — thirty-five from its
   submodules, three from `integration/` and `exchanges/` — plus
-  `PROMPT_VERSION` and `paper_export`, all so a test could import them from
-  `contrib.hyperliquid_perp.cli`; every one of those imports now reads the
-  defining `cli.*` submodule (or `integration.decision_provider`). What
-  `__init__` keeps is `_cmd_*` —
-  `main()`'s own dispatch table — and the layering ratchet that froze the
+  `PROMPT_VERSION` and `paper_export`, none of which production code read
+  through the package; the tests that imported one of them from
+  `contrib.hyperliquid_perp.cli` now reads the defining `cli.*` submodule
+  (or `integration.decision_provider`). What `__init__` keeps is `_cmd_*`
+  — the targets `main()` dispatches to — and the layering ratchet that froze the
   re-export list on 2026-09-22 (PR #293) is now a pin on those six
-  (`test_the_cli_package_binds_no_private_name_but_its_dispatch_targets`).
+  (`test_the_cli_package_imports_no_private_name_but_its_dispatch_targets`).
   `_run_live_loop` takes the daemon's `LiveSession` as one `session=`
   argument in place of the eleven components it took one by one: five that
   `_live_startup_recovery` read off that session, six it had built the

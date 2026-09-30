@@ -746,7 +746,7 @@ def execution_mode(config_json: str | None) -> str:
         return "unknown"
     # Valid JSON that is not an object (``"5"``, ``"[]"``) parses fine but has no
     # ``.get`` — a corrupt genesis record must degrade to "unknown", never crash
-    # this read-only reporter (same discipline as cli._config_drift_report).
+    # this read-only reporter (same discipline as cli._drift._config_drift_report).
     live = parsed.get("live") if isinstance(parsed, dict) else None
     if isinstance(live, dict) and isinstance(live.get("mode"), str):
         return live["mode"]
@@ -782,7 +782,7 @@ def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
     if raw is None:
         return DEFAULT_SCHEDULE_CANCEL_SECONDS
     # COERCE exactly as the config layer does; never type-test. ``config_json``
-    # stores the ``live:`` block VERBATIM, before coercion (cli._run_config_subset),
+    # stores the ``live:`` block VERBATIM, before coercion (cli._drift._run_config_subset),
     # so a perfectly legal ``schedule_cancel_seconds: "300"`` arrives here as a
     # str — and an ``isinstance(raw, (int, float))`` test silently fell back to
     # 120, measuring the run against a deadline it never had. That is precisely

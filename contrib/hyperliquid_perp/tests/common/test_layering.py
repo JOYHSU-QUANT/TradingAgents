@@ -933,13 +933,13 @@ def _private_import_bindings(source: Path, root: Path = _SOURCE_ROOT) -> set[str
     return found
 
 
-def test_the_cli_package_binds_no_private_name_but_its_dispatch_targets():
+def test_the_cli_package_imports_no_private_name_but_its_dispatch_targets():
     # ``main()`` reads the ``_cmd_*`` targets in the same file; every other
     # private name a test needs is imported from its defining submodule, so a
-    # new binding here is a re-export with no reader.
+    # new import here is a re-export with no reader.
     found = _private_import_bindings(_SOURCE_ROOT / "cli" / "__init__.py")
     assert found == _CLI_DISPATCH_TARGETS, _ratchet_message(
-        "cli/__init__'s private bindings", found, _CLI_DISPATCH_TARGETS
+        "cli/__init__'s private import bindings", found, _CLI_DISPATCH_TARGETS
     )
 
 

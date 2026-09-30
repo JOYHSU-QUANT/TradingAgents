@@ -623,7 +623,7 @@ def _drive_cmd_live_loop_to_its_exit(
     called, the scripted recovery goes straight to the ``finally``, and that
     lane runs no §12.2 pre-shutdown reconcile. ``on_recovery`` runs inside
     the scripted recovery, after the session is built, with the recovery's
-    kwargs (the session's components).
+    kwargs.
 
     The smoke gate is seeded open, the §19.1 recovery is scripted as a pass
     (its real arming needs a live exchange), and the loop itself is replaced
@@ -666,9 +666,9 @@ def test_cmd_live_hands_the_loop_the_session_its_recovery_ran_over(
     tmp_path, live_seams, monkeypatch
 ):
     # The loop's ``session=`` is the one object ``_live_startup_recovery``
-    # built and ran the §19.1 recovery over -- the same armed switch, safe mode
-    # and reconciler, not a second session wired the same way (the six inputs
-    # a second one would be built from are shared, so they prove nothing).
+    # built and ran the §19.1 recovery over — the same switch, safe mode
+    # and reconciler, not a second session wired the same way (the inputs a
+    # second one would be built from are shared, so those prove nothing).
     recovered = {}
     handed = {}
 

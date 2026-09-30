@@ -424,9 +424,11 @@ def test_live_run_facts_rejects_a_replay_exception_without_its_count(db):
     with db.read_transaction() as conn:
         facts = read_live_run_facts(conn, run_id="r", config_json=None, now=_T0)
     assert facts.replay_raised is None
-    with pytest.raises(ValueError, match="requires account_replay_mismatch_count == 1"):
+    with pytest.raises(ValueError, match="one unverifiable book"):
         replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=0)
-    assert replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=1)
+    raised = replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=1)
+    assert raised.replay_raised == "ValueError: boom"
+    assert raised.account_replay_mismatch_count == 1
 
 
 def test_a_stranded_cycle_with_an_unreadable_stamp_is_a_failure(tmp_path):

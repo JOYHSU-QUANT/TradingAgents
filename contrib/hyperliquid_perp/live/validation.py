@@ -423,8 +423,9 @@ def _apply_integrity_gate(failures: list[str], *, facts: LiveRunFacts) -> None:
     # this shape, so §3.1 startup adoption raises on every re-read and the run
     # never decides again (issue #205). An integrity failure rather than a
     # shortfall: no later state makes the store consistent, and unlike a locked
-    # store it will not clear itself. Read here rather than through the
-    # repository helper precisely because that helper raises.
+    # store it will not clear itself. ``validation_metrics`` reads the rows
+    # through ``repo.iter_in_progress_attempts`` rather than that helper,
+    # precisely because the helper raises.
     if facts.stranded.count > 1:
         failures.append(
             f"in_progress_decision_attempts = {facts.stranded.count} (want <= 1): the run has "

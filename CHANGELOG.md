@@ -61,7 +61,7 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **The live acceptance validator is three modules** (refactor plan v2,
   T3-a — PR 12 of the plan; no behaviour change). `live/validation.py` held
-  the thresholds, the report dataclass with its 250-line renderer, every
+  the thresholds, the 320-line report dataclass with its renderer, every
   store read and a 470-line `validate_live_run`. It now holds the
   thresholds, `execution_mode`, `validate_live_run` and the gates. The
   report and its `summary_lines` live in `live/validation_report.py`, and

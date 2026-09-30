@@ -932,8 +932,9 @@ class LiveRunFacts:
         # otherwise.
         if self.replay_raised is not None and self.account_replay_mismatch_count != 1:
             raise ValueError(
-                f"replay_raised {self.replay_raised!r} requires "
-                f"account_replay_mismatch_count == 1, got {self.account_replay_mismatch_count}"
+                f"replay_raised is {self.replay_raised!r} but account_replay_mismatch_count "
+                f"is {self.account_replay_mismatch_count} (a replay that raised is one "
+                "unverifiable book)"
             )
 
 

@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import _config_drift_report, _run_config_subset
+from contrib.hyperliquid_perp.cli._drift import _config_drift_report, _run_config_subset
 
 
 def _subset_json(config: dict, coin: str) -> str:

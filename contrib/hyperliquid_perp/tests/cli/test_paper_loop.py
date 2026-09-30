@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from contrib.hyperliquid_perp.cli import paper as paper_mod, paper_export as paper_export_mod
+
 from .conftest import seed_db
 
 _T0 = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -67,7 +69,6 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
     """
     from datetime import timedelta
 
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
@@ -88,7 +89,7 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
         lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
     )
     monkeypatch.setattr(
-        cli_mod.paper_export,
+        paper_export_mod,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), False)[1],
     )
@@ -129,10 +130,10 @@ def test_paper_loop_wiring_and_halt_latch(tmp_path, monkeypatch):
         if len(sleeps) >= 2:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+    monkeypatch.setattr(paper_mod.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _Engine(),
@@ -173,7 +174,6 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     import logging
     from datetime import timedelta
 
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
@@ -190,7 +190,7 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
     )
     # Verification passes, so the loop keeps polling instead of latching halt.
     monkeypatch.setattr(
-        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+        paper_export_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
 
     terminal = PollResult(
@@ -211,13 +211,13 @@ def test_paper_loop_escalates_consecutive_stale_feed_refusals(tmp_path, monkeypa
         if iterations >= NO_DECISION_STREAK_THRESHOLD:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+    monkeypatch.setattr(paper_mod.time, "sleep", fake_sleep)
 
     with (
         caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.runtime.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _HoldingEngine(),
@@ -245,7 +245,6 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
     import logging
     from datetime import timedelta
 
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.common.constants import STALE_MARKET_DATA_ERROR
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
@@ -260,7 +259,7 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
         reconcile_mod, "backfill_pending_funding", lambda db_, *, run_id, now, funding_source: None
     )
     monkeypatch.setattr(
-        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+        paper_export_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
 
     def _failed():
@@ -298,13 +297,13 @@ def test_paper_loop_streak_is_reset_by_a_cycle_that_decided(tmp_path, monkeypatc
         if not outcomes:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+    monkeypatch.setattr(paper_mod.time, "sleep", fake_sleep)
 
     with (
         caplog.at_level(logging.WARNING, logger="contrib.hyperliquid_perp.runtime.no_decision"),
         pytest.raises(KeyboardInterrupt),
     ):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _HoldingEngine(),
@@ -331,7 +330,6 @@ def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, mon
     wake. Config rejects intervals above the 30s TWAP slice cadence, so this
     pins the loop's defensive invariant with a direct call (interval=120),
     not an operator-reachable configuration."""
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
@@ -359,10 +357,10 @@ def test_paper_loop_tick_throttled_to_interval_above_heartbeat_cap(tmp_path, mon
         if len(sleeps) >= 4:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+    monkeypatch.setattr(paper_mod.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _Engine(),
@@ -390,7 +388,6 @@ def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch
     ``scheduler=None`` pins the protection-only construction contract: a halted
     start never builds the scheduler/decision provider, so the loop must never
     touch it."""
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
@@ -405,10 +402,10 @@ def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch
     def forbid_sleep(seconds):
         raise AssertionError("must exit before sleeping")
 
-    monkeypatch.setattr(cli_mod.paper_export, "_post_cycle_export", record_export)
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", forbid_sleep)
+    monkeypatch.setattr(paper_export_mod, "_post_cycle_export", record_export)
+    monkeypatch.setattr(paper_mod.time, "sleep", forbid_sleep)
 
-    rc = cli_mod._paper_loop(
+    rc = paper_mod._paper_loop(
         db,
         "r",
         _ClosingEngine(),
@@ -430,22 +427,21 @@ def test_paper_loop_halted_with_nothing_to_protect_exits_1(tmp_path, monkeypatch
 def test_paper_loop_missing_key_settle_exit_names_the_key(tmp_path, monkeypatch, capsys):
     # Same settle-exit lane, but a keyless-healthy halt must tell the operator
     # to set the key — not to investigate a store that verified fine.
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
     monkeypatch.setattr(
-        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+        paper_export_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
     monkeypatch.setattr(
-        cli_mod.paper.time,
+        paper_mod.time,
         "sleep",
         lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
-    rc = cli_mod._paper_loop(
+    rc = paper_mod._paper_loop(
         db,
         "r",
         _ClosingEngine(),
@@ -469,22 +465,21 @@ def test_paper_loop_engine_config_error_settle_exit_names_the_cause(tmp_path, mo
     # or a rejected config value) has healthy books, so the
     # exit message must point at the environment fix — not at investigating a
     # store that verified fine, and not at the API key.
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.runtime.clock import ManualClock
 
     path, db = seed_db(tmp_path)
     monkeypatch.setattr(run_lock_mod, "heartbeat_run_lock", lambda db_, run_id, *, pid, now: None)
     monkeypatch.setattr(
-        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: True
+        paper_export_mod, "_post_cycle_export", lambda db_, run_id, export_dir: True
     )
     monkeypatch.setattr(
-        cli_mod.paper.time,
+        paper_mod.time,
         "sleep",
         lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
-    rc = cli_mod._paper_loop(
+    rc = paper_mod._paper_loop(
         db,
         "r",
         _ClosingEngine(),
@@ -513,7 +508,6 @@ def test_paper_loop_halted_retries_pending_funding_hourly(tmp_path, monkeypatch)
     pending (its P&L uncounted) for the run's whole halted lifetime. The first
     retry waits a full period: every entry into halted mode has just run a
     backfill."""
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.runtime.clock import ManualClock
@@ -538,10 +532,10 @@ def test_paper_loop_halted_retries_pending_funding_hourly(tmp_path, monkeypatch)
         if len(sleeps) >= 250:  # ~2h05m of 30s (interval) wakes — two retry periods
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+    monkeypatch.setattr(paper_mod.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _HoldingEngine(),
@@ -564,7 +558,6 @@ def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch
     # backfill just ran), or a mid-run-halted loop would never retry again.
     from datetime import timedelta
 
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
@@ -583,7 +576,7 @@ def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch
     )
     # The failing verification flips the loop into halted mode on iteration 1.
     monkeypatch.setattr(
-        cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, export_dir: False
+        paper_export_mod, "_post_cycle_export", lambda db_, run_id, export_dir: False
     )
 
     terminal = PollResult(
@@ -613,10 +606,10 @@ def test_paper_loop_mid_run_halt_arms_hourly_funding_retry(tmp_path, monkeypatch
         if len(sleeps) >= 125:  # ~1h02m of 30s (interval) wakes — one retry period
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", fake_sleep)
+    monkeypatch.setattr(paper_mod.time, "sleep", fake_sleep)
 
     with pytest.raises(KeyboardInterrupt):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _Engine(),
@@ -637,7 +630,6 @@ def test_paper_loop_settle_exit_retries_pending_funding_before_final_export(tmp_
     # The settle-exit CSVs are the run's last word — pending funding that can
     # resolve now must be posted before that final export, not left uncounted
     # forever because the process exits.
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.runtime.clock import ManualClock
@@ -651,17 +643,17 @@ def test_paper_loop_settle_exit_retries_pending_funding_before_final_export(tmp_
         lambda db_, *, run_id, now, funding_source: calls.append("backfill"),
     )
     monkeypatch.setattr(
-        cli_mod.paper_export,
+        paper_export_mod,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: (calls.append("export"), True)[1],
     )
     monkeypatch.setattr(
-        cli_mod.paper.time,
+        paper_mod.time,
         "sleep",
         lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
-    rc = cli_mod._paper_loop(
+    rc = paper_mod._paper_loop(
         db,
         "r",
         _ClosingEngine(),
@@ -682,7 +674,6 @@ def test_paper_loop_shutdown_funding_retry_is_best_effort(tmp_path, monkeypatch)
     # the retry exists to complete the final CSVs — a raising retry must not
     # cost us the export itself (or, in the halted timer, kill the loop that
     # keeps SL/TP alive).
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
     from contrib.hyperliquid_perp.runtime.clock import ManualClock
@@ -696,17 +687,17 @@ def test_paper_loop_shutdown_funding_retry_is_best_effort(tmp_path, monkeypatch)
     monkeypatch.setattr(reconcile_mod, "backfill_pending_funding", raising_backfill)
     exports: list[str] = []
     monkeypatch.setattr(
-        cli_mod.paper_export,
+        paper_export_mod,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
     monkeypatch.setattr(
-        cli_mod.paper.time,
+        paper_mod.time,
         "sleep",
         lambda s: (_ for _ in ()).throw(AssertionError("must exit first")),
     )
 
-    rc = cli_mod._paper_loop(
+    rc = paper_mod._paper_loop(
         db,
         "r",
         _ClosingEngine(),
@@ -730,7 +721,6 @@ def test_paper_loop_names_an_untyped_failure_instead_of_counting_api_tries(
     # times" would file a bug as an outage for anyone scraping the log.
     from datetime import timedelta
 
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
@@ -741,7 +731,7 @@ def test_paper_loop_names_an_untyped_failure_instead_of_counting_api_tries(
     monkeypatch.setattr(
         reconcile_mod, "backfill_pending_funding", lambda db_, *, run_id, now, funding_source: None
     )
-    monkeypatch.setattr(cli_mod.paper_export, "_post_cycle_export", lambda db_, run_id, d: True)
+    monkeypatch.setattr(paper_export_mod, "_post_cycle_export", lambda db_, run_id, d: True)
     untyped = PollResult(
         event=CycleEvent.API_FAILED,
         decision_attempt_id="r#001",
@@ -758,9 +748,9 @@ def test_paper_loop_names_an_untyped_failure_instead_of_counting_api_tries(
     def stop_after_one(seconds):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli_mod.paper.time, "sleep", stop_after_one)
+    monkeypatch.setattr(paper_mod.time, "sleep", stop_after_one)
     with pytest.raises(KeyboardInterrupt):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _Engine(),
@@ -783,7 +773,6 @@ def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatc
     # pinned by test_cli_main_wrapper_maps_interrupt_and_unexpected_error).
     from datetime import timedelta
 
-    import contrib.hyperliquid_perp.cli as cli_mod
     from contrib.hyperliquid_perp.paper import reconcile as reconcile_mod
     from contrib.hyperliquid_perp.paper.scheduler import CycleEvent, PollResult
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
@@ -798,7 +787,7 @@ def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatc
     monkeypatch.setattr(reconcile_mod, "backfill_pending_funding", raising_backfill)
     exports: list[str] = []
     monkeypatch.setattr(
-        cli_mod.paper_export,
+        paper_export_mod,
         "_post_cycle_export",
         lambda db_, run_id, export_dir: exports.append(run_id) or True,
     )
@@ -813,7 +802,7 @@ def test_paper_loop_does_not_swallow_backfill_runtime_error(tmp_path, monkeypatc
     )
 
     with pytest.raises(RuntimeError, match="mid-backfill"):
-        cli_mod._paper_loop(
+        paper_mod._paper_loop(
             db,
             "r",
             _HoldingEngine(),

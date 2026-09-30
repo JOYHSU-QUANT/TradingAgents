@@ -906,52 +906,14 @@ def test_the_sql_scan_counts_calls_and_statements_but_not_prose(tmp_path, body, 
     assert _sql_sites(tmp_path / "m.py") == sites
 
 
-_CLI_PRIVATE_REEXPORTS = frozenset(
+_CLI_DISPATCH_TARGETS = frozenset(
     {
-        "_EngineDecisionProvider",
-        "_HARD_DRIFT_KINDS",
-        "_HistoryFundingSource",
-        "_LIVE_TICK_SECONDS",
-        "_RECOVERY_MAX_TICK_GAP_SECONDS",
-        "_UNVERIFIED_MARKER",
-        "_build_real_smoke_session",
-        "_build_smoke_session",
-        "_classify_engine_error",
         "_cmd_export",
         "_cmd_live",
         "_cmd_live_smoke",
         "_cmd_paper",
         "_cmd_safe_mode",
         "_cmd_validate",
-        "_config_drift_report",
-        "_conflicting_run_lease",
-        "_contain_as_recoverable_safe_mode",
-        "_day_baseline_from_exchange",
-        "_existing_run_row",
-        "_live_heartbeat",
-        "_live_startup_recovery",
-        "_mark_export_verification",
-        "_migrate_owned_store",
-        "_norm_network",
-        "_open_existing_db",
-        "_paper_loop",
-        "_post_cycle_export",
-        "_print_smoke_gate",
-        "_raise_keyboard_interrupt",
-        "_require_agent_key",
-        "_require_api_key",
-        "_require_live_run_mode",
-        "_retry_pending_funding",
-        "_run_config_subset",
-        "_run_genesis_network",
-        "_run_live_loop",
-        "_smoke_gate_buckets",
-        "_smoke_startup_recovery",
-        "_stamp_breadcrumb",
-        "_stamp_reconciliation_case",
-        "_still_owns_run",
-        "_timing_preflight",
-        "_validate_live",
     }
 )
 
@@ -971,13 +933,13 @@ def _private_import_bindings(source: Path, root: Path = _SOURCE_ROOT) -> set[str
     return found
 
 
-def test_the_cli_package_reexports_exactly_the_private_names_frozen_on_2026_09_22():
-    # The ``_cmd_*`` targets are read by ``main()`` in the same file; every
-    # other name is re-exported so a test can IMPORT it from the package
-    # (PR #75). Patch targets are the defining submodules, never these.
+def test_the_cli_package_imports_no_private_name_but_its_dispatch_targets():
+    # ``main()`` reads the ``_cmd_*`` targets in the same file; every other
+    # private name a test needs is imported from its defining submodule, so a
+    # new import here is a re-export with no reader.
     found = _private_import_bindings(_SOURCE_ROOT / "cli" / "__init__.py")
-    assert found == _CLI_PRIVATE_REEXPORTS, _ratchet_message(
-        "cli/__init__'s private re-exports", found, _CLI_PRIVATE_REEXPORTS
+    assert found == _CLI_DISPATCH_TARGETS, _ratchet_message(
+        "cli/__init__'s private import bindings", found, _CLI_DISPATCH_TARGETS
     )
 
 

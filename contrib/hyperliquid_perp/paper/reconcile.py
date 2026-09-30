@@ -549,7 +549,7 @@ def classify_replay(db: Database, *, run_id: str) -> tuple[str, str | None, Exce
 
     Returns ``("ok", None, None)``, ``("mismatch", detail, None)``, or
     ``("failed", detail, exc)`` — the single classification kernel shared by
-    the restart fork below and the mid-run verify (``cli._post_cycle_export``),
+    the restart fork below and the mid-run verify (``cli.paper_export._post_cycle_export``),
     so the two lanes can never drift apart. A replay that *raises* (corrupt
     stored value, I/O error) is an unverifiable-books outcome, not a crash.
     """

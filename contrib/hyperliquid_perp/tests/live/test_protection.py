@@ -337,7 +337,7 @@ def test_the_repair_clamp_tracks_the_budget_it_was_derived_from():
     contradicting its own advisory, which is the defect it was introduced to fix
     (2026-08-01 round-13 exit check).
     """
-    from contrib.hyperliquid_perp.cli import _RECOVERY_MAX_TICK_GAP_SECONDS
+    from contrib.hyperliquid_perp.cli.live_shared import _RECOVERY_MAX_TICK_GAP_SECONDS
     from contrib.hyperliquid_perp.live.kill_switch import _MAX_UNREFRESHED_REST_CALLS
     from contrib.hyperliquid_perp.live.protection import _MAX_REPAIR_SLEEP_S
 

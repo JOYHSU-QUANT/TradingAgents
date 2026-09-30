@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from functools import partial
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..integration.decision_provider import build_decision_provider
 from ._common import (
@@ -17,6 +17,9 @@ from ._common import (
     holds_live_work,
     note_stranded_attempt,
 )
+
+if TYPE_CHECKING:
+    from ..live.wiring import LiveSession
 
 logger = logging.getLogger(__name__)
 
@@ -208,28 +211,19 @@ def _still_owns_run(db, run_id: str, *, pid: int, now) -> bool:
 def _run_live_loop(
     *,
     cfgs,
-    db,
-    run_id: str,
     coin: str,
     config: dict,
     live_cfg,
     client,
-    signed,
-    gate,
-    kill_switch,
-    safe_mode,
-    reconciler,
-    processor,
-    payload_dir: Path,
-    fetch_clearinghouse,
-    identity,
+    session: LiveSession,
 ) -> ProtectionOnlyExit | None:
     """The PR 5 live trading loop (§9/§11.4): tick the engine + pump the 4h cycle.
 
-    ``identity`` is the caller's shared :class:`VenueIdentityMonitor` — the
-    same instance its kill switch and reconciler already probe through — so
-    the §17 protection manager built here feeds the same §13.5 streak
-    (issue #80).
+    ``session`` is the caller's :class:`LiveSession`, the components its §19.1
+    recovery just ran over. Its ``identity`` is the shared
+    :class:`VenueIdentityMonitor` — the same instance the kill switch and
+    reconciler already probe through — so the §17 protection manager built
+    here feeds the same §13.5 streak (issue #80).
 
     Builds the execution engine, §17 protection manager, §10 loss guards and the
     off-thread decision worker/driver over the recovery components, then loops
@@ -286,6 +280,15 @@ def _run_live_loop(
     # function can no longer be reached with an unusable grid and silently
     # skip the loop behind a passing recovery's exit 0.
     risk_cfg, decision_cfg = cfgs
+    db, run_id, payload_dir = session.db, session.run_id, session.payload_dir
+    signed, gate, fetch_clearinghouse = session.signed, session.gate, session.fetch_clearinghouse
+    kill_switch, safe_mode, reconciler, processor, identity = (
+        session.kill_switch,
+        session.safe_mode,
+        session.reconciler,
+        session.processor,
+        session.identity,
+    )
     clock = WallClock()
     market = HyperliquidMarketData(client)
     asset = build_asset_spec(market, coin)

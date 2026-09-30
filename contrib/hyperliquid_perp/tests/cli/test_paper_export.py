@@ -8,10 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import (
+from contrib.hyperliquid_perp.cli import paper_export as paper_export_mod
+from contrib.hyperliquid_perp.cli.paper_export import (
     _UNVERIFIED_MARKER,
     _mark_export_verification,
     _post_cycle_export,
+    _stamp_breadcrumb,
 )
 from contrib.hyperliquid_perp.persistence import repository as repo
 
@@ -71,7 +73,6 @@ def test_post_cycle_export_marks_unverified_on_replay_mismatch(tmp_path, monkeyp
 
 def test_post_cycle_export_persists_status_breadcrumbs(tmp_path, monkeypatch):
     """Export outcomes land durably on scheduler_state (ok and failed lanes)."""
-    from contrib.hyperliquid_perp.cli import _post_cycle_export
     from contrib.hyperliquid_perp.persistence import export as export_mod
 
     path, db = seed_db(tmp_path)
@@ -95,7 +96,6 @@ def test_post_cycle_export_persists_status_breadcrumbs(tmp_path, monkeypatch):
 
 def test_post_cycle_export_persists_replay_breadcrumbs(tmp_path, monkeypatch):
     """Replay outcomes land durably on scheduler_state (ok/mismatch/failed lanes)."""
-    from contrib.hyperliquid_perp.cli import _post_cycle_export
     from contrib.hyperliquid_perp.persistence.models import AccountLedger
     from contrib.hyperliquid_perp.runtime import accounting as acc_mod
 
@@ -128,7 +128,6 @@ def test_post_cycle_export_persists_replay_breadcrumbs(tmp_path, monkeypatch):
 
 
 def test_config_drift_breadcrumb_roundtrip_and_vocabulary(tmp_path):
-    from contrib.hyperliquid_perp.cli import _stamp_breadcrumb
 
     path, db = seed_db(tmp_path)
     _stamp_breadcrumb(db, "r", "config_drift", "drift", "risk differs")
@@ -154,14 +153,12 @@ def test_post_cycle_export_breadcrumb_write_failure_is_fail_loud(tmp_path, monke
     # via main), not be contained like the export/replay outcomes it records.
     import sqlite3
 
-    import contrib.hyperliquid_perp.cli as cli_mod
-
     path, db = seed_db(tmp_path)
 
     def raising_stamp(db_, run_id, kind, status, error):
         raise sqlite3.OperationalError("disk I/O error")
 
-    monkeypatch.setattr(cli_mod.paper_export, "_stamp_breadcrumb", raising_stamp)
+    monkeypatch.setattr(paper_export_mod, "_stamp_breadcrumb", raising_stamp)
     with pytest.raises(sqlite3.OperationalError):
         _post_cycle_export(db, "r", tmp_path / "exp")
     db.close()

@@ -29,8 +29,8 @@ they live beside the text they describe.
 
 One more grep handle lives here for the same reason: the WARNING for a prompt
 rendered without its ``Position:`` section (:func:`position_section_omitted`)
-— logged from ``cli`` and from ``domains/perp``, read beside the
-``prompt_regime:`` line (RUNBOOK §7), owned by neither.
+— logged from ``integration/decision_provider`` and from ``domains/perp``,
+read beside the ``prompt_regime:`` line (RUNBOOK §7), owned by neither.
 """
 
 from __future__ import annotations

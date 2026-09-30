@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import main as cli_main
+from contrib.hyperliquid_perp.cli import _common as common_mod, live as live_mod, main as cli_main
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect
@@ -286,14 +286,12 @@ def test_live_agent_key_error_diagnoses_the_networks_own_env_var(
     the failure worth catching is it being computed for the other network. A
     testnet run cannot distinguish that from correct behaviour.
     """
-    import contrib.hyperliquid_perp.cli as cli_mod
-
     mainnet_env = "HYPERLIQUID_AGENT_KEY_MAINNET"
     monkeypatch.delenv(mainnet_env, raising=False)
     # The message is printed by _common._require_agent_key (issue #126), so
     # patch THAT module's binding (each importer holds its own module-global,
     # per the from-import style).
-    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    monkeypatch.setattr(common_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     cfg = live_yaml(tmp_path, live_lines="  mode: mainnet_tiny\n  network: mainnet\n")
 
     rc = cli_main(["live", "--config", str(cfg)])
@@ -617,14 +615,15 @@ def _drive_cmd_live_loop_to_its_exit(
     loop,
     reconcile=lambda self, *a, **kw: None,
     one_shot=False,
-    on_recovery=lambda: None,
+    on_recovery=lambda **_: None,
 ):
     """``live --loop`` offline, up to and past ``_run_live_loop``'s call site.
 
     With ``one_shot`` the command runs without ``--loop``: ``loop`` is never
     called, the scripted recovery goes straight to the ``finally``, and that
     lane runs no §12.2 pre-shutdown reconcile. ``on_recovery`` runs inside
-    the scripted recovery, after the session is built.
+    the scripted recovery, after the session is built, with the recovery's
+    kwargs.
 
     The smoke gate is seeded open, the §19.1 recovery is scripted as a pass
     (its real arming needs a live exchange), and the loop itself is replaced
@@ -638,7 +637,6 @@ def _drive_cmd_live_loop_to_its_exit(
     signed double has no REST and an unclean pass would latch safe mode — the
     exit-4 lane this drive must be able to tell apart from protection-only's.
     """
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import reconcile as reconcile_mod, startup as startup_mod
     from contrib.hyperliquid_perp.live.startup import StartupResult
 
@@ -655,13 +653,35 @@ def _drive_cmd_live_loop_to_its_exit(
     passed = StartupResult(report=SimpleNamespace(clean=True), safe_mode_active=False)
 
     def _recovery(**kwargs):
-        on_recovery()
+        on_recovery(**kwargs)
         return passed
 
     monkeypatch.setattr(startup_mod, "run_startup_recovery", _recovery)
-    monkeypatch.setattr(cli_mod.live, "_run_live_loop", loop)
+    monkeypatch.setattr(live_mod, "_run_live_loop", loop)
     argv = ["live", "--config", str(cfg), "--run-id", "r1", "--db", str(dbp)]
     return cli_main(argv if one_shot else [*argv, "--loop"])
+
+
+def test_cmd_live_hands_the_loop_the_session_its_recovery_ran_over(
+    tmp_path, live_seams, monkeypatch
+):
+    # The loop's ``session=`` is the one object ``_live_startup_recovery``
+    # built and ran the §19.1 recovery over — the same switch, safe mode
+    # and reconciler, not a second session wired the same way (the inputs a
+    # second one would be built from are shared, so those prove nothing).
+    recovered = {}
+    handed = {}
+
+    def _loop(**kwargs):
+        handed.update(kwargs)
+
+    rc = _drive_cmd_live_loop_to_its_exit(
+        tmp_path, monkeypatch, loop=_loop, on_recovery=lambda **kw: recovered.update(kw)
+    )
+    assert rc == 0
+    session = handed["session"]
+    for component in ("kill_switch", "safe_mode", "reconciler"):
+        assert getattr(session, component) is recovered[component], component
 
 
 def test_cmd_live_names_the_engine_refusal_over_a_flat_book_as_exit_1(
@@ -836,7 +856,7 @@ def test_cmd_live_settled_protection_only_outranks_a_safe_mode_latch(
     from contrib.hyperliquid_perp.cli.live_loop import ProtectionOnlyExit
 
     def _latch_then_settle(**kwargs):
-        _latch_recoverable(kwargs["db"])
+        _latch_recoverable(kwargs["session"].db)
         return ProtectionOnlyExit(cause="config key 'temperature' (TRADINGAGENTS_TEMPERATURE) ...", settled=True)
 
     rc = _drive_cmd_live_loop_to_its_exit(tmp_path, monkeypatch, loop=_latch_then_settle)
@@ -897,7 +917,7 @@ def test_cmd_live_loop_that_latched_safe_mode_exits_4_naming_it(
     # A latch taken mid-loop must not hand exit 0 ("all quiet") to the
     # supervisor: the boot verdict is stale after a loop.
     rc = _drive_cmd_live_loop_to_its_exit(
-        tmp_path, monkeypatch, loop=lambda **kwargs: _latch_recoverable(kwargs["db"])
+        tmp_path, monkeypatch, loop=lambda **kwargs: _latch_recoverable(kwargs["session"].db)
     )
     captured = capsys.readouterr()
     assert rc == 4
@@ -1046,7 +1066,7 @@ def test_cmd_live_one_shot_keeps_its_exit_when_safe_mode_stays_unreadable(
         monkeypatch,
         loop=_loop_must_not_run,
         one_shot=True,
-        on_recovery=lambda: _break_every_safe_mode_read(monkeypatch),
+        on_recovery=lambda **_: _break_every_safe_mode_read(monkeypatch),
     )
     captured = capsys.readouterr()
     assert rc == code

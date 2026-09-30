@@ -59,6 +59,24 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **`cli/__init__.py` imports no private name but its six dispatch targets**
+  (refactor plan v2, T2-f — PR 11 of the plan; no behaviour change). The
+  package re-exported thirty-eight underscore names — thirty-five from its
+  submodules, three from `integration/` and `exchanges/` — plus
+  `PROMPT_VERSION` and `paper_export`, none of which production code read
+  through the package; the tests that imported one of them from
+  `contrib.hyperliquid_perp.cli` now read the defining `cli.*` submodule
+  (or `integration.decision_provider`). What `__init__` keeps is `_cmd_*`
+  — the targets `main()` dispatches to — and the layering ratchet that froze the
+  re-export list on 2026-09-22 (PR #293) is now a pin on those six
+  (`test_the_cli_package_imports_no_private_name_but_its_dispatch_targets`).
+  `_run_live_loop` takes the daemon's `LiveSession` as one `session=`
+  argument in place of the eleven components it took one by one: five that
+  `_live_startup_recovery` read off that session, six it had built the
+  session from and the session stores verbatim. The pin on `PROMPT_VERSION`
+  no longer asserts a `cli` spelling of it; RUNBOOK §4 and the docs README
+  no longer name one.
+
 - **`tests/cli/test_cli.py` is split into thirteen files** (refactor plan
   v2, T5-b and the `getsource` item of T5-c — PR 10 of the plan; tests
   only, plus one comment in `common/prompt_regime.py`). Its 263 test

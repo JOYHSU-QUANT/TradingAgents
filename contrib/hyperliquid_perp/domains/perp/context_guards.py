@@ -18,7 +18,7 @@ through ``engine_bridge._build_context`` — so this is a property of the
 guards, not of that command.)
 
 Patch-target note: the callers reach these names through THIS module —
-``main`` by attribute access, the ``cli`` provider by a function-local
+``main`` by attribute access, the ``integration`` provider by a function-local
 from-import — so a test stubbing :func:`warmup_threshold` patches
 ``context_guards`` and is seen by every path. ``engine_bridge`` keeps no
 re-export: a second binding there would be exactly the second patch surface

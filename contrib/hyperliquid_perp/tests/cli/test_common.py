@@ -6,7 +6,7 @@ import signal
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import _raise_keyboard_interrupt
+from contrib.hyperliquid_perp.cli import _common as common_mod
 
 
 def test_require_agent_key_returns_the_key_or_prints_the_composed_refusal(capsys, monkeypatch):
@@ -15,10 +15,8 @@ def test_require_agent_key_returns_the_key_or_prints_the_composed_refusal(capsys
     # the message is assembled here — variable, the caller's why/remedy, and
     # the dotenv diagnosis for that SAME variable — so no caller can drop or
     # misdirect the suffix again (#82).
-    import contrib.hyperliquid_perp.cli as cli_mod
-
-    require = cli_mod._common._require_agent_key
-    monkeypatch.setattr(cli_mod._common, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
+    require = common_mod._require_agent_key
+    monkeypatch.setattr(common_mod, "dotenv_diagnosis", lambda var: f"DIAG[{var}]")
     monkeypatch.setenv("HYPERLIQUID_AGENT_KEY_MAINNET", "0x" + "ab" * 32)
     assert require("mainnet", remedy="x") == "0x" + "ab" * 32
     assert capsys.readouterr().err == ""
@@ -42,4 +40,4 @@ def test_sigterm_shim_raises_keyboard_interrupt():
     # systemd/docker stop with SIGTERM; the handler must funnel it into the
     # KeyboardInterrupt shutdown-export path.
     with pytest.raises(KeyboardInterrupt):
-        _raise_keyboard_interrupt(signal.SIGTERM, None)
+        common_mod._raise_keyboard_interrupt(signal.SIGTERM, None)

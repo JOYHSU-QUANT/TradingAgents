@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from contrib.hyperliquid_perp.cli import main as cli_main
+from contrib.hyperliquid_perp.cli import main as cli_main, smoke as cli_smoke_mod
 from contrib.hyperliquid_perp.persistence.db import Database
 
 from .conftest import live_yaml, make_live_run, seed_live_run_with_genesis_subset
@@ -185,7 +185,6 @@ def test_live_smoke_only_status_without_submit_exits_1(tmp_path, capsys):
 def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatch):
     # live-smoke places real orders and runs recoveries — the same actions the
     # run lease keeps single-owner. A held lease must refuse the suite.
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     dbp = make_live_run(tmp_path)
@@ -193,7 +192,7 @@ def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatc
     acquire_run_lock(db, "live-BTC", pid=999999, now=datetime.now(timezone.utc))
     db.close()
     monkeypatch.setattr(
-        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_smoke_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
     rc = cli_main(
         ["live-smoke", "--config", "unused.yaml", "--run-id", "live-BTC", "--db", str(dbp)]
@@ -205,13 +204,12 @@ def test_live_smoke_real_run_requires_the_run_lease(tmp_path, capsys, monkeypatc
 def test_live_smoke_preflight_failure_exits_4_and_releases_the_lease(tmp_path, capsys, monkeypatch):
     # A pre-flight recovery failure aborts the suite: exit 4, the error named on
     # stderr, and the lease released so the operator can immediately retry.
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
     from contrib.hyperliquid_perp.runtime.run_lock import acquire_run_lock
 
     dbp = make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_smoke_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
 
     def _fail_preflight(self, *, only=None):
@@ -233,13 +231,12 @@ def test_live_smoke_preflight_failure_exits_4_and_releases_the_lease(tmp_path, c
 def test_live_smoke_superseded_lease_exits_1_by_name(tmp_path, capsys, monkeypatch):
     # A mid-suite lease takeover surfaces as the named lock outcome (exit 1),
     # not main()'s generic exit 2.
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
     from contrib.hyperliquid_perp.runtime.run_lock import RunLockError
 
     dbp = make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_smoke_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
 
     def _superseded(self, *, only=None):
@@ -259,12 +256,11 @@ def test_live_smoke_disarm_warning_survives_an_unexpected_crash(tmp_path, capsys
     # 2026-07-29): a mid-suite exception escaping to main()'s generic handler
     # is exactly when a failed disarm is most likely, and the warning must not
     # be lost under that stack trace.
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
 
     dbp = make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_smoke_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
 
     def _crash(self, *, only=None):
@@ -285,12 +281,11 @@ def test_live_smoke_staged_long_residual_warns_on_stderr(tmp_path, capsys, monke
     # never flattened has no step row to land in: without this warning a real
     # funded position is left on the wire with only a log line — which the
     # operator may not be capturing — to show for it (review round 2026-07-29).
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
 
     dbp = make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_smoke_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
     note = "cleanup: reduce-only close of 0.001 refused (no liquidity)"
 
@@ -312,12 +307,11 @@ def test_live_smoke_flat_staged_long_prints_no_residual_warning(tmp_path, capsys
     # The mirror: a suite that flattened its staged long must not cry wolf. An
     # unconditional warning trains the operator to ignore the one run where a
     # real position IS still open.
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
 
     dbp = make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_smoke_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
     monkeypatch.setattr(smoke_mod.SmokeTestRunner, "run", lambda self, *, only=None: [])
     rc = cli_main(
@@ -340,13 +334,12 @@ def test_the_residual_warnings_quote_the_real_suite_size(tmp_path, capsys, monke
     """
     import re
 
-    from contrib.hyperliquid_perp import cli as cli_mod
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
     from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
 
     dbp = make_live_run(tmp_path)
     monkeypatch.setattr(
-        cli_mod.smoke, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
+        cli_smoke_mod, "_build_smoke_session", lambda args, db: SimpleNamespace(dry_run=False)
     )
 
     def _leaves_both_residuals(self, *, only=None):

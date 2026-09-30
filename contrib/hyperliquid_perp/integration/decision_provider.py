@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 
 # The one in-package import this module takes at load time: ``common`` sits at
 # the bottom of the graph and imports nothing, so it costs no closure. Every
-# other in-package import here stays function-local: ``cli/__init__`` imports
-# this module at load time for its re-exports.
+# other in-package import here stays function-local: ``cli/paper`` and
+# ``cli/live_loop`` import this module at load time for
+# :func:`build_decision_provider`.
 from ..common.prompt_regime import PROMPT_VERSION, position_section_omitted, prompt_regime_line
 
 if TYPE_CHECKING:  # annotation-only: the heavy in-package imports stay function-local

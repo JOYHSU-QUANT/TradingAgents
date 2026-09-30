@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, localcontext
@@ -354,7 +355,7 @@ class _StrandedAttempts:
             raise ValueError("_StrandedAttempts has no rows but carries an oldest_at")
 
 
-def _stranded_in_progress(conn, run_id: str) -> _StrandedAttempts:
+def _stranded_in_progress(conn: sqlite3.Connection, run_id: str) -> _StrandedAttempts:
     rows = repo.iter_in_progress_attempts(conn, run_id)
     if not rows:
         return _StrandedAttempts(0, None, None)
@@ -373,7 +374,7 @@ class _SafeModeState(NamedTuple):
     reason: str | None
 
 
-def _current_safe_mode(conn, run_id: str) -> _SafeModeState:
+def _current_safe_mode(conn: sqlite3.Connection, run_id: str) -> _SafeModeState:
     """Whether the run is sitting in a safe-mode episode right now, and why.
 
     Until 2026-07-31 the only safe-mode question this file asked was "was the
@@ -391,7 +392,7 @@ def _current_safe_mode(conn, run_id: str) -> _SafeModeState:
     return _SafeModeState(str(row["safe_mode_type"]), row["safe_mode_reason"])
 
 
-def _daily_loss_still_active(conn, run_id: str) -> bool:
+def _daily_loss_still_active(conn: sqlite3.Connection, run_id: str) -> bool:
     """Whether the run is CURRENTLY in a safe-mode episode naming the §10.3 cap.
 
     Episode-scoped, the same shape ``safe_mode.enter`` uses for its own
@@ -413,7 +414,9 @@ def _daily_loss_still_active(conn, run_id: str) -> bool:
     )
 
 
-def _unprotected_windows(conn, run_id: str, now: datetime) -> tuple[Decimal, int, bool]:
+def _unprotected_windows(
+    conn: sqlite3.Connection, run_id: str, now: datetime
+) -> tuple[Decimal, int, bool]:
     """``(total_seconds, window_count, has_open_window)`` from protection events.
 
     Per symbol, an unprotected window opens on ``stop_loss_repair_exhausted`` or
@@ -599,7 +602,9 @@ class _KillSwitchTally(NamedTuple):
         return self.refreshed + self.failed
 
 
-def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitchTally:
+def _kill_switch_tally(
+    conn: sqlite3.Connection, run_id: str, config_json: str | None
+) -> _KillSwitchTally:
     """Availability by DURATION, plus the two OUTCOME counts, in one pass.
 
     The rate alone is an availability metric and cannot express the thing §20.3
@@ -855,7 +860,7 @@ def _kill_switch_tally(conn, run_id: str, config_json: str | None) -> _KillSwitc
     )
 
 
-def _unresolved_reconciliation_mismatches(conn, run_id: str) -> int:
+def _unresolved_reconciliation_mismatches(conn: sqlite3.Connection, run_id: str) -> int:
     """Count §12.3 cases still open — the §21.4 "no unresolved mismatch" metric.
 
     Mirrors the ``safe-mode --status`` open-case logic: a mismatch case is open
@@ -917,9 +922,23 @@ class LiveRunFacts:
     emergency_close_event_count: int
     smoke: SmokeGateReport
 
+    def __post_init__(self) -> None:
+        # A replay that raised is counted as exactly ONE unverifiable book, and
+        # ``replay_raised`` is the only place the exception survives: the report
+        # carries the count but not the text, so nothing downstream re-checks
+        # this pair the way the report re-checks the others. The reader cannot
+        # build the mismatch; a hand-built instance (a test driving one gate)
+        # would print "accounting replay raised" beside a count that says
+        # otherwise.
+        if self.replay_raised is not None and self.account_replay_mismatch_count != 1:
+            raise ValueError(
+                f"replay_raised {self.replay_raised!r} requires "
+                f"account_replay_mismatch_count == 1, got {self.account_replay_mismatch_count}"
+            )
+
 
 def read_live_run_facts(
-    conn, *, run_id: str, config_json: str | None, now: datetime
+    conn: sqlite3.Connection, *, run_id: str, config_json: str | None, now: datetime
 ) -> LiveRunFacts:
     """Every store read behind the acceptance verdict, in one pass over ``conn``.
 

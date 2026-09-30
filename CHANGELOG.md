@@ -67,7 +67,9 @@ Breaking changes within the 0.x line are called out explicitly.
   report and its `summary_lines` live in `live/validation_report.py`, and
   `LiveValidationReport` is imported from there. The store reads live in
   `live/validation_metrics.py`, whose `read_live_run_facts` makes them in
-  one pass over the read transaction and returns a `LiveRunFacts`.
+  one pass over the read transaction and returns a `LiveRunFacts`, which
+  refuses a replay exception whose count is not 1 (the one pair the
+  report cannot re-check, since it carries the count alone).
   `validate_live_run` draws the verdict from those facts through named
   helpers, `_apply_integrity_gate`, `_apply_cycle_gate`, the two profile
   gates and `_note_warnings`, which append the same lines in the same

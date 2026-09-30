@@ -400,6 +400,27 @@ def test_stranded_attempts_rejects_a_count_that_disagrees_with_its_rows():
         _StrandedAttempts(count=0, oldest_id="a", oldest_at=None)
     with pytest.raises(ValueError, match="no rows but carries"):
         _StrandedAttempts(count=0, oldest_id=None, oldest_at=_T0)
+
+
+def test_live_run_facts_rejects_a_replay_exception_without_its_count(db):
+    """A replay that raised is ONE unverifiable book, and the facts have to say so.
+
+    ``replay_raised`` is the one reading that does not survive into the report
+    (which carries the count alone), so no downstream guard re-checks the pair;
+    a hand-built facts object driving a gate on its own would otherwise print
+    "accounting replay raised" beside a count that says the books replayed.
+    """
+    from dataclasses import replace
+
+    from contrib.hyperliquid_perp.live.validation_metrics import read_live_run_facts
+
+    _init_live_run(db)
+    with db.read_transaction() as conn:
+        facts = read_live_run_facts(conn, run_id="r", config_json=None, now=_T0)
+    assert facts.replay_raised is None
+    with pytest.raises(ValueError, match="requires account_replay_mismatch_count == 1"):
+        replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=0)
+    assert replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=1)
     with pytest.raises(ValueError, match="must be >= 0"):
         _StrandedAttempts(count=-1, oldest_id=None, oldest_at=None)
     # The two shapes the query really produces stay legal, including the

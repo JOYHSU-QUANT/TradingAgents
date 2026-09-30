@@ -21,7 +21,7 @@ false in both directions, and dangerous in one: a reader who believed it would
 answer an upstream schema change by editing this file alone and miss
 ``signed_client._parse_order_ack``, ``live.orders.parse_order_status``,
 ``live.fills.ExchangeFill.parse``, and the open-order sweeps in
-``live.reconcile`` / ``live.startup`` / ``live.kill_switch`` — the last three
+``live.reconcile_orders`` / ``live.startup`` / ``live.kill_switch`` — the last three
 being what §19.3 bot-ownership and §12.3 reconciliation are decided from. The
 real division of labour, which a grep can check:
 
@@ -35,7 +35,8 @@ real division of labour, which a grep can check:
   ``trigger`` order bodies;
 - **``live/``** — the order-status query, the open-orders listing and the fills
   stream: ``orders.py``'s exchange-status word table and ``parse_order_status``,
-  plus ``fills.py``, ``fill_backfill.py``, ``reconcile.py``, ``startup.py``,
+  plus ``fills.py``, ``fill_backfill.py``, ``reconcile.py``, ``reconcile_fills.py``,
+  ``reconcile_orders.py``, ``startup.py``,
   ``kill_switch.py`` and ``loss_guards.py``. The WS channel names (``userFills``,
   ``orderUpdates``, ``webData2``) live in ``ws_stream.py``.
 

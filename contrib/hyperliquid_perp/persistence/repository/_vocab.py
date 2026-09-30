@@ -428,9 +428,9 @@ PROVISIONAL_DISPOSITIONS = frozenset(
 # key" list.
 _FINAL_DISPOSITIONS = frozenset(
     {
-        # _reconcile_orders, orphan back-fill: the missing local row now exists.
+        # reconcile_orders, orphan back-fill: the missing local row now exists.
         "local_row_backfilled",
-        # _reconcile_fills: the stream fault's fill is booked.
+        # reconcile_fills: the stream fault's fill is booked.
         "resolved_fill_booked",
         # exchange_fill_missing_local: carries no exchange_value, so it never
         # reaches the dedupe in the first place (see the note above).

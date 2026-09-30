@@ -671,7 +671,7 @@ def test_one_order_seen_under_two_fault_shapes_is_still_one_order(tmp_path):
     # The count is per CLOID, not per fact key. This case type writes three key
     # shapes for the same order, and two of them arrive from an ordinary
     # sequence: a failed orderStatus read parks the cloid under
-    # `|local_terminal_read_failed` (reconcile.py `_maybe_reopen_terminal_order`),
+    # `|local_terminal_read_failed` (reconcile_orders.py `_maybe_reopen_terminal_order`),
     # and the pass that gets an answer files `|local_terminal`. Counting keys
     # would report 2 orders to go and find; there is 1.
     db = _healthy(tmp_path)

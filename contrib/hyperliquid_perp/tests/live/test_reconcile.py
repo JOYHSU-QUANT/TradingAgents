@@ -14,8 +14,17 @@ from types import SimpleNamespace
 import pytest
 
 from contrib.hyperliquid_perp.common.instants import whole_hours_label
-from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
-from contrib.hyperliquid_perp.live.fill_backfill import DEFAULT_LOOKBACK, FillBackfiller
+from contrib.hyperliquid_perp.live import (
+    reconcile as reconcile_mod,
+    reconcile_fills,
+    reconcile_orders,
+    reconcile_types,
+)
+from contrib.hyperliquid_perp.live.fill_backfill import (
+    DEFAULT_LOOKBACK,
+    BackfillSummary,
+    FillBackfiller,
+)
 from contrib.hyperliquid_perp.live.reconcile import LiveReconciler
 from contrib.hyperliquid_perp.live.safe_mode import SafeModeManager
 from contrib.hyperliquid_perp.persistence import repository as repo
@@ -211,7 +220,7 @@ def test_the_sweep_refreshes_once_per_open_order_not_once_per_leg(env, tmp_path)
     assert len(refreshes) == 5
 
 
-def test_the_fill_cross_check_ladder_refreshes_between_pages(env, tmp_path, monkeypatch):
+def test_the_fill_cross_check_ladder_refreshes_between_pages(monkeypatch):
     """§18.2: the reconciler has its OWN page ladder for the fill cross-check,
     separate from the backfiller's and easy to miss because it is inline.
 
@@ -220,24 +229,9 @@ def test_the_fill_cross_check_ladder_refreshes_between_pages(env, tmp_path, monk
     while ``_MAX_UNREFRESHED_REST_CALLS`` still claimed 3 — an advisory
     promising headroom it could not deliver. One refresh per page.
     """
-    from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
-
-    db, seams, _ = env
-    monkeypatch.setattr(reconcile_mod, "RESPONSE_FILL_CAP", 1)  # every page "capped"
-    monkeypatch.setattr(reconcile_mod, "DEFAULT_MAX_PAGES", 3)
+    monkeypatch.setattr(reconcile_fills, "RESPONSE_FILL_CAP", 1)  # every page "capped"
+    monkeypatch.setattr(reconcile_fills, "DEFAULT_MAX_PAGES", 3)
     refreshes: list[int] = []
-    reconciler = LiveReconciler(
-        db=db,
-        run_id="r",
-        coin="BTC",
-        fetch_open_orders=seams.fetch_open_orders,
-        fetch_clearinghouse=seams.fetch_clearinghouse,
-        query_order_by_cloid=seams.query_order_by_cloid,
-        fetch_fills=seams.fetch_fills,
-        payload_dir=tmp_path / "payloads",
-        clock=ManualClock(_NOW),
-        refresh_kill_switch=lambda: refreshes.append(1),
-    )
     window_start = _NOW - timedelta(hours=1)
     base = int(window_start.timestamp() * 1000)
     stamps = iter([base + 1, base + 2, base + 3])
@@ -247,7 +241,9 @@ def test_the_fill_cross_check_ladder_refreshes_between_pages(env, tmp_path, monk
         return [{"tid": t, "time": t}]
 
     errors: list[str] = []
-    keys = reconciler._fetch_window_fill_keys(fetch_fills, window_start, _NOW, errors)
+    keys = reconcile_fills.fetch_window_fill_keys(
+        fetch_fills, window_start, _NOW, errors, refresh_deadline=lambda: refreshes.append(1)
+    )
     assert keys is None  # budget exhausted, window unproven — the paging really ran
     assert len(refreshes) == 3  # one per page, not one per leg
 
@@ -555,7 +551,13 @@ def test_a_position_in_an_unexpected_coin_is_manual(env):
     eth = dict(_btc_position(), coin="ETH")
     seams.clearinghouse = _clearinghouse(account_value="101", positions=[eth], maintenance="1")
     report = reconciler.run("heartbeat")
-    assert any(c.manual for c in report.cases)
+    assert [c.case_type for c in report.manual_cases] == ["exchange_position_mismatch"]
+    # The leg's own flag as well as the case: ``clean`` never reads ``cases``, so
+    # a position phase that dropped the flag would record the pass "ok" (snapshot
+    # status, reconciliation_diff) while manual safe mode latched off the case.
+    # Pinned by a PR 13 mutation probe that forced the flag True.
+    assert not report.position_reconciled
+    assert not report.clean
 
 
 def test_a_matching_position_with_a_valid_sl_is_clean(env):
@@ -947,7 +949,7 @@ def test_a_fractional_hour_lookback_is_refused_when_the_backfiller_is_bound(env,
     with pytest.raises(ValueError, match=refusal):
         reconciler._backfiller = fractional
     assert reconciler._backfiller is None  # the refused binding did not land
-    monkeypatch.setattr(reconcile_mod, "DEFAULT_LOOKBACK", timedelta(seconds=5 * 3600 + 1800))
+    monkeypatch.setattr(reconcile_fills, "DEFAULT_LOOKBACK", timedelta(seconds=5 * 3600 + 1800))
     with pytest.raises(ValueError, match="DEFAULT_LOOKBACK must be a whole number of hours"):
         _reconciler_over(db, seams, None)
 
@@ -1523,7 +1525,7 @@ def test_a_failed_snapshot_write_keeps_the_case_rows_and_the_verdict(env, monkey
 
 
 def test_a_case_cannot_be_both_manual_and_resolved(env):
-    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+    from contrib.hyperliquid_perp.live.reconcile_types import ReconciliationCase
 
     with pytest.raises(ValueError, match="manual and resolved"):
         ReconciliationCase(
@@ -1633,7 +1635,7 @@ def test_a_crashed_leg_is_an_unclean_verdict_not_a_crash(env, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(LiveReconciler, "_reconcile_orders", boom)
+    monkeypatch.setattr(reconcile_orders, "reconcile_orders", boom)
     report = reconciler.run("heartbeat")  # must not raise
     assert not report.clean
     assert not report.orders_reconciled
@@ -1691,7 +1693,7 @@ def test_a_clean_pass_does_not_reopen_the_gate_while_release_conditions_are_unme
 
 
 def test_manual_reason_mapping_reaches_the_safe_mode_record(env):
-    # The case_type → REASON_* vocabulary (_MANUAL_CASE_REASONS): a manual case
+    # The case_type → REASON_* vocabulary (MANUAL_CASE_REASONS): a manual case
     # missing there now fails loud at construction, and the safe-mode record
     # must carry the specific reason end to end.
     db, seams, reconciler = env
@@ -1762,7 +1764,7 @@ def test_an_orphan_protection_order_backfills_with_its_role_type(env):
 
 
 def test_an_unknown_case_type_fails_loud_at_construction(env):
-    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+    from contrib.hyperliquid_perp.live.reconcile_types import ReconciliationCase
 
     with pytest.raises(ValueError, match="case_type"):
         ReconciliationCase(
@@ -1771,7 +1773,7 @@ def test_an_unknown_case_type_fails_loud_at_construction(env):
 
 
 def test_an_action_taken_without_resolved_fails_loud_at_construction(env):
-    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+    from contrib.hyperliquid_perp.live.reconcile_types import ReconciliationCase
 
     with pytest.raises(ValueError, match="must be resolved"):
         ReconciliationCase(
@@ -1788,12 +1790,12 @@ def test_an_action_taken_without_resolved_fails_loud_at_construction(env):
 
 
 def test_a_manual_case_without_a_reason_mapping_fails_loud_at_construction(env):
-    # _MANUAL_CASE_REASONS is the ONE manual → safe-mode-reason vocabulary; a
+    # MANUAL_CASE_REASONS is the ONE manual → safe-mode-reason vocabulary; a
     # manual case_type missing there would silently enter safe mode under the
     # generic mismatch reason.
-    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+    from contrib.hyperliquid_perp.live.reconcile_types import ReconciliationCase
 
-    with pytest.raises(ValueError, match="_MANUAL_CASE_REASONS"):
+    with pytest.raises(ValueError, match="MANUAL_CASE_REASONS"):
         ReconciliationCase(
             case_type="order_missing_on_exchange",  # valid type, but never manual
             symbol="BTC",
@@ -1938,7 +1940,7 @@ _STREAM_SEAM_METHODS = ("backfill_epoch", "backfill_since", "mark_backfill_done"
 @pytest.mark.parametrize("missing", _STREAM_SEAM_METHODS)
 def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_construction(env, missing):
     # The stream's three methods are all called inside the guarded fill leg
-    # (``_run_fill_backfill``), so a stand-in missing any one would surface as
+    # (``reconcile_fills.run_fill_backfill``), so a stand-in missing any one would surface as
     # a failed backfill every sweep, never a crash — the fetch-seam argument
     # one seam over (issue #169), and the refusal names WHICH method is
     # missing. ``None`` stays the no-stream wiring (``env``, and every
@@ -2001,10 +2003,15 @@ def test_short_position_sl_coverage_counts_only_buy_side_stops(env):
 
 
 @pytest.mark.parametrize(
-    "leg",
-    ["_run_fill_backfill", "_reconcile_fills", "_reconcile_positions", "_reconcile_account"],
+    ("owner", "leg"),
+    [
+        (reconcile_fills, "run_fill_backfill"),
+        (reconcile_fills, "reconcile_fills"),
+        (LiveReconciler, "_reconcile_positions"),
+        (LiveReconciler, "_reconcile_account"),
+    ],
 )
-def test_every_guarded_leg_maps_a_crash_to_an_unclean_verdict(env, monkeypatch, leg):
+def test_every_guarded_leg_maps_a_crash_to_an_unclean_verdict(env, monkeypatch, owner, leg):
     # run()'s "records everything, raises nothing" is enforced per leg by the
     # guarded() wrapper — prove it for each wrapped site, not just orders
     # (a future edit dropping one wrapper must fail a test, §18.2 callers
@@ -2014,7 +2021,7 @@ def test_every_guarded_leg_maps_a_crash_to_an_unclean_verdict(env, monkeypatch, 
     def boom(*args, **kwargs):
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(LiveReconciler, leg, boom)
+    monkeypatch.setattr(owner, leg, boom)
     report = reconciler.run("heartbeat")  # must not raise
     assert not report.clean
     assert any("leg crashed" in e for e in report.errors)
@@ -2429,7 +2436,7 @@ def test_every_constant_carried_stamp_is_checked_at_import():
     # case-building site whose __post_init__ runs AFTER ``insert_order``
     # committed, so a rename must refuse to start the daemon instead of leaving
     # an orders row with no case row explaining it.
-    assert set(reconcile_mod._IMPORT_CHECKED_DISPOSITIONS) == {
+    assert set(reconcile_types.IMPORT_CHECKED_DISPOSITIONS) == {
         "resolved_fill_booked",
         "resolved_read_succeeded",
         "backfilled",
@@ -2447,24 +2454,24 @@ def test_the_module_refuses_to_import_with_an_unclassified_stamp_constant(monkey
     monkeypatch.setattr(
         repo,
         "MACHINE_DISPOSITIONS",
-        repo.MACHINE_DISPOSITIONS - {reconcile_mod._ORPHAN_BACKFILLED_DISPOSITION},
+        repo.MACHINE_DISPOSITIONS - {reconcile_types.ORPHAN_BACKFILLED_DISPOSITION},
     )
     try:
         with pytest.raises(ValueError, match="action_taken"):
-            importlib.reload(reconcile_mod)
+            importlib.reload(reconcile_types)
     finally:
         # Reload against the real vocabulary so the rest of the session sees
         # the module the other tests hold references into — even if the
         # assertion above is what failed.
         monkeypatch.undo()
-        importlib.reload(reconcile_mod)
+        importlib.reload(reconcile_types)
 
 
 def test_an_unclassified_disposition_fails_where_it_is_constructed():
     # The acceptance shape for #84: a sixth machine disposition added without
     # classifying it fails LOUDLY at the construction that introduced it —
     # an unclean leg in that pass — instead of quietly keeping its key shut.
-    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+    from contrib.hyperliquid_perp.live.reconcile_types import ReconciliationCase
 
     with pytest.raises(ValueError, match="local_row_reopened_v2"):
         ReconciliationCase(
@@ -2504,7 +2511,7 @@ def test_a_classified_disposition_still_constructs():
     # protect. Both shapes are ones production really builds — the reopen
     # tiebreaker's stamp on its own fact key, and the plain orphan back-fill on
     # the bare cloid.
-    from contrib.hyperliquid_perp.live.reconcile import ReconciliationCase
+    from contrib.hyperliquid_perp.live.reconcile_types import ReconciliationCase
 
     for stamp, key in (
         ("local_row_reopened", f"{_HEX}|local_terminal"),
@@ -2697,8 +2704,6 @@ def test_a_failed_disposition_stamp_does_not_fail_the_orders_leg(env, monkeypatc
     # refuses it must cost one stale open row, never the settlement itself. But
     # it must not vanish either — the row is invisible to the verdict, so this
     # log line is the only trace that the stamp did not land.
-    from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
-
     db, seams, reconciler = env
     _insert_local_order(db)
     seams.order_status[_HEX] = RuntimeError("api down")
@@ -2711,7 +2716,7 @@ def test_a_failed_disposition_stamp_does_not_fail_the_orders_leg(env, monkeypatc
     def _boom(*_args, **_kwargs):
         raise RuntimeError("store busy")
 
-    monkeypatch.setattr(reconcile_mod.repo, "get_exchange_reconciliation_case", _boom)
+    monkeypatch.setattr(repo, "get_exchange_reconciliation_case", _boom)
     with caplog.at_level("WARNING"):
         reconciler.run("heartbeat")
     assert repo.get_order(db.conn, "o1")["status"] == "canceled"  # the settle stood
@@ -2987,3 +2992,30 @@ def test_an_orphan_with_a_tif_this_system_never_places_stays_a_mismatch(env, tif
     assert repo.get_order_by_cloid_hex(db.conn, _HEX) is None
     (case,) = _cases(db, "orphan_exchange_order")
     assert case["action_taken"] != "local_row_backfilled"
+
+
+# -- pinned by a PR 13 mutation probe (the record phase split) ------------------
+
+
+def test_a_backfill_that_booked_fills_records_the_resolved_missing_fill_event(env):
+    # §12.3 row 5: the fills the exchange had and SQLite lacked were booked in
+    # this pass, and the audit trail says so once per pass that booked any —
+    # the one recording write nothing else asserted (survived a probe that
+    # skipped it).
+    db, seams, reconciler = env
+
+    class BookingBackfiller(StubBackfiller):
+        def backfill(self, now, *, since=None):
+            self.calls.append(since)
+            return BackfillSummary(
+                fetched=3, applied=2, duplicate=1, unmapped=0, malformed=0, complete=True
+            )
+
+    reconciler._backfiller = BookingBackfiller()
+    report = reconciler.run("heartbeat")
+    assert report.backfill_complete and report.clean
+    (event,) = _cases(db, "exchange_fill_missing_local")
+    assert event["action_taken"] == "backfilled"
+    assert event["symbol"] == "BTC"
+    assert "booked 2 missing fill(s)" in event["detail"]
+    assert "3 fetched, 1 duplicate" in event["detail"]

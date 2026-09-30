@@ -20,6 +20,13 @@ mismatch ladder escalates to manual safe mode.
 
 Reads are seams (callables) so every §12.3 case is testable with fakes;
 production binds them to the PR 1 signed client and Info wrapper.
+
+Four modules. This one holds ``LiveReconciler``: the seams, ``run()``'s
+guarded lanes, the safe-mode application, the position and account legs
+and the recording. Each pass hands a :class:`~.reconcile_types.SweepContext`
+to the fill legs in :mod:`.reconcile_fills` and the orders leg in
+:mod:`.reconcile_orders`; the case/report types and the disposition
+vocabulary are :mod:`.reconcile_types`.
 """
 
 from __future__ import annotations
@@ -27,54 +34,50 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
 from ..common.enum_guard import check_enum
-from ..common.instants import epoch_ms, whole_hours_label
+from ..common.instants import whole_hours_label
 from ..common.seam_guard import require_object_seam, require_seam
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (
-    HL_SIDE_TO_LOCAL,
     hl_closing_side,
     map_account_snapshot,
-    optional_decimal,
     require_decimal,
 )
 from ..persistence import repository as repo
 from ..persistence.db import Database
-from ..persistence.ids import exchange_fill_key, usable_fill_tid
-from ..persistence.models import DECIMAL_CONTEXT
+from ..persistence.models import DECIMAL_CONTEXT, PositionState
 from ..ports import Clock
 from ..runtime import accounting
 from ..runtime.clock import WallClock
+from . import reconcile_fills, reconcile_orders
 from .fill_backfill import (
-    DEFAULT_LOOKBACK,
-    DEFAULT_MAX_PAGES,
-    RESPONSE_FILL_CAP,
     BackfillSummary,
     FillBackfiller,
 )
-from .fills import ENVELOPE_FACT_KEY_PREFIX
-from .orders import ORDER_TYPE_FOR_TIF, OrderStatusQuery, local_status_for_exchange_status
+from .orders import OrderStatusQuery
 from .payloads import write_raw_payload
+from .reconcile_fills import FAILED_BACKFILL
+from .reconcile_types import (
+    FILL_BACKFILLED_DISPOSITION,
+    MANUAL_CASE_REASONS,
+    ReconciliationCase,
+    ReconciliationReport,
+    SweepContext,
+)
 from .safe_mode import (
-    REASON_INVALID_LOCAL_FILL,
-    REASON_NON_BOT_OWNED_ORDER,
     REASON_RECONCILIATION_MISMATCH,
     REASON_SL_MISSING,
     REASON_STALE_ORDER_SWEEP_FAILED,
-    REASON_UNKNOWN_POSITION,
     SafeModeManager,
 )
 from .venue_identity import (
     EscalationHolder,
-    ProbeSite,
     VenueIdentityMonitor,
-    describe_order_status_failure,
     escalate_identity_fault,
 )
 from .ws_stream import LiveWsStream
@@ -83,22 +86,22 @@ __all__ = [
     "EQUITY_TOLERANCE_ABS_USDC",
     "EQUITY_TOLERANCE_REL",
     "LiveReconciler",
-    "ReconciliationCase",
-    "ReconciliationReport",
 ]
 
 logger = logging.getLogger(__name__)
 
-# WIRE VOCABULARY OWNED HERE, not in the mapper: the frontendOpenOrders listing
-# fields (oid, coin, cloid, side, origSz/sz, limitPx, reduceOnly) and the fills
-# fields (tid, time) this file reads directly. The mapper owns the info-endpoint
-# SNAPSHOT vocabulary — and §12.3 reconciliation plus §19.3 bot-ownership are
-# decided off THIS file's reading of the wire, so an upstream schema change has
-# to be answered in both places. What the mapper does own on this side is
-# imported above: the side alphabet and the closing-side rule (so this file and
-# the startup sweep can never disagree on which side acts against a position),
-# plus map_account_snapshot for payloads this file hands over uninspected. The
-# whole division of labour is in mapper's module docstring.
+# WIRE VOCABULARY OWNED BY THE SWEEP, not by the mapper: the frontendOpenOrders
+# listing fields (oid, coin, cloid, side, origSz/sz, limitPx, reduceOnly, tif —
+# read by ``reconcile_orders`` and, for the SL coverage, by ``_has_valid_sl``
+# below) and the fills fields (tid, time — read by ``reconcile_fills``). The
+# mapper owns the info-endpoint SNAPSHOT vocabulary — and §12.3 reconciliation
+# plus §19.3 bot-ownership are decided off the sweep's reading of the wire, so
+# an upstream schema change has to be answered in both places. What the mapper
+# does own on this side each sweep module imports itself: the side alphabet and
+# the closing-side rule (so the sweep and the startup sweep can never disagree
+# on which side acts against a position), plus map_account_snapshot for
+# payloads this file hands over uninspected. The whole division of labour is
+# in mapper's module docstring.
 
 # §12.3 "equity difference beyond tolerance". The spec names the rule but not
 # the number; these are PROVISIONAL tuning constants (same convention as the
@@ -109,34 +112,6 @@ logger = logging.getLogger(__name__)
 EQUITY_TOLERANCE_ABS_USDC = Decimal("1")
 EQUITY_TOLERANCE_REL = Decimal("0.01")
 
-# The invalid-local-fill cross-check window (§12.3 "SQLite 有 fill，但交易所查
-# 不到") is NOT a module constant: it is the trailing lookback of the backfiller
-# the reconciler holds, read at each sweep — ``LiveReconciler._crosscheck_window``
-# (issue #149, after #102) carries the KNOWN EXEMPTION that says why the two
-# must be one number. Fills near the window edges are excluded from the
-# verdict — a fill booked milliseconds ago (or one at the window's far edge)
-# can be absent from one read without being invalid.
-_FILL_CROSSCHECK_EDGE_MARGIN = timedelta(minutes=2)
-
-
-# The fail-safe fill-leg fallback: nothing fetched, nothing proven. Shared by
-# every "the backfill could not run/complete" path so the two sites can never
-# drift on what an unproven backfill looks like.
-_FAILED_BACKFILL = BackfillSummary(
-    fetched=0, applied=0, duplicate=0, unmapped=0, malformed=0, complete=False
-)
-
-# §13.5 manual case → safe-mode entry reason. ONE definition, tied to the
-# construction sites by ``ReconciliationCase.__post_init__`` (a manual case
-# whose case_type is missing here fails loud at construction): without that
-# guard, a future manual case type added without its reason would silently
-# enter safe mode under the generic mismatch reason, hiding the specific fact
-# from the §13.6 triage surface.
-_MANUAL_CASE_REASONS = {
-    "non_bot_owned_order": REASON_NON_BOT_OWNED_ORDER,
-    "invalid_local_fill": REASON_INVALID_LOCAL_FILL,
-    "exchange_position_mismatch": REASON_UNKNOWN_POSITION,
-}
 
 # The equity-mismatch case row's once-per-fact key. Deliberately a CONSTANT:
 # the observed account value drifts with mark prices between passes, so keying
@@ -163,274 +138,62 @@ def _clip(text: str | None) -> str | None:
     return None if text is None else text[:_DIFF_STRING_MAX_CHARS]
 
 
-# Choosing an exchange_value for a NEW order/position fact below (the fill-side
-# keys are §14.2's and §11.3's, and answer to those specs, not to this note):
-# ask whether the fact is an INVARIANT that stands until someone disposes of it
-# — an off-coin holding, an uncovered position, an equity gap — or an EPISODE
-# that recurs as distinct occurrences.
-#   Invariant → key it on the subject alone (``BTC|sl_missing``,
-#     ``equity_out_of_tolerance``). Whatever varies while it stands belongs in
-#     the row's detail, the per-pass reconciliation_diff, and a warning log —
-#     never in the key, or every change of it mints a row and a manual stamp.
-#   Episode   → key it on what makes the occurrence distinct (the position-size
-#     transition below): an independent later mismatch of a different magnitude
-#     is its own fact, not a repeat of the first.
-# The dedupe carries no symbol column, so either way the coin/cloid stays IN the
-# key.
-#
-# Then ask, for a fact this module DISPOSES of automatically, whether the
-# episode can start over — because a stamped key is normally shut for good, and
-# a recurrence under it would reach neither `safe-mode --status` nor §21.4's
-# unresolved count. Ask it PER STAMP — being about an order does not settle it.
-# Most of this module's order stamps dispose of a fact the sweep can find itself
-# facing again (a §8.3 rule-5 resend or a reopen puts the cloid back; the reopen
-# tiebreaker's read failure needs only the venue's next answer to flip), so those are
-# declared PROVISIONAL (repo.PROVISIONAL_DISPOSITIONS) so the next occurrence
-# gets its own row. What is NOT provisional: a human's `--stamp-case`
-# disposition (their answer must not be re-asked on every pass thereafter), and
-# a fact whose subject cannot return — ``local_row_backfilled`` is an order
-# stamp and stays out, because once the local row exists it cannot go missing
-# again (this package contains no `DELETE FROM orders`).
-#
-# Reopenability is not a licence to stamp early, either. How often the fact can
-# return is one thing to weigh — a fault the sweep re-observes every pass with
-# no venue state change in between (the §8.3 rule-10 order that never leaves the
-# cursor) would mint a row per pass if its disposition were provisional, which
-# is why the human stamp that disposes of one is final. The read-failure keys
-# are not that shape: minting needs a failed read and the stamp before it a
-# successful one, so on EITHER of them the ceiling is a row per
-# unreadable→readable flap. What separates their two guards is whether anything
-# else would ever close the row — see ``_clear_read_failure_case``.
-
-
-# The four dispositions whose ``ReconciliationCase.__post_init__`` check
-# cannot stand in front of the write. Three are written WITHOUT building a
-# ``ReconciliationCase`` at all — two stamped onto an already-persisted row,
-# one passed straight to the event insert — and would otherwise have no tie
-# to the vocabulary (issue #84). The fourth, the orphan back-fill's stamp,
-# DOES build a case, but only after ``insert_order`` has committed: the stamp
-# depends on whether the back-fill succeeded, so its __post_init__ runs on the
-# wrong side of the write and an unclassified rename would leave an orders
-# row with no case row explaining it (issue #104). Every other disposition
-# travels through a ``ReconciliationCase`` built before its write.
-#
-# Checked at IMPORT rather than at each write, because the sites do not
-# share a failure lane and TWO of them cannot fail loudly where they stand:
-# ``_clear_read_failure_case`` swallows and logs a warning, and ``_record``'s
-# backfill-event insert swallows and logs an exception while the pass stays
-# CLEAN — both deliberately fail-soft, so a guard at either would report a
-# rename as one log line and let the key shut forever anyway, the exact
-# silence #84 is about. Only the fill-booked stamp reaches ``guarded``, which
-# would turn a raise into an unclean verdict. Checking here gives all four
-# the same answer, and a rename nobody classified in
-# repo.MACHINE_DISPOSITIONS cannot start the daemon at all. (Since issue #151
-# repo.set_reconciliation_action re-checks the set at the write; this loop
-# stays the start-up refusal.)
-_FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
-_READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
-_FILL_BACKFILLED_DISPOSITION = "backfilled"
-_ORPHAN_BACKFILLED_DISPOSITION = "local_row_backfilled"
-# Named so the test side can assert the loop's membership without reloading
-# the module (a reload is what proving the REFUSAL costs; membership is cheap).
-_IMPORT_CHECKED_DISPOSITIONS = (
-    _FILL_BOOKED_DISPOSITION,
-    _READ_SUCCEEDED_DISPOSITION,
-    _FILL_BACKFILLED_DISPOSITION,
-    _ORPHAN_BACKFILLED_DISPOSITION,
-)
-for _disposition in _IMPORT_CHECKED_DISPOSITIONS:
-    check_enum(_disposition, repo.MACHINE_DISPOSITIONS, name="action_taken")
-del _disposition
-
-
-def _read_failure_fact_key(cloid: str) -> str:
-    """The once-per-fact key for "orderStatus could not be read for this cloid".
-
-    A DIFFERENT fact from the order's real disposition, so a different key (the
-    same reasoning, and the same ``|`` suffix shape, as its mirror on the reopen
-    side — ``_local_terminal_read_failure_fact_key``). This key and the bare
-    cloid both land under case_type ``order_missing_on_exchange``, and while
-    they WERE one key the first sighting to arrive owned it — a later genuine absence
-    of that cloid was swallowed by the dedupe and never recorded, which is
-    exactly the pairing a venue misroute produces every tick.
-
-    ONE function so the write site and the disposition lookup cannot drift: a
-    key written one way and looked up another would leave the row open forever
-    with no error anywhere.
-    """
-    return f"{cloid}|read_failed"
-
-
-def _local_terminal_fact_key(cloid: str) -> str:
-    """The reopen tiebreaker's once-per-fact key: what orderStatus ANSWERED.
-
-    "The exchange lists this cloid open while our row is terminal" — a fact of
-    its own, so a later re-settle of the same cloid must not dedupe against a
-    plain-orphan sighting, and vice versa.
-
-    Shared by the two outcomes that are readings of one situation: the reopen
-    (answer LIVE, the terminal row was wrong) and the unknownOid contradiction
-    (the venue's two views disagree). NOT by the read failure, which has its
-    own key below — see there.
-    """
-    return f"{cloid}|local_terminal"
-
-
-def _local_terminal_read_failure_fact_key(cloid: str) -> str:
-    """The once-per-fact key for "orderStatus could not be read" HERE.
-
-    The reopen tiebreaker's read failure is a different fact from what a
-    successful read then says, and it splits off for exactly the reasons
-    ``_read_failure_fact_key`` splits off the absent-order tiebreaker's — the
-    two directions are mirror images and now have mirror-image keys:
-
-    * A recorded read failure would otherwise swallow the unknownOid
-      contradiction that a later pass finds under the same key: the venue
-      contradicting itself is the graver fault and it would reach no durable
-      row at all.
-    * And the disposal would run the other way: "a later read answered" is what
-      disproves the read failure, but stamping that onto a CONTRADICTION row
-      would assert a read that never failed, over a detail saying it answered
-      unknownOid.
-
-    ONE function, same as its sibling: this key is looked up as well as
-    written, and a lookup spelled differently from the write would leave the
-    row open forever with no error anywhere.
-    """
-    return f"{cloid}|local_terminal_read_failed"
-
-
-@dataclass(frozen=True)
-class ReconciliationCase:
-    """One observed §12.3 case: what, where, and whether a human must decide."""
-
-    case_type: str
-    symbol: str | None
-    local_value: str | None
-    exchange_value: str | None
-    detail: str | None = None
-    action_taken: str | None = None
-    # True → §13.5 manual safe mode (non-bot order, unknown position, a fill
-    # the exchange denies); False → recoverable, healable by a later pass.
-    manual: bool = False
-    # True → the case was RESOLVED in this pass (settled/back-filled); it is
-    # recorded for the audit trail but does not make the pass unclean.
-    resolved: bool = False
-
-    def __post_init__(self) -> None:
-        # Loud at construction, not at the write: the only other place this is
-        # checked is ``_record``'s insert, which run() wraps in a swallow-all —
-        # a typo'd case_type there would lose the audit row with nothing but a
-        # log line. Validating here turns it into a failed (unclean) leg.
-        check_enum(self.case_type, repo.RECONCILIATION_CASE_TYPES, name="case_type")
-        # Same argument one field over (issue #84). Every ReconciliationCase is
-        # constructed by the SWEEP — a human's disposition is written straight
-        # to the row by ``safe-mode --stamp-case`` (via
-        # ``stamp_reconciliation_action_if_unset``) and never passes through
-        # here — so ``action_taken`` is machine vocabulary, and the set that
-        # decides whether a fact key REOPENS (repo.PROVISIONAL_DISPOSITIONS)
-        # matches it by string. A new or renamed disposition that nobody
-        # classified there fails silently in exactly the #65 direction: that
-        # key shuts forever. Loud here, at the construction that introduced it.
-        if self.action_taken is not None:
-            check_enum(self.action_taken, repo.MACHINE_DISPOSITIONS, name="action_taken")
-        # Mutually exclusive by the module's model: a manual case is one only a
-        # human may dispose of, so nothing in this pass can have resolved it.
-        # Enforced because ``manual_cases`` filters on ``not resolved`` — a
-        # future path constructing both True would silently skip the §13.5
-        # manual escalation for a case that requires it.
-        if self.manual and self.resolved:
-            raise ValueError(
-                f"a ReconciliationCase cannot be both manual and resolved "
-                f"({self.case_type}): manual means only a human may dispose of it"
-            )
-        # A disposition implies a resolution: ``_record``'s once-per-fact
-        # restamp keys off ``action_taken`` alone, so a case carrying an action
-        # while still unresolved would stamp the persisted row as disposed of
-        # while the in-memory verdict (which keys off ``resolved``) stays
-        # unclean — the audit trail and the verdict would diverge.
-        if self.action_taken is not None and not self.resolved:
-            raise ValueError(
-                f"a ReconciliationCase with action_taken={self.action_taken!r} "
-                f"must be resolved ({self.case_type}): recorded dispositions and "
-                "the pass verdict must agree"
-            )
-        # Every manual case must carry a specific safe-mode reason:
-        # ``reconcile_and_apply`` routes manual cases through
-        # ``_MANUAL_CASE_REASONS``, and a manual case_type missing there would
-        # silently enter safe mode under the generic mismatch reason.
-        if self.manual and self.case_type not in _MANUAL_CASE_REASONS:
-            raise ValueError(
-                f"manual ReconciliationCase {self.case_type!r} has no entry in "
-                "_MANUAL_CASE_REASONS — add its §13.5 safe-mode reason before "
-                "constructing it as manual"
-            )
-
-
-@dataclass(frozen=True)
-class ReconciliationReport:
-    """One pass's verdict, leg by leg — the §13.4 release conditions read it."""
-
-    trigger: str
-    timestamp: datetime
-    cases: tuple[ReconciliationCase, ...]
-    orders_reconciled: bool
-    fills_reconciled: bool
-    position_reconciled: bool
-    account_reconciled: bool
-    position_protected: bool
-    backfill_complete: bool
-    errors: tuple[str, ...] = field(default_factory=tuple)
-    # Legs this pass never ran, appended by the SKIPPING SITE itself (a None
-    # ``backfiller`` / ``fetch_fills`` seam) so the report can never disagree
-    # with what actually ran. THE canonical statement of the rule (other
-    # sites just point here): a skipped leg is unproven, not proven. It is
-    # deliberately OUTSIDE ``clean`` — run()'s verdict speaks for the legs it
-    # ran, which the unit wirings rely on — but §13.4 auto-release attests
-    # ``fully_wired`` (= no skipped legs) on try_auto_recover's signature, so
-    # a half-wired caller's clean pass can hold, never lift, a latched safe
-    # mode (decided 2026-07-17; the tempting shape is a PR 5 heartbeat
-    # wiring without the fill seams).
-    legs_skipped: tuple[str, ...] = field(default_factory=tuple)
-    # The §19.3 startup stale-order sweep's per-order failures, passed in by
-    # the caller that ran the sweep. A cancel that would not land leaves a
-    # stale order resting, so this is a VERDICT INPUT, not an after-the-fact
-    # note (decided 2026-07-17): it is inside ``clean`` — unlike
-    # ``legs_skipped`` — so the pass can never read clean over it, and it is
-    # carried ON the report (rather than folded into ``errors`` by the caller
-    # afterwards) so that it exists BEFORE ``_record`` persists the pass.
-    # Folding it in after run() returned would leave the durable
-    # ``reconciliation_diff`` — and the row's ``reconciliation_status`` —
-    # claiming "ok" for a pass whose verdict was unclean and which fired safe
-    # mode.
-    sweep_failures: tuple[str, ...] = field(default_factory=tuple)
-
-    @property
-    def reconciliation_clean(self) -> bool:
-        """Every RECONCILIATION leg proved, nothing open — ignoring the §19.3 sweep.
-
-        The verdict over what this module itself checked. ``reconcile_and_apply``
-        reads it to tell "the books are fine, only the sweep failed" (which earns
-        the specific ``stale_order_sweep_failed`` reason) from a real mismatch.
-        """
-        return (
-            self.orders_reconciled
-            and self.fills_reconciled
-            and self.position_reconciled
-            and self.account_reconciled
-            and self.position_protected
-            and self.backfill_complete
-            and not self.errors
-        )
-
-    @property
-    def clean(self) -> bool:
-        """§13.4's "no unresolved mismatch": every leg proved, nothing open."""
-        return self.reconciliation_clean and not self.sweep_failures
-
-    @property
-    def manual_cases(self) -> tuple[ReconciliationCase, ...]:
-        return tuple(c for c in self.cases if c.manual and not c.resolved)
+def _diff_json(report: ReconciliationReport, backfill_summary: BackfillSummary | None) -> str:
+    """The per-pass ``reconciliation_diff`` blob: every case, error and sweep failure, clipped."""
+    return json.dumps(
+        {
+            "trigger": report.trigger,
+            "cases": [
+                {
+                    "case_type": c.case_type,
+                    "symbol": c.symbol,
+                    "local": c.local_value,
+                    "exchange": c.exchange_value,
+                    # The pass's own account of the fact, and the only
+                    # DURABLE home for what varies while an invariant-keyed
+                    # fact stands: the case row is written once (its first
+                    # detail), `safe-mode --status` prints no detail at all,
+                    # and the warning log rotates. Without this, an off-coin
+                    # holding that grew all week would be a post-mortem with
+                    # one number in it — the one from Monday.
+                    #
+                    # Clipped like every other string here: two details
+                    # carry a venue exception (a failed orderStatus read, a
+                    # failed reopen tiebreaker), and iter_open_live_orders
+                    # spans runs — so one outage mints one per still-live
+                    # order the store carries, twice per pass, every pass it
+                    # lasts. The head carries the diagnosis.
+                    "detail": _clip(c.detail),
+                    "resolved": c.resolved,
+                    # Severity survives into the durable record: two cases
+                    # can share a case_type (position mismatch on our coin
+                    # vs an unknown coin) yet differ on whether a human
+                    # must decide.
+                    "manual": c.manual,
+                }
+                for c in report.cases
+            ],
+            # Both channels also end in ``{exc}`` (a leg that raised, an
+            # order that would not cancel — the latter one entry per order),
+            # so both are clipped for the same reason the details are. The
+            # full text reaches the operator through the log and the
+            # safe-mode entry detail, which are not written per pass.
+            "errors": [_clip(e) for e in report.errors],
+            # A verdict input like any other (see the field's comment): the
+            # durable diff is what a post-mortem reads, and a row marked
+            # "mismatch" whose diff named no cause would send that reader
+            # hunting through a CLI transcript they no longer have.
+            "sweep_failures": [_clip(f) for f in report.sweep_failures],
+            "backfill": None
+            if backfill_summary is None
+            else {
+                "fetched": backfill_summary.fetched,
+                "applied": backfill_summary.applied,
+                "complete": backfill_summary.complete,
+            },
+        },
+        sort_keys=True,
+    )
 
 
 class LiveReconciler:
@@ -499,7 +262,7 @@ class LiveReconciler:
         # ``stream`` is three seams on one object — ``backfill_epoch() ->
         # epoch``, ``backfill_since() -> datetime | None``,
         # ``mark_backfill_done(epoch) -> bool`` — each called inside the guarded
-        # fill leg (``_run_fill_backfill``), so the refusal names the missing
+        # fill leg (``reconcile_fills.run_fill_backfill``), so the refusal names the missing
         # method (issue #169). ``None`` is every wiring today: no production
         # site binds a stream to the reconciler (the v1 loop runs the REST
         # backfill without a socket — ``cli/live_loop``'s scope note), so this
@@ -587,7 +350,7 @@ class LiveReconciler:
         """Bind the fill leg — and check, on the binding, what the cross-check reads off it.
 
         The window and its operator label follow whichever backfiller is bound
-        (see ``_crosscheck_window``), so both refusals sit here rather than in
+        (see ``reconcile_fills.crosscheck_window``), so both refusals sit here rather than in
         ``__init__``: a stand-in without a ``lookback`` (the cross-check
         window) or a ``backfill`` (the fill leg) is named as a mis-wiring —
         the object form of the seam guard, one seam over — instead of
@@ -606,56 +369,22 @@ class LiveReconciler:
                 attrs=("lookback",),
             )
         # Checked BEFORE the slot is written, so a refused binding does not land.
-        candidate, owner = self._window_of(backfiller)
+        candidate, owner = reconcile_fills.crosscheck_window(backfiller)
         whole_hours_label(candidate, what=owner)
         self._backfiller_slot = backfiller
 
-    @staticmethod
-    def _window_of(backfiller: FillBackfiller | None) -> tuple[timedelta, str]:
-        """``backfiller``'s cross-check window and the name of what owns it; see ``_crosscheck_window``."""
-        if backfiller is None:
-            return DEFAULT_LOOKBACK, "fill_backfill.DEFAULT_LOOKBACK"
-        return backfiller.lookback, "FillBackfiller.lookback"
-
-    def _crosscheck_window(self) -> tuple[timedelta, str]:
-        """The invalid-local-fill cross-check window and the name of what owns it.
-
-        The window is the bound backfiller's trailing lookback, read off it at
-        each sweep — not bound at construction and not restated from the
-        module default (issue #149, after #102). The KNOWN EXEMPTION below
-        holds only while the two windows are one number, and the default
-        equals every instance's lookback only until the first wiring passes
-        ``lookback_seconds`` through from config — a cross-check still pinned
-        to the default would then call every local fill between the two
-        windows "a fill the exchange denies" and open manual cases on a false
-        premise.
-
-        KNOWN EXEMPTION (decided 2026-07-17): the window slides, so a local
-        fill older than the lookback is permanently outside this leg's verdict
-        — a double-booked fill caught inside the window is manual severity,
-        the same fill outside it is seen only by the equity-tolerance leg.
-        Accepted for PR 4 because a genesis floor would page the full history
-        every pass (and withhold the verdict whenever the 2000/20-page budget
-        runs out); PR 5's durable "cross-checked-through" watermark extends
-        coverage without that cost.
-
-        With no backfiller (reads-only wirings: tests, offline verdicts) there
-        is no backfill leg for the window to keep parity with, and it is only
-        "how far back the cross-check reads": the module default stands in
-        (decided 2026-09-01). The owner name is what a refusal names.
-        """
-        return self._window_of(self._backfiller)
-
-    def _lookback_label(self) -> str:
-        """The cross-check window as the operator reads it in the genesis-corruption warning.
-
-        Whole hours only: a lookback that is not one would render truncated
-        ("5h" for 5h30m) and understate how long an outage can go unbooked, so
-        this refuses rather than round — retuning the backfill window to a
-        fraction of an hour is a change that message has to be rewritten for.
-        """
-        span, owner = self._crosscheck_window()
-        return whole_hours_label(span, what=owner)
+    def _sweep_context(self) -> SweepContext:
+        """What the fill and orders legs read for this pass — see ``SweepContext``."""
+        return SweepContext(
+            db=self._db,
+            run_id=self._run_id,
+            identity=self._identity,
+            fetch_fills=self._fetch_fills,
+            backfiller=self._backfiller,
+            stream=self._stream,
+            clock=self._clock,
+            refresh_deadline=self._refresh_deadline,
+        )
 
     # ------------------------------------------------------------------ run
 
@@ -709,6 +438,7 @@ class LiveReconciler:
             logger.exception("reconciliation clearinghouse state read failed")
             errors.append(f"clearinghouse state read failed: {exc}")
         self._refresh_deadline()
+        sweep = self._sweep_context()
 
         # -- legs -----------------------------------------------------------
         # Each leg is individually guarded: the docstring's "raises nothing"
@@ -726,13 +456,19 @@ class LiveReconciler:
                 return fallback
 
         backfill_summary = guarded(
-            "fill backfill", lambda: self._run_fill_backfill(errors, legs_skipped), _FAILED_BACKFILL
+            "fill backfill",
+            lambda: reconcile_fills.run_fill_backfill(sweep, errors, legs_skipped),
+            FAILED_BACKFILL,
         )
         orders_ok = guarded(
-            "orders", lambda: self._reconcile_orders(open_orders, cases, errors, now), False
+            "orders",
+            lambda: reconcile_orders.reconcile_orders(sweep, open_orders, cases, errors, now),
+            False,
         )
         fills_ok = guarded(
-            "fills", lambda: self._reconcile_fills(cases, errors, now, legs_skipped), False
+            "fills",
+            lambda: reconcile_fills.reconcile_fills(sweep, cases, errors, now, legs_skipped),
+            False,
         )
         # Fallback (False, False): unknown ≠ protected — the same fail-safe
         # direction as a failed clearinghouse read (§17.1 rule 1 demands
@@ -801,7 +537,7 @@ class LiveReconciler:
         """
         for case in report.manual_cases:
             # Membership is guaranteed by ReconciliationCase.__post_init__.
-            reason = _MANUAL_CASE_REASONS[case.case_type]
+            reason = MANUAL_CASE_REASONS[case.case_type]
             safe_mode.enter("manual", reason, detail=case.detail or case.case_type)
 
     def reconcile_and_apply(
@@ -902,861 +638,6 @@ class LiveReconciler:
             )
         return report
 
-    # ------------------------------------------------------------- fills leg
-
-    def _run_fill_backfill(
-        self, errors: list[str], legs_skipped: list[str]
-    ) -> BackfillSummary | None:
-        """§12.3 "交易所有 fill，但 SQLite 沒記錄": book them via the PR 3 path.
-
-        The epoch discipline mirrors the stream's contract: read the epoch,
-        run the pass, clear with the epoch read — and only for a COMPLETE
-        pass, so a capped window never retires the gap it failed to cover.
-        """
-        if self._backfiller is None:
-            legs_skipped.append("fill_backfill")
-            return None
-        epoch = self._stream.backfill_epoch() if self._stream is not None else None
-        if self._stream is not None:
-            since = self._stream.backfill_since()
-        else:
-            # No WS stream in this wiring (the PR 4 startup command; the daemon
-            # loop with its stream-held obligations is PR 5): the whole
-            # process-was-down era is owed, so the floor is the newest booked
-            # fill — or the run's genesis when none exists yet (§11.2 rule 5).
-            # The trailing lookback alone would silently skip any outage longer
-            # than itself. The §11.2 v12 durable clean-backfill watermark (which
-            # hardens this derivation against a crash mid-backfill) lands with
-            # PR 5's daemon wiring — decided 2026-07-16.
-            since = repo.last_live_fill_time(self._db.conn, self._run_id)
-            if since is None:
-                run_row = repo.get_run(self._db.conn, self._run_id)
-                genesis_raw = None if run_row is None else run_row["created_at"]
-                try:
-                    since = datetime.fromisoformat(genesis_raw)
-                except (TypeError, ValueError):
-                    since = None
-                    # Our own writer always stores ISO-8601, so this is store
-                    # corruption (same reading as safe_mode's entered_at) — and
-                    # the degradation is money-relevant: the floor silently
-                    # becomes the bare trailing lookback, which skips any
-                    # outage longer than itself. Never degrade without a trace.
-                    logger.warning(
-                        "run %s genesis timestamp %r is missing/unparseable; fill "
-                        "backfill floor degrades to the trailing %s lookback — an "
-                        "outage longer than that may leave fills unbooked",
-                        self._run_id,
-                        genesis_raw,
-                        self._lookback_label(),
-                    )
-        try:
-            summary = self._backfiller.backfill(self._clock.now(), since=since)
-        except Exception as exc:  # noqa: BLE001 — transport failure = gap still open
-            logger.exception("reconciliation fill backfill failed")
-            errors.append(f"fill backfill failed: {exc}")
-            return _FAILED_BACKFILL
-        if not summary.complete:
-            # An incomplete pass (page budget exhausted / capped window that did
-            # not raise) already flips backfill_complete → the verdict is
-            # unclean, but without a trace here the safe-mode detail and the
-            # reconciliation_diff would carry no reason. Name it, like every
-            # other blocking leg does (the exception path above already does).
-            errors.append(
-                f"fill backfill incomplete ({summary.applied} booked, page budget "
-                "exhausted or window uncovered) — some exchange fills may remain "
-                "unbooked (§12.3)"
-            )
-            logger.warning("reconciliation fill backfill incomplete — gap not fully covered")
-        if summary.complete and self._stream is not None and epoch is not None:
-            self._stream.mark_backfill_done(epoch)
-        return summary
-
-    def _reconcile_fills(
-        self,
-        cases: list[ReconciliationCase],
-        errors: list[str],
-        now: datetime,
-        legs_skipped: list[str],
-    ) -> bool:
-        """The fill-ledger legs: sighting backlog + the invalid-local check."""
-        ok = True
-        conn = self._db.conn
-
-        # Sweep the malformed backlog first: a sighting whose bare-tid key has
-        # since been booked (a §8.3 recovery re-ingested it) resolves itself.
-        # Any malformed sighting still un-actioned after this AGE blocks the
-        # pass (decided 2026-07-17): a fill the exchange reported but SQLite
-        # never booked (an unusable tid, a digest-keyed body) is "交易所有
-        # fill、本地沒記錄" — unbooked money a human must stamp action_taken on,
-        # not an audit backlog the verdict may read past. The reason flows into
-        # ``errors`` so the fact reaches the safe-mode detail and the persisted
-        # reconciliation_diff, like every other blocking leg.
-        unresolved_malformed = 0
-        for row in repo.iter_exchange_reconciliation_events(
-            conn, self._run_id, case_type="fill_malformed"
-        ):
-            if row["action_taken"] is not None:
-                continue
-            key = row["exchange_value"]
-            # Three shapes reach here and only ONE is keyed by a tid: a bare
-            # tid, a ``unparsed-`` digest, and an ``envelope-`` fact key (a
-            # stream-level fault — wrong wallet, channel schema drift). The
-            # latter two are unkeyable and can only be settled by a human.
-            #
-            # The envelope arm is not merely a shortcut. The key it carries is
-            # a CONSTANT this code chose, but the tid the resolver would derive
-            # from it is untrusted input: a venue fill whose tid is literally
-            # "envelope-wrong-user" books under exchange_fill_key
-            # "tid|envelope-wrong-user", and letting the lookup run would find
-            # it and stamp the STREAM fault resolved_fill_booked — retiring the
-            # one signal that says we are being served another wallet's fills,
-            # with no human ever seeing it. fills._malformed_key fences the same
-            # namespace on the write side; this is the read side of that fence
-            # (2026-08-17 exit sweep).
-            if not key or key.startswith("unparsed-") or key.startswith(ENVELOPE_FACT_KEY_PREFIX):
-                unresolved_malformed += 1  # unkeyable: human territory
-                continue
-            try:
-                booked = repo.get_fill_by_exchange_key(conn, exchange_fill_key(tid=key))
-            except ValueError:
-                unresolved_malformed += 1  # the malformed tid violates the key derivation
-                continue
-            if booked is not None:
-                with self._db.transaction() as tx:
-                    repo.set_reconciliation_action(tx, row["event_id"], _FILL_BOOKED_DISPOSITION)
-            else:
-                unresolved_malformed += 1
-        if unresolved_malformed:
-            ok = False
-            errors.append(
-                f"{unresolved_malformed} malformed fill sighting(s) unresolved — the "
-                "exchange reported fills SQLite never booked; a human must stamp "
-                "action_taken (§12.3)"
-            )
-
-        # §12.3 (v10/v11): unmapped sightings still absent from the ledger are
-        # the known "exchange has a fill we have not booked" backlog. Record it
-        # in ``errors`` (not just the log): the flip to unclean must reach the
-        # safe-mode detail and the persisted reconciliation_diff, or an operator
-        # sees safe mode fire with no cause named on any operator-facing surface.
-        unbooked = repo.iter_unresolved_fill_sightings(conn, self._run_id)
-        if unbooked:
-            ok = False
-            errors.append(
-                f"{len(unbooked)} unmapped fill sighting(s) still unbooked — exchange "
-                "fills absent from the local ledger (§12.3)"
-            )
-            logger.warning(
-                "%d unmapped fill sighting(s) still unbooked — fills are not reconciled",
-                len(unbooked),
-            )
-
-        # §12.3 "SQLite 有 fill，但交易所查不到" → invalid_local_fill (manual:
-        # money the exchange denies is booked money we cannot trust).
-        if self._fetch_fills is None:
-            # The skipping site is the reporting site — see
-            # ReconciliationReport.legs_skipped.
-            legs_skipped.append("invalid_local_fill_crosscheck")
-        else:
-            lookback, _owner = self._crosscheck_window()
-            window_start = now - lookback
-            logger.debug(
-                "invalid-local-fill cross-check window %s → %s; local fills older "
-                "than the window are outside this leg's verdict (known exemption, "
-                "PR 5 watermark extends coverage)",
-                window_start.isoformat(),
-                now.isoformat(),
-            )
-            exchange_keys = self._fetch_window_fill_keys(
-                self._fetch_fills, window_start, now, errors
-            )
-            if exchange_keys is None:
-                return False  # fetch failed or window provably not covered: inconclusive
-            verdict_start = window_start + _FILL_CROSSCHECK_EDGE_MARGIN
-            verdict_end = now - _FILL_CROSSCHECK_EDGE_MARGIN
-            for fill in repo.iter_live_fills(conn, self._run_id):
-                fill_time = fill["exchange_fill_time"]
-                try:
-                    # NULL and unparseable land in the SAME lane: the writer
-                    # requires exchange_fill_time (PR 3 guard), so either shape
-                    # is store corruption, and a silent exemption would leave
-                    # that fill permanently outside the §12.3 verdict.
-                    stamp = datetime.fromisoformat(fill_time)
-                except (TypeError, ValueError):
-                    # run()'s contract is "records everything, raises nothing";
-                    # a bad stored timestamp is a verdict, not a crash.
-                    errors.append(
-                        f"fill {fill['fill_id']} has missing/unparseable "
-                        f"exchange_fill_time {fill_time!r} — fills leg cannot be proven"
-                    )
-                    ok = False
-                    continue
-                if not (verdict_start <= stamp <= verdict_end):
-                    continue
-                if fill["exchange_fill_key"] not in exchange_keys:
-                    ok = False
-                    cases.append(
-                        ReconciliationCase(
-                            case_type="invalid_local_fill",
-                            symbol=fill["symbol"],
-                            local_value=fill["fill_id"],
-                            exchange_value=fill["exchange_fill_key"],
-                            detail=(
-                                f"fill {fill['fill_id']} booked locally at {fill_time} is "
-                                "absent from the exchange's fill history — its accounting "
-                                "cannot be trusted (§14: never re-applied; human review)"
-                            ),
-                            manual=True,
-                        )
-                    )
-        return ok
-
-    def _fetch_window_fill_keys(
-        self,
-        fetch: Callable[[int, int], Any],
-        window_start: datetime,
-        now: datetime,
-        errors: list[str],
-    ) -> set[str] | None:
-        """Every §14.2 key the exchange reports in the window, or None if unproven.
-
-        PAGED, exactly like the backfiller: ``userFillsByTime`` caps a response
-        (2000 fills), and judging "the exchange denies this fill" against a
-        TRUNCATED window would flag genuinely booked fills as invalid and force
-        manual safe mode on a false premise. A window that cannot be proven
-        covered (page budget out, unadvanceable page) returns None — the leg
-        reports inconclusive (fail-safe) instead of issuing manual verdicts.
-        """
-        start_ms = epoch_ms(window_start, what="fill cross-check window start")
-        end_ms = epoch_ms(now, what="fill cross-check 'now'")
-        keys: set[str] = set()
-        for _ in range(DEFAULT_MAX_PAGES):
-            try:
-                raw = fetch(start_ms, end_ms)
-                if not isinstance(raw, list):
-                    raise ValueError(f"user_fills_by_time returned {type(raw).__name__}")
-            except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
-                logger.exception("fill cross-check fetch failed")
-                errors.append(f"fill cross-check fetch failed: {exc}")
-                return None
-            # §18.2: the SECOND page ladder on this tick, and the one that is easy
-            # to miss — the backfiller's is in another module, this one is inline.
-            # Same shape, same budget (DEFAULT_MAX_PAGES), same hazard: without a
-            # refresh per page a fills-heavy window (>2000 fills, so the response
-            # comes back capped and it pages again) holds the single-threaded tick
-            # for up to 20 × network_timeout_s and the dead man's switch cancels
-            # every resting SL/TP while the process is alive
-            # (2026-07-31 deadline review, second pass).
-            self._refresh_deadline()
-            newest_ms: int | None = None
-            for f in raw:
-                tid = f.get("tid") if isinstance(f, dict) else None
-                if not usable_fill_tid(tid):
-                    # An entry this pass cannot key (non-dict entry, or a tid
-                    # shape ingest treats as malformed — one shared predicate,
-                    # so the two legs cannot drift) is an entry the membership
-                    # verdict below cannot see. Treating the window as covered
-                    # anyway would flag a genuinely booked local fill as
-                    # invalid_local_fill and force MANUAL safe mode on a false
-                    # premise — the one lane where unprovable coverage would
-                    # have produced a verdict instead of this leg's own
-                    # withhold rule.
-                    errors.append(
-                        "fill cross-check window contains an entry with no usable "
-                        "tid — invalid-fill verdicts withheld"
-                    )
-                    return None
-                keys.add(exchange_fill_key(tid=tid))
-                t = f.get("time")
-                if isinstance(t, int) and (newest_ms is None or t > newest_ms):
-                    newest_ms = t
-            if len(raw) < RESPONSE_FILL_CAP:
-                return keys  # the exchange gave everything: the window is covered
-            if newest_ms is None or newest_ms <= start_ms:
-                # Cannot advance: paging again would refetch the same page.
-                errors.append(
-                    "fill cross-check window not covered (capped page with no "
-                    "advanceable timestamp) — invalid-fill verdicts withheld"
-                )
-                return None
-            start_ms = newest_ms
-        errors.append(
-            "fill cross-check window not covered (response still capped after "
-            f"{DEFAULT_MAX_PAGES} pages) — invalid-fill verdicts withheld"
-        )
-        return None
-
-    # ------------------------------------------------------------ orders leg
-
-    def _reconcile_orders(
-        self,
-        open_orders: list | None,
-        cases: list[ReconciliationCase],
-        errors: list[str],
-        now: datetime,
-    ) -> bool:
-        if open_orders is None:
-            return False
-        ok = True
-        conn = self._db.conn
-        exchange_open_cloids: set[str] = set()
-
-        for order in open_orders:
-            # §18.2: this loop's reopen check asks orderStatus per order, and the
-            # exchange decides how many orders there are — refresh every
-            # iteration so the wall of round-trips is never one unbroken gap.
-            #
-            # At the TOP, unlike the absent-order loop below, which refreshes
-            # only for rows it is about to probe. Several branches here can reach
-            # the wire and they do not share one guard, so tracking them
-            # individually would be the kind of bookkeeping that silently misses
-            # the branch added next year. A refresh on an iteration that turns
-            # out to do no I/O costs a clock read (tick() reaches the wire only
-            # when a refresh is due), which is the cheaper mistake.
-            self._refresh_deadline()
-            if not isinstance(order, dict):
-                errors.append(f"malformed open_orders entry ({type(order).__name__})")
-                ok = False
-                continue
-            oid = str(order.get("oid", "?"))
-            coin = order.get("coin")
-            cloid = order.get("cloid")
-            registry = repo.get_cloid_by_hex(conn, cloid) if isinstance(cloid, str) else None
-            if registry is None or not isinstance(cloid, str):
-                # §12.3 row 3 / §19.3: no cloid, or a cloid our registry never
-                # issued → non-bot-owned → manual safe mode; never manage it.
-                ok = False
-                cases.append(
-                    ReconciliationCase(
-                        case_type="non_bot_owned_order",
-                        symbol=coin if isinstance(coin, str) else None,
-                        local_value=None,
-                        exchange_value=f"oid={oid}",
-                        detail=(
-                            f"exchange open order oid={oid} cloid={cloid!r} has no "
-                            "cloid_registry mapping — not bot-owned (§19.3); manual "
-                            "safe mode, the bot never manages it (§25)"
-                        ),
-                        manual=True,
-                    )
-                )
-                continue
-            exchange_open_cloids.add(cloid)
-            local = repo.get_order_by_cloid_hex(conn, cloid)
-            if local is None:
-                # §12.3 row 2: bot-owned on the exchange, absent locally →
-                # back-fill the local row from what the exchange reported
-                # (fail-safe direction: once the row exists, every later sweep
-                # — kill-switch shutdown included — sees and manages it).
-                # The stamp is chosen AFTER ``insert_order`` commits, so
-                # __post_init__ is too late to guard this write; it is checked
-                # at import instead — see ``_ORPHAN_BACKFILLED_DISPOSITION``.
-                resolved = self._backfill_orphan_order(order, registry, now)
-                cases.append(
-                    ReconciliationCase(
-                        case_type="orphan_exchange_order",
-                        symbol=registry["symbol"],
-                        local_value=None,
-                        exchange_value=cloid,
-                        detail=f"exchange open order oid={oid} had no local orders row",
-                        action_taken=_ORPHAN_BACKFILLED_DISPOSITION if resolved else None,
-                        resolved=resolved,
-                    )
-                )
-                if not resolved:
-                    ok = False
-            elif local["status"] not in repo.LIVE_ORDER_STATUSES:
-                # The exchange's open-orders view lists the order but the local
-                # row is terminal. TWO very different stories fit this shape:
-                # a past pass settled the row off a wrong unknownOid answer
-                # (the send had landed — the row must reopen, §12.1), or the
-                # open-orders view is merely BEHIND a cancel this very startup
-                # just landed (reopening would resurrect a phantom-open row
-                # for an order the run itself retired). orderStatus is the
-                # tiebreaker, same as the mirror direction's non-case reading:
-                # two eventually-consistent reads disagreeing is not a
-                # local/exchange conflict.
-                reopened, case = self._maybe_reopen_terminal_order(order, registry, local, now)
-                if case is not None:
-                    cases.append(case)
-                if not reopened:
-                    ok = False
-
-        # §12.3 row 1: locally-live orders the exchange's open-orders view did
-        # not list. Ask orderStatus directly; never resend (§8.3).
-        for row in repo.iter_open_live_orders(conn):
-            cloid = row["cloid_hex"]
-            if cloid in exchange_open_cloids:
-                continue
-            # §18.2: one orderStatus round-trip per absent row, and this cursor
-            # deliberately spans runs — so the count is bounded by the store's
-            # history, not by anything this run configured. Refresh before each.
-            self._refresh_deadline()
-            settled, case = self._settle_absent_order(row, now)
-            if case is not None:
-                cases.append(case)
-                if case.action_taken is not None:
-                    # ONLY when this pass DISPOSED of the order, which is what
-                    # takes it out of THIS cursor. The other outcomes leave it
-                    # here, in a cursor that keeps probing it (while the
-                    # exchange does not list it — a pass that finds it listed
-                    # skips this loop for it), so a later pass gets to settle it
-                    # and stamp then. Waiting costs one row that stays open a
-                    # while; stamping on any answered read would cost a fresh
-                    # row per unreadable→readable flap of the venue, for a fault
-                    # the sweep has not finished with. The sibling caller has no
-                    # later pass to wait for and takes the other trade — see
-                    # _clear_read_failure_case for the pair.
-                    #
-                    # Disposal does not make recurrence impossible — a §8.3
-                    # rule-5 resend re-stamps the same order_id 'submitted'
-                    # (live/orders.py) and _maybe_reopen_terminal_order revives a
-                    # terminal row — it makes it need a deliberate new send or a
-                    # contradicting exchange answer first. That is the bound
-                    # this key relies on: on THIS side, rows come back per
-                    # revive rather than per flap.
-                    self._clear_read_failure_case(
-                        cloid,
-                        case_type="order_missing_on_exchange",
-                        fact_key=_read_failure_fact_key(cloid),
-                    )
-            if not settled:
-                ok = False
-        return ok
-
-    def _maybe_reopen_terminal_order(
-        self, order: dict, registry: Any, local: Any, now: datetime
-    ) -> tuple[bool, ReconciliationCase | None]:
-        """Reopen a terminal local row ONLY when orderStatus proves it live.
-
-        Returns ``(ok, case)``. orderStatus is the authority (§8.3): a LIVE
-        answer proves the terminal row was wrong — reopen it (§12.1, the
-        exchange wins). A TERMINAL answer proves the open-orders view is
-        merely behind (typically a cancel this very startup just landed) —
-        no case, nothing touched. Anything else (unknownOid contradicting the
-        listing, a failed read) is an unproven conflict: recorded, unclean,
-        never guessed.
-        """
-        cloid = local["cloid_hex"]
-        oid = str(order.get("oid", "?"))
-        try:
-            parsed = self._identity.probe(cloid, site=ProbeSite.RECONCILE_ORPHAN_TIEBREAKER)
-        except Exception as exc:  # noqa: BLE001 — a failed read is a verdict
-            # Log-at-origin, same as _settle_absent_order's sibling tiebreaker:
-            # the case detail is an in-memory value (and its row write is
-            # fail-soft), so without this line a transient API error here
-            # would leave no trace of WHY this order failed to reconcile.
-            # The clause tells the two families apart for triage; the fact
-            # key and the disposition are the same for both — an unreadable
-            # ANSWER is still "we could not ask this cloid" as far as the
-            # case ledger is concerned, and its bound lives in the monitor,
-            # not in extra rows.
-            why = describe_order_status_failure(exc)
-            logger.warning("tiebreaker for cloid %s: %s", cloid, why)
-            return False, ReconciliationCase(
-                case_type="orphan_exchange_order",
-                symbol=registry["symbol"],
-                local_value=f"{local['order_id']}:{local['status']}",
-                exchange_value=_local_terminal_read_failure_fact_key(cloid),
-                detail=(
-                    f"exchange lists oid={oid} open but the local row is terminal "
-                    f"({local['status']}) and {why}"
-                ),
-            )
-        # The read ANSWERED, whatever it answered — so the fact "we could not
-        # ask this cloid" is disproved, for all three outcomes below. Disposing
-        # of it here rather than per branch is the whole reason that fact has a
-        # key of its own: the unknownOid branch below records a DIFFERENT fault
-        # (the venue contradicting itself), and stamping "the read succeeded"
-        # onto that row would say something that never happened (issue #66).
-        self._clear_read_failure_case(
-            cloid,
-            case_type="orphan_exchange_order",
-            fact_key=_local_terminal_read_failure_fact_key(cloid),
-        )
-        if parsed is not None:
-            exchange_order_id = parsed.exchange_order_id
-            raw_status = parsed.status
-            local_status = local_status_for_exchange_status(raw_status)
-            if local_status in repo.LIVE_ORDER_STATUSES:
-                # Confirmed live: the terminal row was wrong (the usual story:
-                # a past pass settled it off a wrong unknownOid answer). The
-                # row reopens, making the order visible again to
-                # iter_open_live_orders and the shutdown cross-check. Persist the
-                # MAPPED local status, never a literal "open": only "open" passes the
-                # guard today, but hardcoding it is the same idiom that let the
-                # protection manager misrecord a filled/canceled recovery as live.
-                #
-                # Built BEFORE the write, though it is returned after: its
-                # __post_init__ is what validates the disposition, and an
-                # unclassified one must not leave the order reopened in SQLite
-                # with no audit row saying why (issue #84).
-                case = ReconciliationCase(
-                    case_type="orphan_exchange_order",
-                    symbol=registry["symbol"],
-                    local_value=f"{local['order_id']}:{local['status']}",
-                    # Distinct fact key: a later re-settle of the same cloid
-                    # must not dedupe against a plain-orphan sighting.
-                    exchange_value=_local_terminal_fact_key(cloid),
-                    detail=(
-                        f"exchange lists oid={oid} open, orderStatus confirms "
-                        f"{raw_status!r}, but the local row was terminal "
-                        f"({local['status']}) — reopened per §12.1"
-                    ),
-                    action_taken="local_row_reopened",
-                    resolved=True,
-                )
-                with self._db.transaction() as tx:
-                    repo.update_order(
-                        tx,
-                        local["order_id"],
-                        status=local_status,
-                        status_reason="reopened_from_exchange_reconciliation",
-                        exchange_order_id=exchange_order_id,
-                        exchange_status=local_status,
-                        exchange_raw_status=raw_status,
-                        updated_at=now,
-                    )
-                return True, case
-            # orderStatus says terminal too: the open-orders view is behind
-            # (a cancel this startup just landed is the common cause). Two
-            # eventually-consistent reads disagreeing for a moment is not a
-            # local/exchange conflict — same reading as the mirror direction.
-            # No case, therefore no ``_record`` restamp: the read failure this
-            # pass disproved was disposed of above, where every answered read
-            # is treated alike (issue #66 — before that, this outcome, which is
-            # the COMMON one, left the read-failure row open forever).
-            return True, None
-        # unknownOid while open_orders LISTS the order: contradictory exchange
-        # answers — unproven either way, never guessed.
-        return False, ReconciliationCase(
-            case_type="orphan_exchange_order",
-            symbol=registry["symbol"],
-            local_value=f"{local['order_id']}:{local['status']}",
-            exchange_value=_local_terminal_fact_key(cloid),
-            detail=(
-                f"exchange lists oid={oid} open but orderStatus answers unknownOid "
-                f"and the local row is terminal ({local['status']}) — contradictory "
-                "exchange answers, left for the next pass"
-            ),
-        )
-
-    def _orphan_order_type(self, order: dict, registry: Any) -> str:
-        """The ``orders.type`` word for an orphan: role for triggers, venue tif otherwise.
-
-        The listing entry carries the tif when the venue includes it; the
-        documented ``orderStatus`` shape always does, so an entry without one
-        is probed (through the shared identity monitor, §13.5). Raises when
-        the word is missing or is not one this system places — the caller's
-        back-fill then fails as it does for any unusable field, leaving the
-        orphan an open mismatch rather than a mislabeled row.
-        """
-        role_type = repo.ROLE_TO_ORDER_TYPE.get(registry["order_role"])
-        if role_type is not None:
-            return role_type
-        tif = order.get("tif")
-        if not isinstance(tif, str):
-            try:
-                reading = self._identity.probe(
-                    registry["cloid_hex"], site=ProbeSite.RECONCILE_ORPHAN_TYPE
-                )
-            except Exception as exc:  # noqa: BLE001 — named like the sibling probes, then re-raised
-                raise ValueError(
-                    f"cannot derive orders.type for orphan cloid {registry['cloid_hex']}: "
-                    f"the listing carries no tif and {describe_order_status_failure(exc)}"
-                ) from exc
-            tif = None if reading is None else reading.tif
-        order_type = ORDER_TYPE_FOR_TIF.get(tif) if isinstance(tif, str) else None
-        if order_type is None:
-            raise ValueError(
-                f"cannot derive orders.type for orphan cloid {registry['cloid_hex']}: "
-                f"tif {tif!r} is not a wire type this system places"
-            )
-        return order_type
-
-    def _backfill_orphan_order(self, order: dict, registry: Any, now: datetime) -> bool:
-        """Insert the missing local row for a bot-owned exchange order."""
-        try:
-            side_raw = order.get("side")
-            side = HL_SIDE_TO_LOCAL.get(side_raw) if isinstance(side_raw, str) else None
-            if side is None:
-                raise ValueError(f"open_orders entry side {side_raw!r} not recognised")
-            # `is None` fallback, not dict.get's default: a PRESENT-but-null
-            # origSz must still fall through to sz (get's default only covers
-            # the absent-key case, and a required field that is None raises).
-            raw_orig = order.get("origSz")
-            if raw_orig is None:
-                raw_orig = order.get("sz")
-            # The mapper's guards, not a local Decimal(str(...)): "NaN"/"inf"
-            # parse WITHOUT error, and a non-finite qty would land in the
-            # orders row this back-fill inserts — read back later by the
-            # protection manager's coverage compare (``live/protection.py``
-            # reads this column at both its resting protection-order checks —
-            # the SL-coverage one and the role-agnostic _establish one).
-            # Required sizes fail loud (issue #81); limitPx keeps its optional
-            # contract (a market order legitimately has none), so an unusable
-            # one degrades to None rather than failing the back-fill —
-            # refusing the row would leave a real exchange order with no local
-            # row at all, and so outside the §18.2 disarm cross-check.
-            #
-            # ``field`` names the key the value CAME from, not the column it
-            # fills: after the fallback above, a bad ``sz`` must not be
-            # reported as a bad ``origSz``.
-            raw_sz = order.get("sz")
-            qty = require_decimal(
-                raw_orig, field="origSz" if order.get("origSz") is not None else "sz"
-            )
-            remaining = require_decimal(raw_sz, field="sz")
-            price = optional_decimal(order.get("limitPx"), field="limitPx")
-            if price is None and order.get("limitPx") not in (None, ""):
-                # The mapper logs the drop, but from inside a generic parser:
-                # no cloid, no oid, no coin. This back-fill goes on to write a
-                # RESOLVED case row, so without this line "the venue served a
-                # corrupt price for a resting order" reduces to a context-free
-                # WARNING inside an otherwise clean pass.
-                #
-                # ``""`` is excluded on purpose, not overlooked: the mapper's
-                # optional contract treats blank as ABSENT (it does not log
-                # either), and a market order with no price is the ordinary
-                # case, not a corruption. Only a value that was PRESENT and
-                # could not be used is worth an operator's attention.
-                logger.warning(
-                    "orphan back-fill for cloid %s (oid %s): limitPx %r is unusable — "
-                    "the local row will be written with no price",
-                    registry["cloid_hex"],
-                    order.get("oid"),
-                    order.get("limitPx"),
-                )
-            # The registry role is the bot's own durable record of what it
-            # placed: a trigger role names its type outright. A slice role does
-            # NOT — the registry carries no tif, and since the maker path
-            # (2026-09-16) a resting slice is an ``Alo`` at least as easily as
-            # an ``Ioc`` (more easily: an IOC never rests long enough to be
-            # orphaned). The venue's own ``tif`` word decides; a word this
-            # system never places is refused, not defaulted — a wrong type
-            # here is a permanent audit-row mislabel.
-            order_type = self._orphan_order_type(order, registry)
-            with self._db.transaction() as conn:
-                repo.insert_order(
-                    conn,
-                    # Deterministic and collision-free: one orphan row per cloid
-                    # (idx_orders_cloid_hex would reject a second anyway).
-                    order_id=f"orphan|{registry['cloid_hex']}",
-                    mode="live",
-                    run_id=registry["run_id"],
-                    symbol=registry["symbol"],
-                    order_role=registry["order_role"],
-                    side=side,
-                    order_type=order_type,
-                    qty=qty,
-                    filled_qty=qty - remaining,
-                    remaining_qty=remaining,
-                    status="open",
-                    status_reason="backfilled_from_exchange_reconciliation",
-                    price=price,
-                    reduce_only=bool(order.get("reduceOnly", False)),
-                    cloid_logical=registry["cloid_logical"],
-                    cloid_hex=registry["cloid_hex"],
-                    exchange_order_id=str(order.get("oid")),
-                    exchange_status="open",
-                    # The raw-status column stores the exchange's STATUS word
-                    # (every other writer stores "open"/"filled"/…); the source
-                    # here is presence in the open-orders listing, so "open" —
-                    # the earlier draft stored the orderType word ("Limit"),
-                    # which polluted the status vocabulary.
-                    exchange_raw_status="open",
-                    is_bot_owned=True,
-                    timestamp=now,
-                )
-            return True
-        except Exception as exc:  # noqa: BLE001 — an unfillable orphan stays a mismatch
-            logger.warning(
-                "could not back-fill orphan order for cloid %s: %s", registry["cloid_hex"], exc
-            )
-            return False
-
-    def _settle_absent_order(
-        self, row: Any, now: datetime
-    ) -> tuple[bool, ReconciliationCase | None]:
-        """One locally-live order absent from open_orders, put to orderStatus.
-
-        Returns ``(settled, case)``. The §8.3 rule-10 evidence split decides
-        the unknownOid answer: durable proof the exchange took the cloid makes
-        "I don't know it" a MISMATCH (never a licence to resend); no proof
-        means the send never landed, and the row is settled as rejected.
-        """
-        cloid = row["cloid_hex"]
-        order_id = row["order_id"]
-        try:
-            parsed = self._identity.probe(cloid, site=ProbeSite.RECONCILE_ABSENT_SETTLE)
-        except Exception as exc:  # noqa: BLE001
-            # See the sibling in _maybe_reopen_terminal_order: same fact key
-            # and disposition for both failure families, the clause alone
-            # tells them apart, and the bound on the unreadable one lives in
-            # the monitor the read went through.
-            why = describe_order_status_failure(exc)
-            logger.warning("cloid %s: %s", cloid, why)
-            return False, ReconciliationCase(
-                case_type="order_missing_on_exchange",
-                symbol=row["symbol"],
-                local_value=order_id,
-                exchange_value=_read_failure_fact_key(cloid),
-                detail=f"absent from open_orders and {why}",
-            )
-        if parsed is None:
-            if repo.has_exchange_known_cloid(self._db.conn, cloid_hex=cloid):
-                return False, ReconciliationCase(
-                    case_type="order_missing_on_exchange",
-                    symbol=row["symbol"],
-                    local_value=order_id,
-                    exchange_value=cloid,
-                    detail=(
-                        "orderStatus answers unknownOid but durable local evidence "
-                        "says the exchange took this cloid (§8.3 rule 10) — "
-                        "unresolvable here, never resent"
-                    ),
-                )
-            # No proof the exchange ever saw it: the send never landed.
-            # Case first, write second — see the sibling below.
-            case = ReconciliationCase(
-                case_type="order_missing_on_exchange",
-                symbol=row["symbol"],
-                local_value=order_id,
-                exchange_value=cloid,
-                detail="unknownOid with no §8.3 rule-10 evidence — settled as rejected",
-                action_taken="settled_never_sent",
-                resolved=True,
-            )
-            with self._db.transaction() as conn:
-                repo.update_order(
-                    conn,
-                    order_id,
-                    status="rejected",
-                    status_reason="send_never_reached_exchange",
-                    updated_at=now,
-                )
-            return True, case
-        exchange_order_id = parsed.exchange_order_id
-        raw_status = parsed.status
-        local_status = local_status_for_exchange_status(raw_status)
-        if local_status in repo.LIVE_ORDER_STATUSES:
-            # Still live per orderStatus; open_orders was merely behind. Not a
-            # §12.3 case — two eventually-consistent exchange reads disagreeing
-            # for a moment is not a local/exchange conflict.
-            return True, None
-        # Built before the write for the same reason as the reopen mirror and
-        # the never-sent branch above: __post_init__ is what validates the
-        # disposition, and settling the order in SQLite before validating it
-        # would leave the row changed with no audit row explaining why (issue
-        # #84). It matters most here, where the disposition is DERIVED
-        # (``settled_{local_status}``) and so is the one word in this module no
-        # reader can check by eye.
-        case = ReconciliationCase(
-            case_type="order_missing_on_exchange",
-            symbol=row["symbol"],
-            local_value=order_id,
-            exchange_value=cloid,
-            detail=f"settled from orderStatus: {raw_status}",
-            action_taken=f"settled_{local_status}",
-            resolved=True,
-        )
-        with self._db.transaction() as conn:
-            repo.update_order(
-                conn,
-                order_id,
-                status=local_status,
-                exchange_order_id=exchange_order_id,
-                exchange_status=local_status,
-                exchange_raw_status=raw_status,
-                updated_at=now,
-            )
-        return True, case
-
-    def _clear_read_failure_case(self, cloid: str, *, case_type: str, fact_key: str) -> None:
-        """Dispose of a past unreadable-orderStatus row that a later read disproved.
-
-        ``_record``'s restamp reaches only rows under the SAME fact key, and
-        each tiebreaker's read failure deliberately has one of its own (see
-        ``_read_failure_fact_key`` and ``_local_terminal_read_failure_fact_key``)
-        — so nothing else would ever close these rows. Left open, one transient
-        API error would hold the §21.4 ``unresolved_reconciliation_mismatch``
-        count above zero for the rest of the run, stampable only by hand, for a
-        fact a later pass disproved.
-
-        Both callers pass their own ``case_type``/``fact_key`` pair; the two
-        keys land under DIFFERENT case types (the absent-order tiebreaker files
-        ``order_missing_on_exchange``, the reopen tiebreaker
-        ``orphan_exchange_order``), which is why neither is derived here.
-
-        What "disproved" means differs by caller, and the difference is
-        deliberate rather than an oversight in either:
-
-        * The reopen tiebreaker stamps on the successful read itself, whatever
-          it answered. It can therefore be re-observed without any revive: the
-          local row stays terminal and the exchange goes on listing it, so an
-          orderStatus that alternates unreadable/readable mints a row per flap.
-          Accepted, because only the NEWEST of them is ever unresolved — every
-          superseded one was closed by the read that ended it, so `safe-mode
-          --status` and the §21.4 count still show one live fault, and the
-          exit-5 ``orphan_exchange_order_count`` gate already fails at one row.
-          What is bought is the common case: "orderStatus says terminal too"
-          produces no case at all, so nothing else would ever close this row
-          (issue #66).
-        * The absent-order tiebreaker stamps only once the pass SETTLED the
-          order, which is what takes it out of a cursor that would otherwise
-          re-observe it every pass (see there). Two successful-read outcomes
-          therefore leave its row open: unknownOid against §8.3 rule-10 evidence
-          (that order already needs a human, so the extra row sits on a §12.3
-          case someone is reading anyway), and "still live per orderStatus" —
-          where the order may then be retired by a writer that is not this sweep
-          (a §19.3 cancel, the kill switch, the protection manager), and the row
-          holds §21.4's unresolved count above zero with nothing else reporting
-          a problem. Accepted because this side does not NEED the wider rule:
-          the order stays in a cursor that keeps probing it, so a later pass can
-          settle it and stamp then — what orphans the row is another writer
-          retiring the order first. The reopen side has no such second chance
-          (its common outcome makes no case at all), which is the asymmetry.
-          Not frequency: stamped on any answered read, BOTH sides would mint a
-          row per unreadable→readable flap and neither per pass, since minting
-          needs a failed read and the stamp before it a successful one.
-
-        Fail-soft, like the liquidation mirror: this is the audit trail's
-        disposition, not a verdict input — a store that refuses the stamp must
-        not fail the orders leg. The cost of losing it is one stale open row,
-        the same shape the callers' guards deliberately leave behind elsewhere.
-        """
-        try:
-            existing = repo.get_exchange_reconciliation_case(
-                self._db.conn,
-                self._run_id,
-                case_type=case_type,
-                exchange_value=fact_key,
-            )
-            # Pre-checked outside the write unit deliberately: a successful read
-            # is the common case and almost never has a row to close, and
-            # opening a BEGIN IMMEDIATE per absent order to discover that would
-            # be the expensive way to do nothing.
-            if existing is None or existing["action_taken"] is not None:
-                return
-            with self._db.transaction() as tx:
-                # Which is exactly why the write has to be the if-unset one
-                # rather than _record's set_reconciliation_action: the check
-                # above is a separate step, so an operator (or a `--stamp-case`
-                # racing this pass) may have disposed of the row in between, and
-                # THEIR disposition is the one a human will look for
-                # (2026-07-30 concurrency review).
-                repo.stamp_reconciliation_action_if_unset(
-                    tx, existing["event_id"], _READ_SUCCEEDED_DISPOSITION
-                )
-        except Exception as exc:  # noqa: BLE001 — audit disposition, see above
-            logger.warning(
-                "could not stamp the resolved orderStatus read failure for cloid %s "
-                "(fact %s; %s: %s); the row stays open for a later pass or a human",
-                cloid,
-                fact_key,
-                type(exc).__name__,
-                exc,
-            )
 
     # ---------------------------------------------------------- position leg
 
@@ -1766,14 +647,31 @@ class LiveReconciler:
         snapshot: AccountSnapshot | None,
         cases: list[ReconciliationCase],
     ) -> tuple[bool, bool]:
-        """§12.3 position rows + the SL-protection invariant → (ok, protected)."""
+        """§12.3 position rows + the SL-protection invariant → (ok, protected).
+
+        Three verdict phases plus the advisory mirror, one helper each, in the
+        order they always ran: the off-coin holdings (manual), the
+        liquidation-price mirror (a cache write, no verdict), the size compare,
+        and the §17.1 SL coverage. The verdict helpers append to ``cases`` and
+        return their flag, like ``run()``'s legs.
+        """
         if snapshot is None:
             return False, False
-        ok = True
-        conn = self._db.conn
+        off_coin_ok = self._note_off_coin_positions(snapshot, cases)
+        exch = snapshot.position_for(self._coin)
+        exch_size = Decimal(0) if exch is None else exch.size
+        local = repo.get_current_position(self._db.conn, self._run_id, self._coin)
+        local_size = Decimal(0) if local is None else local.size
+        self._mirror_liquidation_price(exch, local)
+        sizes_ok = self._compare_position_sizes(local_size, exch_size, cases)
+        protected = self._check_sl_coverage(open_orders, exch, local, cases)
+        return off_coin_ok and sizes_ok, protected
 
-        # Any exchange position OUTSIDE the configured symbol is unknown to
-        # this run — §13.5 "unknown exchange position" → manual.
+    def _note_off_coin_positions(
+        self, snapshot: AccountSnapshot, cases: list[ReconciliationCase]
+    ) -> bool:
+        """§13.5 "unknown exchange position": a manual case per holding outside this run's coin."""
+        ok = True
         for pos in snapshot.positions:
             if pos.coin != self._coin:
                 ok = False
@@ -1808,13 +706,15 @@ class LiveReconciler:
                     )
                 )
 
-        exch = snapshot.position_for(self._coin)
-        exch_size = Decimal(0) if exch is None else exch.size
-        local = repo.get_current_position(conn, self._run_id, self._coin)
-        local_size = Decimal(0) if local is None else local.size
+        return ok
 
-        # Mirror the exchange-reported liquidation estimate onto the local row
-        # (§12.1: the exchange is the truth source). The engine's SL band and
+    def _mirror_liquidation_price(
+        self, exch: PerpPosition | None, local: PositionState | None
+    ) -> None:
+        """Mirror the exchange's liquidation estimate onto the local row (§12.1); advisory."""
+        exch_size = Decimal(0) if exch is None else exch.size
+        local_size = Decimal(0) if local is None else local.size
+        # The engine's SL band and
         # the ai_inputs ``estimated_liquidation_price`` column read it back via
         # ``get_current_position``. An explicit ``None`` when the exchange is
         # flat — or reports no liquidationPx — so a stale estimate never
@@ -1860,80 +760,94 @@ class LiveReconciler:
                     exc,
                 )
 
-        if exch_size != local_size:
-            ok = False
-            if exch_size == 0 and local_size != 0:
-                case_type, detail = (
-                    "local_position_phantom",
-                    "SQLite has a position but the exchange is flat — the exchange is "
-                    "the truth source; the closing fills must be booked (backfill), "
-                    "never fabricated (§12.3)",
-                )
-            elif exch_size != 0 and local_size == 0:
-                case_type, detail = (
-                    "exchange_position_mismatch",
-                    "exchange has a position but SQLite believes flat — new entries stop "
-                    "until the missing fills are booked (§12.3)",
-                )
-            else:
-                case_type, detail = (
-                    "exchange_position_mismatch",
-                    "position sizes differ — fills are missing or double-booked (§12.3)",
-                )
-            cases.append(
-                ReconciliationCase(
-                    case_type=case_type,
-                    symbol=self._coin,
-                    local_value=str(local_size),
-                    # The distinct fact is the (local → exchange) size
-                    # transition, not the exchange size alone: a phantom
-                    # (local X, exchange 0) always has exch_size 0, so keying
-                    # on it would collide EVERY phantom this run ever sees onto
-                    # one row. Encode the coin and both sides so an independent
-                    # later mismatch of a different magnitude gets its own audit
-                    # row while an unhealed one still dedupes across passes.
-                    exchange_value=f"{self._coin}:{local_size}->{exch_size}",
-                    detail=detail,
-                )
+    def _compare_position_sizes(
+        self, local_size: Decimal, exch_size: Decimal, cases: list[ReconciliationCase]
+    ) -> bool:
+        """§12.3 size rows: when the two views differ, one case keyed on the transition."""
+        if exch_size == local_size:
+            return True
+        if exch_size == 0 and local_size != 0:
+            case_type, detail = (
+                "local_position_phantom",
+                "SQLite has a position but the exchange is flat — the exchange is "
+                "the truth source; the closing fills must be booked (backfill), "
+                "never fabricated (§12.3)",
             )
+        elif exch_size != 0 and local_size == 0:
+            case_type, detail = (
+                "exchange_position_mismatch",
+                "exchange has a position but SQLite believes flat — new entries stop "
+                "until the missing fills are booked (§12.3)",
+            )
+        else:
+            case_type, detail = (
+                "exchange_position_mismatch",
+                "position sizes differ — fills are missing or double-booked (§12.3)",
+            )
+        cases.append(
+            ReconciliationCase(
+                case_type=case_type,
+                symbol=self._coin,
+                local_value=str(local_size),
+                # The distinct fact is the (local → exchange) size
+                # transition, not the exchange size alone: a phantom
+                # (local X, exchange 0) always has exch_size 0, so keying
+                # on it would collide EVERY phantom this run ever sees onto
+                # one row. Encode the coin and both sides so an independent
+                # later mismatch of a different magnitude gets its own audit
+                # row while an unhealed one still dedupes across passes.
+                exchange_value=f"{self._coin}:{local_size}->{exch_size}",
+                detail=detail,
+            )
+        )
+        return False
 
-        # §12.3 last row / §17: an exchange position without a valid SL.
-        protected = True
-        if exch is not None:
-            protected = self._has_valid_sl(open_orders, exch)
-            # The case row is written only when the absence was OBSERVED: with
-            # open_orders None the truth is "could not look", already carried
-            # by the orders-leg error and the fail-safe ``protected=False`` —
-            # a durable row asserting "no valid SL" off a failed read would
-            # tell a post-mortem reader protection had lapsed when it may not
-            # have (and occupy the fact's once-per-fact dedupe slot).
-            if not protected and open_orders is not None:
-                sl_detail = (
-                    f"live position of {exch_size} has no valid reduce-only SL "
-                    "covering its size — repair is the PR 5 protection manager; "
-                    "until then the run stays in safe mode (§17.1 rule 1)"
-                )
-                # Same shape as the off-coin fact above: recorded once, logged
-                # with the live size every pass.
-                logger.warning("%s %s", self._coin, sl_detail)
-                cases.append(
-                    ReconciliationCase(
-                        case_type="position_sl_missing",
-                        symbol=self._coin,
-                        local_value=None if local is None else str(local_size),
-                        # The fact is "this coin's live position is uncovered",
-                        # not the size it happened to have when first observed:
-                        # the gap stays open until the §17 protection manager
-                        # heals it, and every partial fill or partial close in
-                        # between used to mint another row — one more manual
-                        # stamp for the operator, all describing one lapse.
-                        # Coin-qualified for the same reason the off-coin key is
-                        # (the dedupe key carries no symbol).
-                        exchange_value=f"{self._coin}|sl_missing",
-                        detail=sl_detail,
-                    )
-                )
-        return ok, protected
+    def _check_sl_coverage(
+        self,
+        open_orders: list | None,
+        exch: PerpPosition | None,
+        local: PositionState | None,
+        cases: list[ReconciliationCase],
+    ) -> bool:
+        """§12.3 last row / §17.1 rule 1: an exchange position must carry a valid SL."""
+        if exch is None:
+            return True
+        if self._has_valid_sl(open_orders, exch):
+            return True
+        # The case row is written only when the absence was OBSERVED: with
+        # open_orders None the truth is "could not look", already carried
+        # by the orders-leg error and the fail-safe ``protected=False`` —
+        # a durable row asserting "no valid SL" off a failed read would
+        # tell a post-mortem reader protection had lapsed when it may not
+        # have (and occupy the fact's once-per-fact dedupe slot).
+        if open_orders is None:
+            return False
+        sl_detail = (
+            f"live position of {exch.size} has no valid reduce-only SL "
+            "covering its size — repair is the PR 5 protection manager; "
+            "until then the run stays in safe mode (§17.1 rule 1)"
+        )
+        # Same shape as the off-coin fact above: recorded once, logged
+        # with the live size every pass.
+        logger.warning("%s %s", self._coin, sl_detail)
+        cases.append(
+            ReconciliationCase(
+                case_type="position_sl_missing",
+                symbol=self._coin,
+                local_value=None if local is None else str(local.size),
+                # The fact is "this coin's live position is uncovered",
+                # not the size it happened to have when first observed:
+                # the gap stays open until the §17 protection manager
+                # heals it, and every partial fill or partial close in
+                # between used to mint another row — one more manual
+                # stamp for the operator, all describing one lapse.
+                # Coin-qualified for the same reason the off-coin key is
+                # (the dedupe key carries no symbol).
+                exchange_value=f"{self._coin}|sl_missing",
+                detail=sl_detail,
+            )
+        )
+        return False
 
     def _has_valid_sl(self, open_orders: list | None, position: PerpPosition) -> bool:
         """A bot-owned reduce-only stop_loss order covering the full position.
@@ -2052,63 +966,15 @@ class LiveReconciler:
         raw_clearinghouse: Any,
         backfill_summary: BackfillSummary | None,
     ) -> None:
-        """Persist the pass: case rows + the §16.3/§16.4 snapshot rows."""
+        """Persist the pass: case rows + the §16.3/§16.4 snapshot rows.
+
+        Three writes, each isolated from the others (each helper says why):
+        the case rows, the backfill event, and the snapshot rows carrying
+        the verdict and the diff.
+        """
         now = report.timestamp
         status = "ok" if report.clean else "mismatch"
-        diff = json.dumps(
-            {
-                "trigger": report.trigger,
-                "cases": [
-                    {
-                        "case_type": c.case_type,
-                        "symbol": c.symbol,
-                        "local": c.local_value,
-                        "exchange": c.exchange_value,
-                        # The pass's own account of the fact, and the only
-                        # DURABLE home for what varies while an invariant-keyed
-                        # fact stands: the case row is written once (its first
-                        # detail), `safe-mode --status` prints no detail at all,
-                        # and the warning log rotates. Without this, an off-coin
-                        # holding that grew all week would be a post-mortem with
-                        # one number in it — the one from Monday.
-                        #
-                        # Clipped like every other string here: two details
-                        # carry a venue exception (a failed orderStatus read, a
-                        # failed reopen tiebreaker), and iter_open_live_orders
-                        # spans runs — so one outage mints one per still-live
-                        # order the store carries, twice per pass, every pass it
-                        # lasts. The head carries the diagnosis.
-                        "detail": _clip(c.detail),
-                        "resolved": c.resolved,
-                        # Severity survives into the durable record: two cases
-                        # can share a case_type (position mismatch on our coin
-                        # vs an unknown coin) yet differ on whether a human
-                        # must decide.
-                        "manual": c.manual,
-                    }
-                    for c in report.cases
-                ],
-                # Both channels also end in ``{exc}`` (a leg that raised, an
-                # order that would not cancel — the latter one entry per order),
-                # so both are clipped for the same reason the details are. The
-                # full text reaches the operator through the log and the
-                # safe-mode entry detail, which are not written per pass.
-                "errors": [_clip(e) for e in report.errors],
-                # A verdict input like any other (see the field's comment): the
-                # durable diff is what a post-mortem reads, and a row marked
-                # "mismatch" whose diff named no cause would send that reader
-                # hunting through a CLI transcript they no longer have.
-                "sweep_failures": [_clip(f) for f in report.sweep_failures],
-                "backfill": None
-                if backfill_summary is None
-                else {
-                    "fetched": backfill_summary.fetched,
-                    "applied": backfill_summary.applied,
-                    "complete": backfill_summary.complete,
-                },
-            },
-            sort_keys=True,
-        )
+        diff = _diff_json(report, backfill_summary)
         raw_path = None
         if self._payload_dir is not None and raw_clearinghouse is not None:
             raw_path = write_raw_payload(
@@ -2118,6 +984,26 @@ class LiveReconciler:
                 payload=raw_clearinghouse,
                 now=now,
             )
+        self._record_cases(report, now)
+        self._record_backfill_event(report, backfill_summary, now)
+        if snapshot is not None:
+            # A SEPARATE transaction, fail-soft: the case rows above are the
+            # record a human needs to understand why safe mode fired, and a
+            # snapshot-write failure (constraint, disk, lock timeout) inside
+            # the same unit would roll them back too — losing exactly the
+            # durable evidence of the pass that found the problem. A failed
+            # snapshot degrades to "cases recorded, snapshot rows skipped",
+            # same convention as write_raw_payload.
+            try:
+                with self._db.transaction() as conn:
+                    self._write_snapshots(conn, snapshot, status, diff, raw_path, now)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "reconciliation snapshot rows could not be written (case rows are safe)"
+                )
+
+    def _record_cases(self, report: ReconciliationReport, now: datetime) -> None:
+        """One transaction per case row; a resolved repeat restamps the existing row."""
         # Each case is an INDEPENDENT fact and gets its own transaction (the
         # same isolation the snapshot rows below already have): one case's
         # write failing on a busy store must not roll back — or stop — the
@@ -2172,44 +1058,33 @@ class LiveReconciler:
                     case.case_type,
                     case.exchange_value,
                 )
-        if backfill_summary is not None and backfill_summary.applied > 0:
-            # §12.3 row 5, resolved in-pass: fills the exchange had that
-            # SQLite lacked were booked through the PR 3 path. Not deduped
-            # (no exchange_value): each pass that booked something is its
-            # own event.
-            try:
-                with self._db.transaction() as conn:
-                    repo.insert_exchange_reconciliation_event(
-                        conn,
-                        run_id=self._run_id,
-                        trigger=report.trigger,
-                        case_type="exchange_fill_missing_local",
-                        symbol=self._coin,
-                        action_taken=_FILL_BACKFILLED_DISPOSITION,
-                        detail=(
-                            f"booked {backfill_summary.applied} missing fill(s) via REST "
-                            f"backfill ({backfill_summary.fetched} fetched, "
-                            f"{backfill_summary.duplicate} duplicate)"
-                        ),
-                        timestamp=now,
-                    )
-            except Exception:  # noqa: BLE001 — same isolation as the case rows
-                logger.exception("reconciliation backfill event row could not be recorded")
-        if snapshot is not None:
-            # A SEPARATE transaction, fail-soft: the case rows above are the
-            # record a human needs to understand why safe mode fired, and a
-            # snapshot-write failure (constraint, disk, lock timeout) inside
-            # the same unit would roll them back too — losing exactly the
-            # durable evidence of the pass that found the problem. A failed
-            # snapshot degrades to "cases recorded, snapshot rows skipped",
-            # same convention as write_raw_payload.
-            try:
-                with self._db.transaction() as conn:
-                    self._write_snapshots(conn, snapshot, status, diff, raw_path, now)
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "reconciliation snapshot rows could not be written (case rows are safe)"
+
+    def _record_backfill_event(
+        self, report: ReconciliationReport, backfill_summary: BackfillSummary | None, now: datetime
+    ) -> None:
+        """§12.3 row 5, resolved in-pass: one event per pass that booked fills."""
+        if backfill_summary is None or backfill_summary.applied == 0:
+            return
+        # Booked through the PR 3 path. Not deduped (no exchange_value): each
+        # pass that booked something is its own event.
+        try:
+            with self._db.transaction() as conn:
+                repo.insert_exchange_reconciliation_event(
+                    conn,
+                    run_id=self._run_id,
+                    trigger=report.trigger,
+                    case_type="exchange_fill_missing_local",
+                    symbol=self._coin,
+                    action_taken=FILL_BACKFILLED_DISPOSITION,
+                    detail=(
+                        f"booked {backfill_summary.applied} missing fill(s) via REST "
+                        f"backfill ({backfill_summary.fetched} fetched, "
+                        f"{backfill_summary.duplicate} duplicate)"
+                    ),
+                    timestamp=now,
                 )
+        except Exception:  # noqa: BLE001 — same isolation as the case rows
+            logger.exception("reconciliation backfill event row could not be recorded")
 
     def _write_snapshots(
         self,

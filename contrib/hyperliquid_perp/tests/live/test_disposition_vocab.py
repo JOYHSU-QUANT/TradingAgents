@@ -7,8 +7,8 @@ SOURCE for every literal that could reach the ``action_taken`` column and
 checks each against the set. It lives at package level because its reach is
 the whole ``live`` package: a disposition written tomorrow in ``fills.py``
 fails here, not in a test named after ``reconcile`` (issue #151). What binds
-to ``reconcile``'s own module object — the import-time constant loop and the
-construction-time refusal — stays in ``test_reconcile.py``.
+to ``reconcile_types``'s own module object — the import-time constant loop and
+the construction-time refusal — stays in ``test_reconcile.py``.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import pkgutil
 import pytest
 
 from contrib.hyperliquid_perp import live as live_pkg
-from contrib.hyperliquid_perp.live import reconcile as reconcile_mod
+from contrib.hyperliquid_perp.live import reconcile_types
 from contrib.hyperliquid_perp.persistence import repository as repo
 
 from ..conftest import package_sources
@@ -31,7 +31,7 @@ from ..conftest import package_sources
 # reordered field or parameter moves the scan with it — nothing here spells
 # an index (issue #104).
 _DISPOSITION_WRITERS = {
-    "ReconciliationCase": inspect.signature(reconcile_mod.ReconciliationCase),
+    "ReconciliationCase": inspect.signature(reconcile_types.ReconciliationCase),
     "set_reconciliation_action": inspect.signature(repo.set_reconciliation_action),
     "stamp_reconciliation_action_if_unset": inspect.signature(
         repo.stamp_reconciliation_action_if_unset
@@ -150,7 +150,7 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
     ("source", "expected"),
     [
         # #104-2 (3): a literal handed positionally to a repository stamp
-        # writer — the shape a module other than reconcile.py would use (none
+        # writer — the shape a module other than the sweep's would use (none
         # does today; #104's "fills.py already calls it" was never the case).
         pytest.param(
             "repo.set_reconciliation_action(tx, event_id, 'made_it_up')",
@@ -194,9 +194,9 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
         # hoisting refactor that makes a disposition better protected.
         pytest.param(
             "repo.set_reconciliation_action(conn, existing['event_id'], case.action_taken)\n"
-            "repo.stamp_reconciliation_action_if_unset(tx, event_id, _READ_SUCCEEDED_DISPOSITION)\n"
+            "repo.stamp_reconciliation_action_if_unset(tx, event_id, READ_SUCCEEDED_DISPOSITION)\n"
             "ReconciliationCase(case_type='x', symbol='BTC', local_value=None, exchange_value=k,\n"
-            "                   action_taken=_ORPHAN_BACKFILLED_DISPOSITION if resolved else None)\n",
+            "                   action_taken=ORPHAN_BACKFILLED_DISPOSITION if resolved else None)\n",
             set(),
             id="names-and-computed-values",
         ),

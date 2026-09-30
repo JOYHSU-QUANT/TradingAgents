@@ -1917,7 +1917,7 @@ def test_the_daemon_writer_refuses_a_word_outside_the_machine_vocabulary(db):
     # decides by string whether the fact key reopens (PROVISIONAL_DISPOSITIONS):
     # a word nobody classified in MACHINE_DISPOSITIONS would shut the key
     # forever with no error. Refused at the write (issue #151) — the belt to
-    # reconcile.py's import-time brace, for a literal that reaches the writer
+    # reconcile_types.py's import-time brace, for a literal that reaches the writer
     # some way the constants loop and the AST scan cannot see.
     event_id = _open_case(db)
     for word in ("made_it_up", "", "   "):

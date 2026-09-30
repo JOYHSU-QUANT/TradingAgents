@@ -153,7 +153,7 @@ def usable_fill_tid(tid: object) -> bool:
 
     THE single definition of a usable fill tid, shared by the ingest side
     (``live/fills.py``, which raises ``MalformedResponseError`` on failure)
-    and the reconciliation cross-check (``live/reconcile.py``, which
+    and the reconciliation cross-check (``live/reconcile_fills.py``, which
     withholds invalid-fill verdicts) — one vocabulary, so the two legs that
     together decide MANUAL safe mode can never drift. Usable means the
     exchange's documented wire types (str/int; ``bool`` is an int subclass,

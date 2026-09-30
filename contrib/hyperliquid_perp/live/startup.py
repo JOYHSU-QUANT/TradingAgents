@@ -66,7 +66,8 @@ from ..runtime.clock import WallClock
 from .cancel import cancel_bot_order_with_evidence
 from .kill_switch import KillSwitchManager
 from .order_gate import RealOrderGate
-from .reconcile import LiveReconciler, ReconciliationReport
+from .reconcile import LiveReconciler
+from .reconcile_types import ReconciliationReport
 from .safe_mode import SafeModeManager
 
 __all__ = ["StartupResult", "run_startup_recovery"]

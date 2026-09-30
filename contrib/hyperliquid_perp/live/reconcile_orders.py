@@ -598,10 +598,9 @@ def _clear_read_failure_case(
     fact key, and each tiebreaker's read failure deliberately has one of its
     own (see ``_read_failure_fact_key`` and
     ``_local_terminal_read_failure_fact_key``) — so nothing else would ever
-    close these rows. Left open, one transient
-    API error would hold the §21.4 ``unresolved_reconciliation_mismatch``
-    count above zero for the rest of the run, stampable only by hand, for a
-    fact a later pass disproved.
+    close these rows. Left open, one transient API error would hold the §21.4
+    ``unresolved_reconciliation_mismatch`` count above zero for the rest of
+    the run, stampable only by hand, for a fact a later pass disproved.
 
     Both callers pass their own ``case_type``/``fact_key`` pair; the two
     keys land under DIFFERENT case types (the absent-order tiebreaker files
@@ -640,11 +639,11 @@ def _clear_read_failure_case(
       row per unreadable→readable flap and neither per pass, since minting
       needs a failed read and the stamp before it a successful one.
 
-    Fail-soft, like the liquidation mirror
-    (``LiveReconciler._mirror_liquidation_price``): this is the audit trail's
-    disposition, not a verdict input — a store that refuses the stamp must
-    not fail the orders leg. The cost of losing it is one stale open row,
-    the same shape the callers' guards deliberately leave behind elsewhere.
+    Fail-soft, like the liquidation mirror (``LiveReconciler._mirror_liquidation_price``):
+    this is the audit trail's disposition, not a verdict input — a store that
+    refuses the stamp must not fail the orders leg. The cost of losing it is
+    one stale open row, the same shape the callers' guards deliberately leave
+    behind elsewhere.
     """
     try:
         existing = repo.get_exchange_reconciliation_case(
@@ -660,13 +659,12 @@ def _clear_read_failure_case(
         if existing is None or existing["action_taken"] is not None:
             return
         with ctx.db.transaction() as tx:
-            # Which is exactly why the write has to be the if-unset one
-            # rather than ``LiveReconciler._record_cases``'s
-            # set_reconciliation_action: the check above is a separate step, so
-            # an operator (or a `--stamp-case` racing this pass) may have
-            # disposed of the row in between, and
-            # THEIR disposition is the one a human will look for
-            # (2026-07-30 concurrency review).
+            # Which is exactly why the write has to be the if-unset one rather than
+            # ``LiveReconciler._record_cases``'s set_reconciliation_action: the check
+            # above is a separate step, so an operator (or a `--stamp-case` racing
+            # this pass) may have disposed of the row in between, and THEIR
+            # disposition is the one a human will look for (2026-07-30 concurrency
+            # review).
             repo.stamp_reconciliation_action_if_unset(
                 tx, existing["event_id"], READ_SUCCEEDED_DISPOSITION
             )

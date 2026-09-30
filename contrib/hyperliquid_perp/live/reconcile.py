@@ -99,11 +99,10 @@ logger = logging.getLogger(__name__)
 # an upstream schema change has to be answered in both places. What the mapper
 # does own on this side, the two sweep modules that need it import for
 # themselves: the side alphabet (``reconcile_orders``) and the closing-side
-# rule (here — so this
-# reconciler and the startup sweep can never disagree on which side acts
-# against a position), plus map_account_snapshot for payloads this file hands
-# over uninspected. The whole division of labour is in mapper's module
-# docstring.
+# rule (here — so this reconciler and the startup sweep can never disagree on
+# which side acts against a position), plus map_account_snapshot for payloads
+# this file hands over uninspected. The whole division of labour is in
+# mapper's module docstring.
 
 # §12.3 "equity difference beyond tolerance". The spec names the rule but not
 # the number; these are PROVISIONAL tuning constants (same convention as the
@@ -125,8 +124,8 @@ _EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
 
 # How much of any ONE string the per-pass reconciliation_diff carries (the blob
 # itself is not bounded — it holds one entry per case, error and sweep failure
-# the pass found). Every
-# string this module composes itself fits well inside it; the cap is for the
+# the pass found). Every string the sweep composes itself fits well inside
+# it; the cap is for the
 # parts it does NOT author — the ``{exc}`` interpolated into case details, leg
 # errors and sweep failures, whose length is the venue's (or a client library's)
 # choice, not this code's. The blob is written twice per pass for as long as the
@@ -206,11 +205,12 @@ class LiveReconciler:
     ``user_state`` read and ``user_fills_by_time``); the orderStatus seam is
     the shared ``identity`` monitor (§13.5, issue #80), or — when none is
     passed, in tests and offline verdicts — a private monitor built over
-    ``query_order_by_cloid``. ``backfiller`` + ``stream`` are the PR 3 fill
-    leg; either may be None in reads-only wirings (tests, offline verdicts),
-    which skips booking and reports the fill leg from the sighting backlog
-    alone — every skipped seam lands in the report's ``legs_skipped`` (see
-    that field for the §13.4 consequence).
+    ``query_order_by_cloid``. ``backfiller`` is the PR 3 fill leg; ``None`` in
+    reads-only wirings (tests, offline verdicts) skips booking and reports the
+    fill leg from the sighting backlog alone — every skipped seam lands in the
+    report's ``legs_skipped`` (see that field for the §13.4 consequence).
+    ``stream`` is ``None`` in every wiring today and is not a skipped leg (see
+    ``SweepContext.stream``).
     """
 
     def __init__(
@@ -291,9 +291,9 @@ class LiveReconciler:
         # so an answer this build cannot read as being about the cloid it asked
         # for is COUNTED across passes (and across the other consumers —
         # protection, the kill switch) instead of merely re-recording the same
-        # unresolved case forever. The CLI
-        # passes its one shared instance; a reconciler built without one
-        # (tests, offline verdicts) gets a private monitor over the raw seam.
+        # unresolved case forever. The CLI passes its one shared instance; a
+        # reconciler built without one (tests, offline verdicts) gets a private
+        # monitor over the raw seam.
         # One or the other, never both: a ``query_order_by_cloid`` passed beside
         # a monitor would be silently ignored, and a wrapped or recording seam
         # would then be bypassed without a word.
@@ -318,8 +318,8 @@ class LiveReconciler:
             # runs inside a guarded lane that turns any exception into an
             # unproven case, so a stand-in without one would fail every
             # orderStatus read softly, forever (issue #224). ``latched`` /
-            # ``latched_site`` are
-            # what ``escalate_identity_fault`` reads off it after each pass.
+            # ``latched_site`` are what ``escalate_identity_fault`` reads off it
+            # after each pass.
             require_object_seam(
                 "identity",
                 identity,
@@ -355,10 +355,10 @@ class LiveReconciler:
 
         The window and its operator label follow whichever backfiller is bound
         (see ``reconcile_fills.crosscheck_window``), so both refusals sit here
-        rather than in ``__init__``: a stand-in without a ``lookback`` (the cross-check
-        window) or a ``backfill`` (the fill leg) is named as a mis-wiring —
-        the object form of the seam guard, one seam over — instead of
-        surfacing as an AttributeError inside a guarded leg, and a
+        rather than in ``__init__``: a stand-in without a ``lookback`` (the
+        cross-check window) or a ``backfill`` (the fill leg) is named as a
+        mis-wiring — the object form of the seam guard, one seam over — instead
+        of surfacing as an AttributeError inside a guarded leg, and a
         fractional-hour lookback is refused before the first sweep whether the
         backfiller arrived at construction (both production sites) or was
         attached afterwards (tests). It refused at import while the window was
@@ -718,9 +718,10 @@ class LiveReconciler:
     def _mirror_liquidation_price(
         self, exch: PerpPosition | None, local: PositionState | None
     ) -> None:
-        """Mirror the exchange's liquidation estimate onto the local row (§12.1); advisory.
+        """Mirror the exchange's liquidation estimate onto the local row; advisory.
 
-        Precondition: the clearinghouse read SUCCEEDED, so ``exch is None``
+        §12.1: the exchange is the truth source. Precondition: the clearinghouse
+        read SUCCEEDED, so ``exch is None``
         means the exchange proved this coin flat — never "unknown"
         (``_reconcile_positions`` returns before calling this on a failed
         read).
@@ -749,12 +750,11 @@ class LiveReconciler:
         # positions agree?", and the successful clearinghouse read already
         # answered it. The write is a cache for the SL band, not the evidence
         # this leg produces — letting a transient store error retroactively
-        # mark the
-        # position unreconciled AND unprotected would drive safe mode (halted
-        # cycles, manual §13.6 release) off a metadata failure. A failure costs
-        # one tick of staleness: the next pass rewrites it, and the fallback it
-        # leaves is the entry-based band the engine used for every run before
-        # this mirror existed.
+        # mark the position unreconciled AND unprotected would drive safe mode
+        # (halted cycles, manual §13.6 release) off a metadata failure. A
+        # failure costs one tick of staleness: the next pass rewrites it, and
+        # the fallback it leaves is the entry-based band the engine used for
+        # every run before this mirror existed.
         liq = None if exch is None else exch.liquidation_price
         same_direction = exch_size != 0 and local_size != 0 and (exch_size > 0) == (local_size > 0)
         if not same_direction:

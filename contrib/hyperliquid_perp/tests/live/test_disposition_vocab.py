@@ -151,8 +151,8 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
     [
         # #104-2 (3): a literal handed positionally to a repository stamp
         # writer — the shape a module outside the sweep's four modules would use
-        # (none
-        # does today; #104's "fills.py already calls it" was never the case).
+        # (none does today; #104's "fills.py already calls it" was never the
+        # case).
         pytest.param(
             "repo.set_reconciliation_action(tx, event_id, 'made_it_up')",
             {"made_it_up"},
@@ -197,7 +197,7 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
             "repo.set_reconciliation_action(conn, existing['event_id'], case.action_taken)\n"
             "repo.stamp_reconciliation_action_if_unset(tx, event_id, READ_SUCCEEDED_DISPOSITION)\n"
             "ReconciliationCase(case_type='x', symbol='BTC', local_value=None, exchange_value=k,\n"
-            "                   action_taken=ORPHAN_BACKFILLED_DISPOSITION if resolved else None)\n",
+            "    action_taken=ORPHAN_BACKFILLED_DISPOSITION if resolved else None)\n",
             set(),
             id="names-and-computed-values",
         ),

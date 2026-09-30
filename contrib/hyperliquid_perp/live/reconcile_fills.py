@@ -65,7 +65,7 @@ FAILED_BACKFILL = BackfillSummary(
 
 
 class CrosscheckWindow(NamedTuple):
-    """The cross-check window and the name of what owns it (what a refusal names)."""
+    """``(span, owner)``: the window, and the name a refusal cites."""
 
     span: timedelta
     owner: str
@@ -96,10 +96,8 @@ def crosscheck_window(backfiller: FillBackfiller | None) -> CrosscheckWindow:
     With no backfiller (reads-only wirings: tests, offline verdicts) there
     is no backfill leg for the window to keep parity with, and it is only
     "how far back the cross-check reads": the module default stands in
-    (decided 2026-09-01). The owner name is what a refusal names:
-    ``LiveReconciler``'s backfiller setter feeds this pair to
-    ``lookback_label``, refusing a fractional-hour window before the first
-    sweep.
+    (decided 2026-09-01). The owner name is what a refusal names (see
+    ``lookback_label``).
     """
     if backfiller is None:
         return CrosscheckWindow(DEFAULT_LOOKBACK, "fill_backfill.DEFAULT_LOOKBACK")
@@ -117,8 +115,7 @@ def lookback_label(window: CrosscheckWindow) -> str:
     this refuses rather than round — retuning the backfill window to a
     fraction of an hour is a change that message has to be rewritten for.
     """
-    span, owner = window
-    return whole_hours_label(span, what=owner)
+    return whole_hours_label(window.span, what=window.owner)
 
 
 def run_fill_backfill(
@@ -137,8 +134,8 @@ def run_fill_backfill(
     if ctx.stream is not None:
         since = ctx.stream.backfill_since()
     else:
-        # No WS stream in this wiring (the PR 4 startup command; the daemon
-        # loop with its stream-held obligations is PR 5): the whole
+        # No WS stream in this wiring (every wiring today — the startup command
+        # and the v1 loop alike, see ``cli/live_loop``'s scope note): the whole
         # process-was-down era is owed, so the floor is the newest booked
         # fill — or the run's genesis when none exists yet (§11.2 rule 5).
         # The trailing lookback alone would silently skip any outage longer
@@ -276,7 +273,7 @@ def reconcile_fills(
         # ReconciliationReport.legs_skipped.
         legs_skipped.append("invalid_local_fill_crosscheck")
     else:
-        lookback, _owner = crosscheck_window(ctx.backfiller)
+        lookback = crosscheck_window(ctx.backfiller).span
         window_start = now - lookback
         logger.debug(
             "invalid-local-fill cross-check window %s → %s; local fills older "

@@ -37,9 +37,9 @@ can check:
 - **``live/``** — the order-status query, the open-orders listing and the fills
   stream: ``orders.py``'s exchange-status word table and ``parse_order_status``,
   plus ``fills.py``, ``fill_backfill.py``, ``reconcile.py``, ``reconcile_fills.py``,
-  ``reconcile_orders.py``, ``startup.py``,
-  ``kill_switch.py`` and ``loss_guards.py``. The WS channel names (``userFills``,
-  ``orderUpdates``, ``webData2``) live in ``ws_stream.py``.
+  ``reconcile_orders.py``, ``startup.py``, ``kill_switch.py`` and
+  ``loss_guards.py``. The WS channel names (``userFills``, ``orderUpdates``,
+  ``webData2``) live in ``ws_stream.py``.
 
 The two sides align through five exports of this module —
 :data:`HL_SIDE_TO_LOCAL` and :func:`hl_closing_side` into ``live/``,

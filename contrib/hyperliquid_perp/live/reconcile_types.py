@@ -1,9 +1,10 @@
 """The §12 reconciliation sweep's types and vocabulary.
 
 What every leg of the sweep constructs or reads and what its callers consume:
-:class:`ReconciliationCase` (one observed §12.3 case), :class:`ReconciliationReport`
-(one pass's verdict), :class:`SweepContext` (what the legs read off the
-reconciler for one pass), and the machine-disposition constants whose
+:class:`ReconciliationCase` (one observed §12.3 case),
+:class:`ReconciliationReport` (one pass's verdict), :class:`SweepContext`
+(what the fill and orders legs read off the reconciler for one pass), and
+the machine-disposition constants whose
 membership in ``repo.MACHINE_DISPOSITIONS`` is checked at import. The sweep
 itself is :mod:`.reconcile` (``LiveReconciler``), with the fill legs in
 :mod:`.reconcile_fills` and the orders leg in :mod:`.reconcile_orders`.
@@ -202,7 +203,7 @@ class ReconciliationCase:
                 "the pass verdict must agree"
             )
         # Every manual case must carry a specific safe-mode reason:
-        # ``reconcile_and_apply`` routes manual cases through
+        # ``LiveReconciler.apply_manual_cases`` routes manual cases through
         # ``MANUAL_CASE_REASONS``, and a manual case_type missing there would
         # silently enter safe mode under the generic mismatch reason.
         if self.manual and self.case_type not in MANUAL_CASE_REASONS:
@@ -255,7 +256,6 @@ class ReconciliationReport:
     def reconciliation_clean(self) -> bool:
         """Every RECONCILIATION leg proved, nothing open — ignoring the §19.3 sweep.
 
-        The verdict over what the reconciliation legs themselves checked.
         ``reconcile_and_apply`` reads it to tell "the books are fine, only the
         sweep failed" (which earns the specific ``stale_order_sweep_failed``
         reason) from a real mismatch.

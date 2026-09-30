@@ -60,11 +60,11 @@ Breaking changes within the 0.x line are called out explicitly.
 ### Changed
 
 - **The live reconciliation sweep is four modules** (refactor plan v2,
-  T3-b — PR 13 of the plan; no behaviour change). `live/reconcile.py` was
-  one 1,900-line class: the seams, `run()`, the five guarded legs with the
-  orders leg's orderStatus sub-steps, and the recording. It now holds
-  `LiveReconciler` with the seams, `run()`'s guarded lanes, the safe-mode
-  application, the
+  T3-b — PR 13 of the plan; no behaviour change). `live/reconcile.py` held
+  the case/report types, the fact-key functions and one 1,900-line class:
+  the seams, `run()`, the five guarded legs with the orders leg's
+  orderStatus sub-steps, and the recording. It now holds `LiveReconciler`
+  with the seams, `run()`'s guarded lanes, the safe-mode application, the
   position and account legs and the recording. The fill legs
   (`run_fill_backfill`, `reconcile_fills`) and the cross-check's page ladder
   (`fetch_window_fill_keys`) live in `live/reconcile_fills.py`, and the
@@ -74,8 +74,8 @@ Breaking changes within the 0.x line are called out explicitly.
   the account reads — the store, the run id, the identity monitor, the fill
   seams as bound for that pass, the clock and the kill-switch refresh — so
   a leg reaches the reconciler only through what the context names. The
-  cross-check window rule, `crosscheck_window` (returning a
-  `CrosscheckWindow` (span, owner) named tuple), lives beside its readers in
+  cross-check window rule, `crosscheck_window` (which returns a `(span, owner)`
+  `CrosscheckWindow` named tuple), lives beside its readers in
   `reconcile_fills.py` with its KNOWN EXEMPTION docstring; the reconciler's
   backfiller binding refuses a fractional-hour window through the same
   `lookback_label` the genesis warning renders. `ReconciliationCase`,
@@ -101,10 +101,11 @@ Breaking changes within the 0.x line are called out explicitly.
   "could not back-fill orphan order" and "could not stamp the resolved
   orderStatus read failure") — instead of `...live.reconcile`, which the
   CLI log format prints as `%(name)s`. Every moved function's body is
-  unchanged apart from the mechanical renames (`self.` to `ctx.`, the
-  window and refresh callable arriving as arguments, and the window's
-  tuple becoming the named tuple). The
-  tests import each name from the module that now defines it, patch the
+  unchanged apart from the mechanical renames (`self.` to `ctx.`, sibling
+  calls becoming module-function calls, the backfiller and refresh callable
+  arriving as arguments, the window's tuple becoming the named tuple, and
+  comment pointers re-aimed at the new names). The tests import each name
+  from the module that now defines it, patch the
   fill and orders legs on their modules, and drive the fill cross-check's
   page ladder as a function. Mutation probes against the split found two
   effects nothing pinned (the off-coin phase's leg flag, and the

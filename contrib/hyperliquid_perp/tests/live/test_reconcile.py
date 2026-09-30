@@ -554,8 +554,9 @@ def test_a_position_in_an_unexpected_coin_is_manual(env):
     report = reconciler.run("heartbeat")
     assert [c.case_type for c in report.manual_cases] == ["exchange_position_mismatch"]
     # The leg's own flag as well as the case: ``clean`` never reads ``cases``, so
-    # a position phase that dropped the flag would record the pass "ok" (snapshot
-    # status, reconciliation_diff) while manual safe mode latched off the case.
+    # a position phase that dropped the flag would record the pass "ok" (the
+    # snapshot rows' reconciliation_status) while manual safe mode latched off
+    # the case.
     assert not report.position_reconciled
     assert not report.clean
 
@@ -1005,10 +1006,10 @@ def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog)
     # The KNOWN-EXEMPTION argument on ``reconcile_fills.crosscheck_window`` holds
     # only while the cross-check window equals the backfiller's trailing
     # lookback — THIS backfiller's, not the module default the two used to
-    # share by coincidence (issue #149,
-    # after #102): the first wiring that passes lookback_seconds through from
-    # config must move the window AND the operator warning with it, or every
-    # local fill between the two windows reads as "a fill the exchange denies".
+    # share by coincidence (issue #149, after #102): the first wiring that
+    # passes lookback_seconds through from config must move the window AND
+    # the operator warning with it, or every local fill between the two
+    # windows reads as "a fill the exchange denies".
     db, seams, _ = env
     one_hour = 3600
     assert timedelta(seconds=one_hour) != DEFAULT_LOOKBACK  # proves nothing if they agree
@@ -2462,8 +2463,8 @@ def test_the_module_refuses_to_import_with_an_unclassified_stamp_constant(monkey
             importlib.reload(reconcile_types)
     finally:
         # Reload against the real vocabulary — even if the assertion above is
-        # what failed — and then the three modules that bind its names at
-        # import, so the sweep's own four modules agree on one set of
+        # what failed — and then the sweep's other three modules, which bind
+        # its names at import, so the four agree on one set of
         # case/report/context classes again.
         monkeypatch.undo()
         importlib.reload(reconcile_types)
@@ -2586,7 +2587,7 @@ def test_any_answered_read_disposes_of_the_reopen_read_failure(env, answer, expe
     # live answer reopens the row and the unknownOid answer records a fresh
     # fault, and neither of those would otherwise close the read-failure row:
     # they land under a DIFFERENT key (see _local_terminal_read_failure_fact_key),
-    # so _record's same-key restamp cannot reach it.
+    # so _record_cases's same-key restamp cannot reach it.
     db, seams, reconciler = env
     _insert_local_order(db, status="rejected")
     _list_the_order(seams)

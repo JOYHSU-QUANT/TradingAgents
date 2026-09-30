@@ -2264,7 +2264,9 @@ def _unresolved_mismatches(db) -> int:
     the log, but a run carrying it reports CLEAN to the acceptance gate and
     lists nothing for the operator to work through.
     """
-    from contrib.hyperliquid_perp.live.validation import _unresolved_reconciliation_mismatches
+    from contrib.hyperliquid_perp.live.validation_metrics import (
+        _unresolved_reconciliation_mismatches,
+    )
 
     return _unresolved_reconciliation_mismatches(db.conn, "r")
 

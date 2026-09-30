@@ -40,7 +40,7 @@ def test_the_smoke_floor_and_the_daemon_default_keep_their_relationship():
     are not one constant.
     """
     from contrib.hyperliquid_perp.live.config import DEFAULT_SCHEDULE_CANCEL_SECONDS
-    from contrib.hyperliquid_perp.live.validation import (
+    from contrib.hyperliquid_perp.live.validation_metrics import (
         DEFAULT_SCHEDULE_CANCEL_SECONDS as validation_default,
     )
 
@@ -644,7 +644,7 @@ def test_the_preflight_refresh_records_the_cover_it_installed(live_db):
     (2026-08-01 round-15 mutation probe).
     """
     from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
-    from contrib.hyperliquid_perp.live.validation import _stated_deadline_seconds
+    from contrib.hyperliquid_perp.live.validation_metrics import _stated_deadline_seconds
 
     signed = _FakeSigned()
     with live_db:
@@ -692,7 +692,7 @@ def test_the_exit_disarm_leaves_the_row_the_acceptance_measure_reads(live_db):
 
     The suite drives ``scheduleCancel`` through the signed client rather than
     through a KillSwitchManager, so nothing else writes these rows — and
-    ``validation._kill_switch_tally`` charges any silence longer than the run's
+    ``validation_metrics._kill_switch_tally`` charges any silence longer than the run's
     deadline as an outage on the SAME run_id the acceptance verdict is computed
     over. With the suite silent, its own duration and the operator-paced gap
     before ``live --loop`` were billed as exposure: a flawless 120h run failed at
@@ -737,7 +737,7 @@ def test_test_14_records_every_transition_it_makes(live_db):
     form the validator parses, since that number sizes the stretch that follows.
     """
     from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
-    from contrib.hyperliquid_perp.live.validation import _stated_deadline_seconds
+    from contrib.hyperliquid_perp.live.validation_metrics import _stated_deadline_seconds
 
     signed = _FakeSigned()
     with live_db:

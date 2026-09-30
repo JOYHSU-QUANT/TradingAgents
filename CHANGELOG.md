@@ -59,6 +59,41 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The live acceptance validator is three modules** (refactor plan v2,
+  T3-a — PR 12 of the plan; no behaviour change). `live/validation.py` held
+  the thresholds, the report dataclass with its 250-line renderer, every
+  store read and a 470-line `validate_live_run`. It now holds the
+  thresholds, `execution_mode`, `validate_live_run` and the gates. The
+  report and its `summary_lines` live in `live/validation_report.py`, and
+  `LiveValidationReport` is imported from there. The store reads live in
+  `live/validation_metrics.py`, whose `read_live_run_facts` makes them in
+  one pass over the read transaction and returns a `LiveRunFacts`.
+  `validate_live_run` draws the verdict from those facts through named
+  helpers, `_apply_integrity_gate`, `_apply_cycle_gate`, the two profile
+  gates and `_note_warnings`, which append the same lines in the same
+  order; the smoke-key closure `_passed` is `_smoke_test_passed`. The nine
+  SQL sites the module wrote go through five new `repository` readers:
+  `count_decision_attempts` (which checks its statuses against the
+  vocabulary through the same `_status_in_clause` as
+  `prompt_regime_counts`), `iter_in_progress_attempts`
+  (the non-raising sibling of `find_in_progress_attempt`), `count_fills`,
+  `count_duplicate_exchange_fill_keys` and
+  `count_exchange_known_place_cloids`. The SQL ratchet in
+  `tests/common/test_layering.py` drops `live/validation.py` (nine sites to
+  none). No message, threshold, exit code or summary line changes; the
+  moved code is unchanged apart from import lines and comments, and the
+  tests import each name from the module that now defines it
+  (`DEFAULT_SCHEDULE_CANCEL_SECONDS`, `_StrandedAttempts`,
+  `_kill_switch_tally`, `_schedule_cancel_seconds`,
+  `_stated_deadline_seconds` and `_unresolved_reconciliation_mismatches`
+  from `validation_metrics`; `LiveValidationReport` and
+  `_NO_DAEMON_ROWS_RENDER` from `validation_report`). Mutation probes
+  against the validator suite found four reader predicates nothing
+  pinned (the oldest-first order of the stranded attempts, the run
+  scope of the fill count, and the DISTINCT and `action = 'place'` of
+  the order count); `tests/persistence/test_acceptance_readers.py` now
+  pins them, four tests.
+
 - **`cli/__init__.py` imports no private name but its six dispatch targets**
   (refactor plan v2, T2-f — PR 11 of the plan; no behaviour change). The
   package re-exported thirty-eight underscore names — thirty-five from its

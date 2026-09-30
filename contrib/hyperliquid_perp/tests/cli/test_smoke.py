@@ -558,12 +558,12 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
         REFRESHES_PER_FULL_SUITE,
     )
     from contrib.hyperliquid_perp.live.validation import (
-        _NO_DAEMON_ROWS_RENDER,
         _REFRESH_BAR,
         MIN_KILL_SWITCH_REFRESH_SAMPLES,
         MIN_LIVE_CYCLES,
         MIN_LIVE_ORDERS,
     )
+    from contrib.hyperliquid_perp.live.validation_report import _NO_DAEMON_ROWS_RENDER
 
     runbook = doc_text("RUNBOOK-live.md")
     assert _SUITE_AUTHORED_TOKEN in runbook

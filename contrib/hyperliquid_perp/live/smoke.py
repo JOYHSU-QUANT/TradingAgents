@@ -770,7 +770,7 @@ class SmokeTestRunner:
         through a :class:`KillSwitchManager`, so nothing else writes these rows —
         and the acceptance validator reads the event log as the ONLY record of
         when the wallet was covered. A wire call with no row is therefore not a
-        missing nicety: ``validation._kill_switch_tally`` charges any silence
+        missing nicety: ``validation_metrics._kill_switch_tally`` charges any silence
         longer than the run's deadline as a full outage, so the suite's own
         refreshes and its exit disarm were billed as exposure on the very run
         they belong to, and the operator-paced gap before ``live --loop`` was

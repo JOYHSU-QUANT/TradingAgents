@@ -264,7 +264,7 @@ class ValidationReport:
 def prompt_regime_lines(regimes: tuple[repo.PromptRegime, ...]) -> list[str]:
     """One ``prompt_regime:`` line per segmentation bucket, first seen first.
 
-    Shared with the live report (``live.validation``) so the two print the
+    Shared with the live report (``live.validation_report``) so the two print the
     same shape — and rendered by ``common.prompt_regime.prompt_regime_line``,
     the same function the running daemons and ``--context-only`` print the
     keys through, so the three surfaces grep alike (issue #163). A ``None``

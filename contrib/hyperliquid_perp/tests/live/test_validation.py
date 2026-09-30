@@ -400,6 +400,12 @@ def test_stranded_attempts_rejects_a_count_that_disagrees_with_its_rows():
         _StrandedAttempts(count=0, oldest_id="a", oldest_at=None)
     with pytest.raises(ValueError, match="no rows but carries"):
         _StrandedAttempts(count=0, oldest_id=None, oldest_at=_T0)
+    with pytest.raises(ValueError, match="must be >= 0"):
+        _StrandedAttempts(count=-1, oldest_id=None, oldest_at=None)
+    # The two shapes the query really produces stay legal, including the
+    # unreadable-stamp one (rows exist, age unknown).
+    assert _StrandedAttempts(count=0, oldest_id=None, oldest_at=None).count == 0
+    assert _StrandedAttempts(count=2, oldest_id="a", oldest_at=None).oldest_at is None
 
 
 def test_live_run_facts_rejects_a_replay_exception_without_its_count(db):
@@ -421,12 +427,6 @@ def test_live_run_facts_rejects_a_replay_exception_without_its_count(db):
     with pytest.raises(ValueError, match="requires account_replay_mismatch_count == 1"):
         replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=0)
     assert replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=1)
-    with pytest.raises(ValueError, match="must be >= 0"):
-        _StrandedAttempts(count=-1, oldest_id=None, oldest_at=None)
-    # The two shapes the query really produces stay legal, including the
-    # unreadable-stamp one (rows exist, age unknown).
-    assert _StrandedAttempts(count=0, oldest_id=None, oldest_at=None).count == 0
-    assert _StrandedAttempts(count=2, oldest_id="a", oldest_at=None).oldest_at is None
 
 
 def test_a_stranded_cycle_with_an_unreadable_stamp_is_a_failure(tmp_path):

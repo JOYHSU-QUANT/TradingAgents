@@ -62,11 +62,11 @@ Breaking changes within the 0.x line are called out explicitly.
 - **`cli/__init__.py` binds no private name but its six dispatch targets**
   (refactor plan v2, T2-f — PR 11 of the plan; no behaviour change). The
   package re-exported thirty-eight underscore names — thirty-five from its
-  submodules, three aliased from `integration/` and `exchanges/` — plus
+  submodules, three from `integration/` and `exchanges/` — plus
   `PROMPT_VERSION` and `paper_export`, all so a test could import them from
   `contrib.hyperliquid_perp.cli`; every one of those imports now reads the
-  defining `cli.*` submodule (or `integration.decision_provider`), once per
-  test module rather than once per test. What `__init__` keeps is `_cmd_*` —
+  defining `cli.*` submodule (or `integration.decision_provider`). What
+  `__init__` keeps is `_cmd_*` —
   `main()`'s own dispatch table — and the layering ratchet that froze the
   re-export list on 2026-09-22 (PR #293) is now a pin on those six
   (`test_the_cli_package_binds_no_private_name_but_its_dispatch_targets`).

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from contrib.hyperliquid_perp.cli import main as cli_main
+from contrib.hyperliquid_perp.cli import _common as common_mod, live as live_mod, main as cli_main
 from contrib.hyperliquid_perp.live.config import ExecutionMode
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database, connect
@@ -286,8 +286,6 @@ def test_live_agent_key_error_diagnoses_the_networks_own_env_var(
     the failure worth catching is it being computed for the other network. A
     testnet run cannot distinguish that from correct behaviour.
     """
-    from contrib.hyperliquid_perp.cli import _common as common_mod
-
     mainnet_env = "HYPERLIQUID_AGENT_KEY_MAINNET"
     monkeypatch.delenv(mainnet_env, raising=False)
     # The message is printed by _common._require_agent_key (issue #126), so
@@ -639,7 +637,6 @@ def _drive_cmd_live_loop_to_its_exit(
     signed double has no REST and an unclean pass would latch safe mode — the
     exit-4 lane this drive must be able to tell apart from protection-only's.
     """
-    from contrib.hyperliquid_perp.cli import live as live_mod
     from contrib.hyperliquid_perp.live import reconcile as reconcile_mod, startup as startup_mod
     from contrib.hyperliquid_perp.live.startup import StartupResult
 
@@ -670,8 +667,8 @@ def test_cmd_live_hands_the_loop_the_session_its_recovery_ran_over(
 ):
     # The loop's ``session=`` is the one object ``_live_startup_recovery``
     # built and ran the §19.1 recovery over -- the same armed switch, safe mode
-    # and reconciler, not a second session wired the same way (a second one
-    # would share the db and the gate, so those two prove nothing).
+    # and reconciler, not a second session wired the same way (the six inputs
+    # a second one would be built from are shared, so they prove nothing).
     recovered = {}
     handed = {}
 

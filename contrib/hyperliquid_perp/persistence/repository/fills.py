@@ -12,6 +12,8 @@ from ._base import _insert
 from ._vocab import _FLIP_LEGS, _LIQUIDITY_TYPES, _MODES, LIVE_LIQUIDITY_ROLES
 
 __all__ = [
+    "count_duplicate_exchange_fill_keys",
+    "count_fills",
     "get_fill",
     "get_fill_by_exchange_key",
     "insert_fill",
@@ -149,6 +151,31 @@ def iter_fills(
         params.append(symbol)
     order = "exchange_fill_time, exchange_fill_key, rowid" if chronological else "rowid"
     return conn.execute(f"SELECT * FROM fills WHERE {where} ORDER BY {order}", params).fetchall()
+
+
+def count_fills(conn: sqlite3.Connection, run_id: str) -> int:
+    """How many fills the run has booked, paper and live alike."""
+    return int(
+        conn.execute("SELECT COUNT(*) FROM fills WHERE run_id = ?", (run_id,)).fetchone()[0]
+    )
+
+
+def count_duplicate_exchange_fill_keys(conn: sqlite3.Connection, run_id: str) -> int:
+    """How many ``exchange_fill_key`` values the run booked more than once.
+
+    Structurally 0: the UNIQUE index on the column refuses the second row, so a
+    non-zero count is a store written past the schema; the live acceptance
+    validator reports it as ``duplicate_fill_apply_count``. Live fills only:
+    paper fills carry a NULL key, and NULLs are not duplicates of each other.
+    """
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM (SELECT exchange_fill_key FROM fills"
+            " WHERE run_id = ? AND exchange_fill_key IS NOT NULL"
+            " GROUP BY exchange_fill_key HAVING COUNT(*) > 1)",
+            (run_id,),
+        ).fetchone()[0]
+    )
 
 
 def last_fill_time(conn: sqlite3.Connection, run_id: str) -> str | None:

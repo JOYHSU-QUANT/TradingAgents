@@ -843,7 +843,6 @@ def test_the_symbol_scan_reaches_every_import_shape(tmp_path):
 
 
 _SQL_SITES_OUTSIDE_PERSISTENCE = {
-    "live/validation.py": 9,
     "paper/validation.py": 21,
     "runtime/no_decision.py": 2,
     "runtime/run_lock.py": 2,

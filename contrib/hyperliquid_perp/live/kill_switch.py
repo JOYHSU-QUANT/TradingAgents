@@ -385,7 +385,7 @@ if not _KEEP_PROTECTIVE_ROLES <= LIVE_ORDER_ROLES:
 def deadline_detail(seconds: int, note: str) -> str:
     """The ONE way to write "this row installed N seconds of cover".
 
-    ``validation._stated_deadline_seconds`` parses this token back out to size
+    ``validation_metrics._stated_deadline_seconds`` parses this token back out to size
     every stretch of silence, so the two are a cross-module contract — and a
     contract enforced by three independent f-strings agreeing by eye is not
     enforced at all. The drift is already demonstrable one screen away:
@@ -409,7 +409,7 @@ def deadline_detail(seconds: int, note: str) -> str:
 # concrete figure is quoted once, in RUNBOOK §20.3.
 #
 # It has a SECOND consumer since round 17, and weakening the marker moves that
-# one too: ``validation.py`` derives the DAEMON subsequence from it, and the
+# one too: ``validation_metrics.py`` derives the DAEMON subsequence from it, and the
 # last row of that subsequence is the run's clean-shutdown verdict. "Sample
 # floor only" was true for exactly one round (2026-08-01 round-21 review).
 #
@@ -445,7 +445,7 @@ def is_suite_authored(detail: str | None) -> bool:
     # a JSON blob carrying raw exchange and SQLite exception text into it, so a
     # bare ``in`` let any row that merely QUOTED the token leave the daemon
     # subsequence and take the run's clean-shutdown verdict with it. The reader
-    # of the same column in validation.py answers this with an event-type
+    # of the same column in validation_metrics.py answers this with an event-type
     # allowlist; this predicate runs over every event type and cannot, so it
     # anchors instead (2026-08-01 round-18 review).
     return bool(detail) and detail.split()[-1:] == [_SUITE_AUTHORED_TOKEN]

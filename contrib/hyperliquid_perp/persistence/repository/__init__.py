@@ -54,6 +54,7 @@ from .decisions import (
     PromptRegime,
     UnstampedInput,
     ai_inputs_without_format_fingerprint,
+    count_decision_attempts,
     find_in_progress_attempt,
     get_decision_attempt,
     insert_account_snapshot,
@@ -61,6 +62,7 @@ from .decisions import (
     insert_ai_output,
     insert_decision_attempt,
     insert_position_snapshot,
+    iter_in_progress_attempts,
     prompt_regime_counts,
     record_api_failed,
     stamp_ai_input_format_fingerprint,
@@ -77,6 +79,8 @@ from .events import (
     iter_protection_order_events,
 )
 from .fills import (
+    count_duplicate_exchange_fill_keys,
+    count_fills,
     get_fill,
     get_fill_by_exchange_key,
     insert_fill,
@@ -97,6 +101,7 @@ from .funding import (
     set_funding_status,
 )
 from .live_attempts import (
+    count_exchange_known_place_cloids,
     get_live_order_attempt,
     has_exchange_known_cloid,
     has_place_attempt,

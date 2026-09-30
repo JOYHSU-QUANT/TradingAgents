@@ -18,6 +18,7 @@ from ._vocab import (
 )
 
 __all__ = [
+    "count_exchange_known_place_cloids",
     "get_live_order_attempt",
     "has_exchange_known_cloid",
     "has_place_attempt",
@@ -283,6 +284,24 @@ def has_exchange_known_cloid(conn: sqlite3.Connection, *, cloid_hex: str) -> boo
         (cloid_hex,),
     ).fetchone()
     return order is not None
+
+
+def count_exchange_known_place_cloids(conn: sqlite3.Connection, run_id: str) -> int:
+    """How many distinct cloids the run placed that the exchange confirmed it took.
+
+    A ``place`` attempt in :data:`EXCHANGE_KNOWN_ATTEMPT_STATUSES`: acknowledged,
+    or a 'duplicate' answer saying the exchange already held it. Distinct by
+    cloid, so a §8.3 resend of one order counts one order; the live acceptance
+    validator reports it as ``live_order_count``.
+    """
+    placeholders = ", ".join("?" for _ in EXCHANGE_KNOWN_ATTEMPT_STATUSES)
+    return int(
+        conn.execute(
+            "SELECT COUNT(DISTINCT cloid_hex) FROM live_order_attempts WHERE run_id = ?"
+            f" AND action = 'place' AND status IN ({placeholders})",
+            (run_id, *EXCHANGE_KNOWN_ATTEMPT_STATUSES),
+        ).fetchone()[0]
+    )
 
 
 def next_live_attempt_index(conn: sqlite3.Connection, *, action: str, cloid_hex: str) -> int:

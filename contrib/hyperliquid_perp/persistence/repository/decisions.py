@@ -16,6 +16,7 @@ __all__ = [
     "PromptRegime",
     "UnstampedInput",
     "ai_inputs_without_format_fingerprint",
+    "count_decision_attempts",
     "find_in_progress_attempt",
     "get_decision_attempt",
     "insert_account_snapshot",
@@ -23,6 +24,7 @@ __all__ = [
     "insert_ai_output",
     "insert_decision_attempt",
     "insert_position_snapshot",
+    "iter_in_progress_attempts",
     "prompt_regime_counts",
     "record_api_failed",
     "stamp_ai_input_format_fingerprint",
@@ -112,6 +114,18 @@ class PromptRegime(NamedTuple):
     cycles: int
 
 
+def _status_in_clause(statuses: Iterable[str]) -> tuple[tuple[str, ...], str]:
+    """``statuses`` as a tuple plus its ``IN (?, ?, ...)`` placeholders, vocabulary-checked.
+
+    Shared by the two readers that count cycles over a status set, so they
+    cannot disagree on which statuses are legal.
+    """
+    statuses = tuple(statuses)
+    for status in statuses:
+        check_enum(status, _ATTEMPT_STATUSES, name="status")
+    return statuses, ", ".join("?" for _ in statuses)
+
+
 def prompt_regime_counts(
     conn: sqlite3.Connection, run_id: str, *, statuses: Iterable[str]
 ) -> tuple[PromptRegime, ...]:
@@ -126,10 +140,7 @@ def prompt_regime_counts(
     the ones the decided-on prompt carried. A status the vocabulary rejects
     fails here rather than matching nothing.
     """
-    statuses = tuple(statuses)
-    for status in statuses:
-        check_enum(status, _ATTEMPT_STATUSES, name="status")
-    placeholders = ", ".join("?" for _ in statuses)
+    statuses, placeholders = _status_in_clause(statuses)
     rows = conn.execute(
         "SELECT i.prompt_version, i.context_shape, i.format_fingerprint, COUNT(*) AS cycles"
         " FROM decision_attempts a JOIN ai_inputs i ON i.input_id = a.input_id"
@@ -219,6 +230,41 @@ def find_in_progress_attempt(conn: sqlite3.Connection, run_id: str) -> sqlite3.R
         ids = ", ".join(r["decision_attempt_id"] for r in rows)
         raise ValueError(f"run {run_id!r} has {len(rows)} in-progress attempts ({ids})")
     return rows[0] if rows else None
+
+
+def iter_in_progress_attempts(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    """The run's non-terminal attempts, oldest first, however many there are.
+
+    The read-only sibling of :func:`find_in_progress_attempt`: that one is the
+    daemon's fail-loud on the two-row case, and a reporter that has to DESCRIBE
+    a broken store cannot read it through a helper that raises on one. Ordered
+    by ``timestamp`` (when the row last changed state), then ``rowid``, so the
+    first row is the one that has been stuck the longest.
+    """
+    return conn.execute(
+        "SELECT * FROM decision_attempts WHERE run_id = ? AND status = 'in_progress'"
+        " ORDER BY timestamp, rowid",
+        (run_id,),
+    ).fetchall()
+
+
+def count_decision_attempts(
+    conn: sqlite3.Connection, run_id: str, *, statuses: Iterable[str]
+) -> int:
+    """How many of the run's attempts sit in one of ``statuses``.
+
+    The live acceptance validator's cycle counts. A status the vocabulary
+    rejects fails here rather than matching nothing, as
+    :func:`prompt_regime_counts` does: the two are read over the same set and
+    must agree on what a cycle is.
+    """
+    statuses, placeholders = _status_in_clause(statuses)
+    return int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM decision_attempts WHERE run_id = ? AND status IN ({placeholders})",
+            (run_id, *statuses),
+        ).fetchone()[0]
+    )
 
 
 def _patch_decision_attempt(

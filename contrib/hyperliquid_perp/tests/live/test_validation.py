@@ -17,10 +17,10 @@ from contrib.hyperliquid_perp.live.validation import (
     MIN_KILL_SWITCH_REFRESH_SAMPLES,
     MIN_LIVE_CYCLES,
     MIN_LIVE_ORDERS,
-    LiveValidationReport,
-    _StrandedAttempts,
     validate_live_run,
 )
+from contrib.hyperliquid_perp.live.validation_metrics import _StrandedAttempts
+from contrib.hyperliquid_perp.live.validation_report import LiveValidationReport
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
@@ -406,6 +406,29 @@ def test_stranded_attempts_rejects_a_count_that_disagrees_with_its_rows():
     # unreadable-stamp one (rows exist, age unknown).
     assert _StrandedAttempts(count=0, oldest_id=None, oldest_at=None).count == 0
     assert _StrandedAttempts(count=2, oldest_id="a", oldest_at=None).oldest_at is None
+
+
+def test_live_run_facts_rejects_a_replay_exception_without_its_count(db):
+    """A replay that raised is ONE unverifiable book, and the facts have to say so.
+
+    ``replay_raised`` is the one reading that does not survive into the report
+    (which carries the count alone), so no downstream guard re-checks the pair;
+    a hand-built facts object driving a gate on its own would otherwise print
+    "accounting replay raised" beside a count that says the books replayed.
+    """
+    from dataclasses import replace
+
+    from contrib.hyperliquid_perp.live.validation_metrics import read_live_run_facts
+
+    _init_live_run(db)
+    with db.read_transaction() as conn:
+        facts = read_live_run_facts(conn, run_id="r", config_json=None, now=_T0)
+    assert facts.replay_raised is None
+    with pytest.raises(ValueError, match="one unverifiable book"):
+        replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=0)
+    raised = replace(facts, replay_raised="ValueError: boom", account_replay_mismatch_count=1)
+    assert raised.replay_raised == "ValueError: boom"
+    assert raised.account_replay_mismatch_count == 1
 
 
 def test_a_stranded_cycle_with_an_unreadable_stamp_is_a_failure(tmp_path):
@@ -2124,7 +2147,7 @@ def test_the_two_suite_counters_are_not_interchangeable(tmp_path):
     (2026-08-01 round-18 mutation probe).
     """
     from contrib.hyperliquid_perp.live.kill_switch import _stamp_suite_authored
-    from contrib.hyperliquid_perp.live.validation import _kill_switch_tally
+    from contrib.hyperliquid_perp.live.validation_metrics import _kill_switch_tally
 
     db = Database(tmp_path / "live.db")
     _init_live_run(db)
@@ -2445,7 +2468,7 @@ def test_the_default_deadline_tracks_the_config_layers_own_default():
     actually arms with. Nothing else binds the two modules (2026-08-01 round-14).
     """
     from contrib.hyperliquid_perp.live.config import KillSwitchConfig
-    from contrib.hyperliquid_perp.live.validation import DEFAULT_SCHEDULE_CANCEL_SECONDS
+    from contrib.hyperliquid_perp.live.validation_metrics import DEFAULT_SCHEDULE_CANCEL_SECONDS
 
     assert Decimal(KillSwitchConfig().schedule_cancel_seconds) == DEFAULT_SCHEDULE_CANCEL_SECONDS
 
@@ -2457,7 +2480,7 @@ def test_silence_one_second_either_side_of_the_deadline(tmp_path):
     data points were 60s and six hours against a 120s deadline, so `>` could be
     relaxed to `>=` with the suite green (2026-08-01 round-14 mutation probe).
     """
-    from contrib.hyperliquid_perp.live.validation import DEFAULT_SCHEDULE_CANCEL_SECONDS
+    from contrib.hyperliquid_perp.live.validation_metrics import DEFAULT_SCHEDULE_CANCEL_SECONDS
 
     deadline = int(DEFAULT_SCHEDULE_CANCEL_SECONDS)
 
@@ -2841,7 +2864,7 @@ def test_the_genesis_deadline_reader_degrades_instead_of_crashing(config_json):
     Zero matters as much as the crash: a 0-second cover would make every gap a
     lapse and turn a garbled config into a guaranteed exit 5.
     """
-    from contrib.hyperliquid_perp.live.validation import (
+    from contrib.hyperliquid_perp.live.validation_metrics import (
         DEFAULT_SCHEDULE_CANCEL_SECONDS,
         _schedule_cancel_seconds,
     )
@@ -2855,7 +2878,7 @@ def test_the_genesis_deadline_reader_degrades_instead_of_crashing(config_json):
 # identical shape to prove quoted values ARE read (2026-08-01 round-14 review).
 @pytest.mark.parametrize("raw", [0, -5, True, "abc", 2.5, [120]])
 def test_a_nonsensical_deadline_value_falls_back(raw):
-    from contrib.hyperliquid_perp.live.validation import (
+    from contrib.hyperliquid_perp.live.validation_metrics import (
         DEFAULT_SCHEDULE_CANCEL_SECONDS,
         _schedule_cancel_seconds,
     )
@@ -2874,7 +2897,7 @@ def test_the_genesis_deadline_reader_reads_a_real_value(raw):
     every healthy 121-600s gap charged as a full outage, healthy run at exit 5
     (2026-08-01 round-13 exit check).
     """
-    from contrib.hyperliquid_perp.live.validation import _schedule_cancel_seconds
+    from contrib.hyperliquid_perp.live.validation_metrics import _schedule_cancel_seconds
 
     blob = json.dumps({"live": {"kill_switch": {"schedule_cancel_seconds": raw}}})
     assert _schedule_cancel_seconds(blob) == Decimal(600)

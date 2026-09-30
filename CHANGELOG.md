@@ -105,9 +105,9 @@ Breaking changes within the 0.x line are called out explicitly.
   calls becoming module-function calls, the backfiller and refresh callable
   arriving as arguments, the window's tuple becoming the named tuple, and
   comment pointers re-aimed at the new names). The tests import each name
-  from the module that now defines it, patch the
-  fill and orders legs on their modules, and drive the fill cross-check's
-  page ladder as a function. Mutation probes against the split found two
+  from the module that now defines it, patch the fill and orders legs on
+  their modules, and drive the fill cross-check's page ladder as a
+  function. Mutation probes against the split found two
   effects nothing pinned (the off-coin phase's leg flag, and the
   `exchange_fill_missing_local` event a booking backfill records); in
   `tests/live/test_reconcile.py` the existing off-coin test now asserts the

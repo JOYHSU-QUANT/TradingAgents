@@ -134,10 +134,11 @@ def run_fill_backfill(
     if ctx.stream is not None:
         since = ctx.stream.backfill_since()
     else:
-        # No WS stream in this wiring (every wiring today — the startup command
-        # and the v1 loop alike, see ``cli/live_loop``'s scope note): the whole
-        # process-was-down era is owed, so the floor is the newest booked
-        # fill — or the run's genesis when none exists yet (§11.2 rule 5).
+        # No WS stream in this wiring (every wiring today: neither the startup
+        # command nor the v1 loop hands the reconciler one — the loop's
+        # LiveWsStream goes to the engine, see ``cli/live_loop``'s scope note):
+        # the whole process-was-down era is owed, so the floor is the newest
+        # booked fill — or the run's genesis when none exists yet (§11.2 rule 5).
         # The trailing lookback alone would silently skip any outage longer
         # than itself. The §11.2 v12 durable clean-backfill watermark (which
         # hardens this derivation against a crash mid-backfill) lands with

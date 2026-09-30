@@ -4,9 +4,9 @@ What every leg of the sweep constructs or reads and what its callers consume:
 :class:`ReconciliationCase` (one observed §12.3 case),
 :class:`ReconciliationReport` (one pass's verdict), :class:`SweepContext`
 (what the fill and orders legs read off the reconciler for one pass), and
-the machine-disposition constants whose
-membership in ``repo.MACHINE_DISPOSITIONS`` is checked at import. The sweep
-itself is :mod:`.reconcile` (``LiveReconciler``), with the fill legs in
+the machine-disposition constants whose membership in
+``repo.MACHINE_DISPOSITIONS`` is checked at import. The sweep itself is
+:mod:`.reconcile` (``LiveReconciler``), with the fill legs in
 :mod:`.reconcile_fills` and the orders leg in :mod:`.reconcile_orders`.
 The disposition constants and ``MANUAL_CASE_REASONS`` are the sweep's
 package-internal vocabulary: shared across the four modules and read

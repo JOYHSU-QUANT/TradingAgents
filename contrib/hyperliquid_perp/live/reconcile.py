@@ -125,12 +125,12 @@ _EQUITY_MISMATCH_FACT_KEY = "equity_out_of_tolerance"
 # How much of any ONE string the per-pass reconciliation_diff carries (the blob
 # itself is not bounded — it holds one entry per case, error and sweep failure
 # the pass found). Every string the sweep composes itself fits well inside
-# it; the cap is for the
-# parts it does NOT author — the ``{exc}`` interpolated into case details, leg
-# errors and sweep failures, whose length is the venue's (or a client library's)
-# choice, not this code's. The blob is written twice per pass for as long as the
-# fault lasts, so an unbounded error body would be persisted at that rate; the
-# untruncated text stays on the case row it was first observed under.
+# it; the cap is for the parts it does NOT author — the ``{exc}`` interpolated
+# into case details, leg errors and sweep failures, whose length is the venue's
+# (or a client library's) choice, not this code's. The blob is written twice
+# per pass for as long as the fault lasts, so an unbounded error body would be
+# persisted at that rate; the untruncated text stays on the case row it was
+# first observed under.
 _DIFF_STRING_MAX_CHARS = 300
 
 
@@ -721,10 +721,9 @@ class LiveReconciler:
         """Mirror the exchange's liquidation estimate onto the local row; advisory.
 
         §12.1: the exchange is the truth source. Precondition: the clearinghouse
-        read SUCCEEDED, so ``exch is None``
-        means the exchange proved this coin flat — never "unknown"
-        (``_reconcile_positions`` returns before calling this on a failed
-        read).
+        read SUCCEEDED, so ``exch is None`` means the exchange proved this coin
+        flat — never "unknown" (``_reconcile_positions`` returns before calling
+        this on a failed read).
         """
         exch_size = Decimal(0) if exch is None else exch.size
         local_size = Decimal(0) if local is None else local.size

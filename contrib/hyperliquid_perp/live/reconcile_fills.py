@@ -40,6 +40,7 @@ __all__ = [
     "CrosscheckWindow",
     "crosscheck_window",
     "fetch_window_fill_keys",
+    "lookback_label",
     "reconcile_fills",
     "run_fill_backfill",
 ]
@@ -97,7 +98,7 @@ def crosscheck_window(backfiller: FillBackfiller | None) -> CrosscheckWindow:
     "how far back the cross-check reads": the module default stands in
     (decided 2026-09-01). The owner name is what a refusal names:
     ``LiveReconciler``'s backfiller setter feeds this pair to
-    ``_lookback_label``, refusing a fractional-hour window before the first
+    ``lookback_label``, refusing a fractional-hour window before the first
     sweep.
     """
     if backfiller is None:
@@ -105,8 +106,11 @@ def crosscheck_window(backfiller: FillBackfiller | None) -> CrosscheckWindow:
     return CrosscheckWindow(backfiller.lookback, "FillBackfiller.lookback")
 
 
-def _lookback_label(window: CrosscheckWindow) -> str:
+def lookback_label(window: CrosscheckWindow) -> str:
     """The cross-check window as the operator reads it in the genesis-corruption warning.
+
+    Two callers: the warning in ``run_fill_backfill``, and ``LiveReconciler``'s
+    backfiller setter, which calls it for the refusal alone.
 
     Whole hours only: a lookback that is not one would render truncated
     ("5h" for 5h30m) and understate how long an outage can go unbooked, so
@@ -160,7 +164,7 @@ def run_fill_backfill(
                     "outage longer than that may leave fills unbooked",
                     ctx.run_id,
                     genesis_raw,
-                    _lookback_label(crosscheck_window(ctx.backfiller)),
+                    lookback_label(crosscheck_window(ctx.backfiller)),
                 )
     try:
         summary = ctx.backfiller.backfill(ctx.clock.now(), since=since)

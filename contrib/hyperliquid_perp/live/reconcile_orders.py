@@ -333,10 +333,10 @@ def _maybe_reopen_terminal_order(
         # eventually-consistent reads disagreeing for a moment is not a
         # local/exchange conflict — same reading as the mirror direction.
         # No case, therefore no ``LiveReconciler._record_cases`` restamp: the
-        # read failure this
-        # pass disproved was disposed of above, where every answered read
-        # is treated alike (issue #66 — before that, this outcome, which is
-        # the COMMON one, left the read-failure row open forever).
+        # read failure this pass disproved was disposed of above, where every
+        # answered read is treated alike (issue #66 — before that, this
+        # outcome, which is the COMMON one, left the read-failure row open
+        # forever).
         return True, None
     # unknownOid while open_orders LISTS the order: contradictory exchange
     # answers — unproven either way, never guessed.
@@ -595,10 +595,10 @@ def _clear_read_failure_case(
     """Dispose of a past unreadable-orderStatus row that a later read disproved.
 
     ``LiveReconciler._record_cases``'s restamp reaches only rows under the SAME
-    fact key, and
-    each tiebreaker's read failure deliberately has one of its own (see
-    ``_read_failure_fact_key`` and ``_local_terminal_read_failure_fact_key``)
-    — so nothing else would ever close these rows. Left open, one transient
+    fact key, and each tiebreaker's read failure deliberately has one of its
+    own (see ``_read_failure_fact_key`` and
+    ``_local_terminal_read_failure_fact_key``) — so nothing else would ever
+    close these rows. Left open, one transient
     API error would hold the §21.4 ``unresolved_reconciliation_mismatch``
     count above zero for the rest of the run, stampable only by hand, for a
     fact a later pass disproved.
@@ -662,9 +662,9 @@ def _clear_read_failure_case(
         with ctx.db.transaction() as tx:
             # Which is exactly why the write has to be the if-unset one
             # rather than ``LiveReconciler._record_cases``'s
-            # set_reconciliation_action: the check
-            # above is a separate step, so an operator (or a `--stamp-case`
-            # racing this pass) may have disposed of the row in between, and
+            # set_reconciliation_action: the check above is a separate step, so
+            # an operator (or a `--stamp-case` racing this pass) may have
+            # disposed of the row in between, and
             # THEIR disposition is the one a human will look for
             # (2026-07-30 concurrency review).
             repo.stamp_reconciliation_action_if_unset(

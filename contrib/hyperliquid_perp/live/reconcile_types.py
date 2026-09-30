@@ -28,8 +28,8 @@ from .safe_mode import (
 )
 
 if TYPE_CHECKING:
-    # Annotation-only: this is the sweep's leaf module, and the seam types
-    # it names are what the reconciler binds, not what it needs to load.
+    # Annotation-only: this leaf module names the types the reconciler binds
+    # but never needs them at import (``from __future__ import annotations``).
     from ..persistence.db import Database
     from ..ports import Clock
     from .fill_backfill import FillBackfiller
@@ -73,8 +73,8 @@ MANUAL_CASE_REASONS = {
 #     never in the key, or every change of it mints a row and a manual stamp.
 #   Episode   → key it on what makes the occurrence distinct (the position-size
 #     transition in ``LiveReconciler._compare_position_sizes``): an independent
-#     later mismatch of a different magnitude
-#     is its own fact, not a repeat of the first.
+#     later mismatch of a different magnitude is its own fact, not a repeat
+#     of the first.
 # The dedupe carries no symbol column, so either way the coin/cloid stays IN the
 # key.
 #
@@ -190,11 +190,11 @@ class ReconciliationCase:
                 f"({self.case_type}): manual means only a human may dispose of it"
             )
         # A disposition implies a resolution: ``LiveReconciler._record_cases``'s
-        # once-per-fact
-        # restamp keys off ``action_taken`` alone, so a case carrying an action
-        # while still unresolved would stamp the persisted row as disposed of
-        # while the in-memory verdict (which keys off ``resolved``) stays
-        # unclean — the audit trail and the verdict would diverge.
+        # once-per-fact restamp keys off ``action_taken`` alone, so a case
+        # carrying an action while still unresolved would stamp the persisted
+        # row as disposed of while the in-memory verdict (which keys off
+        # ``resolved``) stays unclean — the audit trail and the verdict would
+        # diverge.
         if self.action_taken is not None and not self.resolved:
             raise ValueError(
                 f"a ReconciliationCase with action_taken={self.action_taken!r} "
@@ -256,9 +256,9 @@ class ReconciliationReport:
         """Every RECONCILIATION leg proved, nothing open — ignoring the §19.3 sweep.
 
         The verdict over what the reconciliation legs themselves checked.
-        ``reconcile_and_apply``
-        reads it to tell "the books are fine, only the sweep failed" (which earns
-        the specific ``stale_order_sweep_failed`` reason) from a real mismatch.
+        ``reconcile_and_apply`` reads it to tell "the books are fine, only the
+        sweep failed" (which earns the specific ``stale_order_sweep_failed``
+        reason) from a real mismatch.
         """
         return (
             self.orders_reconciled
@@ -291,8 +291,9 @@ class SweepContext:
     through what this names (``refresh_deadline`` is the reconciler's own
     bound method). The position and account legs and the recording read the
     reconciler directly. Built only by ``LiveReconciler._sweep_context``: the
-    fields are the reconciler's already-checked seams and are not re-validated
-    here.
+    seam fields (``fetch_fills``, ``backfiller``, ``stream``, ``identity`` and
+    the refresh behind ``refresh_deadline``) were checked when the reconciler
+    bound them, and nothing is re-validated here.
     """
 
     db: Database
@@ -306,7 +307,8 @@ class SweepContext:
     fetch_fills: Callable[[int, int], Any] | None
     backfiller: FillBackfiller | None
     # ``None`` in every wiring today, and not a skipped leg: the backfill
-    # then floors on the newest booked fill (``run_fill_backfill``).
+    # then floors on the newest booked fill, or the run's genesis
+    # (``run_fill_backfill``).
     stream: LiveWsStream | None
     clock: Clock
     # §18.2: refreshes the dead man's switch across a leg's blocking work.

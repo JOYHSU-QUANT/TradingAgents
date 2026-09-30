@@ -97,8 +97,9 @@ logger = logging.getLogger(__name__)
 # mapper owns the info-endpoint SNAPSHOT vocabulary — and §12.3 reconciliation
 # plus §19.3 bot-ownership are decided off the sweep's reading of the wire, so
 # an upstream schema change has to be answered in both places. What the mapper
-# does own on this side, each sweep module imports for itself: the side
-# alphabet (``reconcile_orders``) and the closing-side rule (here — so this
+# does own on this side, the two sweep modules that need it import for
+# themselves: the side alphabet (``reconcile_orders``) and the closing-side
+# rule (here — so this
 # reconciler and the startup sweep can never disagree on which side acts
 # against a position), plus map_account_snapshot for payloads this file hands
 # over uninspected. The whole division of labour is in mapper's module
@@ -265,10 +266,9 @@ class LiveReconciler:
         # ``mark_backfill_done(epoch) -> bool`` — each called inside the guarded
         # fill leg (``reconcile_fills.run_fill_backfill``), so the refusal names
         # the missing method (issue #169). ``None`` is every wiring today: no
-        # production
-        # site binds a stream to the reconciler (the v1 loop runs the REST
-        # backfill without a socket — ``cli/live_loop``'s scope note), so this
-        # covers the seam for the wiring that will.
+        # production site binds a stream to the reconciler (the v1 loop runs
+        # the REST backfill without a socket — ``cli/live_loop``'s scope note),
+        # so this covers the seam for the wiring that will.
         if stream is not None:
             require_object_seam(
                 "stream",
@@ -287,11 +287,11 @@ class LiveReconciler:
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
         # §13.5 (issue #80): every per-order orderStatus read (the orders leg,
-        # ``reconcile_orders``) goes through
-        # the shared venue-identity monitor, so an answer this build cannot
-        # read as being about the cloid it asked for is COUNTED across passes
-        # (and across the other consumers — protection, the kill switch) instead
-        # of merely re-recording the same unresolved case forever. The CLI
+        # ``reconcile_orders``) goes through the shared venue-identity monitor,
+        # so an answer this build cannot read as being about the cloid it asked
+        # for is COUNTED across passes (and across the other consumers —
+        # protection, the kill switch) instead of merely re-recording the same
+        # unresolved case forever. The CLI
         # passes its one shared instance; a reconciler built without one
         # (tests, offline verdicts) gets a private monitor over the raw seam.
         # One or the other, never both: a ``query_order_by_cloid`` passed beside
@@ -315,10 +315,10 @@ class LiveReconciler:
             )
         else:
             # An object seam like ``stream``: every ``probe`` the orders leg makes
-            # runs inside
-            # a guarded lane that turns any exception into an unproven case,
-            # so a stand-in without one would fail every orderStatus read
-            # softly, forever (issue #224). ``latched`` / ``latched_site`` are
+            # runs inside a guarded lane that turns any exception into an
+            # unproven case, so a stand-in without one would fail every
+            # orderStatus read softly, forever (issue #224). ``latched`` /
+            # ``latched_site`` are
             # what ``escalate_identity_fault`` reads off it after each pass.
             require_object_seam(
                 "identity",
@@ -374,7 +374,7 @@ class LiveReconciler:
             )
         # Checked BEFORE the slot is written, so a refused binding does not land:
         # the label the genesis warning would render is what refuses.
-        reconcile_fills._lookback_label(reconcile_fills.crosscheck_window(backfiller))
+        reconcile_fills.lookback_label(reconcile_fills.crosscheck_window(backfiller))
         self._backfiller_slot = backfiller
 
     def _sweep_context(self) -> SweepContext:
@@ -747,9 +747,9 @@ class LiveReconciler:
         # ADVISORY, unlike every other write in this reconciler (decision
         # 2026-07-29): this leg's verdict answers "do the local and exchange
         # positions agree?", and the successful clearinghouse read already
-        # answered it.
-        # The write is a cache for the SL band, not the evidence this leg
-        # produces — letting a transient store error retroactively mark the
+        # answered it. The write is a cache for the SL band, not the evidence
+        # this leg produces — letting a transient store error retroactively
+        # mark the
         # position unreconciled AND unprotected would drive safe mode (halted
         # cycles, manual §13.6 release) off a metadata failure. A failure costs
         # one tick of staleness: the next pass rewrites it, and the fallback it
@@ -983,12 +983,12 @@ class LiveReconciler:
         raw_clearinghouse: Any,
         backfill_summary: BackfillSummary | None,
     ) -> None:
-        """Persist the pass: case rows + the §16.3/§16.4 snapshot rows.
+        """Persist the pass: raw payload, case rows, backfill event, §16.3/§16.4 snapshot rows.
 
-        The raw payload file, then three writes each isolated from the others:
+        The raw payload file, then three writes, each isolated from the others:
         the case rows and the backfill event (their helpers say why), and the
-        snapshot rows carrying the verdict and the diff (the comment below
-        says why).
+        snapshot rows carrying the verdict and the diff (the comment at that
+        write says why).
         """
         now = report.timestamp
         status = "ok" if report.clean else "mismatch"
@@ -1024,10 +1024,10 @@ class LiveReconciler:
         """One transaction per case row; a resolved repeat restamps the existing row."""
         # Per case, not per pass (the snapshot rows in ``_record`` are isolated
         # the same way): one case's write failing on a busy store must not
-        # roll back — or stop — the
-        # sibling facts observed in the same pass. The row a human most needs
-        # (the manual case that fired safe mode) would otherwise vanish with
-        # an unrelated row's failure, leaving the pass's audit trail empty.
+        # roll back — or stop — the sibling facts observed in the same pass.
+        # The row a human most needs (the manual case that fired safe mode)
+        # would otherwise vanish with an unrelated row's failure, leaving the
+        # pass's audit trail empty.
         for case in report.cases:
             try:
                 with self._db.transaction() as conn:
@@ -1083,7 +1083,8 @@ class LiveReconciler:
         """§12.3 row 5, resolved in-pass: one event per pass that booked fills."""
         if backfill_summary is None or backfill_summary.applied <= 0:
             return
-        # Not deduped (no exchange_value). Booked through the PR 3 path.
+        # The fills were booked through the PR 3 path; the event is not deduped
+        # (no exchange_value).
         try:
             with self._db.transaction() as conn:
                 repo.insert_exchange_reconciliation_event(

@@ -1003,9 +1003,9 @@ def test_a_non_callable_refresh_hook_is_refused_at_construction(env):
 
 def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog):
     # The KNOWN-EXEMPTION argument on ``reconcile_fills.crosscheck_window`` holds
-    # only while the cross-
-    # check window equals the backfiller's trailing lookback — THIS backfiller's,
-    # not the module default the two used to share by coincidence (issue #149,
+    # only while the cross-check window equals the backfiller's trailing
+    # lookback — THIS backfiller's, not the module default the two used to
+    # share by coincidence (issue #149,
     # after #102): the first wiring that passes lookback_seconds through from
     # config must move the window AND the operator warning with it, or every
     # local fill between the two windows reads as "a fill the exchange denies".
@@ -1943,10 +1943,9 @@ def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_constructio
     # The stream's three methods are all called inside the guarded fill leg
     # (``reconcile_fills.run_fill_backfill``), so a stand-in missing any one
     # would surface as a failed backfill every sweep, never a crash — the
-    # fetch-seam argument
-    # one seam over (issue #169), and the refusal names WHICH method is
-    # missing. ``None`` stays the no-stream wiring (``env``, and every
-    # production site).
+    # fetch-seam argument one seam over (issue #169), and the refusal names
+    # WHICH method is missing. ``None`` stays the no-stream wiring (``env``,
+    # and every production site).
     db, seams, _ = env
     two_of_three = SimpleNamespace(
         **{m: (lambda *args: None) for m in _STREAM_SEAM_METHODS if m != missing}
@@ -2463,9 +2462,9 @@ def test_the_module_refuses_to_import_with_an_unclassified_stamp_constant(monkey
             importlib.reload(reconcile_types)
     finally:
         # Reload against the real vocabulary — even if the assertion above is
-        # what failed — and then the three modules that bind its names, so the
-        # rest of the session sees ONE set of case/report/context classes, the
-        # way reloading the single pre-split module used to guarantee.
+        # what failed — and then the three modules that bind its names at
+        # import, so the sweep's own four modules agree on one set of
+        # case/report/context classes again.
         monkeypatch.undo()
         importlib.reload(reconcile_types)
         importlib.reload(reconcile_fills)

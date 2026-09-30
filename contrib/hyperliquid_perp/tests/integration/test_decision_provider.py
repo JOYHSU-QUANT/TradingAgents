@@ -1229,8 +1229,8 @@ def test_the_prompt_version_is_pinned_to_the_block_it_versions():
     # age unit (issue #288) — so v6's digest is v5's.
     assert (prompt_regime.PROMPT_VERSION, digest) == ("phase2-target-v6", "947e85a9b7b750f1")
     # The daemon's spelling (``integration.decision_provider``) is the same
-    # object, not a second declaration that would keep equal today and fork
-    # the next time one side moves.
+    # object as ``prompt_regime``'s, not a second declaration that would keep
+    # equal today and fork the next time one side moves.
     assert decision_provider_mod.PROMPT_VERSION is prompt_regime.PROMPT_VERSION
 
 

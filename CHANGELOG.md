@@ -65,7 +65,7 @@ Breaking changes within the 0.x line are called out explicitly.
   submodules, three from `integration/` and `exchanges/` — plus
   `PROMPT_VERSION` and `paper_export`, none of which production code read
   through the package; the tests that imported one of them from
-  `contrib.hyperliquid_perp.cli` now reads the defining `cli.*` submodule
+  `contrib.hyperliquid_perp.cli` now read the defining `cli.*` submodule
   (or `integration.decision_provider`). What `__init__` keeps is `_cmd_*`
   — the targets `main()` dispatches to — and the layering ratchet that froze the
   re-export list on 2026-09-22 (PR #293) is now a pin on those six

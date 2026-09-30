@@ -221,8 +221,9 @@ def test_the_sweep_refreshes_once_per_open_order_not_once_per_leg(env, tmp_path)
 
 
 def test_the_fill_cross_check_ladder_refreshes_between_pages(monkeypatch):
-    """§18.2: the reconciler has its OWN page ladder for the fill cross-check,
-    separate from the backfiller's and easy to miss because it is inline.
+    """§18.2: the sweep has its OWN page ladder for the fill cross-check
+    (``reconcile_fills.fetch_window_fill_keys``), separate from the backfiller's
+    and easy to miss.
 
     The first pass of the deadline review wired only the backfiller's and left
     this one untouched, which made the real worst case DEFAULT_MAX_PAGES deep
@@ -555,7 +556,6 @@ def test_a_position_in_an_unexpected_coin_is_manual(env):
     # The leg's own flag as well as the case: ``clean`` never reads ``cases``, so
     # a position phase that dropped the flag would record the pass "ok" (snapshot
     # status, reconciliation_diff) while manual safe mode latched off the case.
-    # Pinned by a PR 13 mutation probe that forced the flag True.
     assert not report.position_reconciled
     assert not report.clean
 
@@ -1002,7 +1002,8 @@ def test_a_non_callable_refresh_hook_is_refused_at_construction(env):
 
 
 def test_the_fill_crosscheck_window_is_the_backfillers_own_lookback(env, caplog):
-    # The KNOWN-EXEMPTION argument in reconcile.py holds only while the cross-
+    # The KNOWN-EXEMPTION argument on ``reconcile_fills.crosscheck_window`` holds
+    # only while the cross-
     # check window equals the backfiller's trailing lookback — THIS backfiller's,
     # not the module default the two used to share by coincidence (issue #149,
     # after #102): the first wiring that passes lookback_seconds through from
@@ -1940,8 +1941,9 @@ _STREAM_SEAM_METHODS = ("backfill_epoch", "backfill_since", "mark_backfill_done"
 @pytest.mark.parametrize("missing", _STREAM_SEAM_METHODS)
 def test_a_stream_that_cannot_drive_the_backfill_epoch_is_refused_at_construction(env, missing):
     # The stream's three methods are all called inside the guarded fill leg
-    # (``reconcile_fills.run_fill_backfill``), so a stand-in missing any one would surface as
-    # a failed backfill every sweep, never a crash — the fetch-seam argument
+    # (``reconcile_fills.run_fill_backfill``), so a stand-in missing any one
+    # would surface as a failed backfill every sweep, never a crash — the
+    # fetch-seam argument
     # one seam over (issue #169), and the refusal names WHICH method is
     # missing. ``None`` stays the no-stream wiring (``env``, and every
     # production site).
@@ -2460,11 +2462,15 @@ def test_the_module_refuses_to_import_with_an_unclassified_stamp_constant(monkey
         with pytest.raises(ValueError, match="action_taken"):
             importlib.reload(reconcile_types)
     finally:
-        # Reload against the real vocabulary so the rest of the session sees
-        # the module the other tests hold references into — even if the
-        # assertion above is what failed.
+        # Reload against the real vocabulary — even if the assertion above is
+        # what failed — and then the three modules that bind its names, so the
+        # rest of the session sees ONE set of case/report/context classes, the
+        # way reloading the single pre-split module used to guarantee.
         monkeypatch.undo()
         importlib.reload(reconcile_types)
+        importlib.reload(reconcile_fills)
+        importlib.reload(reconcile_orders)
+        importlib.reload(reconcile_mod)
 
 
 def test_an_unclassified_disposition_fails_where_it_is_constructed():
@@ -2994,14 +3000,12 @@ def test_an_orphan_with_a_tif_this_system_never_places_stays_a_mismatch(env, tif
     assert case["action_taken"] != "local_row_backfilled"
 
 
-# -- pinned by a PR 13 mutation probe (the record phase split) ------------------
+# -- §12.3 row 5: the resolved missing-fill event ------------------------------
 
 
 def test_a_backfill_that_booked_fills_records_the_resolved_missing_fill_event(env):
     # §12.3 row 5: the fills the exchange had and SQLite lacked were booked in
-    # this pass, and the audit trail says so once per pass that booked any —
-    # the one recording write nothing else asserted (survived a probe that
-    # skipped it).
+    # this pass, and the audit trail says so once per pass that booked any.
     db, seams, reconciler = env
 
     class BookingBackfiller(StubBackfiller):

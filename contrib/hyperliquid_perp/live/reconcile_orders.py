@@ -1,6 +1,6 @@
 """The §12 sweep's orders leg: the open-orders listing against the local rows.
 
-One leg of :class:`~.reconcile.LiveReconciler.run`, a function over a
+One leg of :meth:`~.reconcile.LiveReconciler.run`, a function over a
 :class:`~.reconcile_types.SweepContext`: :func:`reconcile_orders` walks the
 exchange's open-orders view (§12.3 rows 2–3, §19.3 bot-ownership) and then
 the locally-live rows the view did not list (§12.3 row 1), putting each
@@ -12,14 +12,14 @@ leg's once-per-fact keys, written and looked up only here.
 Wire vocabulary read here: the frontendOpenOrders listing fields (``oid``,
 ``coin``, ``cloid``, ``side``, ``origSz``/``sz``, ``limitPx``, ``reduceOnly``,
 ``tif``) — see the division of labour in the mapper's module docstring and in
-:mod:`.reconcile`.
+the WIRE VOCABULARY note at the top of ``reconcile.py``.
 """
 
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime
-from typing import Any
 
 from ..exchanges.hyperliquid.mapper import HL_SIDE_TO_LOCAL, optional_decimal, require_decimal
 from ..persistence import repository as repo
@@ -101,6 +101,7 @@ def reconcile_orders(
     errors: list[str],
     now: datetime,
 ) -> bool:
+    """§12.3 order rows + §19.3 bot-ownership: the listing, then the local rows it omitted."""
     if open_orders is None:
         return False
     ok = True
@@ -233,7 +234,7 @@ def reconcile_orders(
 
 
 def _maybe_reopen_terminal_order(
-    ctx: SweepContext, order: dict, registry: Any, local: Any, now: datetime
+    ctx: SweepContext, order: dict, registry: sqlite3.Row, local: sqlite3.Row, now: datetime
 ) -> tuple[bool, ReconciliationCase | None]:
     """Reopen a terminal local row ONLY when orderStatus proves it live.
 
@@ -331,7 +332,8 @@ def _maybe_reopen_terminal_order(
         # (a cancel this startup just landed is the common cause). Two
         # eventually-consistent reads disagreeing for a moment is not a
         # local/exchange conflict — same reading as the mirror direction.
-        # No case, therefore no ``_record`` restamp: the read failure this
+        # No case, therefore no ``LiveReconciler._record_cases`` restamp: the
+        # read failure this
         # pass disproved was disposed of above, where every answered read
         # is treated alike (issue #66 — before that, this outcome, which is
         # the COMMON one, left the read-failure row open forever).
@@ -351,7 +353,7 @@ def _maybe_reopen_terminal_order(
     )
 
 
-def _orphan_order_type(ctx: SweepContext, order: dict, registry: Any) -> str:
+def _orphan_order_type(ctx: SweepContext, order: dict, registry: sqlite3.Row) -> str:
     """The ``orders.type`` word for an orphan: role for triggers, venue tif otherwise.
 
     The listing entry carries the tif when the venue includes it; the
@@ -385,7 +387,9 @@ def _orphan_order_type(ctx: SweepContext, order: dict, registry: Any) -> str:
     return order_type
 
 
-def _backfill_orphan_order(ctx: SweepContext, order: dict, registry: Any, now: datetime) -> bool:
+def _backfill_orphan_order(
+    ctx: SweepContext, order: dict, registry: sqlite3.Row, now: datetime
+) -> bool:
     """Insert the missing local row for a bot-owned exchange order."""
     try:
         side_raw = order.get("side")
@@ -488,7 +492,7 @@ def _backfill_orphan_order(ctx: SweepContext, order: dict, registry: Any, now: d
 
 
 def _settle_absent_order(
-    ctx: SweepContext, row: Any, now: datetime
+    ctx: SweepContext, row: sqlite3.Row, now: datetime
 ) -> tuple[bool, ReconciliationCase | None]:
     """One locally-live order absent from open_orders, put to orderStatus.
 
@@ -590,7 +594,8 @@ def _clear_read_failure_case(
 ) -> None:
     """Dispose of a past unreadable-orderStatus row that a later read disproved.
 
-    ``_record``'s restamp reaches only rows under the SAME fact key, and
+    ``LiveReconciler._record_cases``'s restamp reaches only rows under the SAME
+    fact key, and
     each tiebreaker's read failure deliberately has one of its own (see
     ``_read_failure_fact_key`` and ``_local_terminal_read_failure_fact_key``)
     — so nothing else would ever close these rows. Left open, one transient
@@ -635,7 +640,8 @@ def _clear_read_failure_case(
       row per unreadable→readable flap and neither per pass, since minting
       needs a failed read and the stamp before it a successful one.
 
-    Fail-soft, like the liquidation mirror: this is the audit trail's
+    Fail-soft, like the liquidation mirror
+    (``LiveReconciler._mirror_liquidation_price``): this is the audit trail's
     disposition, not a verdict input — a store that refuses the stamp must
     not fail the orders leg. The cost of losing it is one stale open row,
     the same shape the callers' guards deliberately leave behind elsewhere.
@@ -655,7 +661,8 @@ def _clear_read_failure_case(
             return
         with ctx.db.transaction() as tx:
             # Which is exactly why the write has to be the if-unset one
-            # rather than _record's set_reconciliation_action: the check
+            # rather than ``LiveReconciler._record_cases``'s
+            # set_reconciliation_action: the check
             # above is a separate step, so an operator (or a `--stamp-case`
             # racing this pass) may have disposed of the row in between, and
             # THEIR disposition is the one a human will look for

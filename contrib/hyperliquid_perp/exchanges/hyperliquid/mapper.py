@@ -21,7 +21,8 @@ false in both directions, and dangerous in one: a reader who believed it would
 answer an upstream schema change by editing this file alone and miss
 ``signed_client._parse_order_ack``, ``live.orders.parse_order_status``,
 ``live.fills.ExchangeFill.parse``, and the open-order sweeps in
-``live.reconcile_orders`` / ``live.startup`` / ``live.kill_switch`` — the last three
+``live.reconcile`` / ``live.reconcile_orders`` / ``live.startup`` /
+``live.kill_switch`` — the last four
 being what §19.3 bot-ownership and §12.3 reconciliation are decided from. The
 real division of labour, which a grep can check:
 

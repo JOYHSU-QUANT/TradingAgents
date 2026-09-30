@@ -150,7 +150,7 @@ def test_every_disposition_the_sweep_writes_is_in_the_machine_vocabulary():
     ("source", "expected"),
     [
         # #104-2 (3): a literal handed positionally to a repository stamp
-        # writer — the shape a module other than the sweep's would use (none
+        # writer — the shape a module outside the sweep's four would use (none
         # does today; #104's "fills.py already calls it" was never the case).
         pytest.param(
             "repo.set_reconciliation_action(tx, event_id, 'made_it_up')",

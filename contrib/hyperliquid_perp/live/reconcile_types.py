@@ -8,8 +8,8 @@ membership in ``repo.MACHINE_DISPOSITIONS`` is checked at import. The sweep
 itself is :mod:`.reconcile` (``LiveReconciler``), with the fill legs in
 :mod:`.reconcile_fills` and the orders leg in :mod:`.reconcile_orders`.
 The disposition constants and ``MANUAL_CASE_REASONS`` are the sweep's
-package-internal vocabulary: shared by the four modules, read by nothing
-outside them.
+package-internal vocabulary: shared across the four modules and read
+outside them only by the tests.
 """
 
 from __future__ import annotations
@@ -17,20 +17,24 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..common.enum_guard import check_enum
 from ..persistence import repository as repo
-from ..persistence.db import Database
-from ..ports import Clock
-from .fill_backfill import FillBackfiller
 from .safe_mode import (
     REASON_INVALID_LOCAL_FILL,
     REASON_NON_BOT_OWNED_ORDER,
     REASON_UNKNOWN_POSITION,
 )
-from .venue_identity import VenueIdentityMonitor
-from .ws_stream import LiveWsStream
+
+if TYPE_CHECKING:
+    # Annotation-only: this is the sweep's leaf module, and the seam types
+    # it names are what the reconciler binds, not what it needs to load.
+    from ..persistence.db import Database
+    from ..ports import Clock
+    from .fill_backfill import FillBackfiller
+    from .venue_identity import VenueIdentityMonitor
+    from .ws_stream import LiveWsStream
 
 __all__ = [
     "FILL_BACKFILLED_DISPOSITION",
@@ -56,8 +60,10 @@ MANUAL_CASE_REASONS = {
     "exchange_position_mismatch": REASON_UNKNOWN_POSITION,
 }
 
-# Choosing an exchange_value for a NEW order/position fact below (the fill-side
-# keys are §14.2's and §11.3's, and answer to those specs, not to this note):
+# Choosing an exchange_value for a NEW order/position fact — the order keys in
+# ``reconcile_orders``, the position and equity keys in ``LiveReconciler``'s
+# position and account legs (the fill-side keys are §14.2's and §11.3's, and
+# answer to those specs, not to this note):
 # ask whether the fact is an INVARIANT that stands until someone disposes of it
 # — an off-coin holding, an uncovered position, an equity gap — or an EPISODE
 # that recurs as distinct occurrences.
@@ -66,16 +72,17 @@ MANUAL_CASE_REASONS = {
 #     the row's detail, the per-pass reconciliation_diff, and a warning log —
 #     never in the key, or every change of it mints a row and a manual stamp.
 #   Episode   → key it on what makes the occurrence distinct (the position-size
-#     transition below): an independent later mismatch of a different magnitude
+#     transition in ``LiveReconciler._compare_position_sizes``): an independent
+#     later mismatch of a different magnitude
 #     is its own fact, not a repeat of the first.
 # The dedupe carries no symbol column, so either way the coin/cloid stays IN the
 # key.
 #
-# Then ask, for a fact this module DISPOSES of automatically, whether the
+# Then ask, for a fact the sweep DISPOSES of automatically, whether the
 # episode can start over — because a stamped key is normally shut for good, and
 # a recurrence under it would reach neither `safe-mode --status` nor §21.4's
 # unresolved count. Ask it PER STAMP — being about an order does not settle it.
-# Most of this module's order stamps dispose of a fact the sweep can find itself
+# Most of the orders leg's stamps dispose of a fact the sweep can find itself
 # facing again (a §8.3 rule-5 resend or a reopen puts the cloid back; the reopen
 # tiebreaker's read failure needs only the venue's next answer to flip), so those are
 # declared PROVISIONAL (repo.PROVISIONAL_DISPOSITIONS) so the next occurrence
@@ -95,6 +102,8 @@ MANUAL_CASE_REASONS = {
 # unreadable→readable flap. What separates their two guards is whether anything
 # else would ever close the row — see
 # ``reconcile_orders._clear_read_failure_case``.
+
+
 # The four dispositions whose ``ReconciliationCase.__post_init__`` check
 # cannot stand in front of the write. Three are written WITHOUT building a
 # ``ReconciliationCase`` at all — two stamped onto an already-persisted row,
@@ -155,9 +164,9 @@ class ReconciliationCase:
     def __post_init__(self) -> None:
         # Loud at construction, not at the write: the only other place this is
         # checked is ``LiveReconciler._record_cases``'s insert, which run()
-        # wraps in a swallow-all —
-        # a typo'd case_type there would lose the audit row with nothing but a
-        # log line. Validating here turns it into a failed (unclean) leg.
+        # wraps in a swallow-all — a typo'd case_type there would lose the
+        # audit row with nothing but a log line. Validating here turns it into
+        # a failed (unclean) leg.
         check_enum(self.case_type, repo.RECONCILIATION_CASE_TYPES, name="case_type")
         # Same argument one field over (issue #84). Every ReconciliationCase is
         # constructed by the SWEEP — a human's disposition is written straight
@@ -180,7 +189,8 @@ class ReconciliationCase:
                 f"a ReconciliationCase cannot be both manual and resolved "
                 f"({self.case_type}): manual means only a human may dispose of it"
             )
-        # A disposition implies a resolution: ``_record_cases``'s once-per-fact
+        # A disposition implies a resolution: ``LiveReconciler._record_cases``'s
+        # once-per-fact
         # restamp keys off ``action_taken`` alone, so a case carrying an action
         # while still unresolved would stamp the persisted row as disposed of
         # while the in-memory verdict (which keys off ``resolved``) stays
@@ -235,8 +245,7 @@ class ReconciliationReport:
     # ``legs_skipped`` — so the pass can never read clean over it, and it is
     # carried ON the report (rather than folded into ``errors`` by the caller
     # afterwards) so that it exists BEFORE ``LiveReconciler._record`` persists
-    # the pass.
-    # Folding it in after run() returned would leave the durable
+    # the pass. Folding it in after run() returned would leave the durable
     # ``reconciliation_diff`` — and the row's ``reconciliation_status`` —
     # claiming "ok" for a pass whose verdict was unclean and which fired safe
     # mode.
@@ -246,7 +255,8 @@ class ReconciliationReport:
     def reconciliation_clean(self) -> bool:
         """Every RECONCILIATION leg proved, nothing open — ignoring the §19.3 sweep.
 
-        The verdict over what this module itself checked. ``reconcile_and_apply``
+        The verdict over what the reconciliation legs themselves checked.
+        ``reconcile_and_apply``
         reads it to tell "the books are fine, only the sweep failed" (which earns
         the specific ``stale_order_sweep_failed`` reason) from a real mismatch.
         """
@@ -277,9 +287,12 @@ class SweepContext:
     ``LiveReconciler.run`` builds it after the pass's two account reads, once
     the seams are bound (the backfiller can be attached after construction),
     and hands it to :mod:`.reconcile_fills` and :mod:`.reconcile_orders` in
-    place of the reconciler itself, so a leg's reach is what this names and
-    nothing else. The position and account legs and the recording read the
-    reconciler directly.
+    place of the reconciler itself, so a leg reaches the reconciler only
+    through what this names (``refresh_deadline`` is the reconciler's own
+    bound method). The position and account legs and the recording read the
+    reconciler directly. Built only by ``LiveReconciler._sweep_context``: the
+    fields are the reconciler's already-checked seams and are not re-validated
+    here.
     """
 
     db: Database
@@ -287,10 +300,13 @@ class SweepContext:
     # The shared §13.5 venue-identity monitor every per-order orderStatus read
     # goes through (``LiveReconciler.__init__`` says why it is one instance).
     identity: VenueIdentityMonitor
-    # The fill-leg seams as bound for this pass; ``None`` is the reads-only
-    # wiring and lands in ``ReconciliationReport.legs_skipped``.
+    # The fill-leg seams as bound for this pass. For ``fetch_fills`` and
+    # ``backfiller``, ``None`` is the reads-only wiring and lands in
+    # ``ReconciliationReport.legs_skipped``.
     fetch_fills: Callable[[int, int], Any] | None
     backfiller: FillBackfiller | None
+    # ``None`` in every wiring today, and not a skipped leg: the backfill
+    # then floors on the newest booked fill (``run_fill_backfill``).
     stream: LiveWsStream | None
     clock: Clock
     # §18.2: refreshes the dead man's switch across a leg's blocking work.

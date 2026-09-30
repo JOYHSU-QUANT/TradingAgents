@@ -577,7 +577,7 @@ class LiveExecutionEngine:
     def _liquidation_price(self, position: PositionState) -> Decimal | None:
         # The exchange-reported liq price is the live truth source: each
         # reconcile pass mirrors the clearinghouse ``liquidationPx`` onto the
-        # current_positions row (LiveReconciler._reconcile_positions →
+        # current_positions row (LiveReconciler._mirror_liquidation_price →
         # set_position_liquidation_price), and this reads it back. None until
         # the first mirror after an open (and after any flat, which clears it);
         # the SL band then falls back to the entry-based band (stops.py handles

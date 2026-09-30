@@ -1,15 +1,18 @@
 """The §12 sweep's fill legs: the REST backfill and the fill-ledger checks.
 
-Two legs of :class:`~.reconcile.LiveReconciler.run`, each a function over a
+Two legs of :meth:`~.reconcile.LiveReconciler.run`, each a function over a
 :class:`~.reconcile_types.SweepContext`: :func:`run_fill_backfill` books the
 fills the exchange has and SQLite lacks (§12.3 "交易所有 fill，但 SQLite 沒記錄")
 through the PR 3 backfiller, and :func:`reconcile_fills` sweeps the sighting
 backlog and runs the invalid-local-fill cross-check (§12.3 "SQLite 有 fill，
-但交易所查不到"). Both are called inside ``run()``'s guarded lanes: they append
-to ``errors`` / ``cases`` / ``legs_skipped`` and return the leg's verdict.
+但交易所查不到"). Both are called inside ``run()``'s guarded lanes:
+:func:`run_fill_backfill` appends to ``errors`` / ``legs_skipped`` and returns
+the backfill summary; :func:`reconcile_fills` appends to ``cases`` / ``errors``
+/ ``legs_skipped`` and returns the leg's verdict.
 
 Wire vocabulary read here: the fills fields ``tid`` and ``time`` — see the
-division of labour in the mapper's module docstring and in :mod:`.reconcile`.
+division of labour in the mapper's module docstring and in the WIRE
+VOCABULARY note at the top of ``reconcile.py``.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..common.instants import epoch_ms, whole_hours_label
 from ..persistence import repository as repo
@@ -34,6 +37,7 @@ from .reconcile_types import FILL_BOOKED_DISPOSITION, ReconciliationCase, SweepC
 
 __all__ = [
     "FAILED_BACKFILL",
+    "CrosscheckWindow",
     "crosscheck_window",
     "fetch_window_fill_keys",
     "reconcile_fills",
@@ -59,7 +63,14 @@ FAILED_BACKFILL = BackfillSummary(
 )
 
 
-def crosscheck_window(backfiller: FillBackfiller | None) -> tuple[timedelta, str]:
+class CrosscheckWindow(NamedTuple):
+    """The cross-check window and the name of what owns it (what a refusal names)."""
+
+    span: timedelta
+    owner: str
+
+
+def crosscheck_window(backfiller: FillBackfiller | None) -> CrosscheckWindow:
     """The invalid-local-fill cross-check window and the name of what owns it.
 
     The window is the bound backfiller's trailing lookback, read off it at
@@ -84,16 +95,17 @@ def crosscheck_window(backfiller: FillBackfiller | None) -> tuple[timedelta, str
     With no backfiller (reads-only wirings: tests, offline verdicts) there
     is no backfill leg for the window to keep parity with, and it is only
     "how far back the cross-check reads": the module default stands in
-    (decided 2026-09-01). The owner name is what a refusal names — the
-    reconciler's backfiller binding refuses a fractional-hour window here
-    before the first sweep.
+    (decided 2026-09-01). The owner name is what a refusal names:
+    ``LiveReconciler``'s backfiller setter feeds this pair to
+    ``_lookback_label``, refusing a fractional-hour window before the first
+    sweep.
     """
     if backfiller is None:
-        return DEFAULT_LOOKBACK, "fill_backfill.DEFAULT_LOOKBACK"
-    return backfiller.lookback, "FillBackfiller.lookback"
+        return CrosscheckWindow(DEFAULT_LOOKBACK, "fill_backfill.DEFAULT_LOOKBACK")
+    return CrosscheckWindow(backfiller.lookback, "FillBackfiller.lookback")
 
 
-def _lookback_label(window: tuple[timedelta, str]) -> str:
+def _lookback_label(window: CrosscheckWindow) -> str:
     """The cross-check window as the operator reads it in the genesis-corruption warning.
 
     Whole hours only: a lookback that is not one would render truncated
@@ -344,7 +356,7 @@ def fetch_window_fill_keys(
             errors.append(f"fill cross-check fetch failed: {exc}")
             return None
         # §18.2: the SECOND page ladder on this tick, and the one that is easy
-        # to miss — the backfiller's is in another module, this one is inline.
+        # to miss — the backfiller's is in fill_backfill.py, this one is here.
         # Same shape, same budget (DEFAULT_MAX_PAGES), same hazard: without a
         # refresh per page a fills-heavy window (>2000 fills, so the response
         # comes back capped and it pages again) holds the single-threaded tick

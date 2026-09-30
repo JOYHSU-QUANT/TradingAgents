@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, localcontext
@@ -40,7 +41,6 @@ from pathlib import Path
 from typing import Any
 
 from ..common.enum_guard import check_enum
-from ..common.instants import whole_hours_label
 from ..common.seam_guard import require_object_seam, require_seam
 from ..domains.perp.schema import AccountSnapshot, PerpPosition
 from ..exchanges.hyperliquid.mapper import (
@@ -97,11 +97,12 @@ logger = logging.getLogger(__name__)
 # mapper owns the info-endpoint SNAPSHOT vocabulary — and §12.3 reconciliation
 # plus §19.3 bot-ownership are decided off the sweep's reading of the wire, so
 # an upstream schema change has to be answered in both places. What the mapper
-# does own on this side each sweep module imports itself: the side alphabet and
-# the closing-side rule (so the sweep and the startup sweep can never disagree
-# on which side acts against a position), plus map_account_snapshot for
-# payloads this file hands over uninspected. The whole division of labour is
-# in mapper's module docstring.
+# does own on this side, each sweep module imports for itself: the side
+# alphabet (``reconcile_orders``) and the closing-side rule (here — so this
+# reconciler and the startup sweep can never disagree on which side acts
+# against a position), plus map_account_snapshot for payloads this file hands
+# over uninspected. The whole division of labour is in mapper's module
+# docstring.
 
 # §12.3 "equity difference beyond tolerance". The spec names the rule but not
 # the number; these are PROVISIONAL tuning constants (same convention as the
@@ -262,8 +263,9 @@ class LiveReconciler:
         # ``stream`` is three seams on one object — ``backfill_epoch() ->
         # epoch``, ``backfill_since() -> datetime | None``,
         # ``mark_backfill_done(epoch) -> bool`` — each called inside the guarded
-        # fill leg (``reconcile_fills.run_fill_backfill``), so the refusal names the missing
-        # method (issue #169). ``None`` is every wiring today: no production
+        # fill leg (``reconcile_fills.run_fill_backfill``), so the refusal names
+        # the missing method (issue #169). ``None`` is every wiring today: no
+        # production
         # site binds a stream to the reconciler (the v1 loop runs the REST
         # backfill without a socket — ``cli/live_loop``'s scope note), so this
         # covers the seam for the wiring that will.
@@ -284,7 +286,8 @@ class LiveReconciler:
         self._stream = stream
         self._payload_dir = payload_dir
         self._clock = clock or WallClock()
-        # §13.5 (issue #80): every per-order orderStatus read below goes through
+        # §13.5 (issue #80): every per-order orderStatus read (the orders leg,
+        # ``reconcile_orders``) goes through
         # the shared venue-identity monitor, so an answer this build cannot
         # read as being about the cloid it asked for is COUNTED across passes
         # (and across the other consumers — protection, the kill switch) instead
@@ -311,7 +314,8 @@ class LiveReconciler:
                 "the monitor owns the orderStatus seam"
             )
         else:
-            # An object seam like ``stream``: every ``probe`` below runs inside
+            # An object seam like ``stream``: every ``probe`` the orders leg makes
+            # runs inside
             # a guarded lane that turns any exception into an unproven case,
             # so a stand-in without one would fail every orderStatus read
             # softly, forever (issue #224). ``latched`` / ``latched_site`` are
@@ -350,8 +354,8 @@ class LiveReconciler:
         """Bind the fill leg — and check, on the binding, what the cross-check reads off it.
 
         The window and its operator label follow whichever backfiller is bound
-        (see ``reconcile_fills.crosscheck_window``), so both refusals sit here rather than in
-        ``__init__``: a stand-in without a ``lookback`` (the cross-check
+        (see ``reconcile_fills.crosscheck_window``), so both refusals sit here
+        rather than in ``__init__``: a stand-in without a ``lookback`` (the cross-check
         window) or a ``backfill`` (the fill leg) is named as a mis-wiring —
         the object form of the seam guard, one seam over — instead of
         surfacing as an AttributeError inside a guarded leg, and a
@@ -368,9 +372,9 @@ class LiveReconciler:
                 methods=("backfill",),
                 attrs=("lookback",),
             )
-        # Checked BEFORE the slot is written, so a refused binding does not land.
-        candidate, owner = reconcile_fills.crosscheck_window(backfiller)
-        whole_hours_label(candidate, what=owner)
+        # Checked BEFORE the slot is written, so a refused binding does not land:
+        # the label the genesis warning would render is what refuses.
+        reconcile_fills._lookback_label(reconcile_fills.crosscheck_window(backfiller))
         self._backfiller_slot = backfiller
 
     def _sweep_context(self) -> SweepContext:
@@ -438,7 +442,7 @@ class LiveReconciler:
             logger.exception("reconciliation clearinghouse state read failed")
             errors.append(f"clearinghouse state read failed: {exc}")
         self._refresh_deadline()
-        sweep = self._sweep_context()
+        ctx = self._sweep_context()
 
         # -- legs -----------------------------------------------------------
         # Each leg is individually guarded: the docstring's "raises nothing"
@@ -455,19 +459,21 @@ class LiveReconciler:
                 errors.append(f"{name} leg crashed: {exc}")
                 return fallback
 
+        # The fill and orders legs are called through their modules, never bound
+        # by name here: the tests patch the module attribute to prove ``guarded``.
         backfill_summary = guarded(
             "fill backfill",
-            lambda: reconcile_fills.run_fill_backfill(sweep, errors, legs_skipped),
+            lambda: reconcile_fills.run_fill_backfill(ctx, errors, legs_skipped),
             FAILED_BACKFILL,
         )
         orders_ok = guarded(
             "orders",
-            lambda: reconcile_orders.reconcile_orders(sweep, open_orders, cases, errors, now),
+            lambda: reconcile_orders.reconcile_orders(ctx, open_orders, cases, errors, now),
             False,
         )
         fills_ok = guarded(
             "fills",
-            lambda: reconcile_fills.reconcile_fills(sweep, cases, errors, now, legs_skipped),
+            lambda: reconcile_fills.reconcile_fills(ctx, cases, errors, now, legs_skipped),
             False,
         )
         # Fallback (False, False): unknown ≠ protected — the same fail-safe
@@ -638,7 +644,6 @@ class LiveReconciler:
             )
         return report
 
-
     # ---------------------------------------------------------- position leg
 
     def _reconcile_positions(
@@ -649,11 +654,12 @@ class LiveReconciler:
     ) -> tuple[bool, bool]:
         """§12.3 position rows + the SL-protection invariant → (ok, protected).
 
-        Three verdict phases plus the advisory mirror, one helper each, in the
-        order they always ran: the off-coin holdings (manual), the
-        liquidation-price mirror (a cache write, no verdict), the size compare,
-        and the §17.1 SL coverage. The verdict helpers append to ``cases`` and
-        return their flag, like ``run()``'s legs.
+        Three verdict phases plus the advisory mirror, one helper each, in this
+        order: the off-coin holdings (manual), the liquidation-price mirror (a
+        cache write, no verdict), the size compare, and the §17.1 SL coverage.
+        The verdict helpers append to ``cases`` and return their flag, like
+        ``run()``'s legs. The ``snapshot is None`` return here is what lets the
+        helpers read ``exch is None`` as "a successful read proved flat".
         """
         if snapshot is None:
             return False, False
@@ -663,7 +669,9 @@ class LiveReconciler:
         local = repo.get_current_position(self._db.conn, self._run_id, self._coin)
         local_size = Decimal(0) if local is None else local.size
         self._mirror_liquidation_price(exch, local)
-        sizes_ok = self._compare_position_sizes(local_size, exch_size, cases)
+        sizes_ok = self._compare_position_sizes(
+            local_size=local_size, exch_size=exch_size, cases=cases
+        )
         protected = self._check_sl_coverage(open_orders, exch, local, cases)
         return off_coin_ok and sizes_ok, protected
 
@@ -705,23 +713,26 @@ class LiveReconciler:
                         manual=True,
                     )
                 )
-
         return ok
 
     def _mirror_liquidation_price(
         self, exch: PerpPosition | None, local: PositionState | None
     ) -> None:
-        """Mirror the exchange's liquidation estimate onto the local row (§12.1); advisory."""
+        """Mirror the exchange's liquidation estimate onto the local row (§12.1); advisory.
+
+        Precondition: the clearinghouse read SUCCEEDED, so ``exch is None``
+        means the exchange proved this coin flat — never "unknown"
+        (``_reconcile_positions`` returns before calling this on a failed
+        read).
+        """
         exch_size = Decimal(0) if exch is None else exch.size
         local_size = Decimal(0) if local is None else local.size
-        # The engine's SL band and
-        # the ai_inputs ``estimated_liquidation_price`` column read it back via
-        # ``get_current_position``. An explicit ``None`` when the exchange is
-        # flat — or reports no liquidationPx — so a stale estimate never
-        # survives a flat; only reached with a SUCCESSFUL clearinghouse read
-        # (a failed read returns above and proves nothing either way). Skipped
-        # without a local row: the writer is UPDATE-only, so it would be a
-        # guaranteed no-op, and the size-mismatch lane below owns that case.
+        # The engine's SL band and the ai_inputs ``estimated_liquidation_price``
+        # column read it back via ``get_current_position``. An explicit ``None``
+        # when the exchange is flat — or reports no liquidationPx — so a stale
+        # estimate never survives a flat. Skipped without a local row: the
+        # writer is UPDATE-only, so it would be a guaranteed no-op, and
+        # ``_compare_position_sizes`` owns that case.
         #
         # Also ``None`` when the two views DISAGREE on direction — the flip fill
         # landed between this pass's clearinghouse read and its fill backfill,
@@ -735,7 +746,8 @@ class LiveReconciler:
         #
         # ADVISORY, unlike every other write in this reconciler (decision
         # 2026-07-29): this leg's verdict answers "do the local and exchange
-        # positions agree?", and the successful read above already answered it.
+        # positions agree?", and the successful clearinghouse read already
+        # answered it.
         # The write is a cache for the SL band, not the evidence this leg
         # produces — letting a transient store error retroactively mark the
         # position unreconciled AND unprotected would drive safe mode (halted
@@ -761,7 +773,7 @@ class LiveReconciler:
                 )
 
     def _compare_position_sizes(
-        self, local_size: Decimal, exch_size: Decimal, cases: list[ReconciliationCase]
+        self, *, local_size: Decimal, exch_size: Decimal, cases: list[ReconciliationCase]
     ) -> bool:
         """§12.3 size rows: when the two views differ, one case keyed on the transition."""
         if exch_size == local_size:
@@ -809,7 +821,12 @@ class LiveReconciler:
         local: PositionState | None,
         cases: list[ReconciliationCase],
     ) -> bool:
-        """§12.3 last row / §17.1 rule 1: an exchange position must carry a valid SL."""
+        """§12.3 last row / §17.1 rule 1: an exchange position must carry a valid SL.
+
+        Precondition: the clearinghouse read SUCCEEDED, so ``exch is None`` means
+        the exchange proved this coin flat (protected) — never "unknown", which
+        is the ``(False, False)`` return in ``_reconcile_positions``.
+        """
         if exch is None:
             return True
         if self._has_valid_sl(open_orders, exch):
@@ -968,9 +985,10 @@ class LiveReconciler:
     ) -> None:
         """Persist the pass: case rows + the §16.3/§16.4 snapshot rows.
 
-        Three writes, each isolated from the others (each helper says why):
-        the case rows, the backfill event, and the snapshot rows carrying
-        the verdict and the diff.
+        The raw payload file, then three writes each isolated from the others:
+        the case rows and the backfill event (their helpers say why), and the
+        snapshot rows carrying the verdict and the diff (the comment below
+        says why).
         """
         now = report.timestamp
         status = "ok" if report.clean else "mismatch"
@@ -984,8 +1002,8 @@ class LiveReconciler:
                 payload=raw_clearinghouse,
                 now=now,
             )
-        self._record_cases(report, now)
-        self._record_backfill_event(report, backfill_summary, now)
+        self._record_cases(report)
+        self._record_backfill_event(report, backfill_summary)
         if snapshot is not None:
             # A SEPARATE transaction, fail-soft: the case rows above are the
             # record a human needs to understand why safe mode fired, and a
@@ -1002,11 +1020,11 @@ class LiveReconciler:
                     "reconciliation snapshot rows could not be written (case rows are safe)"
                 )
 
-    def _record_cases(self, report: ReconciliationReport, now: datetime) -> None:
+    def _record_cases(self, report: ReconciliationReport) -> None:
         """One transaction per case row; a resolved repeat restamps the existing row."""
-        # Each case is an INDEPENDENT fact and gets its own transaction (the
-        # same isolation the snapshot rows below already have): one case's
-        # write failing on a busy store must not roll back — or stop — the
+        # Per case, not per pass (the snapshot rows in ``_record`` are isolated
+        # the same way): one case's write failing on a busy store must not
+        # roll back — or stop — the
         # sibling facts observed in the same pass. The row a human most needs
         # (the manual case that fired safe mode) would otherwise vanish with
         # an unrelated row's failure, leaving the pass's audit trail empty.
@@ -1023,7 +1041,7 @@ class LiveReconciler:
                         exchange_value=case.exchange_value,
                         action_taken=case.action_taken,
                         detail=case.detail,
-                        timestamp=now,
+                        timestamp=report.timestamp,
                     )
                     if not wrote and case.action_taken is not None and case.exchange_value:
                         # The once-per-fact dedupe swallowed this insert, but
@@ -1060,13 +1078,12 @@ class LiveReconciler:
                 )
 
     def _record_backfill_event(
-        self, report: ReconciliationReport, backfill_summary: BackfillSummary | None, now: datetime
+        self, report: ReconciliationReport, backfill_summary: BackfillSummary | None
     ) -> None:
         """§12.3 row 5, resolved in-pass: one event per pass that booked fills."""
-        if backfill_summary is None or backfill_summary.applied == 0:
+        if backfill_summary is None or backfill_summary.applied <= 0:
             return
-        # Booked through the PR 3 path. Not deduped (no exchange_value): each
-        # pass that booked something is its own event.
+        # Not deduped (no exchange_value). Booked through the PR 3 path.
         try:
             with self._db.transaction() as conn:
                 repo.insert_exchange_reconciliation_event(
@@ -1081,14 +1098,14 @@ class LiveReconciler:
                         f"backfill ({backfill_summary.fetched} fetched, "
                         f"{backfill_summary.duplicate} duplicate)"
                     ),
-                    timestamp=now,
+                    timestamp=report.timestamp,
                 )
         except Exception:  # noqa: BLE001 — same isolation as the case rows
             logger.exception("reconciliation backfill event row could not be recorded")
 
     def _write_snapshots(
         self,
-        conn: Any,
+        conn: sqlite3.Connection,
         snapshot: AccountSnapshot,
         status: str,
         diff: str,

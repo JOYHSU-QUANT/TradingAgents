@@ -61,18 +61,19 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **The live reconciliation sweep is four modules** (refactor plan v2,
   T3-b — PR 13 of the plan; no behaviour change). `live/reconcile.py` was
-  one 1,900-line class: the seams, `run()`, the four legs with their
-  orderStatus sub-steps, and the recording. It now holds `LiveReconciler`
+  one 1,900-line class: the seams, `run()`, the five guarded legs with the
+  orders leg's orderStatus sub-steps, and the recording. It now holds `LiveReconciler`
   with the seams, `run()`'s guarded lanes, the safe-mode application, the
   position and account legs and the recording. The fill legs
-  (`run_fill_backfill`, `reconcile_fills`, `fetch_window_fill_keys`) live in
-  `live/reconcile_fills.py` and the orders leg (`reconcile_orders` with its
-  four orderStatus sub-steps and the three fact-key functions) in
+  (`run_fill_backfill`, `reconcile_fills`) and the cross-check's page ladder
+  (`fetch_window_fill_keys`) live in `live/reconcile_fills.py`, and the
+  orders leg (`reconcile_orders` with its five private sub-steps and the
+  three fact-key functions) in
   `live/reconcile_orders.py`; both are functions over a
   `SweepContext` that `run()` builds once per pass, after the account
   reads — the store, the run id, the identity monitor, the fill seams as
   bound for that pass, the clock and the kill-switch refresh — so a leg
-  reads what the context names and nothing else. The cross-check window
+  reaches the reconciler only through what the context names. The cross-check window
   rule, `crosscheck_window`, lives beside its readers in
   `reconcile_fills.py` with its KNOWN EXEMPTION docstring; the reconciler's
   backfiller binding calls it for the whole-hours refusal. `ReconciliationCase`,
@@ -80,18 +81,30 @@ Breaking changes within the 0.x line are called out explicitly.
   and their import-time vocabulary check live in `live/reconcile_types.py`;
   the constants and `MANUAL_CASE_REASONS` drop their underscore, being the
   sweep's package-internal vocabulary shared by the four modules, and
-  `startup.py` imports `ReconciliationReport` from there. Two long methods
+  `startup.py` imports `ReconciliationReport` from there. `reconcile.__all__`
+  drops `ReconciliationCase` and `ReconciliationReport`: those spellings still
+  resolve but are no longer advertised, and `LiveReconciler.run` returns a
+  type its own module does not export. Two long methods
   are split in place: `_reconcile_positions` into the off-coin holdings, the
   liquidation-price mirror, the size compare and the SL coverage, and
   `_record` into `_diff_json`, `_record_cases` and `_record_backfill_event`
   (each write keeps its own transaction). No message, case type, fact key,
-  disposition or write order changes; every moved function's body is
+  disposition or write order changes, and no log message changes; the
+  moved legs' log records now carry their own logger names —
+  `contrib.hyperliquid_perp.live.reconcile_fills` (the fill backfill
+  failed/incomplete lines, the genesis-timestamp degradation warning, the
+  unmapped-sightings warning, the fill cross-check fetch failure and the
+  window debug line) and `contrib.hyperliquid_perp.live.reconcile_orders`
+  (the two tiebreaker read-failure warnings, the unusable-limitPx warning,
+  "could not back-fill orphan order" and "could not stamp the resolved
+  orderStatus read failure") — instead of `...live.reconcile`, which the
+  CLI log format prints as `%(name)s`. Every moved function's body is
   unchanged apart from the mechanical renames (`self.` to `ctx.`, and the
   window and refresh callable arriving as arguments). The
   tests import each name from the module that now defines it, patch the
   fill and orders legs on their modules, and drive the fill cross-check's
   page ladder as a function. Mutation probes against the split found two
-  writes nothing pinned (the off-coin phase's leg flag, and the
+  effects nothing pinned (the off-coin phase's leg flag, and the
   `exchange_fill_missing_local` event a booking backfill records); in
   `tests/live/test_reconcile.py` the existing off-coin test now asserts the
   flag and one new test pins the event.

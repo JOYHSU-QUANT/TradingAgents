@@ -89,7 +89,7 @@ if set(_ROLE_ORDER_TYPE) != set(_ROLE_TPSL) or set(_ROLE_TPSL) != set(_SLTP_ROLE
 # Keys are not enough: _ROLE_ORDER_TYPE is a literal copy of the repository's
 # role→order_type mapping, and only its VALUES decide how an audit row is
 # labelled. Left key-checked, a changed order_type spelling would have this
-# file writing the old label while reconcile.py's orphan backfill writes the
+# file writing the old label while reconcile_orders.py's orphan backfill writes the
 # new one — the same logical SL carrying two order_types depending on which
 # path recorded it. Compare the whole mapping (strictly stronger).
 if {r: repo.ROLE_TO_ORDER_TYPE[r] for r in _SLTP_ROLES} != _ROLE_ORDER_TYPE:

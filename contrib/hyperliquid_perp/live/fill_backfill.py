@@ -212,7 +212,7 @@ class FillBackfiller:
 
         Read by the reconciler's invalid-local-fill cross-check, whose window
         must be this instance's (issue #149; the argument is on
-        ``LiveReconciler._crosscheck_window``).
+        ``reconcile_fills.crosscheck_window``).
         """
         return self._lookback
 

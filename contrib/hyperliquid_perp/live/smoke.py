@@ -1268,7 +1268,7 @@ class SmokeTestRunner:
         """The qty a reduce-only trigger probe must carry: the staged long itself.
 
         Live sizes an SL to ``floor_to_step(abs(position.size))``
-        (protection._establish), and the whole point of staging a real long is
+        (protection._closing_leg), and the whole point of staging a real long is
         that every probe carries the exact §17 wire shape. Re-deriving the size
         from :meth:`_probe_size` re-read the mark on every call, so a mark move
         between the staging fill and a later probe — or a partial staging fill,

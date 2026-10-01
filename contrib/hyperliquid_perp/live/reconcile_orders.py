@@ -407,7 +407,7 @@ def _backfill_orphan_order(
         # orders row this back-fill inserts — read back later by the
         # protection manager's coverage compare (``live/protection.py``
         # reads this column at both its resting protection-order checks —
-        # the SL-coverage one and the role-agnostic _establish one).
+        # the SL-coverage one and the role-agnostic _resting_order_covers one).
         # Required sizes fail loud (issue #81); limitPx keeps its optional
         # contract (a market order legitimately has none), so an unusable
         # one degrades to None rather than failing the back-fill —

@@ -67,22 +67,24 @@ Breaking changes within the 0.x line are called out explicitly.
   §17.1 rule 4 clear and the residual check), `_sync_stop_loss` (the band
   decision, the SL ladder and its three failure dispositions, with the
   held-off ladder's coverage stamp in `_hold_blocked_stop_loss`),
-  `_suspend_take_profit` (rule 5) and `_sync_take_profit` (rule 6); the six
-  sites that raise the gate's `unresolved_protection_failure` line and
-  record why go through `_raise_failure_line`, and the three that lower it,
-  recording the recovery when the sync began failed, through
-  `_lower_failure_line`. `_establish` takes the floored size and closing
+  `_suspend_take_profit` (rule 5) and `_sync_take_profit` (rule 6); five of
+  the six sites that raise the gate's `unresolved_protection_failure` line
+  and record why go through `_raise_failure_line` (the sixth,
+  `_hold_blocked_stop_loss`, raises the line before the row read and the
+  orderStatus probe its event depends on, so a read that raises cannot leave
+  it down), and the three that lower it, recording the recovery when the
+  sync began failed, through `_lower_failure_line`. `_establish` takes the
+  floored size and closing
   side from `_closing_leg` (one derivation, shared with the blocked-SL
   coverage test, which used to repeat it under a comment asking the two to
   agree), keeps the price rounding and the `active_protection_order` read,
-  asks `_resting_order_covers` (the no-op guard), builds one frozen `_Placement`
-  — role, size, closing side, trigger and limit, the row it supersedes, and
-  the ids, which `_mint_ids` now mints once per ladder instead of once per
-  rung (the same ids each time: they are a function of role and sequence
-  alone) — and runs the ladder one `_attempt_placement` per rung, each
-  returning a `_RungResult` (`ESTABLISHED`, `GATE_REFUSED`, `THROTTLED`,
-  `FAILED`); `_ladder_verdict` turns the rungs into the `_EstablishResult`
-  three booleans used to carry. `_send` holds the modify-or-place dispatch;
+  asks `_resting_order_covers` (the no-op guard), builds one frozen
+  `_Placement` for the ladder (its ids are minted once rather than once per
+  rung: the same ids each time, since they are a function of role and
+  sequence alone) and runs the ladder one `_attempt_placement` per rung,
+  each returning a `_RungResult`; `_ladder_verdict` turns the rungs into the
+  `_EstablishResult` three booleans used to carry. `_send` holds the
+  modify-or-place dispatch;
   `_log_attempt_failed`, `_recover_placed_order` and `_persist_placed` take
   the `_Placement` in place of their repeated keyword arguments. No event
   type, detail string, log line, write, write order, refresh site or sleep

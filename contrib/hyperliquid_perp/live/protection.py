@@ -36,13 +36,13 @@ protection is whole.
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, localcontext
 from enum import Enum
+from typing import TYPE_CHECKING, Literal
 
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..exchanges.hyperliquid.errors import (
@@ -70,6 +70,9 @@ from .kill_switch import KillSwitchManager, refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import is_known_exchange_status, local_status_for_exchange_status
 from .venue_identity import ProbeSite, VenueIdentityMonitor, describe_order_status_failure
+
+if TYPE_CHECKING:
+    import sqlite3
 
 __all__ = ["ProtectionManager", "ProtectionOutcome"]
 
@@ -169,22 +172,32 @@ class _EstablishResult(Enum):
 
 
 class _RungResult(Enum):
-    """How one rung of the §17.4 ladder ended (see ``_attempt_placement``)."""
+    """How one rung of the §17.4 ladder ended (see ``_attempt_placement``).
 
-    ESTABLISHED = "established"  # acknowledged resting, or recovered from orderStatus
+    No member shares a name with ``_EstablishResult`` on purpose: the two enums
+    sit side by side in ``_establish``, and a cross-enum ``is`` / ``in`` is
+    silently False (``strict_equality`` is off), so a slip between them would
+    read a landed rung as a failed one without a word from mypy.
+    """
+
+    LANDED = "landed"  # acknowledged resting, or recovered from orderStatus
     # Refused PRE-SEND by the bound §4.1 gate: nothing was transmitted. A ladder
     # of nothing but these is _EstablishResult.GATE_BLOCKED, never an exhaustion.
     GATE_REFUSED = "gate_refused"
     # The venue declined to SERVE the request (429 / overload) — not a verdict
     # on the order. Alone, these make the ladder _EstablishResult.THROTTLED.
-    THROTTLED = "throttled"
+    RATE_LIMITED = "rate_limited"
     # The order itself was rejected, or its outcome was lost and not recovered:
     # a real failed repair attempt. One of these exhausts the ladder.
     FAILED = "failed"
 
 
-def _ladder_verdict(rungs: Sequence[_RungResult]) -> _EstablishResult:
-    """How a ladder that never ESTABLISHED ended (see ``_EstablishResult``).
+# The rungs a ladder collects: every result but LANDED, which ends the ladder.
+_LadderFailure = Literal[_RungResult.GATE_REFUSED, _RungResult.RATE_LIMITED, _RungResult.FAILED]
+
+
+def _ladder_verdict(rungs: Sequence[_LadderFailure]) -> _EstablishResult:
+    """How a ladder on which no rung LANDED ended (see ``_EstablishResult``).
 
     Nothing but pre-send refusals is GATE_BLOCKED. A ladder whose only
     wire-reaching failures were the venue declining to SERVE us is THROTTLED.
@@ -193,7 +206,7 @@ def _ladder_verdict(rungs: Sequence[_RungResult]) -> _EstablishResult:
     """
     if _RungResult.FAILED in rungs:
         return _EstablishResult.EXHAUSTED
-    if _RungResult.THROTTLED in rungs:
+    if _RungResult.RATE_LIMITED in rungs:
         return _EstablishResult.THROTTLED
     return _EstablishResult.GATE_BLOCKED
 
@@ -203,9 +216,11 @@ class _Placement:
     """What one §17.4 ladder puts on the book, and under which identity.
 
     Built once per ladder, after the no-op guard: every rung resends the same
-    cloid (§8.3 idempotent resend), and ``replaced`` — the resting row
-    ``active_protection_order`` found, if any — decides modify versus place and
-    is marked terminal when the new order lands.
+    cloid (§8.3 idempotent resend). ``replaced`` — the resting row
+    ``active_protection_order`` found, if any — is marked terminal and the
+    event labelled ``_modified`` when the new order lands; whether that order
+    goes out as a ``modify`` or a fresh ``place`` is ``existing_oid``'s call
+    (a row the exchange never named has nothing to modify).
     """
 
     role: str
@@ -501,7 +516,7 @@ class ProtectionManager:
         # audit trail should show protection RESTORED, not only degradation entered).
         was_failed = self._gate.unresolved_protection_failure
         if position.is_flat:
-            return self._sync_flat(was_failed, now)
+            return self._sync_flat(was_failed=was_failed, now=now)
 
         assert position.entry_price is not None  # a sized position always has one
         # ``side`` is the POSITION direction (buy = long), as the paper engine
@@ -518,7 +533,7 @@ class ProtectionManager:
         if held is not None:
             return held
         if plan_active:
-            return self._suspend_take_profit(was_failed, now)
+            return self._suspend_take_profit(was_failed=was_failed, now=now)
         return self._sync_take_profit(
             position,
             pos_side=pos_side,
@@ -527,7 +542,7 @@ class ProtectionManager:
             now=now,
         )
 
-    def _sync_flat(self, was_failed: bool, now: datetime) -> ProtectionOutcome:
+    def _sync_flat(self, *, was_failed: bool, now: datetime) -> ProtectionOutcome:
         """§17.1 rule 4: a flat position must carry no resting SL / TP."""
         self._clear(now)
         residual = next(
@@ -605,7 +620,10 @@ class ProtectionManager:
         return None
 
     def _hold_blocked_stop_loss(
-        self, position: PositionState, sl_result: _EstablishResult, now: datetime
+        self,
+        position: PositionState,
+        sl_result: Literal[_EstablishResult.GATE_BLOCKED, _EstablishResult.THROTTLED],
+        now: datetime,
     ) -> ProtectionOutcome:
         """Hold — do not escalate — an SL ladder the gate or the venue held off.
 
@@ -627,6 +645,10 @@ class ProtectionManager:
         sync; §12.3's SL-missing check remains the standing net for the
         unprotected window.
         """
+        # Raised by hand, not through _raise_failure_line: the event below
+        # carries order_id / cloid_hex, and the line goes up BEFORE the row read
+        # and the orderStatus probe that decide them, so a read that raises
+        # cannot leave it down.
         self._gate.unresolved_protection_failure = True
         # §17.4 is modify-before-cancel, so a gate-refused MODIFY can leave
         # the previous SL resting while a gate-refused CREATE leaves
@@ -691,7 +713,7 @@ class ProtectionManager:
         )
         return ProtectionOutcome.BLOCKED
 
-    def _suspend_take_profit(self, was_failed: bool, now: datetime) -> ProtectionOutcome:
+    def _suspend_take_profit(self, *, was_failed: bool, now: datetime) -> ProtectionOutcome:
         """§17.1 rule 5: TP suspended while a plan runs; SL stays.
 
         Cancels a stale TP so it can't fire against the in-flight plan.
@@ -842,10 +864,10 @@ class ProtectionManager:
             cloid_hex=hexid,
         )
         attempts = self._config.sl_repair_max_attempts
-        rungs: list[_RungResult] = []
+        rungs: list[_LadderFailure] = []
         for attempt in range(1, attempts + 1):
             rung = self._attempt_placement(placement, attempt, attempts, now)
-            if rung is _RungResult.ESTABLISHED:
+            if rung is _RungResult.LANDED:
                 return _EstablishResult.ESTABLISHED
             rungs.append(rung)
         return _ladder_verdict(rungs)
@@ -914,7 +936,7 @@ class ProtectionManager:
     ) -> _RungResult:
         """One rung of the §17.4 ladder: send, then settle what came back.
 
-        Every exit but ``ESTABLISHED`` has logged the failed attempt and run
+        Every exit but ``LANDED`` has logged the failed attempt and run
         ``_maybe_delay``, so the ladder's §18.2 invariant — every wire call is
         followed by a refresh — holds rung by rung.
         """
@@ -941,7 +963,7 @@ class ProtectionManager:
             # is picked up then (or by §12.3 reconciliation).
             self._log_attempt_failed(placement, attempt, attempts, exc, now)
             self._maybe_delay(attempt, attempts, backoff=attempt)
-            return _RungResult.THROTTLED
+            return _RungResult.RATE_LIMITED
         except ExchangeError as exc:
             # Unknown outcome (§8.3 rule 11): a lost ack / timeout may have left
             # the order LIVE on the exchange. Ask orderStatus BEFORE counting a
@@ -957,7 +979,7 @@ class ProtectionManager:
             # (2026-07-31 deadline review).
             refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
             if self._recover_placed_order(placement, now):
-                return _RungResult.ESTABLISHED
+                return _RungResult.LANDED
             self._log_attempt_failed(placement, attempt, attempts, exc, now)
             self._maybe_delay(attempt, attempts)
             return _RungResult.FAILED
@@ -965,7 +987,7 @@ class ProtectionManager:
         # §18.2: an ack means that call was ON the network. Refresh here and
         # the invariant over this whole ladder becomes "every wire call is
         # followed by a refresh", which the exception lanes and _maybe_delay
-        # cover on their own — but the two ESTABLISHED returns below do NOT
+        # cover on their own — but the two LANDED returns below do NOT
         # reach _maybe_delay, so without this a successful SL place followed
         # by a successful TP place is two round-trips inside one gap, and the
         # duplicate lane below is a place plus an orderStatus probe. Cheap to
@@ -979,7 +1001,7 @@ class ProtectionManager:
                 exchange_raw_status=ack.status,
                 now=now,
             )
-            return _RungResult.ESTABLISHED
+            return _RungResult.LANDED
 
         if ack.is_duplicate:
             recovered = self._recover_placed_order(placement, now)
@@ -993,7 +1015,7 @@ class ProtectionManager:
                 # The exchange already knows this cloid from a prior attempt
                 # whose ack we never observed; orderStatus confirms it is
                 # resting (§8.3 rules 2–4) → recovered, no resend.
-                return _RungResult.ESTABLISHED
+                return _RungResult.LANDED
 
         # An ack that says "no" is the exchange REJECTING the order, which is
         # exactly the evidence a throttle is not.
@@ -1005,6 +1027,7 @@ class ProtectionManager:
         """Modify the resting order in place when it has an exchange id (§17.4), else place."""
         if placement.existing_oid is not None:
             return self._client.modify_trigger_order(
+                # ``str()`` kept: the column is dynamically typed, the wire wants text.
                 target=str(placement.existing_oid),
                 coin=self._coin,
                 is_buy=placement.is_buy,
@@ -1031,7 +1054,7 @@ class ProtectionManager:
         placement: _Placement,
         attempt: int,
         attempts: int,
-        error,
+        error: object,
         now: datetime,
     ) -> None:
         # An unreadable recovery answer is folded into THIS row rather than

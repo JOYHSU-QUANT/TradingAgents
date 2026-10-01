@@ -514,7 +514,7 @@ def test_every_row_a_smoke_run_writes_is_marked_including_the_managers(tmp_path,
     over EVERY row the run produced rather than over the runner's own three
     (2026-08-01 round-16 review).
     """
-    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+    from contrib.hyperliquid_perp.live.kill_switch_events import is_suite_authored
 
     dbp = _drive_a_full_smoke_suite(tmp_path)
     with Database(dbp) as db:
@@ -552,7 +552,7 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     # RUNBOOK §20.3 shows operators the literal token so they can read the event
     # log by hand. Nothing tied the doc to the constant, so renaming the constant
     # left the suite green and the runbook quietly wrong (round-16 probe).
-    from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
+    from contrib.hyperliquid_perp.live.kill_switch_events import SUITE_AUTHORED_TOKEN
     from contrib.hyperliquid_perp.live.smoke import (
         _PROBE_RESIDUAL_HEADLINE,
         REFRESHES_PER_FULL_SUITE,
@@ -566,7 +566,7 @@ def test_the_runbook_quotes_the_literals_the_code_prints():
     from contrib.hyperliquid_perp.live.validation_report import _NO_DAEMON_ROWS_RENDER
 
     runbook = doc_text("RUNBOOK-live.md")
-    assert _SUITE_AUTHORED_TOKEN in runbook
+    assert SUITE_AUTHORED_TOKEN in runbook
     # Same tie for the other literal §20.3 quotes: the summary's clean-shutdown
     # value for a run with no daemon rows. It could drift in either place with
     # the suite green (2026-08-01 round-18 mutation probe).

@@ -345,7 +345,7 @@ def test_the_live_loop_refreshes_the_switch_between_the_tick_and_the_pump(tmp_pa
 
     ``engine.tick()`` and ``driver.pump()`` each run a chain of REST calls on
     the loop's thread. Adjacent, the unrefreshed run is their sum, not the max
-    ``_MAX_UNREFRESHED_REST_CALLS`` records.
+    ``MAX_UNREFRESHED_REST_CALLS`` records.
     """
     from contrib.hyperliquid_perp.live.engine import LiveTickResult, TickStatus
 
@@ -966,7 +966,7 @@ def test_the_live_loop_refreshes_across_the_decision_cycles_market_reads(tmp_pat
     ``EngineDecisionProvider.on_blocking_read`` defaults to None, and
     ``_build_context``'s ``_between_reads`` simply returns when it is — so the
     four back-to-back full-timeout reads of a decision cycle run entirely
-    unrefreshed. That chain is what ``_MAX_UNREFRESHED_REST_CALLS`` is reasoned
+    unrefreshed. That chain is what ``MAX_UNREFRESHED_REST_CALLS`` is reasoned
     about against; unwired, the switch's real exposure is the chain's length
     while the operator advisory is still computed from the submit chain's 3.
 

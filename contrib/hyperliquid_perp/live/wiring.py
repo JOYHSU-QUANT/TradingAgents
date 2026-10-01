@@ -35,6 +35,7 @@ from . import (
     fill_backfill as fill_backfill_mod,
     fills as fills_mod,
     kill_switch as kill_switch_mod,
+    kill_switch_timing as kill_switch_timing_mod,
     order_gate as order_gate_mod,
     reconcile as reconcile_mod,
     safe_mode as safe_mode_mod,
@@ -237,7 +238,7 @@ def build_reconciliation(
     # which an in-review draft had left unwired on the mistaken belief that
     # it had no switch.
     def _refresh_across_sweep() -> None:
-        kill_switch_mod.refresh_across_blocking_work(kill_switch, what="reconciliation")
+        kill_switch_timing_mod.refresh_across_blocking_work(kill_switch, what="reconciliation")
 
     fetch_fills = signed.user_fills_by_time
     backfiller = fill_backfill_mod.FillBackfiller(

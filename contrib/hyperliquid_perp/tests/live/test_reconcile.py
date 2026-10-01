@@ -227,7 +227,7 @@ def test_the_fill_cross_check_ladder_refreshes_between_pages(monkeypatch):
 
     The first pass of the deadline review wired only the backfiller's and left
     this one untouched, which made the real worst case DEFAULT_MAX_PAGES deep
-    while ``_MAX_UNREFRESHED_REST_CALLS`` still claimed 3 — an advisory
+    while ``MAX_UNREFRESHED_REST_CALLS`` still claimed 3 — an advisory
     promising headroom it could not deliver. One refresh per page.
     """
     monkeypatch.setattr(reconcile_fills, "RESPONSE_FILL_CAP", 1)  # every page "capped"

@@ -65,7 +65,7 @@ def _day_baseline_from_exchange(fetch_clearinghouse, kill_switch) -> Decimal:
     TIMES OUT is both the expensive one and the one that leaves by exception.
     """
     from ..exchanges.hyperliquid.mapper import map_account_snapshot
-    from ..live.kill_switch import refresh_across_blocking_work
+    from ..live.kill_switch_timing import refresh_across_blocking_work
 
     try:
         return map_account_snapshot(fetch_clearinghouse()).account_value
@@ -264,7 +264,7 @@ def _run_live_loop(
     from ..live.cancel import cancel_bot_order_with_evidence
     from ..live.decision import AdoptionWedgedError, LiveDecisionDriver, LiveDecisionWorker
     from ..live.engine import LiveExecutionEngine
-    from ..live.kill_switch import refresh_across_blocking_work
+    from ..live.kill_switch_timing import refresh_across_blocking_work
     from ..live.loss_guards import LossGuards
     from ..live.orders import LiveOrderSubmitter
     from ..live.protection import ProtectionManager

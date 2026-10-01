@@ -27,7 +27,7 @@ from ..persistence import repository as repo
 from ..runtime import accounting
 from ..runtime.no_decision import TrailingFailureStreaks, trailing_failure_streaks
 from .config import DEFAULT_SCHEDULE_CANCEL_SECONDS as _CONFIG_DEFAULT_DEADLINE_S
-from .kill_switch import is_suite_authored
+from .kill_switch_events import is_suite_authored
 from .safe_mode import REASON_DAILY_LOSS
 from .smoke import SmokeGateReport, smoke_gate_report
 
@@ -269,7 +269,7 @@ def _schedule_cancel_seconds(config_json: str | None) -> Decimal:
 
 
 # The deadline ``arm()`` reports it installed, read back out of the row it wrote
-# (kill_switch.py: ``detail=f"deadline={...}s refresh={...}s"``). Taking the number
+# (``kill_switch_events.deadline_detail``, which ``arm()`` calls). Taking the number
 # from the ARMING rather than from genesis is what makes the measure survive a
 # resume under an edited config: ``runs.config_json`` is written once, at
 # ``--create``, and a changed ``live.kill_switch`` block on a later resume is only

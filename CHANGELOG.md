@@ -59,6 +59,52 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The dead man's switch is three modules, and its shutdown sweep is
+  phased** (refactor plan v2, T3-d — PR 15 of the plan; no behaviour
+  change). `live/kill_switch.py` held the timing invariant, the two
+  advisories, the blocking-work refresh helper, the §18.5 row vocabulary
+  and writer, and the 1,000-line `KillSwitchManager`. It now holds the
+  manager alone, and `kill_switch.__all__` names only `KillSwitchManager`.
+  The timing budget lives in `live/kill_switch_timing.py`:
+  `kill_switch_timing_violation`, `network_timeout_warning`,
+  `sl_repair_delay_warning`, `refresh_across_blocking_work` (typed against a
+  local `tick()` Protocol, so the module does not know the manager) and the
+  two budget constants they share with the manager and the tests, which
+  drop their underscore as package-internal vocabulary:
+  `FAILURE_BACKOFF_FRACTION` and `MAX_UNREFRESHED_REST_CALLS`. The §18.5
+  row contract lives in `live/kill_switch_events.py`: `deadline_detail`,
+  `SUITE_AUTHORED_TOKEN`, `stamp_suite_authored` (both also de-underscored,
+  being read by `validation_metrics`'s tests), `is_suite_authored` and
+  `record_kill_switch_event`. `cli/live_shared.py`, `cli/live_loop.py`,
+  `live/engine.py`, `live/protection.py` and `live/wiring.py` import the
+  timing names from `kill_switch_timing`; `live/smoke.py` and
+  `live/validation_metrics.py` import the row names from
+  `kill_switch_events`; the recording seam in `tests/conftest.py` and
+  `tests/live/test_wiring.py` patches `refresh_across_blocking_work` on
+  `kill_switch_timing`, which is where `wiring.py` now reads it. The
+  260-line `KillSwitchManager.shutdown` is a short caller over named
+  steps: `_enumerate_open_orders` (the `open_orders()` read and its
+  `sweep_error`), `_sweep_order` (one entry's §19.3 ownership verdict,
+  keep, skip, cancel or failure, writing into a `_SweepLedger` — the four
+  detail lists, the enumeration's `sweep_error` and `handled_cloids` — that
+  `_cross_check_local_orders` now takes whole instead of three of its parts (`handled_cloids`,
+  `kept_protective` and `enumeration_failed`),
+  and whose `clean` is the rule-6 verdict) and `_settle_scheduled_cancel` (the
+  disarm, its wire latch, the recorded failure, or the "left ARMED"
+  warning). Every log line, event row, detail field order, latch order and
+  the completed-last mark are unchanged; `is_suite_authored` returns early on an
+  empty `detail` instead of and-ing on it (same answers, one fewer mypy
+  error). Only the moved helper's logger name changes:
+  `refresh_across_blocking_work`'s "kill-switch refresh during %s failed"
+  WARNING now comes from `contrib.hyperliquid_perp.live.kill_switch_timing`
+  instead of `...live.kill_switch`, which the CLI log format prints as
+  `%(name)s`. The tests import each name from the module that now defines
+  it. Mutation probes against the phased sweep (eighteen, sixteen killed)
+  found one guard nothing pinned — the sweep registering a bot cloid as
+  handled BEFORE its cancel attempt, so a raised cancel is not counted a
+  second time by the cross-check; `tests/live/test_kill_switch.py` now
+  pins it, one test.
+
 - **The protection manager's `sync` and `_establish` are phased** (refactor
   plan v2, T3-c — PR 14 of the plan; no behaviour change).
   `live/protection.py` keeps its one file and its two public names; the

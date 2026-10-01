@@ -51,10 +51,11 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from ..common.instants import Seconds, seconds_span
+from ..common.instants import Seconds
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..persistence import repository as repo
 from ..persistence.cloid import LIVE_ORDER_ROLES
@@ -63,17 +64,13 @@ from ..ports import Clock
 from ..runtime.clock import WallClock
 from .cancel import cancel_bot_order_with_evidence
 from .config import KillSwitchConfig
+from .kill_switch_events import deadline_detail, record_kill_switch_event
+from .kill_switch_timing import FAILURE_BACKOFF_FRACTION, kill_switch_timing_violation
 from .order_gate import RealOrderGate
 from .orders import local_status_for_exchange_status
 from .venue_identity import ProbeSite, VenueIdentityMonitor, describe_order_status_failure
 
-__all__ = [
-    "KillSwitchManager",
-    "kill_switch_timing_violation",
-    "network_timeout_warning",
-    "refresh_across_blocking_work",
-    "sl_repair_delay_warning",
-]
+__all__ = ["KillSwitchManager"]
 
 logger = logging.getLogger(__name__)
 
@@ -117,254 +114,6 @@ _MAX_CLOCK_SKEW_S = 5.0
 # the recorded event, so a code bug is loud in the audit trail, never re-raised
 # into the safety path.
 
-
-def kill_switch_timing_violation(
-    config: KillSwitchConfig,
-    max_tick_gap_seconds: Seconds,
-    network_timeout_s: float | None = None,
-) -> str | None:
-    """The constructor's refresh-timing invariant as a checkable message.
-
-    THE canonical account of the invariant (other sites point here). The worst
-    case between two SUCCESSFUL refreshes walks the whole failure path, in the
-    order the code actually executes it::
-
-        refresh_interval          the deadline-to-due wait
-      + max_tick_gap              the tick after it comes due lands a gap late
-      + network_timeout_s         THAT attempt fails only after burning a timeout
-      + min(timeout, backoff_cap) the failure then suppresses the retry
-      + max_tick_gap              and the retry ALSO waits for a tick
-
-    and that must stay strictly inside ``schedule_cancel``, or the dead man's
-    switch fires during normal operation and cancels every order on the wallet.
-    The config layer's own guard (``schedule_cancel >= 2 × refresh``) is only
-    the special case of a caller ticking exactly at the interval: it cannot see
-    the caller's tick gap at all.
-
-    Two of those five terms were missing until 2026-08-01, and both were owed by
-    the very commit that introduced the backoff: a failed attempt does not fail
-    instantly (``_retry_not_before`` is computed from ``failed_at``, i.e. AFTER
-    the request burned up to ``network_timeout_s``), and the backoff creates a
-    SECOND wait-for-a-tick stage (due→tick, then backoff-expiry→tick). Omitting
-    them let ``refresh=30 / max_tick_gap=30 / network_timeout=8 /
-    schedule_cancel=80`` pass at a computed 75s while the real worst case is
-    106s — the switch firing during normal operation, which is the single thing
-    this invariant exists to prevent (2026-08-01 rules-vs-untouched-code review).
-
-    ``network_timeout_s`` is the ONE term of the five that does not live in
-    ``KillSwitchConfig`` (it is the top-level REST timeout), so it is passed in.
-    When it is None the term is DROPPED rather than treated as unbounded: a
-    stubbed client has no timeout to read, and refusing to construct on that
-    would fail wiring this invariant is not about. The unbounded case belongs to
-    :func:`network_timeout_warning`, which already fires on None. Even with the
-    term dropped this check is strictly tighter than the version it replaces,
-    which counted only ONE ``max_tick_gap``.
-
-    Returns the violation text, or None when the timing is sound. ONE
-    definition, used by the constructor (which raises on it) and by the CLI's
-    live preflight — the preflight exists because the constructor runs only
-    AFTER ``--create`` has written the run row and taken the run lock, so a
-    violating config would otherwise surface as a late ValueError → generic
-    exit 2 outside the documented 0/4/1 contract, with side effects already
-    on disk (decided 2026-07-17).
-    """
-    # The gap is converged first, HERE rather than in the constructor, so the
-    # preflight and the constructor read one number the same way (issue #224):
-    # a bool, NaN or infinity would pass a bare ``<= 0`` and then satisfy or
-    # fail the sum below for no reason the message could state — NaN in
-    # particular sums to NaN, which compares under any deadline. Refused by
-    # name as a violation message, which is what both callers read.
-    try:
-        max_tick_gap_seconds = seconds_span(
-            "max_tick_gap_seconds", max_tick_gap_seconds
-        ).total_seconds()
-    except (TypeError, ValueError) as exc:
-        return str(exc)
-    # Every term above, summed in the same order. The failed attempt's own wall
-    # time and the second tick wait are NOT refinements — they are the two
-    # largest terms after the interval itself, and leaving them out is what made
-    # the pre-2026-08-01 check accept configs that fire the switch.
-    backoff_cap = config.refresh_interval_seconds * _FAILURE_BACKOFF_FRACTION
-    # The backoff is min(what the attempt cost, the cap) — see _in_failure_backoff.
-    # With no timeout to read, the cap is the only bound we have.
-    failed_attempt_cost = 0.0 if network_timeout_s is None else float(network_timeout_s)
-    backoff = backoff_cap if network_timeout_s is None else min(failed_attempt_cost, backoff_cap)
-    worst_case_gap = (
-        config.refresh_interval_seconds
-        + max_tick_gap_seconds
-        + failed_attempt_cost
-        + backoff
-        + max_tick_gap_seconds
-    )
-    if worst_case_gap >= config.schedule_cancel_seconds:
-        timeout_term = (
-            "network timeout unknown"
-            if network_timeout_s is None
-            else f"failed-attempt network_timeout_s {failed_attempt_cost:g}s"
-        )
-        return (
-            f"the kill switch cannot be refreshed in time: a refresh may land "
-            f"{worst_case_gap:g}s apart (refresh_interval "
-            f"{config.refresh_interval_seconds}s + max_tick_gap "
-            f"{max_tick_gap_seconds:g}s + {timeout_term} + post-failure backoff "
-            f"{backoff:g}s + a second max_tick_gap {max_tick_gap_seconds:g}s "
-            f"before the retry), but the scheduled cancel fires after "
-            f"{config.schedule_cancel_seconds}s — the dead man's switch would "
-            "cancel every order on the wallet during normal operation"
-        )
-    return None
-
-
-# How much of one refresh interval a FAILED attempt may suppress the retry for
-# (see KillSwitchManager._in_failure_backoff). Named and shared because
-# kill_switch_timing_violation has to budget for it: the backoff lengthens the
-# worst-case gap between two successful refreshes, and an invariant that does not
-# know about it is checking a slack the code no longer has.
-_FAILURE_BACKOFF_FRACTION = 0.5
-
-
-# The longest run of BACK-TO-BACK REST calls a tick can make with no
-# :func:`refresh_across_blocking_work` between them — the order-submission chain
-# in ``orders.submit_limit``: the §8.3 pre-check recovery probe (which falls
-# THROUGH when it cannot resolve the cloid, rather than returning), the place
-# itself, and the duplicate-ack recovery probe. Each rides the full
-# ``network_timeout_s``.
-#
-# Everything else refreshes ACROSS its blocking work and so contributes a run of
-# ONE however many calls it makes: protection's repair ladder and its orderStatus
-# confirmations, the reconcile legs and their per-order loops, BOTH page ladders
-# (the fill backfill's and the reconcile fill cross-check's own inline one), the
-# day-roll baseline read, and — since 2026-08-01 — the decision cycle's five
-# market-data reads in ``engine_bridge._build_context`` (perp meta, snapshot,
-# the exchange clock, candles, funding), which ``driver.pump()`` runs on
-# this same thread.
-#
-# That last one is why this is 3 rather than 5. Those reads share
-# ``network_timeout_s`` (``HyperliquidClient.from_config`` resolves from that key
-# and Info() fetches perp meta at construction), so unrefreshed they were the
-# longest chain and forced the advisory to demand <7.5s. But a live decision
-# cycle has NO within-cycle retry: one market read that times out fail-closes the
-# cycle and re-anchors to the next 4h boundary. Budgeting for that chain would
-# have bought kill-switch headroom with a possible 4-hour decision blackout, so
-# the chain was broken up instead.
-#
-# This number is a MAXIMUM OVER CHAINS, so every seam between two chains has to
-# refresh or the truth becomes their SUM. Twice that was the bug:
-#   - the first pass wired only the backfiller's ladder and left the
-#     cross-check's identical one untouched, making the real maximum 20
-#     (DEFAULT_MAX_PAGES) while this said 3;
-#   - the second left ``engine.tick()`` and ``driver.pump()`` adjacent with
-#     nothing between them, so the submit chain and the build_context chain ran
-#     back to back for a real maximum of 7 (the build_context chain was four reads then) (2026-08-01 lifecycle review).
-# Any new REST loop MUST refresh per iteration, and any new pair of blocking
-# calls MUST refresh between them, or this number is a lie.
-_MAX_UNREFRESHED_REST_CALLS = 3
-
-
-def network_timeout_warning(timeout: float | None, max_tick_gap_seconds: float) -> str | None:
-    """The §18.2 residual-risk advisory as a checkable message (PR 5, decided
-    2026-07-22 "soft mitigation").
-
-    Sister of :func:`kill_switch_timing_violation`, advisory rather than
-    enforced: nothing ties the per-request REST timeout to the caller's
-    ``max_tick_gap_seconds`` promise, and REST calls riding their full timeout
-    on a degraded (slow, not dead) network can stretch the wall gap past the
-    promise — the dead man's switch then cancels the resting SL/TP while the
-    process is still alive (protection re-covers on the next healthy tick, an
-    unprotected window).
-
-    Budgets ``_MAX_UNREFRESHED_REST_CALLS``, not one. The single-call form
-    called a 10s timeout sound against a 30s gap while one unrefreshed chain
-    could spend 30s inside it — the arithmetic contradicted the very sentence
-    this docstring opened with ("a tick makes several sequential REST calls") and
-    under-reported the one number the operator can actually turn (2026-07-31
-    deadline review).
-
-    Returns the warning text when the timeout cannot keep the promise (or is
-    unbounded), None when it fits. The hard construction-time invariant is
-    deferred to the network-layer rework.
-    """
-    budget = max_tick_gap_seconds / _MAX_UNREFRESHED_REST_CALLS
-    if timeout is not None and timeout * _MAX_UNREFRESHED_REST_CALLS < max_tick_gap_seconds:
-        return None
-    return (
-        f"network_timeout_s ({timeout}) leaves no room under the kill switch's "
-        f"max tick gap ({max_tick_gap_seconds:g}s): an order submission can make "
-        f"{_MAX_UNREFRESHED_REST_CALLS} back-to-back REST calls with no refresh "
-        "between them, so on a degraded network that chain alone can push the "
-        "§18.2 refresh past the exchange-side deadline and cancel the resting "
-        f"SL/TP. Set network_timeout_s below {budget:g} in the config for headroom."
-    )
-
-
-def sl_repair_delay_warning(delay_seconds: float, max_tick_gap_seconds: float) -> str | None:
-    """The SL-repair-ladder sibling of :func:`network_timeout_warning` (advisory).
-
-    ``protection._maybe_delay`` sleeps the FULL configured
-    ``sl_repair_retry_delay_seconds`` between repair attempts and only refreshes
-    the kill switch AFTER the sleep — so a delay at or above the
-    ``max_tick_gap_seconds`` promise stretches the refresh gap during an SL
-    repair episode, the one window where the position has no valid stop. Push it
-    past the scheduleCancel budget and the dead man's switch cancels every
-    resting order mid-repair. Config only enforces ``> 0``; like its sister
-    this is a warn-not-refuse preflight, with the hard construction-time
-    invariant deferred to the network-layer rework.
-
-    Budgeted against ONE SLOT of ``_MAX_UNREFRESHED_REST_CALLS``, not the whole
-    tick gap — the same three-way split ``network_timeout_warning`` uses and that
-    ``protection._MAX_REPAIR_SLEEP_S`` clamps the backoff to. Comparing against
-    the WHOLE gap left the band between one slot and the gap (10s..30s at the
-    defaults) both unclamped — ``_maybe_delay`` never shortens a CONFIGURED delay
-    — and unwarned, so a 25s delay burned two and a half slots of the very budget
-    with nothing said (2026-08-01 round-13 exit check). The default (5s against a
-    10s slot) still never warns.
-    """
-    budget = max_tick_gap_seconds / _MAX_UNREFRESHED_REST_CALLS
-    if delay_seconds < budget:
-        return None
-    return (
-        f"live.protection.sl_repair_retry_delay_seconds ({delay_seconds:g}) is not "
-        f"below its share of the kill switch's max tick gap "
-        f"({max_tick_gap_seconds:g}s / {_MAX_UNREFRESHED_REST_CALLS} = {budget:g}s) "
-        "— the repair ladder sleeps that long between attempts while the "
-        "position has no valid stop, and can push the §18.2 refresh past the "
-        "exchange-side deadline, cancelling every resting order mid-repair. "
-        f"Set it below {budget:g} for headroom."
-    )
-
-
-def refresh_across_blocking_work(kill_switch: KillSwitchManager | None, *, what: str) -> None:
-    """Refresh the dead man's switch across a long blocking operation.
-
-    THE helper for :meth:`KillSwitchManager.tick`'s stated contract — "the owner
-    must call this at least once per ``max_tick_gap_seconds``, INCLUDING from
-    inside a long decision cycle". The switch does not refresh itself, and the
-    live loop is single-threaded, so every site that blocks it for anything
-    approaching a network timeout has to call this or the exchange-side deadline
-    lapses and cancels every resting order on the wallet while the process is
-    alive and healthy — the §20.3 unprotected window opening at exactly the
-    moment the network is least able to close it.
-
-    CHEAP when a refresh is not due: :meth:`tick` reaches the wire only when
-    ``refresh_due()`` says so, so calling this once per loop iteration costs a
-    clock read plus the unconditional expired-deadline detection — and that
-    detection is half the point, since a lapse discovered mid-sweep is a lapse
-    the caller's own row-trust logic needs to know about.
-
-    Guarded, and deliberately never re-raising: a refresh miss must not abort
-    the work it was protecting. The caller is typically mid-repair or mid-sweep,
-    where dying is strictly worse than a stale switch the next tick retries.
-    Mirrors ``protection._maybe_delay``'s long-standing treatment, which this
-    replaced.
-    """
-    if kill_switch is None:
-        return
-    try:
-        kill_switch.tick()
-    except Exception:  # noqa: BLE001 — a refresh miss must not abort its caller
-        logger.warning("kill-switch refresh during %s failed", what, exc_info=True)
-
-
 # The resting protective roles ``shutdown(keep_protective=True)`` leaves
 # standing (decided 2026-07-22). Narrower than order_gate.PROTECTIVE_ORDER_ROLES
 # for the same reason as protection._SLTP_ROLES: emergency_close is a one-shot
@@ -382,109 +131,38 @@ if not _KEEP_PROTECTIVE_ROLES <= LIVE_ORDER_ROLES:
     raise AssertionError("_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES")
 
 
-def deadline_detail(seconds: int, note: str) -> str:
-    """The ONE way to write "this row installed N seconds of cover".
+@dataclass
+class _SweepLedger:
+    """What one §18.2 shutdown sweep did with each open order, by exchange oid.
 
-    ``validation_metrics._stated_deadline_seconds`` parses this token back out to size
-    every stretch of silence, so the two are a cross-module contract — and a
-    contract enforced by three independent f-strings agreeing by eye is not
-    enforced at all. The drift is already demonstrable one screen away:
-    ``kill_switch_cancel_triggered`` renders the same concept as
-    ``(deadline 120s)`` — a space, not ``=`` — which the reader silently ignores.
-    Ignoring it there is correct, but nothing structural made it so. With one
-    formatter there is a single writer to pin (2026-08-01 round-14 simplify pass).
+    The four lists are the ``shutdown_cancel_orders_completed`` detail in its
+    field order; ``sweep_error`` is why ``open_orders()`` could not be read,
+    when it could not; ``handled_cloids`` is every bot cloid the sweep took
+    responsibility for — cancelled, failed or deliberately kept — which the
+    local cross-check skips before asking the exchange about the rest.
     """
-    return f"deadline={seconds}s {note}"
 
+    canceled: list[str] = field(default_factory=list)
+    skipped_non_bot: list[str] = field(default_factory=list)
+    kept_protective: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    handled_cloids: set[str] = field(default_factory=set)
+    sweep_error: str | None = None
 
-# Marks a row the SMOKE SUITE wrote rather than the daemon. Both are real cover
-# and both must count toward outage seconds and toward the deadline in force —
-# the suite genuinely arms and renews the wallet-wide trigger. What suite rows
-# must NOT do is satisfy the §20.3 SAMPLE FLOOR, which asks a different question:
-# "has this run exercised the switch enough for its availability number to mean
-# anything?" A handful of back-to-back suites on one run-id clear that floor at
-# 100% with the daemon never started, so it would be answered entirely by
-# evidence from a phase that cannot speak to hours of unattended running
-# (2026-08-01 round-15 review; user decision: exclude from the count only). The
-# concrete figure is quoted once, in RUNBOOK §20.3.
-#
-# It has a SECOND consumer since round 17, and weakening the marker moves that
-# one too: ``validation_metrics.py`` derives the DAEMON subsequence from it, and the
-# last row of that subsequence is the run's clean-shutdown verdict. "Sample
-# floor only" was true for exactly one round (2026-08-01 round-21 review).
-#
-# A token rather than a substring sniff of free text, and read back through
-# ``is_suite_authored`` — same writer/reader discipline as ``deadline_detail``,
-# for the same reason: the one thing that must not happen is the two sides
-# drifting apart silently. RUNBOOK §20.3 shows operators this literal, and a test
-# pins the doc against this constant.
-#
-# STAMPED BY THE WRITER, never by each call site. Per-call-site lasted one round
-# and was wrong twice over. Three of the suite's six writers never got it — the
-# failed refresh among them, which made the exclusion branch that reads it
-# unreachable dead code and the RUNBOOK's claim about it false. And the one that
-# actually mattered: the suite ALSO drives a real KillSwitchManager for its
-# pre-flight recovery and restart tests 15-17, whose own ``tick()`` emits
-# refreshes across a suite that takes minutes per test. Those bought §20.3 sample
-# credit exactly as before, so the exclusion was never in force on a real run —
-# hidden only by an offline test clock that does not elapse (2026-08-01 round-16
-# review; user decision: mark at the manager).
-_SUITE_AUTHORED_TOKEN = "writer=live-smoke"
+    @property
+    def clean(self) -> bool:
+        """Enumeration succeeded and nothing failed: the rule-6 disarm is earned."""
+        return self.sweep_error is None and not self.failures
 
-
-def _stamp_suite_authored(detail: str | None) -> str:
-    """Append the marker, preserving whatever the row already said."""
-    return _SUITE_AUTHORED_TOKEN if not detail else f"{detail} {_SUITE_AUTHORED_TOKEN}"
-
-
-def is_suite_authored(detail: str | None) -> bool:
-    """Whether this row was written during ``live-smoke`` rather than by the daemon."""
-    # The token as the LAST whitespace-delimited field — the only shape
-    # ``_stamp_suite_authored`` writes — and not a substring anywhere in the
-    # column. ``detail`` is free text shared by six writers, one of which dumps
-    # a JSON blob carrying raw exchange and SQLite exception text into it, so a
-    # bare ``in`` let any row that merely QUOTED the token leave the daemon
-    # subsequence and take the run's clean-shutdown verdict with it. The reader
-    # of the same column in validation_metrics.py answers this with an event-type
-    # allowlist; this predicate runs over every event type and cannot, so it
-    # anchors instead (2026-08-01 round-18 review).
-    return bool(detail) and detail.split()[-1:] == [_SUITE_AUTHORED_TOKEN]
-
-
-def record_kill_switch_event(
-    db: Database,
-    *,
-    run_id: str,
-    event_type: str,
-    timestamp: datetime,
-    detail: str | None = None,
-    error: str | None = None,
-    suite_authored: bool = False,
-) -> None:
-    """Append one §18.5 row in its own transaction.
-
-    Shared by :meth:`KillSwitchManager._record` and the smoke suite, which drives
-    ``scheduleCancel`` on the raw signed client and so has to write these rows
-    itself. Only the WRITER is shared, deliberately not the state machine: the
-    suite needs arm→refresh→clear→clear, a shape ``arm()``/``refresh()`` forbid,
-    and installs ``max(config, 120s)`` of cover rather than the configured value.
-
-    ``suite_authored`` stamps the marker here, so EVERY row a caller writes is
-    marked by the fact of who the caller is — not by remembering at each call
-    site, which is how three of the suite's six writers went unmarked.
-
-    Fail-loud (an unguarded transaction): the row is the only durable evidence the
-    acceptance measure has, and a caller that must not raise says so at its own
-    call site rather than making silence the default.
-    """
-    with db.transaction() as conn:
-        repo.insert_kill_switch_event(
-            conn,
-            run_id=run_id,
-            event_type=event_type,
-            detail=_stamp_suite_authored(detail) if suite_authored else detail,
-            error_message=error,
-            timestamp=timestamp,
+    def detail(self) -> str:
+        """The completed event's §18.5 detail: what was cancelled, skipped, kept and failed."""
+        return json.dumps(
+            {
+                "canceled": self.canceled,
+                "skipped_non_bot": self.skipped_non_bot,
+                "kept_protective": self.kept_protective,
+                "failures": self.failures,
+            }
         )
 
 
@@ -851,7 +529,7 @@ class KillSwitchManager:
         always False and ``refresh_due`` behaves exactly as before.
 
         The backoff is the failed attempt's OWN duration (capped at
-        ``_FAILURE_BACKOFF_FRACTION`` of an interval, which
+        ``FAILURE_BACKOFF_FRACTION`` of an interval, which
         :func:`kill_switch_timing_violation` budgets for), not a fixed delay,
         because the thing being rationed is the
         thread — not the exchange. The pathology is an attempt that burns a whole
@@ -974,7 +652,7 @@ class KillSwitchManager:
             self._retry_not_before = failed_at + timedelta(
                 seconds=min(
                     spent,
-                    self._config.refresh_interval_seconds * _FAILURE_BACKOFF_FRACTION,
+                    self._config.refresh_interval_seconds * FAILURE_BACKOFF_FRACTION,
                 )
             )
             # Log BEFORE the durable record: if the event write itself dies
@@ -1141,12 +819,7 @@ class KillSwitchManager:
         return True
 
     def _cross_check_local_orders(
-        self,
-        handled_cloids: set[str],
-        *,
-        enumeration_failed: bool,
-        keep_protective: bool = False,
-        kept_protective: list[str] | None = None,
+        self, ledger: _SweepLedger, *, keep_protective: bool
     ) -> list[str]:
         """Local orders the sweep did not account for — each one blocks the disarm.
 
@@ -1166,7 +839,7 @@ class KillSwitchManager:
 
         ``keep_protective`` (decided 2026-07-22): a kept-role (SL/TP) row that
         ``orderStatus`` POSITIVELY confirms still live is counted kept — appended
-        to ``kept_protective``, not to the returned unaccounted list — so a stale
+        to the ledger's ``kept_protective``, not to the returned unaccounted list — so a stale
         ``open_orders()`` read (likeliest right after a pre-shutdown modify)
         cannot block the rule-6 disarm and let the wallet-wide scheduleCancel
         later sweep exactly the orders the keep exists to protect. Only the
@@ -1175,18 +848,19 @@ class KillSwitchManager:
         the disarm — the fail-safe posture is unchanged where there is no
         evidence.
 
-        ``enumeration_failed`` suppresses the exchange round-trips, and that is a
-        LATENCY guard, not a policy one. When ``open_orders()`` has just failed
-        the endpoint is almost certainly unreachable, so every ``orderStatus``
-        here is doomed for the same reason — and each one can burn the full
-        network timeout, sequentially, inside a signal handler. A handful of open
-        orders against a dead endpoint would push shutdown past systemd's
-        TimeoutStopSec and get the process SIGKILLed mid-sweep, destroying the
-        very teardown these diagnostics document. The outcome is unchanged either
-        way (a sweep_error already keeps the trigger armed), so the orders are
-        still NAMED in the §18.5 detail — just not re-confirmed over a network
-        that is not answering.
+        A failed enumeration (``ledger.sweep_error``) suppresses the exchange
+        round-trips, and that is a LATENCY guard, not a policy one. When
+        ``open_orders()`` has just failed the endpoint is almost certainly
+        unreachable, so every ``orderStatus`` here is doomed for the same reason —
+        and each one can burn the full network timeout, sequentially, inside a
+        signal handler. A handful of open orders against a dead endpoint would
+        push shutdown past systemd's TimeoutStopSec and get the process SIGKILLed
+        mid-sweep, destroying the very teardown these diagnostics document. The
+        outcome is unchanged either way (a sweep_error already keeps the trigger
+        armed), so the orders are still NAMED in the §18.5 detail — just not
+        re-confirmed over a network that is not answering.
         """
+        enumeration_failed = ledger.sweep_error is not None
         unaccounted: list[str] = []
         try:
             rows = repo.iter_open_live_orders(self._db.conn)
@@ -1196,7 +870,7 @@ class KillSwitchManager:
             return [f"?: local live-order cross-check failed: {exc}"]
         for row in rows:
             cloid = row["cloid_hex"]
-            if cloid in handled_cloids:
+            if cloid in ledger.handled_cloids:
                 continue  # the sweep already cancelled it, or already failed it
             order_id = row["order_id"]
             if enumeration_failed:
@@ -1225,9 +899,8 @@ class KillSwitchManager:
                 if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:
                     # Confirmed live + protective role: this IS a keep, found
                     # via the local record instead of the (stale) enumeration.
-                    handled_cloids.add(cloid)
-                    if kept_protective is not None:
-                        kept_protective.append(order_id)
+                    ledger.handled_cloids.add(cloid)
+                    ledger.kept_protective.append(order_id)
                     logger.warning(
                         "kill switch shutdown: local protective order %s (cloid %s) "
                         "confirmed live but absent from open_orders — kept (reduce-only), "
@@ -1327,131 +1000,131 @@ class KillSwitchManager:
         self._gate.kill_switch_active = False
         logger.info("kill switch shutdown: sweeping bot-owned open orders")
         self._record("shutdown_cancel_orders_started")
-        canceled: list[str] = []
-        skipped_non_bot: list[str] = []
-        kept_protective: list[str] = []
-        failures: list[str] = []
-        open_orders: list = []
-        sweep_error: str | None = None
-        # Every bot cloid this sweep took responsibility for — cancelled OR
-        # failed. The cross-check below skips these and asks the exchange about
-        # whatever local live orders remain.
-        handled_cloids: set[str] = set()
-        try:
-            raw_orders = self._client.open_orders()
-            if isinstance(raw_orders, list):
-                open_orders = raw_orders
-            else:
-                sweep_error = f"open_orders returned {type(raw_orders).__name__}, expected a list"
-        except Exception as exc:
-            sweep_error = f"open_orders failed: {exc}"
-        if sweep_error is not None:
-            # Can't enumerate: the scheduled cancel deadline is the backstop.
-            # Same ordering rule as refresh(): log before the durable event
-            # write so a failing write cannot erase the root cause.
-            logger.warning("kill switch shutdown cannot enumerate open orders: %s", sweep_error)
-        for order in open_orders:
-            if not isinstance(order, dict):
-                # Unknown shape means unknown ownership: this might be a bot
-                # order the sweep cannot cancel, so it is a FAILURE (keeps the
-                # wallet-wide backstop armed), not a skip — and it must not
-                # abort the sweep for the well-formed entries that follow.
-                logger.warning("kill switch shutdown: malformed open_orders entry: %r", order)
-                failures.append(f"?: malformed open_orders entry ({type(order).__name__})")
-                continue
-            oid = str(order.get("oid", "?"))
-            coin = order.get("coin")
-            cloid = order.get("cloid")
-            try:
-                # The ownership lookup sits INSIDE the per-order guard: a
-                # repo-layer error here (e.g. lock contention) is the same
-                # must-not-stop-the-sweep class as a failed cancel.
-                if not isinstance(cloid, str):
-                    # §19.3: no cloid = non-bot-owned; §25 — never manage it.
-                    skipped_non_bot.append(oid)
-                    continue
-                row = repo.get_cloid_by_hex(self._db.conn, cloid)
-                if row is None:
-                    # §19.3: unknown cloid = non-bot-owned; §25 — never
-                    # manage it. PR 4's reconciliation escalates to manual
-                    # safe mode.
-                    skipped_non_bot.append(oid)
-                    continue
-                if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:
-                    # Deliberately left standing (see the docstring): accounted
-                    # for, so the cross-check below must not read it as
-                    # unaccounted and the rule-6 disarm must not be blocked.
-                    handled_cloids.add(cloid)
-                    kept_protective.append(oid)
-                    continue
-                if coin is None:
-                    # Bot-owned but the payload carries no coin to cancel
-                    # with: "ours but uncancelable" is a FAILURE, not "not
-                    # ours" — the sweep is not clean and the wallet-wide
-                    # backstop must stay armed for this order.
-                    handled_cloids.add(cloid)
-                    failures.append(f"{oid}: bot-owned order missing 'coin' in open_orders")
-                    continue
-                # Ours: from here the sweep owns this cloid's outcome, cancelled
-                # or failed. Recorded BEFORE the attempt, so a raise cannot leave
-                # the cross-check double-counting it as unaccounted-for.
-                handled_cloids.add(cloid)
-                self._cancel_with_evidence(
-                    coin=coin, cloid_hex=cloid, cloid_logical=row["cloid_logical"]
-                )
-            except Exception as exc:
-                # ANY per-order failure — exchange, gate, or persistence-layer
-                # (ValueError/sqlite3.*) — must not stop the sweep: the
-                # remaining orders still get their cancel attempt, and the
-                # completed event must always be written. Log at capture, same
-                # ordering rule as refresh().
-                logger.warning("kill switch shutdown cancel failed for %s: %s", oid, exc)
-                failures.append(f"{oid}: {type(exc).__name__}: {exc}")
-                continue
-            canceled.append(oid)
+        ledger = _SweepLedger()
+        for order in self._enumerate_open_orders(ledger):
+            self._sweep_order(order, ledger, keep_protective=keep_protective)
         # The exchange's open-orders view has had its say; now the local record
         # gets its say, and an order it still calls live that the sweep never
         # touched blocks the disarm. Runs even when the enumeration FAILED — a
         # sweep_error already keeps the trigger armed, but the operator still
         # wants these orders named in the §18.5 detail.
-        unaccounted = self._cross_check_local_orders(
-            handled_cloids,
-            enumeration_failed=sweep_error is not None,
-            keep_protective=keep_protective,
-            kept_protective=kept_protective,
-        )
-        failures.extend(unaccounted)
+        unaccounted = self._cross_check_local_orders(ledger, keep_protective=keep_protective)
+        ledger.failures.extend(unaccounted)
         # The one line that answers "is real money still exposed?" without
         # opening SQLite: what the sweep cancelled, what it could not, and what
         # it deliberately left alone.
         logger.info(
             "kill switch shutdown sweep: %d canceled, %d failed (%d of them local orders "
             "the exchange never listed), %d skipped (non-bot), %d kept (protective)",
-            len(canceled),
-            len(failures),
+            len(ledger.canceled),
+            len(ledger.failures),
             len(unaccounted),
-            len(skipped_non_bot),
-            len(kept_protective),
+            len(ledger.skipped_non_bot),
+            len(ledger.kept_protective),
         )
         self._record(
-            "shutdown_cancel_orders_completed",
-            detail=json.dumps(
-                {
-                    "canceled": canceled,
-                    "skipped_non_bot": skipped_non_bot,
-                    "kept_protective": kept_protective,
-                    "failures": failures,
-                }
-            ),
-            error=sweep_error,
+            "shutdown_cancel_orders_completed", detail=ledger.detail(), error=ledger.sweep_error
         )
+        self._settle_scheduled_cancel(sweep_clean=ledger.clean)
+        # Marked complete LAST — every durable write above (the sweep outcome AND
+        # the disarm verdict) is now on disk. Latching before the disarm block
+        # would let one failed audit write lose the kill_switch_disarmed event
+        # forever: _record is fail-loud, the exception would unwind shutdown(),
+        # and the signal-handler/finally retry this flag exists to serve would
+        # early-return over the very write that failed. Same rule as
+        # _detect_expired_deadline's report mark: the flag that suppresses a
+        # retry is set only once the thing it suppresses is durable.
+        self._shutdown_completed = True
+
+    def _enumerate_open_orders(self, ledger: _SweepLedger) -> list[object]:
+        """The exchange's ``open_orders()`` as a list — or ``[]``, with the reason stamped on the ledger."""
+        try:
+            raw_orders = self._client.open_orders()
+            if isinstance(raw_orders, list):
+                return raw_orders
+            ledger.sweep_error = f"open_orders returned {type(raw_orders).__name__}, expected a list"
+        except Exception as exc:
+            ledger.sweep_error = f"open_orders failed: {exc}"
+        # Can't enumerate: the scheduled cancel deadline is the backstop (the
+        # error blocks the disarm and travels in the completed event). Same
+        # ordering rule as refresh(): log before the durable event write so a
+        # failing write cannot erase the root cause.
+        logger.warning("kill switch shutdown cannot enumerate open orders: %s", ledger.sweep_error)
+        return []
+
+    def _sweep_order(self, order: object, ledger: _SweepLedger, *, keep_protective: bool) -> None:
+        """One ``open_orders()`` entry: cancel it, keep it, skip it, or count it failed.
+
+        Every outcome lands in ``ledger``; see :meth:`shutdown` for the rules.
+        """
+        if not isinstance(order, dict):
+            # Unknown shape means unknown ownership: this might be a bot
+            # order the sweep cannot cancel, so it is a FAILURE (keeps the
+            # wallet-wide backstop armed), not a skip — and it must not
+            # abort the sweep for the well-formed entries that follow.
+            logger.warning("kill switch shutdown: malformed open_orders entry: %r", order)
+            ledger.failures.append(f"?: malformed open_orders entry ({type(order).__name__})")
+            return
+        oid = str(order.get("oid", "?"))
+        coin = order.get("coin")
+        cloid = order.get("cloid")
+        try:
+            # The ownership lookup sits INSIDE the per-order guard: a
+            # repo-layer error here (e.g. lock contention) is the same
+            # must-not-stop-the-sweep class as a failed cancel.
+            if not isinstance(cloid, str):
+                # §19.3: no cloid = non-bot-owned; §25 — never manage it.
+                ledger.skipped_non_bot.append(oid)
+                return
+            row = repo.get_cloid_by_hex(self._db.conn, cloid)
+            if row is None:
+                # §19.3: unknown cloid = non-bot-owned; §25 — never
+                # manage it. PR 4's reconciliation escalates to manual
+                # safe mode.
+                ledger.skipped_non_bot.append(oid)
+                return
+            if keep_protective and row["order_role"] in _KEEP_PROTECTIVE_ROLES:
+                # Deliberately left standing (see shutdown's docstring):
+                # accounted for, so the cross-check must not read it as
+                # unaccounted and the rule-6 disarm must not be blocked.
+                ledger.handled_cloids.add(cloid)
+                ledger.kept_protective.append(oid)
+                return
+            if coin is None:
+                # Bot-owned but the payload carries no coin to cancel
+                # with: "ours but uncancelable" is a FAILURE, not "not
+                # ours" — the sweep is not clean and the wallet-wide
+                # backstop must stay armed for this order.
+                ledger.handled_cloids.add(cloid)
+                ledger.failures.append(f"{oid}: bot-owned order missing 'coin' in open_orders")
+                return
+            # Ours: from here the sweep owns this cloid's outcome, cancelled
+            # or failed. Recorded BEFORE the attempt, so a raise cannot leave
+            # the cross-check double-counting it as unaccounted-for.
+            ledger.handled_cloids.add(cloid)
+            self._cancel_with_evidence(
+                coin=coin, cloid_hex=cloid, cloid_logical=row["cloid_logical"]
+            )
+        except Exception as exc:
+            # ANY per-order failure — exchange, gate, or persistence-layer
+            # (ValueError/sqlite3.*) — must not stop the sweep: the
+            # remaining orders still get their cancel attempt, and the
+            # completed event must always be written. Log at capture, same
+            # ordering rule as refresh().
+            logger.warning("kill switch shutdown cancel failed for %s: %s", oid, exc)
+            ledger.failures.append(f"{oid}: {type(exc).__name__}: {exc}")
+            return
+        ledger.canceled.append(oid)
+
+    def _settle_scheduled_cancel(self, *, sweep_clean: bool) -> None:
+        """§18.2 rule 6: a clean sweep disarms the wallet-wide trigger; anything else leaves it."""
         # A clean sweep earns the disarm — but so does "we already cleared it on a
         # previous attempt whose audit write died". The wire fact outranks a fresh
         # sweep: without it, a retry whose open_orders() happens to fail would skip
         # the disarm block entirely and log "left ARMED, the trigger will fire" for
         # a trigger the exchange has already forgotten.
         already_cleared = self._scheduled_cancel_cleared
-        disarm_due = already_cleared or (sweep_error is None and not failures)
+        disarm_due = already_cleared or sweep_clean
         if self._armed and disarm_due:
             # Clean sweep: no bot order is left for the wallet-wide trigger to
             # protect, and letting it fire would cancel the skipped non-bot
@@ -1475,8 +1148,8 @@ class KillSwitchManager:
                 self._record("kill_switch_disarm_failed", error=str(exc))
             else:
                 # Say WHICH attempt earned the disarm. On a retry that rides the
-                # wire latch, this very shutdown may have recorded a failed
-                # enumeration a few lines above — claiming "clean shutdown sweep"
+                # wire latch, the completed row ``shutdown()`` wrote just before
+                # calling this may carry a failed enumeration — claiming "clean shutdown sweep"
                 # there would put two flatly contradictory rows next to each other
                 # in the §18.5 trail that PR 4 reconciles against.
                 detail = (
@@ -1500,12 +1173,3 @@ class KillSwitchManager:
                 "kill switch left ARMED after shutdown (sweep not clean): the "
                 "wallet-wide scheduled cancel will fire at its deadline"
             )
-        # Marked complete LAST — every durable write above (the sweep outcome AND
-        # the disarm verdict) is now on disk. Latching before the disarm block
-        # would let one failed audit write lose the kill_switch_disarmed event
-        # forever: _record is fail-loud, the exception would unwind shutdown(),
-        # and the signal-handler/finally retry this flag exists to serve would
-        # early-return over the very write that failed. Same rule as
-        # _detect_expired_deadline's report mark: the flag that suppresses a
-        # retry is set only once the thing it suppresses is durable.
-        self._shutdown_completed = True

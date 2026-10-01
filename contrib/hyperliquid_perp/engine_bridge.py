@@ -218,7 +218,7 @@ def _build_context(
     exchange clock, candles, funding); a sixth, the daily candle series, only
     when ``market_data.macro_trend_daily_lookback`` is on.
     Left unrefreshed, this chain would set
-    ``kill_switch._MAX_UNREFRESHED_REST_CALLS`` to its own length — four when
+    ``kill_switch_timing.MAX_UNREFRESHED_REST_CALLS`` to its own length — four when
     that constant was last argued, five since the exchange-clock read joined
     (issue #51) — which made the
     operator advisory demand a timeout under 7.5s — and a live decision cycle has
@@ -312,7 +312,7 @@ def _build_context(
     # call, no extra latency on the single-threaded live tick. With the
     # feature on it is one more read with a refresh on either side, so the
     # longest UNREFRESHED run is unchanged — and that, not the chain's total
-    # length, is what ``_MAX_UNREFRESHED_REST_CALLS`` is reasoned about.
+    # length, is what ``MAX_UNREFRESHED_REST_CALLS`` is reasoned about.
     # Pinned by driving this function in tests/live/test_kill_switch.py, with
     # the switch ON as well as off, rather than claimed here.
     #

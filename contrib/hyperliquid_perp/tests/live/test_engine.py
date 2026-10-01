@@ -283,7 +283,7 @@ def test_the_market_snapshot_read_refreshes_the_switch_across_itself(tmp_path):
 
     The market snapshot rides the SAME ``network_timeout_s`` as everything else,
     so unrefreshed it chains into the submit ladder and the real unrefreshed run
-    becomes their sum rather than ``_MAX_UNREFRESHED_REST_CALLS``.
+    becomes their sum rather than ``MAX_UNREFRESHED_REST_CALLS``.
 
     DRIVEN, not inspected. The check this replaces searched ``tick``'s source for
     ``refresh_across_blocking_work`` between two statements, and stayed green with

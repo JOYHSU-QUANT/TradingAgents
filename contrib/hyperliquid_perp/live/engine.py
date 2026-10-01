@@ -83,7 +83,7 @@ from .config import (
     ExecutionStyle,
     LiveConfig,
 )
-from .kill_switch import refresh_across_blocking_work
+from .kill_switch_timing import refresh_across_blocking_work
 from .loss_guards import LossGuards
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import (
@@ -721,7 +721,7 @@ class LiveExecutionEngine:
             # ``timeout_seconds`` only judges the answer's FRESHNESS once it arrives;
             # it does not bound the socket). Without this refresh it chains straight
             # into the submit ladder below, making the longest unrefreshed run 4 rather
-            # than the 3 ``_MAX_UNREFRESHED_REST_CALLS`` records — and at the timeout
+            # than the 3 ``MAX_UNREFRESHED_REST_CALLS`` records — and at the timeout
             # the RUNBOOK itself recommends that is 32s against a 30s gap, with the
             # advisory silent because it budgets 3. Placed BEFORE the is_valid check so
             # the fail-closed early return is covered too (2026-08-01 exit check).

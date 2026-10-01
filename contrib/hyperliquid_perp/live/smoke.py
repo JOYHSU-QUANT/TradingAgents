@@ -55,7 +55,7 @@ from ..persistence.cloid import cloid_hex, cloid_logical
 from ..persistence.db import Database
 from ..runtime.run_lock import RunLockError
 from .config import AGGRESSIVE_FILL_BAND_PCT
-from .kill_switch import deadline_detail, record_kill_switch_event
+from .kill_switch_events import deadline_detail, record_kill_switch_event
 from .orders import ORDER_TYPE_FOR_TIF, local_status_for_exchange_status, parse_order_status
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
@@ -166,8 +166,8 @@ SMOKE_MIN_KILL_SWITCH_DEADLINE = timedelta(seconds=120)
 #
 # A FLOOR for a real testnet suite, not the exact figure: the real
 # KillSwitchManager the pre-flight and tests 15-17 build refreshes from its own
-# ``tick()`` as wall clock elapses (see the _SUITE_AUTHORED_TOKEN note in
-# kill_switch.py), which an offline clock never produces — which is also why no
+# ``tick()`` as wall clock elapses (see the SUITE_AUTHORED_TOKEN note in
+# kill_switch_events.py), which an offline clock never produces — which is also why no
 # test can measure that half. That only strengthens what §20.3 uses the number
 # for — "even the runner alone clears the 100-sample floor" — so a floor is the
 # honest thing to quote.
@@ -230,7 +230,7 @@ _ALO_ORDER_TYPE = ORDER_TYPE_FOR_TIF[_ALO_TIF]
 
 # The headline of the probe-residual report. RUNBOOK 20.3 quotes it so an
 # operator can grep for it, and tests/cli pins the two together -- the same
-# tie _SUITE_AUTHORED_TOKEN has, for the same reason.
+# tie SUITE_AUTHORED_TOKEN has, for the same reason.
 _PROBE_RESIDUAL_HEADLINE = "probe(s) may still REST on the exchange"
 
 # The tests whose probe is a resting reduce-only trigger. Hyperliquid's

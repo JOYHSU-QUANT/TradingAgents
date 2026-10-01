@@ -18,6 +18,7 @@ from contrib.hyperliquid_perp.live import (
     fill_backfill as fill_backfill_mod,
     fills as fills_mod,
     kill_switch as ks_mod,
+    kill_switch_timing as kst_mod,
     reconcile as reconcile_mod,
     safe_mode as safe_mode_mod,
     startup as startup_mod,
@@ -105,7 +106,7 @@ def test_the_pair_shares_one_fetch_seam_one_refresh_hook_and_the_sites_inputs(
     # through the helper the recorder in ``tests/conftest.py`` patches.
     seen: list[tuple[object, str]] = []
     monkeypatch.setattr(
-        ks_mod, "refresh_across_blocking_work", lambda switch, *, what: seen.append((switch, what))
+        kst_mod, "refresh_across_blocking_work", lambda switch, *, what: seen.append((switch, what))
     )
     assert backfiller._refresh_kill_switch is reconciler._refresh_kill_switch
     backfiller._refresh_kill_switch()

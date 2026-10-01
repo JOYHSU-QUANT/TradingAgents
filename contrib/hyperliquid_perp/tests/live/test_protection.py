@@ -426,10 +426,10 @@ def test_the_repair_clamp_tracks_the_budget_it_was_derived_from():
     (2026-08-01 round-13 exit check).
     """
     from contrib.hyperliquid_perp.cli.live_shared import _RECOVERY_MAX_TICK_GAP_SECONDS
-    from contrib.hyperliquid_perp.live.kill_switch import _MAX_UNREFRESHED_REST_CALLS
+    from contrib.hyperliquid_perp.live.kill_switch_timing import MAX_UNREFRESHED_REST_CALLS
     from contrib.hyperliquid_perp.live.protection import _MAX_REPAIR_SLEEP_S
 
-    assert _MAX_REPAIR_SLEEP_S == _RECOVERY_MAX_TICK_GAP_SECONDS / _MAX_UNREFRESHED_REST_CALLS
+    assert _MAX_REPAIR_SLEEP_S == _RECOVERY_MAX_TICK_GAP_SECONDS / MAX_UNREFRESHED_REST_CALLS
 
 
 def test_the_repair_backoff_is_capped_to_leave_room_for_two_timeouts(env):

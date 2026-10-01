@@ -295,12 +295,13 @@ def record_reconciliation_sweep_wiring(monkeypatch):
     from contrib.hyperliquid_perp.live import (
         fill_backfill as fb_mod,
         kill_switch as ks_mod,
+        kill_switch_timing as kst_mod,
         reconcile as rec_mod,
     )
 
     record = SimpleNamespace(switches=[], refreshes=[], backfillers=[], reconcilers=[])
     real_switch = ks_mod.KillSwitchManager
-    real_refresh = ks_mod.refresh_across_blocking_work
+    real_refresh = kst_mod.refresh_across_blocking_work
 
     class _RecordingSwitch(real_switch):  # type: ignore[misc, valid-type]
         def __init__(self, **kwargs):
@@ -330,7 +331,7 @@ def record_reconciliation_sweep_wiring(monkeypatch):
     # cli.py imports all of these inside the command functions, so the seam is
     # the SOURCE module — the closures the CLI builds pick the patched ones up.
     monkeypatch.setattr(ks_mod, "KillSwitchManager", _RecordingSwitch)
-    monkeypatch.setattr(ks_mod, "refresh_across_blocking_work", _recording_refresh)
+    monkeypatch.setattr(kst_mod, "refresh_across_blocking_work", _recording_refresh)
     record_constructor_kwargs(monkeypatch, fb_mod, "FillBackfiller", record.backfillers)
     record_constructor_kwargs(monkeypatch, rec_mod, "LiveReconciler", record.reconcilers)
     return record

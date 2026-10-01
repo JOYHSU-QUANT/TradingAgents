@@ -66,7 +66,8 @@ from ..persistence.models import PositionState, Side
 from ..ports import Clock
 from ..runtime.clock import WallClock
 from .config import AGGRESSIVE_FILL_BAND_PCT, LiveProtectionConfig
-from .kill_switch import KillSwitchManager, refresh_across_blocking_work
+from .kill_switch import KillSwitchManager
+from .kill_switch_timing import refresh_across_blocking_work
 from .order_gate import LiveOrderGateRejected, RealOrderGate
 from .orders import is_known_exchange_status, local_status_for_exchange_status
 from .venue_identity import ProbeSite, VenueIdentityMonitor, describe_order_status_failure
@@ -134,7 +135,7 @@ _SL_FIRE_BAND_FLOOR_PCT = AGGRESSIVE_FILL_BAND_PCT
 # timeout; that sentence predates the refresh 5d84d3d put BETWEEN the two, so
 # the real overshoot is 38-vs-30, not 46-vs-30 — this constant is therefore
 # conservative, not tight.) Three slots is the budget
-# ``network_timeout_warning`` already enforces (``_MAX_UNREFRESHED_REST_CALLS``
+# ``network_timeout_warning`` already enforces (``MAX_UNREFRESHED_REST_CALLS``
 # = 3, which is why it demands ``timeout * 3 < max_tick_gap``): the two timeouts
 # take two slots, this sleep takes the third (2026-08-01 round-13 concept scan).
 _MAX_REPAIR_SLEEP_S = 10.0

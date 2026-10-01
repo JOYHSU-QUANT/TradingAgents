@@ -39,7 +39,7 @@ def _timing_preflight(live_cfg, client) -> int:
     point of a preflight; ``kill_switch_timing_violation``'s docstring owns the
     invariant itself.
     """
-    from ..live.kill_switch import (
+    from ..live.kill_switch_timing import (
         kill_switch_timing_violation,
         network_timeout_warning,
         sl_repair_delay_warning,

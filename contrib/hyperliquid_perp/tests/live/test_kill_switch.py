@@ -178,7 +178,7 @@ def test_the_timing_invariant_counts_the_failed_attempt_and_the_second_tick_wait
     is 106s. Asserts on the NUMBERS, not the wording, so a later edit that keeps
     the message and drops a term still fails here.
     """
-    from contrib.hyperliquid_perp.live.kill_switch import kill_switch_timing_violation
+    from contrib.hyperliquid_perp.live.kill_switch_timing import kill_switch_timing_violation
 
     cfg = KillSwitchConfig(schedule_cancel_seconds=80, refresh_interval_seconds=30)
     violation = kill_switch_timing_violation(cfg, 30.0, 8.0)
@@ -251,7 +251,7 @@ def test_a_suite_managers_own_refresh_rows_are_marked(env):
     contributed ``armed`` rows and the refresh path was covered by proxy
     (2026-08-01 round-17 review). Here the clock is advanced past the interval.
     """
-    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+    from contrib.hyperliquid_perp.live.kill_switch_events import is_suite_authored
 
     db, client, gate, clock, _unused = env
     manager = KillSwitchManager(
@@ -287,7 +287,7 @@ def test_the_daemon_manager_is_not_marked(env):
     marking direction on every writer and never the not-marking one
     (2026-08-01 round-17 mutation probe).
     """
-    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+    from contrib.hyperliquid_perp.live.kill_switch_events import is_suite_authored
 
     db, client, gate, clock, manager = env
     manager.arm()
@@ -310,26 +310,26 @@ def test_a_daemon_row_that_merely_quotes_the_marker_is_still_the_daemons():
     (2026-08-01 round-18 review). No writer can turn that into a wrong verdict
     today (see the report-level test), so this is where the guard is pinned.
     """
-    from contrib.hyperliquid_perp.live.kill_switch import (
-        _SUITE_AUTHORED_TOKEN,
-        _stamp_suite_authored,
+    from contrib.hyperliquid_perp.live.kill_switch_events import (
+        SUITE_AUTHORED_TOKEN,
         is_suite_authored,
+        stamp_suite_authored,
     )
 
-    quoted = json.dumps({"failures": [f"cancel rejected near {_SUITE_AUTHORED_TOKEN}"]})
+    quoted = json.dumps({"failures": [f"cancel rejected near {SUITE_AUTHORED_TOKEN}"]})
     assert not is_suite_authored(quoted)
     # Prefix and interior positions are not shapes the writer can produce either.
-    assert not is_suite_authored(f"{_SUITE_AUTHORED_TOKEN} deadline=120s")
+    assert not is_suite_authored(f"{SUITE_AUTHORED_TOKEN} deadline=120s")
     # A FIELD, not a suffix. Every probe above also passes under ``endswith``,
     # under ``strip().endswith`` and under ``rsplit(" ", 1)``, so without this
     # one the guard can be weakened back to a suffix test — which is a
     # substring-class predicate again, one delimiter wide
     # (2026-08-01 round-19 mutation probe).
-    assert not is_suite_authored(f"oid=1,{_SUITE_AUTHORED_TOKEN}")
+    assert not is_suite_authored(f"oid=1,{SUITE_AUTHORED_TOKEN}")
     # The two shapes it DOES produce still read as the suite's, or the marker
     # stops working altogether.
-    assert is_suite_authored(_stamp_suite_authored(None))
-    assert is_suite_authored(_stamp_suite_authored("deadline=120s"))
+    assert is_suite_authored(stamp_suite_authored(None))
+    assert is_suite_authored(stamp_suite_authored("deadline=120s"))
 
 
 def test_a_nonpositive_tick_gap_is_a_wiring_error():
@@ -347,7 +347,7 @@ def test_a_tick_gap_that_is_not_a_span_is_refused_by_name(bad):
     # argument shares (issue #224) — INSIDE ``kill_switch_timing_violation``,
     # so the CLI preflight reads the same refusal as a message and the
     # constructor raises it, one owner for both halves.
-    from contrib.hyperliquid_perp.live.kill_switch import kill_switch_timing_violation
+    from contrib.hyperliquid_perp.live.kill_switch_timing import kill_switch_timing_violation
 
     with pytest.raises(ValueError, match="^max_tick_gap_seconds must be"):
         _manager_with(KillSwitchConfig(), max_tick_gap_seconds=bad)
@@ -855,8 +855,8 @@ def test_the_timing_invariant_budgets_for_the_failure_backoff():
     prevent (2026-08-01 exit check).
     """
     from contrib.hyperliquid_perp.live.config import KillSwitchConfig
-    from contrib.hyperliquid_perp.live.kill_switch import (
-        _FAILURE_BACKOFF_FRACTION,
+    from contrib.hyperliquid_perp.live.kill_switch_timing import (
+        FAILURE_BACKOFF_FRACTION,
         kill_switch_timing_violation,
     )
 
@@ -871,10 +871,10 @@ def test_the_timing_invariant_budgets_for_the_failure_backoff():
 
     # And the budgeted amount is the one the manager can actually impose — pinned
     # by test_a_slow_failure_is_capped_at_half_an_interval, which drives the cap
-    # rather than restating it. `assert _FAILURE_BACKOFF_FRACTION == 0.5` used to
+    # rather than restating it. `assert FAILURE_BACKOFF_FRACTION == 0.5` used to
     # sit here: a literal against itself, which let the cap be multiplied by 1000
     # with the whole suite green (mutation-verified, 2026-08-01 round-13 review).
-    assert _FAILURE_BACKOFF_FRACTION < 1.0
+    assert FAILURE_BACKOFF_FRACTION < 1.0
 
 
 def test_a_slow_failure_is_capped_at_half_an_interval(env):
@@ -886,7 +886,7 @@ def test_a_slow_failure_is_capped_at_half_an_interval(env):
     budgets against, so an uncapped backoff turns that constructor invariant into
     a false promise and the switch can fire during normal operation.
     """
-    from contrib.hyperliquid_perp.live.kill_switch import _FAILURE_BACKOFF_FRACTION
+    from contrib.hyperliquid_perp.live.kill_switch_timing import FAILURE_BACKOFF_FRACTION
 
     db, client, gate, clock, manager = env
     manager.arm()
@@ -898,7 +898,7 @@ def test_a_slow_failure_is_capped_at_half_an_interval(env):
     assert manager.refresh_due() is True
     manager.refresh()
 
-    cap = 30 * _FAILURE_BACKOFF_FRACTION  # 15s
+    cap = 30 * FAILURE_BACKOFF_FRACTION  # 15s
     assert manager.refresh_due() is False
     clock.advance(cap - 1)
     assert manager.refresh_due() is False, "the pause ended before the cap"
@@ -1091,6 +1091,29 @@ def test_shutdown_survives_per_order_cancel_failures(env):
     ok = repo.iter_live_order_attempts(db.conn, "r", cloid_hex=_HEX2)
     assert [a["status"] for a in ok] == ["acknowledged"]
     # A failed cancel keeps the wallet-wide backstop armed (§18.2 rule 6).
+    assert client.clear_calls == 0
+    assert manager.armed
+
+
+def test_a_failed_cancel_is_the_sweeps_failure_not_the_cross_checks_too(env):
+    # The sweep records a bot cloid as handled BEFORE its cancel attempt, so a
+    # cancel that raises is counted ONCE — as the sweep's own failure — and the
+    # local cross-check neither asks the exchange about that order again nor
+    # counts it a second time as one "the exchange never listed". Every other
+    # failed-cancel test here registers the cloid without a live orders row, so
+    # the cross-check had nothing to re-count and dropping the pre-attempt
+    # registration survived them all (refactor v2 PR 15 mutation probe).
+    db, client, gate, clock, manager = env
+    manager.arm()
+    _live_order(db, order_id="o1", cloid_hex=_HEX)
+    client.open_orders_result = [{"oid": 1, "coin": "BTC", "cloid": _HEX}]
+    client.cancel_results[_HEX] = ExchangeRequestError("boom")
+
+    manager.shutdown()
+
+    assert client.order_status_calls == []
+    failures = _completed_failures(db)
+    assert len(failures) == 1 and "boom" in failures[0]
     assert client.clear_calls == 0
     assert manager.armed
 
@@ -1699,7 +1722,7 @@ def test_the_timing_invariant_is_checkable_without_side_effects():
     # run row / run lock exist (decided 2026-07-17), and sharing the one
     # definition is what keeps the number the preflight proves identical to
     # the number the constructor enforces.
-    from contrib.hyperliquid_perp.live.kill_switch import kill_switch_timing_violation
+    from contrib.hyperliquid_perp.live.kill_switch_timing import kill_switch_timing_violation
 
     bad = KillSwitchConfig(schedule_cancel_seconds=60, refresh_interval_seconds=30)
     msg = kill_switch_timing_violation(bad, 30.0)
@@ -1716,18 +1739,18 @@ def test_the_network_timeout_advisory_is_checkable():
     # max_tick_gap promise. The defaults (30s timeout, 30s gap) deliberately
     # warn — the operator earns silence by configuring headroom.
     #
-    # The budget is _MAX_UNREFRESHED_REST_CALLS deep, not one call deep: the
+    # The budget is MAX_UNREFRESHED_REST_CALLS deep, not one call deep: the
     # decision cycle's market-data build makes four back-to-back REST calls with
     # no refresh between them, so the timeout has to fit the CHAIN inside the gap
     # (2026-07-31 deadline review; recounted 2026-08-01). The warning boundary is
     # gap / chain, so it moves with the constant rather than restating a number.
-    from contrib.hyperliquid_perp.live.kill_switch import (
-        _MAX_UNREFRESHED_REST_CALLS,
+    from contrib.hyperliquid_perp.live.kill_switch_timing import (
+        MAX_UNREFRESHED_REST_CALLS,
         network_timeout_warning,
     )
 
     gap = 30.0
-    per_call = gap / _MAX_UNREFRESHED_REST_CALLS
+    per_call = gap / MAX_UNREFRESHED_REST_CALLS
     assert network_timeout_warning(per_call * 0.9, gap) is None  # inside: quiet
     boundary = network_timeout_warning(per_call, gap)  # spends the whole gap: warn
     assert boundary is not None and "back-to-back" in boundary
@@ -1742,7 +1765,7 @@ def test_the_network_timeout_advisory_is_checkable():
 def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do():
     """Derive the constant from the code, never restate it.
 
-    This replaces ``assert _MAX_UNREFRESHED_REST_CALLS == 3``, which asserted a
+    This replaces ``assert MAX_UNREFRESHED_REST_CALLS == 3``, which asserted a
     literal against itself and therefore had zero power to notice the two times
     the constant drifted from reality: the unwired second page ladder (real
     maximum 20) and the unrefreshed ``engine.tick()`` → ``driver.pump()`` seam
@@ -1909,7 +1932,7 @@ def test_the_unrefreshed_rest_budget_matches_what_one_iteration_can_actually_do(
     #    2026-08-01 round-13 review), which is the whole failure it existed to
     #    catch. Nothing to assert here; the drive test owns it.
     #
-    # No `assert _MAX_UNREFRESHED_REST_CALLS == 3` here either: this test's whole
+    # No `assert MAX_UNREFRESHED_REST_CALLS == 3` here either: this test's whole
     # point is that the constant is checked against the CODE, and restating the
     # literal was the tautology it replaced. The advisory boundary test above
     # already moves with the constant.
@@ -1921,7 +1944,7 @@ def test_refreshing_across_blocking_work_never_takes_down_its_caller(caplog):
     be logged and swallowed, never raised. Dying there is strictly worse than a
     stale switch the next tick retries (2026-07-31 deadline review).
     """
-    from contrib.hyperliquid_perp.live.kill_switch import refresh_across_blocking_work
+    from contrib.hyperliquid_perp.live.kill_switch_timing import refresh_across_blocking_work
 
     class _Ticker:
         def __init__(self, boom=False):
@@ -1955,7 +1978,7 @@ def test_the_sl_repair_delay_advisory_is_checkable():
     # refreshes the kill switch, so a delay at/above the max_tick_gap promise
     # stretches the refresh gap exactly while the position has no valid stop.
     # Unlike its sister the default (5s vs 30s) stays quiet.
-    from contrib.hyperliquid_perp.live.kill_switch import sl_repair_delay_warning
+    from contrib.hyperliquid_perp.live.kill_switch_timing import sl_repair_delay_warning
 
     assert sl_repair_delay_warning(5.0, 30.0) is None  # the default: quiet
     # Budgeted at ONE SLOT (30/3 = 10), not the whole gap: the 10..30 band is

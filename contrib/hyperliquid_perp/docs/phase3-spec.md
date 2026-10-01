@@ -1757,7 +1757,7 @@ arm() 本來就會 fail loud。交易所未回時間戳時只警告不擋——�
    max_tick_gap_seconds` **或未設（unbounded）**即印 stderr 警告
    （`network_timeout_warning`，與硬檢查 `kill_switch_timing_violation`
    併排、純函式可單測）。乘以 3 是因為最長的一條無 refresh 鏈是一次下單的 3 筆
-   REST（`_MAX_UNREFRESHED_REST_CALLS`：§8.3 前置查詢→下單→重複 ack 查詢）。
+   REST（`MAX_UNREFRESHED_REST_CALLS`：§8.3 前置查詢→下單→重複 ack 查詢）。
    原本只編列 1 筆，於是 10s 逾時對 30s gap 被判為安全，實際上那條鏈剛好吃滿整個
    gap（2026-07-31 deadline review）。其餘阻塞路徑（protection 修復梯與其
    orderStatus 確認、reconcile 兩條 leg 與 per-order 迴圈、兩條分頁 ladder、

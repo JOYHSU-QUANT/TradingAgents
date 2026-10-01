@@ -643,7 +643,7 @@ def test_the_preflight_refresh_records_the_cover_it_installed(live_db):
     pre-round-14 body (wire call, no row) left the whole suite green
     (2026-08-01 round-15 mutation probe).
     """
-    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+    from contrib.hyperliquid_perp.live.kill_switch_events import is_suite_authored
     from contrib.hyperliquid_perp.live.validation_metrics import _stated_deadline_seconds
 
     signed = _FakeSigned()
@@ -682,7 +682,7 @@ def test_a_failed_preflight_refresh_is_recorded_before_it_propagates(live_db):
     # error_message while the tally reads detail — so the exclusion branch written
     # for suite failures could never fire, and the RUNBOOK's claim that it did was
     # false (2026-08-01 round-16 review).
-    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+    from contrib.hyperliquid_perp.live.kill_switch_events import is_suite_authored
 
     assert is_suite_authored(failures[0])
 
@@ -736,7 +736,7 @@ def test_test_14_records_every_transition_it_makes(live_db):
     that had been covered. The armed row also has to state its deadline in the
     form the validator parses, since that number sizes the stretch that follows.
     """
-    from contrib.hyperliquid_perp.live.kill_switch import is_suite_authored
+    from contrib.hyperliquid_perp.live.kill_switch_events import is_suite_authored
     from contrib.hyperliquid_perp.live.validation_metrics import _stated_deadline_seconds
 
     signed = _FakeSigned()
@@ -767,9 +767,9 @@ def test_test_14_records_every_transition_it_makes(live_db):
     # `...refresh)writer=live-smoke` it once tolerated. This assertion pins
     # the stricter shape on top — one plain space before the marker — the
     # form the column's hand-reader relies on (2026-08-01 round-17 probe).
-    from contrib.hyperliquid_perp.live.kill_switch import _SUITE_AUTHORED_TOKEN
+    from contrib.hyperliquid_perp.live.kill_switch_events import SUITE_AUTHORED_TOKEN
 
-    assert all(detail.endswith(f" {_SUITE_AUTHORED_TOKEN}") for _, detail in rows), rows
+    assert all(detail.endswith(f" {SUITE_AUTHORED_TOKEN}") for _, detail in rows), rows
 
 
 def test_non_arming_run_does_not_disarm(live_db):

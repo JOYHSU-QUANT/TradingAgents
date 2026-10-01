@@ -15,7 +15,11 @@ from contrib.hyperliquid_perp.live.config import (
     LiveProtectionConfig,
 )
 from contrib.hyperliquid_perp.live.order_gate import LiveOrderGateRejected
-from contrib.hyperliquid_perp.live.protection import ProtectionManager, ProtectionOutcome
+from contrib.hyperliquid_perp.live.protection import (
+    ProtectionManager,
+    ProtectionOutcome,
+    _Placement,
+)
 from contrib.hyperliquid_perp.paper.stops import StopConfig, round_to_tick
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
@@ -184,6 +188,21 @@ def _long_position(size=Decimal("0.1"), entry=Decimal(50000)) -> PositionState:
     return PositionState(coin="BTC", size=size, entry_price=entry)
 
 
+def _probe_placement(cloid_hex: str) -> _Placement:
+    """A fresh SL placement whose only variable is the cloid a recovery probe asks about."""
+    return _Placement(
+        role="stop_loss",
+        size=Decimal("0.01"),
+        side=Side.SELL,
+        trigger_price=Decimal(45000),
+        limit_price=Decimal(44900),
+        replaced=None,
+        order_id="ord-1",
+        cloid_logical="log-1",
+        cloid_hex=cloid_hex,
+    )
+
+
 def _all_fail_client():
     client = _FakeClient()
     client.place_script = ["error", "error", "error"]
@@ -247,6 +266,11 @@ def test_sl_modified_when_already_resting(env):
     assert Decimal(active["qty"]) == Decimal("0.2")
     events = [e["event_type"] for e in repo.iter_protection_order_events(db.conn, "r")]
     assert "stop_loss_modified" in events
+    # Modify-before-cancel retires the row it replaced, so active_protection_order
+    # never has two live rows to choose between.
+    replaced = repo.get_order(db.conn, "r:stop_loss:p0")
+    assert replaced["status"] == "canceled"
+    assert replaced["cancel_reason"] == "replaced_by_protection_modify"
 
 
 def test_sl_noop_when_unchanged(env):
@@ -305,6 +329,37 @@ def test_sl_side_mismatch_is_not_treated_as_a_noop(env):
 
 
 # -- SL repair / emergency close --------------------------------------------
+
+
+def test_a_resting_row_without_an_exchange_id_is_not_treated_as_a_noop(env):
+    """A row the exchange never named cannot be modified in place (§17.4 needs
+    the oid), so the no-op guard must not read it as the order we would place:
+    the ladder places afresh and retires the row.
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), order_gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    first = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    with db.transaction() as conn:
+        repo.update_order(conn, first["order_id"], exchange_order_id=None, updated_at=_NOW)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert len(client.placed) == 2 and client.modified == []
+    active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert active["order_id"] != first["order_id"]
+    assert active["exchange_order_id"] == "1002"
+    assert repo.get_order(db.conn, first["order_id"])["status"] == "canceled"
 
 
 def test_sl_repair_retries_then_succeeds(env):
@@ -750,18 +805,7 @@ def test_lost_ack_recovery_does_not_book_an_unclassifiable_word_as_live(env):
         {"status": "order", "order": {"order": {"oid": "4242"}, "status": "someFutureWord"}}
     ]
     mgr = _manager(db, client, gate, kill_switch=_FakeKillSwitch())
-    recovered = mgr._recover_placed_order(
-        role="stop_loss",
-        order_id="ord-1",
-        logical="log-1",
-        hexid="0x" + "b" * 32,
-        size=Decimal("0.01"),
-        side=Side.SELL,
-        trigger_price=Decimal(45000),
-        limit_price=Decimal(44900),
-        replaced=None,
-        now=_NOW,
-    )
+    recovered = mgr._recover_placed_order(_probe_placement("0x" + "b" * 32), _NOW)
     assert recovered is False
     # Nothing was booked: no row may claim protection off an unclassified word.
     assert repo.active_protection_order(db.conn, "r", "BTC", "stop_loss") is None
@@ -1153,7 +1197,8 @@ def test_a_rate_limited_ladder_holds_instead_of_emergency_closing(env):
 
     client.place_trigger_order = _throttle
     client.modify_trigger_order = _throttle
-    outcome = _manager(db, client, gate).sync(
+    sleeps: list[float] = []
+    outcome = _manager(db, client, gate, sleeps=sleeps).sync(
         position=_long_position(),
         liquidation_price=Decimal(40000),
         mark=Decimal(50000),
@@ -1169,6 +1214,9 @@ def test_a_rate_limited_ladder_holds_instead_of_emergency_closing(env):
     assert "rate-limited" in blocked["detail"]
     # The window still opens: nothing was placed, so the position may be naked.
     assert blocked["order_id"] is None
+    # A throttled rung backs off linearly (delay x attempt): a flat cadence mostly
+    # spends the budget re-triggering the limiter. The last rung does not sleep.
+    assert sleeps == [5.0, 10.0]
 
 
 def test_one_real_rejection_among_throttles_still_exhausts(env):
@@ -1861,19 +1909,7 @@ def test_the_two_probe_sites_share_one_identity_fault_counter(env):
     # about the SAME cloid (a §8.3 recovery of the very order the guard
     # watches).
     assert (
-        mgr._recover_placed_order(
-            role="stop_loss",
-            order_id="ord-1",
-            logical="log-1",
-            hexid=_OUR_ROW["cloid_hex"],
-            size=Decimal("0.01"),
-            side=Side.SELL,
-            trigger_price=Decimal(45000),
-            limit_price=Decimal(44900),
-            replaced=None,
-            now=_NOW,
-        )
-        is False
+        mgr._recover_placed_order(_probe_placement(_OUR_ROW["cloid_hex"]), _NOW) is False
     )
     assert mgr.identity.latched is True
     assert len(identity_latch_rows(db, run_id="r")) == 1

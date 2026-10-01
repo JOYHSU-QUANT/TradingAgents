@@ -1,7 +1,7 @@
 """The dead man's switch's timing budget, as checkable messages (phase3-spec §18.2).
 
 Kept apart from :class:`~.kill_switch.KillSwitchManager` because its readers
-are not the manager: the CLI's live preflight runs the invariant and the two
+are not only the manager: the CLI's live preflight runs the invariant and the two
 advisories BEFORE a manager exists, and the sites that block the live loop
 refresh through :func:`refresh_across_blocking_work` against anything that
 can ``tick()``. The two budget constants live with the arithmetic that has
@@ -101,7 +101,7 @@ def kill_switch_timing_violation(
     # largest terms after the interval itself, and leaving them out is what made
     # the pre-2026-08-01 check accept configs that fire the switch.
     backoff_cap = config.refresh_interval_seconds * FAILURE_BACKOFF_FRACTION
-    # The backoff is min(what the attempt cost, the cap) — see _in_failure_backoff.
+    # The backoff is min(what the attempt cost, the cap) — see KillSwitchManager._in_failure_backoff.
     # With no timeout to read, the cap is the only bound we have.
     failed_attempt_cost = 0.0 if network_timeout_s is None else float(network_timeout_s)
     backoff = backoff_cap if network_timeout_s is None else min(failed_attempt_cost, backoff_cap)

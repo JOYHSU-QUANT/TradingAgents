@@ -1148,8 +1148,8 @@ class KillSwitchManager:
                 self._record("kill_switch_disarm_failed", error=str(exc))
             else:
                 # Say WHICH attempt earned the disarm. On a retry that rides the
-                # wire latch, this very shutdown may have recorded a failed
-                # enumeration a few lines above — claiming "clean shutdown sweep"
+                # wire latch, the completed row ``shutdown()`` wrote just before
+                # calling this may carry a failed enumeration — claiming "clean shutdown sweep"
                 # there would put two flatly contradictory rows next to each other
                 # in the §18.5 trail that PR 4 reconciles against.
                 detail = (

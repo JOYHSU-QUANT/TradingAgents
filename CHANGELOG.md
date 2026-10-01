@@ -87,7 +87,8 @@ Breaking changes within the 0.x line are called out explicitly.
   `sweep_error`), `_sweep_order` (one entry's §19.3 ownership verdict,
   keep, skip, cancel or failure, writing into a `_SweepLedger` — the four
   detail lists, the enumeration's `sweep_error` and `handled_cloids` — that
-  `_cross_check_local_orders` now takes whole instead of two of its fields,
+  `_cross_check_local_orders` now takes whole instead of three of its parts (`handled_cloids`,
+  `kept_protective` and `enumeration_failed`),
   and whose `clean` is the rule-6 verdict) and `_settle_scheduled_cancel` (the
   disarm, its wire latch, the recorded failure, or the "left ARMED"
   warning). Every log line, event row, detail field order, latch order and

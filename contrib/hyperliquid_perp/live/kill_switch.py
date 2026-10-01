@@ -848,17 +848,17 @@ class KillSwitchManager:
         the disarm — the fail-safe posture is unchanged where there is no
         evidence.
 
-        ``enumeration_failed`` suppresses the exchange round-trips, and that is a
-        LATENCY guard, not a policy one. When ``open_orders()`` has just failed
-        the endpoint is almost certainly unreachable, so every ``orderStatus``
-        here is doomed for the same reason — and each one can burn the full
-        network timeout, sequentially, inside a signal handler. A handful of open
-        orders against a dead endpoint would push shutdown past systemd's
-        TimeoutStopSec and get the process SIGKILLed mid-sweep, destroying the
-        very teardown these diagnostics document. The outcome is unchanged either
-        way (a sweep_error already keeps the trigger armed), so the orders are
-        still NAMED in the §18.5 detail — just not re-confirmed over a network
-        that is not answering.
+        A failed enumeration (``ledger.sweep_error``) suppresses the exchange
+        round-trips, and that is a LATENCY guard, not a policy one. When
+        ``open_orders()`` has just failed the endpoint is almost certainly
+        unreachable, so every ``orderStatus`` here is doomed for the same reason —
+        and each one can burn the full network timeout, sequentially, inside a
+        signal handler. A handful of open orders against a dead endpoint would
+        push shutdown past systemd's TimeoutStopSec and get the process SIGKILLed
+        mid-sweep, destroying the very teardown these diagnostics document. The
+        outcome is unchanged either way (a sweep_error already keeps the trigger
+        armed), so the orders are still NAMED in the §18.5 detail — just not
+        re-confirmed over a network that is not answering.
         """
         enumeration_failed = ledger.sweep_error is not None
         unaccounted: list[str] = []
@@ -1036,7 +1036,7 @@ class KillSwitchManager:
         # retry is set only once the thing it suppresses is durable.
         self._shutdown_completed = True
 
-    def _enumerate_open_orders(self, ledger: _SweepLedger) -> list:
+    def _enumerate_open_orders(self, ledger: _SweepLedger) -> list[object]:
         """The exchange's ``open_orders()`` as a list — or ``[]``, with the reason stamped on the ledger."""
         try:
             raw_orders = self._client.open_orders()

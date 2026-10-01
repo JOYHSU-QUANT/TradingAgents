@@ -91,8 +91,8 @@ Breaking changes within the 0.x line are called out explicitly.
   and whose `clean` is the rule-6 verdict) and `_settle_scheduled_cancel` (the
   disarm, its wire latch, the recorded failure, or the "left ARMED"
   warning). Every log line, event row, detail field order, latch order and
-  the completed-last mark are unchanged; `is_suite_authored` narrows on
-  `is not None` instead of truthiness (same answers, one fewer mypy
+  the completed-last mark are unchanged; `is_suite_authored` returns early on an
+  empty `detail` instead of and-ing on it (same answers, one fewer mypy
   error). Only the moved helper's logger name changes:
   `refresh_across_blocking_work`'s "kill-switch refresh during %s failed"
   WARNING now comes from `contrib.hyperliquid_perp.live.kill_switch_timing`

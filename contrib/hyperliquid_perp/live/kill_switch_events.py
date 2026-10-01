@@ -1,9 +1,12 @@
-"""The §18.5 ``kill_switch_events`` row: the writer side of its detail tokens.
+"""The §18.5 ``kill_switch_events`` row: its detail tokens and its writer.
 
-``validation_metrics`` parses these back out, so each token is written here,
-once, and :func:`record_kill_switch_event` is the one transaction that lands
-a row — for the manager and for the smoke suite alike (see its docstring for
-why the suite writes rows itself).
+``validation_metrics`` parses the deadline token back out, so its writer
+:func:`deadline_detail` lives here; the suite-authored token keeps BOTH its
+sides here (:func:`stamp_suite_authored`, :func:`is_suite_authored`) so the
+anchoring rule the predicate relies on is a local invariant of the stamp.
+:func:`record_kill_switch_event` is the one transaction that lands a row — for
+the manager and for the smoke suite alike (its docstring says why the suite
+writes rows itself).
 """
 
 from __future__ import annotations

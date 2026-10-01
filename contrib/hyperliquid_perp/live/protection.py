@@ -253,9 +253,10 @@ class ProtectionOutcome(str, Enum):
     # The wire gate refused every SL attempt PRE-SEND (kill switch), or the venue
     # declined to serve every attempt that reached it (rate limit). The SL the
     # sync WANTED is not on the book — a previous one may still be, covering or
-    # not (the event records which) — but escalating is futile (the same gate
-    # blocks the close), so the gate line stays up, the sync retries next tick,
-    # and §12.3 SL-missing is the standing net.
+    # not (the event records which) — but escalating is wrong either way: the
+    # same gate blocks the close, and a rate limit says nothing against the
+    # order. So the gate line stays up, the sync retries next tick, and §12.3
+    # SL-missing is the standing net.
     BLOCKED = "blocked"
 
 

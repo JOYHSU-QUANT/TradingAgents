@@ -1308,6 +1308,7 @@ def test_a_gate_refusal_among_throttles_is_still_a_throttled_hold(env):
         plan_active=True,
     )
     assert outcome is ProtectionOutcome.BLOCKED
+    assert len(calls) == 3  # one refusal, two rate limits: the whole ladder ran
     blocked = [
         e
         for e in repo.iter_protection_order_events(db.conn, "r")

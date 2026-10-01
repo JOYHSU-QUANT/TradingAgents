@@ -62,7 +62,7 @@ Breaking changes within the 0.x line are called out explicitly.
 - **The protection manager's `sync` and `_establish` are phased** (refactor
   plan v2, T3-c — PR 14 of the plan; no behaviour change).
   `live/protection.py` keeps its one file and its two public names; the
-  255-line `sync` and the 229-line `_establish` are each now a short
+  252-line `sync` and the 228-line `_establish` are each now a short
   orchestrator over named phases. `sync` dispatches to `_sync_flat` (the
   §17.1 rule 4 clear and the residual check), `_sync_stop_loss` (the band
   decision, the SL ladder and its three failure dispositions, with the
@@ -72,28 +72,29 @@ Breaking changes within the 0.x line are called out explicitly.
   and record why go through `_raise_failure_line` (the sixth,
   `_hold_blocked_stop_loss`, raises the line before the row read and the
   orderStatus probe its event depends on, so a read that raises cannot leave
-  it down), and the three that lower it, recording the recovery when the
-  sync began failed, through `_lower_failure_line`. `_establish` takes the
-  floored size and closing
-  side from `_closing_leg` (one derivation, shared with the blocked-SL
-  coverage test, which used to repeat it under a comment asking the two to
-  agree), keeps the price rounding and the `active_protection_order` read,
-  asks `_resting_order_covers` (the no-op guard), builds one frozen
-  `_Placement` for the ladder (its ids are minted once rather than once per
-  rung: the same ids each time, since they are a function of role and
-  sequence alone) and runs the ladder one `_attempt_placement` per rung,
-  each returning a `_RungResult`; `_ladder_verdict` turns the rungs into the
-  `_EstablishResult` three booleans used to carry. `_send` holds the
-  modify-or-place dispatch;
+  it down), and the three that lower it, recording the recovery when the sync
+  began failed, through `_lower_failure_line`. `_establish` takes the floored
+  size and closing side from `_closing_leg` (one derivation, shared with the
+  blocked-SL coverage test, which used to repeat it under a comment asking
+  the two to agree), keeps the price rounding and the
+  `active_protection_order` read, asks `_resting_order_covers` (the no-op
+  guard), builds one frozen `_Placement` for the ladder (its ids are minted
+  once rather than once per rung: the same ids each time, since they are a
+  function of role and sequence alone) and runs the ladder one
+  `_attempt_placement` per rung, each returning a `_RungResult`;
+  `_ladder_verdict` turns the rungs into the `_EstablishResult` three
+  booleans used to carry. `_send` holds the modify-or-place dispatch;
   `_log_attempt_failed`, `_recover_placed_order` and `_persist_placed` take
   the `_Placement` in place of their repeated keyword arguments. No event
   type, detail string, log line, write, write order, refresh site or sleep
   changes. Mutation probes against the split found three guards nothing
-  pinned, all older than this change: the retirement of the replaced row on
-  a modify, the linear backoff of a throttled rung, and the no-op guard's
+  pinned, all older than this change: the retirement of the replaced row on a
+  modify, the linear backoff of a throttled rung, and the no-op guard's
   exchange-id term; in `tests/live/test_protection.py` two existing tests
-  gain the assertions and one new test pins the third. The two tests that
-  drive `_recover_placed_order` directly build a `_Placement`.
+  gain the assertions and one new test pins the third; two more new tests pin
+  the guard's trigger-price term and the ladder's throttle-over-gate-refusal
+  precedence, both unpinned before. The two tests that drive
+  `_recover_placed_order` directly build a `_Placement`.
 
 - **The live reconciliation sweep is four modules** (refactor plan v2,
   T3-b — PR 13 of the plan; no behaviour change). `live/reconcile.py` held

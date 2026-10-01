@@ -250,7 +250,8 @@ class ProtectionOutcome(str, Enum):
     PROTECTED = "protected"  # SL (and TP when no plan runs) are on the book
     DEGRADED = "degraded"  # §17.3: SL up but TP could not be (re)established
     NEEDS_EMERGENCY_CLOSE = "needs_emergency_close"  # §17.2: no safe SL — engine must close
-    # The wire gate refused every SL attempt PRE-SEND (kill switch). The SL the
+    # The wire gate refused every SL attempt PRE-SEND (kill switch), or the venue
+    # declined to serve every attempt that reached it (rate limit). The SL the
     # sync WANTED is not on the book — a previous one may still be, covering or
     # not (the event records which) — but escalating is futile (the same gate
     # blocks the close), so the gate line stays up, the sync retries next tick,
@@ -483,7 +484,7 @@ class ProtectionManager:
         self._confirmed_cloid[role] = str(hexid)
         return True
 
-    # -- public entry ---------------------------------------------------------
+    # -- public entry and its sync phases --------------------------------------
 
     def sync(
         self,
@@ -543,7 +544,7 @@ class ProtectionManager:
         )
 
     def _sync_flat(self, *, was_failed: bool, now: datetime) -> ProtectionOutcome:
-        """§17.1 rule 4: a flat position must carry no resting SL / TP."""
+        """§17.1 rule 4: clear the resting SL / TP, then confirm nothing still rests."""
         self._clear(now)
         residual = next(
             (
@@ -669,10 +670,10 @@ class ProtectionManager:
         )
         needed, closing = self._closing_leg(position)
         closing_side = closing.value
-        # EXISTENCE of the row is not evidence here, and this branch is the
-        # one place where that is guaranteed: the only §4.1 line that refuses
-        # a PROTECTIVE order is the kill switch, so reaching this code means
-        # the switch is down — and a switch that went down by LAPSING its
+        # EXISTENCE of the row is not evidence here, and a GATE_BLOCKED arrival
+        # is the one place where that is guaranteed: the only §4.1 line that
+        # refuses a PROTECTIVE order is the kill switch, so arriving that way
+        # means the switch is down — and a switch that went down by LAPSING its
         # deadline has already had the exchange cancel every order on the
         # wallet, leaving these rows untouched and wrong. Confirm against
         # orderStatus before letting the row suppress a §20.3 window; a read
@@ -818,7 +819,9 @@ class ProtectionManager:
         ``sl_repair_max_attempts`` on failure, ``sl_repair_retry_delay_seconds``
         apart. ``ESTABLISHED`` once the order is acknowledged on the book;
         ``GATE_BLOCKED`` when every failure was a pre-send §4.1 refusal (nothing
-        transmitted — not a repair exhaustion); ``EXHAUSTED`` otherwise.
+        transmitted — not a repair exhaustion); ``THROTTLED`` when every failure
+        that reached the wire was the venue declining to serve it; ``EXHAUSTED``
+        otherwise.
 
         Three phases: the no-op guard (``_resting_order_covers``), the repair
         ladder — one rung per ``_attempt_placement`` — and the ladder's
@@ -1009,7 +1012,7 @@ class ProtectionManager:
             # without passing _maybe_delay — the one exit from this ladder
             # that reaches the wire and then leaves without a refresh. Left
             # uncovered, an SL recovered this way and the TP ``_establish``
-            # that sync() runs next share a single gap.
+            # that _sync_take_profit runs next share a single gap.
             refresh_across_blocking_work(self._kill_switch, what="SL/TP repair")
             if recovered:
                 # The exchange already knows this cloid from a prior attempt
@@ -1088,11 +1091,11 @@ class ProtectionManager:
         report success, so a benign network blip never forces a spurious emergency
         close. An unknown cloid, or a rejected / canceled order, means no live
         protective order is resting — return False so the caller records a failed
-        attempt and retries
-        (and, if attempts exhaust, emergency-closes — the safe outcome for a
-        genuinely un-placeable stop). Recovery only ever returns True on a POSITIVE
-        confirmation; any read/parse failure is unresolved → return False (retry,
-        eventually emergency-close is the safe fallback) and never crash the tick.
+        attempt and retries (and, if attempts exhaust, emergency-closes — the safe
+        outcome for a genuinely un-placeable stop). Recovery only ever returns True
+        on a POSITIVE confirmation; any read/parse failure is unresolved → return
+        False (retry, eventually emergency-close is the safe fallback) and never
+        crash the tick.
         """
         role, hexid = placement.role, placement.cloid_hex
         try:

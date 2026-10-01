@@ -8,7 +8,10 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeRequestError
+from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import (
+    ExchangeRequestError,
+    ExchangeThrottledError,
+)
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import CancelAck, OrderAck
 from contrib.hyperliquid_perp.live.config import (
     AGGRESSIVE_FILL_BAND_PCT,
@@ -253,6 +256,7 @@ def test_sl_modified_when_already_resting(env):
         mark=Decimal(50000),
         plan_active=True,
     )
+    first = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
     mgr.sync(
         position=_long_position(size=Decimal("0.2")),
         liquidation_price=Decimal(40000),
@@ -268,7 +272,7 @@ def test_sl_modified_when_already_resting(env):
     assert "stop_loss_modified" in events
     # Modify-before-cancel retires the row it replaced, so active_protection_order
     # never has two live rows to choose between.
-    replaced = repo.get_order(db.conn, "r:stop_loss:p0")
+    replaced = repo.get_order(db.conn, first["order_id"])
     assert replaced["status"] == "canceled"
     assert replaced["cancel_reason"] == "replaced_by_protection_modify"
 
@@ -328,9 +332,6 @@ def test_sl_side_mismatch_is_not_treated_as_a_noop(env):
     assert client.modified[0]["is_buy"] is True
 
 
-# -- SL repair / emergency close --------------------------------------------
-
-
 def test_a_resting_row_without_an_exchange_id_is_not_treated_as_a_noop(env):
     """A row the exchange never named cannot be modified in place (§17.4 needs
     the oid), so the no-op guard must not read it as the order we would place:
@@ -355,11 +356,43 @@ def test_a_resting_row_without_an_exchange_id_is_not_treated_as_a_noop(env):
         mark=Decimal(50000),
         plan_active=True,
     )
-    assert len(client.placed) == 2 and client.modified == []
+    assert len(client.placed) == 2
+    assert client.modified == []
     active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
     assert active["order_id"] != first["order_id"]
     assert active["exchange_order_id"] == "1002"
     assert repo.get_order(db.conn, first["order_id"])["status"] == "canceled"
+
+
+def test_a_drifted_trigger_is_not_treated_as_a_noop(env):
+    """Same size, same side, but the entry moved so the band moved: the resting
+    row's trigger no longer matches and the SL is modified, not left where it was.
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), order_gate()
+    mgr = _manager(db, client, gate)
+    mgr.sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    first_trigger = client.placed[0]["trigger_price"]
+    mgr.sync(
+        position=_long_position(entry=Decimal(52000)),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(52000),
+        plan_active=True,
+    )
+    assert len(client.placed) == 1
+    assert len(client.modified) == 1
+    assert client.modified[0]["trigger_price"] > first_trigger
+    active = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
+    assert Decimal(active["trigger_price"]) == client.modified[0]["trigger_price"]
+
+
+# -- SL repair / emergency close --------------------------------------------
 
 
 def test_sl_repair_retries_then_succeeds(env):
@@ -1186,8 +1219,6 @@ def test_a_rate_limited_ladder_holds_instead_of_emergency_closing(env):
     # 15-second rate-limit window, so a throttle exhausted the ladder → §17.2
     # market-closes a HEALTHY position and latches the run for a human. And a
     # venue throttles hardest in exactly the violent move a stop exists for.
-    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeThrottledError
-
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), order_gate()
@@ -1223,8 +1254,6 @@ def test_one_real_rejection_among_throttles_still_exhausts(env):
     # The carve-out must be narrow. An ack that says "no" is the exchange
     # REJECTING the order — precisely the evidence a throttle is not — so a
     # ladder containing one is an ordinary exhaustion and must still escalate.
-    from contrib.hyperliquid_perp.exchanges.hyperliquid.errors import ExchangeThrottledError
-
     db = env
     _seed_long(db)
     client, gate = _FakeClient(), order_gate()
@@ -1251,6 +1280,41 @@ def test_one_real_rejection_among_throttles_still_exhausts(env):
 def _resting_status_payload(oid: str = "1001") -> dict:
     """An orderStatus answer that CONFIRMS the order is still on the book."""
     return {"status": "order", "order": {"order": {"oid": oid}, "status": "open"}}
+
+
+def test_a_gate_refusal_among_throttles_is_still_a_throttled_hold(env):
+    """One pre-send refusal does not turn a rate-limited ladder into a kill-switch
+    hold: with no rejection of the ORDER anywhere, the ladder is THROTTLED and the
+    blocked event says so.
+    """
+    db = env
+    _seed_long(db)
+    client, gate = _FakeClient(), order_gate()
+    scripted_place = client.place_trigger_order
+    calls: list[int] = []
+
+    def _gate_then_throttle(**kw):
+        calls.append(1)
+        if len(calls) == 1:
+            return scripted_place(**kw)  # the scripted "gate" refusal below
+        raise ExchangeThrottledError("429 Too Many Requests")
+
+    client.place_trigger_order = _gate_then_throttle
+    client.place_script = ["gate"]
+    outcome = _manager(db, client, gate).sync(
+        position=_long_position(),
+        liquidation_price=Decimal(40000),
+        mark=Decimal(50000),
+        plan_active=True,
+    )
+    assert outcome is ProtectionOutcome.BLOCKED
+    blocked = [
+        e
+        for e in repo.iter_protection_order_events(db.conn, "r")
+        if e["event_type"] == "stop_loss_repair_blocked"
+    ][0]
+    assert "rate-limited" in blocked["detail"]
+    assert "kill switch" not in blocked["detail"]
 
 
 def test_a_blocked_sl_does_not_claim_coverage_from_a_row_the_switch_invalidated(env):
@@ -1374,9 +1438,9 @@ def test_an_unreadable_orderstatus_does_not_let_a_stale_row_claim_coverage(env):
 
 def test_a_fired_switch_makes_the_no_op_guard_re_place_the_cancelled_sl(env):
     # The severe sibling of the covering bug, and the one that costs money.
-    # _establish's no-op shortcut compares side/trigger/qty against the local
-    # row — every field a fired scheduleCancel leaves untouched. Trusting it
-    # returns ESTABLISHED before any wire call: no protection event is written
+    # _resting_order_covers, the no-op guard, compares side/trigger/qty against
+    # the local row — every field a fired scheduleCancel leaves untouched. Trusting
+    # it returns ESTABLISHED before any wire call: no protection event is written
     # (so no window ever OPENS, not merely fails to close), the outcome is
     # PROTECTED (which LOWERS the gate's unresolved_protection_failure line),
     # and — the part that costs money — once §13.4 reopens the gate the same

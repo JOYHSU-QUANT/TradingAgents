@@ -1339,8 +1339,8 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
                 f"{from_epoch_ms(rows[0].question.at_ms):%Y-%m-%d %H:%M} to "
                 f"{from_epoch_ms(rows[-1].question.at_ms):%Y-%m-%d %H:%M} UTC, while the rule's "
                 f"history there closes {from_epoch_ms(decided[0]):%Y-%m-%d %H:%M} to "
-                f"{from_epoch_ms(decided[-1]):%Y-%m-%d %H:%M}; fetch the store up to the run, or "
-                "leave the run out of --run-id"
+                f"{from_epoch_ms(decided[-1]):%Y-%m-%d %H:%M}; fetch the store so that its "
+                "history covers the run, or leave the run out of --run-id"
             )
         taken = timeline.first_taken_ms
         early = sum(
@@ -1353,9 +1353,14 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
             *timeline.describe(),
         ]
         if early:
+            before = (
+                "while the rule took no side anywhere in this store"
+                if taken is None
+                else "before the rule first took a side in this store"
+            )
             lines.append(
-                f"{early} question(s) were read before the rule first took a side in this store: "
-                "a flat rule there may be a position it opened before the store begins"
+                f"{early} question(s) were read {before}: a flat rule there may be a position it "
+                "opened before the store begins"
             )
         # The cycles that are not questions: a position the guardrail refuses
         # may have been held through them, unread.

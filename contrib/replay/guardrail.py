@@ -215,8 +215,8 @@ def describe_shadow(rows: Sequence[GuardrailRow]) -> list[str]:
     unknown = sides["unknown"]
     if unknown == len(rows):
         lines.append(
-            "no question has a rule side: the research store does not reach this run, and "
-            "nothing was judged"
+            "no question has a rule side (the research store's history does not cover this run, "
+            "or the rule could not be evaluated there): nothing was judged"
         )
         return lines
     if unknown:

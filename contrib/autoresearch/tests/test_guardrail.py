@@ -148,9 +148,9 @@ def test_a_bar_the_rule_could_not_evaluate_has_no_reading(store, tmp_path):
     assert timeline.reading_at(closes[1]).side is Side.LONG
     assert timeline.reading_at(closes[2]) is None
     assert timeline.reading_at(closes[3]) is None
-    assert timeline.describe()[-1] == (
-        "  on 2 of them the rule could not be evaluated and kept the side it was on; an instant "
-        "read off one of those has no reading"
+    assert timeline.describe()[-2] == (
+        "  on 2 of those bars the rule could not be evaluated and kept the side it was on; an "
+        "instant read off one of them has no reading"
     )
 
 

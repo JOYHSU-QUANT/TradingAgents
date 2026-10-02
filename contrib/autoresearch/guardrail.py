@@ -188,6 +188,11 @@ class RuleTimeline:
             f"{from_epoch_ms(self.close_times[self.first_decided]):%Y-%m-%d %H:%M} to "
             f"{from_epoch_ms(self.close_times[-1]):%Y-%m-%d %H:%M} UTC ({shares})"
         )
+        if self.carried:
+            lines.append(
+                f"  on {self.carried} of those bars the rule could not be evaluated and kept the "
+                "side it was on; an instant read off one of them has no reading"
+            )
         taken = self.first_taken_ms
         lines.append(
             "  the replay starts flat at the store's first bar; the rule "
@@ -197,11 +202,6 @@ class RuleTimeline:
                 else f"first takes a side at the bar closing {from_epoch_ms(taken):%Y-%m-%d %H:%M}"
             )
         )
-        if self.carried:
-            lines.append(
-                f"  on {self.carried} of them the rule could not be evaluated and kept the side "
-                "it was on; an instant read off one of those has no reading"
-            )
         return lines
 
 

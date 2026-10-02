@@ -351,8 +351,8 @@ def test_describe_judges_nothing_when_no_question_has_a_rule_side(tmp_path):
         "rule side at the decisions: long 0, flat 0, short 0, unknown 11",
         "verdicts: pass 2, block_to_flat 0, close_position 0, rule_unknown 9",
         "orders created: 4, of which the guardrail refuses 0 (3 more at a rule side not known)",
-        "no question has a rule side: the research store does not reach this run, and nothing "
-        "was judged",
+        "no question has a rule side (the research store's history does not cover this run, or "
+        "the rule could not be evaluated there): nothing was judged",
     ]
 
 

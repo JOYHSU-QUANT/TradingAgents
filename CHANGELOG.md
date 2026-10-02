@@ -59,6 +59,25 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The autoresearch CLI builds its parser one command at a time, and the
+  store's timestamp helper has a public name** (refactor plan v2, T7 — PR 18
+  of the plan; no behaviour change). `contrib/autoresearch/cli.py`'s
+  `_build_parser` registers the commands, and eight of the eleven get their
+  flags from an `_add_<command>_args` function: `gaps` takes only the common
+  ones, `vocab` takes none, and `validate-spec`'s one flag stays inline. The
+  two closures it held are the module-level `_add_db` and `_add_common`, and
+  `--coin` is spelled once, in `_add_coin`. Every flag, default, choice and
+  help line is unchanged, and so is the order `--help` lists them in.
+  `store._utcnow_iso` is now `store.utcnow_iso`, in `__all__`, so `ledger.py`
+  no longer imports an underscore name from another module; `cli._parse_since`
+  is `cli.parse_since` for the same reason, its reader being the tests.
+  `store.py`'s docstring says its SQLite plumbing is a deliberate second
+  implementation of the perp package's (`tests/test_upstream.py` forbids
+  borrowing that layer), names where the perp one is the stricter, and points
+  at `_is_foreign` for why this one differs. Tests: a non-numeric `--trial`
+  is now pinned as a usage error for `promote` and `report`; nothing held
+  that before.
+
 - **Eight import-time vocabulary guards are gone, because what they kept in
   step is now one definition** (refactor plan v2, T4-a — PR 17 of the plan;
   no behaviour change). Five storage vocabularies are `VocabEnum` classes

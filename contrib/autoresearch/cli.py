@@ -119,7 +119,7 @@ from .store import (
 from .upstream import ExchangeError, from_epoch_ms
 from .vocabulary import describe_vocabulary
 
-__all__ = ["main"]
+__all__ = ["main", "parse_since"]
 
 # ``--interval``'s choices: the two intervals this package studies (see
 # ``constants.STUDIED_INTERVALS`` for why it is two and not the venue's enum).
@@ -129,7 +129,7 @@ _INTERVALS = STUDIED_INTERVALS
 _BARE_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def _parse_since(text: str) -> datetime:
+def parse_since(text: str) -> datetime:
     """``--since`` as an aware UTC instant; ``ValueError`` naming the problem otherwise.
 
     A bare ``YYYY-MM-DD`` is midnight UTC — the spelling the plan's own
@@ -168,33 +168,28 @@ def _parse_since(text: str) -> datetime:
     )
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m contrib.autoresearch",
-        description="AutoResearch history store: the research radar's own BTC data.",
+def _add_db(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--db", default=None, help=f"store path (default: <repo>/data/{DB_FILENAME})")
+
+
+def _add_coin(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--coin", default="BTC", help="perp coin symbol (default: BTC)")
+
+
+def _add_common(sub: argparse.ArgumentParser) -> None:
+    _add_coin(sub)
+    sub.add_argument(
+        "--interval",
+        default=_INTERVALS[0],
+        choices=_INTERVALS,
+        help=f"candle interval (default: {_INTERVALS[0]})",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    _add_db(sub)
 
-    def add_db(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument(
-            "--db", default=None, help=f"store path (default: <repo>/data/{DB_FILENAME})"
-        )
 
-    def add_common(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("--coin", default="BTC", help="perp coin symbol (default: BTC)")
-        sub.add_argument(
-            "--interval",
-            default=_INTERVALS[0],
-            choices=_INTERVALS,
-            help=f"candle interval (default: {_INTERVALS[0]})",
-        )
-        add_db(sub)
-
-    fetch_cmd = subparsers.add_parser(
-        "fetch", help="walk venue history into the store, then scan it for holes"
-    )
-    add_common(fetch_cmd)
-    fetch_cmd.add_argument(
+def _add_fetch_args(sub: argparse.ArgumentParser) -> None:
+    _add_common(sub)
+    sub.add_argument(
         "--since",
         required=True,
         help="backfill start, as 2023-01-01 (midnight UTC) or a full ISO-8601 instant",
@@ -202,7 +197,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # One group: ``--resume`` is about the funding walk, so beside
     # ``--skip-funding`` it would be a flag that does nothing - refused as a
     # usage error rather than accepted and silently ignored.
-    funding_walk = fetch_cmd.add_mutually_exclusive_group()
+    funding_walk = sub.add_mutually_exclusive_group()
     funding_walk.add_argument(
         "--skip-funding",
         action="store_true",
@@ -224,10 +219,136 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+
+def _add_experiment_args(sub: argparse.ArgumentParser) -> None:
+    _add_common(sub)
+    sub.add_argument("--name", required=True, help="the experiment's name")
+    sub.add_argument(
+        "--fill-role",
+        default=FillRole.TAKER.value,
+        choices=[role.value for role in FillRole],
+        help="which fee a fill pays (default: taker, the paper run's)",
+    )
+    for flag, default, what in (
+        ("--taker-fee-rate", LIVE_TAKER_FEE_RATE, "taker fee, a fraction of notional"),
+        ("--maker-fee-rate", VENUE_BASE_MAKER_FEE_RATE, "maker fee, a fraction of notional"),
+        ("--slippage-bps", LIVE_SLIPPAGE_BPS, "adverse slippage per fill, basis points"),
+        ("--leverage", LIVE_LEVERAGE, "notional per unit of margin"),
+        ("--train-share", DEFAULT_TRAIN_SHARE, "train's share of the measurable span"),
+        ("--validation-share", DEFAULT_VALIDATION_SHARE, "validation's share of it"),
+        ("--sharpe-base", SHARPE_BASE, "the promote threshold at one trial"),
+        ("--penalty-k", PENALTY_K, "how much each ln(trials) raises it"),
+    ):
+        sub.add_argument(flag, type=float, default=default, help=f"{what} (default: {default:g})")
+    sub.add_argument(
+        "--indicator-lookback",
+        type=int,
+        default=None,
+        help="bars the indicator engine is shown at each bar (default: the live candle_lookback)",
+    )
+    sub.add_argument("--notes", default="", help="free text stored with the experiment")
+    sub.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "print the split and whether it would pin the coin's holdout, and write no "
+            "experiment (opening the store still brings its schema up to date)"
+        ),
+    )
+
+
+def _add_evaluate_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--experiment", required=True)
+    sub.add_argument("--spec", required=True, help="path to a JSON strategy spec")
+    _add_db(sub)
+
+
+def _add_promote_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--experiment", required=True)
+    sub.add_argument("--trial", required=True, type=int, help="the trial's number")
+    _add_db(sub)
+
+
+def _add_report_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--experiment", default=None)
+    sub.add_argument("--trial", default=None, type=int, help="needs --experiment")
+    _add_db(sub)
+
+
+def _add_calibrate_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--experiment", required=True)
+    _add_db(sub)
+
+
+def _add_signal_args(sub: argparse.ArgumentParser) -> None:
+    # ``--coin`` but no ``--interval``: the bar cadence is the promoted
+    # experiment's, not the operator's to pick here, and offering the flag
+    # would invite an answer measured on bars the rule was never scored on.
+    _add_coin(sub)
+    sub.add_argument("--out", required=True, help="path to write the handoff document to (JSON)")
+    sub.add_argument(
+        "--allow-taker",
+        action="store_true",
+        help=(
+            "publish even though the promoted rule was scored under taker fills "
+            "(plan §7 wants it re-run under maker costs first)"
+        ),
+    )
+    _add_db(sub)
+
+
+def _add_research_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--experiment", required=True)
+    sub.add_argument(
+        "--max-trials",
+        type=int,
+        default=DEFAULT_MAX_TRIALS,
+        help=(
+            f"answers to spend this run (default: {DEFAULT_MAX_TRIALS}). A refused answer "
+            f"and a rule already tried each spend one"
+        ),
+    )
+    # No default provider or model, and the absence is deliberate: WHICH model
+    # proposed a rule is part of what an experiment's results mean, and a
+    # command quietly falling back to some configured default would file trials
+    # from a model nobody chose. Refused by name in the command unless
+    # --dry-run, which asks nothing of any model.
+    sub.add_argument("--provider", default=None, help="LLM provider (e.g. anthropic)")
+    sub.add_argument("--model", default=None, help="model name for that provider")
+    sub.add_argument("--base-url", default=None, help="override the provider endpoint")
+    sub.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="sampling temperature, if this model takes one",
+    )
+    sub.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "print the prompt this experiment would send and stop; no model is asked and "
+            "nothing is filed"
+        ),
+    )
+    _add_db(sub)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m contrib.autoresearch",
+        description="AutoResearch history store: the research radar's own BTC data.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    fetch_cmd = subparsers.add_parser(
+        "fetch", help="walk venue history into the store, then scan it for holes"
+    )
+    _add_fetch_args(fetch_cmd)
+
     gaps_cmd = subparsers.add_parser(
         "gaps", help="scan the stored series for holes (reads the store only, no network)"
     )
-    add_common(gaps_cmd)
+    _add_common(gaps_cmd)
 
     # Neither of the next two takes --coin, --interval or --db, and the
     # absence is the statement: the vocabulary and the parser are properties
@@ -247,126 +368,37 @@ def _build_parser() -> argparse.ArgumentParser:
         "experiment",
         help="cut train/validation/holdout over the store and write an experiment's conditions",
     )
-    add_common(experiment_cmd)
-    experiment_cmd.add_argument("--name", required=True, help="the experiment's name")
-    experiment_cmd.add_argument(
-        "--fill-role",
-        default=FillRole.TAKER.value,
-        choices=[role.value for role in FillRole],
-        help="which fee a fill pays (default: taker, the paper run's)",
-    )
-    for flag, default, what in (
-        ("--taker-fee-rate", LIVE_TAKER_FEE_RATE, "taker fee, a fraction of notional"),
-        ("--maker-fee-rate", VENUE_BASE_MAKER_FEE_RATE, "maker fee, a fraction of notional"),
-        ("--slippage-bps", LIVE_SLIPPAGE_BPS, "adverse slippage per fill, basis points"),
-        ("--leverage", LIVE_LEVERAGE, "notional per unit of margin"),
-        ("--train-share", DEFAULT_TRAIN_SHARE, "train's share of the measurable span"),
-        ("--validation-share", DEFAULT_VALIDATION_SHARE, "validation's share of it"),
-        ("--sharpe-base", SHARPE_BASE, "the promote threshold at one trial"),
-        ("--penalty-k", PENALTY_K, "how much each ln(trials) raises it"),
-    ):
-        experiment_cmd.add_argument(
-            flag, type=float, default=default, help=f"{what} (default: {default:g})"
-        )
-    experiment_cmd.add_argument(
-        "--indicator-lookback",
-        type=int,
-        default=None,
-        help="bars the indicator engine is shown at each bar (default: the live candle_lookback)",
-    )
-    experiment_cmd.add_argument("--notes", default="", help="free text stored with the experiment")
-    experiment_cmd.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "print the split and whether it would pin the coin's holdout, and write no "
-            "experiment (opening the store still brings its schema up to date)"
-        ),
-    )
+    _add_experiment_args(experiment_cmd)
 
     evaluate_cmd = subparsers.add_parser(
         "evaluate", help="score a spec on train and validation and file it as a trial"
     )
-    evaluate_cmd.add_argument("--experiment", required=True)
-    evaluate_cmd.add_argument("--spec", required=True, help="path to a JSON strategy spec")
-    add_db(evaluate_cmd)
+    _add_evaluate_args(evaluate_cmd)
 
     promote_cmd = subparsers.add_parser(
         "promote", help="apply the gate, then measure one trial's holdout (once)"
     )
-    promote_cmd.add_argument("--experiment", required=True)
-    promote_cmd.add_argument("--trial", required=True, type=int, help="the trial's number")
-    add_db(promote_cmd)
+    _add_promote_args(promote_cmd)
 
     report_cmd = subparsers.add_parser(
         "report", help="read the ledger back: experiments, trials, one trial in full"
     )
-    report_cmd.add_argument("--experiment", default=None)
-    report_cmd.add_argument("--trial", default=None, type=int, help="needs --experiment")
-    add_db(report_cmd)
+    _add_report_args(report_cmd)
 
     calibrate_cmd = subparsers.add_parser(
         "calibrate", help="score the baselines on an experiment's windows, filing nothing"
     )
-    calibrate_cmd.add_argument("--experiment", required=True)
-    add_db(calibrate_cmd)
+    _add_calibrate_args(calibrate_cmd)
 
     signal_cmd = subparsers.add_parser(
         "signal", help="write the promoted rule's current qualitative signal for the live path"
     )
-    # ``--coin`` but no ``--interval``: the bar cadence is the promoted
-    # experiment's, not the operator's to pick here, and offering the flag
-    # would invite an answer measured on bars the rule was never scored on.
-    signal_cmd.add_argument("--coin", default="BTC", help="perp coin symbol (default: BTC)")
-    signal_cmd.add_argument(
-        "--out", required=True, help="path to write the handoff document to (JSON)"
-    )
-    signal_cmd.add_argument(
-        "--allow-taker",
-        action="store_true",
-        help=(
-            "publish even though the promoted rule was scored under taker fills "
-            "(plan §7 wants it re-run under maker costs first)"
-        ),
-    )
-    add_db(signal_cmd)
+    _add_signal_args(signal_cmd)
 
     research_cmd = subparsers.add_parser(
         "research", help="ask a model for rules, score each one, and file what it answered"
     )
-    research_cmd.add_argument("--experiment", required=True)
-    research_cmd.add_argument(
-        "--max-trials",
-        type=int,
-        default=DEFAULT_MAX_TRIALS,
-        help=(
-            f"answers to spend this run (default: {DEFAULT_MAX_TRIALS}). A refused answer "
-            f"and a rule already tried each spend one"
-        ),
-    )
-    # No default provider or model, and the absence is deliberate: WHICH model
-    # proposed a rule is part of what an experiment's results mean, and a
-    # command quietly falling back to some configured default would file trials
-    # from a model nobody chose. Refused by name in the command unless
-    # --dry-run, which asks nothing of any model.
-    research_cmd.add_argument("--provider", default=None, help="LLM provider (e.g. anthropic)")
-    research_cmd.add_argument("--model", default=None, help="model name for that provider")
-    research_cmd.add_argument("--base-url", default=None, help="override the provider endpoint")
-    research_cmd.add_argument(
-        "--temperature",
-        type=float,
-        default=None,
-        help="sampling temperature, if this model takes one",
-    )
-    research_cmd.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "print the prompt this experiment would send and stop; no model is asked and "
-            "nothing is filed"
-        ),
-    )
-    add_db(research_cmd)
+    _add_research_args(research_cmd)
     return parser
 
 
@@ -456,7 +488,7 @@ def _print_scans(store: ResearchStore, *, coin: str, interval: str, funding: boo
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
-    since = _parse_since(args.since)
+    since = parse_since(args.since)
     # The reader is built — and the venue clock read — BEFORE the store is
     # opened, so a network or credential problem does not leave a freshly
     # created empty store behind on a path the operator mistyped.

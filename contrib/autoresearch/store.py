@@ -8,6 +8,15 @@ bought by incidents there: WAL plus a busy timeout, an explicit autocommit
 connection so transactions begin where this module says, and a refusal — by
 name, before any write — of a file that is not this package's store.
 
+Not imported: ``tests/test_upstream.py`` forbids borrowing the perp
+``persistence`` layer, so this is a second implementation and nothing keeps
+the two in step. The perp one is the stricter:
+``store_identity.refuse_a_foreign_store`` probes read-only, through an escaped
+URI, before it connects, and refuses a non-empty ``-wal``/``-journal`` beside
+an empty or missing main file; ``db.apply_migrations`` and
+``Database.transaction`` also do more. :func:`_is_foreign` says why this
+module asks on its write connection.
+
 The refusal matters more here than the size of the module suggests. The slip
 it exists for is ``--db`` pointing at the paper store: opening that file and
 running migrations against it would add tables to a store a live paper run is
@@ -41,6 +50,7 @@ __all__ = [
     "StoreError",
     "canonical_coin",
     "default_db_path",
+    "utcnow_iso",
 ]
 
 # Named once: the CLI's ``--db`` help text and the default path both say it.
@@ -91,7 +101,8 @@ def canonical_coin(coin: str) -> str:
     return coin.strip().upper()
 
 
-def _utcnow_iso() -> str:
+def utcnow_iso() -> str:
+    """Now, as the offset-carrying UTC text this store's ``*_at`` columns hold."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -279,7 +290,7 @@ class ResearchStore:
                     conn.execute(statement)
                 conn.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                    (version, _utcnow_iso()),
+                    (version, utcnow_iso()),
                 )
         return SCHEMA_VERSION
 
@@ -477,7 +488,7 @@ class ResearchStore:
                     latest_ms,
                     rows,
                     stopped,
-                    _utcnow_iso(),
+                    utcnow_iso(),
                 ),
             )
 

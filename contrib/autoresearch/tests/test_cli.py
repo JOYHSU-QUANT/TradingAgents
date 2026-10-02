@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from contrib.autoresearch import upstream
-from contrib.autoresearch.cli import _parse_since, main
+from contrib.autoresearch.cli import main, parse_since
 from contrib.autoresearch.constants import DAILY_INTERVAL, STUDIED_INTERVALS
 from contrib.autoresearch.store import DB_FILENAME, ResearchStore
 from contrib.autoresearch.upstream import CandleInterval, ExchangeError, epoch_ms, from_epoch_ms
@@ -40,24 +40,24 @@ def _serve(monkeypatch, market):
 
 
 def test_parse_since_reads_a_bare_date_as_midnight_utc():
-    assert _parse_since("2023-01-01") == datetime(2023, 1, 1, tzinfo=timezone.utc)
+    assert parse_since("2023-01-01") == datetime(2023, 1, 1, tzinfo=timezone.utc)
 
 
 def test_parse_since_keeps_an_explicit_offset():
-    parsed = _parse_since("2023-01-01T06:00:00+02:00")
+    parsed = parse_since("2023-01-01T06:00:00+02:00")
     assert parsed.utcoffset().total_seconds() == 7200
 
 
 def test_parse_since_refuses_a_datetime_without_an_offset():
     """The one door left open if a naive datetime were read in the host zone."""
     with pytest.raises(ValueError) as caught:
-        _parse_since("2023-01-01T00:00:00")
+        parse_since("2023-01-01T00:00:00")
     assert "no UTC offset" in str(caught.value)
 
 
 def test_parse_since_refuses_something_that_is_not_a_date_at_all():
     with pytest.raises(ValueError) as caught:
-        _parse_since("last tuesday")
+        parse_since("last tuesday")
     assert "not a date or ISO-8601 instant" in str(caught.value)
 
 
@@ -325,7 +325,7 @@ def test_every_spelling_of_a_naive_datetime_is_refused(spelling):
     shape instead, and these are the spellings that used to get through it.
     """
     with pytest.raises(ValueError, match="no UTC offset"):
-        _parse_since(spelling)
+        parse_since(spelling)
 
 
 def test_a_malformed_since_exits_one_instead_of_a_traceback(tmp_path, capsys):
@@ -570,4 +570,12 @@ def test_neither_language_command_takes_a_store_or_a_market_argument(argv):
     """
     with pytest.raises(SystemExit) as caught:
         main(argv)
+    assert caught.value.code == 2
+
+
+@pytest.mark.parametrize("command", ["promote", "report"])
+def test_a_trial_that_is_not_a_number_is_a_usage_error(tmp_path, command):
+    with pytest.raises(SystemExit) as caught:
+        main([command, "--experiment", "btc-4h", "--trial", "two",
+              "--db", str(tmp_path / DB_FILENAME)])
     assert caught.value.code == 2

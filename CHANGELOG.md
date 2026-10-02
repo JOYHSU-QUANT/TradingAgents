@@ -868,14 +868,15 @@ Breaking changes within the 0.x line are called out explicitly.
   refused. The cycles that are not questions (failed before an input row,
   still in progress) are printed too. Nothing is scored and no later price is
   read; `--out DIR` writes one CSV row per question beside the summary. The
-  trading daemon, its store and its schema are untouched. The rule is a spec file committed in the
-  research package, `contrib/autoresearch/guardrails/btc-20d-breakout.json`
-  (on 4h bars: enter on a close beyond the 120-bar channel, leave on a close
-  beyond the 55-bar one), named in reports as `<file stem>@<spec hash
-  prefix>`. It is not a promoted trial and is not in the ledger: it was
-  admitted on other terms (written down before any result, measured on long
-  history, never tuned), and a test pins its hash. `contrib/autoresearch/guardrail.py`
-  replays it over a store's whole history through the new
+  trading daemon, its store and its schema are untouched. The rule is a spec
+  file committed in the research package,
+  `contrib/autoresearch/guardrails/btc-20d-breakout.json` (on 4h bars: enter
+  on a close beyond the 120-bar channel, leave on a close beyond the 55-bar
+  one), named in reports as `<file stem>@<spec hash prefix>`. It is not a
+  promoted trial and is not in the ledger: it was admitted on other terms
+  (written down before any result, measured on long history, never tuned),
+  and a test pins its hash. `contrib/autoresearch/guardrail.py` replays it
+  over a store's whole history through the new
   `evaluator.replay_sides`, which keeps the side after every bar;
   `replay_position` is now that record read at its last bar, unchanged in
   what it returns. A rule is always replayed on 4h bars (`RULE_INTERVAL`,

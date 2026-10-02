@@ -1329,8 +1329,8 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
         timeline = timelines[facts.coin]
         rows = shadow(decisions.questions, decisions.answers, timeline)
         lines = [
-            f"guardrail shadow: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; coin "
-            f"and interval from {facts.describe_source()})",
+            f"guardrail shadow: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; "
+            f"interval from {facts.describe_source()})",
             *timeline.describe(),
             # The cycles that are not questions: a position the guardrail
             # refuses may have been held through them, unread.

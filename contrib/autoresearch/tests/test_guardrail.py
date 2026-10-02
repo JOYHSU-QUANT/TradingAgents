@@ -169,6 +169,28 @@ def test_the_committed_rule_takes_a_side_once_its_channel_has_warmed_up(store):
     assert timeline.reading_at(timeline.close_times[120]).side is Side.LONG
 
 
+def test_the_committed_rule_leaves_on_the_55_bar_channel_and_goes_short_on_the_120(store):
+    # The other half of the rule. 122 rising bars (closes 100..221, long from
+    # bar 120), then three closes read against the channels behind each:
+    # - 180: above the lowest low of the 55 bars before it (167), so still
+    #   long. A 20-bar exit channel (low 202) would have left here.
+    # - 150: below the 55-bar low (now 168), so flat; above the 120-bar low
+    #   (103), so not short.
+    # - 95: below the 120-bar low (104), so short.
+    closes = [100 + i for i in range(122)] + [180, 150, 95]
+    store.upsert_candles("BTC", RULE_INTERVAL, candles(closes, highs=closes, lows=closes))
+    timeline = build_timeline(store, load_rule(), coin="BTC")
+    assert timeline.sides[120:] == (Side.LONG, Side.LONG, Side.LONG, None, Side.SHORT)
+
+
+def test_the_committed_rule_goes_short_on_a_falling_channel(store):
+    # The mirror of the rising series: each close one below the last.
+    closes = [300 - i for i in range(125)]
+    store.upsert_candles("BTC", RULE_INTERVAL, candles(closes, highs=closes, lows=closes))
+    timeline = build_timeline(store, load_rule(), coin="BTC")
+    assert timeline.sides == (None,) * 120 + (Side.SHORT,) * 5
+
+
 def test_a_store_that_cannot_answer_is_refused_with_the_rule_named(store, tmp_path):
     rule = _rule(tmp_path)
     with pytest.raises(GuardrailError, match=r"cannot say which side band@\w{8} held on btc"):

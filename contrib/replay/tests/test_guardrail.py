@@ -223,6 +223,11 @@ def test_a_question_the_research_store_does_not_reach_reads_unknown(tmp_path):
     for slot in (7, 8, 9, 10, 11):
         row = rows[input_id(slot)]
         assert (row.rule_side, row.rule_decided_ms, row.verdict) == (None, None, UNKNOWN)
+    # In the CSV such a row has no rule side and no bar it was read from.
+    header, table = shadow_table(list(rows.values()))
+    unread = dict(zip(header, next(r for r in table if r[0] == input_id(7)), strict=True))
+    assert (unread["rule_side"], unread["rule_decided_at"]) == (None, None)
+    assert (unread["held_side"], unread["verdict"]) == ("long", UNKNOWN)
 
 
 @pytest.mark.parametrize(
@@ -234,7 +239,9 @@ def test_a_question_the_research_store_does_not_reach_reads_unknown(tmp_path):
         ((BLOCK, CLOSE, CLOSE), 1),  # the paper book kept what was blocked: the same position
         ((CLOSE, BLOCK), 2),  # closed, then an order refused
         ((CLOSE, PASS, CLOSE), 2),  # a pass ends the stretch
-        ((CLOSE, UNKNOWN, CLOSE), 1),  # a question with no reading does not
+        ((CLOSE, UNKNOWN, CLOSE), 1),  # a question with no reading does not end one
+        ((UNKNOWN, CLOSE), 1),  # nor start one: the close after it is the first found
+        ((CLOSE, PASS, UNKNOWN, CLOSE), 2),  # nor reopen one a pass has ended
     ],
 )
 def test_interventions_count_orders_and_positions_not_questions(tmp_path, verdicts, count):
@@ -314,7 +321,8 @@ def test_describe_does_not_conclude_past_the_questions_it_could_not_read(tmp_pat
         "verdicts: pass 4, block_to_flat 1, close_position 1, rule_unknown 5",
         "orders created: 4, of which the guardrail refuses 1",
         "rule side not known at 5 question(s): the research store does not reach them, or the "
-        "rule could not be evaluated there; nothing is said about those",
+        "rule could not be evaluated there; a position held there is not judged (rule_unknown), "
+        "and a flat book passes unread",
     ]
     assert lines[6].startswith("interventions: 1 (")
     unrefused = describe_shadow([row for row in rows if row.verdict in (PASS, UNKNOWN)])
@@ -373,8 +381,7 @@ def test_guardrail_prints_the_rule_and_the_run_under_it(store, tmp_path, capsys)
     assert main(_guardrail(store, tmp_path)) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0] == (
-        f"guardrail shadow: run {RUN_ID} (BTC, 4h cycle; coin and interval from the run's "
-        "recorded config)"
+        f"guardrail shadow: run {RUN_ID} (BTC, 4h cycle; interval from the run's recorded config)"
     )
     assert out[1].startswith("guardrail rule: band@")
     # The fixture's two cycles that are not questions are said, not dropped.
@@ -442,6 +449,7 @@ def test_a_research_store_that_is_not_one_is_a_named_exit_1(store, tmp_path, cap
     assert main(_guardrail(store, tmp_path, "--research-db", str(foreign))) == 1
     captured = capsys.readouterr()
     assert captured.err.startswith("error: ")
+    assert "is a SQLite database but not an AutoResearch store" in captured.err
     assert captured.out == ""
 
 

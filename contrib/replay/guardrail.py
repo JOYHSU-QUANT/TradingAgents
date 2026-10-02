@@ -173,7 +173,8 @@ def interventions(rows: Sequence[GuardrailRow]) -> int:
             count += 1
             outside = True
         elif row.verdict == CLOSE:
-            count += not outside
+            if not outside:
+                count += 1
             outside = True
         elif row.verdict == PASS:
             outside = False
@@ -211,7 +212,8 @@ def describe_shadow(rows: Sequence[GuardrailRow]) -> list[str]:
         # so the verdict line alone understates how much was not read.
         lines.append(
             f"rule side not known at {unknown} question(s): the research store does not reach "
-            "them, or the rule could not be evaluated there; nothing is said about those"
+            "them, or the rule could not be evaluated there; a position held there is not "
+            "judged (rule_unknown), and a flat book passes unread"
         )
     if not refused:
         lines.append(

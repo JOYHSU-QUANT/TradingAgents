@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from ...common.constants import ERROR_TYPES
-from ..cloid import LIVE_ORDER_ROLES
+from ...common.enum_guard import VocabEnum
+from ...domains.perp.risk_gate import RiskAction
+from ...domains.perp.target_decision import DecisionMode, TargetSide
+from ..cloid import LIVE_ORDER_ROLES, OrderRole
 
 __all__ = [
     "ACCOUNTING_ADJUSTMENT_TYPES",
+    "AttemptStatus",
     "ERROR_TYPES",
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
+    "ExecutionPlanStatus",
     "FUNDING_BACKFILL_LANES",
+    "FinalDisposition",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
     "LIVE_ORDER_STATUSES",
@@ -19,20 +25,24 @@ __all__ = [
     "ORDER_TYPES",
     "PROTECTION_ORDER_EVENT_TYPES",
     "PROVISIONAL_DISPOSITIONS",
+    "ProvisionalDisposition",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
     "RESTING_ORDER_STATUSES",
     "ROLE_TO_ORDER_TYPE",
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
+    "SafeModeType",
     "TERMINAL_ATTEMPT_STATUSES",
 ]
 
 
 # Enumerable storage values validated at the write boundary (fail loud on a typo
 # rather than persisting it). ``Side`` carries the fill/order direction; these
-# small sets cover the columns that don't warrant a full enum yet (their typed
-# writers land in PR3).
+# small sets cover the other columns. A vocabulary whose members a split or
+# another module names is an enum here and its set is derived from it, so the
+# name and the stored string cannot part; the write boundary still checks the
+# plain string against the set.
 _MODES = frozenset({"paper", "live"})
 _LIQUIDITY_TYPES = frozenset({"maker", "taker", "simulated"})
 # §14 live fills: the exchange marks each fill maker or taker (``crossed``); a
@@ -90,6 +100,12 @@ _FUNDING_SOURCES = frozenset(
 # guard that produces a class — ``domains.perp.freshness``, which must not
 # import this package — validates against the same set at construction; this
 # module admits it at the write boundary. One list, two check sites.
+
+# ``ai_outputs`` records the risk gate's verdict in the gate's own enums
+# (phase2-data §7); these are the three columns' stored spellings.
+_DECISION_MODES = frozenset(mode.value for mode in DecisionMode)
+_TARGET_SIDES = frozenset(side.value for side in TargetSide)
+_RISK_ACTIONS = frozenset(action.value for action in RiskAction)
 # scheduler_state CSV-export breadcrumb states (schema v3).
 _EXPORT_STATUSES = frozenset({"ok", "failed"})
 # Replay breadcrumb vocabulary: "mismatch" = replay ran and contradicted the
@@ -125,14 +141,26 @@ KILL_SWITCH_EVENT_TYPES = frozenset(
 )
 
 
-_ATTEMPT_STATUSES = frozenset({"in_progress", "completed", "api_failed", "invalid_output"})
+class AttemptStatus(VocabEnum, noun="decision attempt status"):
+    """``decision_attempts.status``: one cycle's attempt, in progress or ended."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    API_FAILED = "api_failed"
+    INVALID_OUTPUT = "invalid_output"
+
+
+_ATTEMPT_STATUSES = frozenset(status.value for status in AttemptStatus)
 # The live/terminal split of each status vocabulary, defined HERE next to the
 # canonical sets so a future status addition updates both in one place — a
 # hand-copied subset in a consumer (reconcile's cancel sweep, the validator's
 # cycle counting) would silently miss the new member (check_enum can validate
 # membership, never completeness).
-TERMINAL_ATTEMPT_STATUSES: tuple[str, ...] = ("completed", "api_failed", "invalid_output")
-LIVE_PLAN_STATUSES: tuple[str, ...] = ("active", "paused_market_data")
+TERMINAL_ATTEMPT_STATUSES: tuple[str, ...] = (
+    AttemptStatus.COMPLETED.value,
+    AttemptStatus.API_FAILED.value,
+    AttemptStatus.INVALID_OUTPUT.value,
+)
 # "submitted" belongs here: a pre-ack live order is non-terminal — it may be
 # resting on the exchange — so the restart cancel sweep and PR 4's
 # reconciliation must see it, never skip it as already-settled.
@@ -200,7 +228,10 @@ ORDER_TYPES = frozenset(
 # backfill; the paper engine's protection placement) must share one mapping or
 # they drift and audit rows get mislabeled. Non-trigger roles take each
 # writer's own wire-type default.
-ROLE_TO_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
+ROLE_TO_ORDER_TYPE = {
+    OrderRole.STOP_LOSS.value: "stop_market",
+    OrderRole.TAKE_PROFIT.value: "take_market",
+}
 # "submitted" is the live-only pre-ack state (phase3-spec §8.3): the order row
 # is written before the network call and patched once the exchange answers.
 _ORDER_STATUSES = frozenset(
@@ -235,42 +266,39 @@ _TERMINAL_ORDER_STATUSES: tuple[str, ...] = ("filled", "canceled", "rejected")
 # takes the opposite vocabulary (verbatim) — which is precisely how such a slip
 # would happen.
 _EXCHANGE_STATUS_FAMILIES = frozenset({"open", "filled", "canceled", "rejected"})
-# Execution-plan lifecycle: ``active`` / ``paused_market_data`` are live; the rest
-# are terminal (execution §1.1 / §1.3 / §4.1).
-_PLAN_STATUSES = frozenset(
-    {
-        "active",
-        "paused_market_data",
-        "completed",
-        "canceled",
-        "canceled_restart",
-        "expired",
-        "failed",
-        "flip_incomplete",
-        "rejected",
-        "residual",
-    }
+
+
+class ExecutionPlanStatus(VocabEnum, noun="execution plan status"):
+    """``execution_plans.status`` (execution §1.1 / §1.3 / §4.1)."""
+
+    ACTIVE = "active"
+    PAUSED_MARKET_DATA = "paused_market_data"
+    COMPLETED = "completed"
+    CANCELED = "canceled"
+    CANCELED_RESTART = "canceled_restart"
+    EXPIRED = "expired"
+    FAILED = "failed"
+    FLIP_INCOMPLETE = "flip_incomplete"
+    REJECTED = "rejected"
+    RESIDUAL = "residual"
+
+
+_PLAN_STATUSES = frozenset(status.value for status in ExecutionPlanStatus)
+# The live half of the lifecycle; every other member is terminal.
+LIVE_PLAN_STATUSES: tuple[str, ...] = (
+    ExecutionPlanStatus.ACTIVE.value,
+    ExecutionPlanStatus.PAUSED_MARKET_DATA.value,
 )
 
-# A split with no declared complement can only be checked for membership: it must
-# stay a subset of its vocabulary, so a renamed status cannot leave a stale member
-# behind. Checked at import.
-for _split, _whole, _name in (
-    (TERMINAL_ATTEMPT_STATUSES, _ATTEMPT_STATUSES, "TERMINAL_ATTEMPT_STATUSES"),
-    (LIVE_PLAN_STATUSES, _PLAN_STATUSES, "LIVE_PLAN_STATUSES"),
-):
-    _extra = set(_split) - _whole
-    if _extra:
-        raise ValueError(f"{_name} contains statuses outside its vocabulary: {sorted(_extra)}")
-del _split, _whole, _name, _extra
-
-# Subset alone cannot catch the failure mode the comment above describes: a status
-# ADDED to a vocabulary is silently absent from every split (check_enum validates
-# membership, never completeness). Where a vocabulary declares both halves, assert
-# the PARTITION instead — strictly stronger than the subset check (an alien member
-# shows up as "unknown"), and a newly added status fails at import until it is
-# deliberately classified, rather than defaulting into the safe-looking half.
-# §8.3's resend guard is the one that must never silently widen.
+# A split spelled with its enum's members (TERMINAL_ATTEMPT_STATUSES,
+# LIVE_PLAN_STATUSES) is a subset of its vocabulary by construction. That
+# cannot catch the failure mode the split comment further up describes: a
+# status ADDED to a vocabulary is silently absent from every split (check_enum
+# validates membership, never completeness). Where a vocabulary declares both
+# halves, assert the PARTITION — an alien member shows up as "unknown", and a
+# newly added status fails at import until it is deliberately classified,
+# rather than defaulting into the safe-looking half. §8.3's resend guard is
+# the one that must never silently widen.
 for _split, _rest, _whole, _name in (
     (
         EXCHANGE_KNOWN_ATTEMPT_STATUSES,
@@ -395,25 +423,32 @@ RECONCILIATION_CASE_TYPES = frozenset(
 # whatever ends it before the next one opens), so the operator surfaces keep
 # showing one live fault however often it comes back — what grows is the events
 # table, by one row per recurrence.
+class ProvisionalDisposition(VocabEnum, noun="provisional machine disposition"):
+    """The provisional dispositions the sweep writes by name.
+
+    ``PROVISIONAL_DISPOSITIONS`` is these plus the ``settled_{status}`` family.
+    """
+
+    # _settle_absent_order: unknownOid with no §8.3 rule-10 evidence — the
+    # send never landed, the local row goes 'rejected'. Back only after a
+    # deliberate rule-5 resend.
+    SETTLED_NEVER_SENT = "settled_never_sent"
+    # _clear_read_failure_case, for BOTH tiebreakers' read-failure keys.
+    # Absent-order side: stamped only once the pass settled the order, so
+    # back only after a revive. Reopen side: stamped on any answered read
+    # while the local row stays terminal, so back on the venue's next flap
+    # — the one member whose recurrence is not revive-bounded (the cost is
+    # argued at that call site).
+    RESOLVED_READ_SUCCEEDED = "resolved_read_succeeded"
+    # _maybe_reopen_terminal_order: the terminal local row was wrong and is
+    # now live again. Back once some pass settles that row again — which
+    # _settle_absent_order does on its own, so this member and
+    # ``settled_{status}`` can revive each other with no resend involved.
+    LOCAL_ROW_REOPENED = "local_row_reopened"
+
+
 PROVISIONAL_DISPOSITIONS = frozenset(
-    {
-        # _settle_absent_order: unknownOid with no §8.3 rule-10 evidence — the
-        # send never landed, the local row goes 'rejected'. Back only after a
-        # deliberate rule-5 resend.
-        "settled_never_sent",
-        # _clear_read_failure_case, for BOTH tiebreakers' read-failure keys.
-        # Absent-order side: stamped only once the pass settled the order, so
-        # back only after a revive. Reopen side: stamped on any answered read
-        # while the local row stays terminal, so back on the venue's next flap
-        # — the one member whose recurrence is not revive-bounded (the cost is
-        # argued at that call site).
-        "resolved_read_succeeded",
-        # _maybe_reopen_terminal_order: the terminal local row was wrong and is
-        # now live again. Back once some pass settles that row again — which
-        # _settle_absent_order does on its own, so this member and
-        # ``settled_{status}`` can revive each other with no resend involved.
-        "local_row_reopened",
-    }
+    {disposition.value for disposition in ProvisionalDisposition}
     # _settle_absent_order's other disposal: orderStatus answered with a
     # terminal status and the local row was written to match. Derived from the
     # status vocabulary rather than spelled out, so a new terminal status
@@ -421,22 +456,25 @@ PROVISIONAL_DISPOSITIONS = frozenset(
     | {f"settled_{status}" for status in _TERMINAL_ORDER_STATUSES}
 )
 
+
 # The sweep's own dispositions that shut their key FOR GOOD (or never meet the
 # dedupe at all) — the complement of PROVISIONAL_DISPOSITIONS within the
 # machine vocabulary. Spelled out here so the union below is a closed set: the
 # three are the exhaustive "sweep wrote it, and no later sighting reopens the
 # key" list.
-_FINAL_DISPOSITIONS = frozenset(
-    {
-        # reconcile_orders, orphan back-fill: the missing local row now exists.
-        "local_row_backfilled",
-        # reconcile_fills: the stream fault's fill is booked.
-        "resolved_fill_booked",
-        # exchange_fill_missing_local: carries no exchange_value, so it never
-        # reaches the dedupe in the first place (see the note above).
-        "backfilled",
-    }
-)
+class FinalDisposition(VocabEnum, noun="final machine disposition"):
+    """The dispositions whose key no later sighting reopens."""
+
+    # reconcile_orders, orphan back-fill: the missing local row now exists.
+    LOCAL_ROW_BACKFILLED = "local_row_backfilled"
+    # reconcile_fills: the stream fault's fill is booked.
+    RESOLVED_FILL_BOOKED = "resolved_fill_booked"
+    # exchange_fill_missing_local: carries no exchange_value, so it never
+    # reaches the dedupe in the first place (see the note above).
+    BACKFILLED = "backfilled"
+
+
+_FINAL_DISPOSITIONS = frozenset(disposition.value for disposition in FinalDisposition)
 
 # Every disposition the §12 sweep itself can write — the CLOSED vocabulary for
 # ``action_taken`` values that are not a human's ``--stamp-case`` prose.
@@ -450,12 +488,14 @@ _FINAL_DISPOSITIONS = frozenset(
 # an operator noticing a recurrence that never reached ``safe-mode --status``,
 # and #65's whole point was that this path is invisible.
 #
-# So ``ReconciliationCase.__post_init__`` checks membership here, and so does
-# the sweep's import-time loop for the four stamps that check cannot stand in
-# front of (three case-less writes, and the orphan back-fill whose case is
-# built after its write — issue #104). A new disposition then fails LOUDLY at the
-# moment it is constructed — an unclean leg, in the pass that introduced it —
-# and whoever adds it must come here and decide which half it belongs in.
+# So ``ReconciliationCase.__post_init__`` checks membership here. The four
+# stamps that check cannot stand in front of (three case-less writes, and the
+# orphan back-fill whose case is built after its write — issue #104) are named
+# off the two enums above in ``live.reconcile_types``: each is a member by
+# construction, classified by the enum it was added to. A new disposition
+# written as a literal then fails LOUDLY at the moment it is constructed — an
+# unclean leg, in the pass that introduced it — and whoever adds it must come
+# here and decide which half it belongs in.
 # ``safe-mode --stamp-case`` refuses this whole set for the mirror reason: the
 # dedupe reads the string, not who wrote it, and an audit row must not leave a
 # reader unable to tell a human's attestation from the daemon's.
@@ -482,8 +522,15 @@ RECONCILIATION_TRIGGERS = frozenset(
 _RECONCILIATION_TRIGGERS = RECONCILIATION_TRIGGERS
 
 
-# §13.3: the two safe-mode types. Also validates the scheduler_state column.
-SAFE_MODE_TYPES = frozenset({"recoverable", "manual"})
+class SafeModeType(VocabEnum, noun="safe-mode type"):
+    """§13.3: the two safe-mode types."""
+
+    RECOVERABLE = "recoverable"
+    MANUAL = "manual"
+
+
+# Also validates the scheduler_state column.
+SAFE_MODE_TYPES = frozenset(mode_type.value for mode_type in SafeModeType)
 
 # §13.6 history vocabulary. ``safe_mode_entered`` records every entry,
 # ``safe_mode_escalated`` a recoverable→manual upgrade while already inside,

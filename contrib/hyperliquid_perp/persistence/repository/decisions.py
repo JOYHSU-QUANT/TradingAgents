@@ -9,7 +9,15 @@ from typing import Any, NamedTuple
 
 from ...common.enum_guard import check_enum
 from ._base import _UNSET, _encode, _insert, _iso_utc, _Unset
-from ._vocab import _ATTEMPT_STATUSES, _MODES, ERROR_TYPES, TERMINAL_ATTEMPT_STATUSES
+from ._vocab import (
+    _ATTEMPT_STATUSES,
+    _DECISION_MODES,
+    _MODES,
+    _RISK_ACTIONS,
+    _TARGET_SIDES,
+    ERROR_TYPES,
+    TERMINAL_ATTEMPT_STATUSES,
+)
 from .scheduler import upsert_scheduler_state
 
 __all__ = [
@@ -68,7 +76,22 @@ def insert_ai_input(conn: sqlite3.Connection, **fields: Any) -> None:
 
 
 def insert_ai_output(conn: sqlite3.Connection, **fields: Any) -> None:
+    """Insert one ``ai_outputs`` row, its gate-verdict columns vocabulary-checked.
+
+    ``decision_mode``, ``target_side`` and ``risk_action`` are checked when
+    they carry a value, so a word outside the risk gate's enums fails here
+    instead of reaching a reader that parses the column back into them. An
+    absent or ``None`` value is left to the column's own constraint, as in
+    :func:`_check_mode`: ``target_side`` is nullable, the other two NOT NULL.
+    """
     _check_mode(fields)
+    for column, allowed in (
+        ("decision_mode", _DECISION_MODES),
+        ("target_side", _TARGET_SIDES),
+        ("risk_action", _RISK_ACTIONS),
+    ):
+        if fields.get(column) is not None:
+            check_enum(fields[column], allowed, name=column)
     _insert(conn, "ai_outputs", fields)
 
 

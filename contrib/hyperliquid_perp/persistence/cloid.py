@@ -27,27 +27,39 @@ from __future__ import annotations
 import hashlib
 import re
 
-from ..common.enum_guard import check_enum
+from ..common.enum_guard import VocabEnum, check_enum
 
-__all__ = ["LIVE_ORDER_ROLES", "assert_cloid_provenance", "cloid_hex", "cloid_logical"]
+__all__ = [
+    "LIVE_ORDER_ROLES",
+    "OrderRole",
+    "assert_cloid_provenance",
+    "cloid_hex",
+    "cloid_logical",
+]
 
-# §8.1: every live order carries one of these roles. Phase 2 already uses
-# entry / rebalance / stop_loss / take_profit; close / emergency_close /
-# cleanup_cancel are the live-only additions. The repository package's
-# ``_vocab._ORDER_ROLES`` IS this frozenset (aliased, not copied), so the id
-# layer and the write boundary cannot drift — do not re-introduce an
-# independent set there.
-LIVE_ORDER_ROLES = frozenset(
-    {
-        "entry",
-        "rebalance",
-        "close",
-        "stop_loss",
-        "take_profit",
-        "emergency_close",
-        "cleanup_cancel",
-    }
-)
+
+class OrderRole(VocabEnum, noun="order role"):
+    """§8.1: the role every live order carries.
+
+    Phase 2 already uses entry / rebalance / stop_loss / take_profit; close /
+    emergency_close / cleanup_cancel are the live-only additions. A module
+    that names a subset of the roles spells it with these members.
+    """
+
+    ENTRY = "entry"
+    REBALANCE = "rebalance"
+    CLOSE = "close"
+    STOP_LOSS = "stop_loss"
+    TAKE_PROFIT = "take_profit"
+    EMERGENCY_CLOSE = "emergency_close"
+    CLEANUP_CANCEL = "cleanup_cancel"
+
+
+# The plain-string form the id layer and the write boundary check against.
+# The repository package's ``_vocab._ORDER_ROLES`` IS this frozenset (aliased,
+# not copied), so the two cannot drift — do not re-introduce an independent
+# set there.
+LIVE_ORDER_ROLES = frozenset(role.value for role in OrderRole)
 
 # cloid_hex is "0x" + 32 hex chars = 16 bytes = 128 bits (§8.2).
 _HEX_BYTES = 16

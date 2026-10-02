@@ -177,10 +177,6 @@ if not {_RESTART_KEY, _EMERGENCY_KEY, _EXISTING_POSITION_KEY, _STALE_ORDER_KEY} 
     SMOKE_TEST_KEYS
 ):
     raise AssertionError("validation's §20.3 smoke-test keys drifted from smoke.SMOKE_TESTS")
-# Same discipline for the safe-mode TYPE the manual gate keys on: a renamed
-# member would make the gate match zero rows and pass every latched run.
-if SAFE_MODE_MANUAL not in repo.SAFE_MODE_TYPES:
-    raise AssertionError("safe_mode.SAFE_MODE_MANUAL drifted from repository.SAFE_MODE_TYPES")
 
 # execution_mode() returns "unknown" for an unreadable genesis record, else
 # whatever live.mode the genesis config named — one of ExecutionMode's members.

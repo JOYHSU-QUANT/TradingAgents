@@ -4,8 +4,8 @@ What every leg of the sweep constructs or reads and what its callers consume:
 :class:`ReconciliationCase` (one observed §12.3 case),
 :class:`ReconciliationReport` (one pass's verdict), :class:`SweepContext`
 (what the fill and orders legs read off the reconciler for one pass), and
-the machine-disposition constants whose membership in
-``repo.MACHINE_DISPOSITIONS`` is checked at import. The sweep itself is
+the machine-disposition constants, each the value of a member of the
+registry's two disposition enums. The sweep itself is
 :mod:`.reconcile` (``LiveReconciler``), with the fill legs in
 :mod:`.reconcile_fills` and the orders leg in :mod:`.reconcile_orders`.
 The disposition constants and ``MANUAL_CASE_REASONS`` are the sweep's
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 __all__ = [
     "FILL_BACKFILLED_DISPOSITION",
     "FILL_BOOKED_DISPOSITION",
-    "IMPORT_CHECKED_DISPOSITIONS",
     "MANUAL_CASE_REASONS",
     "ORPHAN_BACKFILLED_DISPOSITION",
     "READ_SUCCEEDED_DISPOSITION",
@@ -116,33 +115,17 @@ MANUAL_CASE_REASONS = {
 # row with no case row explaining it (issue #104). Every other disposition
 # travels through a ``ReconciliationCase`` built before its write.
 #
-# Checked at IMPORT rather than at each write, because the sites do not
-# share a failure lane and TWO of them cannot fail loudly where they stand:
-# ``reconcile_orders._clear_read_failure_case`` swallows and logs a warning,
-# and ``LiveReconciler._record_backfill_event`` swallows and logs an exception
-# while the pass stays CLEAN — both deliberately fail-soft, so a guard at
-# either would report a rename as one log line and let the key shut forever
-# anyway, the exact silence #84 is about. Only the fill-booked stamp reaches
-# ``guarded``, which would turn a raise into an unclean verdict. Checking
-# here gives all four the same answer, and a rename nobody classified in
-# repo.MACHINE_DISPOSITIONS cannot start the daemon at all. (Since issue #151
-# repo.set_reconciliation_action re-checks the set at the write; this loop
-# stays the start-up refusal.)
-FILL_BOOKED_DISPOSITION = "resolved_fill_booked"
-READ_SUCCEEDED_DISPOSITION = "resolved_read_succeeded"
-FILL_BACKFILLED_DISPOSITION = "backfilled"
-ORPHAN_BACKFILLED_DISPOSITION = "local_row_backfilled"
-# Named so the test side can assert the loop's membership without reloading
-# the module (a reload is what proving the REFUSAL costs; membership is cheap).
-IMPORT_CHECKED_DISPOSITIONS = (
-    FILL_BOOKED_DISPOSITION,
-    READ_SUCCEEDED_DISPOSITION,
-    FILL_BACKFILLED_DISPOSITION,
-    ORPHAN_BACKFILLED_DISPOSITION,
-)
-for _disposition in IMPORT_CHECKED_DISPOSITIONS:
-    check_enum(_disposition, repo.MACHINE_DISPOSITIONS, name="action_taken")
-del _disposition
+# Each is therefore the value of a registry enum member, not a string typed
+# here: in repo.MACHINE_DISPOSITIONS by construction, and classified by the
+# enum it belongs to. A check at the write would not be enough for them: two
+# of the four sites are deliberately fail-soft
+# (``reconcile_orders._clear_read_failure_case``,
+# ``LiveReconciler._record_backfill_event``), so a stamp refused there is one
+# log line and nothing else.
+FILL_BOOKED_DISPOSITION = repo.FinalDisposition.RESOLVED_FILL_BOOKED.value
+READ_SUCCEEDED_DISPOSITION = repo.ProvisionalDisposition.RESOLVED_READ_SUCCEEDED.value
+FILL_BACKFILLED_DISPOSITION = repo.FinalDisposition.BACKFILLED.value
+ORPHAN_BACKFILLED_DISPOSITION = repo.FinalDisposition.LOCAL_ROW_BACKFILLED.value
 
 
 @dataclass(frozen=True)

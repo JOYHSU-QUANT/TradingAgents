@@ -7,8 +7,8 @@ SOURCE for every literal that could reach the ``action_taken`` column and
 checks each against the set. It lives at package level because its reach is
 the whole ``live`` package: a disposition written tomorrow in ``fills.py``
 fails here, not in a test named after ``reconcile`` (issue #151). What binds
-to ``reconcile_types``'s own module object — the import-time constant loop and
-the construction-time refusal — stays in ``test_reconcile.py``.
+to ``reconcile_types``'s own module object — the construction-time refusal —
+stays in ``test_reconcile.py``.
 """
 
 from __future__ import annotations
@@ -94,9 +94,10 @@ def _machine_disposition_literals(source: str) -> set[str]:
     alike) and positionals are resolved against the real signature. Stated
     exactly so nobody reads it as more: names and attributes (a module
     constant, ``case.action_taken``) are not literals and are not resolved —
-    constants are the import-time loop's job, computed values the runtime
-    guard's; f-strings are skipped (``f"settled_{status}"`` is derived in
-    ``_vocab`` and guarded at runtime); a literal forwarded through a local
+    the module constants are values of the registry's enum members, computed
+    values are the runtime guard's job; f-strings are skipped
+    (``f"settled_{status}"`` is derived in ``_vocab`` and guarded at
+    runtime); a literal forwarded through a local
     wrapper or an aliased import is invisible (``set_reconciliation_action``
     re-checks the set at the write since issue #151, but
     ``stamp_reconciliation_action_if_unset`` carries human prose and checks

@@ -700,7 +700,7 @@ class LiveDecisionDriver:
     def _manual_latched(self) -> bool:
         """Whether a §13.5 manual safe-mode latch is standing (scheduler_state)."""
         state = repo.get_scheduler_state(self._db.conn, self._run_id)
-        return state is not None and state["safe_mode_type"] == "manual"
+        return state is not None and state["safe_mode_type"] == repo.SafeModeType.MANUAL.value
 
     def _due(self, now: datetime) -> bool:
         state = repo.get_scheduler_state(self._db.conn, self._run_id)

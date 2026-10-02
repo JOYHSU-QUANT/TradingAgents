@@ -18,7 +18,6 @@ from contrib.hyperliquid_perp.live import (
     reconcile as reconcile_mod,
     reconcile_fills,
     reconcile_orders,
-    reconcile_types,
 )
 from contrib.hyperliquid_perp.live.fill_backfill import (
     DEFAULT_LOOKBACK,
@@ -2403,74 +2402,6 @@ def test_a_revived_order_that_cannot_be_read_again_gets_its_own_row(env):
     assert len(read_rows) == 2
     assert read_rows[-1]["action_taken"] is None
     assert _unresolved_mismatches(db) == 1
-
-
-def test_the_sweeps_order_dispositions_are_classified_as_the_set_intends(env):
-    # A membership table, not a guard: the behavioural tests above are what
-    # would catch a stamp renamed at its write site (each asserts the literal
-    # string it expects). What this pins is the CLASSIFICATION — that the four
-    # families of order disposition below (six strings, `settled_{status}` being
-    # three of them) are provisional and the "cannot come back" ones are not.
-    # It is the only place `settled_filled` and `settled_rejected` are
-    # named at all: those two are derived from the terminal-status vocabulary
-    # rather than written at a call site, so no behavioural test reaches them
-    # (`settled_canceled`, which several do, is the derivation's witness).
-    # `backfilled` is in neither list on purpose: its case carries no
-    # exchange_value, so it never meets the dedupe. It is still a machine
-    # stamp — see the source scan in tests/live/test_disposition_vocab.py.
-    for stamp in (
-        "settled_never_sent",
-        "settled_canceled",
-        "settled_filled",
-        "settled_rejected",
-        "resolved_read_succeeded",
-        "local_row_reopened",
-    ):
-        assert stamp in repo.PROVISIONAL_DISPOSITIONS, stamp
-    for final in ("resolved_fill_booked", "local_row_backfilled", "backfilled"):
-        assert final not in repo.PROVISIONAL_DISPOSITIONS, final
-
-
-def test_every_constant_carried_stamp_is_checked_at_import():
-    # The stamps the source scan (tests/live/test_disposition_vocab.py) cannot
-    # see (passed by NAME) and __post_init__ either
-    # never sees or sees too late. #104-1 added the orphan back-fill's: the one
-    # case-building site whose __post_init__ runs AFTER ``insert_order``
-    # committed, so a rename must refuse to start the daemon instead of leaving
-    # an orders row with no case row explaining it.
-    assert set(reconcile_types.IMPORT_CHECKED_DISPOSITIONS) == {
-        "resolved_fill_booked",
-        "resolved_read_succeeded",
-        "backfilled",
-        "local_row_backfilled",
-    }
-
-
-def test_the_module_refuses_to_import_with_an_unclassified_stamp_constant(monkeypatch):
-    # The import-time check_enum loop is the constants' ONLY guard. Asserting
-    # membership would be unfalsifiable (an unclassified one makes this very
-    # module fail to import), so defeat the import cache and prove the loop is
-    # what refuses — for the #104-1 constant, the one added last.
-    import importlib
-
-    monkeypatch.setattr(
-        repo,
-        "MACHINE_DISPOSITIONS",
-        repo.MACHINE_DISPOSITIONS - {reconcile_types.ORPHAN_BACKFILLED_DISPOSITION},
-    )
-    try:
-        with pytest.raises(ValueError, match="action_taken"):
-            importlib.reload(reconcile_types)
-    finally:
-        # Reload against the real vocabulary — even if the assertion above is
-        # what failed — and then the sweep's other three modules, which bind
-        # its names at import, so the four agree on one set of
-        # case/report/context classes again.
-        monkeypatch.undo()
-        importlib.reload(reconcile_types)
-        importlib.reload(reconcile_fills)
-        importlib.reload(reconcile_orders)
-        importlib.reload(reconcile_mod)
 
 
 def test_an_unclassified_disposition_fails_where_it_is_constructed():

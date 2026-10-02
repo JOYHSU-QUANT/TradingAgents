@@ -59,7 +59,7 @@ from typing import Any
 
 from ..exchanges.hyperliquid.mapper import hl_closing_side, map_account_snapshot
 from ..persistence import repository as repo
-from ..persistence.cloid import LIVE_ORDER_ROLES
+from ..persistence.cloid import LIVE_ORDER_ROLES, OrderRole
 from ..persistence.db import Database
 from ..ports import Clock
 from ..runtime.clock import WallClock
@@ -77,9 +77,15 @@ logger = logging.getLogger(__name__)
 # §19.3 role classification. Every LIVE_ORDER_ROLES member appears in exactly
 # one bucket — the partition check keeps a future role from silently falling
 # through the sweep unhandled.
-_CANCEL_ROLES = frozenset({"entry", "rebalance"})
-_INSPECT_ROLES = frozenset({"close", "emergency_close", "cleanup_cancel"})
-_PROTECTION_ROLES = frozenset({"stop_loss", "take_profit"})
+_CANCEL_ROLES = frozenset({OrderRole.ENTRY.value, OrderRole.REBALANCE.value})
+_INSPECT_ROLES = frozenset(
+    {
+        OrderRole.CLOSE.value,
+        OrderRole.EMERGENCY_CLOSE.value,
+        OrderRole.CLEANUP_CANCEL.value,
+    }
+)
+_PROTECTION_ROLES = frozenset({OrderRole.STOP_LOSS.value, OrderRole.TAKE_PROFIT.value})
 if _CANCEL_ROLES | _INSPECT_ROLES | _PROTECTION_ROLES != LIVE_ORDER_ROLES:
     raise AssertionError(
         "the §19.3 startup sweep's role buckets no longer partition "

@@ -60,7 +60,7 @@ from ..paper.stops import (
 )
 from ..paper.twap import floor_to_step
 from ..persistence import repository as repo
-from ..persistence.cloid import LIVE_ORDER_ROLES, cloid_hex as derive_cloid_hex, cloid_logical
+from ..persistence.cloid import OrderRole, cloid_hex as derive_cloid_hex, cloid_logical
 from ..persistence.db import Database
 from ..persistence.models import PositionState, Side
 from ..ports import Clock
@@ -79,31 +79,21 @@ __all__ = ["ProtectionManager", "ProtectionOutcome"]
 
 logger = logging.getLogger(__name__)
 
-# The two RESTING protective roles this manager owns. Deliberately narrower
-# than order_gate.PROTECTIVE_ORDER_ROLES: emergency_close is a one-shot IOC,
-# never a resting trigger, so it has no row for a clear/residual sweep to find.
-_SLTP_ROLES = ("stop_loss", "take_profit")
-_ROLE_ORDER_TYPE = {"stop_loss": "stop_market", "take_profit": "take_market"}
-_ROLE_TPSL = {"stop_loss": "sl", "take_profit": "tp"}
-# Literal copies of LIVE_ORDER_ROLES members: a role renamed there without this
-# file would silently drop it from the clear/residual sweeps. Fail at import
-# (same guard family as startup.py's partition check).
-if not set(_SLTP_ROLES) <= LIVE_ORDER_ROLES:
-    raise AssertionError("_SLTP_ROLES drifted from LIVE_ORDER_ROLES")
-if set(_ROLE_ORDER_TYPE) != set(_ROLE_TPSL) or set(_ROLE_TPSL) != set(_SLTP_ROLES):
-    raise AssertionError("protection role tables must cover exactly _SLTP_ROLES")
-# Keys are not enough: _ROLE_ORDER_TYPE is a literal copy of the repository's
-# role→order_type mapping, and only its VALUES decide how an audit row is
-# labelled. Left key-checked, a changed order_type spelling would have this
-# file writing the old label while reconcile_orders.py's orphan backfill writes the
-# new one — the same logical SL carrying two order_types depending on which
-# path recorded it. Compare the whole mapping (strictly stronger).
-if {r: repo.ROLE_TO_ORDER_TYPE[r] for r in _SLTP_ROLES} != _ROLE_ORDER_TYPE:
-    raise AssertionError("_ROLE_ORDER_TYPE drifted from repository.ROLE_TO_ORDER_TYPE")
+# The two RESTING protective roles this manager owns, each with its wire
+# ``tpsl`` word. Deliberately narrower than order_gate.PROTECTIVE_ORDER_ROLES:
+# emergency_close is a one-shot IOC, never a resting trigger, so it has no row
+# for a clear/residual sweep to find.
+_ROLE_TPSL = {OrderRole.STOP_LOSS.value: "sl", OrderRole.TAKE_PROFIT.value: "tp"}
+_SLTP_ROLES = tuple(_ROLE_TPSL)
+# Read off the repository's role→order_type mapping rather than typed again:
+# its VALUES decide how an audit row is labelled, and reconcile_orders.py's
+# orphan backfill labels from the same mapping — a second spelling here could
+# give one logical SL two order_types depending on which path recorded it.
+_ROLE_ORDER_TYPE = {role: repo.ROLE_TO_ORDER_TYPE[role] for role in _SLTP_ROLES}
 # Bound, not re-typed: _row_still_rests asks the EXCHANGE the same "is it still on
 # the book" question active_protection_order asks SQLite, and the two answering
-# from different status vocabularies is precisely the drift this file's other
-# import-time guards exist to prevent.
+# from different status vocabularies is precisely the drift a second spelling
+# invites.
 _RESTING_ORDER_STATUSES = frozenset(repo.RESTING_ORDER_STATUSES)
 
 # §9.4 aggressive family (decided 2026-07-22): a stop-loss trigger only FIRES in

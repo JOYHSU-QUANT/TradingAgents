@@ -43,6 +43,10 @@ from ._vocab import (
     SAFE_MODE_EVENT_TYPES,
     SAFE_MODE_TYPES,
     TERMINAL_ATTEMPT_STATUSES,
+    AttemptStatus,
+    FinalDisposition,
+    ProvisionalDisposition,
+    SafeModeType,
 )
 from .account import (
     get_current_account_state,
@@ -152,8 +156,10 @@ from .smoke import insert_smoke_test_result, iter_smoke_test_results, latest_smo
 
 __all__ = [
     "ACCOUNTING_ADJUSTMENT_TYPES",
+    "AttemptStatus",
     "EXCHANGE_KNOWN_ATTEMPT_STATUSES",
     "FUNDING_BACKFILL_LANES",
+    "FinalDisposition",
     "KILL_SWITCH_EVENT_TYPES",
     "LIVE_LIQUIDITY_ROLES",
     "LIVE_SMOKE_TEST_STATUSES",
@@ -162,12 +168,14 @@ __all__ = [
     "PROTECTION_ORDER_EVENT_TYPES",
     "PROVISIONAL_DISPOSITIONS",
     "PromptRegime",
+    "ProvisionalDisposition",
     "RECONCILIATION_CASE_TYPES",
     "RECONCILIATION_TRIGGERS",
     "RESTING_ORDER_STATUSES",
     "ROLE_TO_ORDER_TYPE",
     "SAFE_MODE_EVENT_TYPES",
     "SAFE_MODE_TYPES",
+    "SafeModeType",
     "UnstampedInput",
     "active_protection_order",
     "ai_inputs_without_format_fingerprint",

@@ -792,7 +792,7 @@ no-op 守衛會對一張**其實還掛在簿上**的停損無限重修，而失�
 修復梯燒成 §17.2 緊急平倉——平掉的是本來健康且有保護的倉位。
 
 **期間仍然安全**：SL/TP 與緊急平倉屬 `PROTECTIVE_ORDER_ROLES`，對 manual safe mode 這條
-gate 線是豁免的（`order_gate.py` 有 import-time 保證），所以 latch 期間保護照常運作、
+gate 線是豁免的（`order_gate.py` 以 `OrderRole` 的成員定義這組 role），所以 latch 期間保護照常運作、
 照常修復；被擋住的只有**加曝險**的新單。
 
 **怎麼查**：

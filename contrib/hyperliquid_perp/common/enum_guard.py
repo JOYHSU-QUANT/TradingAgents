@@ -11,8 +11,8 @@ Two sites, two shapes:
   and candle interval; the persistence layer's fill :class:`Side`, and its
   storage-vocabulary enums, which are read by member while their stored
   strings go through :func:`check_enum`; the live submitter's
-  :class:`SubmitOutcomeKind`). Looking a member up by an unknown
-  value fails with ``unsupported <noun> 'X'; choose from [<members>]``
+  :class:`SubmitOutcomeKind`). Looking a member up by an unknown value
+  fails with ``unsupported <noun> 'X'; choose from [<members>]``
   wherever the lookup is written (issue #166); ``Enum``'s own "'X' is not a
   valid MarketRegime" names neither the vocabulary nor the fix.
 

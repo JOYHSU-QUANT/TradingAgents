@@ -79,8 +79,22 @@ def test_an_unknown_fill_side_names_the_vocabulary_at_both_lookups():
             },
         ),
         (
-            repo.MACHINE_DISPOSITIONS - repo.PROVISIONAL_DISPOSITIONS,
+            _vocab._FINAL_DISPOSITIONS,
             {"local_row_backfilled", "resolved_fill_booked", "backfilled"},
+        ),
+        (
+            repo.MACHINE_DISPOSITIONS,
+            {
+                "settled_never_sent",
+                "settled_filled",
+                "settled_canceled",
+                "settled_rejected",
+                "resolved_read_succeeded",
+                "local_row_reopened",
+                "local_row_backfilled",
+                "resolved_fill_booked",
+                "backfilled",
+            },
         ),
     ],
     ids=[
@@ -91,15 +105,17 @@ def test_an_unknown_fill_side_names_the_vocabulary_at_both_lookups():
         "safe-mode-types",
         "provisional-dispositions",
         "final-dispositions",
+        "machine-dispositions",
     ],
 )
 def test_an_enum_derived_vocabulary_stores_the_spellings_it_always_did(derived, stored):
     # These sets are derived from enum members; the strings are what existing
     # stores hold, so they are pinned by spelling — renaming a member's value
     # is a data migration, not a refactor. Plain ``str``, never the member,
-    # whose ``str()`` is ``Class.MEMBER`` rather than the stored word. The two
-    # disposition rows are also the classification: which machine stamps let a
-    # reconciliation fact key reopen, and which shut it for good.
+    # whose ``str()`` is ``Class.MEMBER`` rather than the stored word. The
+    # provisional and final rows are also the classification: which machine
+    # stamps let a reconciliation fact key reopen, and which do not (the key
+    # stays shut, or, for ``backfilled``, never meets the dedupe).
     assert derived == stored
     assert {type(word) for word in derived} == {str}
 
@@ -829,8 +845,8 @@ def test_audit_insert_missing_mode_keeps_its_not_null_failure_shape(tmp_path):
 # --------------------------------------------------------------------------
 
 # The three columns hold the enums the gate result carries, by value; spelled
-# out here, not read off the enums, so a renamed member fails as the
-# stored-data change it is.
+# out here, not read off the enums, so a member whose value is respelled fails
+# as the stored-data change it is.
 _GATE_VERDICT_WORDS = {
     "decision_mode": ["set_target", "maintain_current"],
     "target_side": ["long", "short", "flat", None],
@@ -850,7 +866,17 @@ def test_ai_output_insert_rejects_a_word_outside_the_gates_vocabulary(tmp_path, 
 
 
 def test_ai_output_insert_accepts_each_stored_gate_word(tmp_path):
-    # Including the NULL target_side a maintain_current round writes.
+    # Including the NULL target_side a maintain_current round writes. The
+    # first assertion keeps the table complete: a member added to one of the
+    # three enums has to be added here.
+    assert {
+        column: {word for word in words if word is not None}
+        for column, words in _GATE_VERDICT_WORDS.items()
+    } == {
+        "decision_mode": _vocab._DECISION_MODES,
+        "target_side": _vocab._TARGET_SIDES,
+        "risk_action": _vocab._RISK_ACTIONS,
+    }
     db = Database(tmp_path / "p.db")
     with db.transaction() as conn:
         for column, words in _GATE_VERDICT_WORDS.items():

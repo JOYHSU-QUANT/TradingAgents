@@ -1923,7 +1923,7 @@ def test_the_daemon_writer_refuses_a_word_outside_the_machine_vocabulary(db):
     # a word nobody classified in MACHINE_DISPOSITIONS would shut the key
     # forever with no error. Refused at the write (issue #151), for a literal
     # that reaches the writer some way the AST scan cannot see (the constants
-    # in reconcile_types.py are the registry's own members).
+    # in reconcile_types.py are values of the registry's enum members).
     event_id = _open_case(db)
     for word in ("made_it_up", "", "   "):
         with (

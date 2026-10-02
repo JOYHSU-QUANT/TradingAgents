@@ -86,8 +86,8 @@ Breaking changes within the 0.x line are called out explicitly.
   instead of being a second copy. The two comparisons that decide whether
   a latch is manual (`SafeModeManager.enter`'s gate line and
   `LiveDecisionDriver._manual_latched`) use the member's value instead of
-  the literal `"manual"`. The guards that compared a copy with the registry
-  at import are removed with the copies: the `AssertionError`s
+  the literal `"manual"`. The import-time guards that only kept those
+  restatements in step are removed with them: the `AssertionError`s
   "safe_mode.SAFE_MODE_MANUAL drifted from repository.SAFE_MODE_TYPES",
   "PROTECTIVE_ORDER_ROLES drifted from LIVE_ORDER_ROLES",
   "_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES", "_SLTP_ROLES
@@ -100,8 +100,8 @@ Breaking changes within the 0.x line are called out explicitly.
   adds: the partition checks in `_vocab`, the partition and mapping-keys
   checks in `live/startup.py`, the cycle-count guards in
   `paper/validation.py` and `live/validation_metrics.py`, and the safe-mode
-  severity equality in `live/safe_mode.py` (a third type must be classified
-  there before it can be written). `_vocab` gains one check in place of the
+  severity equality in `live/safe_mode.py` (its comment says why an
+  equality, not a subset). `_vocab` gains one check in place of the
   copy `protection.py` held: `ROLE_TO_ORDER_TYPE` may only name words in
   `ORDER_TYPES`. `SmokeStepResult.status` keeps its `Literal` and its guard; a
   type-level copy is not one an enum can absorb while the field holds a
@@ -115,12 +115,11 @@ Breaking changes within the 0.x line are called out explicitly.
   v2, T4-b — the same PR). `repository.insert_ai_output` refuses a
   `decision_mode`, `target_side` or `risk_action` outside the
   `DecisionMode`, `TargetSide` and `RiskAction` the gate result carries,
-  with `ValueError`
-  "`<column>` must be one of [...]", as it already refused an unknown
-  `mode`. Its one production caller, `persistence/audit_rows.write_ai_output`,
-  passes those enums' values, so no row either lane writes is affected. An
-  absent or `None` value is still left to the column's own constraint:
-  `target_side` is nullable, the other two NOT NULL.
+  with `ValueError` "`<column>` must be one of [...]", as it already refused
+  an unknown `mode`. Its one production caller,
+  `persistence/audit_rows.write_ai_output`, passes those enums' values, so
+  no row either lane writes is affected. A missing or `None` value is not
+  checked (the function's docstring says what happens to it).
 
 - **The smoke registry and the store-identity refusal each have a module of
   their own** (refactor plan v2, T3-e and the `db.py` move — PR 16 of the

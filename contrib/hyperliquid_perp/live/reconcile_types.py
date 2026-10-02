@@ -5,9 +5,9 @@ What every leg of the sweep constructs or reads and what its callers consume:
 :class:`ReconciliationReport` (one pass's verdict), :class:`SweepContext`
 (what the fill and orders legs read off the reconciler for one pass), and
 the machine-disposition constants, each the value of a member of the
-registry's two disposition enums. The sweep itself is
-:mod:`.reconcile` (``LiveReconciler``), with the fill legs in
-:mod:`.reconcile_fills` and the orders leg in :mod:`.reconcile_orders`.
+registry's two disposition enums. The sweep itself is :mod:`.reconcile`
+(``LiveReconciler``), with the fill legs in :mod:`.reconcile_fills` and the
+orders leg in :mod:`.reconcile_orders`.
 The disposition constants and ``MANUAL_CASE_REASONS`` are the sweep's
 package-internal vocabulary: shared across the four modules and read
 outside them only by the tests.

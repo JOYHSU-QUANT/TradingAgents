@@ -96,9 +96,9 @@ def _machine_disposition_literals(source: str) -> set[str]:
     constant, ``case.action_taken``) are not literals and are not resolved —
     the module constants are values of the registry's enum members, computed
     values are the runtime guard's job; f-strings are skipped
-    (``f"settled_{status}"`` is derived in ``_vocab`` and guarded at
-    runtime); a literal forwarded through a local
-    wrapper or an aliased import is invisible (``set_reconciliation_action``
+    (``f"settled_{status}"`` is derived in ``_vocab`` and guarded at runtime);
+    a literal forwarded through a local wrapper or an aliased import is
+    invisible (``set_reconciliation_action``
     re-checks the set at the write since issue #151, but
     ``stamp_reconciliation_action_if_unset`` carries human prose and checks
     only non-emptiness, so such a wrapper must not be introduced); a starred

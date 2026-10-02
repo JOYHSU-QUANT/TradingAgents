@@ -15,7 +15,7 @@
 它是 `contrib/` 下**唯一**同時 import 兩個鄰居的套件：`hyperliquid_perp` 提供決策詞彙
 （`DecisionMode`／`TargetSide`／`RiskAction`）、store 與 paper 的 fill model 參數，以及考古題用的
 parse seam、閘門（`parse_target_decision`／`evaluate`）、payload digest 與 `inject_perp_context`；
-`autoresearch` 提供 split（holdout 鎖）、`CostModel` 與研究 store。這條邊是單向的：
+`autoresearch` 提供 split（holdout 鎖）、`CostModel`、研究 store，以及護欄規則與它每一根的方向。這條邊是單向的：
 兩個鄰居都不得 import `contrib.replay`，`tests/test_upstream.py` 直接讀兩邊的 source 守著。
 借了什麼一律列在 `upstream.py`：`BORROWED`（載入時就 import）與 `ENGINE_BORROWED`（引擎那一半，
 只在 `load_engine()` 裡 lazy import）；其他模組只從那裡 import。
@@ -343,6 +343,61 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
 **訓練資料**截止（2026 年 1 月，取月底 2026-01-31；它的 reliable knowledge cutoff 是 2025 年 8 月，
 比較早，但洩漏看的是訓練資料）。paper 資料從 2026-08-28 起，全部在它之後。
 
+## 趨勢護欄的影子報表
+
+```
+python -m contrib.replay guardrail --db paper_trading.db --research-db autoresearch.sqlite \
+    --run-id paper-BTC-6 --run-id paper-BTC-7 [--rule FILE] [--out DIR]
+```
+
+趨勢護欄（2026-10-02 拍板，**還沒做進交易員**）的政策是：帳上的倉位只能站在一條固定規則的那一邊。
+規則持多才能持多、持空才能持空，規則空手就空手。這個指令是它的影子模式：把這條政策對著 paper
+交易員**已經做過**的決策讀一遍，印出護欄當時會怎麼做，不改任何交易行為。
+
+每一題讀三件事：
+
+- **規則當時的方向**：研究套件把護欄規則從研究 store 的第一根 K 線重放到最後一根
+  （`contrib/autoresearch/guardrail.py`），取決策時刻之前最新收盤那一根之後的方向。三種情況讀不到：
+  規則還在暖機；那一根比決策時刻早超過 2 根（研究 store 沒抓到那麼新）；規則在那一根讀不到條件
+  （它凍在原本那一邊，不是它選的）。後兩種是線上那條路自己的拒絕：讀端丟掉超過
+  `MAX_SIGNAL_AGE_INTERVALS` 根的文件，寫端在最新一根讀不到條件時不寫文件。讀不到的那一題，
+  帳上有倉位就記成 `rule_unknown`，空手則照樣 `pass`。
+- **決策之後 paper 帳上的方向**：有下單就是核准的目標；沒下單（維持、被拒、fail-closed、落在
+  deadband 內、整輪沒答案）就是原本的倉位。有下單時讀到的是交易員**想**持有的方向；掛單若沒成交，
+  下一題記錄的倉位會反映出來。
+- **判定**：帳上空手、或與規則同向＝`pass`；有下單但目標不合護欄＝`block_to_flat`；
+  沒下單但原本的倉位不合護欄＝`close_position`。
+
+判定的三個意思（2026-10-02 拍板，正式啟用時照這個做）：
+
+- **被擋的單一律改成空手**，從護欄允許的倉位反手也一樣：離開舊倉位那一半照做，開新倉位那一半不做。
+- **護欄看的是帳，不是答案**。模型那一輪沒給決策（沒答案、fail-closed）時，照樣用帳上的倉位判。
+  摘要的 `close_position by cause` 一行把平倉拆成「有決策但沒產生委託」（維持、被閘門拒絕、落在
+  deadband 內）與「沒有決策」。
+- **每一題都對著 paper 當時真的帳讀**。護欄當時不在，它會平掉的倉位到下一題還在、會再被判一次，
+  所以判定的計數是「帳在護欄外的**題數**」。`interventions` 一行另外數護欄會出手幾次：每張被擋的單
+  算一次；一個不合護欄的倉位不管留了幾題都只算一次（緊接在另一題被擋之後的平倉是同一個倉位），
+  遇到 `pass` 才算結束；帳上有倉位但讀不到規則方向的題（`rule_unknown`）不開始也不結束。
+
+另外要知道：
+
+- **不打分**。不讀任何事後價格，split 的 holdout 鎖沒有東西要守，run 的每一題都讀。
+- **讀不到的題先講**。有題目讀不到規則方向時，摘要會先印有幾題、不對那些題下結論；
+  「護欄不會改變任何事」只在每一題都讀得到、而且沒有一題被擋時才印。下在「規則方向不知道」那幾題的單
+  不算被擋，`orders created` 那一行會另外寫有幾張。**整個 run 沒有一題讀得到**時（研究 store 的歷史沒有涵蓋這個 run）
+  指令具名拒絕、exit 1，不印報表。
+- **重放是從空手開始的**。研究 store 第一根之前規則抱著什麼，重放看不到；規則在這段歷史裡第一次站到
+  某一邊之前，讀到的「空手」可能其實是 store 之前開的倉位。報表會印規則第一次站邊是哪一根，
+  有題目落在那之前時另印一行有幾題。
+- **不是題目的 cycle 也會印**：寫出 input 之前就失敗的、複製 store 時還在進行中的。那幾輪帳上可能
+  正抱著護欄不允許的倉位，而報表讀不到。
+- **規則是寫死的**。預設讀研究套件 commit 的 `guardrails/btc-20d-breakout.json`（4h K 線上的
+  120 根突破進場、55 根反向突破出場），報表印 `<檔名>@<spec hash 前 8 碼>`。規則一律在 4h K 線上
+  重放（`RULE_INTERVAL`，跟規則放在研究套件），所以只讀 4h 的 run；`--rule` 換的 spec 檔也是在 4h 上讀。
+
+`--out DIR` 寫 `<run-id>-guardrail-decisions.csv`（一題一列，含當時的 mark 與沒下單的原因）與
+`<run-id>-guardrail-summary.txt`。
+
 ## 還沒有的
 
 - 帶模擬帳戶的回測（PR 3）：從 `.reports.json` 起跑下半段 graph，倉位一路帶下去。
@@ -366,6 +421,10 @@ pytest -q contrib/replay/tests
 假模型 `Echo` 對每題說 paper 當時的模型說過的話，於是兩件事可以直接驗：重放的答案過閘門的結果
 與記錄的**逐欄相同**（`test_replay.py`），以及 echo variant 的每張 repeat 卡與 paper 自己的成績單
 **逐行相同**（`test_replay_score.py`）。模型那一層（`model.py`）用假的引擎介面測，不需要金鑰或網路。
+
+護欄報表（`test_guardrail.py`）沿用那張 11 題的表，研究 store 放 12 根看收盤價就知道方向的 K 線
+（規則：高於 102 持多、低於 98 持空）：判定表每一格、每一題讀到的規則方向與判定、介入次數的算法、
+研究 store 搆不到的題（以及摘要不對它們下結論）、沒答案的那一題被判平倉、指令的輸出與各種拒絕。
 
 探針（`test_probe.py`）用同一個夾具：假模型對每題回固定的機率，`score` 那一段的 Brier、log loss、
 基準率、skill score、reliability 每個數字都從那 10 題的 mark 手算（算式寫在檔頭與斷言旁邊）。

@@ -46,7 +46,10 @@ What is borrowed and why:
   multiplied in;
 - for the direction probe (plan PR 2.1): the decision parser's JSON
   extraction (``extract_json_block``), so a probe answer's object is found
-  the way a decision's block is.
+  the way a decision's block is;
+- for the guardrail's shadow report: the research package's guardrail rule
+  and its side at every close (``load_rule``, ``build_timeline``), so the
+  side a recorded decision is read against is the one that package replays.
 
 The engine half (the LLM client factory, the message types, the
 completion collector) is borrowed LAZILY: it is listed in
@@ -64,6 +67,14 @@ from typing import Any
 
 from contrib.autoresearch.constants import MS_PER_DAY, STUDIED_INTERVALS
 from contrib.autoresearch.costs import CostModel, FillRole, require_amount
+from contrib.autoresearch.guardrail import (
+    DEFAULT_RULE,
+    RULE_INTERVAL,
+    GuardrailError,
+    RuleTimeline,
+    build_timeline,
+    load_rule,
+)
 from contrib.autoresearch.split import SegmentName, Split, SplitError
 from contrib.autoresearch.store import ResearchStore, StoreError
 from contrib.autoresearch.vocabulary import SpecError, require_number
@@ -97,8 +108,10 @@ from contrib.hyperliquid_perp.persistence.repository import TERMINAL_ATTEMPT_STA
 __all__ = [
     "BORROWED",
     "DECIMAL_CONTEXT",
+    "DEFAULT_RULE",
     "ENGINE_BORROWED",
     "MS_PER_DAY",
+    "RULE_INTERVAL",
     "STUDIED_INTERVALS",
     "TERMINAL_ATTEMPT_STATUSES",
     "UPSTREAM_PACKAGES",
@@ -109,12 +122,14 @@ __all__ = [
     "DecisionMode",
     "Engine",
     "FillRole",
+    "GuardrailError",
     "MarketDataConfig",
     "PaperTradingConfig",
     "ResearchStore",
     "RiskAction",
     "RiskConfig",
     "RiskGateResult",
+    "RuleTimeline",
     "SchemaVersionError",
     "SegmentName",
     "SpecError",
@@ -122,6 +137,7 @@ __all__ = [
     "SplitError",
     "StoreError",
     "TargetSide",
+    "build_timeline",
     "epoch_ms",
     "evaluate",
     "extract_json_block",
@@ -130,6 +146,7 @@ __all__ = [
     "inject_perp_context",
     "interval_to_ms",
     "load_engine",
+    "load_rule",
     "parse_instant",
     "parse_target_decision",
     "payload_digest",
@@ -153,6 +170,12 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.costs", "CostModel"),
     ("contrib.autoresearch.costs", "FillRole"),
     ("contrib.autoresearch.costs", "require_amount"),
+    ("contrib.autoresearch.guardrail", "DEFAULT_RULE"),
+    ("contrib.autoresearch.guardrail", "RULE_INTERVAL"),
+    ("contrib.autoresearch.guardrail", "GuardrailError"),
+    ("contrib.autoresearch.guardrail", "RuleTimeline"),
+    ("contrib.autoresearch.guardrail", "build_timeline"),
+    ("contrib.autoresearch.guardrail", "load_rule"),
     ("contrib.autoresearch.split", "SegmentName"),
     ("contrib.autoresearch.split", "Split"),
     ("contrib.autoresearch.split", "SplitError"),

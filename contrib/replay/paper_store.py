@@ -391,6 +391,16 @@ class Decisions:
 
     def describe(self) -> list[str]:
         """The counts that are not questions, one line each, only when non-zero."""
+        lines = self.describe_left_out()
+        if self.retried:
+            lines.append(
+                f"attempts retried: {self.retried} ({self.extra_tries} extra tries); "
+                "the fail-closed rate below counts final answers only"
+            )
+        return lines
+
+    def describe_left_out(self) -> list[str]:
+        """The cycles that are not among the questions, one line each, only when non-zero."""
         lines = []
         if self.without_input:
             lines.append(
@@ -400,11 +410,6 @@ class Decisions:
         if self.in_progress:
             lines.append(
                 f"cycles still in progress when the store was read (left out): {self.in_progress}"
-            )
-        if self.retried:
-            lines.append(
-                f"attempts retried: {self.retried} ({self.extra_tries} extra tries); "
-                "the fail-closed rate below counts final answers only"
             )
         return lines
 

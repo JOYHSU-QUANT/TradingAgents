@@ -110,6 +110,7 @@ __all__ = [
     "ExitReason",
     "RegimeBucket",
     "ReplayedPosition",
+    "ReplayedSides",
     "SegmentResult",
     "SplitResult",
     "Tally",
@@ -119,6 +120,7 @@ __all__ = [
     "evaluate_split",
     "load_bundle",
     "replay_position",
+    "replay_sides",
 ]
 
 # The annualisation base. Stated as a constant so the report can print the
@@ -1081,14 +1083,34 @@ class ReplayedPosition:
     last_bar_unevaluable: bool
 
 
-def replay_position(
-    spec: StrategySpec, frame: FeatureFrame, costs: CostModel, *, since_ms: int
-) -> ReplayedPosition:
-    """Replay ``spec``'s DECISIONS from ``since_ms`` to the frame's last bar.
+@dataclass(frozen=True)
+class ReplayedSides:
+    """The side a spec's decisions leave it on after EVERY replayed bar.
 
-    What this is for: a promoted rule's current side, for the one qualitative
-    block the research radar hands to the live prompt (plan §7, C1). The
-    scored loop cannot answer it. ``evaluate_segment`` flattens whatever is
+    One entry per bar, in bar order: ``sides[i]`` is the side held once the
+    decision taken at ``close_times[i]`` has been applied (``None`` is flat),
+    and ``unevaluable[i]`` says that decision consulted a condition it could
+    not evaluate, so the side there is one carried in rather than re-taken.
+    :class:`ReplayedPosition` is this record read at its last bar.
+    """
+
+    close_times: tuple[int, ...]
+    sides: tuple[Side | None, ...]
+    unevaluable: tuple[bool, ...]
+
+
+def replay_sides(
+    spec: StrategySpec, frame: FeatureFrame, costs: CostModel, *, since_ms: int
+) -> ReplayedSides:
+    """Replay ``spec``'s DECISIONS from ``since_ms`` to the frame's last bar, bar by bar.
+
+    What this is for: a rule's side. The newest one, for the one qualitative
+    block the research radar hands to the live prompt (plan §7, C1, read
+    through :func:`replay_position`); and the one at each earlier close, for
+    an offline reader asking which side the rule held when a recorded
+    decision was taken.
+
+    The scored loop cannot answer it. ``evaluate_segment`` flattens whatever is
     held at its window's last bar and deliberately takes no decision there —
     a window is an island, so the last bar's decision would fill at a bar
     belonging to the next window. A signal wants exactly that decision, and
@@ -1109,9 +1131,9 @@ def replay_position(
     dependent: an empty ``exit`` holds until a reversal, and ``max_bars``
     counts from the entry. Start it later than the rule's own history and a
     position opened before the start is invisible, so the first entry after
-    it reads as an open rather than as a reversal. Callers pass the first bar
-    the experiment ever considered measurable (its train window's start), not
-    a recent tail.
+    it reads as an open rather than as a reversal. The signal passes the first
+    bar its experiment ever considered measurable (its train window's start),
+    and the guardrail timeline the store's first bar; neither a recent tail.
     """
     bars = frame.bundle.bars
     first = bisect_left([bar.open_time for bar in bars], since_ms)
@@ -1140,8 +1162,8 @@ def replay_position(
     reader = _Reader(frame, spec)
     held: _Open | None = None
     pending: _Pending | None = None
-    unevaluable = 0
-    last_bar_unevaluable = False
+    sides: list[Side | None] = []
+    unevaluable: list[bool] = []
 
     for index in range(first, stop):
         bar = bars[index]
@@ -1172,25 +1194,41 @@ def replay_position(
         # scored windows already report, and a second counter over a different
         # span with the same name is how two measurements get compared as one.
         pending, _both = _decide(reader, index, held, STARTING_EQUITY, costs)
-        unevaluable += reader.unevaluable
-        last_bar_unevaluable = reader.unevaluable
+        unevaluable.append(bool(reader.unevaluable))
+        # The fill this decision asks for, applied to the side alone. Closing
+        # before opening, in that order, so a reversal — which carries both —
+        # lands on the new side rather than on flat.
+        side = held.side if held is not None else None
+        if pending is not None:
+            if pending.close is not None:
+                side = None
+            if pending.open_side is not None:
+                side = pending.open_side
+        sides.append(side)
 
-    # The fill the last decision asks for, applied to the side alone. Closing
-    # before opening, in that order, so a reversal — which carries both —
-    # lands on the new side rather than on flat.
-    side = held.side if held is not None else None
-    if pending is not None:
-        if pending.close is not None:
-            side = None
-        if pending.open_side is not None:
-            side = pending.open_side
+    return ReplayedSides(
+        close_times=tuple(bar.close_time for bar in bars[first:stop]),
+        sides=tuple(sides),
+        unevaluable=tuple(unevaluable),
+    )
 
+
+def replay_position(
+    spec: StrategySpec, frame: FeatureFrame, costs: CostModel, *, since_ms: int
+) -> ReplayedPosition:
+    """Which side ``spec``'s decisions leave it on after the frame's LAST bar.
+
+    :func:`replay_sides` read at its final bar: the same replay, the same
+    refusals and the same limits on what it models, as the record
+    :func:`~contrib.autoresearch.signal.build_signal` refuses and reports on.
+    """
+    replayed = replay_sides(spec, frame, costs, since_ms=since_ms)
     return ReplayedPosition(
-        side=side,
-        last_close_time=bars[stop - 1].close_time,
-        replayed_bars=stop - first,
-        replayed_bars_unevaluable=unevaluable,
-        last_bar_unevaluable=last_bar_unevaluable,
+        side=replayed.sides[-1],
+        last_close_time=replayed.close_times[-1],
+        replayed_bars=len(replayed.sides),
+        replayed_bars_unevaluable=sum(replayed.unevaluable),
+        last_bar_unevaluable=replayed.unevaluable[-1],
     )
 
 

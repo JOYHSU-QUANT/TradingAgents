@@ -19,6 +19,10 @@ the scorecard never loads the engine. The direction probe (plan PR 2.1)
 asks the same brain, in a separate call, for up / down / flat
 probabilities on the same questions, scored against the base rate.
 
+The guardrail report (:mod:`~contrib.replay.guardrail`) reads the same
+recorded decisions against the side a fixed rule held at each one, and says
+what a guardrail built on that rule would have done. It scores nothing.
+
 It is the one package under ``contrib/`` that imports BOTH neighbours —
 ``contrib.hyperliquid_perp`` for the decision vocabulary, the store, the
 paper cost parameters and (for the past papers) the parse seam, the gate,

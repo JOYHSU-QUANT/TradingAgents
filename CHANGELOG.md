@@ -82,12 +82,12 @@ Breaking changes within the 0.x line are called out explicitly.
   the two modules share lives in a third, `persistence/db_types.py`, so
   that `store_identity` does not import `db`: `SchemaVersionError`, and
   three constants that drop their underscore too, `BUSY_TIMEOUT_MS`,
-  `IN_MEMORY` and `BOOKKEEPING_TABLE`. `cli/_common.py` and the tests import
-  `SchemaVersionError` from `db_types`, and `db.__all__` no longer lists it.
-  Every refusal message, exit code and the order of the checks are
-  unchanged. Only the logger name of the two
-  WARNINGs that moved changes: "could not resolve %s to look for a log
-  beside its target" and "could not read %s in %s" now come from
+  `IN_MEMORY` and `BOOKKEEPING_TABLE`. `cli/_common.py`, the replay
+  package's `upstream.py` and the tests import `SchemaVersionError` from
+  `db_types`, and `db.__all__` no longer lists it. Every refusal message,
+  exit code and the order of the checks are unchanged. Only the logger name
+  of the two WARNINGs that moved changes: "could not resolve %s to look for
+  a log beside its target" and "could not read %s in %s" now come from
   `contrib.hyperliquid_perp.persistence.store_identity` instead of
   `...persistence.db`, which the CLI log format prints as `%(name)s`. The
   tests read each name from the module that now defines it; the test count

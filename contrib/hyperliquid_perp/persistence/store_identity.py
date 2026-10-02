@@ -550,10 +550,10 @@ def refuse_a_foreign_store(path: str | Path) -> None:
     # The same bounded wait as :func:`~.db.connect`, spelled out so the two
     # cannot drift: this opens a store a sibling daemon may be writing to
     # (RUNBOOK-live §7.3 keeps two live runs in one file), and a lock collision
-    # should be a wait rather than an immediate ``OperationalError: database is
-    # locked``. ``timeout`` is sqlite3's own spelling of ``PRAGMA
-    # busy_timeout``, in seconds; its default happens to equal
-    # ``BUSY_TIMEOUT_MS`` today, so passing it changes nothing until the
+    # should be a wait rather than an immediate
+    # ``OperationalError: database is locked``. ``timeout`` is sqlite3's own
+    # spelling of ``PRAGMA busy_timeout``, in seconds; its default happens to
+    # equal ``BUSY_TIMEOUT_MS`` today, so passing it changes nothing until the
     # constant does. What it bounds is what SQLite makes waitable: an EXCLUSIVE
     # writer on a non-WAL store is waited out; a RESERVED one never blocks a
     # reader in the first place; and WAL — what the deploy box runs — never

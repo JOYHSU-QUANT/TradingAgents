@@ -842,6 +842,34 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **The trend guardrail's shadow report: `python -m contrib.replay guardrail
+  --run-id A [--run-id B ...] --research-db PATH`.** The trend guardrail
+  (decided 2026-10-02, not built into the trader) lets the book hold only the
+  side one fixed rule holds: no position against the rule, and none while the
+  rule is flat. This command reads that policy against decisions a paper run
+  already took. For every finished question it prints the rule's side at the
+  decision instant, the side the paper book held once the decision was
+  applied (the approved target when an order was created, otherwise the
+  position it already had), and a verdict: `pass`, `block_to_flat` (an
+  order's target the guardrail refuses), `close_position` (a held position it
+  refuses) or `rule_unknown` (the research store does not reach the
+  question). Each question is read against the book the run actually had, so
+  the counts are questions on which the book was outside the guardrail, not
+  trades. Nothing is scored and no later price is read; `--out DIR` writes
+  one CSV row per question beside the summary. The trading daemon, its store
+  and its schema are untouched. The rule is a spec file committed in the
+  research package, `contrib/autoresearch/guardrails/btc-20d-breakout.json`
+  (on 4h bars: enter on a close beyond the 120-bar channel, leave on a close
+  beyond the 55-bar one), named in reports as `<file stem>@<spec hash
+  prefix>`. It is not a promoted trial and is not in the ledger: it was
+  admitted on other terms (written down before any result, measured on long
+  history, never tuned), and a test pins its hash. `contrib/autoresearch/guardrail.py`
+  replays it over a store's whole history through the new
+  `evaluator.replay_sides`, which keeps the side after every bar;
+  `replay_position` is now that record read at its last bar, unchanged in
+  what it returns. Only 4h runs are read, because the rule's channels are
+  counted in bars.
+
 - **The direction probe pooled over several runs, with a block-bootstrap
   interval: `python -m contrib.replay pool --run-id A --run-id B ...
   --replay-db PATH --variant NAME --probe NAME`** (replay plan PR 2.2). One

@@ -1,0 +1,12 @@
+{
+  "family": "breakout",
+  "entry": {
+    "long": [{"left": "close", "op": ">", "right": "donchian_high_120"}],
+    "short": [{"left": "close", "op": "<", "right": "donchian_low_120"}]
+  },
+  "exit": {
+    "long": [{"left": "close", "op": "<", "right": "donchian_low_55"}],
+    "short": [{"left": "close", "op": ">", "right": "donchian_high_55"}]
+  },
+  "sizing": {"mode": "vol_target", "lookback": 20, "target_vol": 0.014, "max_fraction": 0.5}
+}

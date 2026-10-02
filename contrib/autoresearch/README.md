@@ -65,6 +65,9 @@ PR C1（本次）＝交接文件：`signal` 指令，以及 `hyperliquid_perp` �
   **最近一次 promote 的規則**重播到 store 裡最新一根，寫出一份只有定性帶的 JSON；
   `hyperliquid_perp` 用標準函式庫讀它、當成 prompt 裡的一段 analyst 輸入，開關預設關。
   見下面「交接文件」段。
+- **護欄規則**（`guardrail.py`、`guardrails/`、`evaluator.replay_sides`）：一條寫死的規則，
+  以及它在 store 裡每一根 K 線之後站在哪一邊。只給 `contrib.replay` 的離線報表讀，不進 ledger、
+  不流回實盤路徑。見下面「護欄規則」段。
 
 **還沒有的東西**：無——計畫 §5 的 A1–A4、B1、C1 都做完了。C1 的開關要不要在 paper
 翻開是部署節奏的決定（計畫 §7：run 5 換 maker 之後，promoted 規則要先在 maker 成本下
@@ -488,6 +491,26 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 `signal` 會讀到 holdout 之後、一直到最新的 bar。這不是 holdout lock 的破口：lock 是為了
 「窗口的分數不能挑在後面窗口會用到的 bar 上」，而這裡什麼都不評分——帶是從 ledger 裡
 **當初在 lock 下量好的**數字切的；重播要 tail，只是因為持倉是路徑相依的。
+
+## 護欄規則
+
+趨勢護欄（2026-10-02 拍板，還沒做進交易員）用一條固定規則的**方向**限制帳上能持有的倉位。
+這個套件只負責其中研究的那一半：是哪一條規則、報表上怎麼稱呼它、它在每一根 K 線之後站在哪一邊。
+
+- **規則是一個 spec 檔**：`guardrails/btc-20d-breakout.json`，跟任何 trial 一樣是本套件的 DSL
+  （`validate-spec --spec` 讀得懂）。4h K 線上收盤突破前 120 根的高（低）點進場做多（空），
+  收盤跌破（漲過）前 55 根的低（高）點出場。
+- **它不是 promote 過的 trial，也不進 ledger**。promote 門檻只讀一段 validation，是用來管搜尋的；
+  護欄規則另有認定方式（同日拍板）：看結果之前先寫死、用長歷史量、之後不調參。最後一條是測試守得住的：
+  `tests/test_guardrail.py` 釘住 commit 的 spec hash，要改規則就得同時改兩個檔。
+- **名字是 `<檔名>@<spec hash 前 8 碼>`**，所以用改過的規則跑出來的報表，不會被當成用 commit 的規則跑的。
+- **每一根的方向**（`build_timeline`）用 `evaluator.replay_sides` 從 store 的第一根重放到最後一根。
+  `replay_position` 現在就是這份紀錄的最後一筆。重放前照量測的標準掃一次歷史（K 線有洞就拒絕），
+  理由與交接文件相同：少一根可能改變規則今天站在哪一邊。
+- **`reading_at(時刻)` 讀不到就回 `None`**：規則還在暖機（第一根能評估的 K 線之前），或 store 的最後一根
+  比那個時刻早超過 `MAX_SIGNAL_AGE_INTERVALS` 根。
+
+沒有指令：唯一的使用者是 `python -m contrib.replay guardrail`（見那個套件的 README）。
 
 ## 對 `hyperliquid_perp` 的關係
 

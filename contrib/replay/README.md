@@ -15,7 +15,7 @@
 它是 `contrib/` 下**唯一**同時 import 兩個鄰居的套件：`hyperliquid_perp` 提供決策詞彙
 （`DecisionMode`／`TargetSide`／`RiskAction`）、store 與 paper 的 fill model 參數，以及考古題用的
 parse seam、閘門（`parse_target_decision`／`evaluate`）、payload digest 與 `inject_perp_context`；
-`autoresearch` 提供 split（holdout 鎖）、`CostModel` 與研究 store。這條邊是單向的：
+`autoresearch` 提供 split（holdout 鎖）、`CostModel`、研究 store，以及護欄規則與它每一根的方向。這條邊是單向的：
 兩個鄰居都不得 import `contrib.replay`，`tests/test_upstream.py` 直接讀兩邊的 source 守著。
 借了什麼一律列在 `upstream.py`：`BORROWED`（載入時就 import）與 `ENGINE_BORROWED`（引擎那一半，
 只在 `load_engine()` 裡 lazy import）；其他模組只從那裡 import。
@@ -343,6 +343,39 @@ down」兩個 Brier skill score，都對「模型自己的先驗」比，各自 
 **訓練資料**截止（2026 年 1 月，取月底 2026-01-31；它的 reliable knowledge cutoff 是 2025 年 8 月，
 比較早，但洩漏看的是訓練資料）。paper 資料從 2026-08-28 起，全部在它之後。
 
+## 趨勢護欄的影子報表
+
+```
+python -m contrib.replay guardrail --db paper_trading.db --research-db autoresearch.sqlite \
+    --run-id paper-BTC-6 --run-id paper-BTC-7 [--rule FILE] [--out DIR]
+```
+
+趨勢護欄（2026-10-02 拍板，**還沒做進交易員**）的政策是：帳上的倉位只能站在一條固定規則的那一邊。
+規則持多才能持多、持空才能持空，規則空手就空手。這個指令是它的影子模式：把這條政策對著 paper
+交易員**已經做過**的決策讀一遍，印出護欄當時會怎麼做，不改任何交易行為。
+
+每一題讀三件事：
+
+- **規則當時的方向**：研究套件把護欄規則從研究 store 的第一根 K 線重放到最後一根
+  （`contrib/autoresearch/guardrail.py`），取決策時刻之前最新收盤那一根之後的方向。規則還在暖機、
+  或那一根比決策時刻早超過 2 根（研究 store 沒抓到那麼新），讀成 `rule_unknown`；2 根是線上讀研究
+  訊號時用的同一個上限（`MAX_SIGNAL_AGE_INTERVALS`）。
+- **決策之後 paper 帳上的方向**：有下單就是核准的目標；沒下單（維持、被拒、fail-closed、落在
+  deadband 內、整輪沒答案）就是原本的倉位。
+- **判定**：帳上空手、或與規則同向＝`pass`；有下單但目標不合護欄＝`block_to_flat`（護欄會改成空手）；
+  沒下單但原本的倉位不合護欄＝`close_position`。
+
+讀報表前要知道三件事：
+
+- **每一題都對著 paper 當時真的帳讀**。護欄當時不在，它會平掉的倉位到下一題還在、會再算一次，
+  所以印出來的是「帳在護欄外的題數」，不是交易筆數。
+- **不打分**。不讀任何事後價格，split 的 holdout 鎖沒有東西要守，run 的每一題都讀。
+- **規則是寫死的**。預設讀研究套件 commit 的 `guardrails/btc-20d-breakout.json`（4h K 線上的
+  120 根突破進場、55 根反向突破出場），報表印 `<檔名>@<spec hash 前 8 碼>`。規則是用 4h 的根數寫的，
+  所以只讀 4h 的 run；`--rule` 可以換一個 spec 檔。
+
+`--out DIR` 寫 `<run-id>-guardrail-decisions.csv`（一題一列）與 `<run-id>-guardrail-summary.txt`。
+
 ## 還沒有的
 
 - 帶模擬帳戶的回測（PR 3）：從 `.reports.json` 起跑下半段 graph，倉位一路帶下去。
@@ -366,6 +399,10 @@ pytest -q contrib/replay/tests
 假模型 `Echo` 對每題說 paper 當時的模型說過的話，於是兩件事可以直接驗：重放的答案過閘門的結果
 與記錄的**逐欄相同**（`test_replay.py`），以及 echo variant 的每張 repeat 卡與 paper 自己的成績單
 **逐行相同**（`test_replay_score.py`）。模型那一層（`model.py`）用假的引擎介面測，不需要金鑰或網路。
+
+護欄報表（`test_guardrail.py`）沿用那張 11 題的表，研究 store 放 12 根看收盤價就知道方向的 K 線
+（規則：高於 102 持多、低於 98 持空）：判定表每一格、每一題讀到的規則方向與判定、研究 store 搆不到的題、
+指令的輸出與每一種拒絕。
 
 探針（`test_probe.py`）用同一個夾具：假模型對每題回固定的機率，`score` 那一段的 Brier、log loss、
 基準率、skill score、reliability 每個數字都從那 10 題的 mark 手算（算式寫在檔頭與斷言旁邊）。

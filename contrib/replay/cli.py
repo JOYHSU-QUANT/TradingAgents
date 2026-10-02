@@ -1,6 +1,6 @@
 """``python -m contrib.replay`` — the offline exam's commands.
 
-Four commands:
+Five commands:
 
 - ``score --db paper_trading.db --run-id paper-BTC-7`` — the scorecard
   (plan PR 1): read the run's decisions, mark each against the price that
@@ -38,6 +38,12 @@ Four commands:
   segments (plan PR 2.2): the headline and up-vs-down skills per horizon,
   against the base rate and against the model's own prior, with 90%
   block-bootstrap intervals, and the plan section 5 bar. Reads only.
+- ``guardrail --run-id A [--run-id B ...] --research-db PATH`` — the trend
+  guardrail's shadow mode (:mod:`.guardrail`): for every finished question
+  of each run, the side the guardrail rule held at that instant, the side
+  the paper book held once the decision was applied, and what the guardrail
+  would have done about it. Scores nothing and reads no later price; with
+  ``--out DIR`` it writes one CSV row per question beside the summary.
 
 Exit codes, kept in step with the two neighbouring packages' CLIs: ``0`` the
 command did what it says, ``1`` a named operator, store, config, split,
@@ -59,6 +65,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .compare import Table, compare, cutoff_scope
+from .guardrail import (
+    RULE_INTERVAL,
+    csv_table as guardrail_table,
+    describe as describe_guardrail,
+    shadow,
+)
 from .model import engine_model
 from .paper_store import (
     Decisions,
@@ -99,17 +111,22 @@ from .score import (
     segment_of,
 )
 from .upstream import (
+    DEFAULT_RULE,
     STUDIED_INTERVALS,
     Database,
     DecisionConfig,
+    GuardrailError,
     ResearchStore,
     RiskConfig,
+    RuleTimeline,
     SchemaVersionError,
     SegmentName,
     Split,
     SplitError,
     StoreError,
+    build_timeline,
     from_epoch_ms,
+    load_rule,
     payload_dir,
 )
 from .variant import Variant, VariantError, load_variant
@@ -373,6 +390,54 @@ def _build_parser() -> argparse.ArgumentParser:
         help="the replay store; created when it does not exist (default: replay.sqlite)",
     )
     register.set_defaults(func=_cmd_register)
+
+    guardrail = subparsers.add_parser(
+        "guardrail",
+        help="what the trend guardrail would have done to a paper run's recorded decisions",
+        description=(
+            "Read the decision attempts of one or more paper runs and, for each question, the "
+            "side the guardrail rule held at that instant (replayed on the research store's "
+            f"{RULE_INTERVAL} candles), and print what the guardrail would have done: pass, block "
+            "an order's target to flat, or close a position already held. The guardrail is not "
+            "built into the trader; this is its shadow mode. Scores nothing and reads no later "
+            "price, so every finished question is read. Never writes to the paper store."
+        ),
+    )
+    guardrail.add_argument(
+        "--db", default="paper_trading.db", help="the paper store (SQLite path)"
+    )
+    guardrail.add_argument(
+        "--run-id",
+        action="append",
+        required=True,
+        help="a run to read; give it once per run",
+    )
+    guardrail.add_argument(
+        "--research-db",
+        required=True,
+        metavar="PATH",
+        help=(
+            "an existing autoresearch.sqlite whose candles the rule is replayed on; a question "
+            "its history does not reach reads rule_unknown"
+        ),
+    )
+    guardrail.add_argument(
+        "--rule",
+        metavar="FILE",
+        help=(
+            "the guardrail rule, a strategy spec JSON file (default: the research package's "
+            "committed rule)"
+        ),
+    )
+    guardrail.add_argument(
+        "--out",
+        metavar="DIR",
+        help=(
+            "write <run-id>-guardrail-decisions.csv (one row per question) and "
+            "<run-id>-guardrail-summary.txt here"
+        ),
+    )
+    guardrail.set_defaults(func=_cmd_guardrail)
     return parser
 
 
@@ -1200,6 +1265,89 @@ def _cmd_register(args: argparse.Namespace) -> int:
     for note in notes:
         print(f"note: {note}")
     return 0
+
+
+# -- guardrail -----------------------------------------------------------------
+
+
+def _guardrail_run(db_path: Path, db_arg: str, run_id: str) -> tuple[RunFacts, Decisions]:
+    """One paper run's terms and decisions for the guardrail report; every refusal is a :class:`_Refused`.
+
+    Not :func:`_open_run`: that one cuts the research split, which this
+    report does not read (it scores nothing), and so refuses a run too short
+    to cut.
+    """
+    try:
+        db = Database(db_path, migrate=False)
+    except SchemaVersionError as exc:
+        raise _Refused(str(exc)) from exc
+    with db:
+        facts = run_facts(db, run_id)
+        if facts is None:
+            raise _Refused(f"run {run_id!r} not found in {db_arg}")
+        if facts.mode != "paper":
+            raise _Refused(
+                f"run {run_id!r} is a {facts.mode} run; the guardrail report reads paper runs"
+            )
+        decisions = load_decisions(db, run_id)
+    if not decisions.questions:
+        raise _Refused(f"run {run_id!r} has no decision attempt with an input row to read")
+    if facts.interval != RULE_INTERVAL:
+        raise _Refused(
+            f"run {run_id!r} was traded on {facts.interval} candles; the guardrail rule is "
+            f"written in {RULE_INTERVAL} bars and is read against {RULE_INTERVAL} runs only"
+        )
+    return facts, decisions
+
+
+def _cmd_guardrail(args: argparse.Namespace) -> int:
+    """What the trend guardrail would have done to each run's recorded decisions."""
+    db_path = Path(args.db)
+    if not db_path.is_file():
+        return _fail(f"database {args.db!r} does not exist")
+    research_path = Path(args.research_db)
+    if not research_path.is_file():
+        # Checked before the store is opened: opening a path that does not
+        # exist would CREATE an empty research store there.
+        return _fail(f"--research-db {args.research_db!r} does not exist")
+    if args.out is not None and not args.out:
+        return _fail("--out needs a directory, got ''")
+    repeated = sorted({r for r in args.run_id if args.run_id.count(r) > 1})
+    if repeated:
+        return _fail(f"--run-id names {', '.join(repeated)} more than once")
+    runs = [_guardrail_run(db_path, args.db, run_id) for run_id in args.run_id]
+    # One replay per coin: the timeline is the store's whole history, so every
+    # run on that coin reads the same one.
+    timelines: dict[str, RuleTimeline] = {}
+    try:
+        rule = load_rule(DEFAULT_RULE if args.rule is None else args.rule)
+        with ResearchStore(research_path) as store:
+            for facts, _ in runs:
+                if facts.coin not in timelines:
+                    timelines[facts.coin] = build_timeline(
+                        store, rule, coin=facts.coin, interval=RULE_INTERVAL
+                    )
+    except (GuardrailError, StoreError) as exc:
+        return _fail(str(exc))
+    status = 0
+    for index, (facts, decisions) in enumerate(runs):
+        timeline = timelines[facts.coin]
+        rows = shadow(decisions.questions, decisions.answers, timeline)
+        lines = [
+            f"guardrail shadow: run {facts.run_id} ({facts.coin}, {facts.interval} cycle)",
+            *timeline.describe(),
+            *describe_guardrail(rows),
+        ]
+        if index:
+            print()
+        for line in lines:
+            print(line)
+        if args.out is not None:
+            written = _write_out(
+                Path(args.out), args.out, f"{facts.run_id}-guardrail", lines, guardrail_table(rows)
+            )
+            status = max(status, written)
+    return status
 
 
 def main(argv: list[str] | None = None) -> int:

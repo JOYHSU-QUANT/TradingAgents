@@ -35,6 +35,7 @@ from contrib.autoresearch.evaluator import (
     evaluate_split,
     load_bundle,
     replay_position,
+    replay_sides,
 )
 from contrib.autoresearch.features import (
     LIVE_CANDLE_LOOKBACK,
@@ -1197,6 +1198,42 @@ def test_the_replay_counts_every_bar_it_could_not_be_asked_about_not_only_the_la
     )
     replayed = _replay(spec, gapped)
     assert replayed.replayed_bars_unevaluable > 0
+
+
+def test_replay_sides_is_the_same_replay_read_at_every_bar():
+    # ``replay_position`` is this record's last entry, so every earlier entry
+    # has to be what ``replay_position`` answers on the history cut off there.
+    spec = _spec(
+        entry={
+            "long": [{"left": "close", "op": ">", "right": 102}],
+            "short": [{"left": "close", "op": "<", "right": 98}],
+        },
+        exit={
+            "long": [{"left": "close", "op": "<", "right": 101}],
+            "short": [{"left": "close", "op": ">", "right": 99}],
+        },
+    )
+    closes = [100, 105, 106, 100, 95, 96, 100, 103]
+    bundle = _bundle(closes)
+    replayed = replay_sides(spec, FeatureFrame(bundle), _FREE, since_ms=ANCHOR_MS)
+    assert replayed.close_times == tuple(bar.close_time for bar in bundle.bars)
+    long, short = Side.LONG, Side.SHORT
+    assert replayed.sides == (None, long, long, None, short, short, None, long)
+    for count in range(1, len(closes) + 1):
+        assert _replay(spec, _bundle(closes[:count])).side is replayed.sides[count - 1]
+
+
+def test_replay_sides_flags_each_bar_it_could_not_evaluate():
+    # The same funding series the last-bar test stops two bars early: the
+    # per-bar flags are what ``replay_position`` counts and reads the last of.
+    spec = _spec(entry={"long": [{"left": "funding_rate", "op": ">", "right": -1}]})
+    short = _bundle([100, 101, 102, 103], funding=_funding(4, hours=4))
+    replayed = replay_sides(spec, FeatureFrame(short), _FREE, since_ms=ANCHOR_MS)
+    position = _replay(spec, short)
+    assert replayed.unevaluable[0] is False
+    assert replayed.unevaluable[-1] is True
+    assert sum(replayed.unevaluable) == position.replayed_bars_unevaluable
+    assert len(replayed.sides) == position.replayed_bars
 
 
 def test_the_replay_refuses_a_start_past_every_bar_it_was_given():

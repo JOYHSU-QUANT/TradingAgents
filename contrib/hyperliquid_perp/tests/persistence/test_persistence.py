@@ -828,8 +828,9 @@ def test_audit_insert_missing_mode_keeps_its_not_null_failure_shape(tmp_path):
 # ai_outputs gate-verdict vocabulary
 # --------------------------------------------------------------------------
 
-# The three columns hold the risk gate's enums by value; spelled out here, not
-# read off the enums, so a renamed member fails as the stored-data change it is.
+# The three columns hold the enums the gate result carries, by value; spelled
+# out here, not read off the enums, so a renamed member fails as the
+# stored-data change it is.
 _GATE_VERDICT_WORDS = {
     "decision_mode": ["set_target", "maintain_current"],
     "target_side": ["long", "short", "flat", None],
@@ -839,8 +840,8 @@ _GATE_VERDICT_WORDS = {
 
 @pytest.mark.parametrize("column", sorted(_GATE_VERDICT_WORDS))
 def test_ai_output_insert_rejects_a_word_outside_the_gates_vocabulary(tmp_path, column):
-    # A word outside the gate's enum must raise at the write, not land where a
-    # reader parses the column back into that enum.
+    # A word outside the column's enum must raise at the write, not land where
+    # a reader parses the column back into that enum.
     db = Database(tmp_path / "p.db")
     with pytest.raises(ValueError, match=f"^{column} must be one of"), db.transaction() as conn:
         repo.insert_ai_output(conn, **{**_ai_output_kwargs("paper"), column: "hold"})

@@ -39,10 +39,11 @@ __all__ = [
 
 # Enumerable storage values validated at the write boundary (fail loud on a typo
 # rather than persisting it). ``Side`` carries the fill/order direction; these
-# small sets cover the other columns. Five vocabularies are enums with the set
-# derived from the members (order roles in ``cloid.OrderRole``; attempt
-# statuses, plan statuses, safe-mode types and machine dispositions below);
-# the write boundary still checks the plain string against the set.
+# small sets cover the other columns. Five storage vocabularies are enums with
+# the set derived from the members (order roles in ``cloid.OrderRole``; attempt
+# statuses, plan statuses, safe-mode types and machine dispositions below), and
+# the three ``ai_outputs`` sets are derived from the domain's enums; the write
+# boundary still checks the plain string against the set.
 _MODES = frozenset({"paper", "live"})
 _LIQUIDITY_TYPES = frozenset({"maker", "taker", "simulated"})
 # §14 live fills: the exchange marks each fill maker or taker (``crossed``); a
@@ -224,8 +225,8 @@ ORDER_TYPES = frozenset(
     }
 )
 # The trigger-role → order-type spelling, next to the vocabulary it draws from:
-# writers that derive a type from a registry/protection role (the live orphan
-# backfill; the paper engine's protection placement) must share one mapping or
+# writers that derive a type from a registry/protection role (the live
+# protection manager; the live orphan backfill) must share one mapping or
 # they drift and audit rows get mislabeled. Non-trigger roles take each
 # writer's own wire-type default.
 ROLE_TO_ORDER_TYPE = {

@@ -73,7 +73,7 @@ from .costs import CostModel, require_amount
 from .dsl import StrategySpec, parse_spec, spec_hash, spec_to_document
 from .metrics import SegmentMetrics
 from .split import Segment, Split
-from .store import ResearchStore, _utcnow_iso, canonical_coin
+from .store import ResearchStore, canonical_coin, utcnow_iso
 from .upstream import VocabEnum, from_epoch_ms
 from .vocabulary import SpecError, require_number
 
@@ -487,7 +487,7 @@ class Ledger:
         would otherwise be told about a moved holdout, when what happened is
         that the experiment already exists.
         """
-        stamped = replace(experiment, created_at=_utcnow_iso())
+        stamped = replace(experiment, created_at=utcnow_iso())
         with self.store.transaction() as conn:
             taken = conn.execute(
                 "SELECT 1 FROM experiments WHERE experiment_id = ?", (stamped.experiment_id,)
@@ -671,7 +671,7 @@ class Ledger:
                         _dumps(train.to_dict()),
                         _dumps(validation.to_dict()),
                         TrialStatus.MEASURED.value,
-                        _utcnow_iso(),
+                        utcnow_iso(),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -847,7 +847,7 @@ class Ledger:
             spec_hash=spec_hash,
             trial_id=trial_id,
             refusal=refusal,
-            created_at=_utcnow_iso(),
+            created_at=utcnow_iso(),
         )
         cursor = conn.execute(
             "INSERT INTO proposals (experiment_id, outcome, response, model, spec_hash,"
@@ -943,7 +943,7 @@ class Ledger:
                 (
                     TrialStatus.PROMOTED.value,
                     _dumps(holdout.to_dict()),
-                    _utcnow_iso(),
+                    utcnow_iso(),
                     experiment.experiment_id,
                     trial.trial_id,
                     TrialStatus.MEASURED.value,

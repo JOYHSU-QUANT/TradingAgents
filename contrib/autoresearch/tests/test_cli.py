@@ -571,3 +571,11 @@ def test_neither_language_command_takes_a_store_or_a_market_argument(argv):
     with pytest.raises(SystemExit) as caught:
         main(argv)
     assert caught.value.code == 2
+
+
+@pytest.mark.parametrize("command", ["promote", "report"])
+def test_a_trial_that_is_not_a_number_is_a_usage_error(tmp_path, command):
+    with pytest.raises(SystemExit) as caught:
+        main([command, "--experiment", "btc-4h", "--trial", "two",
+              "--db", str(tmp_path / DB_FILENAME)])
+    assert caught.value.code == 2

@@ -79,10 +79,10 @@ def insert_ai_output(conn: sqlite3.Connection, **fields: Any) -> None:
     """Insert one ``ai_outputs`` row, its gate-verdict columns vocabulary-checked.
 
     ``decision_mode``, ``target_side`` and ``risk_action`` are checked when
-    they carry a value, so a word outside the risk gate's enums fails here
-    instead of reaching a reader that parses the column back into them. An
-    absent or ``None`` value is left to the column's own constraint, as in
-    :func:`_check_mode`: ``target_side`` is nullable, the other two NOT NULL.
+    they carry a value, so a word outside the enums the gate result carries
+    fails here instead of reaching a reader that parses the column back into
+    them. An absent or ``None`` value is left to the column's own constraint:
+    ``target_side`` is nullable, the other two NOT NULL.
     """
     _check_mode(fields)
     for column, allowed in (

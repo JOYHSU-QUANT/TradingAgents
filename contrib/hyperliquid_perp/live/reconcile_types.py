@@ -116,10 +116,9 @@ MANUAL_CASE_REASONS = {
 # travels through a ``ReconciliationCase`` built before its write.
 #
 # Each is therefore the value of a registry enum member, not a string typed
-# here: in repo.MACHINE_DISPOSITIONS by construction, and classified by the
-# enum it belongs to. A check at the write would not be enough for them: two
-# of the four sites are deliberately fail-soft
-# (``reconcile_orders._clear_read_failure_case``,
+# here (the registry's MACHINE_DISPOSITIONS comment says what that settles).
+# A check at the write would not be enough for them: two of the four sites
+# are deliberately fail-soft (``reconcile_orders._clear_read_failure_case``,
 # ``LiveReconciler._record_backfill_event``), so a stamp refused there is one
 # log line and nothing else.
 FILL_BOOKED_DISPOSITION = repo.FinalDisposition.RESOLVED_FILL_BOOKED.value

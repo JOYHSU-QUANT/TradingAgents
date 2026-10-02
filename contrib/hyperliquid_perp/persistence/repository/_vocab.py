@@ -39,10 +39,10 @@ __all__ = [
 
 # Enumerable storage values validated at the write boundary (fail loud on a typo
 # rather than persisting it). ``Side`` carries the fill/order direction; these
-# small sets cover the other columns. A vocabulary whose members a split or
-# another module names is an enum here and its set is derived from it, so the
-# name and the stored string cannot part; the write boundary still checks the
-# plain string against the set.
+# small sets cover the other columns. Five vocabularies are enums with the set
+# derived from the members (order roles in ``cloid.OrderRole``; attempt
+# statuses, plan statuses, safe-mode types and machine dispositions below);
+# the write boundary still checks the plain string against the set.
 _MODES = frozenset({"paper", "live"})
 _LIQUIDITY_TYPES = frozenset({"maker", "taker", "simulated"})
 # §14 live fills: the exchange marks each fill maker or taker (``crossed``); a
@@ -101,8 +101,8 @@ _FUNDING_SOURCES = frozenset(
 # import this package — validates against the same set at construction; this
 # module admits it at the write boundary. One list, two check sites.
 
-# ``ai_outputs`` records the risk gate's verdict in the gate's own enums
-# (phase2-data §7); these are the three columns' stored spellings.
+# ``ai_outputs`` records the risk gate's verdict in the enums its result
+# carries (phase2-data §7); these are the three columns' stored spellings.
 _DECISION_MODES = frozenset(mode.value for mode in DecisionMode)
 _TARGET_SIDES = frozenset(side.value for side in TargetSide)
 _RISK_ACTIONS = frozenset(action.value for action in RiskAction)
@@ -232,6 +232,11 @@ ROLE_TO_ORDER_TYPE = {
     OrderRole.STOP_LOSS.value: "stop_market",
     OrderRole.TAKE_PROFIT.value: "take_market",
 }
+# Its readers write these words into ``orders.type`` after the venue has
+# accepted the order, so a word outside ORDER_TYPES fails here, at import,
+# rather than at that write.
+if not set(ROLE_TO_ORDER_TYPE.values()) <= ORDER_TYPES:
+    raise ValueError("ROLE_TO_ORDER_TYPE names an order type outside ORDER_TYPES")
 # "submitted" is the live-only pre-ack state (phase3-spec §8.3): the order row
 # is written before the network call and patched once the exchange answers.
 _ORDER_STATUSES = frozenset(
@@ -388,6 +393,7 @@ RECONCILIATION_CASE_TYPES = frozenset(
     }
 )
 
+
 # The machine dispositions the §12 sweep writes for facts that can COME BACK:
 # each ends an episode in one order's life, and the sweep can find itself
 # looking at that same fact again — after a §8.3 rule-5 resend re-stamps the
@@ -424,9 +430,10 @@ RECONCILIATION_CASE_TYPES = frozenset(
 # showing one live fault however often it comes back — what grows is the events
 # table, by one row per recurrence.
 class ProvisionalDisposition(VocabEnum, noun="provisional machine disposition"):
-    """The provisional dispositions the sweep writes by name.
+    """The provisional dispositions spelled out one by one.
 
-    ``PROVISIONAL_DISPOSITIONS`` is these plus the ``settled_{status}`` family.
+    ``PROVISIONAL_DISPOSITIONS`` adds the derived ``settled_{status}`` family,
+    so membership is asked of that set, never of this class.
     """
 
     # _settle_absent_order: unknownOid with no §8.3 rule-10 evidence — the
@@ -463,7 +470,7 @@ PROVISIONAL_DISPOSITIONS = frozenset(
 # three are the exhaustive "sweep wrote it, and no later sighting reopens the
 # key" list.
 class FinalDisposition(VocabEnum, noun="final machine disposition"):
-    """The dispositions whose key no later sighting reopens."""
+    """The dispositions whose key no later sighting reopens, or that never meet the dedupe."""
 
     # reconcile_orders, orphan back-fill: the missing local row now exists.
     LOCAL_ROW_BACKFILLED = "local_row_backfilled"
@@ -529,7 +536,7 @@ class SafeModeType(VocabEnum, noun="safe-mode type"):
     MANUAL = "manual"
 
 
-# Also validates the scheduler_state column.
+# Checked on ``safe_mode_events`` writes and on the ``scheduler_state`` column.
 SAFE_MODE_TYPES = frozenset(mode_type.value for mode_type in SafeModeType)
 
 # §13.6 history vocabulary. ``safe_mode_entered`` records every entry,

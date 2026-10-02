@@ -59,20 +59,20 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
-- **Nine import-time vocabulary guards are gone, because what they kept in
+- **Eight import-time vocabulary guards are gone, because what they kept in
   step is now one definition** (refactor plan v2, T4-a — PR 17 of the plan;
   no behaviour change). Five storage vocabularies are `VocabEnum` classes
-  whose members other modules name instead of retyping the strings:
+  whose members module-level tables name instead of retyping the strings:
   `OrderRole` in `persistence/cloid.py`, and `AttemptStatus`,
   `ExecutionPlanStatus`, `SafeModeType`, `ProvisionalDisposition` and
   `FinalDisposition` (the two halves of the machine dispositions) in
   `persistence/repository/_vocab.py`; `repository` re-exports the four that
-  other modules read. The sets the write boundary checks are derived from
-  them: `LIVE_ORDER_ROLES`, `TERMINAL_ATTEMPT_STATUSES`,
+  other modules read. The sets and splits the repository reads are derived
+  from them: `LIVE_ORDER_ROLES`, `TERMINAL_ATTEMPT_STATUSES`,
   `LIVE_PLAN_STATUSES`, `SAFE_MODE_TYPES`, `PROVISIONAL_DISPOSITIONS`,
   `MACHINE_DISPOSITIONS` and the private attempt-status and plan-status
   sets. They still hold plain `str`, every stored word is unchanged, every
-  `check_enum` call site is as it was, and `settled_{status}` is still
+  write-boundary `check_enum` call is as it was, and `settled_{status}` is still
   derived from the terminal order statuses. Module-level restatements of
   those words now read them off the members: `SAFE_MODE_MANUAL` and
   `SAFE_MODE_RECOVERABLE` (`live/safe_mode.py`), the four `*_DISPOSITION`
@@ -87,8 +87,7 @@ Breaking changes within the 0.x line are called out explicitly.
   a latch is manual (`SafeModeManager.enter`'s gate line and
   `LiveDecisionDriver._manual_latched`) use the member's value instead of
   the literal `"manual"`. The guards that compared a copy with the registry
-  at import are removed with the copies: the `AssertionError`s "safe-mode
-  severity names drifted from repository.SAFE_MODE_TYPES",
+  at import are removed with the copies: the `AssertionError`s
   "safe_mode.SAFE_MODE_MANUAL drifted from repository.SAFE_MODE_TYPES",
   "PROTECTIVE_ORDER_ROLES drifted from LIVE_ORDER_ROLES",
   "_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES", "_SLTP_ROLES
@@ -96,11 +95,15 @@ Breaking changes within the 0.x line are called out explicitly.
   exactly _SLTP_ROLES" and "_ROLE_ORDER_TYPE drifted from
   repository.ROLE_TO_ORDER_TYPE"; the loop in `reconcile_types` over its
   four constants, with `IMPORT_CHECKED_DISPOSITIONS`; and `_vocab`'s subset
-  check on the two splits. Guards that check completeness stay, since an
-  enum does not classify a member someone adds: the partition checks in
-  `_vocab` and `live/startup.py` and the cycle-count guards in
-  `paper/validation.py` and `live/validation_metrics.py`, messages
-  unchanged. `SmokeStepResult.status` keeps its `Literal` and its guard; a
+  check on the two splits. Guards that check completeness stay, with their
+  messages unchanged, since an enum does not classify a member someone
+  adds: the partition checks in `_vocab`, the partition and mapping-keys
+  checks in `live/startup.py`, the cycle-count guards in
+  `paper/validation.py` and `live/validation_metrics.py`, and the safe-mode
+  severity equality in `live/safe_mode.py` (a third type must be classified
+  there before it can be written). `_vocab` gains one check in place of the
+  copy `protection.py` held: `ROLE_TO_ORDER_TYPE` may only name words in
+  `ORDER_TYPES`. `SmokeStepResult.status` keeps its `Literal` and its guard; a
   type-level copy is not one an enum can absorb while the field holds a
   plain string. Tests: each derived set is pinned by spelling and as plain
   `str` in `tests/persistence/`, which takes over the classification table
@@ -110,8 +113,9 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **`ai_outputs` rows are vocabulary-checked at the write** (refactor plan
   v2, T4-b — the same PR). `repository.insert_ai_output` refuses a
-  `decision_mode`, `target_side` or `risk_action` outside the risk gate's
-  `DecisionMode`, `TargetSide` and `RiskAction` with `ValueError`
+  `decision_mode`, `target_side` or `risk_action` outside the
+  `DecisionMode`, `TargetSide` and `RiskAction` the gate result carries,
+  with `ValueError`
   "`<column>` must be one of [...]", as it already refused an unknown
   `mode`. Its one production caller, `persistence/audit_rows.write_ai_output`,
   passes those enums' values, so no row either lane writes is affected. An

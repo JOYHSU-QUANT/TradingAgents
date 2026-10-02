@@ -87,6 +87,12 @@ REASON_STALE_ORDER_SWEEP_FAILED = "stale_order_sweep_failed"
 # stored words themselves, never a second spelling.
 SAFE_MODE_MANUAL = repo.SafeModeType.MANUAL.value
 SAFE_MODE_RECOVERABLE = repo.SafeModeType.RECOVERABLE.value
+# Everything here reads a type that is not MANUAL as auto-releasable, so a
+# third type added to the registry must be classified in this module before
+# it can be written: try_auto_recover would release it, and the gate's
+# manual_safe_mode line would never rise for it.
+if {SAFE_MODE_MANUAL, SAFE_MODE_RECOVERABLE} != repo.SAFE_MODE_TYPES:
+    raise AssertionError("safe-mode severity names drifted from repository.SAFE_MODE_TYPES")
 # §10.3 daily loss cap: recoverable (position + SL/TP kept, new entry/rebalance
 # stopped; auto-releases at the next UTC 00:00 baseline roll, still subject to
 # §13.4). §10.4 consecutive loss cap: manual (3 losing settlements suggest a

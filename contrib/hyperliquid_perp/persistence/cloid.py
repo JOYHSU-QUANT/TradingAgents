@@ -42,8 +42,8 @@ class OrderRole(VocabEnum, noun="order role"):
     """§8.1: the role every live order carries.
 
     Phase 2 already uses entry / rebalance / stop_loss / take_profit; close /
-    emergency_close / cleanup_cancel are the live-only additions. A module
-    that names a subset of the roles spells it with these members.
+    emergency_close / cleanup_cancel are the live-only additions. A
+    module-level subset of the roles is spelled with these members.
     """
 
     ENTRY = "entry"

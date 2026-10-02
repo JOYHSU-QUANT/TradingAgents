@@ -100,8 +100,8 @@ def test_live_role_vocabulary_is_the_section_8_1_list():
         "emergency_close",
         "cleanup_cancel",
     } == LIVE_ORDER_ROLES
-    # Derived from ``OrderRole``, but as plain strings: the id layer joins a
-    # role into ``cloid_logical``, where a member would not format as its word.
+    # Derived from ``OrderRole``, but as plain strings: a member's ``str()``
+    # is ``OrderRole.ENTRY``, not the stored word.
     assert {type(role) for role in LIVE_ORDER_ROLES} == {str}
 
 

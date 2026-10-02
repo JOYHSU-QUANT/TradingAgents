@@ -848,7 +848,7 @@ def test_ai_output_insert_rejects_a_word_outside_the_gates_vocabulary(tmp_path, 
     db.close()
 
 
-def test_ai_output_insert_accepts_every_word_the_gate_can_say(tmp_path):
+def test_ai_output_insert_accepts_each_stored_gate_word(tmp_path):
     # Including the NULL target_side a maintain_current round writes.
     db = Database(tmp_path / "p.db")
     with db.transaction() as conn:

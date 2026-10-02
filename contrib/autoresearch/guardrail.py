@@ -128,6 +128,28 @@ class RuleTimeline:
         """How many bars from the first decided one on the rule could not evaluate."""
         return sum(self.unevaluable[self.first_decided :])
 
+    @property
+    def first_taken_ms(self) -> int | None:
+        """The close at which the rule first takes a side in this history, if it ever does.
+
+        The replay starts flat at the store's first bar, whatever the rule
+        held before it. A flat reading before this close may therefore be a
+        position opened before the store begins; from it on the replay holds
+        what the rule holds.
+        """
+        return next(
+            (
+                close_time
+                for close_time, side in zip(
+                    self.close_times[self.first_decided :],
+                    self.sides[self.first_decided :],
+                    strict=True,
+                )
+                if side is not None
+            ),
+            None,
+        )
+
     def reading_at(self, at_ms: int) -> RuleReading | None:
         """The rule's side at ``at_ms``, or ``None`` where this timeline cannot say.
 
@@ -165,6 +187,15 @@ class RuleTimeline:
             f"rule history: {len(decided)} {self.coin} {self.interval} bars decided, closing "
             f"{from_epoch_ms(self.close_times[self.first_decided]):%Y-%m-%d %H:%M} to "
             f"{from_epoch_ms(self.close_times[-1]):%Y-%m-%d %H:%M} UTC ({shares})"
+        )
+        taken = self.first_taken_ms
+        lines.append(
+            "  the replay starts flat at the store's first bar; the rule "
+            + (
+                "never takes a side in this history"
+                if taken is None
+                else f"first takes a side at the bar closing {from_epoch_ms(taken):%Y-%m-%d %H:%M}"
+            )
         )
         if self.carried:
             lines.append(

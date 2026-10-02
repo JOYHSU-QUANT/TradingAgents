@@ -20,8 +20,8 @@ Per question, three facts:
 - the verdict: :data:`PASS` when that side is flat or the rule's own,
   :data:`BLOCK` when an order's target is one the guardrail refuses,
   :data:`CLOSE` when no order was created and the position already held is
-  one it refuses, and :data:`UNKNOWN` where the timeline cannot say which
-  side the rule held.
+  one it refuses, and :data:`UNKNOWN` for a position held where the timeline
+  cannot say which side the rule held (a flat book passes there too).
 
 Three things the verdicts mean, each decided 2026-10-02 and binding on the
 guardrail when it is built:
@@ -32,7 +32,8 @@ guardrail when it is built:
 - The guardrail reads the BOOK, not the answer. A cycle where the model
   gave no decision (no answer, a fail-closed round) is judged on the
   position held like any other, and :func:`describe_shadow` says how many
-  of the closes rest on such a cycle.
+  of the closes rest on such a cycle as against a decision that created no
+  order (a maintain, a rejection, a target inside the deadband).
 - Each question is read against the book the paper run actually had. The
   guardrail was not there, so a position it would have closed is still held
   at the next question and is refused again: the verdict counts are
@@ -164,7 +165,8 @@ def interventions(rows: Sequence[GuardrailRow]) -> int:
     questions it stays held: the guardrail would have closed it at the first.
     A close straight after another refused question is that same position
     (the paper book kept what the guardrail would not have), so only a pass
-    ends the stretch; a question with no reading neither starts nor ends one.
+    ends the stretch; a position held where the rule's side is not known
+    (:data:`UNKNOWN`) neither starts nor ends one.
     """
     count = 0
     outside = False
@@ -198,15 +200,25 @@ def describe_shadow(rows: Sequence[GuardrailRow]) -> list[str]:
     sides = Counter("unknown" if row.rule_side is None else row.rule_side.value for row in rows)
     orders = [row for row in rows if row.answer is not None and row.answer.order_created]
     refused = [row for row in rows if row.verdict in (BLOCK, CLOSE)]
+    unread_orders = sum(row.verdict == UNKNOWN for row in orders)
     lines = [
         f"questions: {len(rows)} ({sum(row.answer is not None for row in rows)} answered)",
         "rule side at the decisions: "
         + ", ".join(f"{name} {sides[name]}" for name in ("long", "flat", "short", "unknown")),
         "verdicts: " + ", ".join(f"{name} {verdicts[name]}" for name in VERDICTS),
         f"orders created: {len(orders)}, of which the guardrail refuses "
-        f"{sum(row.verdict == BLOCK for row in orders)}",
+        f"{sum(row.verdict == BLOCK for row in orders)}"
+        # An order at a side nobody knows is not one the guardrail lets
+        # through; left unsaid, "refuses 0" reads as a clean bill.
+        + (f" ({unread_orders} more at a rule side not known)" if unread_orders else ""),
     ]
     unknown = sides["unknown"]
+    if unknown == len(rows):
+        lines.append(
+            "no question has a rule side: the research store does not reach this run, and "
+            "nothing was judged"
+        )
+        return lines
     if unknown:
         # Said before any conclusion: a flat book passes without a rule side,
         # so the verdict line alone understates how much was not read.
@@ -229,8 +241,8 @@ def describe_shadow(rows: Sequence[GuardrailRow]) -> list[str]:
         "it was still held)",
         f"interventions: {interventions(rows)} (each blocked order, and each refused position "
         "once however long it stayed held)",
-        f"close_position by cause: the model kept the position "
-        f"{sum(not row.undecided for row in closes)}, the model gave no decision "
+        f"close_position by cause: a decision that created no order "
+        f"{sum(not row.undecided for row in closes)}, no decision "
         f"{sum(row.undecided for row in closes)}",
     ]
     for row in refused[:_LISTED]:

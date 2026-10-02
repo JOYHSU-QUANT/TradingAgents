@@ -1324,27 +1324,51 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
                     timelines[facts.coin] = build_timeline(store, rule, coin=facts.coin)
     except (GuardrailError, StoreError) as exc:
         return _fail(str(exc))
-    status = 0
-    for index, (facts, decisions) in enumerate(runs):
+    reports: list[tuple[str, list[str], Table]] = []
+    for facts, decisions in runs:
         timeline = timelines[facts.coin]
         rows = shadow(decisions.questions, decisions.answers, timeline)
+        if all(row.rule_side is None for row in rows):
+            # Refused like a store that cannot answer at all, and before any
+            # run is printed: a report that judged nothing is not a report,
+            # and a caller reading the exit status must not take it for one.
+            decided = timeline.close_times[timeline.first_decided :]
+            return _fail(
+                f"run {facts.run_id!r}: the research store has no rule side for any of its "
+                f"{len(rows)} question(s), decided "
+                f"{from_epoch_ms(rows[0].question.at_ms):%Y-%m-%d %H:%M} to "
+                f"{from_epoch_ms(rows[-1].question.at_ms):%Y-%m-%d %H:%M} UTC, while the rule's "
+                f"history there closes {from_epoch_ms(decided[0]):%Y-%m-%d %H:%M} to "
+                f"{from_epoch_ms(decided[-1]):%Y-%m-%d %H:%M}; fetch the store up to the run, or "
+                "leave the run out of --run-id"
+            )
+        taken = timeline.first_taken_ms
+        early = sum(
+            row.rule_decided_ms is not None and (taken is None or row.rule_decided_ms < taken)
+            for row in rows
+        )
         lines = [
             f"guardrail shadow: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; "
             f"interval from {facts.describe_source()})",
             *timeline.describe(),
-            # The cycles that are not questions: a position the guardrail
-            # refuses may have been held through them, unread.
-            *decisions.describe_left_out(),
-            *describe_shadow(rows),
         ]
+        if early:
+            lines.append(
+                f"{early} question(s) were read before the rule first took a side in this store: "
+                "a flat rule there may be a position it opened before the store begins"
+            )
+        # The cycles that are not questions: a position the guardrail refuses
+        # may have been held through them, unread.
+        lines += [*decisions.describe_left_out(), *describe_shadow(rows)]
+        reports.append((facts.run_id, lines, shadow_table(rows)))
+    status = 0
+    for index, (run_id, lines, table) in enumerate(reports):
         if index:
             print()
         for line in lines:
             print(line)
         if args.out is not None:
-            written = _write_out(
-                Path(args.out), args.out, f"{facts.run_id}-guardrail", lines, shadow_table(rows)
-            )
+            written = _write_out(Path(args.out), args.out, f"{run_id}-guardrail", lines, table)
             status = max(status, written)
     return status
 

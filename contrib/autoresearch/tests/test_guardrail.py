@@ -124,7 +124,8 @@ def test_a_reading_before_the_rule_could_be_evaluated_is_none(store, tmp_path):
     # The warm-up is not history: the report counts the three decided bars,
     # from the first of them, and none of them as carried.
     first = f"{from_epoch_ms(timeline.close_times[9]):%Y-%m-%d %H:%M}"
-    assert timeline.describe()[-1].startswith(f"rule history: 3 BTC 4h bars decided, closing {first} to ")
+    history = timeline.describe()[-2]
+    assert history.startswith(f"rule history: 3 BTC 4h bars decided, closing {first} to ")
     assert timeline.carried == 0
 
 
@@ -225,5 +226,24 @@ def test_describe_names_the_rule_and_the_share_of_each_side(store, tmp_path):
     lines = timeline.describe()
     assert lines[0] == f"guardrail rule: {timeline.rule.rule_id}"
     assert "  enter long when: close > 102.0" in lines
-    assert lines[-1].startswith("rule history: 8 BTC 4h bars decided, closing ")
-    assert lines[-1].endswith("UTC (long 38%, flat 38%, short 25%)")
+    assert lines[-2].startswith("rule history: 8 BTC 4h bars decided, closing ")
+    assert lines[-2].endswith("UTC (long 38%, flat 38%, short 25%)")
+    # The replay starts flat; the band rule first takes a side at bar 1.
+    taken = f"{from_epoch_ms(timeline.close_times[1]):%Y-%m-%d %H:%M}"
+    assert timeline.first_taken_ms == timeline.close_times[1]
+    assert lines[-1] == (
+        "  the replay starts flat at the store's first bar; the rule first takes a side at the "
+        f"bar closing {taken}"
+    )
+
+
+def test_a_rule_that_never_takes_a_side_says_so(store, tmp_path):
+    # Closes inside the band throughout: decided at every bar, flat at every
+    # bar, and nothing in this history says what it held before the store.
+    timeline = _timeline(store, _rule(tmp_path), closes=[100, 100, 100])
+    assert timeline.sides == (None, None, None)
+    assert timeline.first_taken_ms is None
+    assert timeline.describe()[-1] == (
+        "  the replay starts flat at the store's first bar; the rule never takes a side in this "
+        "history"
+    )

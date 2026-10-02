@@ -99,9 +99,10 @@ _EXPECTED = {
 }
 
 
-def _candles(closes=_CLOSES) -> list[Candle]:
+def _candles(closes=_CLOSES, *, shift: int = 0) -> list[Candle]:
+    """One bar per close, the first closing at slot ``shift``'s instant."""
     made = []
-    for index, close in enumerate(closes):
+    for index, close in enumerate(closes, start=shift):
         price = Decimal(close)
         made.append(
             Candle(
@@ -123,10 +124,10 @@ def _rule_file(tmp_path: Path) -> Path:
     return path
 
 
-def _research(tmp_path: Path, closes=_CLOSES) -> Path:
+def _research(tmp_path: Path, closes=_CLOSES, *, shift: int = 0) -> Path:
     path = tmp_path / "autoresearch.sqlite"
     with ResearchStore(path) as store:
-        store.upsert_candles(COIN, "4h", _candles(closes))
+        store.upsert_candles(COIN, "4h", _candles(closes, shift=shift))
     return path
 
 
@@ -264,10 +265,10 @@ def test_describe_counts_the_verdicts_and_lists_each_refused_question(tmp_path):
     # Slot 2's order, the position found at slot 7 (still held at slot 8),
     # and slot 9's order; slot 3's close is the position slot 2's order opened.
     assert lines[5].startswith("interventions: 3 (")
-    # Slot 7 is the model's own doing (a target inside the deadband); slots 3
-    # and 8 are fail-closed rounds.
+    # Slot 7 is a decision that created no order (a target inside the
+    # deadband); slots 3 and 8 are fail-closed rounds.
     assert lines[6] == (
-        "close_position by cause: the model kept the position 1, the model gave no decision 2"
+        "close_position by cause: a decision that created no order 1, no decision 2"
     )
     assert lines[7:] == [
         f"  {_at(2)} rule long; set_target short 20% -> block_to_flat",
@@ -285,9 +286,7 @@ def test_a_round_with_no_answer_is_judged_on_the_position_it_left_held(tmp_path)
     lines = describe_shadow(_rows(tmp_path, _RALLY))
     assert "verdicts: pass 4, block_to_flat 2, close_position 5, rule_unknown 0" in lines
     assert any(line.startswith("interventions: 3 (") for line in lines)
-    assert (
-        "close_position by cause: the model kept the position 2, the model gave no decision 3"
-    ) in lines
+    assert "close_position by cause: a decision that created no order 2, no decision 3" in lines
     assert lines[-2:] == [
         f"  {_at(10)} rule long; holds short (maintain_current) -> close_position",
         f"  {_at(11)} rule long; no answer, holds short -> close_position",
@@ -319,7 +318,8 @@ def test_describe_does_not_conclude_past_the_questions_it_could_not_read(tmp_pat
         "questions: 11 (10 answered)",
         "rule side at the decisions: long 3, flat 3, short 0, unknown 5",
         "verdicts: pass 4, block_to_flat 1, close_position 1, rule_unknown 5",
-        "orders created: 4, of which the guardrail refuses 1",
+        # Slot 9's order sits at a side nobody knows: not refused, and said.
+        "orders created: 4, of which the guardrail refuses 1 (1 more at a rule side not known)",
         "rule side not known at 5 question(s): the research store does not reach them, or the "
         "rule could not be evaluated there; a position held there is not judged (rule_unknown), "
         "and a flat book passes unread",
@@ -328,6 +328,32 @@ def test_describe_does_not_conclude_past_the_questions_it_could_not_read(tmp_pat
     unrefused = describe_shadow([row for row in rows if row.verdict in (PASS, UNKNOWN)])
     assert unrefused[-1] == "no question that could be read was refused"
     assert "the guardrail would have changed nothing in this run" not in unrefused
+
+
+def test_describe_judges_nothing_when_no_question_has_a_rule_side(tmp_path):
+    # Every row unread: the counts, and one sentence in place of a conclusion.
+    unread = [
+        replace(
+            row,
+            rule_side=None,
+            rule_decided_ms=None,
+            verdict=verdict_of(
+                None, row.held, order_created=row.answer is not None and row.answer.order_created
+            ),
+        )
+        for row in _rows(tmp_path)
+    ]
+    lines = describe_shadow(unread)
+    # Slots 5 and 6 hold nothing, so they pass unread; the other nine hold a
+    # position nobody can judge. All four orders are among the unread.
+    assert lines == [
+        "questions: 11 (10 answered)",
+        "rule side at the decisions: long 0, flat 0, short 0, unknown 11",
+        "verdicts: pass 2, block_to_flat 0, close_position 0, rule_unknown 9",
+        "orders created: 4, of which the guardrail refuses 0 (3 more at a rule side not known)",
+        "no question has a rule side: the research store does not reach this run, and nothing "
+        "was judged",
+    ]
 
 
 def test_the_csv_has_one_row_per_question(tmp_path):
@@ -426,6 +452,44 @@ def test_several_runs_are_read_in_one_call_each_with_its_own_report(tmp_path, ca
     for run_id in (GATE_RUN_ID, other):
         assert (out_dir / f"{run_id}-guardrail-decisions.csv").is_file()
         assert (out_dir / f"{run_id}-guardrail-summary.txt").is_file()
+
+
+def test_a_run_the_research_store_does_not_reach_at_all_is_refused(store, tmp_path, capsys):
+    # The same twelve bars, closing twenty slots before the run begins: no
+    # question has a rule side, so there is no report to print and no exit 0.
+    research = _research(tmp_path, shift=-20)
+    command = ["guardrail", "--db", str(store), "--run-id", RUN_ID]
+    command += ["--research-db", str(research), "--rule", str(_rule_file(tmp_path))]
+    assert main(command) == 1
+    captured = capsys.readouterr()
+    assert (
+        f"error: run {RUN_ID!r}: the research store has no rule side for any of its 11 "
+        f"question(s), decided {_at(0)} to {_at(11)} UTC, while the rule's history there closes "
+        f"{_at(-20)} to {_at(-9)}"
+    ) in captured.err
+    assert captured.out == ""
+
+
+def test_questions_read_before_the_rule_first_took_a_side_are_said(store, tmp_path, capsys):
+    # The replay starts flat. Here the rule first takes a side at the bar
+    # closing at slot 2, so slots 0 and 1 read a flat that may be a position
+    # opened before the store begins. In the main fixture the first bar is
+    # already long, and nothing is read before it.
+    research = _research(tmp_path, (100, 100, *_CLOSES[2:]))
+    command = ["guardrail", "--db", str(store), "--run-id", RUN_ID]
+    command += ["--research-db", str(research), "--rule", str(_rule_file(tmp_path))]
+    assert main(command) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert (
+        "  the replay starts flat at the store's first bar; the rule first takes a side at the "
+        f"bar closing {_at(2)}"
+    ) in out
+    assert (
+        "2 question(s) were read before the rule first took a side in this store: a flat rule "
+        "there may be a position it opened before the store begins"
+    ) in out
+    assert main(_guardrail(store, tmp_path)) == 0
+    assert not any("were read before" in line for line in capsys.readouterr().out.splitlines())
 
 
 def test_the_committed_rule_is_the_default_and_a_short_store_refuses_it(store, tmp_path, capsys):

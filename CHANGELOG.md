@@ -863,13 +863,16 @@ Breaking changes within the 0.x line are called out explicitly.
   how often the guardrail would have acted (`interventions`: each blocked
   order, and each refused position once however long it stayed held) and how
   many of the closes rest on a cycle with no decision. When some questions
-  have no rule side it says how many before concluding anything, and it says
-  "would have changed nothing" only when every question was read and none
-  refused. The cycles that are not questions (failed before an input row,
-  still in progress) are printed too. Nothing is scored and no later price is
-  read; `--out DIR` writes one CSV row per question beside the summary. The
-  trading daemon, its store and its schema are untouched. The rule is a spec
-  file committed in the research package,
+  have no rule side it says how many before concluding anything (and how many
+  orders sit among them), and it says "would have changed nothing" only when
+  every question was read and none refused; a run with no rule side for any
+  question is refused, exit 1. The replay starts flat at the store's first
+  bar, so the report names the bar the rule first takes a side at and how many
+  questions were read before it. The cycles that are not questions (failed
+  before an input row, still in progress) are printed too. Nothing is scored
+  and no later price is read; `--out DIR` writes one CSV row per question
+  beside the summary. The trading daemon, its store and its schema are
+  untouched. The rule is a spec file committed in the research package,
   `contrib/autoresearch/guardrails/btc-20d-breakout.json` (on 4h bars: enter
   on a close beyond the 120-bar channel, leave on a close beyond the 55-bar
   one), named in reports as `<file stem>@<spec hash prefix>`. It is not a

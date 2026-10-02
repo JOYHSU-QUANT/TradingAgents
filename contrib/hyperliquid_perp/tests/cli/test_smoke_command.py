@@ -335,7 +335,7 @@ def test_the_residual_warnings_quote_the_real_suite_size(tmp_path, capsys, monke
     import re
 
     from contrib.hyperliquid_perp.live import smoke as smoke_mod
-    from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
+    from contrib.hyperliquid_perp.live.smoke_catalog import SMOKE_TEST_KEYS
 
     dbp = make_live_run(tmp_path)
     monkeypatch.setattr(

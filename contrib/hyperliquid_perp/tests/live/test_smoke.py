@@ -13,7 +13,7 @@ import pytest
 from contrib.hyperliquid_perp.exchanges.hyperliquid.signed_client import (
     is_post_only_cross_error,
 )
-from contrib.hyperliquid_perp.live import smoke
+from contrib.hyperliquid_perp.live import smoke, smoke_catalog
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 from contrib.hyperliquid_perp.persistence.models import PositionState
@@ -56,7 +56,9 @@ def test_every_registered_smoke_test_has_a_runner_method():
     # whose method is missing or typo'd only breaks when it is SELECTED —
     # mid-suite, on a real run.
     missing = [
-        t.key for t in smoke.SMOKE_TESTS if not hasattr(smoke.SmokeTestRunner, f"_test_{t.key}")
+        t.key
+        for t in smoke_catalog.SMOKE_TESTS
+        if not hasattr(smoke.SmokeTestRunner, f"_test_{t.key}")
     ]
     assert missing == []
 
@@ -66,7 +68,7 @@ def test_the_registry_keys_are_unique_and_the_policy_sets_are_drawn_from_them():
     # copy-pasted duplicate would drop a test in the ``_BY_KEY`` fold, and a
     # key renamed in SMOKE_TESTS but not in a policy set would drop that test
     # from its bucket (no exit disarm, no pre-flight, a flat probe).
-    keys = [t.key for t in smoke.SMOKE_TESTS]
+    keys = [t.key for t in smoke_catalog.SMOKE_TESTS]
     assert len(set(keys)) == len(keys), sorted({k for k in keys if keys.count(k) > 1})
     for copied in (smoke._KILL_SWITCH_TESTS, smoke._ORDER_PLACING_TESTS, smoke._TRIGGER_PROBE_TESTS):
         assert copied <= set(keys), sorted(copied - set(keys))
@@ -286,8 +288,8 @@ def test_full_suite_passes_and_gate_opens(live_db):
             _ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery())
         )
         executed = runner.run()
-        assert [t.number for t in executed] == list(range(1, len(smoke.SMOKE_TESTS) + 1))
-        passed, missing, failed, errored = smoke.smoke_gate_report(live_db.conn, "live-BTC")
+        assert [t.number for t in executed] == list(range(1, len(smoke_catalog.SMOKE_TESTS) + 1))
+        passed, missing, failed, errored = smoke_catalog.smoke_gate_report(live_db.conn, "live-BTC")
     assert passed
     assert missing == () and failed == ()
 
@@ -341,7 +343,7 @@ def test_results_are_persisted_per_test(live_db):
     with live_db:
         smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery())).run()
         rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
-    assert len(rows) == len(smoke.SMOKE_TESTS)
+    assert len(rows) == len(smoke_catalog.SMOKE_TESTS)
     assert {r["status"] for r in rows} == {"passed"}
     assert all(r["dry_run"] == 0 for r in rows)
 
@@ -359,7 +361,9 @@ def test_refused_order_is_a_failed_verdict(live_db):
     with live_db:
         smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run()
         latest = repo.latest_smoke_test_results(live_db.conn, "live-BTC")
-        passed, _missing, failed, _errored = smoke.smoke_gate_report(live_db.conn, "live-BTC")
+        passed, _missing, failed, _errored = smoke_catalog.smoke_gate_report(
+            live_db.conn, "live-BTC"
+        )
     assert latest["multi_slice_fill"]["status"] == "failed"
     assert "multi_slice_fill" in failed
     assert not passed
@@ -429,12 +433,12 @@ def test_dry_run_records_skipped_and_gate_stays_closed(live_db):
         # signed=None: a dry run must never touch the client.
         smoke.SmokeTestRunner(_ctx(live_db, None, dry_run=True)).run()
         rows = repo.iter_smoke_test_results(live_db.conn, "live-BTC")
-        passed, missing, failed, errored = smoke.smoke_gate_report(live_db.conn, "live-BTC")
+        passed, missing, failed, errored = smoke_catalog.smoke_gate_report(live_db.conn, "live-BTC")
     assert {r["status"] for r in rows} == {"skipped"}
     assert all(r["dry_run"] == 1 for r in rows)
     # Dry-run rows never satisfy the gate: every test reads as "not yet run".
     assert not passed
-    assert len(missing) == len(smoke.SMOKE_TESTS)
+    assert len(missing) == len(smoke_catalog.SMOKE_TESTS)
     assert failed == ()
 
 
@@ -442,7 +446,7 @@ def test_dry_run_then_real_run_supersedes(live_db):
     with live_db:
         smoke.SmokeTestRunner(_ctx(live_db, None, dry_run=True)).run()
         smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned(), run_recovery=lambda: _Recovery())).run()
-        passed, _m, _f, _e = smoke.smoke_gate_report(live_db.conn, "live-BTC")
+        passed, _m, _f, _e = smoke_catalog.smoke_gate_report(live_db.conn, "live-BTC")
     assert passed  # the real pass supersedes the earlier dry-run skips
 
 
@@ -461,8 +465,8 @@ def test_only_runs_subset_in_canonical_order(live_db):
 
 def test_validate_only_keys_rejects_unknown():
     with pytest.raises(ValueError, match="unknown smoke test key"):
-        smoke.validate_only_keys(["signed_client_init", "bogus"])
-    assert smoke.validate_only_keys(["emergency_close"]) == ("emergency_close",)
+        smoke_catalog.validate_only_keys(["signed_client_init", "bogus"])
+    assert smoke_catalog.validate_only_keys(["emergency_close"]) == ("emergency_close",)
 
 
 # -- gate report -----------------------------------------------------------
@@ -489,12 +493,12 @@ def test_gate_report_distinguishes_missing_from_failed(live_db):
             executed_at=_T0,
         )
     with live_db:
-        passed, missing, failed, errored = smoke.smoke_gate_report(live_db.conn, "live-BTC")
+        passed, missing, failed, errored = smoke_catalog.smoke_gate_report(live_db.conn, "live-BTC")
     assert not passed
     assert "update_leverage" in failed
     assert "signed_client_init" not in missing and "signed_client_init" not in failed
     # The 16 never-run tests are all missing.
-    assert len(missing) == len(smoke.SMOKE_TESTS) - 2
+    assert len(missing) == len(smoke_catalog.SMOKE_TESTS) - 2
 
 
 def test_gate_report_splits_error_from_failed(live_db):
@@ -503,7 +507,9 @@ def test_gate_report_splits_error_from_failed(live_db):
     signed = _FakeSigned(raise_on={"update_leverage"})  # → "error" verdict
     with live_db:
         smoke.SmokeTestRunner(_ctx(live_db, signed, run_recovery=lambda: _Recovery())).run()
-        passed, _missing, failed, errored = smoke.smoke_gate_report(live_db.conn, "live-BTC")
+        passed, _missing, failed, errored = smoke_catalog.smoke_gate_report(
+            live_db.conn, "live-BTC"
+        )
     assert "update_leverage" in errored
     assert "update_leverage" not in failed
     assert not passed
@@ -523,7 +529,7 @@ def test_failed_then_fixed_rerun_passes_the_key(live_db):
                 executed_at=_T0,
             )
     with live_db:
-        _p, _m, failed, _e = smoke.smoke_gate_report(live_db.conn, "live-BTC")
+        _p, _m, failed, _e = smoke_catalog.smoke_gate_report(live_db.conn, "live-BTC")
     assert "update_leverage" not in failed  # latest passed supersedes the earlier fail
 
 
@@ -1383,8 +1389,8 @@ def test_only_status_without_submit_is_refused():
     # Q3 2026-07-28: a selection that can never pass is refused up front, so
     # the append-only audit never records the slip as "exchange refused".
     with pytest.raises(ValueError, match="select both"):
-        smoke.validate_only_keys(["slice_order_status"])
-    both = smoke.validate_only_keys(("slice_order_submit", "slice_order_status"))
+        smoke_catalog.validate_only_keys(["slice_order_status"])
+    both = smoke_catalog.validate_only_keys(("slice_order_submit", "slice_order_status"))
     assert both == ("slice_order_submit", "slice_order_status")
 
 
@@ -1508,7 +1514,7 @@ def test_an_unresolvable_test_key_is_contained_as_an_error_verdict(live_db):
     # audit promise, mid-suite. (The registry test above makes this
     # unreachable in practice; this pins the containment behind it.)
     runner = smoke.SmokeTestRunner(_ctx(live_db, _FakeSigned()))
-    result = runner._execute(smoke.SmokeTest(99, "no_such_probe", "fabricated"))
+    result = runner._execute(smoke_catalog.SmokeTest(99, "no_such_probe", "fabricated"))
     assert result.status == "error"
     assert "AttributeError" in (result.error_message or "")
 
@@ -1567,7 +1573,7 @@ def test_heartbeat_fires_once_per_test(live_db):
     # places a real reduce-only IOC and can clear the account-wide switch, so it
     # positively re-verifies ownership rather than trusting that some earlier
     # heartbeat happened to raise (2026-07-30 concurrency review).
-    assert beats["n"] == len(smoke.SMOKE_TESTS) + 1
+    assert beats["n"] == len(smoke_catalog.SMOKE_TESTS) + 1
 
 
 def test_superseded_lease_aborts_and_suppresses_disarm(live_db):

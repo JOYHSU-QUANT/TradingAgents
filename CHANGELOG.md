@@ -59,6 +59,40 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **The smoke registry and the store-identity refusal each have a module of
+  their own** (refactor plan v2, T3-e and the `db.py` move — PR 16 of the
+  plan; no behaviour change). `live/smoke.py` held the §20.2 registry, the
+  cycle-entry gate and the `--only` selection rules beside the 1,900-line
+  `SmokeTestRunner`. Those now live in `live/smoke_catalog.py`: `SmokeTest`,
+  `SMOKE_TESTS`, `SMOKE_TEST_KEYS`, `SmokeGateReport`, `smoke_gate_report`,
+  `validate_only_keys` and `rerun_keys_for`, which leave `smoke.__all__`.
+  `live/validation.py`, `live/validation_metrics.py`, `cli/live.py` and
+  `cli/smoke.py` import them from there, as does `smoke.py` itself for the
+  two the runner reads (`SMOKE_TESTS`, `SmokeTest`). The runner's policy sets
+  (`_KILL_SWITCH_TESTS`, `_ORDER_PLACING_TESTS`, `_TRIGGER_PROBE_TESTS`), its
+  probe constants, `REFRESHES_PER_FULL_SUITE` and
+  `SMOKE_MIN_KILL_SWITCH_DEADLINE` stay in `smoke.py`: they describe the
+  runner, not the registry. More than half of `persistence/db.py` was the
+  refusal of a `--db` that is not one of this project's stores. It now lives
+  in `persistence/store_identity.py`: `refuse_a_foreign_store` and
+  `unopenable_error` (called by `Database.__init__`), `sqlite_file_uri`,
+  `is_our_unused_bookkeeping` and `STORE_TABLES` (read by the tests) — the
+  five drop their underscore — and the private helpers and constants behind
+  them. `db.py` keeps `connect`, the migration runner and `Database`. What
+  the two modules share lives in a third, `persistence/db_types.py`, so
+  that `store_identity` does not import `db`: `SchemaVersionError`, and
+  three constants that drop their underscore too, `BUSY_TIMEOUT_MS`,
+  `IN_MEMORY` and `BOOKKEEPING_TABLE`. `cli/_common.py` and the tests import
+  `SchemaVersionError` from `db_types`, and `db.__all__` no longer lists it.
+  Every refusal message, exit code and the order of the checks are
+  unchanged. Only the logger name of the two
+  WARNINGs that moved changes: "could not resolve %s to look for a log
+  beside its target" and "could not read %s in %s" now come from
+  `contrib.hyperliquid_perp.persistence.store_identity` instead of
+  `...persistence.db`, which the CLI log format prints as `%(name)s`. The
+  tests read each name from the module that now defines it; the test count
+  is unchanged.
+
 - **The dead man's switch is three modules, and its shutdown sweep is
   phased** (refactor plan v2, T3-d — PR 15 of the plan; no behaviour
   change). `live/kill_switch.py` held the timing invariant, the two

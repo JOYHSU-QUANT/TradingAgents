@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.live import smoke
+from contrib.hyperliquid_perp.live import smoke_catalog
 from contrib.hyperliquid_perp.live.fills import ExchangeFill, post_live_fill
 from contrib.hyperliquid_perp.live.validation import (
     _ADOPTION_WEDGE_AFTER,
@@ -59,7 +59,7 @@ def _init_live_run(
 
 def _pass_all_smoke(db: Database, *, run_id: str = "r") -> None:
     with db.transaction() as conn:
-        for test in smoke.SMOKE_TESTS:
+        for test in smoke_catalog.SMOKE_TESTS:
             repo.insert_smoke_test_result(
                 conn,
                 run_id=run_id,
@@ -578,7 +578,7 @@ def test_the_rerun_command_obeys_the_only_pairing_rule(tmp_path):
     remedy = next(s for s in report.shortfalls if "ERRORED" in s)
     assert "--only slice_order_submit slice_order_status" in remedy
     # And the command really is accepted by the guard that used to reject it.
-    from contrib.hyperliquid_perp.live.smoke import validate_only_keys
+    from contrib.hyperliquid_perp.live.smoke_catalog import validate_only_keys
 
     validate_only_keys(["slice_order_submit", "slice_order_status"])
 

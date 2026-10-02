@@ -29,7 +29,7 @@ from ..runtime.no_decision import TrailingFailureStreaks, trailing_failure_strea
 from .config import DEFAULT_SCHEDULE_CANCEL_SECONDS as _CONFIG_DEFAULT_DEADLINE_S
 from .kill_switch_events import is_suite_authored
 from .safe_mode import REASON_DAILY_LOSS
-from .smoke import SmokeGateReport, smoke_gate_report
+from .smoke_catalog import SmokeGateReport, smoke_gate_report
 
 __all__ = ["DEFAULT_SCHEDULE_CANCEL_SECONDS", "LiveRunFacts", "read_live_run_facts"]
 

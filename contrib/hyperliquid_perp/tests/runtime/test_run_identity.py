@@ -8,7 +8,8 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.hyperliquid_perp.persistence.db import Database, SchemaVersionError
+from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.persistence.db_types import SchemaVersionError
 from contrib.hyperliquid_perp.persistence.schema import SCHEMA_VERSION
 from contrib.hyperliquid_perp.runtime import accounting, run_identity as run_identity_mod
 from contrib.hyperliquid_perp.runtime.run_identity import (

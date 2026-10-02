@@ -554,7 +554,7 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     # so the command stops at the lease refusal — proof it got PAST the gate).
     # The refusal is scripted rather than a pre-held lease: since issue #129
     # a held lease is caught by the read-only peek at open, before the gate.
-    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.live import smoke_catalog
     from contrib.hyperliquid_perp.runtime import run_lock as run_lock_mod
 
     acquires: list[tuple[str, int]] = []
@@ -573,7 +573,7 @@ def test_live_loop_open_smoke_gate_proceeds_past_the_gate(
     dbp = seed_live_run_with_genesis_subset(tmp_path, cfg)
     db = Database(dbp)
     with db.transaction() as conn:
-        for test in smoke_mod.SMOKE_TESTS:
+        for test in smoke_catalog.SMOKE_TESTS:
             repo.insert_smoke_test_result(
                 conn,
                 run_id="r1",
@@ -1253,11 +1253,11 @@ def test_live_migrates_a_behind_store_once_nobody_owns_it(
 
 
 def _open_smoke_gate(dbp, run_id="r1") -> None:
-    from contrib.hyperliquid_perp.live import smoke as smoke_mod
+    from contrib.hyperliquid_perp.live import smoke_catalog
 
     db = Database(dbp)
     with db.transaction() as conn:
-        for test in smoke_mod.SMOKE_TESTS:
+        for test in smoke_catalog.SMOKE_TESTS:
             repo.insert_smoke_test_result(
                 conn,
                 run_id=run_id,

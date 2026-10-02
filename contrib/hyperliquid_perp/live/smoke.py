@@ -6,17 +6,18 @@ testnet connection. This module turns that checklist into a per-item,
 re-runnable, DB-recorded CLI (`live-smoke`): every test drives the actual PR 1–5
 signed client / recovery components, its verdict lands in ``live_smoke_tests``
 (append-only — a re-run after a fix supersedes without erasing the record), and
-the cycle-entry gate (:func:`smoke_gate_report`) reads the latest non-dry-run
-result per test.
+the cycle-entry gate (:func:`~.smoke_catalog.smoke_gate_report`) reads the
+latest non-dry-run result per test.
 
-The checklist is §20.2's seventeen items verbatim (:data:`SMOKE_TESTS` 1–17)
-plus one addition, test 18 "emergency close": §20.3's ``emergency_close_test_passed``
-acceptance metric (and §21.3's "emergency close tested" entry criterion) demand
-a deliberate emergency-close exercise, and a healthy cycle run produces none —
-so the metric can only come from a test that forces it, never from cycle
-telemetry. Test 18 is therefore run by the suite and gated like the rest (§20.2
-"all smoke tests must pass"); :mod:`.validation` reads tests 15/16/17/18 for the
-four §20.3 ``*_test_passed`` booleans.
+The checklist is §20.2's seventeen items verbatim
+(:data:`~.smoke_catalog.SMOKE_TESTS` 1–17) plus one addition, test 18 "emergency
+close": §20.3's ``emergency_close_test_passed`` acceptance metric (and §21.3's
+"emergency close tested" entry criterion) demand a deliberate emergency-close
+exercise, and a healthy cycle run produces none — so the metric can only come
+from a test that forces it, never from cycle telemetry. Test 18 is therefore run
+by the suite and gated like the rest (§20.2 "all smoke tests must pass");
+:mod:`.validation` reads tests 15/16/17/18 for the four §20.3 ``*_test_passed``
+booleans.
 
 Design: each test is a thin orchestration over the injected
 :class:`SmokeContext` — the signed client for the wire actions, a ``mark_price``
@@ -39,13 +40,13 @@ only on a real (non-dry-run) placement.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, localcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from ..common.decimal_context import DECIMAL_CONTEXT
 from ..paper.stops import round_to_tick
@@ -57,6 +58,7 @@ from ..runtime.run_lock import RunLockError
 from .config import AGGRESSIVE_FILL_BAND_PCT
 from .kill_switch_events import deadline_detail, record_kill_switch_event
 from .orders import ORDER_TYPE_FOR_TIF, local_status_for_exchange_status, parse_order_status
+from .smoke_catalog import SMOKE_TESTS, SmokeTest
 
 if TYPE_CHECKING:  # import cost only under type checking; runtime stays lazy
     from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
@@ -66,18 +68,11 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "REFRESHES_PER_FULL_SUITE",
     "SMOKE_MIN_KILL_SWITCH_DEADLINE",
-    "SMOKE_TESTS",
-    "SMOKE_TEST_KEYS",
     "RecoveryResult",
     "SmokeContext",
-    "SmokeGateReport",
     "SmokePreflightError",
     "SmokeStepResult",
-    "SmokeTest",
     "SmokeTestRunner",
-    "rerun_keys_for",
-    "smoke_gate_report",
-    "validate_only_keys",
 ]
 
 
@@ -93,51 +88,6 @@ class RecoveryResult(Protocol):
 
     passed: bool
 
-
-@dataclass(frozen=True)
-class SmokeTest:
-    """One §20.2 checklist item: its 1-based number, stable key, and label."""
-
-    number: int
-    key: str
-    name: str
-
-
-# §20.2's seventeen items verbatim, plus test 18 (emergency close, see module
-# docstring). The KEY is the stable identity the store and the validator read;
-# the NUMBER and NAME are for operator-facing reports. Order is execution order:
-# a slice submitted in test 3 is the order test 4 queries, so the sequence is
-# meaningful and the runner honours it.
-SMOKE_TESTS: tuple[SmokeTest, ...] = (
-    SmokeTest(1, "signed_client_init", "signed client initialization (incl. §6.1 authorization)"),
-    SmokeTest(2, "update_leverage", "updateLeverage"),
-    SmokeTest(3, "slice_order_submit", "slice order submit (IOC limit + cloid)"),
-    SmokeTest(4, "slice_order_status", "slice order status check (orderStatus by cloid)"),
-    SmokeTest(5, "slice_plan_cancel", "slice plan cancel (cancel an unfilled resting order)"),
-    SmokeTest(6, "multi_slice_fill", "small entry / multi-slice fill"),
-    SmokeTest(7, "reduce_only_close", "reduce-only close"),
-    SmokeTest(8, "stop_loss_create", "SL create"),
-    SmokeTest(9, "stop_loss_modify", "SL modify"),
-    SmokeTest(10, "stop_loss_cancel", "SL cancel"),
-    SmokeTest(11, "take_profit_create", "TP create"),
-    SmokeTest(12, "take_profit_modify", "TP modify"),
-    SmokeTest(13, "take_profit_cancel", "TP cancel"),
-    SmokeTest(14, "kill_switch_arm_refresh", "scheduleCancel arm / refresh"),
-    SmokeTest(15, "restart_reconciliation", "restart reconciliation"),
-    SmokeTest(16, "startup_with_existing_position", "startup with existing position"),
-    SmokeTest(17, "startup_with_stale_open_order", "startup with stale bot-owned order"),
-    SmokeTest(18, "emergency_close", "emergency close (aggressive reduce-only IOC, §17.2)"),
-    SmokeTest(19, "maker_slice_post_cancel", "post-only (Alo) slice rests, is listed, cancels"),
-    SmokeTest(
-        20,
-        "maker_slice_post_only_refusal",
-        "post-only (Alo) slice that would cross is refused by name",
-    ),
-)
-
-# The stable identities, in one place: the gate iterates them, the validator
-# maps §20.3 booleans through a subset of them, and --only validates against them.
-SMOKE_TEST_KEYS: tuple[str, ...] = tuple(t.key for t in SMOKE_TESTS)
 
 # The narrowest dead-man cover the suite runs under, whatever the config says:
 # ``SmokeContext.kill_switch_deadline``'s default, and the floor ``cli.smoke``
@@ -174,10 +124,10 @@ SMOKE_MIN_KILL_SWITCH_DEADLINE = timedelta(seconds=120)
 #
 # Derived rather than hand-counted because the RUNBOOK quotes the six-suite
 # total to explain WHY suite rows are barred from the floor, and that figure
-# moves the day this table grows while nothing else notices (issue #100). One
-# test measures this against a driven suite; a doc-pin ties the RUNBOOK to it.
+# moves the day ``SMOKE_TESTS`` grows while nothing else notices (issue #100).
+# One test measures this against a driven suite; a doc-pin ties the RUNBOOK to
+# it.
 REFRESHES_PER_FULL_SUITE = len(SMOKE_TESTS) + 1
-_BY_KEY: dict[str, SmokeTest] = {t.key: t for t in SMOKE_TESTS}
 
 # The tests whose execution touches the account-wide dead man's switch: the
 # three restart tests (their §19.1 recovery ARMS the scheduleCancel and never
@@ -456,10 +406,10 @@ class SmokeTestRunner:
         """Execute the selected tests in order, persisting each verdict.
 
         ``only`` restricts to the named test keys (validated by the CLI); the
-        default runs all of :data:`SMOKE_TESTS`. Returns the tests that were
-        executed (in order) — the caller reports them and computes the gate from
-        the store, never from this return value, so a crash mid-suite still
-        leaves every completed verdict durable.
+        default runs all of :data:`~.smoke_catalog.SMOKE_TESTS`. Returns the
+        tests that were executed (in order) — the caller reports them and
+        computes the gate from the store, never from this return value, so a
+        crash mid-suite still leaves every completed verdict durable.
 
         An ``error`` verdict (the harness itself broke — as opposed to
         ``failed``, the exchange refusing a well-formed action) STOPS the suite
@@ -2305,100 +2255,3 @@ class SmokeTestRunner:
         if filled <= 0:
             return "the venue reported a fill with no size — check the position by hand"
         return self._best_effort_close(filled) or f"reduce-only closed {filled}"
-
-
-# --------------------------------------------------------------------------
-# Cycle-entry gate (§20.2: all smoke tests must pass)
-# --------------------------------------------------------------------------
-
-
-class SmokeGateReport(NamedTuple):
-    """The §20.2 gate verdict, slot by NAME.
-
-    Three of the four slots share the same ``tuple[str, ...]`` type — a bare
-    tuple would let a transposed return (or a mis-ordered destructuring at a
-    new call site) swap ``missing``/``failed``/``errored`` silently past the
-    type checker, mislabeling why a smoke test is red in an operator-facing
-    real-money go/no-go report. Still positionally unpackable (a plain
-    ``NamedTuple``), so existing ``passed, missing, failed, errored = ...``
-    call sites are unaffected (2026-07-30 type-design pass).
-    """
-
-    passed: bool
-    missing: tuple[str, ...]
-    failed: tuple[str, ...]
-    errored: tuple[str, ...]
-
-
-def smoke_gate_report(conn: Any, run_id: str) -> SmokeGateReport:
-    """``(passed, missing_keys, failed_keys, errored_keys)`` for the §20.2 gate.
-
-    ``passed`` is True only when every :data:`SMOKE_TESTS` key has a latest
-    non-dry-run row of ``passed``. The non-passed keys are split three ways so an
-    operator at a real-money go/no-go can triage without querying the DB:
-    ``missing`` never ran for real (a dry-run row does not count), ``errored``
-    ran but the harness itself broke (status ``error`` — a code bug to fix), and
-    ``failed`` ran but the exchange refused a well-formed action (status
-    ``failed`` or anything else — a config/market issue). All in canonical
-    (test-number) order. The gate is the same either way: any non-empty bucket
-    fails it.
-    """
-    latest = repo.latest_smoke_test_results(conn, run_id)
-    missing: list[str] = []
-    failed: list[str] = []
-    errored: list[str] = []
-    for key in SMOKE_TEST_KEYS:
-        row = latest.get(key)
-        if row is None:
-            missing.append(key)
-        elif row["status"] == "passed":
-            continue
-        elif row["status"] == "error":
-            errored.append(key)
-        else:
-            failed.append(key)
-    passed = not missing and not failed and not errored
-    return SmokeGateReport(passed, tuple(missing), tuple(failed), tuple(errored))
-
-
-def validate_only_keys(keys: Iterable[str]) -> tuple[str, ...]:
-    """Return the given keys if the selection is runnable, else raise ValueError.
-
-    The CLI's ``--only`` guard: a typo'd key must name itself, not silently run
-    an empty suite (which would then read as "all selected tests passed"). A
-    selection that CANNOT pass is refused too: ``slice_order_status`` (test 4)
-    queries the order test 3 submits in the same process, so selecting it
-    without ``slice_order_submit`` would place nothing and still write a real
-    FAILED row into the append-only audit — which ``validate`` then reports as
-    "exchange refused", dressing an operator selection slip up as an exchange
-    problem (decision 2026-07-28).
-    """
-    keys = tuple(keys)
-    unknown = [k for k in keys if k not in _BY_KEY]
-    if unknown:
-        raise ValueError(
-            f"unknown smoke test key(s): {', '.join(unknown)}. "
-            f"Valid keys: {', '.join(SMOKE_TEST_KEYS)}"
-        )
-    if "slice_order_status" in keys and "slice_order_submit" not in keys:
-        raise ValueError(
-            "slice_order_status (test 4) queries the order slice_order_submit "
-            "(test 3) places in the same process — select both, e.g. "
-            "--only slice_order_submit slice_order_status"
-        )
-    return keys
-
-
-def rerun_keys_for(keys: Iterable[str]) -> tuple[str, ...]:
-    """The ``--only`` selection that will actually RUN the given keys.
-
-    The same pairing rule :func:`validate_only_keys` enforces, read backwards. A
-    remedy line that echoes the red keys verbatim prints a command the CLI
-    REFUSES (exit 1) whenever ``slice_order_status`` is among them — and that is
-    the commonest errored key of all, because test 4 errors precisely when test 3
-    did not complete. Emitted in registry order so the printed command is stable.
-    """
-    selection = set(keys)
-    if "slice_order_status" in selection:
-        selection.add("slice_order_submit")
-    return tuple(k for k in SMOKE_TEST_KEYS if k in selection)

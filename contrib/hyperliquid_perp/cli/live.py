@@ -730,7 +730,7 @@ def _live_startup_recovery(
         from ..live.config import ExecutionMode
 
         if args.loop and live_cfg.mode is ExecutionMode.TESTNET_LIVE:
-            from ..live.smoke import smoke_gate_report
+            from ..live.smoke_catalog import smoke_gate_report
 
             gate_ok, gate_missing, gate_failed, gate_errored = smoke_gate_report(db.conn, run_id)
             if not gate_ok:

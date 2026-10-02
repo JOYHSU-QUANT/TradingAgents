@@ -81,7 +81,7 @@ Where the metrics come from (all from persisted PR 2–5 event logs):
   confirm" latch, which leaves no other durable trace while §13.1 lets the
   cycle counts keep climbing.
 - the four ``*_test_passed`` booleans — the §20.2 smoke suite's latest verdicts
-  (tests 15/16/17/18), read through :mod:`.smoke`.
+  (tests 15/16/17/18), read through :mod:`.smoke_catalog`.
 
 Exit-code contract (mirrors ``paper.validation`` / the ``validate`` CLI): a hard
 acceptance failure lands in ``failures`` → exit 5 ("investigate before going
@@ -121,7 +121,7 @@ from ..persistence.db import Database
 from ..runtime.no_decision import NO_DECISION_STREAK_THRESHOLD, no_decision_shortfall
 from .config import ExecutionMode
 from .safe_mode import SAFE_MODE_MANUAL
-from .smoke import SMOKE_TEST_KEYS, SmokeGateReport, rerun_keys_for
+from .smoke_catalog import SMOKE_TEST_KEYS, SmokeGateReport, rerun_keys_for
 from .validation_metrics import LiveRunFacts, _KillSwitchTally, read_live_run_facts
 from .validation_report import LiveValidationReport
 

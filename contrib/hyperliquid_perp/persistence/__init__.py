@@ -5,6 +5,8 @@ accounting replay. Submodules:
 
 - :mod:`.schema` — table DDL and migration list;
 - :mod:`.db` — connection, transaction boundary, migration runner;
+- :mod:`.store_identity` — the refusal of a ``--db`` that is not a store;
+- :mod:`.db_types` — the error and constants those two share;
 - :mod:`.repository` — typed insert / update / query helpers;
 - :mod:`.models` — the mutable ``current_*`` state dataclasses;
 - :mod:`.ids` — deterministic dedup / exactly-once keys.

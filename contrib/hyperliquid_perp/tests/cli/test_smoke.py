@@ -36,7 +36,7 @@ from contrib.hyperliquid_perp.live.authorization import (
     AgentAuthorization,
     AgentAuthorizationError,
 )
-from contrib.hyperliquid_perp.live.smoke import SMOKE_TEST_KEYS
+from contrib.hyperliquid_perp.live.smoke_catalog import SMOKE_TEST_KEYS
 from contrib.hyperliquid_perp.persistence import repository as repo
 from contrib.hyperliquid_perp.persistence.db import Database
 

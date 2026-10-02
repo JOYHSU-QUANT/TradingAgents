@@ -224,7 +224,8 @@ def test_a_deferred_open_refuses_a_populated_store_older_than_the_lease_floor(tm
     # with the store untouched, and with ONE remedy across both non-migrating
     # policies (the reporting refusal's "run paper/live" would only bounce
     # back here); the migrating open the message names still upgrades it.
-    from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, stored_schema_version
+    from contrib.hyperliquid_perp.persistence.db import stored_schema_version
+    from contrib.hyperliquid_perp.persistence.db_types import SchemaVersionError
 
     below = LEASE_READABLE_SINCE - 1
 
@@ -344,7 +345,8 @@ def test_a_loser_whose_winner_ran_a_newer_build_is_refused_not_skipped(tmp_path)
     # for, and something the pre-fix ``duplicate column name`` crash at least
     # prevented. The read after the loop must raise that refusal.
     from contrib.hyperliquid_perp.persistence import db as db_module
-    from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, apply_migrations
+    from contrib.hyperliquid_perp.persistence.db import apply_migrations
+    from contrib.hyperliquid_perp.persistence.db_types import SchemaVersionError
     from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
 
     path = tmp_path / "shared.db"
@@ -379,7 +381,8 @@ def test_a_newer_build_landing_mid_loop_is_still_refused(tmp_path):
     # while the loser is releasing that lock. Without the post-loop read the
     # loser returns "current" over a store that is now newer than it knows.
     from contrib.hyperliquid_perp.persistence import db as db_module
-    from contrib.hyperliquid_perp.persistence.db import SchemaVersionError, apply_migrations
+    from contrib.hyperliquid_perp.persistence.db import apply_migrations
+    from contrib.hyperliquid_perp.persistence.db_types import SchemaVersionError
     from contrib.hyperliquid_perp.persistence.schema import MIGRATIONS
 
     path = tmp_path / "shared.db"

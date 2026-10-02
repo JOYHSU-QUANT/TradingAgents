@@ -103,13 +103,8 @@ def _cmd_live_smoke(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    from ..live.smoke import (
-        SMOKE_TEST_KEYS,
-        SmokePreflightError,
-        SmokeTestRunner,
-        smoke_gate_report,
-        validate_only_keys,
-    )
+    from ..live.smoke import SmokePreflightError, SmokeTestRunner
+    from ..live.smoke_catalog import SMOKE_TEST_KEYS, smoke_gate_report, validate_only_keys
 
     # The suite's size, for the residual warnings that quote it. Derived,
     # not copied: these sentences said 18 through the two tests PR B2 added

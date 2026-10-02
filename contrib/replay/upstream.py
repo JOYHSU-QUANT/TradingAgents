@@ -90,7 +90,8 @@ from contrib.hyperliquid_perp.domains.perp.target_decision import (
 )
 from contrib.hyperliquid_perp.integration.trading_graph import inject_perp_context
 from contrib.hyperliquid_perp.paper.config import PaperTradingConfig
-from contrib.hyperliquid_perp.persistence.db import Database, SchemaVersionError
+from contrib.hyperliquid_perp.persistence.db import Database
+from contrib.hyperliquid_perp.persistence.db_types import SchemaVersionError
 from contrib.hyperliquid_perp.persistence.repository import TERMINAL_ATTEMPT_STATUSES, get_run
 
 __all__ = [
@@ -181,7 +182,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.hyperliquid_perp.integration.trading_graph", "inject_perp_context"),
     ("contrib.hyperliquid_perp.paper.config", "PaperTradingConfig"),
     ("contrib.hyperliquid_perp.persistence.db", "Database"),
-    ("contrib.hyperliquid_perp.persistence.db", "SchemaVersionError"),
+    ("contrib.hyperliquid_perp.persistence.db_types", "SchemaVersionError"),
     ("contrib.hyperliquid_perp.persistence.repository", "TERMINAL_ATTEMPT_STATUSES"),
     ("contrib.hyperliquid_perp.persistence.repository", "get_run"),
 )

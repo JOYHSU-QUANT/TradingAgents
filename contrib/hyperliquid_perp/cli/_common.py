@@ -16,7 +16,8 @@ from pathlib import Path
 
 from ..config import dotenv_diagnosis
 from ..persistence import repository as repo
-from ..persistence.db import Database, SchemaVersionError
+from ..persistence.db import Database
+from ..persistence.db_types import SchemaVersionError
 from ..runtime.run_identity import OpenedRun, RunIdentityRefusal, RunIdentityStage, open_run
 
 logger = logging.getLogger(__name__)

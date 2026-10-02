@@ -21,14 +21,18 @@ from decimal import Decimal
 import pytest
 
 import contrib.hyperliquid_perp.persistence.db as db_module
-from contrib.hyperliquid_perp.persistence import repository as repo
+from contrib.hyperliquid_perp.persistence import (
+    db_types,
+    repository as repo,
+    store_identity,
+)
 from contrib.hyperliquid_perp.persistence.db import (
     Database,
-    SchemaVersionError,
     apply_migrations,
     connect,
     stored_schema_version,
 )
+from contrib.hyperliquid_perp.persistence.db_types import SchemaVersionError
 from contrib.hyperliquid_perp.persistence.ids import live_order_attempt_id
 from contrib.hyperliquid_perp.persistence.models import PositionState
 from contrib.hyperliquid_perp.persistence.schema import (
@@ -1006,10 +1010,10 @@ def test_a_foreign_database_is_refused_by_name_under_every_policy(tmp_path, poli
     # Issue #174: "EMPTY store" used to mean "no rows in schema_migrations",
     # which another application's database satisfies just as well as a fresh
     # file does. The most likely way to get here is a typo in --db, and the
-    # answer to that must be a refusal naming what it found, not a store's
-    # worth of tables added to someone else's database. The Rails-shaped case
-    # is why ownership is judged on db._STORE_TABLES and not on the presence of
-    # a schema_migrations table, which several other frameworks also carry.
+    # answer to that must be a refusal naming what it found, not a store's worth
+    # of tables added to someone else's database. The Rails-shaped case is why
+    # ownership is judged on store_identity.STORE_TABLES and not on the presence
+    # of a schema_migrations table, which several other frameworks also carry.
     path = tmp_path / f"someone-elses-{kind}.db"
     _write_sqlite_file(path, *tables)
     before = path.read_bytes()
@@ -1124,30 +1128,30 @@ def test_the_probe_is_opened_with_the_same_bounded_wait_as_connect(tmp_path, mon
     with pytest.raises(SchemaVersionError):
         Database(path, migrate=False)
 
-    assert seen["timeout"] == db_module._BUSY_TIMEOUT_MS / 1000
+    assert seen["timeout"] == db_types.BUSY_TIMEOUT_MS / 1000
     # ...and connect() really does set that constant, so "the same as connect"
     # is observed here rather than assumed.
     conn = connect(tmp_path / "ours.db")
     try:
-        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == db_module._BUSY_TIMEOUT_MS
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == db_types.BUSY_TIMEOUT_MS
     finally:
         conn.close()
 
 
 def test_the_refusal_and_the_schema_agree_on_the_bookkeeping_table(tmp_path):
-    # db.py names this table and its two columns by hand; schema.py creates it
-    # by hand. Nothing else backstops that pair: _STORE_TABLES protects a
-    # POPULATED store, but the lone-bookkeeping lane is the only thing standing
-    # between a crashed-before-v1 store and being called somebody else's, and
-    # it matches on exactly this name and these columns. Rename the table in
-    # schema.py and it would silently start refusing that store.
+    # The refusal names this table and its two columns by hand; schema.py
+    # creates it by hand. Nothing else backstops that pair: STORE_TABLES
+    # protects a POPULATED store, but the lone-bookkeeping lane is the only
+    # thing standing between a crashed-before-v1 store and being called somebody
+    # else's, and it matches on exactly this name and these columns. Rename the
+    # table in schema.py and it would silently start refusing that store.
     path = tmp_path / "bookkeeping-only.db"
     _write_sqlite_file(path, SCHEMA_MIGRATIONS_DDL)
-    assert _objects(path) == {db_module._BOOKKEEPING_TABLE}
+    assert _objects(path) == {db_types.BOOKKEEPING_TABLE}
     probe = connect(path)
     try:
-        assert _columns(probe, db_module._BOOKKEEPING_TABLE) == {"version", "applied_at"}
-        assert db_module._is_our_unused_bookkeeping(probe) is True
+        assert _columns(probe, db_types.BOOKKEEPING_TABLE) == {"version", "applied_at"}
+        assert store_identity.is_our_unused_bookkeeping(probe) is True
     finally:
         probe.close()
 
@@ -1165,7 +1169,7 @@ def test_every_store_version_carries_the_tables_the_refusal_looks_for(version):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     finally:
         conn.close()
-    assert set(db_module._STORE_TABLES) <= tables
+    assert set(store_identity.STORE_TABLES) <= tables
 
 
 @pytest.mark.parametrize(
@@ -1183,7 +1187,7 @@ def test_refusing_a_foreign_database_never_modifies_it(tmp_path, name, prepare):
     # The refusal's whole content is "I did not touch it", so the assertion is
     # the bytes. Each journal state is written by a different mechanism, and the
     # crashed one is the reason the probe is read-only: see
-    # db._refuse_a_foreign_store.
+    # store_identity.refuse_a_foreign_store.
     path = tmp_path / name
     prepare(path)
     before = path.read_bytes()
@@ -1244,21 +1248,22 @@ def test_the_probe_uri_survives_the_paths_as_uri_cannot_express(tmp_path):
     # working to not opening at all. An empty authority is what SQLite reads.
     store = tmp_path / "a store.db"
     Database(store).close()
-    assert db_module._sqlite_file_uri(store) == store.resolve().as_uri()  # ordinary paths unchanged
+    # ordinary paths unchanged
+    assert store_identity.sqlite_file_uri(store) == store.resolve().as_uri()
 
     if os.name == "nt":  # a UNC path is only a path at all on Windows
         unc = pathlib.Path(chr(92) * 2 + "server" + chr(92) + "share" + chr(92) + "live.db")
         # Four slashes: file:// (empty authority) + //server/share/... — what
         # SQLite reads. as_uri() gives three, making "server" the authority,
         # which it rejects outright.
-        assert db_module._sqlite_file_uri(unc) == "file:////server/share/live.db"
+        assert store_identity.sqlite_file_uri(unc) == "file:////server/share/live.db"
         assert unc.as_uri() == "file://server/share/live.db"  # the form that broke
 
     # A relative path resolves rather than raising, and still opens read-only.
     cwd = pathlib.Path.cwd()
     os.chdir(tmp_path)
     try:
-        uri = db_module._sqlite_file_uri(pathlib.Path("a store.db")) + "?mode=ro"
+        uri = store_identity.sqlite_file_uri(pathlib.Path("a store.db")) + "?mode=ro"
         probe = sqlite3.connect(uri, uri=True)
         try:
             assert probe.execute("SELECT 1").fetchone() == (1,)
@@ -1785,7 +1790,7 @@ def test_a_store_the_probe_cannot_open_is_refused_by_name(tmp_path, monkeypatch)
     def refuse(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(db_module.sqlite3, "connect", refuse)
+    monkeypatch.setattr(sqlite3, "connect", refuse)
     with pytest.raises(SchemaVersionError) as caught:
         Database(store, migrate=False)
     message = str(caught.value)

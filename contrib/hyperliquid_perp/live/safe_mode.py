@@ -82,14 +82,15 @@ REASON_SL_MISSING = "position_sl_missing"  # §12.3: recoverable (PR 5 loop repa
 # a cancel that would not land AND a positions read it could not prove — so a
 # reason-keyed query never misclassifies a read failure as a cancel failure.
 REASON_STALE_ORDER_SWEEP_FAILED = "stale_order_sweep_failed"
-# The two severities, named. ``check_enum`` on the write boundary validates
-# MEMBERSHIP, which a rename passes — and then ``is_manual`` returns False
-# forever: try_auto_recover would release a MANUAL latch a human was required
-# to lift, release_manual would refuse the legitimate CLI release, and the
-# gate's manual_safe_mode line would stop blocking risk-adding orders. Exactly
-# what this class exists to prevent, so bind the copies to the registry.
-SAFE_MODE_MANUAL = "manual"
-SAFE_MODE_RECOVERABLE = "recoverable"
+# The two severities, read off the registry's members: ``is_manual`` and the
+# gate's manual_safe_mode line compare against these, so they must be the
+# stored words themselves, never a second spelling.
+SAFE_MODE_MANUAL = repo.SafeModeType.MANUAL.value
+SAFE_MODE_RECOVERABLE = repo.SafeModeType.RECOVERABLE.value
+# Everything here reads a type that is not MANUAL as auto-releasable, so a
+# third type added to the registry must be classified in this module before
+# it can be written: try_auto_recover would release it, and the gate's
+# manual_safe_mode line would never rise for it.
 if {SAFE_MODE_MANUAL, SAFE_MODE_RECOVERABLE} != repo.SAFE_MODE_TYPES:
     raise AssertionError("safe-mode severity names drifted from repository.SAFE_MODE_TYPES")
 # §10.3 daily loss cap: recoverable (position + SL/TP kept, new entry/rebalance
@@ -327,7 +328,7 @@ class SafeModeManager:
         # recorded safe mode whose gate still admits orders until hydrate.
         if self._gate is not None:
             self._gate.state_reconciled = False
-            if safe_mode_type == "manual":
+            if safe_mode_type == SAFE_MODE_MANUAL:
                 self._gate.manual_safe_mode = True
         logger.error(
             "entering %s safe mode: %s%s — new risk-adding orders are blocked (§13.2)",

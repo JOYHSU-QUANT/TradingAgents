@@ -84,13 +84,18 @@ MIN_CYCLES_FOR_PHASE3 = 30
 # a retryable failure, never past the 3-try budget — so the re-ask decides the
 # terminal status; a restart that finds the third try already spent records
 # api_failed/interrupted instead, counted as api_failed_count rather than here.
-_COMPLETED_CYCLE_STATUSES = ("completed", "invalid_output")
+_COMPLETED_CYCLE_STATUSES = (
+    repo.AttemptStatus.COMPLETED.value,
+    repo.AttemptStatus.INVALID_OUTPUT.value,
+)
 
 # Import-time completeness guard: this subset must be exactly "every terminal
 # attempt status except api_failed". A new terminal status added to the
 # canonical vocabulary fails here, forcing an explicit decision on whether it
 # counts toward the ≥30-cycle gate instead of being silently missed.
-if set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) != {"api_failed"}:
+if set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) != {
+    repo.AttemptStatus.API_FAILED.value
+}:
     raise ValueError(
         "_COMPLETED_CYCLE_STATUSES must cover every terminal attempt status "
         "except api_failed; the vocabulary drifted"

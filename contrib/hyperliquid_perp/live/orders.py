@@ -95,8 +95,8 @@ OrderStatusQuery = Callable[[str], Any]
 # maker slice (2026-09-16 maker path).
 ORDER_TYPE_FOR_TIF = {"Ioc": "ioc_limit", "Alo": "alo_limit"}
 _SUBMITTABLE_TIFS = frozenset(ORDER_TYPE_FOR_TIF)
-# Literal copies of two other modules' vocabularies, pinned at import (the
-# protection.py / startup.py guard family). A tif respelled in the transport
+# Literal copies of two other modules' vocabularies, pinned at import (as
+# validation.py pins its smoke-test keys). A tif respelled in the transport
 # but not here would pass this layer's check, write the registry row, the
 # orders row and a 'submitted' attempt, and only THEN be refused by
 # place_limit — riding the post-wire failure lane, burning a cloid per slice

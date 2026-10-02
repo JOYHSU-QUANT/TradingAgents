@@ -58,7 +58,7 @@ from pathlib import Path
 from ..common.instants import Seconds
 from ..exchanges.hyperliquid.signed_client import HyperliquidSignedClient
 from ..persistence import repository as repo
-from ..persistence.cloid import LIVE_ORDER_ROLES
+from ..persistence.cloid import OrderRole
 from ..persistence.db import Database
 from ..ports import Clock
 from ..runtime.clock import WallClock
@@ -118,17 +118,12 @@ _MAX_CLOCK_SKEW_S = 5.0
 # standing (decided 2026-07-22). Narrower than order_gate.PROTECTIVE_ORDER_ROLES
 # for the same reason as protection._SLTP_ROLES: emergency_close is a one-shot
 # IOC, never a resting order for a sweep to keep.
-_KEEP_PROTECTIVE_ROLES = frozenset({"stop_loss", "take_profit"})
+_KEEP_PROTECTIVE_ROLES = frozenset({OrderRole.STOP_LOSS.value, OrderRole.TAKE_PROFIT.value})
 
 # The ``symbol`` a manager-private VenueIdentityMonitor stamps on its latch row:
 # this manager is wallet-wide (no coin), and the row's symbol column is NOT NULL.
 # Only reachable when no shared monitor was passed (tests) — see __init__.
 _UNSCOPED_SYMBOL = "*"
-# Literal copy of LIVE_ORDER_ROLES members: a role renamed there without this
-# file would silently drop it from the shutdown keep-set — the sweep would
-# cancel a live position's resting SL/TP. Fail at import.
-if not _KEEP_PROTECTIVE_ROLES <= LIVE_ORDER_ROLES:
-    raise AssertionError("_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES")
 
 
 @dataclass

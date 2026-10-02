@@ -908,6 +908,8 @@ def test_sl_fire_band_floored_at_the_aggressive_band_while_tp_keeps_routine(env)
     assert outcome is ProtectionOutcome.PROTECTED
     sl = repo.active_protection_order(db.conn, "r", "BTC", "stop_loss")
     tp = repo.active_protection_order(db.conn, "r", "BTC", "take_profit")
+    # Each row is labelled from the repository's role→order_type mapping.
+    assert (sl["type"], tp["type"]) == ("stop_market", "take_market")
     # Long: SL and TP both fire as a SELL, so each limit sits BELOW its trigger.
     # The SL's width derives from config.AGGRESSIVE_FILL_BAND_PCT rather than
     # being re-typed — this is precisely the test that would otherwise go on

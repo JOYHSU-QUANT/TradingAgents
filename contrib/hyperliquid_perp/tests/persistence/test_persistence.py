@@ -18,6 +18,7 @@ from contrib.hyperliquid_perp.persistence.ids import (
     slice_id,
 )
 from contrib.hyperliquid_perp.persistence.models import AccountLedger, PositionState, Side
+from contrib.hyperliquid_perp.persistence.repository import _vocab
 from contrib.hyperliquid_perp.persistence.repository._vocab import TERMINAL_ATTEMPT_STATUSES
 from contrib.hyperliquid_perp.persistence.schema import LEASE_READABLE_SINCE, SCHEMA_VERSION
 
@@ -42,6 +43,81 @@ def test_an_unknown_fill_side_names_the_vocabulary_at_both_lookups():
     # on the member.
     assert Side.parse(Side.BUY) is Side.BUY
     assert Side.parse("sell") is Side.SELL
+
+
+@pytest.mark.parametrize(
+    ("derived", "stored"),
+    [
+        (_vocab._ATTEMPT_STATUSES, {"in_progress", "completed", "api_failed", "invalid_output"}),
+        (TERMINAL_ATTEMPT_STATUSES, ("completed", "api_failed", "invalid_output")),
+        (
+            _vocab._PLAN_STATUSES,
+            {
+                "active",
+                "paused_market_data",
+                "completed",
+                "canceled",
+                "canceled_restart",
+                "expired",
+                "failed",
+                "flip_incomplete",
+                "rejected",
+                "residual",
+            },
+        ),
+        (repo.LIVE_PLAN_STATUSES, ("active", "paused_market_data")),
+        (repo.SAFE_MODE_TYPES, {"recoverable", "manual"}),
+        (
+            repo.PROVISIONAL_DISPOSITIONS,
+            {
+                "settled_never_sent",
+                "settled_filled",
+                "settled_canceled",
+                "settled_rejected",
+                "resolved_read_succeeded",
+                "local_row_reopened",
+            },
+        ),
+        (
+            _vocab._FINAL_DISPOSITIONS,
+            {"local_row_backfilled", "resolved_fill_booked", "backfilled"},
+        ),
+        (
+            repo.MACHINE_DISPOSITIONS,
+            {
+                "settled_never_sent",
+                "settled_filled",
+                "settled_canceled",
+                "settled_rejected",
+                "resolved_read_succeeded",
+                "local_row_reopened",
+                "local_row_backfilled",
+                "resolved_fill_booked",
+                "backfilled",
+            },
+        ),
+    ],
+    ids=[
+        "attempt-statuses",
+        "terminal-attempt-statuses",
+        "plan-statuses",
+        "live-plan-statuses",
+        "safe-mode-types",
+        "provisional-dispositions",
+        "final-dispositions",
+        "machine-dispositions",
+    ],
+)
+def test_an_enum_derived_vocabulary_stores_the_spellings_it_always_did(derived, stored):
+    # These sets are derived from enum members; the strings are what existing
+    # stores hold, so they are pinned by spelling — renaming a member's value
+    # is a data migration, not a refactor. Plain ``str``, never the member,
+    # whose ``str()`` is ``Class.MEMBER`` rather than the stored word. The
+    # provisional and final rows are also the classification: which machine
+    # stamps let a reconciliation fact key reopen, and which do not (the key
+    # stays shut, or, for ``backfilled``, never meets the dedupe).
+    assert derived == stored
+    assert {type(word) for word in derived} == {str}
 
 
 def _fill_kwargs(fill_id="f1", slice_id_=None):
@@ -761,6 +837,70 @@ def test_audit_insert_missing_mode_keeps_its_not_null_failure_shape(tmp_path):
     db = Database(tmp_path / "p.db")
     with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
         repo.insert_ai_input(conn, input_id="i1", timestamp=_TS, run_id="r1", symbol="BTC")
+    db.close()
+
+
+# --------------------------------------------------------------------------
+# ai_outputs gate-verdict vocabulary
+# --------------------------------------------------------------------------
+
+# The three columns hold the enums the gate result carries, by value; spelled
+# out here, not read off the enums, so a member whose value is respelled fails
+# as the stored-data change it is.
+_GATE_VERDICT_WORDS = {
+    "decision_mode": ["set_target", "maintain_current"],
+    "target_side": ["long", "short", "flat", None],
+    "risk_action": ["approved", "clamped", "rejected", "invalid_fail_closed"],
+}
+
+
+@pytest.mark.parametrize("column", sorted(_GATE_VERDICT_WORDS))
+def test_ai_output_insert_rejects_a_word_outside_the_gates_vocabulary(tmp_path, column):
+    # A word outside the column's enum must raise at the write, not land where
+    # a reader parses the column back into that enum.
+    db = Database(tmp_path / "p.db")
+    with pytest.raises(ValueError, match=f"^{column} must be one of"), db.transaction() as conn:
+        repo.insert_ai_output(conn, **{**_ai_output_kwargs("paper"), column: "hold"})
+    assert db.conn.execute("SELECT COUNT(*) FROM ai_outputs").fetchone()[0] == 0
+    db.close()
+
+
+def test_ai_output_insert_accepts_each_stored_gate_word(tmp_path):
+    # Including the NULL target_side a maintain_current round writes. The
+    # first assertion keeps the table complete: a member added to one of the
+    # three enums has to be added here.
+    assert {
+        column: {word for word in words if word is not None}
+        for column, words in _GATE_VERDICT_WORDS.items()
+    } == {
+        "decision_mode": _vocab._DECISION_MODES,
+        "target_side": _vocab._TARGET_SIDES,
+        "risk_action": _vocab._RISK_ACTIONS,
+    }
+    db = Database(tmp_path / "p.db")
+    with db.transaction() as conn:
+        for column, words in _GATE_VERDICT_WORDS.items():
+            for n, word in enumerate(words):
+                row = {**_ai_output_kwargs("paper"), "output_id": f"{column}-{n}", column: word}
+                repo.insert_ai_output(conn, **row)
+    for column, words in _GATE_VERDICT_WORDS.items():
+        stored = db.conn.execute(
+            f"SELECT {column} FROM ai_outputs WHERE output_id LIKE ? ORDER BY output_id",
+            (f"{column}-%",),
+        ).fetchall()
+        assert [row[0] for row in stored] == words
+    db.close()
+
+
+def test_ai_output_insert_leaves_an_absent_verdict_to_the_columns_constraint(tmp_path):
+    # Checked only when it carries a value: an omitted or None decision_mode
+    # still fails on NOT NULL, as it did before the check existed.
+    db = Database(tmp_path / "p.db")
+    without = _ai_output_kwargs("paper")
+    del without["decision_mode"]
+    for fields in (without, {**without, "decision_mode": None}):
+        with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
+            repo.insert_ai_output(conn, **fields)
     db.close()
 
 

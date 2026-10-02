@@ -59,6 +59,68 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Eight import-time vocabulary guards are gone, because what they kept in
+  step is now one definition** (refactor plan v2, T4-a — PR 17 of the plan;
+  no behaviour change). Five storage vocabularies are `VocabEnum` classes
+  whose members module-level tables name instead of retyping the strings:
+  `OrderRole` in `persistence/cloid.py`, and `AttemptStatus`,
+  `ExecutionPlanStatus`, `SafeModeType`, `ProvisionalDisposition` and
+  `FinalDisposition` (the two halves of the machine dispositions) in
+  `persistence/repository/_vocab.py`; `repository` re-exports the four that
+  other modules read. The sets and splits the repository reads are derived
+  from them: `LIVE_ORDER_ROLES`, `TERMINAL_ATTEMPT_STATUSES`,
+  `LIVE_PLAN_STATUSES`, `SAFE_MODE_TYPES`, `PROVISIONAL_DISPOSITIONS`,
+  `MACHINE_DISPOSITIONS` and the private attempt-status and plan-status
+  sets. They still hold plain `str`, every stored word is unchanged, every
+  write-boundary `check_enum` call is as it was, and `settled_{status}` is still
+  derived from the terminal order statuses. Module-level restatements of
+  those words now read them off the members: `SAFE_MODE_MANUAL` and
+  `SAFE_MODE_RECOVERABLE` (`live/safe_mode.py`), the four `*_DISPOSITION`
+  constants (`live/reconcile_types.py`), `PROTECTIVE_ORDER_ROLES`
+  (`live/order_gate.py`), the SL/TP role sets of `live/kill_switch.py` and
+  `live/protection.py`, the §19.3 role buckets (`live/startup.py`), the
+  keys of `ROLE_TO_ORDER_TYPE`, and both validators'
+  `_COMPLETED_CYCLE_STATUSES`. `live/protection.py` keeps one table of its
+  own, role → `tpsl` word: its role tuple is that table's keys, and its
+  role → order-type table is read off `repository.ROLE_TO_ORDER_TYPE`
+  instead of being a second copy. The two comparisons that decide whether
+  a latch is manual (`SafeModeManager.enter`'s gate line and
+  `LiveDecisionDriver._manual_latched`) use the member's value instead of
+  the literal `"manual"`. The import-time guards that only kept those
+  restatements in step are removed with them: the `AssertionError`s
+  "safe_mode.SAFE_MODE_MANUAL drifted from repository.SAFE_MODE_TYPES",
+  "PROTECTIVE_ORDER_ROLES drifted from LIVE_ORDER_ROLES",
+  "_KEEP_PROTECTIVE_ROLES drifted from LIVE_ORDER_ROLES", "_SLTP_ROLES
+  drifted from LIVE_ORDER_ROLES", "protection role tables must cover
+  exactly _SLTP_ROLES" and "_ROLE_ORDER_TYPE drifted from
+  repository.ROLE_TO_ORDER_TYPE"; the loop in `reconcile_types` over its
+  four constants, with `IMPORT_CHECKED_DISPOSITIONS`; and `_vocab`'s subset
+  check on the two splits. Guards that check completeness stay, with their
+  messages unchanged, since an enum does not classify a member someone
+  adds: the partition checks in `_vocab`, the partition and mapping-keys
+  checks in `live/startup.py`, the cycle-count guards in
+  `paper/validation.py` and `live/validation_metrics.py`, and the safe-mode
+  severity equality in `live/safe_mode.py` (its comment says why an
+  equality, not a subset). `_vocab` gains one check in place of the
+  copy `protection.py` held: `ROLE_TO_ORDER_TYPE` may only name words in
+  `ORDER_TYPES`. `SmokeStepResult.status` keeps its `Literal` and its guard; a
+  type-level copy is not one an enum can absorb while the field holds a
+  plain string. Tests: each derived set is pinned by spelling and as plain
+  `str` in `tests/persistence/`, which takes over the classification table
+  `tests/live/test_reconcile.py` held; the two tests of the removed import
+  loop (its membership, and a module reload proving it refused) are gone
+  with it; a protection test now asserts the `type` of the SL and TP rows.
+
+- **`ai_outputs` rows are vocabulary-checked at the write** (refactor plan
+  v2, T4-b — the same PR). `repository.insert_ai_output` refuses a
+  `decision_mode`, `target_side` or `risk_action` outside the
+  `DecisionMode`, `TargetSide` and `RiskAction` the gate result carries,
+  with `ValueError` "`<column>` must be one of [...]", as it already refused
+  an unknown `mode`. Its one production caller,
+  `persistence/audit_rows.write_ai_output`, passes those enums' values, so
+  no row either lane writes is affected. A missing or `None` value is not
+  checked (the function's docstring says what happens to it).
+
 - **The smoke registry and the store-identity refusal each have a module of
   their own** (refactor plan v2, T3-e and the `db.py` move — PR 16 of the
   plan; no behaviour change). `live/smoke.py` held the §20.2 registry, the

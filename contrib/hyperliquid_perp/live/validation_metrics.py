@@ -82,13 +82,13 @@ _SINCE_BEGINNING = "0001-01-01T00:00:00+00:00"
 # in api_failed_count, EXTENDS the no-decision streak instead of resetting it,
 # and is missing from the non-gating invalid_output_count — and this report
 # cannot tell it from a cycle the AI never answered, because the row cannot.
-_COMPLETED_CYCLE_STATUSES = ("completed",)
+_COMPLETED_CYCLE_STATUSES = (repo.AttemptStatus.COMPLETED.value,)
 # The registry stays partitioned into exactly what this file classifies: a NEW
 # terminal attempt status must be counted or explicitly excluded HERE, at
 # import, not silently dropped from a mainnet-facing gate.
 if set(repo.TERMINAL_ATTEMPT_STATUSES) - set(_COMPLETED_CYCLE_STATUSES) != {
-    "api_failed",
-    "invalid_output",
+    repo.AttemptStatus.API_FAILED.value,
+    repo.AttemptStatus.INVALID_OUTPUT.value,
 }:
     raise AssertionError(
         "live cycle-count vocabulary drifted from repository.TERMINAL_ATTEMPT_STATUSES"

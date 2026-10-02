@@ -156,8 +156,8 @@ def reconcile_orders(
             # (fail-safe direction: once the row exists, every later sweep
             # — kill-switch shutdown included — sees and manages it).
             # The stamp is chosen AFTER ``insert_order`` commits, so
-            # __post_init__ is too late to guard this write; it is checked
-            # at import instead — see ``ORPHAN_BACKFILLED_DISPOSITION``.
+            # __post_init__ is too late to guard this write; the stamp is the
+            # registry's own member instead — see ``ORPHAN_BACKFILLED_DISPOSITION``.
             resolved = _backfill_orphan_order(ctx, order, registry, now)
             cases.append(
                 ReconciliationCase(

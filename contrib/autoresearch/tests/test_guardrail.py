@@ -9,12 +9,14 @@ import pytest
 from contrib.autoresearch.dsl import Side, spec_hash
 from contrib.autoresearch.guardrail import (
     DEFAULT_RULE,
+    RULE_INTERVAL,
     GuardrailError,
     build_timeline,
     load_rule,
 )
+from contrib.autoresearch.upstream import from_epoch_ms
 
-from .conftest import MS_PER_HOUR, bars, candles
+from .conftest import ANCHOR_MS, MS_PER_HOUR, bars, candles, funding_points
 
 _STEP = 4 * MS_PER_HOUR
 
@@ -44,7 +46,7 @@ def _rule(tmp_path, document=_BAND, name="band.json"):
 
 def _timeline(store, rule, closes=_CLOSES):
     store.upsert_candles("BTC", "4h", candles(closes))
-    return build_timeline(store, rule, coin="btc", interval="4h")
+    return build_timeline(store, rule, coin="btc")
 
 
 # -- the rule -----------------------------------------------------------------
@@ -119,15 +121,61 @@ def test_a_reading_before_the_rule_could_be_evaluated_is_none(store, tmp_path):
     assert timeline.first_decided == 9
     assert timeline.reading_at(timeline.close_times[8]) is None
     assert timeline.reading_at(timeline.close_times[9]).side is Side.LONG
+    # The warm-up is not history: the report counts the three decided bars,
+    # from the first of them, and none of them as carried.
+    first = f"{from_epoch_ms(timeline.close_times[9]):%Y-%m-%d %H:%M}"
+    assert timeline.describe()[-1].startswith(f"rule history: 3 BTC 4h bars decided, closing {first} to ")
+    assert timeline.carried == 0
+
+
+def test_a_bar_the_rule_could_not_evaluate_has_no_reading(store, tmp_path):
+    # Settlements for the first eight hours only: the rule reads the funding
+    # rate, so it is asked at bars 0 and 1 and cannot be asked at bars 2 and
+    # 3, where it stays long because it could not have left. The live path
+    # writes no signal off such a bar, and neither does this.
+    frozen = {
+        "family": "breakout",
+        "entry": {"long": [{"left": "funding_rate", "op": ">", "right": -1}]},
+        "sizing": {"mode": "fixed_margin_fraction", "fraction": 0.5},
+    }
+    store.upsert_funding("BTC", funding_points(8, start_ms=ANCHOR_MS + MS_PER_HOUR))
+    timeline = _timeline(store, _rule(tmp_path, frozen), closes=[100, 101, 102, 103])
+    assert timeline.unevaluable == (False, False, True, True)
+    assert timeline.sides == (Side.LONG,) * 4
+    assert (timeline.first_decided, timeline.carried) == (0, 2)
+    closes = timeline.close_times
+    assert timeline.reading_at(closes[1]).side is Side.LONG
+    assert timeline.reading_at(closes[2]) is None
+    assert timeline.reading_at(closes[3]) is None
+    assert timeline.describe()[-1] == (
+        "  on 2 of them the rule could not be evaluated and kept the side it was on; an instant "
+        "read off one of those has no reading"
+    )
+
+
+def test_the_committed_rule_takes_a_side_once_its_channel_has_warmed_up(store):
+    # The rule that will actually be read, on history long enough to answer
+    # it. Each bar closes one above the last and its high is its close, so
+    # from the first bar with 120 bars behind it every close is above the
+    # highest high of those 120: the rule goes long there and stays long.
+    closes = [100 + i for i in range(125)]
+    store.upsert_candles("BTC", RULE_INTERVAL, candles(closes, highs=closes, lows=closes))
+    timeline = build_timeline(store, load_rule(), coin="BTC")
+    assert timeline.interval == RULE_INTERVAL == "4h"
+    assert timeline.first_decided == 120
+    assert timeline.sides == (None,) * 120 + (Side.LONG,) * 5
+    assert timeline.carried == 0
+    assert timeline.reading_at(timeline.close_times[119]) is None
+    assert timeline.reading_at(timeline.close_times[120]).side is Side.LONG
 
 
 def test_a_store_that_cannot_answer_is_refused_with_the_rule_named(store, tmp_path):
     rule = _rule(tmp_path)
     with pytest.raises(GuardrailError, match=r"cannot say which side band@\w{8} held on btc"):
-        build_timeline(store, rule, coin="btc", interval="4h")  # no bars at all
+        build_timeline(store, rule, coin="btc")  # no bars at all
     store.upsert_candles("BTC", "4h", bars(8, skip=[4]))
     with pytest.raises(GuardrailError, match="are not a grid"):
-        build_timeline(store, rule, coin="btc", interval="4h")
+        build_timeline(store, rule, coin="btc")
 
 
 def test_a_store_too_short_for_the_rule_is_refused(store, tmp_path):
@@ -135,18 +183,19 @@ def test_a_store_too_short_for_the_rule_is_refused(store, tmp_path):
     # and the feature stack says so before any bar is replayed.
     store.upsert_candles("BTC", "4h", candles(_CLOSES))
     with pytest.raises(GuardrailError, match="donchian_high_55 has no value at any"):
-        build_timeline(store, load_rule(), coin="BTC", interval="4h")
+        build_timeline(store, load_rule(), coin="BTC")
 
 
 def test_a_rule_no_bar_could_evaluate_is_refused(store, tmp_path):
     # A lagged reference has a column but nothing to read one bar back from
     # the first bar, so on a one-bar store the rule is never asked anything.
     lagged = json.loads(json.dumps(_BAND))
-    lagged["entry"] = {"long": [{"left": "close", "op": ">", "right": {"feature": "close", "offset": 1}}]}
+    previous_close = {"feature": "close", "offset": 1}
+    lagged["entry"] = {"long": [{"left": "close", "op": ">", "right": previous_close}]}
     del lagged["exit"]
     store.upsert_candles("BTC", "4h", candles([100]))
     with pytest.raises(GuardrailError, match="could not be evaluated on any of the 1 BTC 4h"):
-        build_timeline(store, _rule(tmp_path, lagged), coin="BTC", interval="4h")
+        build_timeline(store, _rule(tmp_path, lagged), coin="BTC")
 
 
 def test_describe_names_the_rule_and_the_share_of_each_side(store, tmp_path):

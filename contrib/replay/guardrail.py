@@ -14,17 +14,30 @@ Per question, three facts:
   approved target when an order was created, and otherwise the position it
   already had — a maintain, a rejection, a fail-closed round, a target
   inside the deadband, and a round with no answer at all leave the book
-  where it was;
+  where it was. An order's target is the side the trader MEANT to hold; a
+  resting order that never filled shows at the next question, whose own
+  position is the book's;
 - the verdict: :data:`PASS` when that side is flat or the rule's own,
-  :data:`BLOCK` when an order's target is one the guardrail refuses (the
-  book would go flat instead), :data:`CLOSE` when no order was created and
-  the position already held is one it refuses, and :data:`UNKNOWN` where
-  the timeline cannot say which side the rule held.
+  :data:`BLOCK` when an order's target is one the guardrail refuses,
+  :data:`CLOSE` when no order was created and the position already held is
+  one it refuses, and :data:`UNKNOWN` where the timeline cannot say which
+  side the rule held.
 
-Each question is read against the book the paper run actually had. The
-guardrail was not there, so a position it would have closed is still held at
-the next question and is counted again: the counts are QUESTIONS on which
-the book was outside the guardrail, not trades.
+Three things the verdicts mean, each decided 2026-10-02 and binding on the
+guardrail when it is built:
+
+- A blocked order sends the book FLAT, also when it reverses a position the
+  guardrail allowed: leaving the old side is honoured, opening the new one
+  is not.
+- The guardrail reads the BOOK, not the answer. A cycle where the model
+  gave no decision (no answer, a fail-closed round) is judged on the
+  position held like any other, and :func:`describe_shadow` says how many
+  of the closes rest on such a cycle.
+- Each question is read against the book the paper run actually had. The
+  guardrail was not there, so a position it would have closed is still held
+  at the next question and is refused again: the verdict counts are
+  QUESTIONS on which the book was outside the guardrail. :func:`interventions`
+  counts how often the guardrail would have acted.
 
 Nothing here is scored. No later price is read, so the split's holdout lock
 has nothing to guard and every finished question of the run is read.
@@ -45,20 +58,16 @@ __all__ = [
     "BLOCK",
     "CLOSE",
     "PASS",
-    "RULE_INTERVAL",
     "UNKNOWN",
     "VERDICTS",
     "GuardrailRow",
-    "csv_table",
-    "describe",
+    "describe_shadow",
     "held_after",
+    "interventions",
     "shadow",
+    "shadow_table",
     "verdict_of",
 ]
-
-# The cadence the guardrail rule is written in: its channels are counted in
-# bars, so on another interval the same file would be a different rule.
-RULE_INTERVAL: Final = "4h"
 
 PASS: Final = "pass"
 BLOCK: Final = "block_to_flat"
@@ -100,9 +109,9 @@ def verdict_of(rule_side: TargetSide | None, held: TargetSide, *, order_created:
 class GuardrailRow:
     """One question under the guardrail: the rule's side, the book's, and the verdict.
 
-    ``rule_side`` and ``rule_decided_ms`` are ``None`` where the timeline
-    could not say (the research store starts after the question, or ends
-    before it).
+    ``rule_side`` and ``rule_decided_ms`` are ``None`` together, where the
+    timeline had no reading (the research store starts after the question or
+    ends before it, or the rule could not be evaluated at that bar).
     """
 
     question: Question
@@ -111,6 +120,11 @@ class GuardrailRow:
     rule_decided_ms: int | None
     held: TargetSide
     verdict: str
+
+    @property
+    def undecided(self) -> bool:
+        """Whether the model gave no decision this cycle: no answer, or a fail-closed round."""
+        return self.answer is None or self.answer.fail_closed
 
 
 def shadow(
@@ -124,6 +138,8 @@ def shadow(
         reading = timeline.reading_at(question.at_ms)
         rule_side: TargetSide | None = None
         if reading is not None:
+            # The research package's ``Side`` is long / short, spelled as
+            # ``TargetSide`` spells them; its flat is ``None``.
             rule_side = TargetSide.FLAT if reading.side is None else TargetSide(reading.side.value)
         held = held_after(question, answer)
         rows.append(
@@ -141,6 +157,29 @@ def shadow(
     return rows
 
 
+def interventions(rows: Sequence[GuardrailRow]) -> int:
+    """How many times the guardrail would have acted on the run, as against refused QUESTIONS.
+
+    Every blocked order is one. A refused position is one however many
+    questions it stays held: the guardrail would have closed it at the first.
+    A close straight after another refused question is that same position
+    (the paper book kept what the guardrail would not have), so only a pass
+    ends the stretch; a question with no reading neither starts nor ends one.
+    """
+    count = 0
+    outside = False
+    for row in rows:
+        if row.verdict == BLOCK:
+            count += 1
+            outside = True
+        elif row.verdict == CLOSE:
+            count += not outside
+            outside = True
+        elif row.verdict == PASS:
+            outside = False
+    return count
+
+
 def _what(row: GuardrailRow) -> str:
     """What the paper trader did at this question, in the summary's words."""
     answer = row.answer
@@ -152,7 +191,7 @@ def _what(row: GuardrailRow) -> str:
     return f"holds {row.held.value} ({answer.no_order_reason})"
 
 
-def describe(rows: Sequence[GuardrailRow]) -> list[str]:
+def describe_shadow(rows: Sequence[GuardrailRow]) -> list[str]:
     """The run under the guardrail as lines to print: the counts, then each refused question."""
     verdicts = Counter(row.verdict for row in rows)
     sides = Counter("unknown" if row.rule_side is None else row.rule_side.value for row in rows)
@@ -166,14 +205,32 @@ def describe(rows: Sequence[GuardrailRow]) -> list[str]:
         f"orders created: {len(orders)}, of which the guardrail refuses "
         f"{sum(row.verdict == BLOCK for row in orders)}",
     ]
+    unknown = sides["unknown"]
+    if unknown:
+        # Said before any conclusion: a flat book passes without a rule side,
+        # so the verdict line alone understates how much was not read.
+        lines.append(
+            f"rule side not known at {unknown} question(s): the research store does not reach "
+            "them, or the rule could not be evaluated there; nothing is said about those"
+        )
     if not refused:
-        lines.append("the guardrail would have changed nothing in this run")
+        lines.append(
+            "no question that could be read was refused"
+            if unknown
+            else "the guardrail would have changed nothing in this run"
+        )
         return lines
-    lines.append(
+    closes = [row for row in refused if row.verdict == CLOSE]
+    lines += [
         f"questions on which the book was outside the guardrail: {len(refused)} (read against "
         "the book the run had; a position it would have closed is counted at every question "
-        "it was still held)"
-    )
+        "it was still held)",
+        f"interventions: {interventions(rows)} (each blocked order, and each refused position "
+        "once however long it stayed held)",
+        f"close_position by cause: the model kept the position "
+        f"{sum(not row.undecided for row in closes)}, the model gave no decision "
+        f"{sum(row.undecided for row in closes)}",
+    ]
     for row in refused[:_LISTED]:
         assert row.rule_side is not None
         lines.append(
@@ -185,11 +242,12 @@ def describe(rows: Sequence[GuardrailRow]) -> list[str]:
     return lines
 
 
-def csv_table(rows: Sequence[GuardrailRow]) -> Table:
+def shadow_table(rows: Sequence[GuardrailRow]) -> Table:
     """One row per question."""
     header = [
         "input_id",
         "at",
+        "mark",
         "rule_side",
         "rule_decided_at",
         "current_side",
@@ -197,6 +255,7 @@ def csv_table(rows: Sequence[GuardrailRow]) -> Table:
         "target_side",
         "approved_margin_pct",
         "order_created",
+        "no_order_reason",
         "held_side",
         "verdict",
     ]
@@ -207,6 +266,7 @@ def csv_table(rows: Sequence[GuardrailRow]) -> Table:
             [
                 q.input_id,
                 from_epoch_ms(q.at_ms).isoformat(),
+                q.mark,
                 None if row.rule_side is None else row.rule_side.value,
                 None
                 if row.rule_decided_ms is None
@@ -216,6 +276,7 @@ def csv_table(rows: Sequence[GuardrailRow]) -> Table:
                 None if a is None or a.target_side is None else a.target_side.value,
                 None if a is None else a.approved_margin_pct,
                 None if a is None else a.order_created,
+                None if a is None else a.no_order_reason,
                 row.held.value,
                 row.verdict,
             ]

@@ -11,24 +11,29 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from contrib.hyperliquid_perp.domains.perp.schema import Candle
+from contrib.replay import guardrail as guardrail_module
 from contrib.replay.cli import main
 from contrib.replay.guardrail import (
     BLOCK,
     CLOSE,
     PASS,
     UNKNOWN,
-    csv_table,
-    describe,
+    describe_shadow,
     held_after,
+    interventions,
     shadow,
+    shadow_table,
     verdict_of,
 )
+from contrib.replay.score import Answer
 from contrib.replay.upstream import (
     ResearchStore,
     TargetSide,
@@ -72,6 +77,10 @@ _BAND = {
 # holds after each: long, long, long, flat, flat, flat, short, short, flat,
 # flat, short, short — which slots 0..11 read in that order.
 _CLOSES = (105, 106, 104, 100, 100, 100, 95, 96, 100, 100, 95, 94)
+
+# The same history ending in a rally: the rule is long at slots 10 and 11,
+# where the book is short on a maintain and on a round with no answer.
+_RALLY = (*_CLOSES[:10], 105, 106)
 
 # What each fixture question reads, by slot: the rule's side, the side the
 # book held once the decision was applied, and the verdict.
@@ -123,10 +132,12 @@ def _research(tmp_path: Path, closes=_CLOSES) -> Path:
 
 def _rows(tmp_path: Path, closes=_CLOSES):
     with ResearchStore(_research(tmp_path, closes)) as store:
-        timeline = build_timeline(
-            store, load_rule(_rule_file(tmp_path)), coin=COIN, interval="4h"
-        )
+        timeline = build_timeline(store, load_rule(_rule_file(tmp_path)), coin=COIN)
     return shadow(fixture_questions(), fixture_answers(), timeline)
+
+
+def _at(slot: int) -> str:
+    return f"{from_epoch_ms(at_ms(slot)):%Y-%m-%d %H:%M}"
 
 
 # -- the verdict table ----------------------------------------------------------
@@ -173,6 +184,24 @@ def test_the_book_holds_the_approved_target_only_when_an_order_was_created():
     assert held == {slot: expected[1] for slot, expected in _EXPECTED.items()}
 
 
+def test_an_order_for_no_margin_leaves_the_book_flat_whatever_side_it_names():
+    # The gate's shape allows it (a sized set_target of zero margin), and the
+    # fixture's only zero-margin order names ``flat``, which would read flat
+    # either way. A long target of nothing is not a long book.
+    nothing = Answer(
+        input_id=input_id(0),
+        decision_mode="set_target",
+        target_side="long",
+        requested_margin_pct=0.0,
+        approved_margin_pct=0.0,
+        risk_action="approved",
+        risk_reason=None,
+        confidence=0.8,
+        order_created=True,
+    )
+    assert held_after(fixture_questions()[0], nothing) is FLAT
+
+
 # -- the rows -----------------------------------------------------------------------
 
 
@@ -196,8 +225,28 @@ def test_a_question_the_research_store_does_not_reach_reads_unknown(tmp_path):
         assert (row.rule_side, row.rule_decided_ms, row.verdict) == (None, None, UNKNOWN)
 
 
+@pytest.mark.parametrize(
+    ("verdicts", "count"),
+    [
+        ((PASS, PASS), 0),
+        ((BLOCK, BLOCK), 2),  # every blocked order is one
+        ((CLOSE, CLOSE, CLOSE), 1),  # one position, however long it stays held
+        ((BLOCK, CLOSE, CLOSE), 1),  # the paper book kept what was blocked: the same position
+        ((CLOSE, BLOCK), 2),  # closed, then an order refused
+        ((CLOSE, PASS, CLOSE), 2),  # a pass ends the stretch
+        ((CLOSE, UNKNOWN, CLOSE), 1),  # a question with no reading does not
+    ],
+)
+def test_interventions_count_orders_and_positions_not_questions(tmp_path, verdicts, count):
+    row = _rows(tmp_path)[0]
+    assert interventions([replace(row, verdict=verdict) for verdict in verdicts]) == count
+
+
+# -- the summary -----------------------------------------------------------------------
+
+
 def test_describe_counts_the_verdicts_and_lists_each_refused_question(tmp_path):
-    lines = describe(_rows(tmp_path))
+    lines = describe_shadow(_rows(tmp_path))
     assert lines[:4] == [
         "questions: 11 (10 answered)",
         "rule side at the decisions: long 3, flat 4, short 4, unknown 0",
@@ -205,39 +254,100 @@ def test_describe_counts_the_verdicts_and_lists_each_refused_question(tmp_path):
         "orders created: 4, of which the guardrail refuses 2",
     ]
     assert lines[4].startswith("questions on which the book was outside the guardrail: 5 (")
+    # Slot 2's order, the position found at slot 7 (still held at slot 8),
+    # and slot 9's order; slot 3's close is the position slot 2's order opened.
+    assert lines[5].startswith("interventions: 3 (")
+    # Slot 7 is the model's own doing (a target inside the deadband); slots 3
+    # and 8 are fail-closed rounds.
+    assert lines[6] == (
+        "close_position by cause: the model kept the position 1, the model gave no decision 2"
+    )
+    assert lines[7:] == [
+        f"  {_at(2)} rule long; set_target short 20% -> block_to_flat",
+        f"  {_at(3)} rule flat; holds short (invalid_fail_closed) -> close_position",
+        f"  {_at(7)} rule short; holds long (within_deadband) -> close_position",
+        f"  {_at(8)} rule flat; holds long (invalid_fail_closed) -> close_position",
+        f"  {_at(9)} rule flat; set_target short 50% -> block_to_flat",
+    ]
 
-    def at(slot: int) -> str:
-        return f"{from_epoch_ms(at_ms(slot)):%Y-%m-%d %H:%M}"
 
-    assert lines[5:] == [
-        f"  {at(2)} rule long; set_target short 20% -> block_to_flat",
-        f"  {at(3)} rule flat; holds short (invalid_fail_closed) -> close_position",
-        f"  {at(7)} rule short; holds long (within_deadband) -> close_position",
-        f"  {at(8)} rule flat; holds long (invalid_fail_closed) -> close_position",
-        f"  {at(9)} rule flat; set_target short 50% -> block_to_flat",
+def test_a_round_with_no_answer_is_judged_on_the_position_it_left_held(tmp_path):
+    # Decided 2026-10-02: the guardrail reads the book, not the answer. Under
+    # the rally the rule is long at slots 10 (a maintain, short) and 11 (no
+    # answer, short): both are closes, and they are one position.
+    lines = describe_shadow(_rows(tmp_path, _RALLY))
+    assert "verdicts: pass 4, block_to_flat 2, close_position 5, rule_unknown 0" in lines
+    assert any(line.startswith("interventions: 3 (") for line in lines)
+    assert (
+        "close_position by cause: the model kept the position 2, the model gave no decision 3"
+    ) in lines
+    assert lines[-2:] == [
+        f"  {_at(10)} rule long; holds short (maintain_current) -> close_position",
+        f"  {_at(11)} rule long; no answer, holds short -> close_position",
+    ]
+
+
+def test_describe_stops_listing_at_the_cap_and_says_how_many_it_left_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(guardrail_module, "_LISTED", 2)
+    lines = describe_shadow(_rows(tmp_path))
+    assert lines[7:] == [
+        f"  {_at(2)} rule long; set_target short 20% -> block_to_flat",
+        f"  {_at(3)} rule flat; holds short (invalid_fail_closed) -> close_position",
+        "  ... and 3 more (the CSV lists every question)",
     ]
 
 
 def test_describe_says_so_when_the_guardrail_changes_nothing(tmp_path):
     passing = [row for row in _rows(tmp_path) if row.verdict == PASS]
-    assert describe(passing)[-1] == "the guardrail would have changed nothing in this run"
+    assert describe_shadow(passing)[-1] == "the guardrail would have changed nothing in this run"
+
+
+def test_describe_does_not_conclude_past_the_questions_it_could_not_read(tmp_path):
+    # The store ends at slot 4: slots 7 to 11 have no rule side. They are
+    # counted and named before anything is concluded, and "changed nothing"
+    # is never said over them.
+    rows = _rows(tmp_path, _CLOSES[:5])
+    lines = describe_shadow(rows)
+    assert lines[:5] == [
+        "questions: 11 (10 answered)",
+        "rule side at the decisions: long 3, flat 3, short 0, unknown 5",
+        "verdicts: pass 4, block_to_flat 1, close_position 1, rule_unknown 5",
+        "orders created: 4, of which the guardrail refuses 1",
+        "rule side not known at 5 question(s): the research store does not reach them, or the "
+        "rule could not be evaluated there; nothing is said about those",
+    ]
+    assert lines[6].startswith("interventions: 1 (")
+    unrefused = describe_shadow([row for row in rows if row.verdict in (PASS, UNKNOWN)])
+    assert unrefused[-1] == "no question that could be read was refused"
+    assert "the guardrail would have changed nothing in this run" not in unrefused
 
 
 def test_the_csv_has_one_row_per_question(tmp_path):
-    header, table = csv_table(_rows(tmp_path))
-    assert header[:4] == ["input_id", "at", "rule_side", "rule_decided_at"]
+    header, table = shadow_table(_rows(tmp_path))
+    assert header == [
+        "input_id", "at", "mark", "rule_side", "rule_decided_at", "current_side",
+        "decision_mode", "target_side", "approved_margin_pct", "order_created",
+        "no_order_reason", "held_side", "verdict",
+    ]  # fmt: skip
     assert len(table) == 11
-    by_input = {row[0]: dict(zip(header, row, strict=True)) for row in table}
-    blocked = by_input[input_id(2)]
-    assert (blocked["rule_side"], blocked["held_side"], blocked["verdict"]) == (
-        "long",
-        "short",
-        BLOCK,
-    )
-    assert (blocked["decision_mode"], blocked["approved_margin_pct"]) == ("set_target", 20.0)
-    unanswered = by_input[input_id(11)]
-    assert (unanswered["decision_mode"], unanswered["order_created"]) == (None, None)
-    assert unanswered["held_side"] == "short"
+    by_input = {row[0]: row[1:] for row in table}
+
+    def stamp(slot: int) -> str:
+        return from_epoch_ms(at_ms(slot)).isoformat()
+
+    # A blocked order, a close with no order, and the question nobody answered.
+    assert by_input[input_id(2)] == [
+        stamp(2), 99.0, "long", stamp(2), "long",
+        "set_target", "short", 20.0, True, None, "short", BLOCK,
+    ]  # fmt: skip
+    assert by_input[input_id(7)] == [
+        stamp(7), 104.0, "short", stamp(7), "long",
+        "set_target", "long", 30.0, False, "within_deadband", "long", CLOSE,
+    ]  # fmt: skip
+    assert by_input[input_id(11)] == [
+        stamp(11), 109.0, "short", stamp(11), "short",
+        None, None, None, None, None, "short", PASS,
+    ]  # fmt: skip
 
 
 # -- the command ------------------------------------------------------------------------
@@ -262,8 +372,14 @@ def _guardrail(store: Path, tmp_path: Path, *extra: str) -> list[str]:
 def test_guardrail_prints_the_rule_and_the_run_under_it(store, tmp_path, capsys):
     assert main(_guardrail(store, tmp_path)) == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == f"guardrail shadow: run {RUN_ID} (BTC, 4h cycle)"
+    assert out[0] == (
+        f"guardrail shadow: run {RUN_ID} (BTC, 4h cycle; coin and interval from the run's "
+        "recorded config)"
+    )
     assert out[1].startswith("guardrail rule: band@")
+    # The fixture's two cycles that are not questions are said, not dropped.
+    assert "cycles that failed before an input row was written (not questions): 1" in out
+    assert "cycles still in progress when the store was read (left out): 1" in out
     assert "verdicts: pass 6, block_to_flat 2, close_position 3, rule_unknown 0" in out
     assert "orders created: 4, of which the guardrail refuses 2" in out
 
@@ -293,10 +409,9 @@ def test_several_runs_are_read_in_one_call_each_with_its_own_report(tmp_path, ca
     command[command.index(RUN_ID)] = GATE_RUN_ID
     assert main(command) == 0
     blocks = capsys.readouterr().out.split("\n\n")
-    assert [block.splitlines()[0] for block in blocks] == [
-        f"guardrail shadow: run {GATE_RUN_ID} (BTC, 4h cycle)",
-        f"guardrail shadow: run {other} (BTC, 4h cycle)",
-    ]
+    assert len(blocks) == 2
+    for block, run_id in zip(blocks, (GATE_RUN_ID, other), strict=True):
+        assert block.splitlines()[0].startswith(f"guardrail shadow: run {run_id} (BTC, 4h cycle; ")
     # Same decisions, same rule, same history: the two reports differ in the
     # run's name alone.
     assert blocks[0].splitlines()[1:] == blocks[1].strip().splitlines()[1:]
@@ -313,6 +428,20 @@ def test_the_committed_rule_is_the_default_and_a_short_store_refuses_it(store, t
     assert main([*args, "--research-db", str(_research(tmp_path))]) == 1
     captured = capsys.readouterr()
     assert "cannot say which side btc-20d-breakout@" in captured.err
+    assert captured.out == ""
+
+
+def test_a_research_store_that_is_not_one_is_a_named_exit_1(store, tmp_path, capsys):
+    # A SQLite file that belongs to something else: the store's own refusal,
+    # which is not one of the errors ``main`` catches for every command.
+    foreign = tmp_path / "other.sqlite"
+    conn = sqlite3.connect(foreign)
+    conn.execute("CREATE TABLE something_else (x)")
+    conn.commit()
+    conn.close()
+    assert main(_guardrail(store, tmp_path, "--research-db", str(foreign))) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
     assert captured.out == ""
 
 

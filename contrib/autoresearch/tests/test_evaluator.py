@@ -1229,11 +1229,12 @@ def test_replay_sides_flags_each_bar_it_could_not_evaluate():
     spec = _spec(entry={"long": [{"left": "funding_rate", "op": ">", "right": -1}]})
     short = _bundle([100, 101, 102, 103], funding=_funding(4, hours=4))
     replayed = replay_sides(spec, FeatureFrame(short), _FREE, since_ms=ANCHOR_MS)
+    # Four hourly settlements cover the first bar and no other: the rule is
+    # asked there, goes long, and is frozen long for the three bars after.
+    assert replayed.unevaluable == (False, True, True, True)
+    assert replayed.sides == (Side.LONG,) * 4
     position = _replay(spec, short)
-    assert replayed.unevaluable[0] is False
-    assert replayed.unevaluable[-1] is True
-    assert sum(replayed.unevaluable) == position.replayed_bars_unevaluable
-    assert len(replayed.sides) == position.replayed_bars
+    assert (position.replayed_bars, position.replayed_bars_unevaluable) == (4, 3)
 
 
 def test_the_replay_refuses_a_start_past_every_bar_it_was_given():

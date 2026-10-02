@@ -507,8 +507,12 @@ exit 0；要補洞請跑 `fetch`。**被拒絕的 spec 則相反**：文件本�
 - **每一根的方向**（`build_timeline`）用 `evaluator.replay_sides` 從 store 的第一根重放到最後一根。
   `replay_position` 現在就是這份紀錄的最後一筆。重放前照量測的標準掃一次歷史（K 線有洞就拒絕），
   理由與交接文件相同：少一根可能改變規則今天站在哪一邊。
-- **`reading_at(時刻)` 讀不到就回 `None`**：規則還在暖機（第一根能評估的 K 線之前），或 store 的最後一根
-  比那個時刻早超過 `MAX_SIGNAL_AGE_INTERVALS` 根。
+- **週期跟著規則走**：`RULE_INTERVAL`＝`4h`。spec 是用根數寫的、自己不帶週期，同一個檔放到日線上
+  就是 120 日通道，是另一條規則；所以 `build_timeline` 不收 interval，每個讀 timeline 的人拿到同一個。
+- **`reading_at(時刻)` 讀不到就回 `None`**，三種情況：規則還在暖機（第一根能評估的 K 線之前）；
+  store 的最後一根比那個時刻早超過 `MAX_SIGNAL_AGE_INTERVALS` 根；規則在那一根讀不到條件
+  （方向是凍住的，不是它選的）。後兩種與交接文件一致：讀端丟掉過期文件，`signal` 在最新一根讀不到
+  條件時不寫文件。回傳值本身是 `None`＝讀不到；讀到了而 `side` 是 `None`＝規則空手，兩者不同。
 
 沒有指令：唯一的使用者是 `python -m contrib.replay guardrail`（見那個套件的 README）。
 

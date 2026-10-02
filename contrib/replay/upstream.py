@@ -69,6 +69,7 @@ from contrib.autoresearch.constants import MS_PER_DAY, STUDIED_INTERVALS
 from contrib.autoresearch.costs import CostModel, FillRole, require_amount
 from contrib.autoresearch.guardrail import (
     DEFAULT_RULE,
+    RULE_INTERVAL,
     GuardrailError,
     RuleTimeline,
     build_timeline,
@@ -110,6 +111,7 @@ __all__ = [
     "DEFAULT_RULE",
     "ENGINE_BORROWED",
     "MS_PER_DAY",
+    "RULE_INTERVAL",
     "STUDIED_INTERVALS",
     "TERMINAL_ATTEMPT_STATUSES",
     "UPSTREAM_PACKAGES",
@@ -169,6 +171,7 @@ BORROWED: tuple[tuple[str, str], ...] = (
     ("contrib.autoresearch.costs", "FillRole"),
     ("contrib.autoresearch.costs", "require_amount"),
     ("contrib.autoresearch.guardrail", "DEFAULT_RULE"),
+    ("contrib.autoresearch.guardrail", "RULE_INTERVAL"),
     ("contrib.autoresearch.guardrail", "GuardrailError"),
     ("contrib.autoresearch.guardrail", "RuleTimeline"),
     ("contrib.autoresearch.guardrail", "build_timeline"),

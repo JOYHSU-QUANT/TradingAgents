@@ -853,11 +853,22 @@ Breaking changes within the 0.x line are called out explicitly.
   position it already had), and a verdict: `pass`, `block_to_flat` (an
   order's target the guardrail refuses), `close_position` (a held position it
   refuses) or `rule_unknown` (the research store does not reach the
-  question). Each question is read against the book the run actually had, so
-  the counts are questions on which the book was outside the guardrail, not
-  trades. Nothing is scored and no later price is read; `--out DIR` writes
-  one CSV row per question beside the summary. The trading daemon, its store
-  and its schema are untouched. The rule is a spec file committed in the
+  question, or the rule could not be evaluated at that bar). Three readings
+  were decided with the report and bind the guardrail when it is built: a
+  blocked order sends the book flat, also when it reverses a position the
+  guardrail allowed; the guardrail reads the book, so a cycle where the model
+  gave no decision is judged on the position held; and each question is read
+  against the book the run actually had, so the verdict counts are questions
+  on which the book was outside the guardrail. Beside them the summary prints
+  how often the guardrail would have acted (`interventions`: each blocked
+  order, and each refused position once however long it stayed held) and how
+  many of the closes rest on a cycle with no decision. When some questions
+  have no rule side it says how many before concluding anything, and it says
+  "would have changed nothing" only when every question was read and none
+  refused. The cycles that are not questions (failed before an input row,
+  still in progress) are printed too. Nothing is scored and no later price is
+  read; `--out DIR` writes one CSV row per question beside the summary. The
+  trading daemon, its store and its schema are untouched. The rule is a spec file committed in the
   research package, `contrib/autoresearch/guardrails/btc-20d-breakout.json`
   (on 4h bars: enter on a close beyond the 120-bar channel, leave on a close
   beyond the 55-bar one), named in reports as `<file stem>@<spec hash
@@ -867,8 +878,11 @@ Breaking changes within the 0.x line are called out explicitly.
   replays it over a store's whole history through the new
   `evaluator.replay_sides`, which keeps the side after every bar;
   `replay_position` is now that record read at its last bar, unchanged in
-  what it returns. Only 4h runs are read, because the rule's channels are
-  counted in bars.
+  what it returns. A rule is always replayed on 4h bars (`RULE_INTERVAL`,
+  kept beside the rule: a spec counts its windows in bars and carries no
+  cadence of its own), so only 4h runs are read. `Decisions.describe_left_out`
+  is the first two lines of `Decisions.describe`, split out so both reports
+  print them; `describe` prints what it did.
 
 - **The direction probe pooled over several runs, with a block-bootstrap
   interval: `python -m contrib.replay pool --run-id A --run-id B ...

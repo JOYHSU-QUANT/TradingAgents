@@ -65,12 +65,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .compare import Table, compare, cutoff_scope
-from .guardrail import (
-    RULE_INTERVAL,
-    csv_table as guardrail_table,
-    describe as describe_guardrail,
-    shadow,
-)
+from .guardrail import describe_shadow, shadow, shadow_table
 from .model import engine_model
 from .paper_store import (
     Decisions,
@@ -112,6 +107,7 @@ from .score import (
 )
 from .upstream import (
     DEFAULT_RULE,
+    RULE_INTERVAL,
     STUDIED_INTERVALS,
     Database,
     DecisionConfig,
@@ -426,7 +422,8 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help=(
             "the guardrail rule, a strategy spec JSON file (default: the research package's "
-            "committed rule)"
+            "committed rule); whatever cadence it was written for, it is replayed on "
+            f"{RULE_INTERVAL} bars"
         ),
     )
     guardrail.add_argument(
@@ -1324,9 +1321,7 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
         with ResearchStore(research_path) as store:
             for facts, _ in runs:
                 if facts.coin not in timelines:
-                    timelines[facts.coin] = build_timeline(
-                        store, rule, coin=facts.coin, interval=RULE_INTERVAL
-                    )
+                    timelines[facts.coin] = build_timeline(store, rule, coin=facts.coin)
     except (GuardrailError, StoreError) as exc:
         return _fail(str(exc))
     status = 0
@@ -1334,9 +1329,13 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
         timeline = timelines[facts.coin]
         rows = shadow(decisions.questions, decisions.answers, timeline)
         lines = [
-            f"guardrail shadow: run {facts.run_id} ({facts.coin}, {facts.interval} cycle)",
+            f"guardrail shadow: run {facts.run_id} ({facts.coin}, {facts.interval} cycle; coin "
+            f"and interval from {facts.describe_source()})",
             *timeline.describe(),
-            *describe_guardrail(rows),
+            # The cycles that are not questions: a position the guardrail
+            # refuses may have been held through them, unread.
+            *decisions.describe_left_out(),
+            *describe_shadow(rows),
         ]
         if index:
             print()
@@ -1344,7 +1343,7 @@ def _cmd_guardrail(args: argparse.Namespace) -> int:
             print(line)
         if args.out is not None:
             written = _write_out(
-                Path(args.out), args.out, f"{facts.run_id}-guardrail", lines, guardrail_table(rows)
+                Path(args.out), args.out, f"{facts.run_id}-guardrail", lines, shadow_table(rows)
             )
             status = max(status, written)
     return status

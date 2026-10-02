@@ -29,13 +29,13 @@ from typing import Final
 
 from .costs import CostModel
 from .dsl import Side, StrategySpec, describe_spec, load_spec, spec_hash
-from .split import SplitError
 from .store import ResearchStore, canonical_coin
 from .upstream import MAX_SIGNAL_AGE_INTERVALS, from_epoch_ms, interval_to_ms
 from .vocabulary import SpecError
 
 __all__ = [
     "DEFAULT_RULE",
+    "RULE_INTERVAL",
     "GuardrailError",
     "GuardrailRule",
     "RuleReading",
@@ -48,6 +48,13 @@ __all__ = [
 # the 120-bar channel, leave on a close beyond the 55-bar one, both sides. On
 # 4h bars that is a twenty-day breakout with a nine-day exit.
 DEFAULT_RULE: Final = Path(__file__).resolve().parent / "guardrails" / "btc-20d-breakout.json"
+
+# The cadence every guardrail rule is replayed on. A spec counts its windows
+# in bars and carries no interval of its own, so the cadence is part of what
+# the rule IS: the same file on daily bars would be a 120-day channel, a
+# different rule under the same name. Kept here, beside the rule, so every
+# reader of a timeline gets the same one.
+RULE_INTERVAL: Final = "4h"
 
 # How many leading characters of the spec hash a rule's name carries: enough
 # to tell two versions of a file apart in a report, short enough to read.
@@ -101,12 +108,11 @@ class RuleTimeline:
     """One rule's side after every bar of one coin's stored history.
 
     ``sides[i]`` is the side held once the decision at ``close_times[i]`` has
-    been applied. ``first_decided`` is the index of the first bar whose
-    decision the rule could evaluate: before it the features are still
-    warming up, and a side there is the replay's starting state, not a
-    reading. A bar after it that the rule could not evaluate keeps the side
-    it carried in, as :func:`~.signal.build_signal` lets it; ``carried``
-    counts those.
+    been applied, and ``unevaluable[i]`` says the rule could not evaluate
+    that decision, so the side there is one it carried in rather than one it
+    took. ``first_decided`` is the index of the first bar it could evaluate:
+    before it the features are still warming up, and a side there is the
+    replay's starting state.
     """
 
     rule: GuardrailRule
@@ -114,20 +120,32 @@ class RuleTimeline:
     interval: str
     close_times: tuple[int, ...]
     sides: tuple[Side | None, ...]
+    unevaluable: tuple[bool, ...]
     first_decided: int
-    carried: int
+
+    @property
+    def carried(self) -> int:
+        """How many bars from the first decided one on the rule could not evaluate."""
+        return sum(self.unevaluable[self.first_decided :])
 
     def reading_at(self, at_ms: int) -> RuleReading | None:
         """The rule's side at ``at_ms``, or ``None`` where this timeline cannot say.
 
-        Read off the newest bar that had closed by then. ``None`` before the
-        first decided bar, and where that newest bar is more than
-        ``MAX_SIGNAL_AGE_INTERVALS`` intervals old: the store ends before the
-        instant asked about, and the bound is the one the live reader of the
-        research signal applies to its own document.
+        Read off the newest bar that had closed by then. Two different
+        ``None`` here: the RESULT is ``None`` when there is no reading, while
+        a reading whose ``side`` is ``None`` is a rule that was flat.
+
+        No reading in three cases. Before the first decided bar. Where that
+        newest bar is more than ``MAX_SIGNAL_AGE_INTERVALS`` intervals old,
+        because the store ends before the instant asked about. And where the
+        rule could not evaluate that bar, because the side there is one it
+        took earlier and could not have left. The last two are the live path's
+        own refusals, read off each bar in turn: its reader drops a document
+        older than that bound, and :func:`~.signal.build_signal` writes none
+        when the newest bar is one the rule could not evaluate.
         """
         index = bisect_right(self.close_times, at_ms) - 1
-        if index < self.first_decided:
+        if index < self.first_decided or self.unevaluable[index]:
             return None
         close_time = self.close_times[index]
         if at_ms - close_time > MAX_SIGNAL_AGE_INTERVALS * interval_to_ms(self.interval):
@@ -151,15 +169,13 @@ class RuleTimeline:
         if self.carried:
             lines.append(
                 f"  on {self.carried} of them the rule could not be evaluated and kept the side "
-                "it was on"
+                "it was on; an instant read off one of those has no reading"
             )
         return lines
 
 
-def build_timeline(
-    store: ResearchStore, rule: GuardrailRule, *, coin: str, interval: str
-) -> RuleTimeline:
-    """``rule``'s side after every ``interval`` bar ``store`` holds for ``coin``.
+def build_timeline(store: ResearchStore, rule: GuardrailRule, *, coin: str) -> RuleTimeline:
+    """``rule``'s side after every :data:`RULE_INTERVAL` bar ``store`` holds for ``coin``.
 
     The replay starts at the store's first bar, for the reason
     :func:`~.evaluator.replay_sides` gives: a side is path dependent, so a
@@ -173,6 +189,7 @@ def build_timeline(
     from .features import FeatureError, FeatureFrame
     from .research import require_clean_history
 
+    interval = RULE_INTERVAL
     try:
         bundle = load_bundle(store, coin=coin, interval=interval)
         require_clean_history(bundle, interval)
@@ -181,7 +198,7 @@ def build_timeline(
         replayed = replay_sides(
             rule.spec, FeatureFrame(bundle), CostModel(), since_ms=bundle.bars[0].open_time
         )
-    except (EvaluationError, FeatureError, SplitError) as exc:
+    except (EvaluationError, FeatureError) as exc:
         raise GuardrailError(
             f"this research store cannot say which side {rule.rule_id} held on {coin}: {exc}"
         ) from exc
@@ -198,6 +215,6 @@ def build_timeline(
         interval=interval,
         close_times=replayed.close_times,
         sides=replayed.sides,
+        unevaluable=replayed.unevaluable,
         first_decided=first,
-        carried=sum(replayed.unevaluable[first:]),
     )

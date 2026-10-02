@@ -119,7 +119,7 @@ from .store import (
 from .upstream import ExchangeError, from_epoch_ms
 from .vocabulary import describe_vocabulary
 
-__all__ = ["main"]
+__all__ = ["main", "parse_since"]
 
 # ``--interval``'s choices: the two intervals this package studies (see
 # ``constants.STUDIED_INTERVALS`` for why it is two and not the venue's enum).
@@ -129,7 +129,7 @@ _INTERVALS = STUDIED_INTERVALS
 _BARE_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def _parse_since(text: str) -> datetime:
+def parse_since(text: str) -> datetime:
     """``--since`` as an aware UTC instant; ``ValueError`` naming the problem otherwise.
 
     A bare ``YYYY-MM-DD`` is midnight UTC — the spelling the plan's own
@@ -488,7 +488,7 @@ def _print_scans(store: ResearchStore, *, coin: str, interval: str, funding: boo
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
-    since = _parse_since(args.since)
+    since = parse_since(args.since)
     # The reader is built — and the venue clock read — BEFORE the store is
     # opened, so a network or credential problem does not leave a freshly
     # created empty store behind on a path the operator mistyped.

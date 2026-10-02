@@ -8,12 +8,14 @@ bought by incidents there: WAL plus a busy timeout, an explicit autocommit
 connection so transactions begin where this module says, and a refusal — by
 name, before any write — of a file that is not this package's store.
 
-Copied, not imported: ``tests/test_upstream.py`` forbids borrowing the perp
+Not imported: ``tests/test_upstream.py`` forbids borrowing the perp
 ``persistence`` layer, so this is a second implementation and nothing keeps
-the two in step. The perp one does more, among other things in
-``store_identity.refuse_a_foreign_store`` (it also refuses a hot journal),
-``db.apply_migrations`` and ``Database.transaction``. :func:`_is_foreign` says
-why this module asks its question on the write connection instead.
+the two in step. The perp one is the stricter:
+``store_identity.refuse_a_foreign_store`` probes read-only, through an escaped
+URI, before it connects, and refuses a non-empty ``-wal``/``-journal`` beside
+an empty or missing main file; ``db.apply_migrations`` and
+``Database.transaction`` also do more. :func:`_is_foreign` says why this
+module asks on its write connection.
 
 The refusal matters more here than the size of the module suggests. The slip
 it exists for is ``--db`` pointing at the paper store: opening that file and

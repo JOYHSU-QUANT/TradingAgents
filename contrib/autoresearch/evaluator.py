@@ -1131,9 +1131,9 @@ def replay_sides(
     dependent: an empty ``exit`` holds until a reversal, and ``max_bars``
     counts from the entry. Start it later than the rule's own history and a
     position opened before the start is invisible, so the first entry after
-    it reads as an open rather than as a reversal. Callers pass the first bar
-    the experiment ever considered measurable (its train window's start), not
-    a recent tail.
+    it reads as an open rather than as a reversal. The signal passes the first
+    bar its experiment ever considered measurable (its train window's start),
+    and the guardrail timeline the store's first bar; neither a recent tail.
     """
     bars = frame.bundle.bars
     first = bisect_left([bar.open_time for bar in bars], since_ms)

@@ -413,8 +413,9 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="PATH",
         help=(
-            "an existing autoresearch.sqlite whose candles the rule is replayed on; a question "
-            "its history does not reach reads rule_unknown"
+            "an existing autoresearch.sqlite whose candles the rule is replayed on; a position "
+            "held at a question its history does not reach reads rule_unknown, and a run it "
+            "reaches nowhere is refused"
         ),
     )
     guardrail.add_argument(

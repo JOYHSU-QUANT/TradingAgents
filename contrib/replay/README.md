@@ -357,10 +357,11 @@ python -m contrib.replay guardrail --db paper_trading.db --research-db autoresea
 每一題讀三件事：
 
 - **規則當時的方向**：研究套件把護欄規則從研究 store 的第一根 K 線重放到最後一根
-  （`contrib/autoresearch/guardrail.py`），取決策時刻之前最新收盤那一根之後的方向。三種情況讀不到、
-  記成 `rule_unknown`：規則還在暖機；那一根比決策時刻早超過 2 根（研究 store 沒抓到那麼新）；
-  規則在那一根讀不到條件（它凍在原本那一邊，不是它選的）。後兩種是線上那條路自己的拒絕：讀端丟掉
-  超過 `MAX_SIGNAL_AGE_INTERVALS` 根的文件，寫端在最新一根讀不到條件時不寫文件。
+  （`contrib/autoresearch/guardrail.py`），取決策時刻之前最新收盤那一根之後的方向。三種情況讀不到：
+  規則還在暖機；那一根比決策時刻早超過 2 根（研究 store 沒抓到那麼新）；規則在那一根讀不到條件
+  （它凍在原本那一邊，不是它選的）。後兩種是線上那條路自己的拒絕：讀端丟掉超過
+  `MAX_SIGNAL_AGE_INTERVALS` 根的文件，寫端在最新一根讀不到條件時不寫文件。讀不到的那一題，
+  帳上有倉位就記成 `rule_unknown`，空手則照樣 `pass`。
 - **決策之後 paper 帳上的方向**：有下單就是核准的目標；沒下單（維持、被拒、fail-closed、落在
   deadband 內、整輪沒答案）就是原本的倉位。有下單時讀到的是交易員**想**持有的方向；掛單若沒成交，
   下一題記錄的倉位會反映出來。
@@ -423,7 +424,7 @@ pytest -q contrib/replay/tests
 
 護欄報表（`test_guardrail.py`）沿用那張 11 題的表，研究 store 放 12 根看收盤價就知道方向的 K 線
 （規則：高於 102 持多、低於 98 持空）：判定表每一格、每一題讀到的規則方向與判定、介入次數的算法、
-研究 store 搆不到的題（以及摘要不對它們下結論）、沒答案的那一題被判平倉、指令的輸出與每一種拒絕。
+研究 store 搆不到的題（以及摘要不對它們下結論）、沒答案的那一題被判平倉、指令的輸出與各種拒絕。
 
 探針（`test_probe.py`）用同一個夾具：假模型對每題回固定的機率，`score` 那一段的 Brier、log loss、
 基準率、skill score、reliability 每個數字都從那 10 題的 mark 手算（算式寫在檔頭與斷言旁邊）。

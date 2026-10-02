@@ -847,13 +847,15 @@ Breaking changes within the 0.x line are called out explicitly.
   (decided 2026-10-02, not built into the trader) lets the book hold only the
   side one fixed rule holds: no position against the rule, and none while the
   rule is flat. This command reads that policy against decisions a paper run
-  already took. For every finished question it prints the rule's side at the
-  decision instant, the side the paper book held once the decision was
+  already took. For every finished question it reads the rule's side at the
+  decision instant and the side the paper book held once the decision was
   applied (the approved target when an order was created, otherwise the
-  position it already had), and a verdict: `pass`, `block_to_flat` (an
+  position it already had), and gives a verdict: `pass`, `block_to_flat` (an
   order's target the guardrail refuses), `close_position` (a held position it
-  refuses) or `rule_unknown` (the research store does not reach the
-  question, or the rule could not be evaluated at that bar). Three readings
+  refuses) or `rule_unknown` (a position held where the research store does
+  not reach the question, or where the rule could not be evaluated at that
+  bar; a flat book passes there). The summary prints the counts and lists the
+  refused questions, the first twenty of them. Three readings
   were decided with the report and bind the guardrail when it is built: a
   blocked order sends the book flat, also when it reverses a position the
   guardrail allowed; the guardrail reads the book, so a cycle where the model
@@ -864,7 +866,8 @@ Breaking changes within the 0.x line are called out explicitly.
   order, and each refused position once however long it stayed held) and how
   many of the closes rest on a cycle with no decision. When some questions
   have no rule side it says how many before concluding anything (and how many
-  orders sit among them), and it says "would have changed nothing" only when
+  orders it could not judge for that reason), and it says "would have changed
+  nothing" only when
   every question was read and none refused; a run with no rule side for any
   question is refused, exit 1. The replay starts flat at the store's first
   bar, so the report names the bar the rule first takes a side at and how many

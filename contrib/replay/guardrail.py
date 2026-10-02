@@ -241,10 +241,13 @@ def describe_shadow(rows: Sequence[GuardrailRow]) -> list[str]:
         "it was still held)",
         f"interventions: {interventions(rows)} (each blocked order, and each refused position "
         "once however long it stayed held)",
-        f"close_position by cause: a decision that created no order "
-        f"{sum(not row.undecided for row in closes)}, no decision "
-        f"{sum(row.undecided for row in closes)}",
     ]
+    if closes:
+        lines.append(
+            f"close_position by cause: a decision that created no order "
+            f"{sum(not row.undecided for row in closes)}, no decision "
+            f"{sum(row.undecided for row in closes)}"
+        )
     for row in refused[:_LISTED]:
         assert row.rule_side is not None
         lines.append(
@@ -252,7 +255,9 @@ def describe_shadow(rows: Sequence[GuardrailRow]) -> list[str]:
             f"{_what(row)} -> {row.verdict}"
         )
     if len(refused) > _LISTED:
-        lines.append(f"  ... and {len(refused) - _LISTED} more (the CSV lists every question)")
+        lines.append(
+            f"  ... and {len(refused) - _LISTED} more (--out writes every question to a CSV)"
+        )
     return lines
 
 

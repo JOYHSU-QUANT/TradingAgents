@@ -64,8 +64,9 @@ _HASH_CHARS: Final = 8
 class GuardrailError(ValueError):
     """The rule cannot be read, or this store cannot say which side it held.
 
-    A ``ValueError``, like :class:`~.signal.SignalError`, so a CLI's named
-    refusal lane prints the sentence and exits 1.
+    A ``ValueError``, like :class:`~.signal.SignalError`: a sentence written
+    for an operator, which the replay CLI catches by name, prints and exits 1
+    on.
     """
 
 

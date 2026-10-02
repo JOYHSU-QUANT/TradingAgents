@@ -299,7 +299,7 @@ def test_describe_stops_listing_at_the_cap_and_says_how_many_it_left_out(tmp_pat
     assert lines[7:] == [
         f"  {_at(2)} rule long; set_target short 20% -> block_to_flat",
         f"  {_at(3)} rule flat; holds short (invalid_fail_closed) -> close_position",
-        "  ... and 3 more (the CSV lists every question)",
+        "  ... and 3 more (--out writes every question to a CSV)",
     ]
 
 
@@ -345,7 +345,8 @@ def test_describe_judges_nothing_when_no_question_has_a_rule_side(tmp_path):
     ]
     lines = describe_shadow(unread)
     # Slots 5 and 6 hold nothing, so they pass unread; the other nine hold a
-    # position nobody can judge. All four orders are among the unread.
+    # position nobody can judge. Three of the four orders are among those;
+    # slot 5's flat target is one of the two that pass.
     assert lines == [
         "questions: 11 (10 answered)",
         "rule side at the decisions: long 0, flat 0, short 0, unknown 11",
@@ -432,8 +433,8 @@ def test_out_writes_one_csv_row_per_question_and_the_summary(store, tmp_path, ca
 
 
 def test_several_runs_are_read_in_one_call_each_with_its_own_report(tmp_path, capsys):
-    # The gate-written fixture, twice in one store: the rule is replayed once
-    # and each run gets its own block on stdout and its own pair of files.
+    # The gate-written fixture, twice in one store: each run gets its own
+    # block on stdout and its own pair of files.
     other = "paper-GATE-B"
     papers_store = write_gate_store(tmp_path / "paper_trading.db")
     write_gate_store(papers_store, run_id=other)

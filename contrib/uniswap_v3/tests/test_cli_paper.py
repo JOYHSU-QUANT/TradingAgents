@@ -315,3 +315,40 @@ def test_paper_warns_once_of_a_latest_boundary_without_an_answer_after_catching_
     assert err.count("warning:") == 1
     assert "1 boundary(ies) without a bar, from 2024-01-03T00:00:00Z" in err
     assert "A later visit asks the chain again" in err and "needs a new run" not in err
+
+
+def test_paper_warns_of_every_boundary_without_an_answer_when_none_has_a_bar(
+    node, tmp_path, capsys
+):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    for day in (1, 2):
+        node.reverts.add((_USDC_WETH, block_at(FIRST_DAY + day * DAY) - 1))
+    capsys.readouterr()
+
+    code, lines = _paper(node, db, now=_TEN_PAST + 2 * DAY)
+
+    assert code == cli.EXIT_OK
+    assert lines[0] == "read 0 bar(s); 0 already stored, 2 without an answer"
+    err = capsys.readouterr().err
+    assert err.count("warning:") == 1
+    assert (
+        "no answer at the boundary 2024-01-03T00:00:00Z, nor at 1 boundary(ies) before it, "
+        "from 2024-01-02T00:00:00Z" in err
+    )
+
+
+def test_a_backtest_counts_a_rebalance_the_quote_refused_and_does_not_warn_of_it(
+    node, tmp_path, capsys
+):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    node.quote_bps = 9_900
+    capsys.readouterr()
+    code, lines = _run(
+        node, "backtest", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", "bt",
+        "--from", "2024-01-01", "--fills", "quoter", *_OPENING,
+    )  # fmt: skip
+    assert code == cli.EXIT_OK
+    assert lines[1] == "filled 0, hold 0, no_trade 0, rejected 1, skipped_suspect 0"
+    assert "were rejected" not in capsys.readouterr().err

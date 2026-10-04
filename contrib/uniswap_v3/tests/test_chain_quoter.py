@@ -235,8 +235,28 @@ def test_a_garbled_quote_is_not_taken_for_no_quote():
         ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)
 
 
-def test_a_revert_quoterv2_has_no_reason_for_is_the_nodes_and_not_an_answer_about_the_swap():
-    provider = answering({"error": {"code": 3, "message": "execution reverted: Unexpected error"}})
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": 3, "message": "execution reverted: Unexpected error"},
+        # A node that gives the reason only as revert data: Error("Unexpected error").
+        {
+            "code": 3,
+            "message": "execution reverted",
+            "data": "0x08c379a0" + encoded(["string"], ["Unexpected error"])[2:],
+        },
+    ],
+)
+def test_a_revert_quoterv2_has_no_reason_for_is_the_nodes_and_not_an_answer_about_the_swap(error):
+    provider = answering({"error": error})
     rpc, _ = rpc_over(provider, attempts=1)
     with pytest.raises(RpcRejected, match="gives no reason of a pool's"):
+        ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)
+
+
+def test_a_pools_own_reason_given_only_as_revert_data_is_still_no_quote():
+    data = "0x08c379a0" + encoded(["string"], ["SPL"])[2:]
+    provider = answering({"error": {"code": 3, "message": "execution reverted", "data": data}})
+    rpc, _ = rpc_over(provider, attempts=1)
+    with pytest.raises(NoQuote):
         ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)

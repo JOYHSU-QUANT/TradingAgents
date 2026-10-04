@@ -166,8 +166,10 @@ def quote_exact_input(
 
 
 # What QuoterV2 reverts with when a pool's swap failed and left no reason of
-# its own: from v3-periphery's QuoterV2.parseRevertReason.
+# its own: from v3-periphery's QuoterV2.parseRevertReason. A node gives it
+# as words in its message, or only as the bytes of the revert data, in hex.
 _NO_REASON: Final = "Unexpected error"
+_NO_REASON_FORMS: Final = (_NO_REASON.lower(), _NO_REASON.encode().hex())
 
 
 class ChainQuoter:
@@ -190,7 +192,8 @@ class ChainQuoter:
         try:
             quoted = quote_exact_input(self._rpc, token_in, route, amount_in, block=block)
         except CallReverted as exc:
-            if _NO_REASON in str(exc):
+            said = str(exc).lower()
+            if any(form in said for form in _NO_REASON_FORMS):
                 raise RpcRejected(
                     f"{exc}: QuoterV2 gives no reason of a pool's, as when the node's gas "
                     f"cap for a call is too low for the swap"

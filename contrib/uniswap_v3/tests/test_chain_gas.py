@@ -7,7 +7,13 @@ import pytest
 from contrib.uniswap_v3.chain.errors import MalformedResponse
 from contrib.uniswap_v3.chain.gas import ChainGasOracle
 from contrib.uniswap_v3.ports import GasOracle
-from contrib.uniswap_v3.tests.fakes.rpc import ReplayProvider, answering, block_result, rpc_over
+from contrib.uniswap_v3.tests.fakes.rpc import (
+    ReplayProvider,
+    ScriptedProvider,
+    answering,
+    block_result,
+    rpc_over,
+)
 from contrib.uniswap_v3.tests.fixtures import BLOCK, CASSETTE
 
 
@@ -30,3 +36,14 @@ def test_the_base_fee_of_the_block_just_asked_about_is_not_read_again():
     oracle = ChainGasOracle(rpc_over(provider)[0])
     assert [oracle.base_fee_wei(7), oracle.base_fee_wei(7)] == [5, 5]
     assert len(provider.requests) == 1
+
+
+def test_the_base_fee_kept_is_that_of_the_block_it_was_read_for():
+    fees = {7: 5, 8: 9}
+
+    def respond(method, params):
+        number = int(params[0], 16)
+        return {"result": block_result(number, 100 + number, base_fee=fees[number])}
+
+    oracle = ChainGasOracle(rpc_over(ScriptedProvider(respond))[0])
+    assert [oracle.base_fee_wei(7), oracle.base_fee_wei(8), oracle.base_fee_wei(7)] == [5, 9, 5]

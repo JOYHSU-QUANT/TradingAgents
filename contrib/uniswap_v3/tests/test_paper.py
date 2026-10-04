@@ -392,3 +392,14 @@ def test_a_quoted_backtest_whose_node_has_not_reached_a_fill_block_stops_there(n
             executor=executor,
         )  # fmt: skip
     assert store.last_decided("quoted") is None
+
+
+def test_a_visit_that_finds_the_bar_decided_does_not_wait_on_a_node_short_of_its_fill_block(
+    node, store
+):
+    _visit(node, store, day=0)
+    # Another node, or the same one fallen back: its head is short of the bar's fill block.
+    node.head = _fill_block(0) - 1
+    rpc, executor = _executor(node)
+    summary = run_paper(rpc, store, _CONFIG, executor, run_id=_RUN, now=_day(0) + 2_400)
+    assert (summary.replayed.decided, summary.replayed.already_decided) == (0, 1)

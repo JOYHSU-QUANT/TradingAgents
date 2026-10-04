@@ -155,7 +155,10 @@ class GasOracle(Protocol):
 
 
 class NoQuote(Exception):
-    """The pools give no answer for this swap at this block: the quote reverts, or a pool runs dry."""
+    """The pools give no answer for this swap at this block.
+
+    The quote reverts with a reason of a pool's, or a pool runs dry.
+    """
 
 
 @runtime_checkable

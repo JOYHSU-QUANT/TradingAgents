@@ -2,7 +2,8 @@
 
 The bars come from the store. With fills from the model, a backtest reads
 no chain; with fills from quotes, the chain is asked what each swap would
-have returned at its fill block, and nothing else. Each bar is decided by
+have returned at its fill block and for that block's base fee, and nothing
+else. Each bar is decided by
 the same :meth:`~.step.Engine.step` every other run mode uses.
 
 :func:`replay` is the loop itself, whatever the mode: a paper run is the

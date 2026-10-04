@@ -575,10 +575,16 @@ def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[
     if decision is None:
         # A replay has already warned of every boundary it found without a bar.
         if summary.replayed is None:
+            earlier = len(read.unanswered) - 1
+            others = (
+                f", nor at {earlier} boundary(ies) before it, from {_iso(read.unanswered[0])}"
+                if earlier > 0
+                else ""
+            )
             print(
-                f"warning: the chain had no answer at the boundary {_iso(summary.latest)}, "
-                f"so it has no bar and was not decided; a later visit asks again, and "
-                f"decides it only if the run has not gone past it",
+                f"warning: the chain had no answer at the boundary {_iso(summary.latest)}"
+                f"{others}, so nothing has a bar and nothing was decided; a later visit asks "
+                f"again, and decides a bar only if the run has not gone past it",
                 file=sys.stderr,
             )
         return EXIT_OK

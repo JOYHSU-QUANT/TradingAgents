@@ -53,7 +53,7 @@ class RejectionCode(str, Enum):
 
     # The executor refused a swap: what this bar's market gave.
     EXECUTOR = "executor"
-    # The gas balance did not cover the fills, and will not cover the next bar's either.
+    # The gas balance did not cover the fills' gas. Nothing tops it up.
     GAS = "gas"
 
 

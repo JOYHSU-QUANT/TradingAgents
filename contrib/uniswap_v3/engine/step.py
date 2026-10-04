@@ -27,8 +27,10 @@ What is not recorded stops the run instead: a strategy that raises, or
 answers with something other than ``Hold`` or weights over exactly the
 configured tokens; a bar that does not price those tokens; an executor that
 answers for another swap than the one it was handed; swaps that cannot be
-planned, or that sell more than the ledger holds. The bar is left undecided,
-so it can be decided once the cause is fixed.
+planned, or that sell more than the ledger holds; a ``seen`` that describes
+another block than the bar's; a bar before the latest one the run has
+decided. The bar is left undecided, so it can be decided once the cause is
+fixed.
 """
 
 from __future__ import annotations
@@ -93,14 +95,14 @@ class Engine:
         the decision; a bar that came from no store has none.
         """
         bar = view.latest
+        decided = self.journal.decision(self.run_id, bar.time)
+        if decided is not None:
+            return StepResult(decided, already_run=True)
         if seen is not None and seen.close_block != bar.close_block:
             raise EngineError(
                 f"seen describes block {seen.close_block}, and the bar at {bar.time} closed "
                 f"on {bar.close_block}"
             )
-        decided = self.journal.decision(self.run_id, bar.time)
-        if decided is not None:
-            return StepResult(decided, already_run=True)
         latest = self.journal.last_decided(self.run_id)
         if latest is not None and latest > bar.time:
             raise EngineError(
@@ -143,8 +145,8 @@ class Engine:
                 pools=self.config.pools,
                 settings=self.config.execution,
             )
-        except ValueError as exc:
-            raise EngineError(f"the swaps at {bar.time} cannot be planned ({exc})") from exc
+        except (ValueError, ArithmeticError) as exc:
+            raise EngineError(f"the swaps at {bar.time} cannot be planned ({exc!r})") from exc
         if not swaps:
             return self._record(bar, seen, Outcome.NO_TRADE, ledger, target=answer)
         fills: list[Fill] = []

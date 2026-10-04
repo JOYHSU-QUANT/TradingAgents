@@ -355,7 +355,7 @@ def test_swaps_that_cannot_be_planned_stop_the_run(store, monkeypatch):
 
     monkeypatch.setattr(step_module, "plan_swaps", refuse)
     engine = _engine(store, ScriptedStrategy({FIRST_DAY: _TARGET}))
-    with pytest.raises(EngineError, match="cannot be planned .no pool path joins USDC to WBTC"):
+    with pytest.raises(EngineError, match="cannot be planned .*no pool path joins USDC to WBTC"):
         engine.step(_view(bar(0)))
     assert store.decision(_RUN, FIRST_DAY) is None
 

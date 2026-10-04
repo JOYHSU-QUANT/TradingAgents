@@ -71,7 +71,11 @@ def test_each_outcome_has_one_well_formed_decision():
         (Outcome.FILLED, {}, "carries a target exactly when"),
         (Outcome.NO_TRADE, {"target": {"USDC": D("1")}}, "carries a target exactly when"),
         (Outcome.REJECTED, {"target": _TARGET}, "and no other, carries a reason"),
-        (Outcome.REJECTED, {"target": _TARGET, "reason": "why"}, "carries a reason and a reason code"),
+        (
+            Outcome.REJECTED,
+            {"target": _TARGET, "reason": "why"},
+            "carries a reason and a reason code",
+        ),
         (
             Outcome.REJECTED,
             {"target": _TARGET, "reason_code": RejectionCode.GAS},

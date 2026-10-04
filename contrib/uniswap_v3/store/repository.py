@@ -112,6 +112,9 @@ def _amounts(text: str) -> dict[str, Decimal]:
     amounts = json.loads(text)
     if not isinstance(amounts, dict):
         raise ValueError(f"expected a JSON object of amounts, got {text!r}")
+    # Written as text; a JSON number here was not written by the store.
+    if not all(isinstance(amount, str) for amount in amounts.values()):
+        raise ValueError(f"expected every amount as decimal text, got {text!r}")
     return {symbol: Decimal(amount) for symbol, amount in amounts.items()}
 
 
@@ -445,69 +448,59 @@ class Store:
         """
         decision, valuation = step.decision, step.valuation
         seen = decision.seen
-        with _sqlite_errors("recording a decision"):
-            try:
-                with transaction(self._connection):
-                    self._require_follows_on(run_id, step)
-                    self._connection.execute(
-                        "INSERT INTO decisions (run_id, time, outcome, target, reason, "
-                        "reason_code, close_block, close_block_hash, finality) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            run_id,
-                            decision.time,
-                            decision.outcome.value,
-                            None
-                            if decision.target is None
-                            else _amounts_text(decision.target.weights),
-                            decision.reason,
-                            None if decision.reason_code is None else decision.reason_code.value,
-                            decision.close_block,
-                            None if seen is None else seen.close_block_hash,
-                            None if seen is None else seen.finality.value,
-                        ),
+        with _sqlite_errors("recording a decision"), transaction(self._connection):
+            self._require_follows_on(run_id, step)
+            self._connection.execute(
+                "INSERT INTO decisions (run_id, time, outcome, target, reason, "
+                "reason_code, close_block, close_block_hash, finality) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    decision.time,
+                    decision.outcome.value,
+                    None
+                    if decision.target is None
+                    else _amounts_text(decision.target.weights),
+                    decision.reason,
+                    None if decision.reason_code is None else decision.reason_code.value,
+                    decision.close_block,
+                    None if seen is None else seen.close_block_hash,
+                    None if seen is None else seen.finality.value,
+                ),
+            )
+            self._connection.executemany(
+                "INSERT INTO fills (run_id, time, leg, token_in, token_out, route, "
+                "amount_in, min_amount_out, amount_out, gas_cost_eth, block) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        run_id,
+                        decision.time,
+                        leg,
+                        fill.swap.token_in.symbol,
+                        fill.swap.token_out.symbol,
+                        json.dumps([pool.address for pool in fill.swap.route]),
+                        str(fill.swap.amount_in),
+                        str(fill.swap.min_amount_out),
+                        str(fill.amount_out),
+                        str(fill.gas_cost_eth),
+                        fill.block,
                     )
-                    self._connection.executemany(
-                        "INSERT INTO fills (run_id, time, leg, token_in, token_out, route, "
-                        "amount_in, min_amount_out, amount_out, gas_cost_eth, block) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        [
-                            (
-                                run_id,
-                                decision.time,
-                                leg,
-                                fill.swap.token_in.symbol,
-                                fill.swap.token_out.symbol,
-                                json.dumps([pool.address for pool in fill.swap.route]),
-                                str(fill.swap.amount_in),
-                                str(fill.swap.min_amount_out),
-                                str(fill.amount_out),
-                                str(fill.gas_cost_eth),
-                                fill.block,
-                            )
-                            for leg, fill in enumerate(step.fills)
-                        ],
-                    )
-                    self._connection.execute(
-                        "INSERT INTO valuations (run_id, time, balances, gas_eth, prices, "
-                        "total_value) VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            run_id,
-                            decision.time,
-                            _amounts_text(valuation.ledger.balances),
-                            str(valuation.ledger.gas_eth),
-                            _amounts_text(valuation.prices),
-                            str(valuation.total_value),
-                        ),
-                    )
-            except sqlite3.IntegrityError as exc:
-                if "UNIQUE constraint failed" in str(exc):
-                    raise StoreError(
-                        f"the run {run_id!r} has already decided the bar at {decision.time}"
-                    ) from exc
-                if "FOREIGN KEY constraint failed" in str(exc):
-                    raise StoreError(f"there is no run {run_id!r} in the store") from exc
-                raise
+                    for leg, fill in enumerate(step.fills)
+                ],
+            )
+            self._connection.execute(
+                "INSERT INTO valuations (run_id, time, balances, gas_eth, prices, "
+                "total_value) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    decision.time,
+                    _amounts_text(valuation.ledger.balances),
+                    str(valuation.ledger.gas_eth),
+                    _amounts_text(valuation.prices),
+                    str(valuation.total_value),
+                ),
+            )
 
 
 def open_store(path: Path, *, create: bool = True) -> Store:

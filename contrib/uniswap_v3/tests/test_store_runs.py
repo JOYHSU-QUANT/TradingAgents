@@ -323,6 +323,7 @@ def test_a_stored_row_that_no_longer_reads_is_a_store_error(tmp_path):
         store.record("run-1", _held())
     connection = sqlite3.connect(path)
     connection.execute("UPDATE valuations SET total_value = 'much'")
+    connection.execute("UPDATE valuations SET prices = '{\"WETH\": 2000, \"WBTC\": 40000}'")
     connection.execute("UPDATE runs SET balances = '{\"USDC\": \"-1\"}'")
     connection.commit()
     connection.close()

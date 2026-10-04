@@ -18,6 +18,7 @@ from contrib.uniswap_v3.domain.types import (
     SwapIntent,
     TargetWeights,
     Token,
+    tokens_along,
 )
 
 LOW = "0x" + "0" * 39 + "1"
@@ -215,27 +216,57 @@ def test_a_malformed_portfolio_is_refused(quote, balances, prices, match):
         Portfolio(quote, balances, prices)
 
 
-SWAP = SwapIntent("USDC", "WETH", D("100"))
+# A third token above the other two, and the pool that joins it to B: A to C is two hops.
+C = Token("C", "0x" + "0" * 39 + "4", 8)
+AB = Pool(POOL, A, B, 500)
+BC = Pool("0x" + "0" * 39 + "5", B, C, 3000)
+# Sells 18-decimal A for 6-decimal B.
+SWAP = SwapIntent(A, (AB,), D("100"), D("0.04"))
+
+
+def test_a_swap_ends_in_the_token_its_route_hands_on_last():
+    assert SWAP.token_out == B
+    assert SWAP.tokens == (A, B)
+    through = SwapIntent(C, (BC, AB), D("1"), D("0"))
+    assert through.tokens == (C, B, A)
+    assert through.token_out == A
+    assert tokens_along(B, [AB]) == (B, A)
+
+
+def test_a_swap_may_use_every_decimal_place_its_tokens_have():
+    swap = SwapIntent(B, (AB,), D("0.000001"), D("0.000000000000000001"))
+    assert swap.amount_in == D("0.000001")
+    # Trailing zeros are not decimal places a chain would have to carry.
+    assert SwapIntent(B, (AB,), D("1.0000000"), D("0")).amount_in == 1
 
 
 @pytest.mark.parametrize(
-    ("token_in", "token_out", "amount_in", "match"),
+    ("token_in", "route", "amount_in", "min_amount_out", "match"),
     [
-        ("USDC", "USDC", D("1"), "two different tokens"),
-        ("", "WETH", D("1"), "token_in"),
-        ("USDC", "", D("1"), "token_out"),
-        ("USDC", "WETH", D("0"), "positive Decimal"),
-        ("USDC", "WETH", D("-1"), "positive Decimal"),
-        ("USDC", "WETH", 100, "Decimal"),
+        ("A", (AB,), D("1"), D("0"), "token_in must be a Token"),
+        (A, [AB], D("1"), D("0"), "route must be a tuple"),
+        (A, (), D("1"), D("0"), "at least one pool"),
+        (A, ("A/B",), D("1"), D("0"), "Pool values"),
+        (A, (BC,), D("1"), D("0"), "holding A, which that pool does not trade"),
+        (A, (AB, AB), D("1"), D("0"), "passes through A more than once"),
+        (A, (AB,), D("0"), D("0"), "amount_in must be a finite, positive Decimal"),
+        (A, (AB,), D("-1"), D("0"), "positive Decimal"),
+        (A, (AB,), 100, D("0"), "Decimal"),
+        (B, (AB,), D("0.0000001"), D("0"), "amount_in of B has more than 6 decimal places"),
+        (A, (AB,), D("1"), D("-1"), "min_amount_out must be a finite, non-negative Decimal"),
+        (A, (AB,), D("1"), D("0.0000001"), "min_amount_out of B has more than 6 decimal places"),
+        (A, (AB,), D("1"), None, "min_amount_out"),
     ],
 )
-def test_a_malformed_swap_intent_is_refused(token_in, token_out, amount_in, match):
+def test_a_malformed_swap_intent_is_refused(token_in, route, amount_in, min_amount_out, match):
     with pytest.raises(ValueError, match=match):
-        SwapIntent(token_in, token_out, amount_in)
+        SwapIntent(token_in, route, amount_in, min_amount_out)
 
 
 def test_a_fill_may_cost_no_gas_but_must_deliver_something():
     assert Fill(SWAP, D("0.05"), D("0"), 7).gas_cost_eth == 0
+    # Exactly the minimum is enough.
+    assert Fill(SWAP, D("0.04"), D("0"), 7).amount_out == D("0.04")
 
 
 @pytest.mark.parametrize(
@@ -243,7 +274,10 @@ def test_a_fill_may_cost_no_gas_but_must_deliver_something():
     [
         ("swap", D("1"), D("0"), 7, "SwapIntent"),
         (SWAP, D("0"), D("0"), 7, "amount_out"),
+        (SWAP, D("0.039999"), D("0"), 7, "below the swap's min_amount_out"),
+        (SWAP, D("1.0000001"), D("0"), 7, "amount_out of B has more than 6 decimal places"),
         (SWAP, D("1"), D("-0.001"), 7, "gas_cost_eth"),
+        (SWAP, D("1"), D("1E-19"), 7, "gas_cost_eth has more than 18 decimal places"),
         (SWAP, D("1"), D("0"), -1, "block"),
         (SWAP, D("1"), D("0"), 7.0, "block"),
     ],

@@ -22,7 +22,7 @@ from typing import Any, Final
 
 from ..constants import QUOTER_V2
 from ..domain.prices import MAX_SQRT_RATIO, MIN_SQRT_RATIO
-from ..domain.types import Pool, Token
+from ..domain.types import Pool, Token, tokens_along
 from .errors import InsufficientLiquidity, MalformedResponse, RpcConfigError
 from .rpc import Rpc
 from .units import from_raw, to_raw
@@ -93,26 +93,6 @@ class Quote:
     block: int
 
 
-def _tokens_along(token_in: Token, route: Sequence[Pool]) -> list[Token]:
-    """``token_in`` and then the token each pool of ``route`` hands on."""
-    if not route:
-        raise ValueError("a route holds at least one pool")
-    tokens = [token_in]
-    for pool in route:
-        if not isinstance(pool, Pool):
-            raise ValueError(f"a route holds Pool values, got {pool!r}")
-        if tokens[-1] == pool.token0:
-            tokens.append(pool.token1)
-        elif tokens[-1] == pool.token1:
-            tokens.append(pool.token0)
-        else:
-            raise ValueError(
-                f"the route reaches {pool.token0.symbol}/{pool.token1.symbol} holding "
-                f"{tokens[-1].symbol}, which that pool does not trade"
-            )
-    return tokens
-
-
 def _encode_path(tokens: Sequence[Token], route: Sequence[Pool]) -> bytes:
     """The packed path v3-periphery reads: token, then (3-byte fee, token) per hop."""
     path = bytes.fromhex(tokens[0].address[2:])
@@ -131,7 +111,7 @@ def quote_exact_input(
     the way raises :class:`~.errors.InsufficientLiquidity`, and a quote that
     reverts :class:`~.errors.CallReverted`.
     """
-    tokens = _tokens_along(token_in, route)
+    tokens = tokens_along(token_in, route)
     if tokens[-1] == token_in:
         raise ValueError(f"the route ends in {token_in.symbol}, the token it started with")
     raw_in = to_raw(token_in, amount_in)

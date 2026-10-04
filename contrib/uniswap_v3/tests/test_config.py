@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -13,11 +14,13 @@ from contrib.uniswap_v3.config import (
     ConfigError,
     StrategySpec,
     UniswapConfig,
+    config_snapshot,
     load_config,
     parse_config,
 )
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarSettings
+from contrib.uniswap_v3.domain.execution import ExecutionSettings
 from contrib.uniswap_v3.domain.types import Pool, Token
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
 from contrib.uniswap_v3.strategies.registry import build_strategy
@@ -323,3 +326,144 @@ def test_a_config_built_by_hand_checks_its_bars_and_its_variable_name():
         UniswapConfig(**fields, bars={"interval_seconds": 3_600})
     with pytest.raises(ConfigError, match="rpc.url_env must be the name of an environment variable"):
         UniswapConfig(**fields, rpc_url_env=" ")
+    with pytest.raises(ConfigError, match="execution must be an ExecutionSettings"):
+        UniswapConfig(**fields, execution={"delay_blocks": 25})
+
+
+# --- execution -------------------------------------------------------------
+
+
+def test_execution_may_be_left_out_and_the_shipped_example_spells_out_its_defaults():
+    assert parse_config(_document()).execution == ExecutionSettings()
+    assert parse_config(_document(execution={})).execution == ExecutionSettings()
+    assert parse_config(_document(execution={"model": {}})).execution == ExecutionSettings()
+    assert load_config(EXAMPLE).execution == ExecutionSettings()
+
+
+def test_execution_keys_are_read_one_by_one_over_the_defaults():
+    config = parse_config(
+        _document(
+            execution={
+                "min_trade_value": "25",
+                "delay_blocks": 5,
+                "model": {"slippage": "0.002", "gas_units_per_hop": 180_000},
+            }
+        )
+    )
+    assert config.execution == ExecutionSettings(
+        min_trade_value=Decimal("25"),
+        delay_blocks=5,
+        model_slippage=Decimal("0.002"),
+        model_gas_units_per_hop=180_000,
+    )
+    exact = parse_config(_document(execution={"max_slippage": 0, "model": {"slippage": 0}}))
+    assert exact.execution.max_slippage == 0
+
+
+@pytest.mark.parametrize(
+    ("execution", "match"),
+    [
+        ({"slippage": "0.01"}, "execution must be a mapping with keys from"),
+        ([25], "execution must be a mapping"),
+        ({"max_slippage": 0.005}, "execution.max_slippage must be a quoted decimal"),
+        ({"max_slippage": "1"}, r"execution: max_slippage must be a Decimal in \[0, 1\)"),
+        ({"min_trade_value": "-10"}, "execution: min_trade_value"),
+        ({"delay_blocks": "25"}, "execution: delay_blocks must be an integer"),
+        ({"model": {"gas": 1}}, "execution.model must be a mapping with keys from"),
+        ({"model": "cheap"}, "execution.model must be a mapping"),
+        ({"model": {"slippage": 0.001}}, "execution.model.slippage must be a quoted decimal"),
+        ({"model": {"gas_units_per_hop": 0}}, "execution: model_gas_units_per_hop"),
+        ({"model": {"slippage": "0.01"}}, "execution: model_slippage 0.01 must not be above"),
+    ],
+)
+def test_a_malformed_execution_section_is_refused_by_name(execution, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_config(_document(execution=execution))
+
+
+# --- the pools form a tree -------------------------------------------------
+
+
+def test_pools_that_form_a_loop_are_refused(monkeypatch):
+    # No such pool is in the tables: with it a token would have two paths to the quote.
+    third = Pool("0x" + "1" * 40, _TOKENS["WBTC"], _TOKENS["USDC"], 3000)
+    monkeypatch.setattr(
+        config_module, "POOLS", {ETHEREUM_MAINNET: {**_POOLS, "WBTC/USDC-3000": third}}
+    )
+    with pytest.raises(ConfigError, match="3 tokens are joined by 2 pools, and .* form a loop"):
+        parse_config(_document(pools=["USDC/WETH-500", "WBTC/WETH-500", "WBTC/USDC-3000"]))
+
+
+def test_pools_that_do_not_reach_every_token_from_the_quote_are_refused(monkeypatch):
+    # Two more tokens with a pool of their own: every token is in a pool, and two are cut off.
+    dai, link = Token("DAI", "0x" + "6" * 40, 18), Token("LINK", "0x" + "7" * 40, 18)
+    island = Pool("0x" + "1" * 40, dai, link, 3000)
+    monkeypatch.setattr(
+        config_module, "TOKENS", {ETHEREUM_MAINNET: {**_TOKENS, "DAI": dai, "LINK": link}}
+    )
+    monkeypatch.setattr(
+        config_module, "POOLS", {ETHEREUM_MAINNET: {**_POOLS, "DAI/LINK-3000": island}}
+    )
+    with pytest.raises(ConfigError, match="pools: no pool path joins USDC to DAI"):
+        parse_config(
+            _document(
+                tokens=["USDC", "WETH", "DAI", "LINK"], pools=["USDC/WETH-500", "DAI/LINK-3000"]
+            )
+        )
+
+
+# --- the snapshot ----------------------------------------------------------
+
+
+def test_a_snapshot_names_everything_a_run_depends_on_and_is_the_same_each_time():
+    config = load_config(EXAMPLE)
+    snapshot = config_snapshot(config)
+    assert snapshot == config_snapshot(load_config(EXAMPLE))
+    assert json.loads(snapshot) == {
+        "chain_id": 1,
+        "quote_token": "USDC",
+        "tokens": ["USDC", "WETH", "WBTC"],
+        "pools": ["USDC/WETH-500", "WBTC/WETH-500"],
+        "strategy": {
+            "name": "fixed_weights",
+            "params": {"weights": {"USDC": "0.5", "WETH": "0.3", "WBTC": "0.2"}, "band": "0.05"},
+        },
+        "bars": {
+            "interval_seconds": 86_400,
+            "twap_window_seconds": 1_800,
+            "max_twap_deviation": "0.05",
+            "max_move": "0.5",
+        },
+        # The config file's own shape, so the model's two keys sit under ``model``.
+        "execution": {
+            "min_trade_value": "10",
+            "max_slippage": "0.005",
+            "delay_blocks": 25,
+            "model": {"slippage": "0.0005", "gas_units_per_hop": 150_000},
+        },
+    }
+
+
+def test_a_snapshot_changes_with_what_changes_a_run_and_not_with_where_the_node_is():
+    config = parse_config(_document())
+    snapshot = config_snapshot(config)
+    assert config_snapshot(parse_config(_document(rpc={"url_env": "MY_NODE"}))) == snapshot
+    # A number written with padding is the same number.
+    assert config_snapshot(parse_config(_document(bars={"max_move": "0.50"}))) == snapshot
+    for changed in (
+        _document(execution={"delay_blocks": 24}),
+        _document(execution={"model": {"gas_units_per_hop": 150_001}}),
+        _document(bars={"max_move": "0.4"}),
+        _document(strategy={"name": "fixed_weights", "params": {"band": "0.06"}}),
+        _document(quote_token="WETH"),
+    ):
+        assert config_snapshot(parse_config(changed)) != snapshot
+
+
+def test_a_snapshot_writes_frozen_params_down_and_refuses_what_json_cannot_hold():
+    spec = StrategySpec(name="x", params={"only": {"WETH", "USDC"}, "levels": [Decimal("0.1")]})
+    snapshot = json.loads(config_snapshot(_config(strategy=spec)))
+    assert snapshot["strategy"]["params"] == {"only": ["USDC", "WETH"], "levels": ["0.1"]}
+    for unwritable in (object(), float("nan")):
+        with pytest.raises(ConfigError, match="cannot be written down as JSON"):
+            config_snapshot(_config(strategy=StrategySpec(name="x", params={"odd": unwritable})))

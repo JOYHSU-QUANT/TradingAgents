@@ -23,6 +23,22 @@ bars:
   max_twap_deviation: "0.05"
   max_move: "0.5"
 
+# Execution. A rebalance leaves out a transfer worth less than min_trade_value
+# (in the quote token). max_slippage is how far below the bar's close price,
+# after the pools' fees, a swap's output may fall before the swap is refused.
+# A modelled or quoted fill is taken delay_blocks after the first block of the
+# bar's boundary. model is the offline fill model's own: what it takes off the
+# close price on top of the fees, and the gas it charges per pool crossed, at
+# the bar's base fee. These are the defaults, and the whole section may be
+# left out.
+execution:
+  min_trade_value: "10"
+  max_slippage: "0.005"
+  delay_blocks: 25
+  model:
+    slippage: "0.0005"
+    gas_units_per_hop: 150000
+
 # The name of the environment variable that holds the node's URL, never the
 # URL itself. Backfilling needs an archive node.
 rpc:

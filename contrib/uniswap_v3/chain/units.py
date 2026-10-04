@@ -9,13 +9,12 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Final
 
+from ..domain.decimal_context import MAX_MAGNITUDE
 from ..domain.types import Token
 
 __all__ = ["from_raw", "to_raw"]
 
 _UINT256_MAX: Final = 2**256 - 1
-# A uint256 has 78 digits, so a larger leading digit cannot fit either way.
-_MAX_MAGNITUDE: Final = 77
 
 
 def to_raw(token: Token, amount: Decimal) -> int:
@@ -24,7 +23,7 @@ def to_raw(token: Token, amount: Decimal) -> int:
         raise ValueError(f"an amount is a finite, non-negative Decimal, got {amount!r}")
     if amount == 0:
         return 0
-    if abs(amount.adjusted()) > _MAX_MAGNITUDE:
+    if abs(amount.adjusted()) > MAX_MAGNITUDE:
         raise ValueError(f"{amount!r} is outside what a token amount can be")
     # As a ratio of integers, so no decimal context takes part.
     numerator, denominator = amount.as_integer_ratio()

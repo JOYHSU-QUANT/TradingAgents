@@ -12,6 +12,7 @@ from contrib.uniswap_v3.config import StrategySpec, UniswapConfig
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarFlag, BarSettings, Finality
 from contrib.uniswap_v3.domain.prices import MAX_SQRT_RATIO
+from contrib.uniswap_v3.domain.records import BarSeen
 from contrib.uniswap_v3.ports import BarSource
 from contrib.uniswap_v3.store.bar_source import StoreBarSource, load_bar
 from contrib.uniswap_v3.store.repository import StoreError, open_store
@@ -339,3 +340,22 @@ def test_a_reorged_reading_makes_its_bar_suspect(store):
     stored = load_bar(store, _CONFIG, FIRST_DAY)
     assert stored.flags == (frozenset(), frozenset({BarFlag.REORGED}))
     assert stored.bar.suspect is True
+
+
+def test_a_stored_bar_says_what_a_decision_keeps_of_it(store):
+    store.insert_bars([_reading(), _reading(_WBTC_WETH, finality=Finality.PENDING)])
+    stored = load_bar(store, _CONFIG, FIRST_DAY)
+    # The bar is as final as its reading furthest from final.
+    assert stored.seen == BarSeen(
+        close_block=999, close_block_hash=_reading().close_block_hash, finality=Finality.PENDING
+    )
+
+
+def test_where_the_readings_close_on_different_blocks_the_hash_kept_is_the_highest_blocks(store):
+    later = "0x" + "cd" * 32
+    store.insert_bars(
+        [_reading(), _reading(_WBTC_WETH, close_block=1_000, close_block_hash=later)]
+    )
+    stored = load_bar(store, _CONFIG, FIRST_DAY)
+    assert stored.bar.close_block == 1_000
+    assert (stored.seen.close_block, stored.seen.close_block_hash) == (1_000, later)

@@ -85,6 +85,7 @@ _REVERT_CODE: Final = 3
 # block asked for, and when it no longer keeps that block's state.
 _BEHIND: Final = ("header not found", "block not found", "unknown block")
 _NO_STATE: Final = ("missing trie node", "pruned", "pruning", "discarded", "archive")
+_HASH_BYTES: Final = 32
 # The packages under a request, whose loggers write the URL or its path:
 # web3's provider and urllib3's connection pool at DEBUG, urllib3's
 # connection at WARNING.
@@ -196,9 +197,14 @@ class RpcSettings:
 
 @dataclass(frozen=True)
 class BlockHeader:
-    """What the package reads off a block. ``base_fee_wei`` is ``None`` before London."""
+    """What the package reads off a block. ``base_fee_wei`` is ``None`` before London.
+
+    ``hash`` is ``0x`` and 64 lowercase hex digits. A block number names
+    whichever block the node holds there now; the hash names one block.
+    """
 
     number: int
+    hash: str
     timestamp: int
     base_fee_wei: int | None
 
@@ -350,7 +356,15 @@ class Rpc:
             raise MalformedResponse(f"{what} has number {number!r} and timestamp {timestamp!r}")
         if base_fee is not None and not _is_count(base_fee):
             raise MalformedResponse(f"{what} has a base fee of {base_fee!r}")
-        return BlockHeader(number=number, timestamp=timestamp, base_fee_wei=base_fee)
+        block_hash = raw.get("hash")
+        if not isinstance(block_hash, bytes) or len(block_hash) != _HASH_BYTES:
+            raise MalformedResponse(f"{what} has a hash of {block_hash!r}")
+        return BlockHeader(
+            number=number,
+            hash="0x" + bytes(block_hash).hex(),
+            timestamp=timestamp,
+            base_fee_wei=base_fee,
+        )
 
     def call(
         self,

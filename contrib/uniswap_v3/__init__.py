@@ -11,9 +11,12 @@ hold that). It is also strategy-agnostic: a strategy enters only through
 :class:`~.ports.Strategy`, and the one strategy shipped here,
 ``fixed_weights``, is a placeholder that drives the engine and its tests.
 
-What exists so far is the skeleton and the chain reader: the value types and
-the pool price conversion (:mod:`.domain`), the ports, the address tables
-(:mod:`.constants`), the config loader, the strategy registry, and reads of
-blocks, pool prices, quotes and the base fee from a node (:mod:`.chain`).
-There is no engine yet, and nothing here holds a key or signs a transaction.
+What exists so far is the skeleton, the chain reader and the bar store: the
+value types and the pool price conversion (:mod:`.domain`), the ports, the
+address tables (:mod:`.constants`), the config loader, the strategy
+registry, reads of blocks, pool prices, quotes and the base fee from a node
+(:mod:`.chain`), an SQLite store of each pool's reading at every bar
+boundary (:mod:`.store`), and two commands (:mod:`.cli`): ``backfill`` fills
+the store from an archive node and ``status`` prints what it holds. There
+is no engine yet, and nothing here holds a key or signs a transaction.
 """

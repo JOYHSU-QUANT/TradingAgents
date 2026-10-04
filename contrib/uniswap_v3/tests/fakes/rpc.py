@@ -33,11 +33,16 @@ from contrib.uniswap_v3.chain.rpc import Rpc, RpcSettings
 _HEADER_KEYS = ("number", "hash", "parentHash", "timestamp", "baseFeePerGas")
 
 
+def block_hash(number: int) -> str:
+    """The hash :func:`block_result` gives block ``number``."""
+    return "0x" + f"{number + 1:064x}"
+
+
 def block_result(number: int, timestamp: int, *, base_fee: int | None = 10**9) -> dict[str, Any]:
     """A block as a node sends it, cut down to the header; no base fee before London."""
     block = {
         "number": hex(number),
-        "hash": "0x" + f"{number + 1:064x}",
+        "hash": block_hash(number),
         "parentHash": "0x" + f"{number:064x}",
         "timestamp": hex(timestamp),
     }

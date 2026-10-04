@@ -9,7 +9,14 @@ from __future__ import annotations
 import pytest
 from web3 import Web3
 
-from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, QUOTER_V2, TOKENS, pool_key
+from contrib.uniswap_v3.constants import (
+    EARLIEST_BAR_TIME,
+    ETHEREUM_MAINNET,
+    POOLS,
+    QUOTER_V2,
+    TOKENS,
+    pool_key,
+)
 
 
 def test_the_mainnet_tokens_are_the_three_decided():
@@ -49,8 +56,14 @@ def test_every_address_is_a_valid_eip55_checksum():
     assert [address for address in addresses if not Web3.is_checksum_address(address)] == []
 
 
-def test_every_chain_has_all_three_tables_keyed_by_their_own_names():
-    assert set(TOKENS) == set(POOLS) == set(QUOTER_V2)
+def test_the_earliest_mainnet_bar_is_the_first_day_of_2022():
+    # 2022-01-01 00:00:00 UTC, a boundary of every bar length that divides a day.
+    assert dict(EARLIEST_BAR_TIME) == {ETHEREUM_MAINNET: 1_640_995_200}
+    assert EARLIEST_BAR_TIME[ETHEREUM_MAINNET] % 86_400 == 0
+
+
+def test_every_chain_has_all_the_tables_keyed_by_their_own_names():
+    assert set(TOKENS) == set(POOLS) == set(QUOTER_V2) == set(EARLIEST_BAR_TIME)
     for chain_id, tokens in TOKENS.items():
         assert all(symbol == token.symbol for symbol, token in tokens.items())
         for key, pool in POOLS[chain_id].items():

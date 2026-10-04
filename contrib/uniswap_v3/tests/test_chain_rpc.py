@@ -281,7 +281,10 @@ def test_every_read_checks_the_chain_first_until_it_has_passed_once():
 def test_header_reads_a_recorded_block_and_the_latest():
     rpc, _ = rpc_over(ReplayProvider(CASSETTE))
     assert rpc.header(BLOCK) == BlockHeader(
-        number=BLOCK, timestamp=1_693_066_895, base_fee_wei=21_721_091_641
+        number=BLOCK,
+        hash="0x95b198e154acbfc64109dfd22d8224fe927fd8dfdedfae01587674482ba4baf3",
+        timestamp=1_693_066_895,
+        base_fee_wei=21_721_091_641,
     )
     latest = rpc.latest_header()
     assert latest.number > BLOCK and latest.timestamp > 1_693_066_895
@@ -289,7 +292,18 @@ def test_header_reads_a_recorded_block_and_the_latest():
 
 def test_header_of_a_block_before_london_has_no_base_fee():
     rpc, _ = rpc_over(answering({"result": block_result(7, 1_500_000_000, base_fee=None)}))
-    assert rpc.header(7) == BlockHeader(number=7, timestamp=1_500_000_000, base_fee_wei=None)
+    assert rpc.header(7) == BlockHeader(
+        number=7, hash="0x" + f"{8:064x}", timestamp=1_500_000_000, base_fee_wei=None
+    )
+
+
+@pytest.mark.parametrize("block_hash", [None, "0x1234", 7])
+def test_header_refuses_a_block_without_a_32_byte_hash(block_hash):
+    block = block_result(7, 1_500_000_000)
+    block["hash"] = block_hash
+    rpc, _ = rpc_over(answering({"result": block}))
+    with pytest.raises(MalformedResponse, match="has a hash of"):
+        rpc.header(7)
 
 
 def test_header_raises_when_the_node_has_no_such_block():

@@ -17,33 +17,17 @@ read, so one is refused rather than rounded.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
 
-from ..domain.decimal_context import DECIMAL_CONTEXT
+from ..domain.decimal_context import DECIMAL_CONTEXT, parse_decimal
 from ..domain.types import Hold, MarketView, Portfolio, TargetWeights
 
 __all__ = ["FixedWeights"]
 
 _PARAMS: Final = frozenset({"weights", "band"})
-# Plain digits only. ``Decimal`` itself also reads "0_5", " 0.5", "NaN" and
-# full-width digits, none of which is what a config author meant to write.
-_DECIMAL: Final = re.compile(r"-?[0-9]+(\.[0-9]+)?")
-
-
-def _decimal(value: object, what: str) -> Decimal:
-    if isinstance(value, Decimal):
-        return value
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | str)
-        or (isinstance(value, str) and not _DECIMAL.fullmatch(value))
-    ):
-        raise ValueError(f'{what} must be a quoted decimal such as "0.25", got {value!r}')
-    return Decimal(value)
 
 
 @dataclass(frozen=True)
@@ -77,9 +61,12 @@ class FixedWeights:
             raise ValueError(f"weights must map token symbol to weight, got {weights!r}")
         return cls(
             target=TargetWeights(
-                {symbol: _decimal(weight, f"weights[{symbol!r}]") for symbol, weight in weights.items()}
+                {
+                    symbol: parse_decimal(weight, f"weights[{symbol!r}]")
+                    for symbol, weight in weights.items()
+                }
             ),
-            band=_decimal(params["band"], "band"),
+            band=parse_decimal(params["band"], "band"),
         )
 
     def decide(self, view: MarketView, portfolio: Portfolio) -> TargetWeights | Hold:

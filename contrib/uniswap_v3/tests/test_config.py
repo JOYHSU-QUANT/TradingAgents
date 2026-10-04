@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from contrib.uniswap_v3 import config as config_module
+from contrib.uniswap_v3.chain.rpc import DEFAULT_URL_ENV
 from contrib.uniswap_v3.config import (
     ConfigError,
     StrategySpec,
@@ -16,6 +17,7 @@ from contrib.uniswap_v3.config import (
     parse_config,
 )
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
+from contrib.uniswap_v3.domain.bars import BarSettings
 from contrib.uniswap_v3.domain.types import Pool, Token
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
 from contrib.uniswap_v3.strategies.registry import build_strategy
@@ -249,3 +251,67 @@ def test_two_pools_for_one_pair_are_refused(monkeypatch):
     )
     with pytest.raises(ConfigError, match=r"more than one pool for the pair \['USDC', 'WETH'\]"):
         parse_config(_document(pools=["USDC/WETH-500", "WBTC/WETH-500", "USDC/WETH-3000"]))
+
+
+# --- bars and rpc ----------------------------------------------------------
+
+
+def test_bars_and_rpc_may_be_left_out_and_then_the_defaults_stand():
+    config = parse_config(_document())
+    assert config.bars == BarSettings()
+    assert config.bars.interval_seconds == 86_400
+    assert config.rpc_url_env is None
+
+
+def test_the_shipped_example_spells_out_the_default_bars_and_the_default_variable():
+    config = load_config(EXAMPLE)
+    assert config.bars == BarSettings()
+    assert config.rpc_url_env == DEFAULT_URL_ENV
+
+
+def test_bars_keys_are_read_one_by_one_over_the_defaults():
+    config = parse_config(
+        _document(bars={"interval_seconds": 3_600, "max_twap_deviation": "0.02"})
+    )
+    assert config.bars == BarSettings(
+        interval_seconds=3_600, max_twap_deviation=Decimal("0.02")
+    )
+    assert parse_config(_document(bars={})).bars == BarSettings()
+    assert parse_config(_document(rpc={"url_env": "MY_NODE"})).rpc_url_env == "MY_NODE"
+    assert parse_config(_document(rpc={})).rpc_url_env is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"bars": {"interval": 3_600}}, "bars must be a mapping with keys from"),
+        ({"bars": [86_400]}, "bars must be a mapping"),
+        ({"bars": None}, "bars must be a mapping"),
+        ({"bars": {"interval_seconds": 0}}, "bars: interval_seconds must be a positive integer"),
+        ({"bars": {"interval_seconds": "86400"}}, "bars: interval_seconds"),
+        ({"bars": {"twap_window_seconds": 2**32}}, "bars: twap_window_seconds"),
+        ({"bars": {"max_twap_deviation": 0.05}}, "bars.max_twap_deviation must be a quoted decimal"),
+        ({"bars": {"max_move": "0"}}, "bars: max_move must be a finite, positive Decimal"),
+        ({"rpc": {"url": "https://node.example"}}, "rpc must be a mapping with keys from"),
+        ({"rpc": "ETH_RPC_URL"}, "rpc must be a mapping"),
+        ({"rpc": {"url_env": ""}}, "rpc.url_env must be a non-empty string"),
+        ({"rpc": {"url_env": 7}}, "rpc.url_env must be a non-empty string"),
+    ],
+)
+def test_a_malformed_bars_or_rpc_section_is_refused_by_name(overrides, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_config(_document(**overrides))
+
+
+def test_a_config_built_by_hand_checks_its_bars_and_its_variable_name():
+    fields = {
+        "chain_id": ETHEREUM_MAINNET,
+        "quote": _TOKENS["USDC"],
+        "tokens": (_TOKENS["USDC"], _TOKENS["WETH"]),
+        "pools": (_POOLS["USDC/WETH-500"],),
+        "strategy": StrategySpec(name="fixed_weights", params={}),
+    }
+    with pytest.raises(ConfigError, match="bars must be a BarSettings"):
+        UniswapConfig(**fields, bars={"interval_seconds": 3_600})
+    with pytest.raises(ConfigError, match="rpc.url_env must be a non-empty string"):
+        UniswapConfig(**fields, rpc_url_env=" ")

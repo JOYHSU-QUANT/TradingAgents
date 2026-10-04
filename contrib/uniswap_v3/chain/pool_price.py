@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final
 
+from ..domain.bars import MAX_TWAP_WINDOW_SECONDS
 from ..domain.prices import MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO, MIN_TICK
 from ..domain.types import Pool
 from .errors import MalformedResponse
@@ -18,8 +19,6 @@ from .rpc import Rpc
 __all__ = ["DEFAULT_TWAP_WINDOW_SECONDS", "Slot0", "read_slot0", "read_twap_tick"]
 
 DEFAULT_TWAP_WINDOW_SECONDS: Final = 1800
-# ``observe`` takes its ages as uint32.
-_MAX_WINDOW_SECONDS: Final = 2**32 - 1
 
 # From v3-core's IUniswapV3PoolState and IUniswapV3PoolDerivedState:
 # https://github.com/Uniswap/v3-core/tree/main/contracts/interfaces/pool
@@ -85,10 +84,10 @@ def read_twap_tick(
     if (
         isinstance(window_seconds, bool)
         or not isinstance(window_seconds, int)
-        or not 0 < window_seconds <= _MAX_WINDOW_SECONDS
+        or not 0 < window_seconds <= MAX_TWAP_WINDOW_SECONDS
     ):
         raise ValueError(
-            f"window_seconds must be an integer from 1 to {_MAX_WINDOW_SECONDS}, "
+            f"window_seconds must be an integer from 1 to {MAX_TWAP_WINDOW_SECONDS}, "
             f"got {window_seconds!r}"
         )
     result = rpc.call(pool.address, _POOL_ABI, "observe", ([window_seconds, 0],), block=block)

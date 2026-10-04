@@ -152,7 +152,8 @@ class FakeNode:
       ``observe`` reverts, and ``slot0_reverts`` those whose ``slot0`` does;
       ``revert_message`` is what the node says when one does.
     - ``errors``: ``block`` to the JSON-RPC error every ``eth_call`` at that
-      block gets.
+      block gets. An ``eth_call`` at a block above ``head`` gets "header not
+      found".
     - ``hashes`` and ``times``: ``block`` to a hash or timestamp in place of
       the regular one.
     - ``base_fee``: every block's base fee; ``None`` for a chain before London.

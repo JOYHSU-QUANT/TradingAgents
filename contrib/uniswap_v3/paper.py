@@ -114,18 +114,20 @@ def run_paper(
             created_at=now,
         )
         open_engine(store, config, executor, run_id=run_id)
+    # ``reached`` is the latest boundary the run has come to, and ``first`` the one it
+    # goes on from.
     decided = store.last_decided(run_id)
     if decided is not None:
-        first = decided + interval
+        reached, first = decided, decided + interval
     elif run is not None:
         # Started by a visit that decided nothing: the bar that visit came for is still owed.
-        first = run.created_at - run.created_at % interval
+        reached = first = run.created_at - run.created_at % interval
     else:
-        first = latest
-    if first - interval > latest:
+        reached = first = latest
+    if latest < reached:
         raise EngineError(
-            f"the clock says {now}, which is before the boundary at {first - interval} the "
-            f"run {run_id!r} has already come to; the clock is behind"
+            f"the clock says {now}, which is before the boundary at {reached} the run "
+            f"{run_id!r} has already come to; the clock is behind"
         )
     start = min(first, latest)
     read = backfill(rpc, store, config, start=start, end=latest)

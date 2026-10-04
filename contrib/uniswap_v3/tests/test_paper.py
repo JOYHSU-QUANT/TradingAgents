@@ -344,6 +344,18 @@ def test_a_visit_whose_clock_is_behind_the_run_is_refused_and_reads_no_chain(nod
     assert _visit(node, store, day=1, minutes=30, opening=None).replayed.already_decided == 1
 
 
+def test_a_clock_behind_the_boundary_an_undecided_run_was_started_on_is_refused(node, store):
+    node.errors[_fill_block(1)] = {"code": -32000, "message": "the node is having a moment"}
+    with pytest.raises(RpcRejected):
+        _visit(node, store, day=1)
+    del node.errors[_fill_block(1)]
+    rpc, executor = _executor(node)
+    requests = len(node.provider.requests)
+    with pytest.raises(EngineError, match=f"before the boundary at {_day(1)} the run"):
+        run_paper(rpc, store, _CONFIG, executor, run_id=_RUN, now=_day(0) + 600)
+    assert len(node.provider.requests) == requests and store.last_decided(_RUN) is None
+
+
 def test_a_suspect_latest_bar_is_skipped_without_waiting_for_its_fill_block(node, store):
     # Its close is some 6% from its TWAP.
     node.twap_tick[(_ETH_POOL, block_at(_day(0)) - 1)] = DEFAULT_TICK + 600
@@ -367,3 +379,16 @@ def test_the_summary_names_the_bars_whose_rebalance_the_executor_rejected(node, 
     summary = _visit(node, store, day=0)
     assert summary.replayed.executor_rejected == (_day(0),)
     assert summary.replayed.gas_rejected == () and summary.replayed.skipped == ()
+
+
+def test_a_quoted_backtest_whose_node_has_not_reached_a_fill_block_stops_there(node, store):
+    _visit(node, store, day=0)
+    # The head falls back to between the bar's close and its fill block.
+    node.head = _fill_block(0) - 1
+    _, executor = _executor(node)
+    with pytest.raises(BlockNotFound):
+        run_backtest(
+            store, _CONFIG, run_id="quoted", start=_day(0), opening=_OPENING, created_at=0,
+            executor=executor,
+        )  # fmt: skip
+    assert store.last_decided("quoted") is None

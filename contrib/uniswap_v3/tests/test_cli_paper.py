@@ -297,3 +297,21 @@ def test_paper_whose_clock_is_before_any_bar_exits_1_with_one_line(node, tmp_pat
     assert code == cli.EXIT_FAILED
     err = capsys.readouterr().err
     assert err.startswith("failed: bars on chain 1 start at ") and err.count("\n") == 1
+
+
+def test_paper_warns_once_of_a_latest_boundary_without_an_answer_after_catching_up(
+    node, tmp_path, capsys
+):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    node.reverts.add((_USDC_WETH, block_at(FIRST_DAY + 2 * DAY) - 1))
+    capsys.readouterr()
+
+    code, lines = _paper(node, db, now=_TEN_PAST + 2 * DAY)
+
+    assert code == cli.EXIT_OK
+    assert lines[2].endswith("1 decided, 0 already decided, 1 without a bar")
+    err = capsys.readouterr().err
+    assert err.count("warning:") == 1
+    assert "1 boundary(ies) without a bar, from 2024-01-03T00:00:00Z" in err
+    assert "A later visit asks the chain again" in err and "needs a new run" not in err

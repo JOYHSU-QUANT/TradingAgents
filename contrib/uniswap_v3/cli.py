@@ -491,8 +491,8 @@ def _replayed(
     warnings = []
     if summary.missing:
         later = (
-            "A later visit asks the chain again, and decides one only if the run has not "
-            "gone past it"
+            "A later visit asks the chain again for those after the run's latest decided "
+            "bar; one the run has gone past stays undecided"
             if paper
             else "One that is backfilled later is decided by a rerun only if the run has not "
             "gone past it; otherwise the range needs a new run"
@@ -555,7 +555,7 @@ def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[
             )
     except BackfillRangeError as exc:
         # The clock puts the latest boundary where no bar can be read.
-        print(f"failed: {exc}", file=sys.stderr)
+        print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_FAILED
     read = summary.read
     out(

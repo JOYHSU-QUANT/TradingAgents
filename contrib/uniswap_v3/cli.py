@@ -47,10 +47,13 @@ in a way that would leave a stored bar undecided behind it: from a later
 ``--from``, or over a boundary given its bar after the run had passed it.
 A ``paper`` visit exits 0 once the latest bar is decided, by this visit or
 an earlier one and whatever the decision, and also when the chain had no
-answer at the bar's boundary, which a warning on stderr says. It exits 3,
-having decided nothing, when the node's chain has not yet reached the
-boundary or the bar's fill block: whoever schedules the visit runs it
-again later.
+answer at the bar's boundary. It warns on stderr, still exiting 0, of a
+boundary without an answer, of a rebalance that was rejected, of a bar
+skipped as suspect, and of stored readings a check found to be off the
+final chain. It exits 3, having decided nothing of the latest bar, when
+the node's chain has not yet reached the boundary or the bar's fill block,
+and when a quote reverted without a reason of a pool's: whoever schedules
+the visit runs it again later. It exits 1 when its clock is behind the run.
 """
 
 from __future__ import annotations
@@ -450,9 +453,9 @@ def _quoting(config: UniswapConfig, command: str) -> tuple[Rpc, QuoteExecutor]:
 def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
     config = _config(args)
     opening = _opening(args, config)
-    quoted = None
+    executor = None
     if args.fills == "quoter":
-        _, quoted = _quoting(config, "backtest --fills quoter")
+        _, executor = _quoting(config, "backtest --fills quoter")
     # A backtest's rows can be made again, so its commits need not wait for the disk.
     with open_store(args.db, create=False, durable=False) as store:
         summary = run_backtest(
@@ -463,19 +466,21 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             end=args.end,
             opening=opening,
             created_at=int(now()),
-            executor=quoted,
+            executor=executor,
         )
     _replayed(args.run_id, summary, out)
     return EXIT_OK
 
 
 def _replayed(
-    run_id: str, summary: BacktestSummary, out: Callable[[str], None], *, pending: bool = True
+    run_id: str, summary: BacktestSummary, out: Callable[[str], None], *, paper: bool = False
 ) -> None:
     """Print what a replay did, and warn on stderr of what a reader should know of it.
 
-    ``pending`` is whether bars decided on readings that were not final are worth a
-    warning: a paper run always decides its latest bar on one.
+    A paper visit, ``paper``, is watched by its exit code and stderr alone, and so is
+    warned of a rebalance the executor rejected and of a bar skipped as suspect, which
+    in a backtest are counted and no more. It is not warned of bars decided on readings
+    that were not final: a visit made on time always decides its latest bar on one.
     """
     out(
         f"run {_one_ascii_line(run_id)}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
@@ -485,13 +490,19 @@ def _replayed(
     out(_outcome_counts(summary.outcomes))
     warnings = []
     if summary.missing:
+        later = (
+            "A later visit asks the chain again, and decides one only if the run has not "
+            "gone past it"
+            if paper
+            else "One that is backfilled later is decided by a rerun only if the run has not "
+            "gone past it; otherwise the range needs a new run"
+        )
         warnings.append(
             f"{len(summary.missing)} boundary(ies) without a bar, from "
-            f"{_iso(summary.missing[0])} to {_iso(summary.missing[-1])}; they were not decided. "
-            f"One that is backfilled later is decided by a rerun only if the run has not gone "
-            f"past it; otherwise the range needs a new run"
+            f"{_iso(summary.missing[0])} to {_iso(summary.missing[-1])}; they were not "
+            f"decided. {later}"
         )
-    if summary.on_pending and pending:
+    if summary.on_pending and not paper:
         warnings.append(
             f"{summary.on_pending} bar(s) were decided on readings that are not final yet; a "
             f"decision stands even if the chain later drops the block it was made on"
@@ -509,6 +520,17 @@ def _replayed(
             f"did not cover them, the first at {_iso(summary.gas_rejected[0])}; nothing tops a "
             f"run's gas balance up"
         )
+    if summary.executor_rejected and paper:
+        warnings.append(
+            f"{len(summary.executor_rejected)} rebalance(s) were rejected because a swap was "
+            f"refused, the first at {_iso(summary.executor_rejected[0])}; the decision keeps "
+            f"why, and a rejected rebalance is not tried again"
+        )
+    if summary.skipped and paper:
+        warnings.append(
+            f"{len(summary.skipped)} bar(s) were skipped as suspect, the first at "
+            f"{_iso(summary.skipped[0])}; nothing was traded on them"
+        )
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
@@ -517,28 +539,48 @@ def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[
     config = _config(args)
     opening = _opening(args, config)
     rpc, executor = _quoting(config, "paper")
+    from .backfill import BackfillRangeError
     from .paper import run_paper
 
-    with open_store(args.db) as store:
-        summary = run_paper(
-            rpc, store, config, executor, run_id=args.run_id, opening=opening, now=int(now())
-        )
+    try:
+        with open_store(args.db) as store:
+            summary = run_paper(
+                rpc,
+                store,
+                config,
+                executor,
+                run_id=args.run_id,
+                opening=opening,
+                now=int(now()),
+            )
+    except BackfillRangeError as exc:
+        # The clock puts the latest boundary where no bar can be read.
+        print(f"failed: {exc}", file=sys.stderr)
+        return EXIT_FAILED
     read = summary.read
     out(
         f"read {read.written} bar(s); {read.already_stored} already stored, "
         f"{len(read.unanswered)} without an answer"
     )
     _pending_checked(read, out)
-    if summary.replayed is not None:
-        _replayed(args.run_id, summary.replayed, out, pending=False)
-    decision = summary.decision
-    if decision is None:
+    if read.reorged:
         print(
-            f"warning: the chain had no answer at the boundary {_iso(summary.latest)}, so it "
-            f"has no bar and was not decided; a later visit asks again, and decides it only "
-            f"if the run has not gone past it",
+            f"warning: {read.reorged} stored reading(s) are no longer on the final chain; a "
+            f"bar decided on one keeps its decision, and a new run skips it as suspect",
             file=sys.stderr,
         )
+    if summary.replayed is not None:
+        _replayed(args.run_id, summary.replayed, out, paper=True)
+    decision = summary.decision
+    if decision is None:
+        # A replay has already warned of every boundary it found without a bar.
+        if summary.replayed is None:
+            print(
+                f"warning: the chain had no answer at the boundary {_iso(summary.latest)}, "
+                f"so it has no bar and was not decided; a later visit asks again, and "
+                f"decides it only if the run has not gone past it",
+                file=sys.stderr,
+            )
         return EXIT_OK
     made = summary.replayed is not None and summary.replayed.decided
     why = "" if decision.reason is None else f" ({_one_ascii_line(decision.reason)})"

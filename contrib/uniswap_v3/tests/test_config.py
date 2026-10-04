@@ -500,3 +500,5 @@ def test_the_quoted_fills_gas_overhead_is_read_and_may_be_zero():
 
 def test_a_bar_is_suspect_two_percent_from_its_twap_unless_the_config_says_otherwise():
     assert parse_config(_document()).bars.max_twap_deviation == Decimal("0.02")
+    looser = parse_config(_document(bars={"max_twap_deviation": "0.05"}))
+    assert looser.bars.max_twap_deviation == Decimal("0.05")

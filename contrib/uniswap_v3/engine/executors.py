@@ -7,6 +7,7 @@ one can be set beside a run filled by the other.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Final
 
 from ..domain.decimal_context import DECIMAL_CONTEXT, EXACT_CONTEXT, floor_to_places, plain
 from ..domain.execution import ExecutionSettings
@@ -42,7 +43,7 @@ class ModelExecutor:
     :func:`fill_block`.
     """
 
-    source = FillSource.MODEL
+    source: Final = FillSource.MODEL
 
     def __init__(self, quote: str, settings: ExecutionSettings) -> None:
         self._quote = quote
@@ -101,7 +102,7 @@ class QuoteExecutor:
     undecided.
     """
 
-    source = FillSource.QUOTER
+    source: Final = FillSource.QUOTER
 
     def __init__(self, quoter: Quoter, gas: GasOracle, settings: ExecutionSettings) -> None:
         self._quoter = quoter
@@ -118,7 +119,11 @@ class QuoteExecutor:
             )
         except NoQuote as exc:
             return Rejection(swap, f"the quote at block {block} has no answer ({exc})")
-        if amount_out == 0 or amount_out < swap.min_amount_out:
+        if amount_out == 0:
+            return Rejection(
+                swap, f"the quote at block {block} is of no {token_out.symbol} at all"
+            )
+        if amount_out < swap.min_amount_out:
             return Rejection(
                 swap,
                 f"the quote of {plain(amount_out)} {token_out.symbol} at block {block} is "

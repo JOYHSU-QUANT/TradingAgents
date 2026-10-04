@@ -850,15 +850,17 @@ Breaking changes within the 0.x line are called out explicitly.
   first, through the same step a backtest uses. A new run starts at the
   latest boundary, with `--balance` and `--gas-eth` as its opening balances.
   Run again before the next boundary, it reports that the bar was already
-  decided and writes nothing. Fills come from the new `QuoteExecutor`
+  decided and writes no decision. Fills come from the new `QuoteExecutor`
   (`engine/executors.py`): each swap is quoted on QuoterV2 at the bar's fill
   block, `execution.delay_blocks` after the first block of its boundary, the
   block a modelled fill is dated. The block is fixed by the bar and not by
   when the visit runs, so a late visit, or one that catches up on several
   bars, fills each as an earlier visit would have. A quote below the swap's
-  `min_amount_out`, a quote of nothing, a quote that reverts and a pool out
-  of liquidity reject the rebalance; any other failed read leaves the bar
-  undecided. Gas is the quoter's estimate plus the new
+  `min_amount_out`, a quote of nothing, a quote that reverts with a reason
+  of a pool's and a pool out of liquidity reject the rebalance; any other
+  failed read leaves the bar undecided, and so does a revert QuoterV2 has
+  no reason for (a swap that ran out of gas under the node's cap for a call
+  reverts so), which exits 3. Gas is the quoter's estimate plus the new
   `execution.quote.gas_overhead_units` (default 50000, once per swap: the
   estimate covers the pools' swaps alone), at the fill block's base fee.
   `backtest --fills quoter` fills a backtest the same way from an archive
@@ -870,7 +872,12 @@ Breaking changes within the 0.x line are called out explicitly.
   nothing, while the node's chain has not reached the latest boundary or
   its bar's fill block; it exits 0 once the bar is decided, whatever the
   decision, and also, with a warning, when the chain had no answer at the
-  boundary.
+  boundary. It warns on stderr as well of a rejected rebalance, of a bar
+  skipped as suspect and of stored readings found to be off the final
+  chain, and exits 1 when its clock is behind the run. A store written
+  before this is brought to schema version 3 the first time a command
+  opens it for writing; a read-only file at an older version is refused
+  until then.
 
   **Two defaults moved, so a run stored before this is not carried on.**
   `bars.max_twap_deviation` is now `"0.02"` (was `"0.05"`, which no bar

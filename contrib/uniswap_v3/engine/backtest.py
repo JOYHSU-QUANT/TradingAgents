@@ -75,7 +75,9 @@ class BacktestSummary:
     suspect bar is skipped, whatever its finality, and is not one of them. The
     rest are boundaries, oldest first: ``missing`` had no bar, ``changed``
     were decided earlier on a reading the store no longer holds as it was,
-    and ``gas_rejected`` had their rebalance refused for want of gas.
+    ``gas_rejected`` had their rebalance refused for want of gas,
+    ``executor_rejected`` had it refused by the executor, and
+    ``skipped`` were suspect and not traded on.
     """
 
     start: int
@@ -86,6 +88,8 @@ class BacktestSummary:
     missing: tuple[int, ...]
     changed: tuple[int, ...]
     gas_rejected: tuple[int, ...]
+    executor_rejected: tuple[int, ...]
+    skipped: tuple[int, ...]
     outcomes: Mapping[Outcome, int]
 
     @property
@@ -135,7 +139,7 @@ def run_backtest(
     return replay(
         store,
         config,
-        executor or ModelExecutor(config.quote.symbol, config.execution),
+        ModelExecutor(config.quote.symbol, config.execution) if executor is None else executor,
         run_id=run_id,
         mode=RunMode.BACKTEST,
         start=start,
@@ -213,6 +217,8 @@ def replay(
     decided = already_decided = on_pending = 0
     changed: list[int] = []
     gas_rejected: list[int] = []
+    executor_rejected: list[int] = []
+    skipped: list[int] = []
     outcomes: Counter[Outcome] = Counter()
     for time in stored:
         loaded = load_bar(store, config, time)
@@ -242,6 +248,10 @@ def replay(
         outcomes[decision.outcome] += 1
         if decision.reason_code is RejectionCode.GAS:
             gas_rejected.append(time)
+        elif decision.reason_code is RejectionCode.EXECUTOR:
+            executor_rejected.append(time)
+        elif decision.outcome is Outcome.SKIPPED_SUSPECT:
+            skipped.append(time)
     return BacktestSummary(
         start=start,
         end=last,
@@ -251,5 +261,7 @@ def replay(
         missing=tuple(time for time in range(start, last + 1, interval) if time not in in_range),
         changed=tuple(changed),
         gas_rejected=tuple(gas_rejected),
+        executor_rejected=tuple(executor_rejected),
+        skipped=tuple(skipped),
         outcomes=MappingProxyType(dict(outcomes)),
     )

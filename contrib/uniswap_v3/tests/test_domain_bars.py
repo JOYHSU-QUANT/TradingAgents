@@ -140,6 +140,14 @@ def test_a_close_further_from_the_twap_than_the_limit_is_flagged():
     assert pool_bar_flags(_USDC_WETH, outside, None, loose) == frozenset()
 
 
+def test_under_the_default_limit_a_close_three_percent_from_its_twap_is_flagged():
+    # 1.0001 ** 150 is 1.5% and 1.0001 ** 300 is 3.0%.
+    inside = _reading(twap_tick=_ETH_TICK - 150)
+    outside = _reading(twap_tick=_ETH_TICK - 300)
+    assert pool_bar_flags(_USDC_WETH, inside, None, BarSettings()) == frozenset()
+    assert pool_bar_flags(_USDC_WETH, outside, None, BarSettings()) == {BarFlag.TWAP_DEVIATION}
+
+
 def test_a_reading_off_the_final_chain_is_flagged():
     reorged = _reading(finality=Finality.REORGED)
     assert pool_bar_flags(_USDC_WETH, reorged, None, _SETTINGS) == {BarFlag.REORGED}

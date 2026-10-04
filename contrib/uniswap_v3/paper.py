@@ -5,7 +5,8 @@ One call is one visit, and whoever schedules it decides how often. A visit
 1. reads into the store every boundary from the one after the run's latest
    decided bar to the latest that has passed, as
    :func:`~.backfill.backfill` does, checking the store's pending readings
-   on the way. A run that has decided nothing starts at the latest.
+   on the way. A new run starts at the latest; a run that was started and
+   has decided nothing yet starts at the boundary it was started on.
 2. decides those bars, oldest first, through
    :func:`~.engine.backtest.replay`, with fills quoted at each bar's fill
    block.
@@ -19,15 +20,17 @@ A visit that comes before the latest boundary, or the fill block of its
 bar, is on the node's chain decides nothing and raises
 :class:`~.chain.errors.BlockNotFound`: a later visit finds it. A visit that
 finds the latest bar already decided checks the pending readings and writes
-no decision.
+no decision. A suspect bar is not traded on, and is decided without waiting
+for its fill block. A visit whose clock is behind the run, at a boundary
+before one the run has come to, is refused.
 
 A bar a visit catches up on is read and quoted at blocks as old as the
 visits that were missed, which takes a node that still has their state: an
 archive node, once a visit has been missed by more than the node keeps.
 
-The latest bar is decided on a reading that is not final yet: its close
-block is minutes old. A reading the chain later drops is marked by a later
-visit, and the decision made on it stands.
+A visit made on time decides the latest bar on a reading that is not final
+yet: its close block is minutes old. A reading the chain later drops is
+marked by a later visit, and the decision made on it stands.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from .chain.errors import BlockNotFound
 from .chain.rpc import Rpc
 from .config import UniswapConfig
 from .domain.ledger import Ledger
-from .domain.records import Decision
+from .domain.records import Decision, FillSource
 from .domain.types import RunMode
 from .engine.backtest import BacktestSummary, NoBarInRange, replay
 from .engine.executors import fill_block
@@ -90,7 +93,13 @@ def run_paper(
     interval = config.bars.interval_seconds
     latest = now - now % interval
     # Before anything is read: nothing the node says can make up for these.
-    if store.run(run_id) is None:
+    if executor.source is not FillSource.QUOTER:
+        raise EngineError(
+            f"a paper run fills from quotes, and the executor handed fills from the "
+            f"{executor.source.value}"
+        )
+    run = store.run(run_id)
+    if run is None:
         if opening is None:
             raise EngineError(
                 f"there is no run {run_id!r}, and a new run needs opening balances"
@@ -106,13 +115,30 @@ def run_paper(
         )
         open_engine(store, config, executor, run_id=run_id)
     decided = store.last_decided(run_id)
-    start = latest if decided is None else min(decided + interval, latest)
+    if decided is not None:
+        first = decided + interval
+    elif run is not None:
+        # Started by a visit that decided nothing: the bar that visit came for is still owed.
+        first = run.created_at - run.created_at % interval
+    else:
+        first = latest
+    if first - interval > latest:
+        raise EngineError(
+            f"the clock says {now}, which is before the boundary at {first - interval} the "
+            f"run {run_id!r} has already come to; the clock is behind"
+        )
+    start = min(first, latest)
     read = backfill(rpc, store, config, start=start, end=latest)
     if latest in read.not_reached:
         raise BlockNotFound(f"the node's chain has not reached the bar boundary at {latest} yet")
 
     loaded = load_bar(store, config, latest)
-    if loaded is not None and store.decision(run_id, latest) is None:
+    # A suspect bar is skipped, and asks for no quote.
+    if (
+        loaded is not None
+        and not loaded.bar.suspect
+        and store.decision(run_id, latest) is None
+    ):
         needed = fill_block(loaded.bar, config.execution)
         head = rpc.latest_header().number
         if head < needed:

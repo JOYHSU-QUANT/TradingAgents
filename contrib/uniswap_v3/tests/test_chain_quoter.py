@@ -11,6 +11,7 @@ from contrib.uniswap_v3.chain.errors import (
     InsufficientLiquidity,
     MalformedResponse,
     RpcConfigError,
+    RpcRejected,
 )
 from contrib.uniswap_v3.chain.pool_price import read_slot0
 from contrib.uniswap_v3.chain.quoter import ChainQuoter, Quote, quote_exact_input
@@ -231,4 +232,11 @@ def test_a_quote_that_reverts_or_runs_a_pool_dry_is_no_quote(provider):
 def test_a_garbled_quote_is_not_taken_for_no_quote():
     rpc, _ = rpc_over(_single(5 * 10**17, 0), attempts=1)
     with pytest.raises(MalformedResponse):
+        ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)
+
+
+def test_a_revert_quoterv2_has_no_reason_for_is_the_nodes_and_not_an_answer_about_the_swap():
+    provider = answering({"error": {"code": 3, "message": "execution reverted: Unexpected error"}})
+    rpc, _ = rpc_over(provider, attempts=1)
+    with pytest.raises(RpcRejected, match="gives no reason of a pool's"):
         ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)

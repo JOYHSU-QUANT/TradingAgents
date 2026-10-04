@@ -14,7 +14,7 @@ from contrib.uniswap_v3.domain.bars import BarSettings, Finality
 from contrib.uniswap_v3.domain.records import FillSource, Outcome, RejectionCode
 from contrib.uniswap_v3.domain.types import RunMode
 from contrib.uniswap_v3.engine.backtest import run_backtest
-from contrib.uniswap_v3.engine.executors import QuoteExecutor
+from contrib.uniswap_v3.engine.executors import ModelExecutor, QuoteExecutor
 from contrib.uniswap_v3.engine.step import EngineError
 from contrib.uniswap_v3.paper import run_paper
 from contrib.uniswap_v3.store.repository import Store, open_store
@@ -28,6 +28,7 @@ from contrib.uniswap_v3.tests.fakes.engine import (
 )
 from contrib.uniswap_v3.tests.fakes.node import (
     BTC_TICK,
+    DEFAULT_TICK,
     UP_HALF_TICK,
     FakeNode,
     block_at,
@@ -107,7 +108,9 @@ def test_a_visit_reads_the_latest_bar_and_decides_it_with_fills_quoted_at_its_fi
     assert [fill.gas_cost_eth for fill in fills] == [Decimal("0.00105"), Decimal("0.00175")]
 
 
-def test_a_second_visit_before_the_next_boundary_finds_the_bar_decided_and_writes_nothing(node, store):
+def test_a_second_visit_before_the_next_boundary_finds_the_bar_decided_and_writes_no_decision(
+    node, store
+):
     first = _visit(node, store, day=0)
     requests = len(node.provider.requests)
 
@@ -117,9 +120,10 @@ def test_a_second_visit_before_the_next_boundary_finds_the_bar_decided_and_write
     assert second.decision == first.decision
     assert (second.read.written, second.read.already_stored) == (0, 1)
     assert len(store.decisions(_RUN)) == 1 and len(store.fills(_RUN)) == 2
-    # No quote is asked again: the visit reads the head and checks the pending reading.
+    # No quote is asked again. The two readings, final by now, are checked and marked so.
     assert node.calls_at(_fill_block(0)) == 2
     assert len(node.provider.requests) > requests
+    assert (second.read.confirmed, second.read.reorged) == (2, 0)
 
 
 def test_a_late_visit_fills_at_the_bars_block_and_not_at_the_heads(node, store):
@@ -301,3 +305,65 @@ def test_missed_bars_are_decided_even_when_the_latest_boundary_has_no_answer(nod
     assert summary.read.unanswered == (_day(2),)
     assert (summary.replayed.decided, summary.replayed.missing) == (1, (_day(2),))
     assert store.last_decided(_RUN) == _day(1)
+
+
+def test_a_revert_without_a_reason_of_a_pools_leaves_the_bar_for_the_next_visit(node, store):
+    node.quote_reverts.add(_fill_block(0))
+    node.revert_message = "execution reverted: Unexpected error"
+    with pytest.raises(RpcRejected, match="gives no reason of a pool's"):
+        _visit(node, store, day=0)
+    assert store.last_decided(_RUN) is None
+
+    node.quote_reverts.clear()
+    assert _visit(node, store, day=0, minutes=40).decision.outcome is Outcome.FILLED
+
+
+def test_a_run_started_by_a_visit_that_decided_nothing_is_still_owed_that_bar(node, store):
+    node.errors[_fill_block(0)] = {"code": -32000, "message": "the node is having a moment"}
+    with pytest.raises(RpcRejected):
+        _visit(node, store, day=0)
+    assert store.run(_RUN) is not None and store.last_decided(_RUN) is None
+    del node.errors[_fill_block(0)]
+
+    # The retry comes after the next boundary has passed.
+    summary = _visit(node, store, day=1)
+
+    assert (summary.replayed.start, summary.replayed.decided) == (_day(0), 2)
+    assert [decision.time for decision in store.decisions(_RUN)] == [_day(0), _day(1)]
+
+
+def test_a_visit_whose_clock_is_behind_the_run_is_refused_and_reads_no_chain(node, store):
+    _visit(node, store, day=0)
+    _visit(node, store, day=1, opening=None)
+    rpc, executor = _executor(node)
+    requests = len(node.provider.requests)
+    with pytest.raises(EngineError, match="the clock is behind"):
+        run_paper(rpc, store, _CONFIG, executor, run_id=_RUN, now=_day(0) + 600)
+    assert len(node.provider.requests) == requests
+    # At the boundary the run has come to, a visit finds the bar decided.
+    assert _visit(node, store, day=1, minutes=30, opening=None).replayed.already_decided == 1
+
+
+def test_a_suspect_latest_bar_is_skipped_without_waiting_for_its_fill_block(node, store):
+    # Its close is some 6% from its TWAP.
+    node.twap_tick[(_ETH_POOL, block_at(_day(0)) - 1)] = DEFAULT_TICK + 600
+    summary = _visit(node, store, day=0, minutes=1)
+    assert node.head < _fill_block(0)
+    assert summary.decision.outcome is Outcome.SKIPPED_SUSPECT
+    assert summary.replayed.skipped == (_day(0),)
+    assert node.calls_at(_fill_block(0)) == 0
+
+
+def test_a_paper_run_is_not_started_with_an_executor_that_fills_from_the_model(node, store):
+    rpc, _ = _executor(node)
+    modelled = ModelExecutor("USDC", _CONFIG.execution)
+    with pytest.raises(EngineError, match="a paper run fills from quotes"):
+        run_paper(rpc, store, _CONFIG, modelled, run_id=_RUN, opening=_OPENING, now=_day(0) + 600)
+    assert node.provider.requests == [] and store.run(_RUN) is None
+
+
+def test_the_summary_names_the_bars_whose_rebalance_the_executor_rejected(node, store):
+    node.quote_bps = 9_900
+    summary = _visit(node, store, day=0)
+    assert summary.replayed.executor_rejected == (_day(0),)
+    assert summary.replayed.gas_rejected == () and summary.replayed.skipped == ()

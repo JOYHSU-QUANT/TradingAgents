@@ -14,12 +14,14 @@ from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
 from contrib.uniswap_v3.tests.fakes.node import (
     BTC_TICK,
     DAY,
+    DEFAULT_TICK,
     FIRST_DAY,
+    UP_HALF_TICK,
     FakeNode,
     block_at,
     sqrt_price_at,
 )
-from contrib.uniswap_v3.tests.fakes.rpc import rpc_over
+from contrib.uniswap_v3.tests.fakes.rpc import block_hash, rpc_over
 
 _EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
 _USDC_WETH = POOLS[ETHEREUM_MAINNET]["USDC/WETH-500"].address.lower()
@@ -76,7 +78,7 @@ def test_paper_makes_the_store_reads_the_latest_bar_and_decides_it(node, tmp_pat
         "filled 1, hold 0, no_trade 0, rejected 0, skipped_suspect 0",
         "the bar at 2024-01-01T00:00:00Z is decided: filled",
     ]
-    # Every paper bar is decided on a reading that is not final: that is not worth a warning.
+    # A visit made on time decides on a reading that is not final: that is not worth a warning.
     assert capsys.readouterr().err == ""
     assert (_count(db, "decisions"), _count(db, "fills")) == (1, 2)
 
@@ -144,13 +146,18 @@ def test_paper_warns_and_exits_0_when_the_chain_has_no_answer_at_the_boundary(
     assert lines == ["read 0 bar(s); 0 already stored, 1 without an answer"]
     err = capsys.readouterr().err
     assert "warning: the chain had no answer at the boundary 2024-01-01T00:00:00Z" in err
+    assert err.count("warning:") == 1
     assert _count(db, "runs") == 0
 
 
-def test_paper_prints_why_a_rebalance_was_rejected_and_exits_0(node, tmp_path):
+def test_paper_prints_why_a_rebalance_was_rejected_warns_and_exits_0(node, tmp_path, capsys):
     node.quote_bps = 9_900
     code, lines = _paper(node, tmp_path / "store.db", *_OPENING)
     assert code == cli.EXIT_OK
+    assert (
+        "warning: 1 rebalance(s) were rejected because a swap was refused, the first at "
+        "2024-01-01T00:00:00Z" in capsys.readouterr().err
+    )
     assert lines[-1].startswith(
         "the bar at 2024-01-01T00:00:00Z is decided: rejected (leg 0 (USDC to WETH) was refused: "
         "the quote of "
@@ -220,22 +227,73 @@ def test_a_quoted_backtest_whose_node_answers_with_an_error_exits_3_and_is_carri
     node, tmp_path, capsys
 ):
     db = tmp_path / "store.db"
+    # WETH is half as high again on the second day, so that day rebalances and asks for quotes.
+    close = block_at(FIRST_DAY + DAY) - 1
+    fill_block = close + 26
+    for block in (close, fill_block):
+        node.slot0[(_USDC_WETH, block)] = (sqrt_price_at(UP_HALF_TICK), UP_HALF_TICK)
+    node.twap_tick[(_USDC_WETH, close)] = UP_HALF_TICK
     for day in range(2):
         _paper(node, db, *_OPENING, now=_TEN_PAST + day * DAY)
     backtest = [
         "backtest", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", "bt",
         "--from", "2024-01-01", "--fills", "quoter", *_OPENING,
     ]  # fmt: skip
-    fill_block = block_at(FIRST_DAY) + 25
     node.errors[fill_block] = {"code": -32000, "message": "the node is having a moment"}
     capsys.readouterr()
 
     code, lines = _run(node, *backtest, now=_TEN_PAST + DAY)
     assert code == cli.EXIT_RETRY and lines == []
     assert capsys.readouterr().err.startswith("try again later: ")
-    assert _count(db, "decisions") == 2
+    # The paper run's two, and the first day of the backtest, which stays.
+    assert _count(db, "decisions") == 3
 
     del node.errors[fill_block]
     code, lines = _run(node, *backtest, now=_TEN_PAST + DAY)
     assert code == cli.EXIT_OK
-    assert lines[0].endswith("2 decided, 0 already decided, 0 without a bar")
+    assert lines[0].endswith("1 decided, 1 already decided, 0 without a bar")
+
+
+def test_paper_warns_of_a_bar_skipped_as_suspect(node, tmp_path, capsys):
+    node.twap_tick[(_USDC_WETH, block_at(FIRST_DAY) - 1)] = DEFAULT_TICK + 600
+    code, lines = _paper(node, tmp_path / "store.db", *_OPENING)
+    assert code == cli.EXIT_OK
+    assert lines[-1].startswith("the bar at 2024-01-01T00:00:00Z is decided: skipped_suspect (")
+    assert (
+        "warning: 1 bar(s) were skipped as suspect, the first at 2024-01-01T00:00:00Z"
+        in capsys.readouterr().err
+    )
+
+
+def test_paper_warns_of_stored_readings_found_off_the_final_chain(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    # The first day's close block is another block by the time it is final.
+    node.hashes[block_at(FIRST_DAY) - 1] = block_hash(77)
+    capsys.readouterr()
+
+    code, lines = _paper(node, db, now=_TEN_PAST + DAY)
+
+    assert code == cli.EXIT_OK
+    assert "checked pending readings against the final chain: 0 final, 2 reorged" in lines
+    assert "warning: 2 stored reading(s) are no longer on the final chain" in capsys.readouterr().err
+
+
+def test_paper_whose_clock_is_behind_the_run_exits_1(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING, now=_TEN_PAST + DAY)
+    capsys.readouterr()
+    code, lines = _paper(node, db, now=_TEN_PAST)
+    assert code == cli.EXIT_FAILED and lines == []
+    assert "the clock is behind" in capsys.readouterr().err
+
+
+def test_paper_whose_clock_is_before_any_bar_exits_1_with_one_line(node, tmp_path, capsys):
+    code = cli.main(
+        ["paper", "--config", str(_EXAMPLE), "--db", str(tmp_path / "s.db"), "--run-id", "p", *_OPENING],
+        out=lambda line: None,
+        now=lambda: 86_400.0 * 365,
+    )
+    assert code == cli.EXIT_FAILED
+    err = capsys.readouterr().err
+    assert err.startswith("failed: bars on chain 1 start at ") and err.count("\n") == 1

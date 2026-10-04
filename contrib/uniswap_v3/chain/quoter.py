@@ -24,7 +24,13 @@ from ..constants import QUOTER_V2
 from ..domain.prices import MAX_SQRT_RATIO, MIN_SQRT_RATIO
 from ..domain.types import Pool, Token, tokens_along
 from ..ports import NoQuote
-from .errors import CallReverted, InsufficientLiquidity, MalformedResponse, RpcConfigError
+from .errors import (
+    CallReverted,
+    InsufficientLiquidity,
+    MalformedResponse,
+    RpcConfigError,
+    RpcRejected,
+)
 from .rpc import Rpc
 from .units import from_raw, to_raw
 
@@ -159,6 +165,11 @@ def quote_exact_input(
     )
 
 
+# What QuoterV2 reverts with when a pool's swap failed and left no reason of
+# its own: from v3-periphery's QuoterV2.parseRevertReason.
+_NO_REASON: Final = "Unexpected error"
+
+
 class ChainQuoter:
     """A :class:`~..ports.Quoter` that asks QuoterV2 through a node."""
 
@@ -170,11 +181,21 @@ class ChainQuoter:
     ) -> tuple[Decimal, int]:
         """The output and the quoter's gas estimate of :func:`quote_exact_input` at ``block``.
 
-        A quote that reverts, and a pool that runs out of liquidity, are
-        :class:`~..ports.NoQuote`.
+        A quote that reverts with a reason of a pool's, and a pool that
+        runs out of liquidity, are :class:`~..ports.NoQuote`. A revert
+        QuoterV2 has no reason for is not an answer about the swap: a swap
+        that ran out of gas under the node's cap for a call reverts so. It
+        is :class:`~.errors.RpcRejected`, and a later run asks again.
         """
         try:
             quoted = quote_exact_input(self._rpc, token_in, route, amount_in, block=block)
-        except (CallReverted, InsufficientLiquidity) as exc:
+        except CallReverted as exc:
+            if _NO_REASON in str(exc):
+                raise RpcRejected(
+                    f"{exc}: QuoterV2 gives no reason of a pool's, as when the node's gas "
+                    f"cap for a call is too low for the swap"
+                ) from exc
+            raise NoQuote(str(exc)) from exc
+        except InsufficientLiquidity as exc:
             raise NoQuote(str(exc)) from exc
         return quoted.amount_out, quoted.gas_estimate

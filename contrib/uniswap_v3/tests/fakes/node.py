@@ -65,6 +65,7 @@ _SLOT0_TYPES = ["uint160", "int24", "uint16", "uint16", "uint16", "uint8", "bool
 _QUOTER = QUOTER_V2[ETHEREUM_MAINNET].lower()
 _QUOTE_SINGLE_TYPE = "(address,address,uint256,uint24,uint160)"
 _QUOTE_SINGLE = Web3.keccak(text=f"quoteExactInputSingle({_QUOTE_SINGLE_TYPE})")[:4]
+_QUOTE_PATH = Web3.keccak(text="quoteExactInput(bytes,uint256)")[:4]
 
 
 def sqrt_price_at(tick: int) -> int:
@@ -199,6 +200,8 @@ class FakeNode:
             ((token_in, token_out, amount, fee, _),) = decode([_QUOTE_SINGLE_TYPE], data[4:])
             hops = [(token_in, token_out, fee)]
         else:
+            if data[:4] != _QUOTE_PATH:
+                raise AssertionError(f"the fake quoter has no answer for {data[:4].hex()}")
             path, amount = decode(["bytes", "uint256"], data[4:])
             tokens = ["0x" + path[at : at + 20].hex() for at in range(0, len(path), 23)]
             fees = [int.from_bytes(path[at + 20 : at + 23], "big") for at in range(0, len(path) - 20, 23)]
@@ -244,6 +247,8 @@ class FakeNode:
             call, block = params[0], int(params[1], 16)
             if block in self.errors:
                 return {"error": self.errors[block]}
+            if block > self.head:
+                return {"error": {"code": -32000, "message": "header not found"}}
             key = (call["to"].lower(), block)
             if key[0] == _QUOTER:
                 if block in self.quote_reverts:

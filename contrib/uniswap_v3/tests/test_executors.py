@@ -143,9 +143,8 @@ def test_a_two_hop_swap_is_one_quote_and_adds_the_overhead_once():
     assert quoter.asked == [(USDC, (USDC_WETH, WBTC_WETH), D("4000"), 1_026)]
 
 
-@pytest.mark.parametrize("quoted", [D("1.48999"), D(0)])
-def test_a_quote_below_the_swaps_minimum_is_refused(quoted):
-    executor, _, gas = _quoting((quoted, 90_000))
+def test_a_quote_below_the_swaps_minimum_is_refused():
+    executor, _, gas = _quoting((D("1.48999"), 90_000))
     answer = executor.execute(_ONE_HOP, bar())
     assert isinstance(answer, Rejection) and answer.swap == _ONE_HOP
     assert "at block 1026 is below the swap's minimum of 1.49" in answer.reason
@@ -170,3 +169,10 @@ def test_a_quote_the_pools_have_no_answer_to_refuses_the_swap():
 def test_a_read_that_failed_is_raised_and_refuses_nothing(error):
     with pytest.raises(type(error)):
         _quoting(error)[0].execute(_ONE_HOP, bar())
+
+
+def test_a_quote_of_nothing_is_refused_even_by_a_swap_with_no_minimum():
+    swap = SwapIntent(USDC, (USDC_WETH,), D("3000"), D(0))
+    answer = _quoting((D(0), 90_000))[0].execute(swap, bar())
+    assert isinstance(answer, Rejection)
+    assert answer.reason == "the quote at block 1026 is of no WETH at all"

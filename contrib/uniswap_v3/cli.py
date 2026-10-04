@@ -17,7 +17,7 @@ and a later run may succeed. 2 is argparse's, for a command line it cannot
 read. A ``backfill`` that ran to its end exits 0 even when it left
 boundaries without an answer: its last lines count them, and a warning on
 stderr gives their count and the first and last of them. A ``backfill``
-whose node has not reached a boundary that passed more than five minutes
+whose node has not reached a boundary that passed five minutes or more
 ago exits 3: the node's head is behind.
 """
 

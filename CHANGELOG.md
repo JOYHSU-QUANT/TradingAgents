@@ -878,8 +878,8 @@ Breaking changes within the 0.x line are called out explicitly.
   one TWAP window: `backfill` refuses to add to a store whose readings were
   taken over another window than the config's, and so does building a bar
   from one, so a changed `bars.twap_window_seconds` needs a new store. A
-  `backfill` whose node has not reached a boundary that passed more than
-  five minutes ago exits 3, since the node's head is behind. The store's schema
+  `backfill` whose node has not reached a boundary that passed
+  five minutes or more ago exits 3, since the node's head is behind. The store's schema
   is versioned
   (`schema_migrations`), and a database some other program created is
   refused before anything is written to it.

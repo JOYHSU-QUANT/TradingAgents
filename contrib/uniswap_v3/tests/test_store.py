@@ -406,7 +406,8 @@ def test_a_store_is_kept_in_write_ahead_log_mode_and_syncs_every_commit_unless_t
         (8 | (5 << 8), "attempt to write a readonly database", True),
         (5, "database is locked", False),
         (5, "readonly", False),
-        (2056, "not the read-only kind", True),
+        # The code decides, whatever the words: 2056 is the read-only directory case.
+        (2056, "the words say nothing of it", True),
         # Before Python 3.11 there is no code, and SQLite's words are all there is.
         (None, "attempt to write a readonly database", True),
         (None, "database is locked", False),

@@ -61,7 +61,7 @@ _COLUMNS: Final = (
 )
 # SQLite's primary result code for a write to a database that is read-only.
 _SQLITE_READONLY: Final = 8
-_SELECT: Final =f"SELECT {', '.join(_COLUMNS)} FROM bars"
+_SELECT: Final = f"SELECT {', '.join(_COLUMNS)} FROM bars"
 _SERIES: Final = "chain_id = ? AND pool = ? AND interval_seconds = ?"
 
 
@@ -577,6 +577,19 @@ class Store:
             )
 
 
+def _is_read_only(error: sqlite3.OperationalError) -> bool:
+    """Whether SQLite refused a write because the database is read-only.
+
+    The low byte of the error's code is its kind, and the rest says which
+    read-only case it is. Before Python 3.11 an error carries no code, only
+    SQLite's words.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return "readonly" in str(error)
+    return bool(code & 0xFF == _SQLITE_READONLY)
+
+
 def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Store:
     """Open the database at ``path`` and bring its schema up to date.
 
@@ -612,12 +625,8 @@ def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Stor
             (journal_mode,) = connection.execute("PRAGMA journal_mode = WAL").fetchone()
         except sqlite3.OperationalError as exc:
             # A file that cannot be written keeps the mode it has, and can still
-            # be read. The low byte is the error's kind; the rest says which
-            # read-only case it is. Any other failure, a lock among them, stops.
-            # Before Python 3.11 the error carries no code, only SQLite's words.
-            code = getattr(exc, "sqlite_errorcode", None)
-            read_only = "readonly" in str(exc) if code is None else code & 0xFF == _SQLITE_READONLY
-            if not read_only:
+            # be read. Any other failure, a lock among them, stops.
+            if not _is_read_only(exc):
                 raise
             (journal_mode,) = connection.execute("PRAGMA journal_mode").fetchone()
         if not durable and journal_mode == "wal":

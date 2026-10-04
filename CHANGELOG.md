@@ -861,7 +861,8 @@ Breaking changes within the 0.x line are called out explicitly.
   also warns on stderr, still exiting 0, when bars were decided on readings
   that were not final yet, when a bar decided earlier now reads differently
   in the store, and when rebalances were rejected because the gas balance
-  ran out. `report --db <file> --run-id <id>` prints a run of any
+  ran out. A config whose strategy cannot be built starts no run, so its
+  run id stays free. `report --db <file> --run-id <id>` prints a run of any
   mode: its decisions by outcome, and its start, end, return and maximum
   drawdown beside two comparisons (the opening balances left untouched, and
   the opening value held in the quote token), then rebalances, swaps, the
@@ -883,7 +884,8 @@ Breaking changes within the 0.x line are called out explicitly.
   mode, so an open store has a `-wal` and a `-shm` file beside it; every
   command still syncs each commit to disk except `backtest`, whose rows can
   be made again. A store file that cannot be written is left in the mode
-  it has, so `status` and `report` still read a read-only copy.
+  it has, so `status` and `report` still read a read-only copy whose
+  schema is up to date.
 
 - **`contrib/uniswap_v3`: the engine's step, offline (`engine/`).** The
   package can now decide a bar: `Engine.step` takes the bars up to the one

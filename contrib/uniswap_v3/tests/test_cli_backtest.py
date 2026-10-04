@@ -142,10 +142,35 @@ def test_backtest_warns_of_readings_not_final_and_of_ones_that_changed_since(tmp
     assert lines[0].endswith("0 decided, 2 already decided, 0 without a bar")
     assert capsys.readouterr().err == (
         "warning: 1 bar(s) decided earlier now read differently in the store (another close "
-        "block, or suspect where they were not), from 2024-01-02T00:00:00Z to "
+        "block, or another verdict on whether they are suspect), from 2024-01-02T00:00:00Z to "
         "2024-01-02T00:00:00Z; their decisions stand, and a new run decides them on what the "
         "store holds now\n"
     )
+
+
+def test_a_skipped_bar_is_not_among_those_decided_on_readings_not_final(tmp_path, capsys):
+    db = tmp_path / "store.db"
+    with open_store(db) as store:
+        put_day(store, 0)
+        put_day(store, 1, twap_tick=BTC_TICK + 600, finality=Finality.PENDING)
+        put_day(store, 2)
+    code, lines = _backtest(db, *_OPENING)
+    assert code == cli.EXIT_OK
+    assert lines[1] == "filled 1, hold 1, no_trade 0, rejected 0, skipped_suspect 1"
+    assert capsys.readouterr().err == ""
+    code, lines = _report(db)
+    assert code == cli.EXIT_OK and not any("not final yet" in line for line in lines)
+
+
+def test_report_reads_decisions_that_kept_nothing_of_their_bars(db):
+    _backtest(db, *_OPENING)
+    # As the decisions of bars that came from no store are kept.
+    connection = sqlite3.connect(db)
+    connection.execute("UPDATE decisions SET close_block_hash = NULL, finality = NULL")
+    connection.commit()
+    connection.close()
+    code, lines = _report(db)
+    assert code == cli.EXIT_OK and len(lines) == 11
 
 
 def test_backtest_warns_when_the_gas_balance_runs_out(db, capsys):

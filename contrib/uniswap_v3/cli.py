@@ -56,7 +56,7 @@ from .constants import WRAPPED_NATIVE, pool_key
 from .domain.bars import Finality
 from .domain.decimal_context import parse_decimal, plain
 from .domain.ledger import Ledger
-from .domain.metrics import Curve, MetricsError, run_metrics
+from .domain.metrics import Curve, MetricsError, measurable, run_metrics
 from .domain.records import Outcome
 from .engine.backtest import BacktestRangeError, run_backtest
 from .engine.step import EngineError
@@ -212,13 +212,14 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="TOKEN=AMOUNT",
         help="an opening balance of a new run, in whole tokens: USDC=10000. Repeat it for "
-        "each token held; a token left out starts at zero",
+        "each token held; a token left out starts at zero. Given for a stored run, the "
+        "balances must be the ones it was started with",
     )
     backtest.add_argument(
         "--gas-eth",
         type=_amount,
         metavar="AMOUNT",
-        help="the ETH a new run sets aside for gas: 0.5",
+        help="the ETH a new run sets aside for gas: 0.5. It goes with --balance",
     )
     backtest.add_argument(
         "--fills",
@@ -400,7 +401,7 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             created_at=int(now()),
         )
     out(
-        f"run {args.run_id}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
+        f"run {_one_ascii_line(args.run_id)}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
         f"{_iso(summary.end)}: {summary.decided} decided, {summary.already_decided} already "
         f"decided, {len(summary.missing)} without a bar"
     )
@@ -421,7 +422,7 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
     if summary.changed:
         warnings.append(
             f"{len(summary.changed)} bar(s) decided earlier now read differently in the store "
-            f"(another close block, or suspect where they were not), from "
+            f"(another close block, or another verdict on whether they are suspect), from "
             f"{_iso(summary.changed[0])} to {_iso(summary.changed[-1])}; their decisions stand, "
             f"and a new run decides them on what the store holds now"
         )
@@ -460,14 +461,7 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         valuations = store.valuations(args.run_id)
         fills = store.fills(args.run_id)
     config = config_from_snapshot(run.config)
-    # A suspect bar's prices are not to be trusted, so its valuation is not measured.
-    suspect = {decision.time for decision in decisions if decision.suspect}
-    measured = [valuation for valuation in valuations if valuation.time not in suspect]
-    if decisions and not measured:
-        raise MetricsError(
-            f"every one of the run's {len(decisions)} decided bar(s) was suspect, so there "
-            f"is none to measure it on"
-        )
+    measured = measurable(decisions, valuations)
     quote = run.quote
     metrics = run_metrics(
         quote=quote,
@@ -477,7 +471,10 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         fills=fills,
         fee_rates={pool.address: pool.fee_rate for pool in config.pools},
     )
-    out(f"run {run.run_id}: {run.mode.value}, {run.strategy}, values in {quote}")
+    out(
+        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}, {_one_ascii_line(run.strategy)}, "
+        f"values in {quote}"
+    )
     out(
         f"{len(decisions)} bar(s) decided from {_iso(decisions[0].time)} to "
         f"{_iso(decisions[-1].time)}"
@@ -505,7 +502,8 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
             f"measured as they were decided"
         )
     days = Decimal(measured[-1].time - measured[0].time) / 86_400
-    left_out = f"; {len(suspect)} suspect bar(s) left out" if suspect else ""
+    suspect = len(valuations) - len(measured)
+    left_out = f"; {suspect} suspect bar(s) left out" if suspect else ""
     out(f"measured on {metrics.bars} bar(s) over {_fixed(days)} day(s){left_out}")
     out(f"{'':<18}{'start':>14}{'end':>14}{'return':>11}{'max drawdown':>14}")
     out(_curve_line("strategy", metrics.strategy))

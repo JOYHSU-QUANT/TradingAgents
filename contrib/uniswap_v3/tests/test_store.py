@@ -15,6 +15,7 @@ from contrib.uniswap_v3.domain.bars import BarFlag, BarSettings, Finality
 from contrib.uniswap_v3.domain.prices import MAX_SQRT_RATIO
 from contrib.uniswap_v3.domain.records import BarSeen, SkipCode, Suspicion
 from contrib.uniswap_v3.ports import BarSource
+from contrib.uniswap_v3.store import repository
 from contrib.uniswap_v3.store.bar_source import StoreBarSource, load_bar
 from contrib.uniswap_v3.store.repository import StoreError, open_store
 from contrib.uniswap_v3.store.schema import APPLICATION_ID, SCHEMA_VERSION, transaction
@@ -394,6 +395,49 @@ def test_a_store_is_kept_in_write_ahead_log_mode_and_syncs_every_commit_unless_t
     with open_store(path) as again:
         assert again._connection.execute("PRAGMA synchronous").fetchone() == (2,)
         assert again.bar(*_series(), FIRST_DAY) == _reading()
+
+
+@pytest.mark.parametrize(
+    ("code", "text", "read_only"),
+    [
+        (8, "attempt to write a readonly database", True),
+        # Extended codes: which read-only case it is sits above the low byte.
+        (8 | (1 << 8), "attempt to write a readonly database", True),
+        (8 | (5 << 8), "attempt to write a readonly database", True),
+        (5, "database is locked", False),
+        (5, "readonly", False),
+        (2056, "not the read-only kind", True),
+        # Before Python 3.11 there is no code, and SQLite's words are all there is.
+        (None, "attempt to write a readonly database", True),
+        (None, "database is locked", False),
+    ],
+)
+def test_a_refused_write_is_read_only_by_its_code_or_failing_that_its_words(
+    code, text, read_only
+):
+    error = sqlite3.OperationalError(text)
+    if code is not None:
+        error.sqlite_errorcode = code
+    assert repository._is_read_only(error) is read_only
+
+
+def test_a_store_another_writer_holds_is_not_opened_in_the_mode_it_has(tmp_path, monkeypatch):
+    path = tmp_path / "store.db"
+    open_store(path).close()
+    other = sqlite3.connect(path, isolation_level=None)
+    other.execute("PRAGMA journal_mode = DELETE")
+    other.execute("BEGIN IMMEDIATE")
+    connect = sqlite3.connect
+    # Without the five seconds a connection waits for a lock by default.
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0})
+    )
+    try:
+        with pytest.raises(StoreError, match="cannot be used .*locked"):
+            open_store(path)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
 
 
 def test_a_store_in_memory_stays_durable():

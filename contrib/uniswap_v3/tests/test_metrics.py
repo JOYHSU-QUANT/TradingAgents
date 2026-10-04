@@ -8,8 +8,8 @@ from decimal import Decimal
 import pytest
 
 from contrib.uniswap_v3.domain.ledger import Ledger
-from contrib.uniswap_v3.domain.metrics import Curve, MetricsError, run_metrics
-from contrib.uniswap_v3.domain.records import FillRecord, Valuation
+from contrib.uniswap_v3.domain.metrics import Curve, MetricsError, measurable, run_metrics
+from contrib.uniswap_v3.domain.records import Decision, FillRecord, Outcome, SkipCode, Valuation
 from contrib.uniswap_v3.tests.fakes.engine import USDC_WETH
 
 D = Decimal
@@ -182,6 +182,26 @@ def test_a_fill_priced_above_the_close_has_negative_slippage():
     assert metrics.costs.slippage == D("-2")
     assert metrics.costs.total == 0
     assert metrics.strategy.total_return == 0
+
+
+def test_the_valuations_of_suspect_bars_are_not_measured_on():
+    def decision(time: int, outcome: Outcome) -> Decision:
+        if outcome is Outcome.HOLD:
+            return Decision(time=time, outcome=outcome, close_block=time)
+        return Decision(
+            time=time,
+            outcome=outcome,
+            close_block=time,
+            reason="its close is off its TWAP",
+            reason_code=SkipCode.TWAP_DEVIATION,
+        )
+
+    held, skipped = Outcome.HOLD, Outcome.SKIPPED_SUSPECT
+    decisions = [decision(time, held if time != 2 else skipped) for time in (1, 2, 3)]
+    assert measurable(decisions, _VALUATIONS[:3]) == [_VALUATIONS[0], _VALUATIONS[2]]
+    assert measurable([], []) == []
+    with pytest.raises(MetricsError, match="every one of the run's 1 decided bar"):
+        measurable([decision(2, skipped)], [_VALUATIONS[1]])
 
 
 def test_gas_paid_in_the_quote_token_is_valued_as_it_is():

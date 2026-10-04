@@ -208,6 +208,14 @@ def test_why_the_bar_is_suspect_is_kept_with_the_skipped_decision(store):
     assert (decision.reason_code, decision.reason) == (why.code, why.reason)
 
 
+def test_a_suspect_bar_from_a_store_that_does_not_say_why_stops_the_run(store):
+    seen = BarSeen(close_block=1_000, close_block_hash="0x" + "ab" * 32, finality=Finality.FINAL)
+    engine = _engine(store, ScriptedStrategy({}))
+    with pytest.raises(EngineError, match="came from a store, and nothing says why"):
+        engine.step(_view(bar(0, suspect=True)), seen=seen)
+    assert store.decision(_RUN, FIRST_DAY) is None
+
+
 def test_a_reason_to_skip_a_bar_that_is_not_suspect_stops_the_run(store):
     why = Suspicion(SkipCode.REORGED, "USDC/WETH-500: its close block is gone")
     engine = _engine(store, ScriptedStrategy({}))

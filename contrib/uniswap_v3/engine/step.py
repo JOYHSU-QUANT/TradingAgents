@@ -29,7 +29,8 @@ configured tokens; a bar that does not price those tokens; an executor that
 fails, or answers for another swap than the one it was handed; a ledger
 that does not hold exactly the configured tokens; swaps that cannot be
 planned, or that sell more than the ledger holds; a ``seen`` that describes
-another block than the bar's; a ``suspicion`` of a bar that is not suspect;
+another block than the bar's; a ``suspicion`` of a bar that is not suspect,
+or a suspect bar with a ``seen`` and no ``suspicion``;
 a bar before the latest one the run has decided. The bar is left undecided,
 so it can be decided once the cause is fixed.
 """
@@ -120,6 +121,12 @@ class Engine:
             raise EngineError(
                 f"seen describes block {seen.close_block}, and the bar at {bar.time} closed "
                 f"on {bar.close_block}"
+            )
+        if bar.suspect and seen is not None and suspicion is None:
+            # A bar that came with what its store said of it comes with why it is suspect.
+            raise EngineError(
+                f"the bar at {bar.time} is suspect and came from a store, and nothing says "
+                f"why it is suspect"
             )
         if suspicion is not None and not bar.suspect:
             raise EngineError(

@@ -240,6 +240,12 @@ def test_a_read_that_raises_leaves_the_store_usable(store):
     assert store.last_decided("run-1") == FIRST_DAY
 
 
+def test_a_read_whose_store_was_closed_inside_it_raises_what_was_raised(store):
+    with pytest.raises(RuntimeError, match="stop"), store.reading():
+        store.close()
+        raise RuntimeError("stop")
+
+
 def test_a_bar_is_decided_once_and_a_second_record_writes_nothing(store):
     store.insert_run(_run())
     store.record("run-1", _held())

@@ -62,7 +62,8 @@ class BacktestSummary:
 
     ``decided`` bars were decided by this call and ``already_decided`` ones
     by an earlier one; ``outcomes`` counts both. ``on_pending`` of the bars
-    decided by this call were decided on a reading that was not final. The
+    decided by this call were decided on a reading that was not final; a
+    suspect bar is skipped, whatever its finality, and is not one of them. The
     rest are boundaries, oldest first: ``missing`` had no bar, ``changed``
     were decided earlier on a reading the store no longer holds as it was,
     and ``gas_rejected`` had their rebalance refused for want of gas.

@@ -22,8 +22,9 @@ prices, the prices the valuations carry.
 - Two curves stand beside the run's for comparison: the opening balances
   left untouched, and the opening value held in the quote token.
 
-The valuations handed in are the ones to measure on. A caller leaves out
-those of suspect bars, whose prices are not to be trusted.
+The valuations handed to :func:`run_metrics` are the ones to measure on:
+what :func:`measurable` keeps of a run's, which leaves out those of suspect
+bars, whose prices are not to be trusted.
 """
 
 from __future__ import annotations
@@ -34,9 +35,9 @@ from decimal import Decimal
 
 from .decimal_context import DECIMAL_CONTEXT
 from .ledger import Ledger
-from .records import FillRecord, Valuation
+from .records import Decision, FillRecord, Valuation
 
-__all__ = ["Costs", "Curve", "MetricsError", "RunMetrics", "run_metrics"]
+__all__ = ["Costs", "Curve", "MetricsError", "RunMetrics", "measurable", "run_metrics"]
 
 _ZERO = Decimal(0)
 _ONE = Decimal(1)
@@ -120,6 +121,23 @@ def _value(ledger: Ledger, quote: str, valuation: Valuation) -> Decimal:
         raise MetricsError(
             f"the opening balances cannot be valued at {valuation.time} ({exc})"
         ) from exc
+
+
+def measurable(decisions: Sequence[Decision], valuations: Sequence[Valuation]) -> list[Valuation]:
+    """The valuations to measure a run on: those of the bars that were not suspect when decided.
+
+    A suspect bar's prices are not to be trusted, so neither is a value
+    worked out at them. A run that decided bars and found every one of them
+    suspect has nothing to be measured on, and is refused.
+    """
+    suspect = {decision.time for decision in decisions if decision.suspect}
+    measured = [valuation for valuation in valuations if valuation.time not in suspect]
+    if decisions and not measured:
+        raise MetricsError(
+            f"every one of the run's {len(decisions)} decided bar(s) was suspect, so there "
+            f"is none to measure it on"
+        )
+    return measured
 
 
 def run_metrics(

@@ -842,6 +842,48 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: the engine's step, offline (`engine/`).** The
+  package can now decide a bar: `Engine.step` takes the bars up to the one
+  being decided and writes one decision for it, in any run mode. There is no
+  command for it yet (the backtest command is the next change), and still no
+  key and no signing. A bar the run has already decided is reported and left
+  alone, so a rerun does nothing twice. A suspect bar is recorded as skipped
+  without the strategy being asked. `Hold` records only a valuation. Target
+  weights are turned into swaps (`domain/routing.py`): each sells a token
+  the portfolio holds too much of straight into one it holds too little of,
+  along the configured pools, and a transfer worth less than
+  `execution.min_trade_value` is left out. The swaps are applied together or
+  not at all: when the executor refuses one, or the ledger does not cover
+  them and their gas, the decision is recorded as rejected with the reason,
+  the balances stay as they were, and the next bar is decided afresh. A
+  strategy that raises, or answers with anything but `Hold` or weights over
+  exactly the configured tokens, stops the run and leaves the bar undecided.
+  **`SwapIntent` changed shape**: it now carries the `Token` sold, the route
+  (the pools in the order crossed, so USDC to WBTC through WETH is one
+  swap), `amount_in` and `min_amount_out`; neither amount may have more
+  decimal places than its token, and a `Fill` below the minimum cannot be
+  built. **`Executor.execute` now takes the bar** in place of a block
+  number: the executor chooses the block and the fill says which it was.
+  `ModelExecutor` (`engine/executors.py`) fills from the bar alone: the
+  close price after the pools' fees, less `execution.model.slippage`, with
+  gas at `execution.model.gas_units_per_hop` per pool at the bar's base fee,
+  dated `execution.delay_blocks` after the boundary's first block. The
+  ledger (`domain/ledger.py`) keeps the traded balances and a separate ETH
+  balance that gas, and nothing else, is paid from; it is exact beyond the
+  28 digits prices are worked at. The store gains `runs`, `decisions`,
+  `fills` and `valuations` (schema version 2; an existing store is migrated
+  when it is opened). A decision is keyed by run and bar, and keeps the
+  bar's close block, that block's hash and finality, and whether the bar was
+  suspect, as the store said when it was decided. Applying fills together or
+  not at all is sound only for fills that change nothing outside the ledger;
+  a signing executor is not to be wired to this step as it stands. A run keeps a snapshot of
+  the config it was started under and is not continued under a changed one.
+  The config's new optional `execution` section holds the five numbers
+  above; a `model.slippage` above `max_slippage` is refused, since the model
+  would then refuse every swap. **A config's pools must now form a tree that reaches every
+  token from the quote token**: one path of pools then joins any two tokens.
+  The shipped example already does.
+
 - **`contrib/uniswap_v3`: the bar store and `backfill`.** The package has its
   own SQLite store (`store/`), shared with no other package, and a command
   line: `python -m contrib.uniswap_v3 backfill` fills the store from an

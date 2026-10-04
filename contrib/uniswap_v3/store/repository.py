@@ -5,17 +5,35 @@ and its reading is never changed afterwards; the one column that is updated
 is ``finality``. Inserting a row whose key is already there raises, so a
 caller decides what is missing before it writes, and nothing is silently
 replaced.
+
+A run's rows are only ever added. :meth:`Store.record` writes one bar's
+decision, its fills and its valuation in one transaction, and a second
+decision on the same bar of the same run raises. The store is the engine's
+:class:`~..ports.Journal`.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Final
 
 from ..domain.bars import Finality, PoolBar
+from ..domain.ledger import Ledger
+from ..domain.records import (
+    BarSeen,
+    Decision,
+    FillRecord,
+    Outcome,
+    RunRecord,
+    StepRecord,
+    Valuation,
+)
+from ..domain.types import RunMode, TargetWeights
 from .schema import SchemaError, migrate, transaction
 
 __all__ = ["Store", "StoreError", "open_store"]
@@ -82,6 +100,28 @@ def _bar(row: Sequence[Any]) -> PoolBar:
         raise StoreError(
             f"the bars row of pool {row[1]!r} at {row[3]!r} is not a valid reading ({exc})"
         ) from exc
+
+
+def _amounts_text(amounts: Mapping[str, Decimal]) -> str:
+    """A symbol -> amount mapping as JSON, each amount as decimal text."""
+    return json.dumps({symbol: str(amount) for symbol, amount in amounts.items()}, sort_keys=True)
+
+
+def _amounts(text: str) -> dict[str, Decimal]:
+    return {symbol: Decimal(amount) for symbol, amount in json.loads(text).items()}
+
+
+def _ledger(balances: str, gas_eth: str) -> Ledger:
+    return Ledger(balances=_amounts(balances), gas_eth=Decimal(gas_eth))
+
+
+@contextmanager
+def _stored(what: str) -> Iterator[None]:
+    """Turn a stored row that no longer reads as ``what`` into a :class:`StoreError`."""
+    try:
+        yield
+    except (TypeError, ValueError, AttributeError, InvalidOperation) as exc:
+        raise StoreError(f"the stored {what} is not valid ({exc})") from exc
 
 
 class Store:
@@ -214,6 +254,219 @@ class Store:
                         f"reading in the store"
                     )
 
+    def insert_run(self, run: RunRecord) -> None:
+        """Start ``run``; a run with its id that is already stored raises :class:`StoreError`."""
+        with _sqlite_errors("starting a run"):
+            try:
+                with transaction(self._connection):
+                    self._connection.execute(
+                        "INSERT INTO runs (run_id, mode, chain_id, quote, strategy, config, "
+                        "balances, gas_eth, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            run.run_id,
+                            run.mode.value,
+                            run.chain_id,
+                            run.quote,
+                            run.strategy,
+                            run.config,
+                            _amounts_text(run.ledger.balances),
+                            str(run.ledger.gas_eth),
+                            run.created_at,
+                        ),
+                    )
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE constraint failed" not in str(exc):
+                    raise
+                raise StoreError(f"the run {run.run_id!r} is already stored") from exc
+
+    def run(self, run_id: str) -> RunRecord | None:
+        """The run ``run_id``, when there is one."""
+        with _sqlite_errors("reading a run"):
+            row = self._connection.execute(
+                "SELECT mode, chain_id, quote, strategy, config, balances, gas_eth, created_at "
+                "FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        mode, chain_id, quote, strategy, config, balances, gas_eth, created_at = row
+        with _stored(f"run {run_id!r}"):
+            return RunRecord(
+                run_id=run_id,
+                mode=RunMode(mode),
+                chain_id=chain_id,
+                quote=quote,
+                strategy=strategy,
+                config=config,
+                ledger=_ledger(balances, gas_eth),
+                created_at=created_at,
+            )
+
+    def decision(self, run_id: str, time: int) -> Decision | None:
+        """The run's decision on the bar at ``time``, when it has made one."""
+        with _sqlite_errors("reading a decision"):
+            row = self._connection.execute(
+                "SELECT outcome, target, reason, close_block, close_block_hash, finality "
+                "FROM decisions WHERE run_id = ? AND time = ?",
+                (run_id, time),
+            ).fetchone()
+        if row is None:
+            return None
+        outcome, target, reason, close_block, close_block_hash, finality = row
+        with _stored(f"decision of run {run_id!r} at {time}"):
+            return Decision(
+                time=time,
+                outcome=Outcome(outcome),
+                close_block=close_block,
+                target=None if target is None else TargetWeights(_amounts(target)),
+                reason=reason,
+                seen=(
+                    None
+                    if close_block_hash is None
+                    else BarSeen(close_block_hash=close_block_hash, finality=Finality(finality))
+                ),
+            )
+
+    def last_decided(self, run_id: str) -> int | None:
+        """The boundary of the latest bar the run has decided, when it has decided any."""
+        with _sqlite_errors("reading a run's decisions"):
+            (time,) = self._connection.execute(
+                "SELECT MAX(time) FROM decisions WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return time
+
+    def valuation(self, run_id: str, time: int) -> Valuation | None:
+        """The run's valuation after the bar at ``time``, when it has decided that bar."""
+        with _sqlite_errors("reading a valuation"):
+            row = self._connection.execute(
+                "SELECT balances, gas_eth, prices, total_value FROM valuations "
+                "WHERE run_id = ? AND time = ?",
+                (run_id, time),
+            ).fetchone()
+        if row is None:
+            return None
+        balances, gas_eth, prices, total_value = row
+        with _stored(f"valuation of run {run_id!r} at {time}"):
+            return Valuation(
+                time=time,
+                ledger=_ledger(balances, gas_eth),
+                prices=_amounts(prices),
+                total_value=Decimal(total_value),
+            )
+
+    def ledger(self, run_id: str) -> Ledger:
+        """The run's balances after its latest decision, or its opening ones before any.
+
+        A run that is not stored raises :class:`StoreError`.
+        """
+        run = self.run(run_id)
+        if run is None:
+            raise StoreError(f"there is no run {run_id!r} in the store")
+        latest = self.last_decided(run_id)
+        if latest is None:
+            return run.ledger
+        valuation = self.valuation(run_id, latest)
+        if valuation is None:
+            raise StoreError(f"the decision of run {run_id!r} at {latest} has no valuation")
+        return valuation.ledger
+
+    def fills(self, run_id: str, time: int | None = None) -> list[FillRecord]:
+        """The run's fills, oldest first: all of them, or those of the bar at ``time``."""
+        at = "" if time is None else " AND time = ?"
+        with _sqlite_errors("reading fills"):
+            rows = self._connection.execute(
+                "SELECT time, leg, token_in, token_out, route, amount_in, min_amount_out, "
+                f"amount_out, gas_cost_eth, block FROM fills WHERE run_id = ?{at} "
+                "ORDER BY time, leg",
+                (run_id,) if time is None else (run_id, time),
+            ).fetchall()
+        with _stored(f"fills of run {run_id!r}"):
+            return [
+                FillRecord(
+                    time=row[0],
+                    leg=row[1],
+                    token_in=row[2],
+                    token_out=row[3],
+                    route=tuple(json.loads(row[4])),
+                    amount_in=Decimal(row[5]),
+                    min_amount_out=Decimal(row[6]),
+                    amount_out=Decimal(row[7]),
+                    gas_cost_eth=Decimal(row[8]),
+                    block=row[9],
+                )
+                for row in rows
+            ]
+
+    def record(self, run_id: str, step: StepRecord) -> None:
+        """Write one step's decision, fills and valuation in one transaction: all, or none.
+
+        A bar the run has already decided, or a run that is not stored,
+        raises :class:`StoreError`.
+        """
+        decision, valuation = step.decision, step.valuation
+        seen = decision.seen
+        with _sqlite_errors("recording a decision"):
+            try:
+                with transaction(self._connection):
+                    self._connection.execute(
+                        "INSERT INTO decisions (run_id, time, outcome, target, reason, "
+                        "close_block, close_block_hash, finality) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            decision.time,
+                            decision.outcome.value,
+                            None
+                            if decision.target is None
+                            else _amounts_text(decision.target.weights),
+                            decision.reason,
+                            decision.close_block,
+                            None if seen is None else seen.close_block_hash,
+                            None if seen is None else seen.finality.value,
+                        ),
+                    )
+                    self._connection.executemany(
+                        "INSERT INTO fills (run_id, time, leg, token_in, token_out, route, "
+                        "amount_in, min_amount_out, amount_out, gas_cost_eth, block) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            (
+                                run_id,
+                                decision.time,
+                                leg,
+                                fill.swap.token_in.symbol,
+                                fill.swap.token_out.symbol,
+                                json.dumps([pool.address for pool in fill.swap.route]),
+                                str(fill.swap.amount_in),
+                                str(fill.swap.min_amount_out),
+                                str(fill.amount_out),
+                                str(fill.gas_cost_eth),
+                                fill.block,
+                            )
+                            for leg, fill in enumerate(step.fills)
+                        ],
+                    )
+                    self._connection.execute(
+                        "INSERT INTO valuations (run_id, time, balances, gas_eth, prices, "
+                        "total_value) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            decision.time,
+                            _amounts_text(valuation.ledger.balances),
+                            str(valuation.ledger.gas_eth),
+                            _amounts_text(valuation.prices),
+                            str(valuation.total_value),
+                        ),
+                    )
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE constraint failed" in str(exc):
+                    raise StoreError(
+                        f"the run {run_id!r} has already decided the bar at {decision.time}"
+                    ) from exc
+                if "FOREIGN KEY constraint failed" in str(exc):
+                    raise StoreError(f"there is no run {run_id!r} in the store") from exc
+                raise
+
 
 def open_store(path: Path, *, create: bool = True) -> Store:
     """Open the database at ``path`` and bring its schema up to date.
@@ -229,6 +482,9 @@ def open_store(path: Path, *, create: bool = True) -> Store:
     except sqlite3.Error as exc:
         raise StoreError(f"the store at {str(path)!r} cannot be opened ({exc})") from exc
     try:
+        # Off unless asked for, per connection: a fill or a valuation without
+        # its decision, or a decision without its run, is refused.
+        connection.execute("PRAGMA foreign_keys = ON")
         migrate(connection)
     except (sqlite3.Error, SchemaError) as exc:
         connection.close()

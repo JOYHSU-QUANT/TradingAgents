@@ -4,7 +4,8 @@ The engine step is the same in every :class:`~.domain.types.RunMode`; what
 differs is the adapter behind each of these ``Protocol`` classes. A backtest
 replays stored bars under a scripted clock and fills from a model, a paper
 run reads the chain and fills from quotes, and a fork or live run signs.
-:class:`Strategy` is the only way a strategy enters the package.
+:class:`Strategy` is the only way a strategy enters the package, and
+:class:`Journal` is where every mode writes what it decided.
 
 Structural typing: an implementation does not subclass these, it only needs
 matching method signatures. Times are epoch seconds (UTC), as block
@@ -15,6 +16,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from .domain.ledger import Ledger
+from .domain.records import Decision, RunRecord, StepRecord
 from .domain.types import (
     Bar,
     Fill,
@@ -32,6 +35,7 @@ __all__ = [
     "Clock",
     "Executor",
     "GasOracle",
+    "Journal",
     "Strategy",
 ]
 
@@ -44,8 +48,15 @@ class Strategy(Protocol):
         """The target weights, or :class:`~.domain.types.Hold` to leave the portfolio alone.
 
         ``view`` ends at the bar being decided and ``portfolio`` is valued at
-        that bar's prices. A strategy that cannot decide raises; it does not
-        guess.
+        that bar's prices. The answer must depend on those two arguments and
+        nothing else: no clock, no random number, no state kept from an
+        earlier call, nothing read from outside. The same bars and the same
+        portfolio then give the same answer in a backtest, a paper run and a
+        rerun, which the engine relies on and does not check.
+
+        A strategy that cannot decide raises; it does not guess. The raise
+        stops the run at that bar, which is left undecided and can be
+        decided once the cause is fixed.
         """
         ...
 
@@ -63,8 +74,48 @@ class BarSource(Protocol):
 class Executor(Protocol):
     """Turns one swap into a fill, or says why not."""
 
-    def execute(self, swap: SwapIntent, at_block: int) -> Fill | Rejection:
-        """Fill ``swap`` at ``at_block``, or refuse it with a reason."""
+    def execute(self, swap: SwapIntent, bar: Bar) -> Fill | Rejection:
+        """Fill ``swap``, decided on ``bar``, or refuse it with a reason.
+
+        The executor chooses the block: a modelled or quoted fill is taken a
+        fixed number of blocks after the bar's boundary, and a signed one
+        lands where the chain puts it. The fill says which block it was. A
+        swap that would deliver less than its ``min_amount_out`` is refused.
+
+        The engine applies a rebalance's fills only when every swap of it
+        filled, and drops the fills it already has when a later swap is
+        refused. That is sound only while a fill changes nothing outside
+        the ledger.
+        """
+        ...
+
+
+@runtime_checkable
+class Journal(Protocol):
+    """Where a run's decisions are kept, and its balances with them."""
+
+    def insert_run(self, run: RunRecord) -> None:
+        """Start ``run``; a run with its id that is already there raises."""
+        ...
+
+    def run(self, run_id: str) -> RunRecord | None:
+        """The run ``run_id``, when there is one."""
+        ...
+
+    def decision(self, run_id: str, time: int) -> Decision | None:
+        """The run's decision on the bar at ``time``, when it has made one."""
+        ...
+
+    def last_decided(self, run_id: str) -> int | None:
+        """The boundary of the latest bar the run has decided, when it has decided any."""
+        ...
+
+    def ledger(self, run_id: str) -> Ledger:
+        """The run's balances after its latest decision, or its opening ones before any."""
+        ...
+
+    def record(self, run_id: str, step: StepRecord) -> None:
+        """Write one step's decision, fills and valuation: all of them, or none."""
         ...
 
 

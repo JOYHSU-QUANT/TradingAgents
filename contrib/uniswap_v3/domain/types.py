@@ -4,14 +4,15 @@ All of them are frozen and check themselves on construction, so an invalid
 value is refused where it is built rather than where it is used. Token
 amounts are whole-token ``Decimal`` values (``1.5`` WETH, not wei); an
 adapter that speaks to a chain converts at its own edge with
-:attr:`Token.decimals`. Prices and values are in the portfolio's quote token.
+:attr:`Token.decimals`, and an amount that is to be swapped has no more
+decimal places than that. Prices and values are in the portfolio's quote token.
 A mapping handed to a constructor is copied and exposed read-only.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -19,9 +20,10 @@ from fractions import Fraction
 from types import MappingProxyType
 from typing import Final
 
-from .decimal_context import DECIMAL_CONTEXT
+from .decimal_context import DECIMAL_CONTEXT, MAX_MAGNITUDE
 
 __all__ = [
+    "ETH_DECIMALS",
     "Bar",
     "Fill",
     "Hold",
@@ -33,6 +35,7 @@ __all__ = [
     "SwapIntent",
     "TargetWeights",
     "Token",
+    "tokens_along",
 ]
 
 _ADDRESS: Final = re.compile(r"0x[0-9a-fA-F]{40}")
@@ -40,10 +43,6 @@ _ADDRESS: Final = re.compile(r"0x[0-9a-fA-F]{40}")
 _MAX_DECIMALS: Final = 255
 # A v3 fee is in hundredths of a basis point; 1_000_000 would be 100%.
 _FEE_DENOMINATOR: Final = 1_000_000
-# How many digits from the decimal point an amount's leading digit may sit. A
-# uint256 has 78 digits, so no token amount, price or weight is outside it,
-# and arithmetic on two checked values stays inside the context's exponents.
-_MAX_MAGNITUDE: Final = 77
 
 
 class RunMode(str, Enum):
@@ -81,13 +80,21 @@ def _require_amount(value: object, what: str, *, positive: bool = False) -> None
         or not value.is_finite()
         or value.is_signed()
         or (positive and value == 0)
-        or abs(value.adjusted()) > _MAX_MAGNITUDE
+        or abs(value.adjusted()) > MAX_MAGNITUDE
     ):
         bound = "positive" if positive else "non-negative"
         raise ValueError(
-            f"{what} must be a finite, {bound} Decimal from 1e-{_MAX_MAGNITUDE} to below "
-            f"1e{_MAX_MAGNITUDE + 1}, got {value!r}"
+            f"{what} must be a finite, {bound} Decimal from 1e-{MAX_MAGNITUDE} to below "
+            f"1e{MAX_MAGNITUDE + 1}, got {value!r}"
         )
+
+
+def _require_places(amount: Decimal, places: int, what: str) -> None:
+    """Refuse an ``amount`` with more than ``places`` decimal places: no chain could carry it."""
+    # As a ratio of integers, so no decimal context takes part.
+    numerator, denominator = amount.as_integer_ratio()
+    if (numerator * 10**places) % denominator:
+        raise ValueError(f"{what} has more than {places} decimal places: {amount}")
 
 
 def _frozen_amounts(
@@ -300,25 +307,80 @@ class Portfolio:
         return total
 
 
+def tokens_along(token_in: Token, route: Sequence[Pool]) -> tuple[Token, ...]:
+    """``token_in`` and then the token each pool of ``route`` hands on."""
+    if not route:
+        raise ValueError("a route holds at least one pool")
+    tokens = [token_in]
+    for pool in route:
+        if not isinstance(pool, Pool):
+            raise ValueError(f"a route holds Pool values, got {pool!r}")
+        if tokens[-1] == pool.token0:
+            tokens.append(pool.token1)
+        elif tokens[-1] == pool.token1:
+            tokens.append(pool.token0)
+        else:
+            raise ValueError(
+                f"the route reaches {pool.token0.symbol}/{pool.token1.symbol} holding "
+                f"{tokens[-1].symbol}, which that pool does not trade"
+            )
+    return tuple(tokens)
+
+
 @dataclass(frozen=True)
 class SwapIntent:
-    """One exact-input swap the engine wants: sell ``amount_in`` of one token for another."""
+    """One exact-input swap the engine wants: sell ``amount_in`` of ``token_in`` along ``route``.
 
-    token_in: str
-    token_out: str
+    ``route`` is the pools in the order they are crossed. A swap through an
+    intermediate token is one intent, as it is one quote and, on a chain,
+    one transaction. ``min_amount_out`` is the least of :attr:`token_out`
+    the swap may deliver: an executor that would deliver less refuses the
+    swap. Neither amount has more decimal places than its token.
+    """
+
+    token_in: Token
+    route: tuple[Pool, ...]
     amount_in: Decimal
+    min_amount_out: Decimal
 
     def __post_init__(self) -> None:
-        _require_symbol(self.token_in, "token_in")
-        _require_symbol(self.token_out, "token_out")
-        if self.token_in == self.token_out:
-            raise ValueError(f"a swap needs two different tokens, got {self.token_in!r} twice")
+        if not isinstance(self.token_in, Token):
+            raise ValueError(f"token_in must be a Token, got {self.token_in!r}")
+        if not isinstance(self.route, tuple):
+            raise ValueError(f"route must be a tuple of pools, got {self.route!r}")
+        tokens = tokens_along(self.token_in, self.route)
+        for token in tokens:
+            if tokens.count(token) > 1:
+                raise ValueError(f"the route passes through {token.symbol} more than once")
         _require_amount(self.amount_in, "amount_in", positive=True)
+        _require_places(self.amount_in, self.token_in.decimals, f"amount_in of {self.token_in.symbol}")
+        _require_amount(self.min_amount_out, "min_amount_out")
+        _require_places(
+            self.min_amount_out, tokens[-1].decimals, f"min_amount_out of {tokens[-1].symbol}"
+        )
+
+    @property
+    def tokens(self) -> tuple[Token, ...]:
+        """Every token the swap passes through, from ``token_in`` to :attr:`token_out`."""
+        return tokens_along(self.token_in, self.route)
+
+    @property
+    def token_out(self) -> Token:
+        """The token the route ends in."""
+        return self.tokens[-1]
+
+
+# Gas is paid in ETH, which has 18 decimal places.
+ETH_DECIMALS: Final = 18
 
 
 @dataclass(frozen=True)
 class Fill:
-    """A swap that went through: what came out, what the gas cost, and in which block."""
+    """A swap that went through: what came out, what the gas cost, and in which block.
+
+    A fill delivers at least its swap's ``min_amount_out``; one that would
+    not is a :class:`Rejection`.
+    """
 
     swap: SwapIntent
     amount_out: Decimal
@@ -328,8 +390,16 @@ class Fill:
     def __post_init__(self) -> None:
         if not isinstance(self.swap, SwapIntent):
             raise ValueError(f"a fill names the SwapIntent it filled, got {self.swap!r}")
+        token_out = self.swap.token_out
         _require_amount(self.amount_out, "amount_out", positive=True)
+        _require_places(self.amount_out, token_out.decimals, f"amount_out of {token_out.symbol}")
+        if self.amount_out < self.swap.min_amount_out:
+            raise ValueError(
+                f"amount_out {self.amount_out} is below the swap's min_amount_out "
+                f"{self.swap.min_amount_out}"
+            )
         _require_amount(self.gas_cost_eth, "gas_cost_eth")
+        _require_places(self.gas_cost_eth, ETH_DECIMALS, "gas_cost_eth")
         _require_int(self.block, "block")
 
 

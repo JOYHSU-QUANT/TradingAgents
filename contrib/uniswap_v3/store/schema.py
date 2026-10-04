@@ -9,7 +9,15 @@ tables and does not carry the mark, or that carries another mark, is some
 other program's, and is refused before anything is written to it.
 
 ``sqrt_price_x96`` and ``base_fee_wei`` are decimal text: a uint160 does not
-fit SQLite's 64-bit integer, and a base fee is a uint256.
+fit SQLite's 64-bit integer, and a base fee is a uint256. Token amounts,
+prices and values are decimal text as well, so that none passes through a
+float, and a mapping of them (balances, prices, target weights) or a route
+is JSON text.
+
+``bars`` is market data and belongs to no run. ``runs``, ``decisions``,
+``fills`` and ``valuations`` are what a run writes, in any mode: a decision
+is keyed by its run and its bar's boundary, so a bar is decided once, and a
+decision's fills and its valuation hang off that key.
 """
 
 from __future__ import annotations
@@ -48,6 +56,65 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         )
         """,
         "CREATE INDEX bars_by_finality ON bars (finality, chain_id)",
+    ),
+    (
+        """
+        CREATE TABLE runs (
+            run_id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL CHECK (mode IN ('backtest', 'paper', 'fork', 'live')),
+            chain_id INTEGER NOT NULL,
+            quote TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            config TEXT NOT NULL,
+            balances TEXT NOT NULL,
+            gas_eth TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE decisions (
+            run_id TEXT NOT NULL REFERENCES runs (run_id),
+            time INTEGER NOT NULL,
+            outcome TEXT NOT NULL CHECK (
+                outcome IN ('skipped_suspect', 'hold', 'no_trade', 'filled', 'rejected')
+            ),
+            target TEXT,
+            reason TEXT,
+            close_block INTEGER NOT NULL,
+            close_block_hash TEXT,
+            finality TEXT CHECK (finality IN ('pending', 'final', 'reorged')),
+            PRIMARY KEY (run_id, time)
+        )
+        """,
+        """
+        CREATE TABLE fills (
+            run_id TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            leg INTEGER NOT NULL,
+            token_in TEXT NOT NULL,
+            token_out TEXT NOT NULL,
+            route TEXT NOT NULL,
+            amount_in TEXT NOT NULL,
+            min_amount_out TEXT NOT NULL,
+            amount_out TEXT NOT NULL,
+            gas_cost_eth TEXT NOT NULL,
+            block INTEGER NOT NULL,
+            PRIMARY KEY (run_id, time, leg),
+            FOREIGN KEY (run_id, time) REFERENCES decisions (run_id, time)
+        )
+        """,
+        """
+        CREATE TABLE valuations (
+            run_id TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            balances TEXT NOT NULL,
+            gas_eth TEXT NOT NULL,
+            prices TEXT NOT NULL,
+            total_value TEXT NOT NULL,
+            PRIMARY KEY (run_id, time),
+            FOREIGN KEY (run_id, time) REFERENCES decisions (run_id, time)
+        )
+        """,
     ),
 )
 

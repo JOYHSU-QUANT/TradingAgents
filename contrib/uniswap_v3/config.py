@@ -16,12 +16,21 @@
       twap_window_seconds: 1800
       max_twap_deviation: "0.05"
       max_move: "0.5"
+    execution:                  # optional, and so is each key in it
+      min_trade_value: "10"
+      max_slippage: "0.005"
+      delay_blocks: 25
+      model:
+        slippage: "0.0005"
+        gas_units_per_hop: 150000
     rpc:                        # optional
       url_env: ETH_RPC_URL
 
 Tokens and pools are named by their keys in :mod:`.constants`; a config
 cannot supply an address, and :class:`UniswapConfig` itself refuses a token
-or pool that is not in those tables. Unknown keys are refused rather than
+or pool that is not in those tables. The pools must form a tree that reaches
+every token from the quote token: one path of pools then joins any two
+tokens, and it is both how a token is priced and how it is swapped. Unknown keys are refused rather than
 ignored, so a typo cannot silently fall back to a default, and so is a key
 written twice, which YAML would otherwise settle in favour of the last. The
 strategy's ``params`` are not interpreted here: they belong to the strategy,
@@ -30,7 +39,9 @@ it. They are kept as a read-only copy, so a list arrives as a tuple.
 
 ``bars`` is read into a :class:`~.domain.bars.BarSettings`, whose defaults
 stand for whatever is left out. Its two limits are quoted decimals, as a
-strategy's numbers are.
+strategy's numbers are. ``execution`` is read the same way into an
+:class:`~.domain.execution.ExecutionSettings`; its ``model`` keys are the
+fill model's own.
 
 A file named ``*.local.yaml`` is gitignored inside this package. The config
 holds no secret. ``rpc.url_env`` is the name of the environment variable
@@ -40,9 +51,11 @@ that holds the endpoint URL, never the URL; left out, the chain reader
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Hashable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, TypeVar
@@ -51,17 +64,32 @@ import yaml
 
 from .constants import POOLS, TOKENS, pool_key
 from .domain.bars import BarSettings
-from .domain.decimal_context import parse_decimal
+from .domain.decimal_context import parse_decimal, plain
+from .domain.execution import ExecutionSettings
+from .domain.routing import find_route
 from .domain.types import Pool, Token
 
-__all__ = ["ConfigError", "StrategySpec", "UniswapConfig", "load_config", "parse_config"]
+__all__ = [
+    "ConfigError",
+    "StrategySpec",
+    "UniswapConfig",
+    "config_snapshot",
+    "load_config",
+    "parse_config",
+]
 
 _REQUIRED_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
-_KEYS: Final = _REQUIRED_KEYS | {"bars", "rpc"}
+_KEYS: Final = _REQUIRED_KEYS | {"bars", "execution", "rpc"}
 _STRATEGY_KEYS: Final = frozenset({"name", "params"})
 _BARS_INTEGERS: Final = frozenset({"interval_seconds", "twap_window_seconds"})
 _BARS_DECIMALS: Final = frozenset({"max_twap_deviation", "max_move"})
 _RPC_KEYS: Final = frozenset({"url_env"})
+_EXECUTION_DECIMALS: Final = frozenset({"min_trade_value", "max_slippage"})
+_EXECUTION_KEYS: Final = _EXECUTION_DECIMALS | {"delay_blocks", "model"}
+# ``execution.model``'s keys, and the setting each is read into.
+_MODEL_KEYS: Final = MappingProxyType(
+    {"slippage": "model_slippage", "gas_units_per_hop": "model_gas_units_per_hop"}
+)
 _ENV_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 _T = TypeVar("_T")
@@ -120,6 +148,7 @@ class UniswapConfig:
     pools: tuple[Pool, ...]
     strategy: StrategySpec
     bars: BarSettings = BarSettings()
+    execution: ExecutionSettings = ExecutionSettings()
     # The environment variable that names the endpoint; ``None`` leaves it
     # to the chain reader's default.
     rpc_url_env: str | None = None
@@ -137,6 +166,8 @@ class UniswapConfig:
             raise ConfigError(f"strategy must be a StrategySpec, got {self.strategy!r}")
         if not isinstance(self.bars, BarSettings):
             raise ConfigError(f"bars must be a BarSettings, got {self.bars!r}")
+        if not isinstance(self.execution, ExecutionSettings):
+            raise ConfigError(f"execution must be an ExecutionSettings, got {self.execution!r}")
         if self.rpc_url_env is not None and (
             not isinstance(self.rpc_url_env, str) or not _ENV_NAME.fullmatch(self.rpc_url_env)
         ):
@@ -180,6 +211,19 @@ class UniswapConfig:
         stranded = [symbol for symbol in symbols if symbol not in pooled]
         if stranded:
             raise ConfigError(f"no configured pool trades {stranded}")
+        # Every token reached from the quote, by as few pools as that takes:
+        # a tree, so one path prices a token and one path swaps any two.
+        for token in self.tokens:
+            if token != self.quote:
+                try:
+                    find_route(self.pools, self.quote, token)
+                except ValueError as exc:
+                    raise ConfigError(f"pools: {exc}") from exc
+        if len(self.pools) != len(self.tokens) - 1:
+            raise ConfigError(
+                f"pools must form a tree over the tokens: {len(self.tokens)} tokens are "
+                f"joined by {len(self.tokens) - 1} pools, and {keys} form a loop"
+            )
 
 
 def _names(value: object, key: str) -> list[object]:
@@ -194,12 +238,17 @@ def _resolve(table: Mapping[str, _T], name: object, what: str, chain_id: int) ->
     return table[name]
 
 
-def _section(document: dict[Any, Any], key: str, allowed: frozenset[str]) -> dict[Any, Any]:
-    """An optional mapping of the config: empty when left out, refused with a key not allowed."""
+def _section(
+    document: dict[Any, Any], key: str, allowed: frozenset[str], *, within: str = ""
+) -> dict[Any, Any]:
+    """An optional mapping of the config: empty when left out, refused with a key not allowed.
+
+    ``within`` is the prefix a refusal names the section with, for one inside another.
+    """
     section = document.get(key, {})
     if not isinstance(section, dict) or set(section) - allowed:
         raise ConfigError(
-            f"{key} must be a mapping with keys from {sorted(allowed)}, got {section!r}"
+            f"{within}{key} must be a mapping with keys from {sorted(allowed)}, got {section!r}"
         )
     return section
 
@@ -215,6 +264,68 @@ def _bar_settings(document: dict[Any, Any]) -> BarSettings:
         )
     except ValueError as exc:
         raise ConfigError(f"bars: {exc}") from exc
+
+
+def _execution_settings(document: dict[Any, Any]) -> ExecutionSettings:
+    section = _section(document, "execution", _EXECUTION_KEYS)
+    model = _section(section, "model", frozenset(_MODEL_KEYS), within="execution.")
+    try:
+        settings: dict[str, object] = {
+            key: parse_decimal(value, f"execution.{key}") if key in _EXECUTION_DECIMALS else value
+            for key, value in section.items()
+            if key != "model"
+        }
+        for key, value in model.items():
+            name = f"execution.model.{key}"
+            settings[_MODEL_KEYS[key]] = parse_decimal(value, name) if key == "slippage" else value
+        return ExecutionSettings(**settings)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise ConfigError(f"execution: {exc}") from exc
+
+
+def _jsonable(value: object) -> object:
+    """A frozen config value as JSON can write it: sets sorted, decimals as plain text.
+
+    A decimal is written without padding, so ``0.50`` and ``0.5`` are one value.
+    """
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, frozenset):
+        return sorted((_jsonable(item) for item in value), key=repr)
+    if isinstance(value, Decimal):
+        return plain(value)
+    return value
+
+
+def config_snapshot(config: UniswapConfig) -> str:
+    """Everything in ``config`` that a run's decisions and fills depend on, as one JSON text.
+
+    Two configs with the same snapshot run the same way, so a run keeps the
+    snapshot it was started under and is not continued under another. Where
+    the node's URL comes from is left out: it changes no decision.
+    """
+    try:
+        return json.dumps(
+            {
+                "chain_id": config.chain_id,
+                "quote_token": config.quote.symbol,
+                "tokens": [token.symbol for token in config.tokens],
+                "pools": [pool_key(pool) for pool in config.pools],
+                "strategy": {
+                    "name": config.strategy.name,
+                    "params": _jsonable(config.strategy.params),
+                },
+                "bars": _jsonable(asdict(config.bars)),
+                "execution": _jsonable(asdict(config.execution)),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"strategy.params cannot be written down as JSON ({exc})") from exc
 
 
 def parse_config(document: object) -> UniswapConfig:
@@ -254,6 +365,7 @@ def parse_config(document: object) -> UniswapConfig:
         ),
         strategy=StrategySpec(name=strategy["name"], params={} if params is None else params),
         bars=_bar_settings(document),
+        execution=_execution_settings(document),
         rpc_url_env=_section(document, "rpc", _RPC_KEYS).get("url_env"),
     )
 

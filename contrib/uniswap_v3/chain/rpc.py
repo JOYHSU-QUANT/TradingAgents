@@ -26,8 +26,9 @@ before it is quoted, and the error that replaces it is raised once the
 ``except`` block is over, so the original is neither its cause nor its
 context. Every log record of ``web3``, ``urllib3`` and ``requests``, which
 write the URL or its path, has its message and its traceback scrubbed as it
-is created. What counts as secret is the URL, its path and each segment of
-it, its query and each value in it, and its password; the host name is not.
+is created. What counts as secret is the URL and, where they are six
+characters or longer, its path and each segment of it, its query and each
+value in it, and its password; the host name is not.
 """
 
 from __future__ import annotations
@@ -74,7 +75,7 @@ _REVERT_CODE: Final = 3
 # What a node says, under the catch-all code -32000, when it is behind the
 # block asked for, and when it no longer keeps that block's state.
 _BEHIND: Final = ("header not found", "block not found", "unknown block")
-_NO_STATE: Final = ("missing trie node", "state is not available", "pruned", "archive")
+_NO_STATE: Final = ("missing trie node", "pruned", "pruning", "discarded", "archive")
 # The packages under a request, whose loggers write the URL or its path:
 # web3's provider and urllib3's connection pool at DEBUG, urllib3's
 # connection at WARNING.
@@ -187,6 +188,14 @@ class BlockHeader:
     base_fee_wei: int | None
 
 
+def _lacks_state(message: str) -> bool:
+    """Whether a node's error says it no longer has the state a read needs."""
+    # geth words it "... state <root> is not available", with the root between.
+    return any(phrase in message for phrase in _NO_STATE) or (
+        "state" in message and "not available" in message
+    )
+
+
 def _is_count(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
@@ -225,6 +234,9 @@ class _ErrorTap(BaseProvider):
         super().__init__()
         self._inner = inner
         self.last_error: Mapping[str, Any] | None = None
+
+    def is_connected(self, show_traceback: bool = False) -> bool:
+        return self._inner.is_connected(show_traceback)
 
     def make_request(self, method: Any, params: Any) -> Any:
         response = self._inner.make_request(method, params)
@@ -372,7 +384,7 @@ class Rpc:
                 return CallReverted(f"{what} reverted ({said})")
             if any(phrase in message for phrase in _BEHIND):
                 return BlockNotFound(f"the node is behind {what} ({said})")
-            if any(phrase in message for phrase in _NO_STATE):
+            if _lacks_state(message):
                 return RpcConfigError(
                     f"the node no longer has the state for {what}; "
                     f"an archive node is needed ({said})"

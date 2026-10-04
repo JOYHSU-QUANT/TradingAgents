@@ -126,8 +126,10 @@ def quote_exact_input(
 ) -> Quote:
     """Quote selling ``amount_in`` of ``token_in`` through ``route`` at the end of ``block``.
 
-    ``route`` is the pools in the order they are crossed. A route the pools
-    cannot fill reverts, which raises :class:`~.errors.CallReverted`.
+    ``route`` is the pools in the order they are crossed, and must end in
+    another token than ``token_in``. A pool that runs out of liquidity on
+    the way raises :class:`~.errors.InsufficientLiquidity`, and a quote that
+    reverts :class:`~.errors.CallReverted`.
     """
     tokens = _tokens_along(token_in, route)
     if tokens[-1] == token_in:
@@ -149,7 +151,12 @@ def quote_exact_input(
     # Decoded by the ABI above: four outputs, the first and last uint256, the
     # second one price for a single pool and a list of them for a path.
     raw_out, after, _, gas_estimate = result
-    for pool, sqrt_price_x96 in zip(route, [after] if len(route) == 1 else after, strict=True):
+    prices = [after] if len(route) == 1 else list(after)
+    if len(prices) != len(route):
+        raise MalformedResponse(
+            f"QuoterV2 at block {block} returned {len(prices)} price(s) for {len(route)} pool(s)"
+        )
+    for pool, sqrt_price_x96 in zip(route, prices, strict=True):
         # Where a swap with no price limit stops when nothing is left to
         # swap against: one step inside TickMath's bounds.
         if not MIN_SQRT_RATIO + 1 < sqrt_price_x96 < MAX_SQRT_RATIO - 1:

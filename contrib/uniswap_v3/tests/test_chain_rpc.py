@@ -19,6 +19,7 @@ from contrib.uniswap_v3.chain.errors import (
     BlockNotFound,
     CallReverted,
     ChainError,
+    InsufficientLiquidity,
     MalformedResponse,
     RpcConfigError,
     RpcRejected,
@@ -31,6 +32,7 @@ from contrib.uniswap_v3.chain.quoter import _QUOTER_ABI
 from contrib.uniswap_v3.chain.rpc import BlockHeader, Rpc, RpcSettings, connect, http_provider
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, QUOTER_V2
 from contrib.uniswap_v3.tests.fakes.rpc import (
+    CassetteMiss,
     ReplayProvider,
     ScriptedProvider,
     answering,
@@ -53,7 +55,10 @@ def _http_error(status: int) -> requests.HTTPError:
 
 
 def _failing(*failures: Exception, then=None) -> ScriptedProvider:
-    """Raises ``failures`` in turn, one per request, and answers ``then`` after them."""
+    """Raises ``failures`` in turn, one per read, and answers ``then`` after them.
+
+    The chain check is not a read: the provider answers it itself.
+    """
     remaining = list(failures)
 
     def respond(method, params):
@@ -136,7 +141,8 @@ def test_a_logged_traceback_and_an_unformattable_record_are_scrubbed(caplog):
     try:
         raise requests.ConnectionError(f"Max retries exceeded with url: /v2/{_KEY}")
     except requests.ConnectionError:
-        # The stack is printed as source lines, this one among them.
+        # The stack is printed as source lines, the first line of this call
+        # among them: the comment has to stay on it.
         log.warning("the request failed", exc_info=True, stack_info=True)  # key-spelled-out-in-a-source-line
     # More placeholders than arguments: logging would print the arguments raw.
     log.warning("bad %s %s", f"/v2/{_KEY}")
@@ -181,8 +187,10 @@ def test_the_pieces_of_a_url_that_are_quoted_alone_are_secret_too(url, quoted):
 
 def test_a_provider_built_by_hand_has_its_url_made_secret_all_the_same():
     url = f"http://127.0.0.1:{_closed_port()}/v2/BUILT-BY-HAND-KEY"
-    provider = HTTPProvider(url, exception_retry_configuration=None)
-    rpc = Rpc(provider, ETHEREUM_MAINNET, settings=RpcSettings(timeout_seconds=2, attempts=1))
+    provider = HTTPProvider(
+        url, request_kwargs={"timeout": 2}, exception_retry_configuration=None
+    )
+    rpc = Rpc(provider, ETHEREUM_MAINNET, settings=RpcSettings(attempts=1))
     with pytest.raises(RpcUnavailable) as caught:
         rpc.header(7)
     assert "BUILT-BY-HAND-KEY" not in str(caught.value) and "<redacted>" in str(caught.value)
@@ -394,6 +402,22 @@ def test_a_rate_limit_that_outlasts_the_attempts_is_not_a_revert(error):
             RpcConfigError,
             "an archive node is needed",
         ),
+        (
+            {"code": -32000, "message": "historical state 0xab is not available"},
+            RpcConfigError,
+            "an archive node is needed",
+        ),
+        (
+            {"code": -32000, "message": "state already discarded"},
+            RpcConfigError,
+            "an archive node is needed",
+        ),
+        # "Not available" alone is not about state.
+        (
+            {"code": -32601, "message": "the method eth_call is not available"},
+            RpcRejected,
+            "the node refused",
+        ),
         # An error with no revert in it that web3 nevertheless reads as one.
         ({"code": -32000, "message": "out of gas", "data": None}, RpcRejected, "the node refused"),
     ],
@@ -410,13 +434,11 @@ def test_a_node_error_is_classed_by_what_the_node_said(error, kind, message):
 def test_the_error_classes_say_what_a_caller_can_do():
     by_action = {
         TransientChainError: {RpcUnavailable, BlockNotFound},
-        UnansweredRead: {
-            CallReverted,
-            MalformedResponse,
-            RpcRejected,
-            errors.InsufficientLiquidity,
-        },
+        UnansweredRead: {CallReverted, InsufficientLiquidity, MalformedResponse, RpcRejected},
     }
+    assert not by_action[TransientChainError] & by_action[UnansweredRead]
+    assert not issubclass(TransientChainError, UnansweredRead)
+    assert not issubclass(UnansweredRead, TransientChainError)
     for action, kinds in by_action.items():
         assert all(issubclass(kind, action) for kind in kinds)
     # Every class is in exactly one group; the setup fault is a group of its own.
@@ -486,6 +508,21 @@ def test_a_call_that_does_not_fit_the_abi_is_the_callers_error_and_sends_nothing
         rpc.call(address, abi, function, args, block=BLOCK)
     assert not isinstance(caught.value, ChainError)
     assert provider.requests == [] and provider.chain_checks == 0
+
+
+def test_a_request_the_cassette_lacks_fails_the_test_rather_than_becoming_a_chain_error():
+    rpc, _ = rpc_over(ReplayProvider(CASSETTE))
+    with pytest.raises(CassetteMiss, match="not in the cassette: eth_getBlockByNumber"):
+        rpc.header(5)
+
+
+def test_the_connection_can_be_asked_whether_it_is_up():
+    class Up(ScriptedProvider):
+        def is_connected(self, show_traceback=False):
+            return True
+
+    rpc, _ = rpc_over(Up(lambda method, params: {"result": "0x1"}))
+    assert rpc._w3.is_connected() is True
 
 
 def test_a_call_asks_the_node_once_and_at_the_block_named():

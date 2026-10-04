@@ -4,8 +4,8 @@
 
     python -m dotenv run -- python -m contrib.uniswap_v3.tests.fixtures.record
 
-Needs ``ETH_RPC_URL``, which that line takes from the ``.env`` file. It runs every read the replayed
-tests make, through the package's own functions, and writes what passed over
+Needs ``ETH_RPC_URL``, which that line takes from the ``.env`` file. It runs
+every read the replayed tests make, through the package's own functions, and writes what passed over
 the wire. The block search starts from the chain's head, so a new recording
 visits other blocks than the last one did and the pinned answer stays the
 same.

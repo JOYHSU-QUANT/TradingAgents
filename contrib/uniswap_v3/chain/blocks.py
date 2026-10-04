@@ -4,8 +4,9 @@ A bisection over block numbers, since timestamps only grow. Before the
 answer is returned, every timestamp the search read is checked to be in
 block order; a node that reported two blocks out of order raises. A time
 the chain has not reached raises too; no block is extrapolated. So does a
-node that lacks a block below its own head: it does not keep the history the
-search needs.
+node that lacks a block below its own head. Near the head that is a node
+behind the one that reported the head, and worth trying again; deeper, the
+node does not keep the history the search needs.
 
 Timestamps read along the way are kept, and narrow the next search. They
 are kept only once the search they were read in has passed that check, and
@@ -45,7 +46,7 @@ class ChainBlockLocator:
         index = bisect_left(self._numbers, block)
         return index if index < len(self._numbers) and self._numbers[index] == block else None
 
-    def _timestamp(self, block: int) -> int:
+    def _timestamp(self, block: int, final: int) -> int:
         """The timestamp of ``block``, which is below the head."""
         kept = self._kept_index(block)
         if kept is not None:
@@ -53,9 +54,13 @@ class ChainBlockLocator:
         try:
             return self._rpc.header(block).timestamp
         except BlockNotFound:
-            # Not a block that is still to come: waiting will not bring it.
+            if block > final:
+                # Behind a load balancer, the node asked now may trail the
+                # one that reported the head by a few blocks.
+                raise
+            # A final block is not one still to come: waiting will not bring it.
             raise RpcConfigError(
-                f"the node does not keep block {block}, which is below its head; "
+                f"the node does not keep block {block}, which is final; "
                 f"a node with full block history is needed"
             ) from None
 
@@ -70,6 +75,7 @@ class ChainBlockLocator:
                 f"is at {head.timestamp}"
             )
         seen = {head.number: head.timestamp}
+        final = head.number - self._finality_depth
 
         # The answer is in [low, high], and block ``high`` is at or after ``time``.
         low, high = 0, head.number
@@ -84,7 +90,7 @@ class ChainBlockLocator:
             seen[low - 1] = self._times[index - 1]
         while low < high:
             middle = (low + high) // 2
-            seen[middle] = self._timestamp(middle)
+            seen[middle] = self._timestamp(middle, final)
             if seen[middle] >= time:
                 high = middle
             else:
@@ -98,7 +104,6 @@ class ChainBlockLocator:
                     f"block {earlier} is at {seen[earlier]} and block {later} at {seen[later]}: "
                     f"block times must increase"
                 )
-        final = head.number - self._finality_depth
         for block in ordered:
             if block <= final and self._kept_index(block) is None:
                 index = bisect_left(self._numbers, block)

@@ -142,7 +142,7 @@ def test_a_route_the_token_cannot_walk_is_refused_before_any_request(token_in, r
     rpc, _ = rpc_over(provider)
     with pytest.raises(ValueError, match=message):
         quote_exact_input(rpc, token_in, route, Decimal(1), block=7)
-    assert provider.requests == []
+    assert provider.requests == [] and provider.chain_checks == 0
 
 
 @pytest.mark.parametrize(
@@ -161,7 +161,7 @@ def test_an_amount_the_chain_cannot_carry_is_refused_before_any_request(amount, 
     rpc, _ = rpc_over(provider)
     with pytest.raises(ValueError, match=message):
         quote_exact_input(rpc, _USDC, [_USDC_WETH], amount, block=7)
-    assert provider.requests == []
+    assert provider.requests == [] and provider.chain_checks == 0
 
 
 def test_a_chain_without_a_known_quoter_is_refused():
@@ -169,7 +169,7 @@ def test_a_chain_without_a_known_quoter_is_refused():
     rpc, _ = rpc_over(provider, chain_id=5)
     with pytest.raises(RpcConfigError, match="no QuoterV2 address is known for chain 5"):
         quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1), block=7)
-    assert provider.requests == []
+    assert provider.requests == [] and provider.chain_checks == 0
 
 
 @pytest.mark.parametrize("after", [MIN_SQRT_RATIO + 1, MAX_SQRT_RATIO - 1, MIN_SQRT_RATIO])
@@ -189,6 +189,13 @@ def test_a_price_one_step_inside_the_range_ends_is_a_quote():
     assert quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1), block=7).gas_estimate == 70_000
     rpc, _ = rpc_over(_single(amount_out=1, gas=70_000, after=MAX_SQRT_RATIO - 2))
     assert quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1), block=7).gas_estimate == 70_000
+
+
+def test_a_path_quote_without_one_price_per_pool_is_refused():
+    reply = encoded(_PATH_OUT, [3_800_000, [2**96], [1], 160_000])
+    rpc, _ = rpc_over(answering({"result": reply}))
+    with pytest.raises(MalformedResponse, match=r"returned 1 price\(s\) for 2 pool\(s\)"):
+        quote_exact_input(rpc, _USDC, [_USDC_WETH, _WBTC_WETH], Decimal(1000), block=7)
 
 
 def test_a_gas_estimate_of_zero_is_refused():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -12,7 +13,7 @@ from contrib.uniswap_v3.config import StrategySpec, UniswapConfig
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarFlag, BarSettings, Finality
 from contrib.uniswap_v3.domain.prices import MAX_SQRT_RATIO
-from contrib.uniswap_v3.domain.records import BarSeen
+from contrib.uniswap_v3.domain.records import BarSeen, SkipCode, Suspicion
 from contrib.uniswap_v3.ports import BarSource
 from contrib.uniswap_v3.store.bar_source import StoreBarSource, load_bar
 from contrib.uniswap_v3.store.repository import StoreError, open_store
@@ -264,6 +265,7 @@ def test_a_bar_is_built_from_every_configured_pools_reading(store):
     assert stored.readings == (_reading(), _reading(_WBTC_WETH))
     assert stored.flags == (frozenset(), frozenset())
     assert stored.bar.suspect is False
+    assert stored.suspicion is None
     assert set(stored.bar.prices) == {"WETH", "WBTC"}
     assert Decimal(1_990) < stored.bar.prices["WETH"] < Decimal(2_010)
     assert Decimal(28_000) < stored.bar.prices["WBTC"] < Decimal(32_000)
@@ -316,6 +318,7 @@ def test_a_gap_alone_does_not_make_a_bar_suspect(store):
     stored = load_bar(store, _CONFIG, later)
     assert stored.flags == (frozenset({BarFlag.GAP}), frozenset({BarFlag.GAP}))
     assert stored.bar.suspect is False
+    assert stored.suspicion is None
 
 
 def test_a_reading_taken_over_another_twap_window_than_the_configs_is_refused(store):
@@ -340,6 +343,62 @@ def test_a_reorged_reading_makes_its_bar_suspect(store):
     stored = load_bar(store, _CONFIG, FIRST_DAY)
     assert stored.flags == (frozenset(), frozenset({BarFlag.REORGED}))
     assert stored.bar.suspect is True
+    assert stored.suspicion == Suspicion(
+        SkipCode.REORGED, "WBTC/WETH-500: its close block is not on the final chain"
+    )
+
+
+def test_a_suspect_bar_names_every_cause_and_is_coded_by_the_first_in_order(store):
+    later = "0x" + "cd" * 32
+    store.insert_bars(
+        [
+            _reading(twap_tick=_ETH_TICK + 600, finality=Finality.PENDING),
+            _reading(
+                _WBTC_WETH,
+                twap_tick=_BTC_TICK + 600,
+                close_block=1_000,
+                close_block_hash=later,
+            ),
+        ]
+    )
+    stored = load_bar(store, _CONFIG, FIRST_DAY)
+    assert stored.bar.suspect is True
+    assert stored.suspicion == Suspicion(
+        SkipCode.CLOSE_BLOCK_MISMATCH,
+        "the pools' readings do not agree on the close block (999, 1000); "
+        "USDC/WETH-500: its close price is further from its TWAP than the limit; "
+        "WBTC/WETH-500: its close price is further from its TWAP than the limit",
+    )
+    # A block the chain dropped is graver than either, and is named first.
+    assert store.set_finality([_reading()], Finality.REORGED) is None
+    reorged = load_bar(store, _CONFIG, FIRST_DAY).suspicion
+    assert reorged.code is SkipCode.REORGED
+    assert reorged.reason.startswith(
+        "USDC/WETH-500: its close block is not on the final chain; the pools' readings"
+    )
+
+
+def test_a_store_is_kept_in_write_ahead_log_mode_and_syncs_every_commit_unless_told(tmp_path):
+    path = tmp_path / "store.db"
+    with open_store(path) as durable:
+        assert durable._connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        # 2 is FULL: a commit returns once it is on the disk.
+        assert durable._connection.execute("PRAGMA synchronous").fetchone() == (2,)
+    with open_store(path, durable=False) as relaxed:
+        assert relaxed._connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        # 1 is NORMAL: the log is synced at a checkpoint, not at every commit.
+        assert relaxed._connection.execute("PRAGMA synchronous").fetchone() == (1,)
+        relaxed.insert_bars([_reading()])
+    # The mode is the file's, and the setting only that connection's.
+    with open_store(path) as again:
+        assert again._connection.execute("PRAGMA synchronous").fetchone() == (2,)
+        assert again.bar(*_series(), FIRST_DAY) == _reading()
+
+
+def test_a_store_in_memory_stays_durable():
+    with open_store(Path(":memory:"), durable=False) as store:
+        assert store._connection.execute("PRAGMA journal_mode").fetchone() == ("memory",)
+        assert store._connection.execute("PRAGMA synchronous").fetchone() == (2,)
 
 
 def test_a_stored_bar_says_what_a_decision_keeps_of_it(store):

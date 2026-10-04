@@ -10,6 +10,10 @@ A run's rows are only ever added. :meth:`Store.record` writes one bar's
 decision, its fills and its valuation in one transaction, and a second
 decision on the same bar of the same run raises. The store is the engine's
 :class:`~..ports.Journal`.
+
+The database is kept in SQLite's write-ahead log mode, which
+:func:`open_store` turns on and the file then keeps: beside ``store.db``
+there are a ``store.db-wal`` and a ``store.db-shm`` while it is open.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from typing import Any, Final
 from ..domain.bars import Finality, PoolBar
 from ..domain.ledger import Ledger, LedgerError
 from ..domain.records import (
+    REASON_CODES,
     BarSeen,
     Decision,
     FillRecord,
@@ -129,6 +134,47 @@ def _ledger(balances: str, gas_eth: str) -> Ledger:
     return Ledger(balances=_amounts(balances), gas_eth=Decimal(gas_eth))
 
 
+_DECISION_COLUMNS: Final = (
+    "time, outcome, target, reason, reason_code, close_block, close_block_hash, finality"
+)
+_VALUATION_COLUMNS: Final = "time, balances, gas_eth, prices, total_value"
+
+
+def _decision(row: Sequence[Any]) -> Decision:
+    time, outcome_text, target, reason, code, close_block, close_block_hash, finality = row
+    outcome = Outcome(outcome_text)
+    # An outcome that says nothing has no code of its own to read one in; the
+    # decision then refuses the row for carrying one.
+    reason_code = None if code is None else REASON_CODES.get(outcome, RejectionCode)(code)
+    return Decision(
+        time=time,
+        outcome=outcome,
+        close_block=close_block,
+        target=None if target is None else TargetWeights(_amounts(target)),
+        reason=reason,
+        reason_code=reason_code,
+        seen=(
+            None
+            if close_block_hash is None
+            else BarSeen(
+                close_block=close_block,
+                close_block_hash=close_block_hash,
+                finality=Finality(finality),
+            )
+        ),
+    )
+
+
+def _valuation(row: Sequence[Any]) -> Valuation:
+    time, balances, gas_eth, prices, total_value = row
+    return Valuation(
+        time=time,
+        ledger=_ledger(balances, gas_eth),
+        prices=_amounts(prices),
+        total_value=Decimal(total_value),
+    )
+
+
 @contextmanager
 def _stored(what: str) -> Iterator[None]:
     """Turn a stored row that no longer reads as ``what`` into a :class:`StoreError`."""
@@ -194,12 +240,15 @@ class Store:
         return None if row is None else _bar(row)
 
     def bar_times(
-        self, chain_id: int, pool: str, interval_seconds: int, *, start: int, end: int
+        self, chain_id: int, pool: str, interval_seconds: int, *, start: int, end: int | None
     ) -> set[int]:
-        """The boundaries from ``start`` to ``end``, both included, that ``pool`` has a reading at."""
+        """The boundaries from ``start`` to ``end``, both included, that ``pool`` has a reading at.
+
+        With no ``end``, every one from ``start`` on.
+        """
         with _sqlite_errors("reading bar times"):
             rows = self._connection.execute(
-                f"SELECT time FROM bars WHERE {_SERIES} AND time BETWEEN ? AND ?",
+                f"SELECT time FROM bars WHERE {_SERIES} AND time >= ? AND time <= IFNULL(?, time)",
                 (chain_id, pool, interval_seconds, start, end),
             ).fetchall()
         return {time for (time,) in rows}
@@ -323,31 +372,26 @@ class Store:
         """The run's decision on the bar at ``time``, when it has made one."""
         with _sqlite_errors("reading a decision"):
             row = self._connection.execute(
-                "SELECT outcome, target, reason, reason_code, close_block, close_block_hash, "
-                "finality FROM decisions WHERE run_id = ? AND time = ?",
+                f"SELECT {_DECISION_COLUMNS} FROM decisions WHERE run_id = ? AND time = ?",
                 (run_id, time),
             ).fetchone()
         if row is None:
             return None
-        outcome, target, reason, reason_code, close_block, close_block_hash, finality = row
         with _stored(f"decision of run {run_id!r} at {time}"):
-            return Decision(
-                time=time,
-                outcome=Outcome(outcome),
-                close_block=close_block,
-                target=None if target is None else TargetWeights(_amounts(target)),
-                reason=reason,
-                reason_code=None if reason_code is None else RejectionCode(reason_code),
-                seen=(
-                    None
-                    if close_block_hash is None
-                    else BarSeen(
-                        close_block=close_block,
-                        close_block_hash=close_block_hash,
-                        finality=Finality(finality),
-                    )
-                ),
-            )
+            return _decision(row)
+
+    def decisions(self, run_id: str) -> list[Decision]:
+        """Every decision of the run, oldest first."""
+        with _sqlite_errors("reading a run's decisions"):
+            rows = self._connection.execute(
+                f"SELECT {_DECISION_COLUMNS} FROM decisions WHERE run_id = ? ORDER BY time",
+                (run_id,),
+            ).fetchall()
+        decisions = []
+        for row in rows:
+            with _stored(f"decision of run {run_id!r} at {row[0]}"):
+                decisions.append(_decision(row))
+        return decisions
 
     def last_decided(self, run_id: str) -> int | None:
         """The boundary of the latest bar the run has decided, when it has decided any."""
@@ -361,20 +405,26 @@ class Store:
         """The run's valuation after the bar at ``time``, when it has decided that bar."""
         with _sqlite_errors("reading a valuation"):
             row = self._connection.execute(
-                "SELECT balances, gas_eth, prices, total_value FROM valuations "
-                "WHERE run_id = ? AND time = ?",
+                f"SELECT {_VALUATION_COLUMNS} FROM valuations WHERE run_id = ? AND time = ?",
                 (run_id, time),
             ).fetchone()
         if row is None:
             return None
-        balances, gas_eth, prices, total_value = row
         with _stored(f"valuation of run {run_id!r} at {time}"):
-            return Valuation(
-                time=time,
-                ledger=_ledger(balances, gas_eth),
-                prices=_amounts(prices),
-                total_value=Decimal(total_value),
-            )
+            return _valuation(row)
+
+    def valuations(self, run_id: str) -> list[Valuation]:
+        """The run's valuation after every bar it has decided, oldest first."""
+        with _sqlite_errors("reading a run's valuations"):
+            rows = self._connection.execute(
+                f"SELECT {_VALUATION_COLUMNS} FROM valuations WHERE run_id = ? ORDER BY time",
+                (run_id,),
+            ).fetchall()
+        valuations = []
+        for row in rows:
+            with _stored(f"valuation of run {run_id!r} at {row[0]}"):
+                valuations.append(_valuation(row))
+        return valuations
 
     def ledger(self, run_id: str) -> Ledger:
         """The run's balances after its latest decision, or its opening ones before any.
@@ -506,14 +556,21 @@ class Store:
             )
 
 
-def open_store(path: Path, *, create: bool = True) -> Store:
+def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Store:
     """Open the database at ``path`` and bring its schema up to date.
 
     A store an older version of the package wrote is migrated here, whatever
     opens it: a command that only reads its rows still writes the missing
-    tables. With ``create`` false a path that is not an existing file is
-    refused, so such a command does not leave an empty database behind a
-    mistyped path.
+    tables, and the file is put in write-ahead log mode. With ``create``
+    false a path that is not an existing file is refused, so such a command
+    does not leave an empty database behind a mistyped path.
+
+    With ``durable`` false this connection's commits return before they
+    reach the disk. A power cut can then lose the latest of them and cannot
+    damage the file: what is lost is whole transactions this connection
+    wrote, the newest first. That is for a writer whose rows can be made
+    again, as a backtest's can. It holds only in write-ahead log mode, so a
+    database that cannot be put in it (one in memory) stays durable.
     """
     if not create and not path.is_file():
         raise StoreError(f"there is no store at {str(path)!r}")
@@ -528,6 +585,9 @@ def open_store(path: Path, *, create: bool = True) -> Store:
         # A build of SQLite without foreign keys takes the pragma and does nothing.
         if connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
             raise SchemaError("this SQLite does not enforce foreign keys")
+        (journal_mode,) = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+        if not durable and journal_mode == "wal":
+            connection.execute("PRAGMA synchronous = NORMAL")
         migrate(connection)
     except (sqlite3.Error, SchemaError) as exc:
         connection.close()

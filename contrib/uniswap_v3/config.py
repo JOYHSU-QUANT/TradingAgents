@@ -75,6 +75,7 @@ __all__ = [
     "ConfigError",
     "StrategySpec",
     "UniswapConfig",
+    "config_from_snapshot",
     "config_snapshot",
     "load_config",
     "parse_config",
@@ -342,6 +343,15 @@ def config_snapshot(config: UniswapConfig) -> str:
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"strategy.params cannot be written down as JSON ({exc})") from exc
+
+
+def config_from_snapshot(snapshot: str) -> UniswapConfig:
+    """The config ``snapshot`` was taken of, less where the node's URL comes from."""
+    try:
+        document = json.loads(snapshot)
+    except ValueError as exc:
+        raise ConfigError(f"the config snapshot is not JSON ({exc})") from exc
+    return parse_config(document)
 
 
 def parse_config(document: object) -> UniswapConfig:

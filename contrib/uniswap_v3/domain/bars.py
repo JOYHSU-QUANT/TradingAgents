@@ -40,8 +40,10 @@ __all__ = [
     "BarSettings",
     "Finality",
     "PoolBar",
+    "SuspectCause",
     "assemble_bar",
     "pool_bar_flags",
+    "suspect_causes",
 ]
 
 _ADDRESS: Final = re.compile(r"0x[0-9a-fA-F]{40}")
@@ -299,6 +301,44 @@ def _quote_prices(
     return priced
 
 
+class SuspectCause(str, Enum):
+    """Why a bar is suspect, the gravest first."""
+
+    # A reading's close block turned out not to be on the final chain.
+    REORGED = "reorged"
+    # The pools' readings do not agree on the close block.
+    CLOSE_BLOCK_MISMATCH = "close_block_mismatch"
+    # A pool's close price is further from its TWAP than the limit allows.
+    TWAP_DEVIATION = "twap_deviation"
+
+
+def suspect_causes(
+    pools: Sequence[Pool], readings: Sequence[PoolBar], flags: Sequence[frozenset[BarFlag]]
+) -> tuple[tuple[SuspectCause, Pool | None], ...]:
+    """Every cause the bar of ``readings`` is suspect for, the gravest first; none when it is not.
+
+    A cause comes with the pool whose reading it was found on, and the
+    disagreement on the close block, which is no one pool's, with ``None``.
+    The arguments are :func:`assemble_bar`'s, which holds a bar suspect
+    exactly when this finds a cause.
+    """
+    both = list(zip(pools, readings, flags, strict=True))
+    blocks = {(reading.close_block, reading.close_block_hash) for reading in readings}
+    return (
+        *(
+            (SuspectCause.REORGED, pool)
+            for pool, reading, found in both
+            if BarFlag.REORGED in found or reading.finality is Finality.REORGED
+        ),
+        *([(SuspectCause.CLOSE_BLOCK_MISMATCH, None)] if len(blocks) > 1 else []),
+        *(
+            (SuspectCause.TWAP_DEVIATION, pool)
+            for pool, _, found in both
+            if BarFlag.TWAP_DEVIATION in found
+        ),
+    )
+
+
 def assemble_bar(
     quote: Token,
     pools: Sequence[Pool],
@@ -327,17 +367,10 @@ def assemble_bar(
     if len(series) != 1:
         raise ValueError(f"the readings are not of one boundary of one series: {sorted(series)}")
     closing = max(readings, key=lambda reading: reading.close_block)
-    agreed = all(
-        (reading.close_block, reading.close_block_hash)
-        == (closing.close_block, closing.close_block_hash)
-        for reading in readings
-    )
-    flagged = any(found & SUSPECT_FLAGS for found in flags)
-    reorged = any(reading.finality is Finality.REORGED for reading in readings)
     return Bar(
         time=closing.time,
         close_block=closing.close_block,
         prices=_quote_prices(quote, pools, readings),
         base_fee_wei=closing.base_fee_wei,
-        suspect=flagged or reorged or not agreed,
+        suspect=bool(suspect_causes(pools, readings, flags)),
     )

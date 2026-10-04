@@ -30,10 +30,12 @@ __all__ = [
     "DEFAULT_TICK",
     "FIRST_DAY",
     "GENESIS_TIME",
+    "UP_HALF_TICK",
     "FakeNode",
     "block_at",
     "block_hash",
     "pool_bar",
+    "put_day",
     "sqrt_price_at",
 ]
 
@@ -47,6 +49,7 @@ DEFAULT_TICK = 200_311
 BTC_TICK = 257_300
 
 _USDC_WETH = POOLS[ETHEREUM_MAINNET]["USDC/WETH-500"]
+_WBTC_WETH = POOLS[ETHEREUM_MAINNET]["WBTC/WETH-500"]
 
 
 def block_at(time: int) -> int:
@@ -91,6 +94,40 @@ def pool_bar(
         "finality": Finality.FINAL,
     }
     return PoolBar(**{**fields, **changes})
+
+
+# A tick this much lower prices WETH, and WBTC through it, half as high again.
+UP_HALF_TICK = DEFAULT_TICK - 4_055
+
+
+def put_day(
+    store: Any,
+    day: int,
+    *,
+    eth_tick: int = DEFAULT_TICK,
+    pools: tuple[Pool, ...] = (_USDC_WETH, _WBTC_WETH),
+    **wbtc_changes: Any,
+) -> None:
+    """Store the readings of ``pools`` on the day ``day`` days after :data:`FIRST_DAY`.
+
+    They close on the last block before the day's boundary. The USDC/WETH
+    pool is priced at ``eth_tick``, and ``wbtc_changes`` go over the
+    WBTC/WETH pool's reading.
+    """
+    time = FIRST_DAY + day * DAY
+    close = block_at(time) - 1
+    at = {
+        "time": time,
+        "close_block": close,
+        "close_block_hash": block_hash(close),
+        "close_block_time": time - 12,
+    }
+    readings = []
+    if _USDC_WETH in pools:
+        readings.append(pool_bar(_USDC_WETH, tick=eth_tick, **at))
+    if _WBTC_WETH in pools:
+        readings.append(pool_bar(_WBTC_WETH, **{**at, **wbtc_changes}))
+    store.insert_bars(readings)
 
 
 class FakeNode:

@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from contrib.uniswap_v3.domain.bars import Finality
+from contrib.uniswap_v3.domain.bars import Finality, SuspectCause
 from contrib.uniswap_v3.domain.records import (
     BarSeen,
     Decision,
@@ -14,7 +14,9 @@ from contrib.uniswap_v3.domain.records import (
     Outcome,
     RejectionCode,
     RunRecord,
+    SkipCode,
     StepRecord,
+    Suspicion,
     Valuation,
 )
 from contrib.uniswap_v3.domain.types import Fill, RunMode, SwapIntent
@@ -54,7 +56,9 @@ def test_the_outcomes_are_the_five_a_step_can_end_in():
 
 def test_each_outcome_has_one_well_formed_decision():
     _decision(Outcome.HOLD)
-    assert _decision(Outcome.SKIPPED_SUSPECT).suspect
+    assert _decision(
+        Outcome.SKIPPED_SUSPECT, reason="its TWAP is off", reason_code=SkipCode.TWAP_DEVIATION
+    ).suspect
     assert not _decision(Outcome.HOLD).suspect
     _decision(Outcome.NO_TRADE, target=_TARGET)
     _decision(Outcome.FILLED, target=_TARGET)
@@ -89,7 +93,18 @@ def test_each_outcome_has_one_well_formed_decision():
         (
             Outcome.REJECTED,
             {"target": _TARGET, "reason": "why", "reason_code": "gas"},
-            "a reason code a RejectionCode",
+            "of a rejected decision a RejectionCode",
+        ),
+        (
+            Outcome.REJECTED,
+            {"target": _TARGET, "reason": "why", "reason_code": SkipCode.REORGED},
+            "of a rejected decision a RejectionCode",
+        ),
+        (Outcome.SKIPPED_SUSPECT, {}, "and no other, carries a reason"),
+        (
+            Outcome.SKIPPED_SUSPECT,
+            {"reason": "why", "reason_code": RejectionCode.GAS},
+            "of a skipped_suspect decision a SkipCode",
         ),
         (Outcome.FILLED, {"target": _TARGET, "reason": "why"}, "and no other, carries a reason"),
         (Outcome.HOLD, {"reason_code": RejectionCode.GAS}, "and no other, carries a reason"),
@@ -122,6 +137,26 @@ def test_a_decision_that_contradicts_itself_is_refused(outcome, changes, match):
 def test_a_malformed_bar_seen_is_refused(close_block_hash, finality, match):
     with pytest.raises(ValueError, match=match):
         BarSeen(close_block=9, close_block_hash=close_block_hash, finality=finality)
+
+
+@pytest.mark.parametrize(
+    ("code", "reason", "match"),
+    [
+        ("reorged", "why", "code must be a SkipCode"),
+        (RejectionCode.GAS, "why", "code must be a SkipCode"),
+        (SkipCode.REORGED, " ", "reason must be a non-empty string"),
+        (SkipCode.REORGED, None, "reason must be a non-empty string"),
+    ],
+)
+def test_a_malformed_suspicion_is_refused(code, reason, match):
+    with pytest.raises(ValueError, match=match):
+        Suspicion(code=code, reason=reason)
+
+
+def test_every_cause_a_bar_is_suspect_for_has_its_skip_code():
+    assert {code.value for code in SkipCode} == {cause.value for cause in SuspectCause} | {
+        "unspecified"
+    }
 
 
 def test_a_bar_seen_names_a_block_that_can_exist():

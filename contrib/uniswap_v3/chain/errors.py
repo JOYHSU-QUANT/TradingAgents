@@ -54,7 +54,12 @@ class RpcUnavailable(TransientChainError):
 
 
 class BlockNotFound(TransientChainError):
-    """The node does not have the block yet, or the chain has not reached the time asked for."""
+    """The node does not have the block yet, or the chain has not reached the time asked for.
+
+    A read of a block long past, from a node that has dropped it, raises
+    this as well: only the block search can tell the two apart, and it
+    raises :class:`RpcConfigError` for the second.
+    """
 
 
 class RpcRejected(UnansweredRead):

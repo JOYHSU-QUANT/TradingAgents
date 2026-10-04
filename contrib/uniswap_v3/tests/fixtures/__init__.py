@@ -1,7 +1,7 @@
 """Recorded JSON-RPC responses, and the fixed points they were recorded at.
 
 ``mainnet.json`` is written by ``record.py`` from a real archive node; the
-suite replays it and never connects.
+tests that replay it never reach a node.
 """
 
 from __future__ import annotations

@@ -848,16 +848,17 @@ Breaking changes within the 0.x line are called out explicitly.
   (`ETH_RPC_URL` by default), refuses a node on another chain before its
   first read, and offers the latest block's header, the header of a named
   block and a contract call at a named block. A connection error, a
-  timeout, a response cut short, an HTTP 429, an HTTP 5xx and a JSON-RPC
-  rate-limit error (code -32005 or 429) are retried with a doubling wait;
+  timeout, a response cut short, a body that is not JSON, an HTTP 408, 425,
+  429 or 5xx and a JSON-RPC rate-limit error (code -32005 or 429) are
+  retried with a doubling wait;
   every other failure raises at once. The `ChainError` classes in
   `chain/errors.py` are grouped by what a caller can do: under
   `TransientChainError` (try again later), `RpcUnavailable` and
   `BlockNotFound`; under `UnansweredRead` (this read has no answer),
   `CallReverted`, `InsufficientLiquidity`, `MalformedResponse` and
   `RpcRejected`; and `RpcConfigError` (nothing will work until the setup is
-  fixed: no URL, the wrong chain, an HTTP 401 or 403, or a node that does
-  not keep the history asked for). A call that does not fit its ABI raises
+  fixed: no URL or one that cannot be requested, the wrong chain, an HTTP
+  401 or 403, or a node that does not keep the history asked for). A call that does not fit its ABI raises
   web3's own exception and asks the node nothing. No read answers with a
   guess. The URL ends in the API key, so it is kept out of every exception,
   which does not carry the original as its cause or context either, and out

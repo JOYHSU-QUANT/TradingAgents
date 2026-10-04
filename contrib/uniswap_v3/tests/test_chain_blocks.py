@@ -16,17 +16,20 @@ from contrib.uniswap_v3.tests.fakes.rpc import (
 from contrib.uniswap_v3.tests.fixtures import BAR_TIME, CASSETTE
 
 
-def _chain(timestamps: list[int], lies: dict[int, int] | None = None) -> ScriptedProvider:
+def _chain(
+    timestamps: list[int], lies: dict[int, int] | None = None, *, missing: range = range(0)
+) -> ScriptedProvider:
     """A node whose block ``n`` is at ``timestamps[n]``; the last one is the head.
 
     While ``lies`` lists a block, the node claims that time for it instead.
+    The node has no block in ``missing``.
     """
     lies = {} if lies is None else lies
 
     def respond(method, params):
         assert method == "eth_getBlockByNumber"
         number = len(timestamps) - 1 if params[0] == "latest" else int(params[0], 16)
-        if number >= len(timestamps):
+        if number >= len(timestamps) or number in missing:
             return {"result": None}
         return {"result": block_result(number, lies.get(number, timestamps[number]))}
 
@@ -168,20 +171,10 @@ def test_kept_blocks_are_held_against_what_a_later_search_reads():
         locator.first_block_at_or_after(timestamps[300])
 
 
-def _chain_without(timestamps: list[int], missing: range) -> ScriptedProvider:
-    """``_chain``, on a node that has no block in ``missing``."""
-
-    def respond(method, params):
-        number = len(timestamps) - 1 if params[0] == "latest" else int(params[0], 16)
-        return {"result": None if number in missing else block_result(number, timestamps[number])}
-
-    return ScriptedProvider(respond)
-
-
 def test_a_node_that_lacks_a_final_block_is_a_setup_fault():
     timestamps = _uneven(1_000)
     # Only the last 128 blocks are kept, as on a node that prunes history.
-    rpc, _ = rpc_over(_chain_without(timestamps, range(0, 872)))
+    rpc, _ = rpc_over(_chain(timestamps, missing=range(0, 872)))
     with pytest.raises(RpcConfigError, match="does not keep block 499, which is final"):
         ChainBlockLocator(rpc).first_block_at_or_after(timestamps[300])
 
@@ -189,12 +182,12 @@ def test_a_node_that_lacks_a_final_block_is_a_setup_fault():
 def test_a_node_that_lacks_a_block_near_the_head_is_behind_and_worth_another_try():
     timestamps = _uneven(1_000)
     # The node asked for a block trails the one that reported the head (999).
-    rpc, _ = rpc_over(_chain_without(timestamps, range(990, 999)))
+    rpc, _ = rpc_over(_chain(timestamps, missing=range(990, 999)))
     locator = ChainBlockLocator(rpc, finality_depth=64)
     with pytest.raises(BlockNotFound, match="does not have block 99"):
         locator.first_block_at_or_after(timestamps[995])
     # Block 935 is the last final one: one deeper and it is the node's history.
-    rpc, _ = rpc_over(_chain_without(timestamps, range(935, 936)))
+    rpc, _ = rpc_over(_chain(timestamps, missing=range(935, 936)))
     locator = ChainBlockLocator(rpc, finality_depth=64)
     assert locator.first_block_at_or_after(timestamps[990]) == 990
     with pytest.raises(RpcConfigError, match="does not keep block 935, which is final"):

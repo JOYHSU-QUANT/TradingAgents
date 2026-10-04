@@ -6,6 +6,7 @@ exception for the key, and the ones that write a log record read the log.
 
 from __future__ import annotations
 
+import json
 import logging
 import socket
 
@@ -79,7 +80,18 @@ def test_connect_refuses_an_environment_without_the_variable():
         connect(ETHEREUM_MAINNET, settings=RpcSettings(url_env="MY_RPC"), env={"ETH_RPC_URL": "x"})
 
 
-@pytest.mark.parametrize("value", [_KEY, f"wss://node.example/v2/{_KEY}", f"https:///v2/{_KEY}"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        _KEY,
+        f"wss://node.example/v2/{_KEY}",
+        f"https:///v2/{_KEY}",
+        # An address and two ports that no URL can have.
+        f"http://[::1/v2/{_KEY}",
+        f"https://node.example:99999/v2/{_KEY}",
+        f"https://node.example:abc/v2/{_KEY}",
+    ],
+)
 def test_connect_refuses_a_value_that_is_not_an_http_url_without_quoting_it(value):
     with pytest.raises(RpcConfigError, match="must hold an http") as caught:
         connect(ETHEREUM_MAINNET, env={"ETH_RPC_URL": value})
@@ -106,6 +118,13 @@ def test_a_failed_connection_leaks_the_url_into_neither_the_error_nor_the_log(ca
     assert _KEY not in caplog.text
     # The records that would have held it were written, scrubbed.
     assert "<redacted>" in caplog.text
+
+
+def test_printing_the_provider_does_not_print_its_url():
+    provider = http_provider(env={"ETH_RPC_URL": f"https://user:pass-word-1@node.example/v2/{_KEY}"})
+    for text in (str(provider), repr(provider), f"{provider}"):
+        assert _KEY not in text and "pass-word-1" not in text
+    assert str(provider) == "RPC connection <redacted>"
 
 
 def test_a_key_in_the_query_string_is_scrubbed_too():
@@ -158,6 +177,21 @@ def test_scrubbing_survives_another_record_factory_being_installed(caplog):
     try:
         logging.setLogRecordFactory(logging.LogRecord)
         http_provider(env={"ETH_RPC_URL": f"https://node.example/v2/{_KEY}"})
+        logging.getLogger("urllib3.connectionpool").debug("POST /v2/%s HTTP/1.1", _KEY)
+        assert _KEY not in caplog.text and "POST <redacted> HTTP/1.1" in caplog.text
+    finally:
+        logging.setLogRecordFactory(ours)
+
+
+def test_a_read_puts_the_scrubbing_back_if_another_record_factory_took_its_place(caplog):
+    caplog.set_level(logging.DEBUG)
+    http_provider(env={"ETH_RPC_URL": f"https://node.example/v2/{_KEY}"})
+    rpc, _ = rpc_over(answering({"result": block_result(7, 1_500_000_000)}))
+    ours = logging.getLogRecordFactory()
+    try:
+        logging.setLogRecordFactory(logging.LogRecord)
+        # No new endpoint is opened: a connection that already exists reads.
+        rpc.header(7)
         logging.getLogger("urllib3.connectionpool").debug("POST /v2/%s HTTP/1.1", _KEY)
         assert _KEY not in caplog.text and "POST <redacted> HTTP/1.1" in caplog.text
     finally:
@@ -278,7 +312,7 @@ def test_header_refuses_another_block_than_the_one_asked_for():
         {},
     ],
 )
-def test_header_refuses_a_reply_of_the_wrong_shape(response):
+def test_header_refuses_a_reply_it_cannot_read(response):
     rpc, _ = rpc_over(answering(response))
     with pytest.raises(MalformedResponse):
         rpc.header(7)
@@ -302,6 +336,11 @@ def test_a_block_is_a_non_negative_integer(block):
         requests.ConnectionError("refused"),
         requests.Timeout("timed out"),
         requests.exceptions.ChunkedEncodingError("connection broken"),
+        # A 200 whose body is not JSON: empty, cut short, or a gateway's page.
+        json.JSONDecodeError("Could not decode '<html>' because of Expecting value", "<html>", 0),
+        requests.exceptions.JSONDecodeError("Expecting value", "", 0),
+        _http_error(408),
+        _http_error(425),
         _http_error(429),
         _http_error(500),
         _http_error(503),
@@ -345,6 +384,32 @@ def test_an_http_refusal_is_not_retried_and_a_refused_key_is_a_setup_fault(statu
     assert _KEY not in str(caught.value)
     assert caught.value.__context__ is None
     assert waits == [] and len(provider.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        requests.exceptions.InvalidURL(f"Failed to parse: https://node.example:99999/v2/{_KEY}"),
+        requests.exceptions.MissingSchema(f"No scheme supplied for {_KEY}"),
+        requests.exceptions.InvalidSchema(f"No connection adapters were found for wss://{_KEY}"),
+    ],
+)
+def test_a_url_that_cannot_be_requested_is_a_setup_fault_and_is_not_quoted(failure):
+    provider = _failing(failure)
+    rpc, waits = rpc_over(provider)
+    with pytest.raises(RpcConfigError, match="the endpoint URL cannot be requested") as caught:
+        rpc.header(7)
+    assert _KEY not in str(caught.value) and "node.example" not in str(caught.value)
+    assert waits == [] and len(provider.requests) == 1
+
+
+def test_a_long_reply_is_not_quoted_whole():
+    page = "<html>" + "x" * 5_000
+    failure = json.JSONDecodeError(f"Could not decode {page!r}", page, 0)
+    rpc, _ = rpc_over(_failing(failure), attempts=1)
+    with pytest.raises(RpcUnavailable, match=r"\.\.\. \(\d+ more characters\)") as caught:
+        rpc.header(7)
+    assert len(str(caught.value)) < 500
 
 
 def test_a_node_error_is_not_retried():
@@ -516,7 +581,7 @@ def test_a_request_the_cassette_lacks_fails_the_test_rather_than_becoming_a_chai
         rpc.header(5)
 
 
-def test_the_connection_can_be_asked_whether_it_is_up():
+def test_asking_web3_whether_it_is_connected_reaches_the_provider():
     class Up(ScriptedProvider):
         def is_connected(self, show_traceback=False):
             return True

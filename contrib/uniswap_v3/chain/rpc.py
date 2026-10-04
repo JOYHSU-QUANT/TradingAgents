@@ -8,14 +8,16 @@ the node for its chain ID and refuses a node on another chain.
 
 Failures, by what the node or the transport said:
 
-- A connection error, a timeout, a response cut short, an HTTP 429, an HTTP
-  5xx and a JSON-RPC rate-limit error (code -32005 or 429) are tried again,
-  waiting twice as long each time. When the attempts run out the read raises
+- A connection error, a timeout, a response cut short, a body that is not
+  JSON (a gateway's error page), an HTTP 408, 425, 429 or 5xx and a JSON-RPC
+  rate-limit error (code -32005 or 429) are tried again, waiting twice as
+  long each time. When the attempts run out the read raises
   :class:`~.errors.RpcUnavailable`.
 - "header not found" and its like, which a node behind the head answers,
   raise :class:`~.errors.BlockNotFound`.
-- An HTTP 401 or 403, and a node that says it no longer has the state asked
-  for (it is not an archive node), raise :class:`~.errors.RpcConfigError`.
+- An HTTP 401 or 403, a URL that cannot be requested, and a node that says
+  it no longer has the state asked for (it is not an archive node), raise
+  :class:`~.errors.RpcConfigError`.
 - A revert raises :class:`~.errors.CallReverted`, any other error the node
   answers with :class:`~.errors.RpcRejected`, and a reply that cannot be
   decoded :class:`~.errors.MalformedResponse`.
@@ -33,6 +35,7 @@ value in it, and its password; the host name is not.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -68,6 +71,11 @@ DEFAULT_URL_ENV: Final = "ETH_RPC_URL"
 
 # A key the endpoint does not accept: no later request will fare better.
 _UNAUTHORISED_STATUS: Final = frozenset({401, 403})
+# Statuses that say "not now" rather than "no"; every 5xx is one as well.
+_RETRY_STATUS: Final = frozenset({408, 425, 429})
+# How much of a caught exception's text an error quotes. A reply that is not
+# JSON is quoted whole by web3, and it can be a page of HTML.
+_MAX_QUOTE: Final = 300
 # JSON-RPC error codes. -32005 is EIP-1474's "limit exceeded"; some providers
 # send the HTTP status, 429, as the code. 3 is a revert.
 _RATE_LIMIT_CODES: Final = frozenset({-32005, 429})
@@ -97,30 +105,36 @@ class _Redactor:
 
     def register(self, url: str) -> None:
         """Treat ``url`` as secret, with the pieces of it that are quoted alone."""
-        parts = urlsplit(url)
-        pieces = {url, parts.path, parts.query, parts.password or ""}
-        pieces.update(parts.path.split("/"))
-        pieces.update(value for _, value in parse_qsl(parts.query))
-        if parts.query:
-            pieces.add(f"{parts.path}?{parts.query}")
+        pieces = {url}
+        try:
+            parts = urlsplit(url)
+            pieces.update({parts.path, parts.query, parts.password or ""})
+        except ValueError:
+            # Not a URL that can be taken apart; the whole of it is still secret.
+            parts = None
+        if parts is not None:
+            pieces.update(parts.path.split("/"))
+            pieces.update(value for _, value in parse_qsl(parts.query))
+            if parts.query:
+                pieces.add(f"{parts.path}?{parts.query}")
         known = set(self._secrets) | {piece for piece in pieces if len(piece) >= _MIN_SECRET}
         # Longest first, so the whole URL goes before the key inside it.
         self._secrets = sorted(known, key=len, reverse=True)
-        self._scrub_logs()
+        self.scrub_logs()
 
     def scrub(self, text: str) -> str:
         for secret in self._secrets:
             text = text.replace(secret, "<redacted>")
         return _URL.sub("<url>", text)
 
-    def _scrub_logs(self) -> None:
-        """Scrub the HTTP stack's log records, from the first registered URL on.
+    def scrub_logs(self) -> None:
+        """Scrub the HTTP stack's log records from here on.
 
         Done where records are created rather than with a filter per logger:
         a filter sees only its own logger's records, so each logger that
         writes the URL would have to be found and named. The record factory
-        is one per process and stays in place; if another has replaced it
-        since, it is wrapped again.
+        is one per process and stays in place. This is called again before
+        every request, and wraps whatever factory has replaced it since.
         """
         create = logging.getLogRecordFactory()
         if create is self._factory:
@@ -217,9 +231,18 @@ def _is_transient(exc: BaseException) -> bool:
         requests.ConnectionError,
         requests.Timeout,
         requests.exceptions.ChunkedEncodingError,
+        # The body was not JSON: empty, cut short, or a gateway's error page.
+        json.JSONDecodeError,
     )
     status = _status(exc)
-    return isinstance(exc, transport) or (status is not None and (status == 429 or status >= 500))
+    return isinstance(exc, transport) or (
+        status is not None and (status in _RETRY_STATUS or status >= 500)
+    )
+
+
+def _is_unusable_url(exc: BaseException) -> bool:
+    kinds = requests.exceptions
+    return isinstance(exc, kinds.InvalidURL | kinds.MissingSchema | kinds.InvalidSchema)
 
 
 class _ErrorTap(BaseProvider):
@@ -246,7 +269,11 @@ class _ErrorTap(BaseProvider):
 
 
 class Rpc:
-    """A node on one chain: block headers, and contract calls at a named block."""
+    """A node on one chain: block headers, and contract calls at a named block.
+
+    For one thread at a time: the error of the last response and the chain
+    check are plain attributes.
+    """
 
     def __init__(
         self,
@@ -350,6 +377,7 @@ class Rpc:
         """Run one read, retrying a transient failure and translating every other one."""
         attempts = self._settings.attempts
         for attempt in range(1, attempts + 1):
+            _REDACTOR.scrub_logs()
             try:
                 return read()
             except Exception as exc:
@@ -365,7 +393,10 @@ class Rpc:
 
     def _translate(self, what: str, exc: Exception, *, last: bool) -> ChainError | None:
         """The error to raise for ``exc``, or ``None`` to try the read again."""
-        said = f"{type(exc).__name__}: {_REDACTOR.scrub(str(exc))}"
+        text = _REDACTOR.scrub(str(exc))
+        if len(text) > _MAX_QUOTE:
+            text = f"{text[:_MAX_QUOTE]}... ({len(text) - _MAX_QUOTE} more characters)"
+        said = f"{type(exc).__name__}: {text}"
         if isinstance(exc, _Web3BlockNotFound):
             return BlockNotFound(f"the node does not have {what}")
         if isinstance(exc, ContractLogicError | Web3RPCError):
@@ -390,6 +421,11 @@ class Rpc:
                     f"an archive node is needed ({said})"
                 )
             return RpcRejected(f"the node refused {what} ({said})")
+        if _is_unusable_url(exc):
+            # Its text is the URL, in pieces no scrubbing was registered for.
+            return RpcConfigError(
+                f"the endpoint URL cannot be requested ({type(exc).__name__}) on {what}"
+            )
         if _is_transient(exc):
             if not last:
                 return None
@@ -399,6 +435,13 @@ class Rpc:
         if isinstance(exc, requests.HTTPError):
             return RpcRejected(f"{what} failed ({said})")
         return MalformedResponse(f"{what} could not be read ({said})")
+
+
+class _HTTPProvider(HTTPProvider):
+    """``HTTPProvider``, except that printing it does not print its URL."""
+
+    def __str__(self) -> str:
+        return "RPC connection <redacted>"
 
 
 def http_provider(
@@ -414,11 +457,17 @@ def http_provider(
     url = (os.environ if env is None else env).get(settings.url_env, "").strip()
     if not url:
         raise RpcConfigError(f"the environment variable {settings.url_env} is not set")
-    if not url.startswith(("https://", "http://")) or not urlsplit(url).hostname:
+    try:
+        parts = urlsplit(url)
+        # Reading the port is what checks it.
+        usable = url.startswith(("https://", "http://")) and bool(parts.hostname) and parts.port != 0
+    except ValueError:
+        usable = False
+    if not usable:
         # The value is not quoted: a key pasted without its URL is still a key.
         raise RpcConfigError(f"the environment variable {settings.url_env} must hold an http(s) URL")
     _REDACTOR.register(url)
-    return HTTPProvider(
+    return _HTTPProvider(
         url,
         request_kwargs={"timeout": settings.timeout_seconds},
         # Retries are counted in Rpc._request alone.

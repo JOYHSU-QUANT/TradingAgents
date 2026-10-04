@@ -80,6 +80,8 @@ filterwarnings = [
 # be removed. ``contrib/replay`` (the offline scorecard, replay plan PR 1)
 # joined clean on 2026-09-23 with no pins; its tests are excluded because
 # the CI job installs mypy alone and the suites import pytest.
+# ``contrib/uniswap_v3``'s pure layers (``domain/`` and ``ports.py``) joined
+# clean on 2026-10-04; they import the standard library and each other only.
 files = [
     "contrib/hyperliquid_perp/common",
     "contrib/hyperliquid_perp/domains",
@@ -87,6 +89,8 @@ files = [
     "contrib/hyperliquid_perp/ports.py",
     "contrib/hyperliquid_perp/runtime",
     "contrib/replay",
+    "contrib/uniswap_v3/domain",
+    "contrib/uniswap_v3/ports.py",
 ]
 exclude = ["^contrib/replay/tests/"]
 python_version = "3.10"

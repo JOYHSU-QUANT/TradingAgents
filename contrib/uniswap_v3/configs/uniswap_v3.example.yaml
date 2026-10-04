@@ -1,0 +1,24 @@
+# Example configuration for contrib/uniswap_v3. Copy it to a *.local.yaml
+# beside this file (gitignored) and edit the copy.
+#
+# Tokens and pools are named by their keys in contrib/uniswap_v3/constants.py;
+# a config cannot supply an address. Unknown keys are refused.
+
+chain_id: 1                 # Ethereum mainnet
+quote_token: USDC           # prices and portfolio value are in this token
+tokens: [USDC, WETH, WBTC]
+pools:                      # <token0>/<token1>-<fee>, fee in hundredths of a basis point
+  - USDC/WETH-500
+  - WBTC/WETH-500
+
+# fixed_weights is a placeholder that drives the engine: hold these shares of
+# portfolio value, and rebalance when one is more than `band` (absolute
+# weight) away from its target. Numbers are quoted so no float digits are lost.
+strategy:
+  name: fixed_weights
+  params:
+    weights:
+      USDC: "0.5"
+      WETH: "0.3"
+      WBTC: "0.2"
+    band: "0.05"

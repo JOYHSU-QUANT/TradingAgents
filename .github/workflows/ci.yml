@@ -99,3 +99,23 @@ jobs:
           grep -v '^\.$' requirements.txt | pip install -r /dev/stdin
       - name: Run the research radar's and the replay package's suites
         run: pytest -q contrib/autoresearch/tests contrib/replay/tests
+
+  uniswap-v3:
+    name: uniswap_v3 tests (py3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (dev extras, then PyYAML)
+        # contrib/uniswap_v3 imports no other contrib package, so it needs
+        # none of the perp module's requirements. Its config loader reads
+        # YAML with PyYAML, which pyproject does not declare (the dev install
+        # brings it in only as a dependency of langchain-core), so it is
+        # named here, at the floor requirements.txt gives it.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" "PyYAML>=6.0"
+      - name: Run the Uniswap v3 package's suite
+        run: pytest -q contrib/uniswap_v3/tests

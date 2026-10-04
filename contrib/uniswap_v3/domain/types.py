@@ -85,8 +85,8 @@ def _require_amount(value: object, what: str, *, positive: bool = False) -> None
     ):
         bound = "positive" if positive else "non-negative"
         raise ValueError(
-            f"{what} must be a finite, {bound} Decimal between 1e-{_MAX_MAGNITUDE} and "
-            f"1e{_MAX_MAGNITUDE}, got {value!r}"
+            f"{what} must be a finite, {bound} Decimal from 1e-{_MAX_MAGNITUDE} to below "
+            f"1e{_MAX_MAGNITUDE + 1}, got {value!r}"
         )
 
 

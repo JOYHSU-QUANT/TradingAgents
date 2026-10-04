@@ -17,9 +17,9 @@ cannot supply an address, and :class:`UniswapConfig` itself refuses a token
 or pool that is not in those tables. Unknown keys are refused rather than
 ignored, so a typo cannot silently fall back to a default, and so is a key
 written twice, which YAML would otherwise settle in favour of the last. The
-strategy's ``params`` are
-kept as written: they belong to the strategy, which checks them when
-:func:`~.strategies.registry.build_strategy` builds it.
+strategy's ``params`` are not interpreted here: they belong to the strategy,
+which checks them when :func:`~.strategies.registry.build_strategy` builds
+it. They are kept as a read-only copy, so a list arrives as a tuple.
 
 A file named ``*.local.yaml`` is gitignored inside this package. The config
 holds no secret and names no environment variable yet; the RPC endpoint

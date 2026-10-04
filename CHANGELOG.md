@@ -862,8 +862,8 @@ Breaking changes within the 0.x line are called out explicitly.
   asks for its fixed weights again whenever a token's share of portfolio
   value is more than a band away from its target. The package imports no
   other package under `contrib/` and none imports it; `domain/` and
-  `ports.py` import the standard library only and are type-checked by the
-  CI mypy job. `tests/test_isolation.py` reads the sources to hold both
+  `ports.py` import the standard library and each other only, and are
+  type-checked by the CI mypy job. `tests/test_isolation.py` reads the sources to hold both
   rules. CI runs the package's suite in a new job, `uniswap_v3 tests
   (py3.12)`.
 

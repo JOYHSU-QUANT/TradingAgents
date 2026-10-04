@@ -856,7 +856,8 @@ Breaking changes within the 0.x line are called out explicitly.
   (`store/bar_source.py`): each token priced in the quote token through the
   configured pools, and suspect when a pool's close is further from its TWAP
   than `bars.max_twap_deviation` (5%), its block turned out not to be on
-  the final chain, or the pools' readings disagree on the close block. A gap in the series and a move beyond `bars.max_move`
+  the final chain, or the pools' readings disagree on the close block. A gap
+  in the series and a move beyond `bars.max_move`
   (50%) are flagged and do not make a bar suspect. The flags are worked out
   when a bar is read, from the readings and the config's limits; they are
   not stored, and nothing is deleted. `backfill` can be repeated: a boundary
@@ -868,7 +869,8 @@ Breaking changes within the 0.x line are called out explicitly.
   back the window) leaves its boundary unwritten and the run goes on, with a
   warning on stderr; any other chain error ends the run, exit 3 when a later
   run may succeed (the node could not be reached, is behind, or answered a
-  read with an error) and 1 otherwise. `backfill` refuses a range that starts before
+  read with an error) and 1 otherwise. `backfill` refuses a range that
+  starts before
   `constants.EARLIEST_BAR_TIME`. `BlockHeader` now carries the block's hash.
   The config's new optional `rpc.url_env` names the environment variable the
   node's URL is read from; a value that is not a variable's name is refused

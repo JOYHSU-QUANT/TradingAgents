@@ -4,9 +4,10 @@ The classes are grouped by what a caller can do about each:
 
 - :class:`TransientChainError`, try again later: :class:`RpcUnavailable`
   and :class:`BlockNotFound`.
-- :class:`UnansweredRead`, this read has no answer and asking again will not
-  change that: :class:`CallReverted`, :class:`InsufficientLiquidity`,
-  :class:`MalformedResponse` and :class:`RpcRejected`.
+- :class:`UnansweredRead`, this read has no answer: :class:`CallReverted`,
+  :class:`InsufficientLiquidity`, :class:`MalformedResponse` and
+  :class:`RpcRejected`. Asking again will not change the first three; the
+  last may be the node's bad moment.
 - :class:`RpcConfigError`, no read will work until the setup is fixed.
 
 The messages never hold the RPC URL: :class:`~.rpc.Rpc` scrubs it from the
@@ -64,7 +65,13 @@ class BlockNotFound(TransientChainError):
 
 
 class RpcRejected(UnansweredRead):
-    """The node answered, and the answer was an error."""
+    """The node answered, and the answer was an error.
+
+    Which kind is not known: a request the node will never accept, or a
+    node having a bad moment. A caller must not take it for an answer about
+    the chain; the command line stops and exits as it does for a transient
+    failure, leaving the retry to whoever scheduled it.
+    """
 
 
 class CallReverted(UnansweredRead):

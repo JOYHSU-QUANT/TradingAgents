@@ -182,6 +182,29 @@ def test_boundaries_without_an_answer_exit_0_with_a_warning_on_stderr(node, tmp_
     )
 
 
+def test_what_a_node_said_is_reported_on_one_ascii_line(node, tmp_path, capsys):
+    close = block_at(FIRST_DAY + DAY) - 1
+    node.reverts.add((_WBTC_WETH.address.lower(), close))
+    node.revert_message = "execution reverted: vieuxé\nforged line"
+    code, lines = _backfill(tmp_path / "store.db")
+    assert code == cli.EXIT_OK
+    assert len(lines) == 5
+    assert "vieux" in lines[2] and lines[2].isascii() and "\n" not in lines[2]
+    capsys.readouterr()
+    assert cli._one_ascii_line("vieuxé\nforged  line") == "vieux\\xe9 forged line"
+
+
+def test_a_time_the_platform_cannot_print_back_is_refused(monkeypatch, capsys):
+    def unprintable(time: int) -> str:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(cli, "_iso", unprintable)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["backfill", "--config", "c.yaml", "--db", "s.db", "--from", "2024-01-01"])
+    assert exit_info.value.code == 2
+    assert "is outside the times supported" in capsys.readouterr().err
+
+
 def test_backfill_connects_with_the_variable_the_config_names(node, tmp_path):
     named = tmp_path / "named.yaml"
     named.write_text(

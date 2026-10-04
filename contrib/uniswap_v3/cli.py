@@ -82,6 +82,16 @@ def _iso(time: int) -> str:
     return datetime.fromtimestamp(time, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _one_ascii_line(text: str) -> str:
+    """``text`` as one printable line.
+
+    A report line quotes what a node said. That need not be ASCII, which a
+    console may be unable to print, and a line break in it would read as a
+    second report line.
+    """
+    return " ".join(text.split()).encode("ascii", "backslashreplace").decode()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m contrib.uniswap_v3", description="Uniswap v3 spot execution."
@@ -165,11 +175,7 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             config,
             start=args.start,
             end=end,
-            # What a node said is quoted in the text; it need not be ASCII,
-            # and a console may not be able to print it.
-            report=lambda time, text: out(
-                f"{_iso(time)}  {text.encode('ascii', 'backslashreplace').decode()}"
-            ),
+            report=lambda time, text: out(f"{_iso(time)}  {_one_ascii_line(text)}"),
         )
     out(
         f"wrote {summary.written} bar(s); {summary.already_stored} already stored, "

@@ -56,7 +56,6 @@ def block_at(time: int) -> int:
 _SLOT0 = "0x" + Web3.keccak(text="slot0()")[:4].hex()
 _OBSERVE = "0x" + Web3.keccak(text="observe(uint32[])")[:4].hex()
 _SLOT0_TYPES = ["uint160", "int24", "uint16", "uint16", "uint16", "uint8", "bool"]
-_REVERT = {"error": {"code": 3, "message": "execution reverted: OLD"}}
 
 
 def sqrt_price_at(tick: int) -> int:
@@ -101,7 +100,8 @@ class FakeNode:
     - ``slot0`` and ``twap_tick``: ``(pool address in lowercase, block)`` to
       what the pool answers there, in place of the defaults.
     - ``reverts``: the ``(pool address in lowercase, block)`` pairs whose
-      ``observe`` reverts, and ``slot0_reverts`` those whose ``slot0`` does.
+      ``observe`` reverts, and ``slot0_reverts`` those whose ``slot0`` does;
+      ``revert_message`` is what the node says when one does.
     - ``errors``: ``block`` to the JSON-RPC error every ``eth_call`` at that
       block gets.
     - ``hashes`` and ``times``: ``block`` to a hash or timestamp in place of
@@ -118,6 +118,7 @@ class FakeNode:
         self.twap_tick: dict[tuple[str, int], int] = {}
         self.reverts: set[tuple[str, int]] = set()
         self.slot0_reverts: set[tuple[str, int]] = set()
+        self.revert_message = "execution reverted: OLD"
         self.errors: dict[int, dict[str, Any]] = {}
         self.hashes: dict[int, str] = {}
         self.times: dict[int, int] = {}
@@ -135,6 +136,9 @@ class FakeNode:
             if method == "eth_call" and int(params[1], 16) == block
         )
 
+    def _revert(self) -> dict[str, Any]:
+        return {"error": {"code": 3, "message": self.revert_message}}
+
     def _respond(self, method: str, params: Any) -> dict[str, Any]:
         if method == "eth_getBlockByNumber":
             number = self.head if params[0] == "latest" else int(params[0], 16)
@@ -150,14 +154,14 @@ class FakeNode:
             key = (call["to"].lower(), block)
             if call["data"].startswith(_SLOT0):
                 if key in self.slot0_reverts:
-                    return _REVERT
+                    return self._revert()
                 sqrt_price_x96, tick = self.slot0.get(key, self.default_slot0)
                 return {
                     "result": encoded(_SLOT0_TYPES, [sqrt_price_x96, tick, 0, 1, 1, 0, True])
                 }
             if call["data"].startswith(_OBSERVE):
                 if key in self.reverts:
-                    return _REVERT
+                    return self._revert()
                 # The window is the first of the two ages asked for.
                 window = int(call["data"][10 + 64 * 2 : 10 + 64 * 3], 16)
                 mean = self.twap_tick.get(key, self.default_twap_tick)

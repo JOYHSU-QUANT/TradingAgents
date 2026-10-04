@@ -855,23 +855,33 @@ Breaking changes within the 0.x line are called out explicitly.
   counts them, a warning on stderr names the first and last, and the exit
   code stays 0; a range without a single bar exits 1. The same command run
   again decides nothing twice, and a stored run is carried on without its
-  opening balances. `report --db <file> --run-id <id>` prints a run of any
+  opening balances. A run only goes forward: carrying one on from a `--from`
+  that would leave stored bars undecided behind it exits 1, and so does a
+  bar that was backfilled after the run had passed its boundary. `backtest`
+  also warns on stderr, still exiting 0, when bars were decided on readings
+  that were not final yet, when a bar decided earlier now reads differently
+  in the store, and when rebalances were rejected because the gas balance
+  ran out. `report --db <file> --run-id <id>` prints a run of any
   mode: its decisions by outcome, and its start, end, return and maximum
   drawdown beside two comparisons (the opening balances left untouched, and
   the opening value held in the quote token), then rebalances, swaps, the
   value sold, turnover and the costs split into pool fees, slippage and gas
   (`domain/metrics.py`). Equity is the value of the traded balances less the
   gas paid so far, each fill's gas valued at its bar's WETH price; the gas
-  balance itself is not counted. Suspect bars are left out of the curves.
+  balance itself is not counted. Suspect bars are left out of the curves,
+  and the two comparisons pay no cost. `report` reads its rows in one
+  transaction, so it can be run while a backtest is writing.
   `report` takes the run's config from the run, not from a file. A skipped
   decision now says why its bar was suspect: `reason` names every cause and
-  `reason_code` is `reorged`, `close_block_mismatch`, `twap_deviation` or
-  `unspecified` (`SkipCode`), the first that applies in that order. A
+  `reason_code` (`SkipCode`) is the gravest of them, in the order
+  `reorged`, `close_block_mismatch`, `twap_deviation`; a bar handed to the
+  step with no reason gets `unspecified`. A
   skipped decision stored without one no longer reads; no command wrote a
   run before this one. The store is now kept in SQLite's write-ahead log
   mode, so an open store has a `-wal` and a `-shm` file beside it; every
   command still syncs each commit to disk except `backtest`, whose rows can
-  be made again.
+  be made again. A store file that cannot be written is left in the mode
+  it has, so `status` and `report` still read a read-only copy.
 
 - **`contrib/uniswap_v3`: the engine's step, offline (`engine/`).** The
   package can now decide a bar: `Engine.step` takes the bars up to the one

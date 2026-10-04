@@ -103,6 +103,36 @@ def test_a_run_worked_by_hand():
     assert metrics.turnover == D("5996") / D("9992.5")
 
 
+def test_a_swap_through_two_pools_pays_both_fees_and_a_bar_adds_up_its_swaps_gas():
+    other = "0x" + "12" * 20
+    # 4000 USDC through a 0.05% and a 0.3% pool: 2 kept, then 11.994 of the 3998 left.
+    two_hop = FillRecord(
+        time=1,
+        leg=0,
+        token_in="USDC",
+        token_out="WETH",
+        route=(_POOL, other),
+        amount_in=D("4000"),
+        min_amount_out=D("0"),
+        amount_out=D("1.99"),
+        gas_cost_eth=D("0.001"),
+        block=1,
+    )
+    second = replace(_fill(1, "USDC", "1000", "0.4995", "0.002"), leg=1)
+    metrics = _metrics(
+        valuations=[_valuation(1, "5000", "2.4895", "2000", gas="0.997")],
+        fills=[two_hop, second],
+        fee_rates={_POOL: D("0.0005"), other: D("0.003")},
+    )
+    assert metrics.costs.pool_fees == D("13.994") + D("0.5")
+    # 3986.006 left of the first swap against 3980 out, and 999.5 against 999.
+    assert metrics.costs.slippage == D("6.006") + D("0.5")
+    # Both swaps' gas, 0.003 ETH at 2000, comes off the one bar's equity.
+    assert metrics.costs.gas == D("6")
+    assert metrics.strategy.end == D("9979") - D("6")
+    assert (metrics.rebalances, metrics.swaps) == (1, 2)
+
+
 def test_the_gas_balance_is_no_part_of_equity():
     # Ten times the gas float, and the same gas spent: the same curve.
     richer = [
@@ -181,6 +211,7 @@ def test_gas_paid_in_the_quote_token_is_valued_as_it_is():
         ),
         ({"valuations": []}, "no valuation to measure it on"),
         ({"valuations": [_VALUATIONS[1], _VALUATIONS[0]]}, "follows the one at"),
+        ({"valuations": [_VALUATIONS[0], _VALUATIONS[0]]}, "follows the one at"),
         ({"valuations": _VALUATIONS[1:]}, "the fill at 1 is of a bar that has no valuation"),
         ({"fee_rates": {}}, "crosses the pool .* whose fee is not known"),
         ({"gas_token": "ETH"}, "the valuation at 1 has no price for ETH"),

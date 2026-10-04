@@ -459,11 +459,23 @@ def test_a_strategy_the_registry_refuses_is_a_config_error(store):
     ):
         config = replace(_CONFIG, strategy=spec)
         run_id = f"run-{spec.name}-{len(spec.params)}"
-        start_run(
-            store, config, run_id=run_id, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0
-        )
+        # No run is started under it: the run could never be opened.
         with pytest.raises(ConfigError, match=match):
-            open_engine(store, config, ModelExecutor("USDC", config.execution), run_id=run_id)
+            start_run(
+                store, config, run_id=run_id, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0
+            )
+        assert store.run(run_id) is None
+
+
+def test_a_run_whose_strategy_can_no_longer_be_built_is_not_opened(store, monkeypatch):
+    start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
+
+    def refuse(name, params):
+        raise ValueError(f"unknown strategy {name!r}")
+
+    monkeypatch.setattr(step_module, "build_strategy", refuse)
+    with pytest.raises(ConfigError, match="strategy: unknown strategy 'fixed_weights'"):
+        open_engine(store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN)
 
 
 def test_a_run_cannot_be_started_twice_or_over_other_tokens(store):

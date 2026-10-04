@@ -2,8 +2,8 @@
 
 The engine step is the same in every :class:`~.domain.types.RunMode`; what
 differs is the adapter behind each of these ``Protocol`` classes. A backtest
-replays stored bars under a scripted clock and fills from a model, a paper
-run reads the chain and fills from quotes, and a fork or live run signs.
+replays stored bars and fills from a model, a paper run reads the chain and
+fills from quotes, and a fork or live run signs.
 :class:`Strategy` is the only way a strategy enters the package, and
 :class:`Journal` is where every mode writes what it decided.
 
@@ -145,7 +145,7 @@ class GasOracle(Protocol):
 
 @runtime_checkable
 class Clock(Protocol):
-    """The engine's notion of now; a backtest advances a scripted one bar by bar."""
+    """The notion of now, for a mode that waits on the clock; a backtest has no use for one."""
 
     def now(self) -> int:
         """The current time."""

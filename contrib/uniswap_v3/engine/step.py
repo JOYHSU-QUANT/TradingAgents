@@ -30,8 +30,8 @@ fails, or answers for another swap than the one it was handed; a ledger
 that does not hold exactly the configured tokens; swaps that cannot be
 planned, or that sell more than the ledger holds; a ``seen`` that describes
 another block than the bar's; a ``suspicion`` of a bar that is not suspect;
-a bar before the latest one the run has decided. The bar is left undecided, so it can be decided once the cause is
-fixed.
+a bar before the latest one the run has decided. The bar is left undecided,
+so it can be decided once the cause is fixed.
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ class Engine:
             # A run only goes forward: the bars after this one were decided without it in view.
             raise EngineError(
                 f"the run {self.run_id!r} has decided the bar at {latest}, and the bar at "
-                f"{bar.time} is before it; a bar that turns up after the run has passed it "
+                f"{bar.time} is before it; a run only goes forward, so an earlier bar "
                 f"needs a new run"
             )
         ledger = self.journal.ledger(self.run_id)
@@ -256,6 +256,14 @@ class Engine:
         return StepResult(decision, already_run=False)
 
 
+def _strategy(config: UniswapConfig) -> Strategy:
+    """The config's strategy, built; one the registry refuses is a :class:`~..config.ConfigError`."""
+    try:
+        return build_strategy(config.strategy.name, config.strategy.params)
+    except ValueError as exc:
+        raise ConfigError(f"strategy: {exc}") from exc
+
+
 def start_run(
     journal: Journal,
     config: UniswapConfig,
@@ -271,7 +279,10 @@ def start_run(
     the run starts without, though not all at zero: a run that holds nothing
     can never trade. No balance has more decimal places than its token, nor
     the gas balance more than ETH. The config's snapshot is kept with the run.
+    A config whose strategy cannot be built starts no run: the run could
+    never be opened, and its id would be taken.
     """
+    _strategy(config)
     symbols = {token.symbol for token in config.tokens}
     if set(ledger.balances) != symbols:
         raise EngineError(
@@ -363,10 +374,10 @@ def open_engine(
             f"the run {run_id!r} was started under another config; a changed config "
             f"needs a new run"
         )
-    try:
-        strategy = build_strategy(config.strategy.name, config.strategy.params)
-    except ValueError as exc:
-        raise ConfigError(f"strategy: {exc}") from exc
     return Engine(
-        run_id=run_id, config=config, strategy=strategy, executor=executor, journal=journal
+        run_id=run_id,
+        config=config,
+        strategy=_strategy(config),
+        executor=executor,
+        journal=journal,
     )

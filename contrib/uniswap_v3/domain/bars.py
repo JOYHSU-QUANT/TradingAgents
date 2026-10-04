@@ -35,7 +35,6 @@ from .types import Bar, Pool, Token
 
 __all__ = [
     "MAX_TWAP_WINDOW_SECONDS",
-    "SUSPECT_FLAGS",
     "BarFlag",
     "BarSettings",
     "Finality",
@@ -79,12 +78,6 @@ class BarFlag(str, Enum):
     GAP = "gap"
     # The close price moved more than the limit since the reading before.
     LARGE_MOVE = "large_move"
-
-
-# The flags that make a bar suspect, which the engine does not trade on. A
-# gap and a large move are reported and left to whoever reads the report: a
-# market can move that far, and a bar after a gap is still a true reading.
-SUSPECT_FLAGS: Final = frozenset({BarFlag.TWAP_DEVIATION, BarFlag.REORGED})
 
 
 def _is_int(value: object, *, minimum: int = 0) -> bool:
@@ -317,6 +310,12 @@ def suspect_causes(
 ) -> tuple[tuple[SuspectCause, Pool | None], ...]:
     """Every cause the bar of ``readings`` is suspect for, the gravest first; none when it is not.
 
+    A reading that is ``REORGED``, by its flag or its finality, or whose
+    close is too far from its TWAP makes its bar suspect, and so do readings
+    that do not agree on the close block. A gap and a large move do not:
+    they are reported and left to whoever reads the report, since a market
+    can move that far and a bar after a gap is still a true reading.
+
     A cause comes with the pool whose reading it was found on, and the
     disagreement on the close block, which is no one pool's, with ``None``.
     The arguments are :func:`assemble_bar`'s, which holds a bar suspect
@@ -351,10 +350,9 @@ def assemble_bar(
     ``readings`` and ``flags`` are in the order of ``pools``, one each, all
     at the same boundary of the same series; the flags are what
     :func:`pool_bar_flags` found on each reading. The bar is suspect when
-    any reading carries one of :data:`SUSPECT_FLAGS` or is ``REORGED``, and
-    when the readings do not agree on the close block: at most one of them
-    then describes the block the boundary closed on, and the bar carries
-    the highest of the blocks.
+    :func:`suspect_causes` finds a cause. When the readings do not agree on
+    the close block, at most one of them describes the block the boundary
+    closed on, and the bar carries the highest of the blocks.
     """
     if not pools or len(pools) != len(readings) or len(flags) != len(readings):
         raise ValueError(

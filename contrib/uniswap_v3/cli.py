@@ -29,8 +29,12 @@ whose node has not reached a boundary that passed five minutes or more
 ago exits 3: the node's head is behind. A ``backtest`` that ran to its end
 exits 0 even when boundaries of its range had no bar: they are not decided,
 its first line counts them, and a warning on stderr gives the first and
-last of them. A range without a single bar exits 1, and so does carrying a
-run on over a boundary that was given its bar after the run had passed it.
+last of them. It warns on stderr as well, and still exits 0, when bars were
+decided on readings that were not final yet, when a bar decided earlier now
+reads differently in the store, and when rebalances were rejected for want
+of gas. A range without a single bar exits 1, and so does carrying a run on
+in a way that would leave a stored bar undecided behind it: from a later
+``--from``, or over a boundary given its bar after the run had passed it.
 """
 
 from __future__ import annotations
@@ -400,25 +404,54 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
         f"decided, {len(summary.missing)} without a bar"
     )
     out(_outcome_counts(summary.outcomes))
+    warnings = []
     if summary.missing:
-        print(
-            f"warning: {len(summary.missing)} boundary(ies) without a bar, from "
-            f"{_iso(summary.missing[0])} to {_iso(summary.missing[-1])}; they were not decided, "
-            f"and once one is backfilled the range needs a new run",
-            file=sys.stderr,
+        warnings.append(
+            f"{len(summary.missing)} boundary(ies) without a bar, from "
+            f"{_iso(summary.missing[0])} to {_iso(summary.missing[-1])}; they were not decided. "
+            f"One that is backfilled later is decided by a rerun only if the run has not gone "
+            f"past it; otherwise the range needs a new run"
         )
+    if summary.on_pending:
+        warnings.append(
+            f"{summary.on_pending} bar(s) were decided on readings that are not final yet; a "
+            f"decision stands even if the chain later drops the block it was made on"
+        )
+    if summary.changed:
+        warnings.append(
+            f"{len(summary.changed)} bar(s) decided earlier now read differently in the store "
+            f"(another close block, or suspect where they were not), from "
+            f"{_iso(summary.changed[0])} to {_iso(summary.changed[-1])}; their decisions stand, "
+            f"and a new run decides them on what the store holds now"
+        )
+    if summary.gas_rejected:
+        warnings.append(
+            f"{len(summary.gas_rejected)} rebalance(s) were rejected because the gas balance "
+            f"did not cover them, the first at {_iso(summary.gas_rejected[0])}; nothing tops a "
+            f"run's gas balance up"
+        )
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
     return EXIT_OK
 
 
+def _fixed(value: Decimal, *, signed: bool = False) -> str:
+    """``value`` to two decimal places, with its sign when ``signed``, and never a negative zero."""
+    text = f"{value:+.2f}" if signed else f"{value:.2f}"
+    if text.strip("+-0."):
+        return text
+    return ("+" if signed else "") + text.lstrip("+-")
+
+
 def _curve_line(name: str, curve: Curve) -> str:
-    return (
-        f"{name:<18}{curve.start:>14.2f}{curve.end:>14.2f}{curve.total_return * 100:>+10.2f}%"
-        f"{curve.max_drawdown * 100:>13.2f}%"
-    )
+    change = _fixed(curve.total_return * 100, signed=True) + "%"
+    fall = _fixed(curve.max_drawdown * 100) + "%"
+    return f"{name:<18}{_fixed(curve.start):>14}{_fixed(curve.end):>14}{change:>11}{fall:>14}"
 
 
 def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
-    with open_store(args.db, create=False) as store:
+    # One view for the three reads: a backtest may be writing the run meanwhile.
+    with open_store(args.db, create=False) as store, store.reading():
         run = store.run(args.run_id)
         if run is None:
             raise StoreError(f"there is no run {args.run_id!r} in the store")
@@ -428,12 +461,18 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     config = config_from_snapshot(run.config)
     # A suspect bar's prices are not to be trusted, so its valuation is not measured.
     suspect = {decision.time for decision in decisions if decision.suspect}
+    measured = [valuation for valuation in valuations if valuation.time not in suspect]
+    if decisions and not measured:
+        raise MetricsError(
+            f"every one of the run's {len(decisions)} decided bar(s) was suspect, so there "
+            f"is none to measure it on"
+        )
     quote = run.quote
     metrics = run_metrics(
         quote=quote,
         gas_token=WRAPPED_NATIVE[config.chain_id].symbol,
         opening=run.ledger,
-        valuations=[valuation for valuation in valuations if valuation.time not in suspect],
+        valuations=measured,
         fills=fills,
         fee_rates={pool.address: pool.fee_rate for pool in config.pools},
     )
@@ -451,20 +490,23 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         )
         if codes:
             out(f"{outcome.value}: {_counts(codes)}")
-    if suspect:
-        out(f"measured on the {metrics.bars} bar(s) that were not suspect")
+    days = Decimal(measured[-1].time - measured[0].time) / 86_400
+    left_out = f"; {len(suspect)} suspect bar(s) left out" if suspect else ""
+    out(f"measured on {metrics.bars} bar(s) over {_fixed(days)} day(s){left_out}")
     out(f"{'':<18}{'start':>14}{'end':>14}{'return':>11}{'max drawdown':>14}")
     out(_curve_line("strategy", metrics.strategy))
     out(_curve_line("opening balances", metrics.opening_held))
     out(_curve_line(f"all in {quote}", metrics.all_quote))
+    out("the two comparisons pay no cost")
     out(
         f"{metrics.rebalances} rebalance(s), {metrics.swaps} swap(s); "
-        f"{metrics.traded_value:.2f} {quote} sold, {metrics.turnover:.2f} times the mean equity"
+        f"{_fixed(metrics.traded_value)} {quote} sold, {_fixed(metrics.turnover)} times the "
+        f"mean equity"
     )
     costs = metrics.costs
     out(
-        f"costs: {costs.total:.2f} {quote} (pool fees {costs.pool_fees:.2f}, slippage "
-        f"{costs.slippage:.2f}, gas {costs.gas:.2f} for {plain(costs.gas_eth)} ETH)"
+        f"costs: {_fixed(costs.total)} {quote} (pool fees {_fixed(costs.pool_fees)}, slippage "
+        f"{_fixed(costs.slippage)}, gas {_fixed(costs.gas)} for {plain(costs.gas_eth)} ETH)"
     )
     return EXIT_OK
 

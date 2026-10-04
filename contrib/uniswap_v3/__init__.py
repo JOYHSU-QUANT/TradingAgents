@@ -11,15 +11,18 @@ hold that). It is also strategy-agnostic: a strategy enters only through
 :class:`~.ports.Strategy`, and the one strategy shipped here,
 ``fixed_weights``, is a placeholder that drives the engine and its tests.
 
-What exists so far is the skeleton, the chain reader, the bar store and the
-engine's step: the value types, the pool price conversion, the routing and
-the ledger (:mod:`.domain`), the ports, the address tables
+What exists so far is the skeleton, the chain reader, the bar store, the
+engine's step and the backtest: the value types, the pool price conversion,
+the routing, the ledger and the run metrics (:mod:`.domain`), the ports,
+the address tables
 (:mod:`.constants`), the config loader, the strategy registry, reads of
 blocks, pool prices, quotes and the base fee from a node (:mod:`.chain`), an
 SQLite store of each pool's reading at every bar boundary and of what each
-run decided (:mod:`.store`), the step that decides one bar and an executor
-that fills from the bar alone (:mod:`.engine`), and two commands
-(:mod:`.cli`): ``backfill`` fills the store from an archive node and
-``status`` prints what it holds. No command runs the engine yet, and nothing
-here holds a key or signs a transaction.
+run decided (:mod:`.store`), the step that decides one bar, an executor
+that fills from the bar alone and the loop that replays stored bars through
+the step (:mod:`.engine`), and four commands (:mod:`.cli`): ``backfill``
+fills the store from an archive node, ``status`` prints what it holds,
+``backtest`` replays stored bars through the engine with modelled fills, and
+``report`` prints a run's return, drawdown and costs. Nothing here holds a
+key or signs a transaction.
 """

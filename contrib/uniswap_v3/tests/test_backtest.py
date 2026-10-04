@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from contrib.uniswap_v3.config import StrategySpec
+from contrib.uniswap_v3.config import ConfigError, StrategySpec
 from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.records import BarSeen, Outcome, SkipCode
 from contrib.uniswap_v3.domain.types import RunMode
@@ -205,7 +205,7 @@ def test_a_run_does_not_go_back_to_a_boundary_given_its_bar_later(store):
     assert _backtest(store).missing == (_day(2),)
     _put(store, 2)
 
-    with pytest.raises(EngineError, match="after the run has passed it needs a new run"):
+    with pytest.raises(EngineError, match="an earlier bar needs a new run"):
         _backtest(store)
     assert store.decision(_RUN, _day(2)) is None
     # The range is replayed as a new run, which sees the bar.
@@ -300,6 +300,54 @@ def test_a_backtest_does_not_carry_on_a_run_of_another_mode(store):
     with pytest.raises(EngineError, match="is a paper run, and is not carried on as a backtest"):
         _backtest(store, run_id="paper")
     assert store.last_decided("paper") is None
+
+
+def test_a_range_that_would_leave_stored_bars_undecided_behind_it_is_refused(store):
+    _put_days(store, [DEFAULT_TICK] * 5)
+    _backtest(store, end=_day(1))
+    with pytest.raises(
+        EngineError,
+        match=f"the 2 stored bar\\(s\\) between them, the first at {_day(2)}, would be left",
+    ):
+        _backtest(store, opening=None, start=_day(4))
+    assert store.last_decided(_RUN) == _day(1)
+    # From the bar after the latest decided one, or from any earlier, the run is carried on.
+    assert _backtest(store, opening=None, start=_day(2), end=_day(2)).decided == 1
+    assert _backtest(store, opening=None, start=_day(1)).decided == 2
+
+
+def test_the_summary_counts_readings_not_final_and_ones_that_changed_since(store):
+    _put(store, 0)
+    _put(store, 1, finality=Finality.PENDING)
+    _put(store, 2)
+
+    summary = _backtest(store)
+
+    assert (summary.on_pending, summary.changed) == (1, ())
+    assert store.decision(_RUN, _day(1)).seen.finality is Finality.PENDING
+
+    store.set_finality(store.pending_bars(1), Finality.REORGED)
+    again = _backtest(store)
+    assert (again.decided, again.on_pending, again.changed) == (0, 0, (_day(1),))
+    # The decision stands, and a new run skips the bar.
+    assert store.decision(_RUN, _day(1)).outcome is Outcome.HOLD
+    assert _backtest(store, run_id="again").outcomes[Outcome.SKIPPED_SUSPECT] == 1
+
+
+def test_the_summary_names_the_rebalances_rejected_for_want_of_gas(store):
+    _put_days(store, [DEFAULT_TICK, DEFAULT_TICK, _UP_HALF])
+    summary = _backtest(store, opening=_ledger(gas="0.004"))
+    assert summary.outcomes == {Outcome.FILLED: 1, Outcome.HOLD: 1, Outcome.REJECTED: 1}
+    assert summary.gas_rejected == (_day(2),)
+    assert _backtest(store, opening=None).gas_rejected == (_day(2),)
+
+
+def test_a_config_whose_strategy_cannot_be_built_starts_no_run(store):
+    _put_days(store, [DEFAULT_TICK] * 2)
+    unbuildable = replace(_CONFIG, strategy=StrategySpec("fixed_weights", {"band": "wide"}))
+    with pytest.raises(ConfigError, match="strategy: "):
+        _backtest(store, config=unbuildable)
+    assert store.run(_RUN) is None
 
 
 def test_a_strategy_that_raises_stops_the_backtest_and_keeps_what_was_decided(store, monkeypatch):

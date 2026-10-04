@@ -51,7 +51,8 @@ class Curve:
     """A value over the run's bars: where it started and ended, and its deepest fall.
 
     ``max_drawdown`` is the largest fall from an earlier peak, as a fraction
-    of that peak: ``Decimal("0.25")`` is a fall of 25%.
+    of that peak: ``Decimal("0.25")`` is a fall of 25%. It is never negative,
+    and is above 1 only for a value that fell below zero.
     """
 
     start: Decimal

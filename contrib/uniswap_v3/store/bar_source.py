@@ -42,7 +42,7 @@ class StoredBar:
     bar: Bar
     readings: tuple[PoolBar, ...]
     flags: tuple[frozenset[BarFlag], ...]
-    suspicion: Suspicion | None = None
+    suspicion: Suspicion | None
 
     @property
     def finality(self) -> Finality:
@@ -76,7 +76,13 @@ def _suspicion(
     causes = suspect_causes(pools, readings, flags)
     if not causes:
         return None
-    closes = ", ".join(str(block) for block in sorted({reading.close_block for reading in readings}))
+    # A hash is cut to its first eight digits: enough to tell two blocks of one number apart.
+    closes = ", ".join(
+        f"{block} {block_hash[:10]}"
+        for block, block_hash in sorted(
+            {(reading.close_block, reading.close_block_hash) for reading in readings}
+        )
+    )
     words = {
         SuspectCause.REORGED: "its close block is not on the final chain",
         SuspectCause.TWAP_DEVIATION: "its close price is further from its TWAP than the limit",

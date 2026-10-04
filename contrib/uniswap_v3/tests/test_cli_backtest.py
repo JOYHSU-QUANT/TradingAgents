@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from contrib.uniswap_v3 import cli
 from contrib.uniswap_v3.config import load_config
+from contrib.uniswap_v3.domain.bars import Finality
+from contrib.uniswap_v3.domain.metrics import run_metrics
 from contrib.uniswap_v3.domain.types import RunMode
 from contrib.uniswap_v3.engine.step import start_run
-from contrib.uniswap_v3.store.repository import open_store
+from contrib.uniswap_v3.store.repository import Store, open_store
 from contrib.uniswap_v3.tests.fakes.engine import ledger as _ledger
 from contrib.uniswap_v3.tests.fakes.node import (
     BTC_TICK,
@@ -107,9 +111,54 @@ def test_boundaries_without_a_bar_exit_0_with_a_warning_on_stderr(tmp_path, caps
     assert lines[0].endswith("2 decided, 0 already decided, 2 without a bar")
     assert capsys.readouterr().err == (
         "warning: 2 boundary(ies) without a bar, from 2024-01-02T00:00:00Z to "
-        "2024-01-03T00:00:00Z; they were not decided, and once one is backfilled the range "
-        "needs a new run\n"
+        "2024-01-03T00:00:00Z; they were not decided. One that is backfilled later is "
+        "decided by a rerun only if the run has not gone past it; otherwise the range needs a "
+        "new run\n"
     )
+
+
+def test_backtest_warns_of_readings_not_final_and_of_ones_that_changed_since(tmp_path, capsys):
+    db = tmp_path / "store.db"
+    with open_store(db) as store:
+        put_day(store, 0)
+        put_day(store, 1, finality=Finality.PENDING)
+    code, _ = _backtest(db, *_OPENING)
+    assert code == cli.EXIT_OK
+    assert capsys.readouterr().err == (
+        "warning: 1 bar(s) were decided on readings that are not final yet; a decision stands "
+        "even if the chain later drops the block it was made on\n"
+    )
+    # The chain dropped that block: the bar is suspect now, and was decided as if it were not.
+    with open_store(db) as store:
+        store.set_finality(store.pending_bars(1), Finality.REORGED)
+    code, lines = _backtest(db)
+    assert code == cli.EXIT_OK
+    assert lines[0].endswith("0 decided, 2 already decided, 0 without a bar")
+    assert capsys.readouterr().err == (
+        "warning: 1 bar(s) decided earlier now read differently in the store (another close "
+        "block, or suspect where they were not), from 2024-01-02T00:00:00Z to "
+        "2024-01-02T00:00:00Z; their decisions stand, and a new run decides them on what the "
+        "store holds now\n"
+    )
+
+
+def test_backtest_warns_when_the_gas_balance_runs_out(db, capsys):
+    code, lines = _backtest(db, "--balance", "USDC=10000", "--gas-eth", "0.004")
+    assert code == cli.EXIT_OK
+    # The first rebalance costs 0.00315 ETH and the next is not covered; with the rise
+    # undone on the last day, the balances left as they were are back on target.
+    assert lines[1] == "filled 1, hold 2, no_trade 0, rejected 1, skipped_suspect 0"
+    assert capsys.readouterr().err == (
+        "warning: 1 rebalance(s) were rejected because the gas balance did not cover them, "
+        "the first at 2024-01-03T00:00:00Z; nothing tops a run's gas balance up\n"
+    )
+
+
+def test_carrying_a_run_on_from_a_later_start_exits_1(db, capsys):
+    _backtest(db, *_OPENING, "--to", "2024-01-01")
+    code, lines = _backtest(db, start="2024-01-03")
+    assert code == cli.EXIT_FAILED and lines == []
+    assert "the 1 stored bar(s) between them" in capsys.readouterr().err
 
 
 def test_opening_balances_no_chain_could_hold_exit_1(db, capsys):
@@ -270,30 +319,95 @@ def test_report_prints_the_run_beside_its_two_comparisons(db):
     _backtest(db, *_OPENING)
     code, lines = _report(db)
     assert code == cli.EXIT_OK
-    assert lines[:4] == [
+    assert lines[:5] == [
         "run bt: backtest, fixed_weights, values in USDC",
         "4 bar(s) decided from 2024-01-01T00:00:00Z to 2024-01-04T00:00:00Z",
         "decisions: filled 3, hold 1, no_trade 0, rejected 0, skipped_suspect 0",
+        "measured on 4 bar(s) over 3.00 day(s)",
         f"{'':<18}{'start':>14}{'end':>14}{'return':>11}{'max drawdown':>14}",
     ]
-    assert len(lines) == 9
+    assert len(lines) == 11
     curve = r" +10000\.00 +\d+\.\d\d +[+-]\d+\.\d\d% +\d+\.\d\d%"
-    assert re.fullmatch("strategy" + curve, lines[4])
+    assert re.fullmatch("strategy" + curve, lines[5])
     # All in USDC and left alone, the opening balances never move.
-    for line, name in ((lines[5], "opening balances"), (lines[6], "all in USDC")):
+    for line, name in ((lines[6], "opening balances"), (lines[7], "all in USDC")):
         assert line == f"{name:<18}{'10000.00':>14}{'10000.00':>14}{'+0.00%':>11}{'0.00%':>14}"
-    assert re.fullmatch(
-        r"3 rebalance\(s\), 6 swap\(s\); \d+\.\d\d USDC sold, \d\.\d\d times the mean equity",
-        lines[7],
+    assert lines[8] == "the two comparisons pay no cost"
+    sold = re.fullmatch(
+        r"3 rebalance\(s\), 6 swap\(s\); (\d+\.\d\d) USDC sold, \d\.\d\d times the mean "
+        r"equity",
+        lines[9],
     )
     costs = re.fullmatch(
         r"costs: (\d+\.\d\d) USDC \(pool fees (\d+\.\d\d), slippage (\d+\.\d\d), "
         r"gas (\d+\.\d\d) for (0\.\d+) ETH\)",
-        lines[8],
+        lines[10],
     )
-    assert costs
+    assert sold and costs
     # Six swaps and nine pools crossed, at 150,000 gas and 7 gwei each.
     assert costs[5] == "0.00945"
+    # What the report prints is what the metrics work out from the stored rows.
+    with open_store(db) as store:
+        run = store.run("bt")
+        metrics = run_metrics(
+            quote="USDC",
+            gas_token="WETH",
+            opening=run.ledger,
+            valuations=store.valuations("bt"),
+            fills=store.fills("bt"),
+            fee_rates={pool.address: pool.fee_rate for pool in load_config(_EXAMPLE).pools},
+        )
+    assert (sold[1], costs[1], costs[2], costs[3], costs[4]) == tuple(
+        f"{value:.2f}"
+        for value in (
+            metrics.traded_value,
+            metrics.costs.total,
+            metrics.costs.pool_fees,
+            metrics.costs.slippage,
+            metrics.costs.gas,
+        )
+    )
+    # Three of the six swaps cross both pools: more than one pool's fee on what they sold.
+    assert metrics.costs.pool_fees > metrics.traded_value * Decimal("0.0005")
+
+
+def test_report_never_prints_a_negative_zero():
+    assert cli._fixed(Decimal("-0.00003")) == "0.00"
+    assert cli._fixed(Decimal("-0.00003"), signed=True) == "+0.00"
+    assert cli._fixed(Decimal("-0.006")) == "-0.01"
+    assert cli._fixed(Decimal("12.346"), signed=True) == "+12.35"
+    assert cli._fixed(Decimal("0")) == "0.00"
+
+
+def test_report_reads_its_rows_in_one_view_of_the_store(db, monkeypatch):
+    _backtest(db, *_OPENING)
+    inside = []
+    for name in ("run", "decisions", "valuations", "fills"):
+        read = getattr(Store, name)
+
+        def spied(self, *args, _read=read, **kwargs):
+            inside.append(self._connection.in_transaction)
+            return _read(self, *args, **kwargs)
+
+        monkeypatch.setattr(Store, name, spied)
+    assert _report(db)[0] == cli.EXIT_OK
+    assert inside == [True, True, True, True]
+
+
+def test_status_and_report_read_a_store_file_that_cannot_be_written(db, tmp_path):
+    _backtest(db, *_OPENING)
+    # As a store written before the write-ahead log was: in SQLite's default mode.
+    connection = sqlite3.connect(db)
+    connection.execute("PRAGMA journal_mode = DELETE")
+    connection.close()
+    db.chmod(stat.S_IREAD)
+    try:
+        code, lines = _run("status", "--config", str(_EXAMPLE), "--db", str(db))
+        assert code == cli.EXIT_OK and lines[1].startswith("USDC/WETH-500: 4 reading(s)")
+        code, lines = _report(db)
+        assert code == cli.EXIT_OK and len(lines) == 11
+    finally:
+        db.chmod(stat.S_IREAD | stat.S_IWRITE)
 
 
 def test_report_counts_why_bars_were_skipped_and_leaves_them_out_of_the_curves(tmp_path):
@@ -303,8 +417,19 @@ def test_report_counts_why_bars_were_skipped_and_leaves_them_out_of_the_curves(t
     assert code == cli.EXIT_OK
     assert lines[2] == "decisions: filled 1, hold 2, no_trade 0, rejected 0, skipped_suspect 1"
     assert lines[3] == "skipped_suspect: twap_deviation 1"
-    assert lines[4] == "measured on the 3 bar(s) that were not suspect"
-    assert len(lines) == 11
+    assert lines[4] == "measured on 3 bar(s) over 3.00 day(s); 1 suspect bar(s) left out"
+    assert len(lines) == 12
+
+
+def test_a_run_whose_every_bar_was_suspect_exits_1_and_says_so(tmp_path, capsys):
+    db = _fill_store(tmp_path / "store.db", [DEFAULT_TICK], twap_off=0)
+    _backtest(db, *_OPENING)
+    code, lines = _report(db)
+    assert code == cli.EXIT_FAILED and lines == []
+    assert capsys.readouterr().err == (
+        "failed: every one of the run's 1 decided bar(s) was suspect, so there is none to "
+        "measure it on\n"
+    )
 
 
 def test_report_counts_why_rebalances_were_rejected(db):

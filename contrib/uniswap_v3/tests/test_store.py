@@ -365,7 +365,8 @@ def test_a_suspect_bar_names_every_cause_and_is_coded_by_the_first_in_order(stor
     assert stored.bar.suspect is True
     assert stored.suspicion == Suspicion(
         SkipCode.CLOSE_BLOCK_MISMATCH,
-        "the pools' readings do not agree on the close block (999, 1000); "
+        "the pools' readings do not agree on the close block (999 0x00000000, "
+        "1000 0xcdcdcdcd); "
         "USDC/WETH-500: its close price is further from its TWAP than the limit; "
         "WBTC/WETH-500: its close price is further from its TWAP than the limit",
     )

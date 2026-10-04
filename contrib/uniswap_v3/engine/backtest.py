@@ -16,10 +16,20 @@ counts it. A range that holds no bar at all is refused.
 
 A run can be carried on: a bar it has already decided is counted as such
 and nothing is written for it, so the same command run twice leaves the
-store as the first run left it. A run only goes forward, though. When a
-boundary it passed over without a bar is given one later, the engine
-refuses that bar: the bars the run decided after the gap were decided
-without it in view, and the range is replayed as a new run.
+store as the first run left it. A run only goes forward, though, and leaves
+no stored bar behind undecided:
+
+- A range that starts after the run's latest decided bar, with stored bars
+  in between, is refused. Those bars could never be decided afterwards.
+- When a boundary the run passed over without a bar is given one later,
+  the engine refuses that bar: the bars the run decided after the gap were
+  decided without it in view. The range is replayed as a new run.
+
+A bar is decided on the reading the store holds at that moment, final or
+not. The summary counts the bars decided on a reading that was not final
+yet, and the bars decided earlier whose reading has changed since (another
+close block, or suspect now and not then, or the reverse). Their decisions
+stand: a new run decides them on what the store holds now.
 """
 
 from __future__ import annotations
@@ -30,10 +40,11 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from ..config import UniswapConfig
+from ..domain.bars import Finality
 from ..domain.ledger import Ledger
-from ..domain.records import Outcome
+from ..domain.records import Decision, Outcome, RejectionCode
 from ..domain.types import Bar, MarketView, RunMode
-from ..store.bar_source import load_bar
+from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
 from .executors import ModelExecutor
 from .step import EngineError, open_engine, start_or_continue_run
@@ -50,15 +61,21 @@ class BacktestSummary:
     """What a backtest did over its range, ``start`` to ``end``, both boundaries.
 
     ``decided`` bars were decided by this call and ``already_decided`` ones
-    by an earlier one; ``outcomes`` counts both. ``missing`` are the
-    boundaries without a bar, oldest first.
+    by an earlier one; ``outcomes`` counts both. ``on_pending`` of the bars
+    decided by this call were decided on a reading that was not final. The
+    rest are boundaries, oldest first: ``missing`` had no bar, ``changed``
+    were decided earlier on a reading the store no longer holds as it was,
+    and ``gas_rejected`` had their rebalance refused for want of gas.
     """
 
     start: int
     end: int
     decided: int
     already_decided: int
+    on_pending: int
     missing: tuple[int, ...]
+    changed: tuple[int, ...]
+    gas_rejected: tuple[int, ...]
     outcomes: Mapping[Outcome, int]
 
     @property
@@ -78,6 +95,14 @@ def _stored_boundaries(store: Store, config: UniswapConfig, *, end: int | None) 
                 for pool in config.pools
             )
         )
+    )
+
+
+def _reads_differently(decision: Decision, loaded: StoredBar) -> bool:
+    """Whether the stored bar is no longer the one ``decision`` was made on."""
+    seen = decision.seen
+    return decision.suspect != loaded.bar.suspect or (
+        seen is not None and seen.close_block_hash != loaded.seen.close_block_hash
     )
 
 
@@ -125,11 +150,23 @@ def run_backtest(
         opening=opening,
         created_at=created_at,
     )
+    latest = store.last_decided(run_id)
+    if latest is not None:
+        passed_over = [time for time in stored if latest < time < start]
+        if passed_over:
+            raise EngineError(
+                f"the run {run_id!r} has decided up to the bar at {latest} and the range "
+                f"starts at {start}: the {len(passed_over)} stored bar(s) between them, the "
+                f"first at {passed_over[0]}, would be left undecided for good; start the "
+                f"range no later than {passed_over[0]}, or use a new run"
+            )
     executor = ModelExecutor(config.quote.symbol, config.execution)
     engine = open_engine(store, config, executor, run_id=run_id)
 
     bars: list[Bar] = []
-    decided = already_decided = 0
+    decided = already_decided = on_pending = 0
+    changed: list[int] = []
+    gas_rejected: list[int] = []
     outcomes: Counter[Outcome] = Counter()
     for time in stored:
         loaded = load_bar(store, config, time)
@@ -143,6 +180,8 @@ def run_backtest(
         decision = store.decision(run_id, time)
         if decision is not None:
             already_decided += 1
+            if _reads_differently(decision, loaded):
+                changed.append(time)
         else:
             try:
                 view = MarketView(tuple(bars))
@@ -152,12 +191,18 @@ def run_backtest(
                 ) from exc
             decision = engine.step(view, seen=loaded.seen, suspicion=loaded.suspicion).decision
             decided += 1
+            on_pending += loaded.finality is Finality.PENDING
         outcomes[decision.outcome] += 1
+        if decision.reason_code is RejectionCode.GAS:
+            gas_rejected.append(time)
     return BacktestSummary(
         start=start,
         end=last,
         decided=decided,
         already_decided=already_decided,
+        on_pending=on_pending,
         missing=tuple(time for time in range(start, last + 1, interval) if time not in in_range),
+        changed=tuple(changed),
+        gas_rejected=tuple(gas_rejected),
         outcomes=MappingProxyType(dict(outcomes)),
     )

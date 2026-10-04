@@ -143,8 +143,8 @@ _VALUATION_COLUMNS: Final = "time, balances, gas_eth, prices, total_value"
 def _decision(row: Sequence[Any]) -> Decision:
     time, outcome_text, target, reason, code, close_block, close_block_hash, finality = row
     outcome = Outcome(outcome_text)
-    # An outcome that says nothing has no code of its own to read one in; the
-    # decision then refuses the row for carrying one.
+    # An outcome that says nothing has no codes of its own to read one in; the
+    # row is then refused, by the enum or by the decision, for carrying one.
     reason_code = None if code is None else REASON_CODES.get(outcome, RejectionCode)(code)
     return Decision(
         time=time,
@@ -201,6 +201,22 @@ class Store:
 
     def close(self) -> None:
         self._connection.close()
+
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        """One view of the database for every read made inside the ``with``.
+
+        A commit another connection makes after the first of those reads is
+        not seen by the later ones, so rows read one statement after another
+        (a run's decisions, then its valuations) belong together.
+        """
+        with _sqlite_errors("opening a read"):
+            self._connection.execute("BEGIN")
+        try:
+            yield
+        finally:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
 
     def insert_bars(self, bars: Sequence[PoolBar]) -> None:
         """Write ``bars`` in one transaction: all of them, or none.
@@ -561,9 +577,11 @@ def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Stor
 
     A store an older version of the package wrote is migrated here, whatever
     opens it: a command that only reads its rows still writes the missing
-    tables, and the file is put in write-ahead log mode. With ``create``
-    false a path that is not an existing file is refused, so such a command
-    does not leave an empty database behind a mistyped path.
+    tables, and the file is put in write-ahead log mode. A file that cannot
+    be written (a read-only one) is left in the mode it has, and can be read
+    as long as its schema is up to date. With ``create`` false a path that
+    is not an existing file is refused, so such a command does not leave an
+    empty database behind a mistyped path.
 
     With ``durable`` false this connection's commits return before they
     reach the disk. A power cut can then lose the latest of them and cannot
@@ -585,7 +603,11 @@ def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Stor
         # A build of SQLite without foreign keys takes the pragma and does nothing.
         if connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
             raise SchemaError("this SQLite does not enforce foreign keys")
-        (journal_mode,) = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+        try:
+            (journal_mode,) = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+        except sqlite3.OperationalError:
+            # A file that cannot be written keeps the mode it has, and can still be read.
+            (journal_mode,) = connection.execute("PRAGMA journal_mode").fetchone()
         if not durable and journal_mode == "wal":
             connection.execute("PRAGMA synchronous = NORMAL")
         migrate(connection)

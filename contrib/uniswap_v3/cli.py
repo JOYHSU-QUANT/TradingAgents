@@ -15,8 +15,10 @@ the node's setup, or an answer of the node's that cannot be right), 3 when
 the node could not be reached, is behind, or answered a read with an error,
 and a later run may succeed. 2 is argparse's, for a command line it cannot
 read. A ``backfill`` that ran to its end exits 0 even when it left
-boundaries without an answer or not reached yet: its last lines count them,
-and a warning on stderr names the ones without an answer.
+boundaries without an answer: its last lines count them, and a warning on
+stderr gives their count and the first and last of them. A ``backfill``
+whose node has not reached a boundary that passed more than five minutes
+ago exits 3: the node's head is behind.
 """
 
 from __future__ import annotations
@@ -42,6 +44,9 @@ EXIT_OK: Final = 0
 EXIT_FAILED: Final = 1
 EXIT_RETRY: Final = 3
 
+# How long after a boundary a node's head may still be short of it before
+# the node counts as behind. Mainnet makes a block every twelve seconds.
+_HEAD_LAG_SECONDS: Final = 300
 # What a dry run plans against when there is no store yet: an empty one,
 # in memory, so that it leaves no file behind.
 _NO_STORE: Final = Path(":memory:")
@@ -82,14 +87,16 @@ def _iso(time: int) -> str:
     return datetime.fromtimestamp(time, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _one_ascii_line(text: str) -> str:
+def _one_ascii_line(text: object) -> str:
     """``text`` as one printable line.
 
-    A report line quotes what a node said. That need not be ASCII, which a
-    console may be unable to print, and a line break in it would read as a
-    second report line.
+    A line that quotes what a node said need not be ASCII, which a console
+    may be unable to print; a line break in it would read as a second line,
+    and a control character could do anything to a terminal.
     """
-    return " ".join(text.split()).encode("ascii", "backslashreplace").decode()
+    line = " ".join(str(text).split())
+    printable = "".join(char if char.isprintable() else "?" for char in line)
+    return printable.encode("ascii", "backslashreplace").decode()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -147,11 +154,18 @@ def _config(args: argparse.Namespace) -> UniswapConfig:
 
 def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
     # Imported here: ``status`` reads no chain and should not wait on web3.
-    from .backfill import BackfillRangeError, backfill, check_range, plan_backfill
-    from .chain.rpc import RpcSettings, connect
+    try:
+        from .backfill import BackfillRangeError, backfill, check_range, plan_backfill
+        from .chain.rpc import RpcSettings, connect
+    except ImportError as exc:
+        raise ConfigError(
+            f"backfill needs the packages in contrib/uniswap_v3/requirements.txt ({exc})"
+        ) from exc
 
     config = _config(args)
-    end = int(now()) if args.end is None else args.end
+    # No boundary after this moment exists yet, whatever --to says.
+    present = int(now())
+    end = present if args.end is None else min(args.end, present)
     try:
         check_range(config, start=args.start, end=end)
     except BackfillRangeError as exc:
@@ -193,6 +207,14 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             f"asks again",
             file=sys.stderr,
         )
+    overdue = [time for time in summary.not_reached if time <= present - _HEAD_LAG_SECONDS]
+    if overdue:
+        print(
+            f"try again later: the node's head is behind; {len(overdue)} boundary(ies) from "
+            f"{_iso(overdue[0])} have passed and are not on its chain yet",
+            file=sys.stderr,
+        )
+        return EXIT_RETRY
     return EXIT_OK
 
 
@@ -250,8 +272,8 @@ def main(
     except (TransientChainError, RpcRejected) as exc:
         # A node that answers a read with an error is as likely to be having
         # a bad moment as to be broken; the run stopped, and a later one asks.
-        print(f"try again later: {exc}", file=sys.stderr)
+        print(f"try again later: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_RETRY
     except (ChainError, ConfigError, StoreError) as exc:
-        print(f"failed: {exc}", file=sys.stderr)
+        print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_FAILED

@@ -165,6 +165,17 @@ def test_the_times_the_previous_reading_and_the_extent_of_a_series(store):
     assert store.extent(ETHEREUM_MAINNET, _USDC_WETH.address, 3_600) == (0, None, None)
 
 
+def test_the_twap_windows_of_a_series_and_a_number_sqlite_cannot_hold(store):
+    assert store.twap_windows(*_series()) == set()
+    store.insert_bars(
+        [_reading(), _reading(time=FIRST_DAY + DAY, twap_window_seconds=600), _reading(_WBTC_WETH)]
+    )
+    assert store.twap_windows(*_series()) == {600, 1_800}
+    assert store.twap_windows(*_series(_WBTC_WETH)) == {1_800}
+    with pytest.raises(StoreError, match="the store failed while reading bar times"):
+        store.latest_times(*_series(), 2**70)
+
+
 def test_pending_readings_are_listed_until_their_finality_is_recorded(store):
     final = _reading()
     first = _reading(time=FIRST_DAY + DAY, finality=Finality.PENDING)

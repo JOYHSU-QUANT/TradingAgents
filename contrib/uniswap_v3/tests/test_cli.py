@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -185,13 +186,14 @@ def test_boundaries_without_an_answer_exit_0_with_a_warning_on_stderr(node, tmp_
 def test_what_a_node_said_is_reported_on_one_ascii_line(node, tmp_path, capsys):
     close = block_at(FIRST_DAY + DAY) - 1
     node.reverts.add((_WBTC_WETH.address.lower(), close))
-    node.revert_message = "execution reverted: vieuxé\nforged line"
+    node.revert_message = "execution reverted: vieux" + chr(0xE9) + chr(10) + "forged line"
     code, lines = _backfill(tmp_path / "store.db")
     assert code == cli.EXIT_OK
     assert len(lines) == 5
     assert "vieux" in lines[2] and lines[2].isascii() and "\n" not in lines[2]
     capsys.readouterr()
-    assert cli._one_ascii_line("vieuxé\nforged  line") == "vieux\\xe9 forged line"
+    noisy = "vieux" + chr(0xE9) + chr(10) + "forged  line" + chr(27) + "[2J"
+    assert cli._one_ascii_line(noisy) == "vieux" + chr(92) + "xe9 forged line?[2J"
 
 
 def test_a_time_the_platform_cannot_print_back_is_refused(monkeypatch, capsys):
@@ -203,6 +205,57 @@ def test_a_time_the_platform_cannot_print_back_is_refused(monkeypatch, capsys):
         cli.main(["backfill", "--config", "c.yaml", "--db", "s.db", "--from", "2024-01-01"])
     assert exit_info.value.code == 2
     assert "is outside the times supported" in capsys.readouterr().err
+
+
+def test_a_node_whose_head_is_behind_exits_3_once_a_boundary_is_overdue(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    # The chain's head is in the third day. Five minutes into the fourth,
+    # its boundary is not overdue yet; a second later it is.
+    fourth = FIRST_DAY + 3 * DAY
+    node.head = block_at(fourth) - 1
+    code, lines = _backfill(db, now=fourth + 299)
+    assert code == cli.EXIT_OK
+    assert lines[-1] == "wrote 3 bar(s); 0 already stored, 0 without an answer, 1 not reached yet"
+    assert capsys.readouterr().err == ""
+
+    code, lines = _backfill(db, now=fourth + 300)
+    assert code == cli.EXIT_RETRY
+    assert lines[-1] == "wrote 0 bar(s); 3 already stored, 0 without an answer, 1 not reached yet"
+    assert capsys.readouterr().err == (
+        "try again later: the node's head is behind; 1 boundary(ies) from "
+        "2024-01-04T00:00:00Z have passed and are not on its chain yet\n"
+    )
+
+
+def test_an_end_in_the_future_is_cut_at_now(node, tmp_path, capsys):
+    code, lines = _backfill(tmp_path / "store.db", "--to", "2030-01-01")
+    assert code == cli.EXIT_OK
+    assert lines[0].startswith("3 bar(s) from 2024-01-01T00:00:00Z to 2024-01-03T00:10:00Z")
+    assert capsys.readouterr().err == ""
+
+
+def test_backfill_without_its_requirements_exits_1_with_one_line(monkeypatch, tmp_path, capsys):
+    monkeypatch.setitem(sys.modules, "contrib.uniswap_v3.backfill", None)
+    code, _ = _backfill(tmp_path / "store.db")
+    assert code == cli.EXIT_FAILED
+    assert capsys.readouterr().err.startswith(
+        "failed: backfill needs the packages in contrib/uniswap_v3/requirements.txt ("
+    )
+
+
+def test_backfill_refuses_a_store_taken_over_another_twap_window(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    _backfill(db, "--to", "2024-01-01")
+    shorter = tmp_path / "shorter.yaml"
+    shorter.write_text(
+        _EXAMPLE.read_text(encoding="utf-8").replace(
+            "twap_window_seconds: 1800", "twap_window_seconds: 600"
+        ),
+        encoding="utf-8",
+    )
+    code, _ = _run("backfill", "--config", str(shorter), "--db", str(db), "--from", "2024-01-01")
+    assert code == cli.EXIT_FAILED
+    assert "a TWAP over [1800] seconds, and the config asks for 600" in capsys.readouterr().err
 
 
 def test_backfill_connects_with_the_variable_the_config_names(node, tmp_path):

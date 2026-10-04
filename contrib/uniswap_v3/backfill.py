@@ -6,6 +6,9 @@ gets only the missing ones. The readings of one boundary are written in one
 transaction, so a run that stops leaves whole boundaries behind and the
 next run carries on from there.
 
+A run refuses a store whose readings of the configured pools were taken
+over another TWAP window than the config's: a series holds one window.
+
 Before reading anything new, a run checks the stored readings that were
 ``PENDING`` and whose blocks are final by now
 (:func:`~.chain.bars.confirm_pool_bars`).
@@ -31,10 +34,10 @@ from .chain.blocks import FINALITY_DEPTH, ChainBlockLocator
 from .chain.errors import CallReverted
 from .chain.rpc import Rpc
 from .config import UniswapConfig
-from .constants import EARLIEST_BAR_TIME
+from .constants import EARLIEST_BAR_TIME, pool_key
 from .domain.bars import Finality
 from .domain.types import Pool
-from .store.repository import Store
+from .store.repository import Store, StoreError
 
 __all__ = [
     "BackfillPlan",
@@ -47,9 +50,9 @@ __all__ = [
 
 
 # Roughly what reading one boundary of a one-day bar costs once a run is
-# under way: the block search reads the head and about thirteen headers
-# (the first search of a run reads about twice that, and a shorter bar's
-# fewer), then the close block's header, and two calls per pool.
+# under way: about fourteen header reads (the head, the block search and
+# the close block; the first search of a run reads about twice as many,
+# and a shorter bar's fewer), and two calls per pool.
 _SEARCH_REQUESTS = 14
 _REQUESTS_PER_POOL = 2
 
@@ -130,6 +133,27 @@ def plan_backfill(store: Store, config: UniswapConfig, *, start: int, end: int) 
     return BackfillPlan(boundaries=len(boundaries), missing=tuple(missing))
 
 
+def _require_one_twap_window(store: Store, config: UniswapConfig) -> None:
+    """Refuse to add readings to a series that was taken over another TWAP window.
+
+    A series holds one window: a bar is checked against a limit set for the
+    config's, and :func:`~.store.bar_source.load_bar` refuses a reading of
+    another. Writing the config's window beside an older one would leave a
+    store that can be read under neither.
+    """
+    window = config.bars.twap_window_seconds
+    for pool in config.pools:
+        others = store.twap_windows(
+            config.chain_id, pool.address, config.bars.interval_seconds
+        ) - {window}
+        if others:
+            raise StoreError(
+                f"the store holds readings of {pool_key(pool)} with a TWAP over "
+                f"{sorted(others)} seconds, and the config asks for {window}; backfill "
+                f"that window into a new store, or set bars.twap_window_seconds back"
+            )
+
+
 def _confirm_pending(rpc: Rpc, store: Store, *, final_block: int) -> tuple[int, int]:
     """Check the pending readings that are final by now; how many held and how many did not."""
     checked = confirm_pool_bars(rpc, store.pending_bars(rpc.chain_id), final_block=final_block)
@@ -162,6 +186,7 @@ def backfill(
             f"the connection is to chain {rpc.chain_id} and the config is for {config.chain_id}"
         )
     plan = plan_backfill(store, config, start=start, end=end)
+    _require_one_twap_window(store, config)
     head = rpc.latest_header()
     final_block = head.number - FINALITY_DEPTH
     confirmed, reorged = _confirm_pending(rpc, store, final_block=final_block)

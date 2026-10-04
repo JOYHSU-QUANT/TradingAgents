@@ -65,7 +65,10 @@ def load_bar(store: Store, config: UniswapConfig, time: int) -> StoredBar | None
             raise StoreError(
                 f"the stored reading of {pool_key(pool)} at {time} cannot be checked ({exc})"
             ) from exc
-    bar = assemble_bar(config.quote, config.pools, readings, flags=flags)
+    try:
+        bar = assemble_bar(config.quote, config.pools, readings, flags=flags)
+    except ValueError as exc:
+        raise StoreError(f"the stored readings at {time} do not make a bar ({exc})") from exc
     return StoredBar(bar=bar, readings=tuple(readings), flags=tuple(flags))
 
 

@@ -17,7 +17,7 @@ from contrib.uniswap_v3.chain.errors import MalformedResponse, RpcRejected, RpcU
 from contrib.uniswap_v3.config import StrategySpec, UniswapConfig
 from contrib.uniswap_v3.constants import EARLIEST_BAR_TIME, ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarSettings, Finality
-from contrib.uniswap_v3.store.repository import open_store
+from contrib.uniswap_v3.store.repository import StoreError, open_store
 from contrib.uniswap_v3.tests.fakes.node import DAY, FIRST_DAY, FakeNode, block_at
 from contrib.uniswap_v3.tests.fakes.rpc import rpc_over
 
@@ -173,6 +173,23 @@ def test_the_latest_boundary_is_stored_pending_while_its_block_can_be_replaced(s
         store.bar(ETHEREUM_MAINNET, _USDC_WETH.address, DAY, time).finality for time in _DAYS
     ]
     assert finalities == [Finality.FINAL, Finality.FINAL, Finality.PENDING]
+
+
+def test_a_store_taken_over_another_twap_window_is_not_added_to(store):
+    node = FakeNode()
+    _run(node, store, start=FIRST_DAY, end=FIRST_DAY)
+    before = len(node.provider.requests)
+    shorter = replace(_CONFIG, bars=BarSettings(twap_window_seconds=600))
+
+    with pytest.raises(StoreError, match=r"WBTC/WETH-500|USDC/WETH-500") as refusal:
+        _run(node, store, config=shorter)
+
+    assert "a TWAP over [1800] seconds, and the config asks for 600" in str(refusal.value)
+    assert _rows(store) == 2
+    assert len(node.provider.requests) == before
+    # The same window under another interval is another series, and is not in the way.
+    hourly = replace(_CONFIG, bars=BarSettings(interval_seconds=3_600, twap_window_seconds=600))
+    assert _run(node, store, config=hourly, start=FIRST_DAY, end=FIRST_DAY).written == 1
 
 
 def test_a_connection_to_another_chain_than_the_configs_is_refused(store):

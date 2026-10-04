@@ -39,7 +39,11 @@ class TransientChainError(ChainError):
 
 
 class UnansweredRead(ChainError):
-    """This read has no answer, now or later; another read may have one."""
+    """This read has no answer; another read may have one.
+
+    Asking the same thing again is pointless for every subclass but
+    :class:`RpcRejected`.
+    """
 
 
 class RpcConfigError(ChainError):

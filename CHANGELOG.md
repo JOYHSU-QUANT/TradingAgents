@@ -874,9 +874,12 @@ Breaking changes within the 0.x line are called out explicitly.
   `constants.EARLIEST_BAR_TIME`. `BlockHeader` now carries the block's hash.
   The config's new optional `rpc.url_env` names the environment variable the
   node's URL is read from; a value that is not a variable's name is refused
-  without being echoed. A bar length must divide a day. A stored reading
-  whose TWAP window is not the config's is refused rather than mixed in, so
-  a changed `bars.twap_window_seconds` needs a new store. The store's schema
+  without being echoed. A bar length must divide a day. A series holds
+  one TWAP window: `backfill` refuses to add to a store whose readings were
+  taken over another window than the config's, and so does building a bar
+  from one, so a changed `bars.twap_window_seconds` needs a new store. A
+  `backfill` whose node has not reached a boundary that passed more than
+  five minutes ago exits 3, since the node's head is behind. The store's schema
   is versioned
   (`schema_migrations`), and a database some other program created is
   refused before anything is written to it.

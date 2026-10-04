@@ -48,7 +48,8 @@ def _sqlite_errors(doing: str) -> Iterator[None]:
     """Turn whatever SQLite raises while ``doing`` into a :class:`StoreError`."""
     try:
         yield
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, OverflowError) as exc:
+        # OverflowError: an integer SQLite's 64 bits cannot hold.
         raise StoreError(f"the store failed while {doing} ({exc})") from exc
 
 
@@ -165,6 +166,15 @@ class Store:
                 (chain_id, pool, interval_seconds),
             ).fetchone()
         return count, first, last
+
+    def twap_windows(self, chain_id: int, pool: str, interval_seconds: int) -> set[int]:
+        """Every TWAP window the readings of ``pool`` were taken over."""
+        with _sqlite_errors("reading a series"):
+            rows = self._connection.execute(
+                f"SELECT DISTINCT twap_window_seconds FROM bars WHERE {_SERIES}",
+                (chain_id, pool, interval_seconds),
+            ).fetchall()
+        return {window for (window,) in rows}
 
     def pending_bars(self, chain_id: int) -> list[PoolBar]:
         """Every reading on ``chain_id`` still to be checked against the final chain."""

@@ -5,8 +5,8 @@ A database carries the versions applied to it in ``schema_migrations``.
 transaction, and refuses a database a newer version of the package wrote.
 
 The file is marked with an SQLite ``application_id``. A database that holds
-tables and does not carry the mark is some other program's, and is refused
-before anything is written to it.
+tables and does not carry the mark, or that carries another mark, is some
+other program's, and is refused before anything is written to it.
 
 ``sqrt_price_x96`` and ``base_fee_wei`` are decimal text: a uint160 does not
 fit SQLite's 64-bit integer, and a base fee is a uint256.

@@ -842,6 +842,40 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: the chain reader (`chain/`).** The package can now
+  read an Ethereum node; it still has no engine, holds no key and signs
+  nothing. `chain/rpc.py` opens the endpoint named by an environment variable
+  (`ETH_RPC_URL` by default), refuses a node on another chain, and offers two
+  reads, a block header and a contract call, each at a named block. A
+  connection error, a timeout, a response cut short, an HTTP 429 and an HTTP
+  5xx are retried with a doubling wait; every other failure raises at once
+  as one of the `ChainError` classes in `chain/errors.py`, which follow what
+  a caller can do: `RpcUnavailable` and `BlockNotFound` (try again later),
+  `CallReverted`, `MalformedResponse` and `RpcRejected` (this read has no
+  answer), `RpcConfigError` (nothing will work until the setup is fixed: no
+  URL, the wrong chain, or an HTTP 401 or 403). No read answers with a
+  guess. The URL ends in the API key, so it is kept out of every exception,
+  which does not carry the original as its cause or context either, and out
+  of the log: once an endpoint is opened, every log record of `web3`,
+  `urllib3` and `requests` is scrubbed as it is created. On top of that:
+  `chain/blocks.py` finds the first block at or after a time by bisection,
+  raises if the node reported block times out of order, and keeps the
+  timestamps of final blocks from a search that passed that check to narrow
+  later ones; `chain/pool_price.py` reads
+  a pool's `slot0` and its time-weighted mean tick from `observe`;
+  `chain/quoter.py` quotes an exact-input swap through QuoterV2 with
+  `eth_call`, over one pool or a packed path of several; `chain/gas.py` reads
+  a block's base fee; `chain/units.py` converts whole-token `Decimal` amounts
+  to raw integers and back exactly, refusing an amount with more decimal
+  places than its token has. `constants.py` gains the QuoterV2 address,
+  checked against Uniswap's deployments page and on chain. The suite replays
+  JSON-RPC responses recorded from an archive node
+  (`tests/fixtures/mainnet.json`, re-recorded by `tests/fixtures/record.py`)
+  and never connects; two `smoke` tests read a real node, are skipped without
+  `ETH_RPC_URL`, and are left out of CI. `requirements.txt` gains
+  `web3>=7,<8`: web3 8 needs an `eth-account` the Hyperliquid SDK does not
+  allow.
+
 - **`contrib/uniswap_v3`: the skeleton of a Uniswap v3 spot execution
   package.** A strategy answers "what should the portfolio's weights be" and
   an engine, still to be built, turns the answer into swaps; the same engine

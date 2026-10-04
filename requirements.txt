@@ -4,3 +4,8 @@
 # contrib/hyperliquid_perp (Phase 1) — optional perp module.
 hyperliquid-python-sdk>=0.22
 PyYAML>=6.0
+
+# contrib/uniswap_v3 — optional Uniswap v3 module (its chain reader).
+# Below 8: web3 8 needs eth-account>=0.14, and hyperliquid-python-sdk 0.22
+# allows only eth-account<0.14, so the two could not share an environment.
+web3>=7,<8

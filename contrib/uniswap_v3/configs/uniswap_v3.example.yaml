@@ -11,6 +11,23 @@ pools:                      # <token0>/<token1>-<fee>, fee in hundredths of a ba
   - USDC/WETH-500
   - WBTC/WETH-500
 
+# Bars. A boundary is a multiple of interval_seconds since the epoch, so a
+# one-day bar closes at 00:00 UTC; interval_seconds must divide a day
+# (86400). A bar whose close price is further than
+# max_twap_deviation from the TWAP over twap_window_seconds is suspect and
+# is not traded on; a move of more than max_move since the bar before is
+# reported. These are the defaults, and the whole section may be left out.
+bars:
+  interval_seconds: 86400
+  twap_window_seconds: 1800
+  max_twap_deviation: "0.05"
+  max_move: "0.5"
+
+# The name of the environment variable that holds the node's URL, never the
+# URL itself. Backfilling needs an archive node.
+rpc:
+  url_env: ETH_RPC_URL
+
 # fixed_weights is a placeholder that drives the engine: hold these shares of
 # portfolio value, and rebalance when one is more than `band` (absolute
 # weight) away from its target. Numbers are quoted so no float digits are lost.

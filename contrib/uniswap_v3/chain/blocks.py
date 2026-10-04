@@ -17,21 +17,45 @@ recent can still be replaced by another with a different timestamp.
 from __future__ import annotations
 
 from bisect import bisect_left
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Final
 
 from .errors import BlockNotFound, MalformedResponse, RpcConfigError
 from .rpc import Rpc
 
-__all__ = ["ChainBlockLocator"]
+__all__ = ["FINALITY_DEPTH", "ChainBlockLocator", "reading_block"]
 
 # Two epochs of 32 slots, after which a mainnet block is final.
-_FINALITY_DEPTH: Final = 64
+FINALITY_DEPTH: Final = 64
+
+
+@contextmanager
+def reading_block(block: int, final: int) -> Iterator[None]:
+    """Around a read of ``block``, where ``final`` is the highest final block number.
+
+    A node that lacks a block answers the same way for one still to come
+    and for one it has dropped. Above ``final`` the
+    :class:`~.errors.BlockNotFound` stands: behind a load balancer, the node
+    asked now may trail the one that reported the head by a few blocks. A
+    final block is not one still to come, and waiting will not bring it, so
+    there it becomes :class:`~.errors.RpcConfigError`.
+    """
+    try:
+        yield
+    except BlockNotFound:
+        if block > final:
+            raise
+        raise RpcConfigError(
+            f"the node does not keep block {block}, which is final; "
+            f"a node with full block history is needed"
+        ) from None
 
 
 class ChainBlockLocator:
     """A :class:`~..ports.BlockLocator` that asks a node."""
 
-    def __init__(self, rpc: Rpc, *, finality_depth: int = _FINALITY_DEPTH) -> None:
+    def __init__(self, rpc: Rpc, *, finality_depth: int = FINALITY_DEPTH) -> None:
         if isinstance(finality_depth, bool) or not isinstance(finality_depth, int):
             raise ValueError(f"finality_depth must be an integer, got {finality_depth!r}")
         if finality_depth < 0:
@@ -51,18 +75,8 @@ class ChainBlockLocator:
         kept = self._kept_index(block)
         if kept is not None:
             return self._times[kept]
-        try:
+        with reading_block(block, final):
             return self._rpc.header(block).timestamp
-        except BlockNotFound:
-            if block > final:
-                # Behind a load balancer, the node asked now may trail the
-                # one that reported the head by a few blocks.
-                raise
-            # A final block is not one still to come: waiting will not bring it.
-            raise RpcConfigError(
-                f"the node does not keep block {block}, which is final; "
-                f"a node with full block history is needed"
-            ) from None
 
     def first_block_at_or_after(self, time: int) -> int:
         """The number of the first block whose timestamp is at or after ``time``."""

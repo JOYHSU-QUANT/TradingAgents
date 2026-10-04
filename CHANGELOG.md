@@ -842,6 +842,48 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: the bar store and `backfill`.** The package has its
+  own SQLite store (`store/`), shared with no other package, and a command
+  line: `python -m contrib.uniswap_v3 backfill` fills the store from an
+  archive node and `status` prints what it holds. There is still no engine,
+  no key and no signing. A row of `bars` is one pool's reading at one bar
+  boundary (`domain/bars.py`, `PoolBar`): the pool's `slot0` and its TWAP at
+  the end of the last block before the boundary, with that block's number,
+  hash, time and base fee. It belongs to no run. A bar is one day unless the
+  config's new optional `bars` section says otherwise, and a boundary is a
+  multiple of the bar length since the epoch, so a one-day bar closes at
+  00:00 UTC. The engine's `Bar` is built on the way out
+  (`store/bar_source.py`): each token priced in the quote token through the
+  configured pools, and suspect when a pool's close is further from its TWAP
+  than `bars.max_twap_deviation` (5%), its block turned out not to be on
+  the final chain, or the pools' readings disagree on the close block. A gap
+  in the series and a move beyond `bars.max_move`
+  (50%) are flagged and do not make a bar suspect. The flags are worked out
+  when a bar is read, from the readings and the config's limits; they are
+  not stored, and nothing is deleted. `backfill` can be repeated: a boundary
+  already stored is not read again, a boundary's readings are written in one
+  transaction, and a duplicate row is impossible by the table's key. A
+  reading taken from a block that could still be replaced is stored as
+  `pending`, and the next run checks it against the final chain and marks it
+  `final` or `reorged`. A reverted TWAP read (an oracle that does not reach
+  back the window) leaves its boundary unwritten and the run goes on, with a
+  warning on stderr; any other chain error ends the run, exit 3 when a later
+  run may succeed (the node could not be reached, is behind, or answered a
+  read with an error) and 1 otherwise. `backfill` refuses a range that
+  starts before
+  `constants.EARLIEST_BAR_TIME`. `BlockHeader` now carries the block's hash.
+  The config's new optional `rpc.url_env` names the environment variable the
+  node's URL is read from; a value that is not a variable's name is refused
+  without being echoed. A bar length must divide a day. A series holds
+  one TWAP window: `backfill` refuses to add to a store whose readings were
+  taken over another window than the config's, and so does building a bar
+  from one, so a changed `bars.twap_window_seconds` needs a new store. A
+  `backfill` whose node has not reached a boundary that passed
+  five minutes or more ago exits 3, since the node's head is behind. The store's schema
+  is versioned
+  (`schema_migrations`), and a database some other program created is
+  refused before anything is written to it.
+
 - **`contrib/uniswap_v3`: the chain reader (`chain/`).** The package can now
   read an Ethereum node; it still has no engine, holds no key and signs
   nothing. `chain/rpc.py` opens the endpoint named by an environment variable

@@ -11,19 +11,27 @@ from __future__ import annotations
 
 import os
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
+from contrib.uniswap_v3.backfill import backfill
 from contrib.uniswap_v3.chain.blocks import ChainBlockLocator
 from contrib.uniswap_v3.chain.gas import ChainGasOracle
 from contrib.uniswap_v3.chain.pool_price import read_slot0, read_twap_tick
 from contrib.uniswap_v3.chain.quoter import quote_exact_input
 from contrib.uniswap_v3.chain.rpc import DEFAULT_URL_ENV, Rpc, connect
+from contrib.uniswap_v3.config import load_config
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
+from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.prices import price_from_sqrt_price_x96, price_from_tick
+from contrib.uniswap_v3.store.bar_source import load_bar
+from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fixtures import BAR_TIME, BLOCK
 
 pytestmark = pytest.mark.smoke
+
+_EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
 
 _USDC = TOKENS[ETHEREUM_MAINNET]["USDC"]
 _WETH = TOKENS[ETHEREUM_MAINNET]["WETH"]
@@ -75,3 +83,18 @@ def test_a_historical_block_reads_the_same_as_the_recording(rpc):
     quote = quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1000), block=BLOCK)
     assert quote.amount_out == Decimal("0.605704440938728572")
     assert ChainBlockLocator(rpc).first_block_at_or_after(BAR_TIME) == 18_251_965
+
+
+def test_a_historical_bar_is_backfilled_once_and_prices_both_tokens(rpc, tmp_path):
+    config = load_config(_EXAMPLE)
+    with open_store(tmp_path / "store.db") as store:
+        first = backfill(rpc, store, config, start=BAR_TIME, end=BAR_TIME)
+        second = backfill(rpc, store, config, start=BAR_TIME, end=BAR_TIME)
+        stored = load_bar(store, config, BAR_TIME)
+    assert (first.written, second.written, second.already_stored) == (1, 0, 1)
+    assert stored.bar.close_block == 18_251_964
+    assert {reading.finality for reading in stored.readings} == {Finality.FINAL}
+    # 2023-10-01: ETH near 1,670 USDC and BTC near 27,000.
+    assert Decimal(1_600) < stored.bar.prices["WETH"] < Decimal(1_750)
+    assert Decimal(26_000) < stored.bar.prices["WBTC"] < Decimal(28_000)
+    assert stored.bar.suspect is False

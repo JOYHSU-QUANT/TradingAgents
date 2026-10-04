@@ -32,7 +32,7 @@ from typing import Final
 
 from .domain.types import Pool, Token
 
-__all__ = ["ETHEREUM_MAINNET", "POOLS", "QUOTER_V2", "TOKENS", "pool_key"]
+__all__ = ["EARLIEST_BAR_TIME", "ETHEREUM_MAINNET", "POOLS", "QUOTER_V2", "TOKENS", "pool_key"]
 
 ETHEREUM_MAINNET: Final = 1
 
@@ -67,6 +67,15 @@ POOLS: Final[Mapping[int, Mapping[str, Pool]]] = MappingProxyType(
         )
     }
 )
+
+# The earliest bar boundary a backfill may start at: 2022-01-01 00:00:00 UTC.
+# Probed once against an archive node (2026-10-04), at every 00:00 UTC
+# boundary from 2021-08-06, the first after London, to 2023-06-30. Before
+# London a block has no base fee. From there to the end of 2021 the WBTC/WETH
+# pool's oracle did not reach back 30 minutes at 35 of the 148 boundaries, the
+# last of them 2021-12-30, so its TWAP could not be read; the USDC/WETH pool
+# answered at every one. From 2022-01-01 both pools answered at all 546.
+EARLIEST_BAR_TIME: Final[Mapping[int, int]] = MappingProxyType({ETHEREUM_MAINNET: 1_640_995_200})
 
 # The periphery contract that quotes a swap without making it.
 QUOTER_V2: Final[Mapping[int, str]] = MappingProxyType(

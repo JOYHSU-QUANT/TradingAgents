@@ -11,6 +11,13 @@
       params:
         weights: {USDC: "0.5", WETH: "0.3", WBTC: "0.2"}
         band: "0.05"
+    bars:                       # optional, and so is each key in it
+      interval_seconds: 86400
+      twap_window_seconds: 1800
+      max_twap_deviation: "0.05"
+      max_move: "0.5"
+    rpc:                        # optional
+      url_env: ETH_RPC_URL
 
 Tokens and pools are named by their keys in :mod:`.constants`; a config
 cannot supply an address, and :class:`UniswapConfig` itself refuses a token
@@ -21,14 +28,19 @@ strategy's ``params`` are not interpreted here: they belong to the strategy,
 which checks them when :func:`~.strategies.registry.build_strategy` builds
 it. They are kept as a read-only copy, so a list arrives as a tuple.
 
+``bars`` is read into a :class:`~.domain.bars.BarSettings`, whose defaults
+stand for whatever is left out. Its two limits are quoted decimals, as a
+strategy's numbers are.
+
 A file named ``*.local.yaml`` is gitignored inside this package. The config
-holds no secret and names no environment variable: the chain reader
-(:mod:`.chain.rpc`) takes its endpoint from ``ETH_RPC_URL`` unless its own
-settings name another variable.
+holds no secret. ``rpc.url_env`` is the name of the environment variable
+that holds the endpoint URL, never the URL; left out, the chain reader
+(:mod:`.chain.rpc`) uses its own default, ``ETH_RPC_URL``.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,12 +50,19 @@ from typing import Any, Final, TypeVar
 import yaml
 
 from .constants import POOLS, TOKENS, pool_key
+from .domain.bars import BarSettings
+from .domain.decimal_context import parse_decimal
 from .domain.types import Pool, Token
 
 __all__ = ["ConfigError", "StrategySpec", "UniswapConfig", "load_config", "parse_config"]
 
-_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
+_REQUIRED_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
+_KEYS: Final = _REQUIRED_KEYS | {"bars", "rpc"}
 _STRATEGY_KEYS: Final = frozenset({"name", "params"})
+_BARS_INTEGERS: Final = frozenset({"interval_seconds", "twap_window_seconds"})
+_BARS_DECIMALS: Final = frozenset({"max_twap_deviation", "max_move"})
+_RPC_KEYS: Final = frozenset({"url_env"})
+_ENV_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 _T = TypeVar("_T")
 
@@ -100,6 +119,10 @@ class UniswapConfig:
     tokens: tuple[Token, ...]
     pools: tuple[Pool, ...]
     strategy: StrategySpec
+    bars: BarSettings = BarSettings()
+    # The environment variable that names the endpoint; ``None`` leaves it
+    # to the chain reader's default.
+    rpc_url_env: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -112,6 +135,16 @@ class UniswapConfig:
             raise ConfigError("tokens and pools must be tuples")
         if not isinstance(self.strategy, StrategySpec):
             raise ConfigError(f"strategy must be a StrategySpec, got {self.strategy!r}")
+        if not isinstance(self.bars, BarSettings):
+            raise ConfigError(f"bars must be a BarSettings, got {self.bars!r}")
+        if self.rpc_url_env is not None and (
+            not isinstance(self.rpc_url_env, str) or not _ENV_NAME.fullmatch(self.rpc_url_env)
+        ):
+            # The value is not quoted: a URL written here by mistake holds the API key.
+            raise ConfigError(
+                "rpc.url_env must be the name of an environment variable (letters, digits "
+                "and underscores), not the URL itself"
+            )
         known_tokens = list(TOKENS[self.chain_id].values())
         for token in (self.quote, *self.tokens):
             if token not in known_tokens:
@@ -161,6 +194,29 @@ def _resolve(table: Mapping[str, _T], name: object, what: str, chain_id: int) ->
     return table[name]
 
 
+def _section(document: dict[Any, Any], key: str, allowed: frozenset[str]) -> dict[Any, Any]:
+    """An optional mapping of the config: empty when left out, refused with a key not allowed."""
+    section = document.get(key, {})
+    if not isinstance(section, dict) or set(section) - allowed:
+        raise ConfigError(
+            f"{key} must be a mapping with keys from {sorted(allowed)}, got {section!r}"
+        )
+    return section
+
+
+def _bar_settings(document: dict[Any, Any]) -> BarSettings:
+    section = _section(document, "bars", _BARS_INTEGERS | _BARS_DECIMALS)
+    try:
+        return BarSettings(
+            **{
+                key: parse_decimal(value, f"bars.{key}") if key in _BARS_DECIMALS else value
+                for key, value in section.items()
+            }
+        )
+    except ValueError as exc:
+        raise ConfigError(f"bars: {exc}") from exc
+
+
 def parse_config(document: object) -> UniswapConfig:
     """Check a parsed YAML document and resolve its names into a :class:`UniswapConfig`."""
     if not isinstance(document, dict):
@@ -170,7 +226,7 @@ def parse_config(document: object) -> UniswapConfig:
         raise ConfigError(
             f"unknown config key(s) {sorted(map(str, unknown))}; allowed: {sorted(_KEYS)}"
         )
-    missing = _KEYS - set(document)
+    missing = _REQUIRED_KEYS - set(document)
     if missing:
         raise ConfigError(f"the config lacks {sorted(missing)}")
 
@@ -197,6 +253,8 @@ def parse_config(document: object) -> UniswapConfig:
             _resolve(pools, name, "pool", chain_id) for name in _names(document["pools"], "pools")
         ),
         strategy=StrategySpec(name=strategy["name"], params={} if params is None else params),
+        bars=_bar_settings(document),
+        rpc_url_env=_section(document, "rpc", _RPC_KEYS).get("url_env"),
     )
 
 

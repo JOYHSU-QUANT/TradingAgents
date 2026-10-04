@@ -347,7 +347,7 @@ def test_a_stored_bar_says_what_a_decision_keeps_of_it(store):
     stored = load_bar(store, _CONFIG, FIRST_DAY)
     # The bar is as final as its reading furthest from final.
     assert stored.seen == BarSeen(
-        close_block_hash=_reading().close_block_hash, finality=Finality.PENDING
+        close_block=999, close_block_hash=_reading().close_block_hash, finality=Finality.PENDING
     )
 
 
@@ -358,4 +358,4 @@ def test_where_the_readings_close_on_different_blocks_the_hash_kept_is_the_highe
     )
     stored = load_bar(store, _CONFIG, FIRST_DAY)
     assert stored.bar.close_block == 1_000
-    assert stored.seen.close_block_hash == later
+    assert (stored.seen.close_block, stored.seen.close_block_hash) == (1_000, later)

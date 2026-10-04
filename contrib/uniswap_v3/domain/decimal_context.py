@@ -72,7 +72,8 @@ _CUTTING.traps[Inexact] = False
 
 def floor_to_places(value: Decimal, places: int) -> Decimal:
     """A non-negative ``value`` cut, never rounded up, to ``places`` decimal places."""
-    return value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_DOWN, context=_CUTTING)
+    # The unit is built from its digits, so no context takes part in making it.
+    return value.quantize(Decimal((0, (1,), -places)), rounding=ROUND_DOWN, context=_CUTTING)
 
 
 def plain(value: Decimal) -> str:

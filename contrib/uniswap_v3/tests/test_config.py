@@ -434,12 +434,12 @@ def test_a_snapshot_names_everything_a_run_depends_on_and_is_the_same_each_time(
             "max_twap_deviation": "0.05",
             "max_move": "0.5",
         },
+        # The config file's own shape, so the model's two keys sit under ``model``.
         "execution": {
             "min_trade_value": "10",
             "max_slippage": "0.005",
             "delay_blocks": 25,
-            "model_slippage": "0.0005",
-            "model_gas_units_per_hop": 150_000,
+            "model": {"slippage": "0.0005", "gas_units_per_hop": 150_000},
         },
     }
 
@@ -452,6 +452,7 @@ def test_a_snapshot_changes_with_what_changes_a_run_and_not_with_where_the_node_
     assert config_snapshot(parse_config(_document(bars={"max_move": "0.50"}))) == snapshot
     for changed in (
         _document(execution={"delay_blocks": 24}),
+        _document(execution={"model": {"gas_units_per_hop": 150_001}}),
         _document(bars={"max_move": "0.4"}),
         _document(strategy={"name": "fixed_weights", "params": {"band": "0.06"}}),
         _document(quote_token="WETH"),

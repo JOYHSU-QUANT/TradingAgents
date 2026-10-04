@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 
 from contrib.uniswap_v3.config import StrategySpec, UniswapConfig
@@ -45,7 +46,7 @@ DAY = 86_400
 FIRST_DAY = 1_704_067_200
 GWEI = 10**9
 # What the tests price the two tokens at unless they say otherwise.
-PRICES = {"WETH": D("2000"), "WBTC": D("40000")}
+PRICES: Mapping[str, Decimal] = MappingProxyType({"WETH": D("2000"), "WBTC": D("40000")})
 
 USDC = TOKENS[ETHEREUM_MAINNET]["USDC"]
 WETH = TOKENS[ETHEREUM_MAINNET]["WETH"]

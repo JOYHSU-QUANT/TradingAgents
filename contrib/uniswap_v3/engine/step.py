@@ -8,10 +8,10 @@ One step, for the bar a :class:`~..domain.types.MarketView` ends at:
    not asked.
 3. The strategy answers ``Hold``: only the valuation changes.
 4. The strategy gives target weights: the swaps toward them are planned and
-   each is handed to the executor. Only when every one fills, and the
-   ledger covers them and their gas, are they applied, together. Otherwise
-   none is, the reason is recorded, and the next bar's decision starts from
-   the unchanged balances.
+   each is handed to the executor. Only when every one fills, and the gas
+   balance covers their gas, are they applied, together. Otherwise none
+   is, the reason is recorded, and the next bar's decision starts from the
+   unchanged balances.
 
 Every decided bar gets one decision and one valuation, written together.
 
@@ -26,8 +26,9 @@ rebalance as what it is.
 What is not recorded stops the run instead: a strategy that raises, or
 answers with something other than ``Hold`` or weights over exactly the
 configured tokens; a bar that does not price those tokens; an executor that
-answers for another swap than the one it was handed. The bar is left
-undecided, so it can be decided once the cause is fixed.
+answers for another swap than the one it was handed; swaps that cannot be
+planned, or that sell more than the ledger holds. The bar is left undecided,
+so it can be decided once the cause is fixed.
 """
 
 from __future__ import annotations
@@ -35,10 +36,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..config import ConfigError, UniswapConfig, config_snapshot
-from ..domain.ledger import Ledger, LedgerError
-from ..domain.records import BarSeen, Decision, Outcome, RunRecord, StepRecord, Valuation
+from ..domain.decimal_context import plain
+from ..domain.ledger import InsufficientGas, Ledger, LedgerError
+from ..domain.records import (
+    BarSeen,
+    Decision,
+    Outcome,
+    RejectionCode,
+    RunRecord,
+    StepRecord,
+    Valuation,
+)
 from ..domain.routing import plan_swaps
-from ..domain.types import Bar, Fill, Hold, MarketView, Rejection, RunMode, TargetWeights
+from ..domain.types import (
+    ETH_DECIMALS,
+    Bar,
+    Fill,
+    Hold,
+    MarketView,
+    Rejection,
+    RunMode,
+    TargetWeights,
+)
 from ..ports import Executor, Journal, Strategy
 from ..strategies.registry import build_strategy
 
@@ -74,6 +93,11 @@ class Engine:
         the decision; a bar that came from no store has none.
         """
         bar = view.latest
+        if seen is not None and seen.close_block != bar.close_block:
+            raise EngineError(
+                f"seen describes block {seen.close_block}, and the bar at {bar.time} closed "
+                f"on {bar.close_block}"
+            )
         decided = self.journal.decision(self.run_id, bar.time)
         if decided is not None:
             return StepResult(decided, already_run=True)
@@ -94,7 +118,9 @@ class Engine:
         try:
             portfolio = ledger.portfolio(quote, bar.prices)
         except ValueError as exc:
-            raise EngineError(f"the bar at {bar.time} does not price the run's tokens ({exc})") from exc
+            raise EngineError(
+                f"the bar at {bar.time} does not price the run's tokens ({exc})"
+            ) from exc
 
         if bar.suspect:
             return self._record(bar, seen, Outcome.SKIPPED_SUSPECT, ledger)
@@ -109,13 +135,16 @@ class Engine:
                 f"{sorted(symbols)}"
             )
 
-        swaps = plan_swaps(
-            portfolio,
-            answer,
-            tokens=self.config.tokens,
-            pools=self.config.pools,
-            settings=self.config.execution,
-        )
+        try:
+            swaps = plan_swaps(
+                portfolio,
+                answer,
+                tokens=self.config.tokens,
+                pools=self.config.pools,
+                settings=self.config.execution,
+            )
+        except ValueError as exc:
+            raise EngineError(f"the swaps at {bar.time} cannot be planned ({exc})") from exc
         if not swaps:
             return self._record(bar, seen, Outcome.NO_TRADE, ledger, target=answer)
         fills: list[Fill] = []
@@ -130,15 +159,32 @@ class Engine:
                     f"refused: {answered.reason}"
                 )
                 return self._record(
-                    bar, seen, Outcome.REJECTED, ledger, target=answer, reason=reason
+                    bar,
+                    seen,
+                    Outcome.REJECTED,
+                    ledger,
+                    target=answer,
+                    reason=reason,
+                    reason_code=RejectionCode.EXECUTOR,
                 )
             fills.append(answered)
         try:
             after = ledger.apply(fills)
-        except LedgerError as exc:
+        except InsufficientGas as exc:
             return self._record(
-                bar, seen, Outcome.REJECTED, ledger, target=answer, reason=str(exc)
+                bar,
+                seen,
+                Outcome.REJECTED,
+                ledger,
+                target=answer,
+                reason=str(exc),
+                reason_code=RejectionCode.GAS,
             )
+        except LedgerError as exc:
+            # The plan sells no more than the ledger holds; this is a planning fault.
+            raise EngineError(
+                f"the fills at {bar.time} do not apply to the ledger ({exc})"
+            ) from exc
         return self._record(bar, seen, Outcome.FILLED, after, target=answer, fills=tuple(fills))
 
     def _record(
@@ -150,15 +196,17 @@ class Engine:
         *,
         target: TargetWeights | None = None,
         reason: str | None = None,
+        reason_code: RejectionCode | None = None,
         fills: tuple[Fill, ...] = (),
     ) -> StepResult:
-        """Write the bar's decision with ``ledger``, the balances the step leaves, valued at the bar."""
+        """Write the bar's decision, with ``ledger`` (what the step leaves) valued at the bar."""
         decision = Decision(
             time=bar.time,
             outcome=outcome,
             close_block=bar.close_block,
             target=target,
             reason=reason,
+            reason_code=reason_code,
             seen=seen,
         )
         valuation = Valuation(
@@ -185,7 +233,9 @@ def start_run(
     """Start a run under ``config`` with ``ledger`` as its opening balances.
 
     The balances must name exactly the configured tokens, at zero for one
-    the run starts without. The config's snapshot is kept with the run.
+    the run starts without, though not all at zero: a run that holds nothing
+    can never trade. No balance has more decimal places than its token, nor
+    the gas balance more than ETH. The config's snapshot is kept with the run.
     """
     symbols = {token.symbol for token in config.tokens}
     if set(ledger.balances) != symbols:
@@ -193,6 +243,18 @@ def start_run(
             f"the opening balances name {sorted(ledger.balances)}, and the config's tokens "
             f"are {sorted(symbols)}"
         )
+    if not any(ledger.balances.values()):
+        raise EngineError("the opening balances are all zero: the run would have nothing to trade")
+    places = {token.symbol: token.decimals for token in config.tokens}
+    for what, amount, limit in (
+        *((symbol, ledger.balances[symbol], places[symbol]) for symbol in sorted(symbols)),
+        ("gas ETH", ledger.gas_eth, ETH_DECIMALS),
+    ):
+        numerator, denominator = amount.as_integer_ratio()
+        if (numerator * 10**limit) % denominator:
+            raise EngineError(
+                f"the opening {what} balance {plain(amount)} has more than {limit} decimal places"
+            )
     try:
         run = RunRecord(
             run_id=run_id,

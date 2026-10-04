@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from contrib.uniswap_v3.domain.decimal_context import floor_to_places, plain
-from contrib.uniswap_v3.domain.ledger import Ledger, LedgerError
+from contrib.uniswap_v3.domain.ledger import InsufficientGas, Ledger, LedgerError
 from contrib.uniswap_v3.domain.types import Fill, SwapIntent
 from contrib.uniswap_v3.tests.fakes.engine import (
     USDC,
@@ -38,7 +38,7 @@ def test_a_two_hop_fill_leaves_the_token_it_passes_through_alone():
 
 def test_gas_is_not_paid_from_weth():
     ledger = _ledger(weth="5", gas="0.0005")
-    with pytest.raises(LedgerError, match="the gas balance of 0.0005 ETH does not cover"):
+    with pytest.raises(InsufficientGas, match="the gas balance of 0.0005 ETH does not cover"):
         ledger.apply([_fill(USDC, (USDC_WETH,), "100", "0.05")])
 
 
@@ -56,8 +56,10 @@ def test_fills_are_applied_together_or_not_at_all():
 
 
 def test_a_fill_the_balance_does_not_cover_is_refused():
-    with pytest.raises(LedgerError, match="holds 10000 USDC, less than the 10000.000001"):
+    with pytest.raises(LedgerError, match="holds 10000 USDC, less than the 10000.000001") as short:
         _ledger().apply([_fill(USDC, (USDC_WETH,), "10000.000001", "5")])
+    # Not the shortfall a rebalance may meet: the engine stops on this one.
+    assert not isinstance(short.value, InsufficientGas)
     # The whole balance may go.
     assert _ledger().apply([_fill(USDC, (USDC_WETH,), "10000", "5")]).balances["USDC"] == 0
 
@@ -122,6 +124,6 @@ def test_a_cut_never_rounds_up_and_a_printed_amount_carries_no_padding():
     assert plain(D("1E+2")) == "100"
 
 
-def test_wbtc_can_be_sold_as_well():
+def test_a_fill_between_two_tokens_that_are_not_the_quote_moves_only_those_two():
     after = _ledger("0", "0", "0.5").apply([_fill(WBTC, (WBTC_WETH,), "0.5", "10")])
     assert after.balances == {"USDC": D("0"), "WETH": D("10"), "WBTC": D("0")}

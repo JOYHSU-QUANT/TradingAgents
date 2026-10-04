@@ -9,11 +9,13 @@ it is read and can differ later.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
+from typing import Final
 
 from .bars import Finality
 from .ledger import Ledger
@@ -24,6 +26,7 @@ __all__ = [
     "Decision",
     "FillRecord",
     "Outcome",
+    "RejectionCode",
     "RunRecord",
     "StepRecord",
     "Valuation",
@@ -41,11 +44,24 @@ class Outcome(str, Enum):
     NO_TRADE = "no_trade"
     # Every swap toward the target filled and was applied.
     FILLED = "filled"
-    # A swap was refused, or the ledger could not take the fills: nothing was applied.
+    # A swap was refused, or the gas balance did not cover the fills: nothing was applied.
     REJECTED = "rejected"
 
 
-def _is_time(value: object) -> bool:
+class RejectionCode(str, Enum):
+    """Why a rebalance was rejected, for code to tell apart; the reason says it in words."""
+
+    # The executor refused a swap: what this bar's market gave.
+    EXECUTOR = "executor"
+    # The gas balance did not cover the fills, and will not cover the next bar's either.
+    GAS = "gas"
+
+
+_BLOCK_HASH: Final = re.compile(r"0x[0-9a-f]{64}")
+_ADDRESS: Final = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
+def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
@@ -53,29 +69,45 @@ def _is_time(value: object) -> bool:
 class BarSeen:
     """What the store said of a bar's close block at the moment it was decided."""
 
+    close_block: int
     close_block_hash: str
     finality: Finality
 
     def __post_init__(self) -> None:
-        if not isinstance(self.close_block_hash, str) or not self.close_block_hash:
-            raise ValueError(f"close_block_hash must be a string, got {self.close_block_hash!r}")
+        if not _is_count(self.close_block):
+            raise ValueError(
+                f"close_block must be a non-negative integer, got {self.close_block!r}"
+            )
+        if not isinstance(self.close_block_hash, str) or not _BLOCK_HASH.fullmatch(
+            self.close_block_hash
+        ):
+            raise ValueError(
+                f"close_block_hash must be 0x followed by 64 lowercase hex digits, "
+                f"got {self.close_block_hash!r}"
+            )
         if not isinstance(self.finality, Finality):
             raise ValueError(f"finality must be a Finality, got {self.finality!r}")
 
 
 @dataclass(frozen=True)
 class Decision:
-    """One bar's decision. ``seen`` is ``None`` for a bar that came from no store."""
+    """One bar's decision.
+
+    A rejected decision, and no other, says why: ``reason`` in words and
+    ``reason_code`` for code. ``seen`` is ``None`` for a bar that came from
+    no store, and otherwise describes the block ``close_block`` names.
+    """
 
     time: int
     outcome: Outcome
     close_block: int
     target: TargetWeights | None = None
     reason: str | None = None
+    reason_code: RejectionCode | None = None
     seen: BarSeen | None = None
 
     def __post_init__(self) -> None:
-        if not _is_time(self.time) or not _is_time(self.close_block):
+        if not _is_count(self.time) or not _is_count(self.close_block):
             raise ValueError("time and close_block must be non-negative integers")
         if not isinstance(self.outcome, Outcome):
             raise ValueError(f"outcome must be an Outcome, got {self.outcome!r}")
@@ -85,10 +117,29 @@ class Decision:
                 f"a decision carries a target exactly when the strategy gave one: "
                 f"{self.outcome.value} with target {self.target!r}"
             )
-        if (self.outcome is Outcome.REJECTED) != (self.reason is not None):
-            raise ValueError(f"a rejected decision, and no other, carries a reason: {self!r}")
-        if self.seen is not None and not isinstance(self.seen, BarSeen):
-            raise ValueError(f"seen must be a BarSeen, got {self.seen!r}")
+        rejected = self.outcome is Outcome.REJECTED
+        if rejected != (self.reason is not None) or rejected != (self.reason_code is not None):
+            raise ValueError(
+                f"a rejected decision, and no other, carries a reason and a reason code: "
+                f"{self.outcome.value} with {self.reason!r} and {self.reason_code!r}"
+            )
+        if rejected and (
+            not isinstance(self.reason, str)
+            or not self.reason.strip()
+            or not isinstance(self.reason_code, RejectionCode)
+        ):
+            raise ValueError(
+                f"a reason is a non-empty string and a reason code a RejectionCode, "
+                f"got {self.reason!r} and {self.reason_code!r}"
+            )
+        if self.seen is not None:
+            if not isinstance(self.seen, BarSeen):
+                raise ValueError(f"seen must be a BarSeen, got {self.seen!r}")
+            if self.seen.close_block != self.close_block:
+                raise ValueError(
+                    f"seen describes block {self.seen.close_block}, and the bar closed on "
+                    f"{self.close_block}"
+                )
 
     @property
     def suspect(self) -> bool:
@@ -109,12 +160,19 @@ class Valuation:
     total_value: Decimal
 
     def __post_init__(self) -> None:
-        if not _is_time(self.time):
+        if not _is_count(self.time):
             raise ValueError(f"time must be a non-negative integer, got {self.time!r}")
         if not isinstance(self.ledger, Ledger):
             raise ValueError(f"ledger must be a Ledger, got {self.ledger!r}")
         if not isinstance(self.total_value, Decimal) or not self.total_value.is_finite():
             raise ValueError(f"total_value must be a finite Decimal, got {self.total_value!r}")
+        if not isinstance(self.prices, Mapping):
+            raise ValueError(f"prices must map token symbol to price, got {self.prices!r}")
+        for symbol, price in self.prices.items():
+            if not isinstance(price, Decimal) or not price.is_finite() or price <= 0:
+                raise ValueError(
+                    f"prices[{symbol!r}] must be a finite, positive Decimal, got {price!r}"
+                )
         object.__setattr__(self, "prices", MappingProxyType(dict(self.prices)))
 
 
@@ -127,6 +185,8 @@ class StepRecord:
     fills: tuple[Fill, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.decision, Decision) or not isinstance(self.valuation, Valuation):
+            raise ValueError("a step holds a Decision and a Valuation")
         if self.valuation.time != self.decision.time:
             raise ValueError(
                 f"the valuation at {self.valuation.time} is not of the decision at "
@@ -136,6 +196,9 @@ class StepRecord:
             self.decision.outcome is Outcome.FILLED
         ):
             raise ValueError("a step carries fills exactly when its decision is filled")
+        for fill in self.fills:
+            if not isinstance(fill, Fill):
+                raise ValueError(f"a step's fills are Fill values, got {fill!r}")
 
 
 @dataclass(frozen=True)
@@ -152,6 +215,45 @@ class FillRecord:
     amount_out: Decimal
     gas_cost_eth: Decimal
     block: int
+
+    def __post_init__(self) -> None:
+        for name in ("time", "leg", "block"):
+            if not _is_count(getattr(self, name)):
+                raise ValueError(
+                    f"{name} must be a non-negative integer, got {getattr(self, name)!r}"
+                )
+        for name in ("token_in", "token_out"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a token symbol, got {value!r}")
+        if self.token_in == self.token_out:
+            raise ValueError(f"a fill swaps two different tokens, got {self.token_in!r} twice")
+        if (
+            not isinstance(self.route, tuple)
+            or not self.route
+            or not all(isinstance(pool, str) and _ADDRESS.fullmatch(pool) for pool in self.route)
+        ):
+            raise ValueError(
+                f"route must be a non-empty tuple of pool addresses, got {self.route!r}"
+            )
+        for name, positive in (
+            ("amount_in", True),
+            ("amount_out", True),
+            ("min_amount_out", False),
+            ("gas_cost_eth", False),
+        ):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, Decimal)
+                or not value.is_finite()
+                or value.is_signed()
+                or (positive and value == 0)
+            ):
+                raise ValueError(f"{name} is not an amount a fill can have: {value!r}")
+        if self.amount_out < self.min_amount_out:
+            raise ValueError(
+                f"amount_out {self.amount_out} is below min_amount_out {self.min_amount_out}"
+            )
 
 
 @dataclass(frozen=True)
@@ -178,7 +280,7 @@ class RunRecord:
                 raise ValueError(f"{name} must be a non-empty string, got {value!r}")
         if not isinstance(self.mode, RunMode):
             raise ValueError(f"mode must be a RunMode, got {self.mode!r}")
-        if not _is_time(self.chain_id) or not _is_time(self.created_at):
+        if not _is_count(self.chain_id) or not _is_count(self.created_at):
             raise ValueError("chain_id and created_at must be non-negative integers")
         if not isinstance(self.ledger, Ledger):
             raise ValueError(f"ledger must be a Ledger, got {self.ledger!r}")

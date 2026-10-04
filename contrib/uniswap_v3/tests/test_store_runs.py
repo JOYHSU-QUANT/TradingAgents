@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -14,6 +15,7 @@ from contrib.uniswap_v3.domain.records import (
     Decision,
     FillRecord,
     Outcome,
+    RejectionCode,
     RunRecord,
     StepRecord,
     Valuation,
@@ -58,6 +60,17 @@ def _run(run_id: str = "run-1", **changes) -> RunRecord:
     return RunRecord(**{**fields, **changes})
 
 
+def _tamper(path, *statements: str) -> None:
+    """Change the database behind the store's back."""
+    connection = sqlite3.connect(path)
+    try:
+        for statement in statements:
+            connection.execute(statement)
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _held(time: int = FIRST_DAY, ledger: Ledger | None = None) -> StepRecord:
     ledger = ledger or _ledger()
     return StepRecord(
@@ -79,7 +92,7 @@ def _filled(time: int = FIRST_DAY) -> StepRecord:
             outcome=Outcome.FILLED,
             close_block=999,
             target=weights("0.5", "0.3", "0.2"),
-            seen=BarSeen(close_block_hash=_HASH, finality=Finality.PENDING),
+            seen=BarSeen(close_block=999, close_block_hash=_HASH, finality=Finality.PENDING),
         ),
         valuation=Valuation(time=time, ledger=after, prices=PRICES, total_value=D("9991.5039")),
         fills=(
@@ -104,7 +117,7 @@ def test_the_store_is_the_engines_journal(store):
 
 
 def test_a_run_comes_back_as_it_was_stored(store):
-    run = _run(mode=RunMode.PAPER, ledger=_ledger("1234.567891", "0.000000000000000001"))
+    run = _run(mode=RunMode.PAPER, ledger=_ledger("1234.567891", weth="0.000000000000000001"))
     store.insert_run(run)
     assert store.run("run-1") == run
     assert store.run("run-2") is None
@@ -173,6 +186,7 @@ def test_a_rejected_decision_keeps_its_reason_and_a_skipped_one_its_flag(store):
         close_block=999,
         target=weights("0.5", "0.3", "0.2"),
         reason="leg 0 (USDC to WETH) was refused: closed",
+        reason_code=RejectionCode.EXECUTOR,
     )
     skipped = Decision(time=FIRST_DAY + DAY, outcome=Outcome.SKIPPED_SUSPECT, close_block=8_199)
     store.record("run-1", StepRecord(decision=rejected, valuation=value))
@@ -219,12 +233,87 @@ def test_a_run_that_is_not_stored_has_no_ledger_and_takes_no_record(store):
     assert store.decision("run-9", FIRST_DAY) is None
 
 
-def test_the_latest_ledger_is_that_of_the_latest_bar_whatever_order_they_were_written_in(store):
+def test_a_step_on_an_earlier_bar_than_the_latest_decided_is_refused(store):
     store.insert_run(_run())
-    store.record("run-1", _held(FIRST_DAY + DAY, _ledger("7000", "1.5")))
-    store.record("run-1", _held(FIRST_DAY, _ledger("10000")))
+    store.record("run-1", _held(FIRST_DAY + DAY))
+    with pytest.raises(StoreError, match=f"has already decided the later bar at {FIRST_DAY + DAY}"):
+        store.record("run-1", _held(FIRST_DAY))
+    assert store.decision("run-1", FIRST_DAY) is None
     assert store.last_decided("run-1") == FIRST_DAY + DAY
-    assert store.ledger("run-1") == _ledger("7000", "1.5")
+
+
+def test_a_step_whose_ledger_does_not_follow_from_the_runs_is_refused(store):
+    # What a second writer on the run would send: balances worked from a ledger that has moved on.
+    store.insert_run(_run())
+    store.record("run-1", _filled())
+    with pytest.raises(StoreError, match="is not its ledger before with the step's fills applied"):
+        store.record("run-1", _held(FIRST_DAY + DAY, _ledger()))
+    stale = _filled(FIRST_DAY + DAY)
+    with pytest.raises(StoreError, match="is not its ledger before"):
+        store.record("run-1", stale)
+    assert store.last_decided("run-1") == FIRST_DAY
+    assert len(store.fills("run-1")) == 2
+
+
+def test_fills_the_runs_ledger_does_not_cover_are_refused(store):
+    store.insert_run(_run(ledger=_ledger("100")))
+    with pytest.raises(StoreError, match="do not apply to its ledger .*holds 100 USDC"):
+        store.record("run-1", _filled())
+    assert store.decision("run-1", FIRST_DAY) is None
+
+
+@pytest.mark.parametrize("mode", list(RunMode))
+def test_the_schema_takes_every_run_mode(store, mode):
+    store.insert_run(_run(mode=mode))
+    assert store.run("run-1").mode is mode
+
+
+@pytest.mark.parametrize("finality", list(Finality))
+def test_the_schema_takes_every_finality_a_decision_can_keep(store, finality):
+    store.insert_run(_run())
+    held = _held()
+    seen = BarSeen(close_block=999, close_block_hash=_HASH, finality=finality)
+    store.record("run-1", replace(held, decision=replace(held.decision, seen=seen)))
+    assert store.decision("run-1", FIRST_DAY).seen == seen
+
+
+def test_an_outcome_or_a_reason_code_this_code_does_not_know_is_refused_when_read(tmp_path):
+    path = tmp_path / "store.db"
+    with open_store(path) as store:
+        store.insert_run(_run())
+        store.record("run-1", _held())
+    _tamper(path, "UPDATE decisions SET outcome = 'partial'")
+    with open_store(path) as store, pytest.raises(StoreError, match="'partial' is not a valid"):
+        store.decision("run-1", FIRST_DAY)
+    _tamper(
+        path,
+        "UPDATE decisions SET outcome = 'rejected', target = '{\"USDC\": \"1\"}', "
+        "reason = 'why', reason_code = 'weather'",
+    )
+    with open_store(path) as store, pytest.raises(StoreError, match="'weather' is not a valid"):
+        store.decision("run-1", FIRST_DAY)
+
+
+def test_a_step_that_fails_part_way_leaves_nothing_behind(tmp_path):
+    path = tmp_path / "store.db"
+    with open_store(path) as store:
+        store.insert_run(_run())
+    # The decision and the fills go in; the valuation, last, has nowhere to go.
+    _tamper(path, "DROP TABLE valuations")
+    with open_store(path) as store:
+        with pytest.raises(StoreError, match="the store failed while recording a decision"):
+            store.record("run-1", _filled())
+        assert store.decision("run-1", FIRST_DAY) is None
+        assert store.fills("run-1") == []
+
+
+def test_the_schema_refuses_a_hash_without_a_finality(tmp_path):
+    path = tmp_path / "store.db"
+    with open_store(path) as store:
+        store.insert_run(_run())
+        store.record("run-1", _held())
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _tamper(path, f"UPDATE decisions SET close_block_hash = '{_HASH}'")
 
 
 def test_a_stored_row_that_no_longer_reads_is_a_store_error(tmp_path):

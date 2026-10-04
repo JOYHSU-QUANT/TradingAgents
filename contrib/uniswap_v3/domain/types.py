@@ -353,7 +353,9 @@ class SwapIntent:
             if tokens.count(token) > 1:
                 raise ValueError(f"the route passes through {token.symbol} more than once")
         _require_amount(self.amount_in, "amount_in", positive=True)
-        _require_places(self.amount_in, self.token_in.decimals, f"amount_in of {self.token_in.symbol}")
+        _require_places(
+            self.amount_in, self.token_in.decimals, f"amount_in of {self.token_in.symbol}"
+        )
         _require_amount(self.min_amount_out, "min_amount_out")
         _require_places(
             self.min_amount_out, tokens[-1].decimals, f"min_amount_out of {tokens[-1].symbol}"

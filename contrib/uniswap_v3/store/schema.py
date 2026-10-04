@@ -17,7 +17,10 @@ is JSON text.
 ``bars`` is market data and belongs to no run. ``runs``, ``decisions``,
 ``fills`` and ``valuations`` are what a run writes, in any mode: a decision
 is keyed by its run and its bar's boundary, so a bar is decided once, and a
-decision's fills and its valuation hang off that key.
+decision's fills and its valuation hang off that key. ``decisions.outcome``
+and ``reason_code`` carry no CHECK of their values: SQLite cannot alter one,
+so a new outcome would mean rebuilding three tables, and a value this code
+does not know is refused when the row is read.
 """
 
 from __future__ import annotations
@@ -75,14 +78,15 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         CREATE TABLE decisions (
             run_id TEXT NOT NULL REFERENCES runs (run_id),
             time INTEGER NOT NULL,
-            outcome TEXT NOT NULL CHECK (
-                outcome IN ('skipped_suspect', 'hold', 'no_trade', 'filled', 'rejected')
-            ),
+            outcome TEXT NOT NULL,
             target TEXT,
             reason TEXT,
+            reason_code TEXT,
             close_block INTEGER NOT NULL,
             close_block_hash TEXT,
             finality TEXT CHECK (finality IN ('pending', 'final', 'reorged')),
+            CHECK ((close_block_hash IS NULL) = (finality IS NULL)),
+            CHECK ((reason IS NULL) = (reason_code IS NULL)),
             PRIMARY KEY (run_id, time)
         )
         """,

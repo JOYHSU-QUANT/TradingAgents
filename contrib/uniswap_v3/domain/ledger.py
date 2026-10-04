@@ -16,11 +16,19 @@ from types import MappingProxyType
 from .decimal_context import EXACT_CONTEXT, MAX_MAGNITUDE, plain
 from .types import Fill, Portfolio
 
-__all__ = ["Ledger", "LedgerError"]
+__all__ = ["InsufficientGas", "Ledger", "LedgerError"]
 
 
 class LedgerError(ValueError):
     """Fills the ledger cannot take: a balance, or the gas balance, does not cover them."""
+
+
+class InsufficientGas(LedgerError):
+    """The gas balance does not cover a fill's gas.
+
+    The one shortfall a well-planned rebalance can meet: a swap never sells
+    more than its balance, but nothing plans the gas.
+    """
 
 
 def _require_balance(value: object, what: str) -> None:
@@ -63,7 +71,8 @@ class Ledger:
 
         Each fill takes its swap's ``amount_in`` from one balance, adds its
         ``amount_out`` to another and takes its gas from the gas balance. A
-        fill that a balance does not cover at its turn raises.
+        fill that a balance does not cover at its turn raises, and one whose
+        gas the gas balance does not cover raises :class:`InsufficientGas`.
         """
         balances = dict(self.balances)
         gas_eth = self.gas_eth
@@ -78,7 +87,7 @@ class Ledger:
                     f"{plain(fill.swap.amount_in)} the swap sells"
                 )
             if gas_eth < fill.gas_cost_eth:
-                raise LedgerError(
+                raise InsufficientGas(
                     f"the gas balance of {plain(gas_eth)} ETH does not cover the "
                     f"{plain(fill.gas_cost_eth)} ETH the swap of {sold} for {bought} costs"
                 )

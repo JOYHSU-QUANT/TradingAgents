@@ -4,7 +4,7 @@ Every swap is exact-input and sells a token the portfolio holds too much of
 straight into one it holds too little of, along the pools that join the two.
 A token is therefore either sold or bought in one rebalance, never both, and
 no swap's input depends on another's output: the whole list is known before
-the first swap is made, and its order does not matter.
+the first swap is made.
 """
 
 from __future__ import annotations
@@ -67,7 +67,8 @@ def amount_out_at(
         DECIMAL_CONTEXT.multiply(amount_in, price(token_in)), price(token_out)
     )
     for pool in route:
-        amount = DECIMAL_CONTEXT.multiply(amount, DECIMAL_CONTEXT.subtract(Decimal(1), pool.fee_rate))
+        kept = DECIMAL_CONTEXT.subtract(Decimal(1), pool.fee_rate)
+        amount = DECIMAL_CONTEXT.multiply(amount, kept)
     return amount
 
 
@@ -84,7 +85,8 @@ def plan_swaps(
     The token furthest above its target is matched with the one furthest
     below, then the next, until one side is used up; a tie goes to the
     symbol that sorts first. A transfer worth less than
-    ``settings.min_trade_value`` is left out. Each swap's ``amount_in`` is
+    ``settings.min_trade_value`` is left out, and so is one too small to
+    return a single unit of the token it buys. Each swap's ``amount_in`` is
     cut to its token's decimal places, and its ``min_amount_out`` is what the
     route returns at the portfolio's prices after the pools' fees, less
     ``settings.max_slippage``.
@@ -144,17 +146,22 @@ def plan_swaps(
             at_close = amount_out_at(
                 by_symbol[seller], route, amount, quote=portfolio.quote, prices=portfolio.prices
             )
-            floor = DECIMAL_CONTEXT.multiply(
-                at_close, DECIMAL_CONTEXT.subtract(Decimal(1), settings.max_slippage)
+            floor = floor_to_places(
+                DECIMAL_CONTEXT.multiply(
+                    at_close, DECIMAL_CONTEXT.subtract(Decimal(1), settings.max_slippage)
+                ),
+                by_symbol[buyer].decimals,
             )
-            swaps.append(
-                SwapIntent(
-                    token_in=by_symbol[seller],
-                    route=route,
-                    amount_in=amount,
-                    min_amount_out=floor_to_places(floor, by_symbol[buyer].decimals),
+            # A minimum of nothing would protect nothing, and no executor fills nothing.
+            if floor > 0:
+                swaps.append(
+                    SwapIntent(
+                        token_in=by_symbol[seller],
+                        route=route,
+                        amount_in=amount,
+                        min_amount_out=floor,
+                    )
                 )
-            )
         excess[seller] = DECIMAL_CONTEXT.subtract(excess[seller], value)
         deficit[buyer] = DECIMAL_CONTEXT.subtract(deficit[buyer], value)
         if excess[seller] == 0:

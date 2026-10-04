@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 
+from contrib.uniswap_v3.domain.decimal_context import DECIMAL_CONTEXT, floor_to_places
 from contrib.uniswap_v3.domain.execution import ExecutionSettings
 from contrib.uniswap_v3.domain.routing import amount_out_at, find_route, plan_swaps
 from contrib.uniswap_v3.domain.types import Pool, Portfolio, SwapIntent, Token
@@ -112,11 +113,26 @@ def test_a_token_is_sold_or_bought_in_one_rebalance_and_never_both():
 
 
 def test_a_target_of_zero_sells_the_whole_balance_and_leaves_no_dust():
-    # A price with no short decimal form: value / price would not give the balance back.
-    prices = {"WETH": D("1999.999999999999999997"), "WBTC": D("40000")}
-    held = "1.234567890123456789"
-    (swap,) = _plan(_portfolio("0", held, "0", prices), weights("1", "0", "0"))
-    assert swap.amount_in == D(held)
+    # At this price the balance's value, divided by the price again and cut to
+    # WETH's places, comes back one unit short of the balance.
+    price, held = D("1733.571247926063913299924044"), D("673.600010949915485140")
+    value = DECIMAL_CONTEXT.multiply(held, price)
+    assert floor_to_places(DECIMAL_CONTEXT.divide(value, price), 18) == D("673.600010949915485139")
+    prices = {"WETH": price, "WBTC": D("40000")}
+    (swap,) = _plan(_portfolio("0", str(held), "0", prices), weights("1", "0", "0"))
+    assert swap.amount_in == held
+
+
+def test_a_transfer_too_small_to_buy_one_unit_is_left_out_rather_than_given_no_minimum():
+    # A millionth of a USDC buys less than one unit of either token.
+    dust = _portfolio("0.000001", "0", "0")
+    settings = {"min_trade_value": D("0")}
+    assert _plan(dust, weights("0", "0", "1"), **settings) == ()
+    # A cent buys units of WETH's eighteen places, and none of WBTC's eight after the cut.
+    (swap,) = _plan(_portfolio("0.01", "0", "0"), weights("0", "1", "0"), **settings)
+    assert swap.min_amount_out > 0
+    for swap in _plan(_portfolio("1000", "0.2", "0.01"), weights("0.5", "0.3", "0.2"), **settings):
+        assert swap.min_amount_out > 0
 
 
 def test_amounts_fit_their_tokens_decimal_places_and_together_sell_down_to_the_target():
@@ -185,15 +201,18 @@ def test_a_portfolio_or_target_over_other_tokens_is_refused():
 # --- settings --------------------------------------------------------------
 
 
-def test_the_default_settings_are_the_ones_the_example_config_spells_out():
+def test_the_default_settings_are_the_documented_ones():
     settings = ExecutionSettings()
     assert settings.min_trade_value == D("10")
     assert settings.max_slippage == D("0.005")
     assert settings.delay_blocks == 25
     assert settings.model_slippage == D("0.0005")
     assert settings.model_gas_units_per_hop == 150_000
-    # The model may take off exactly what a swap tolerates.
-    assert ExecutionSettings(max_slippage=D("0.001"), model_slippage=D("0.001")).delay_blocks == 25
+
+
+def test_the_model_may_take_off_exactly_what_a_swap_tolerates():
+    settings = ExecutionSettings(max_slippage=D("0.001"), model_slippage=D("0.001"))
+    assert settings.model_slippage == settings.max_slippage
 
 
 @pytest.mark.parametrize(

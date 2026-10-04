@@ -30,9 +30,10 @@ Tokens and pools are named by their keys in :mod:`.constants`; a config
 cannot supply an address, and :class:`UniswapConfig` itself refuses a token
 or pool that is not in those tables. The pools must form a tree that reaches
 every token from the quote token: one path of pools then joins any two
-tokens, and it is both how a token is priced and how it is swapped. Unknown keys are refused rather than
-ignored, so a typo cannot silently fall back to a default, and so is a key
-written twice, which YAML would otherwise settle in favour of the last. The
+tokens, and it is both how a token is priced and how it is swapped. Unknown
+keys are refused rather than ignored, so a typo cannot silently fall back to
+a default, and so is a key written twice, which YAML would otherwise settle
+in favour of the last. The
 strategy's ``params`` are not interpreted here: they belong to the strategy,
 which checks them when :func:`~.strategies.registry.build_strategy` builds
 it. They are kept as a read-only copy, so a list arrives as a tuple.
@@ -193,7 +194,7 @@ class UniswapConfig:
         keys = [pool_key(pool) for pool in self.pools]
         if _repeated(keys):
             raise ConfigError(f"pools lists {_repeated(keys)} more than once")
-        # A swap names two tokens and no pool, so a pair has one pool.
+        # One path joins any two tokens, so a pair has one pool.
         pairs = [frozenset({pool.token0.symbol, pool.token1.symbol}) for pool in self.pools]
         for crowded in pairs:
             if pairs.count(crowded) > 1:
@@ -283,6 +284,17 @@ def _execution_settings(document: dict[Any, Any]) -> ExecutionSettings:
         raise ConfigError(f"execution: {exc}") from exc
 
 
+def _execution_document(settings: ExecutionSettings) -> dict[str, object]:
+    """``settings`` in the shape a config file writes them: the model's keys under ``model``."""
+    document: dict[str, object] = {}
+    model = {key: getattr(settings, name) for key, name in _MODEL_KEYS.items()}
+    for name, value in asdict(settings).items():
+        if name not in _MODEL_KEYS.values():
+            document[name] = value
+    document["model"] = model
+    return document
+
+
 def _jsonable(value: object) -> object:
     """A frozen config value as JSON can write it: sets sorted, decimals as plain text.
 
@@ -303,8 +315,11 @@ def config_snapshot(config: UniswapConfig) -> str:
     """Everything in ``config`` that a run's decisions and fills depend on, as one JSON text.
 
     Two configs with the same snapshot run the same way, so a run keeps the
-    snapshot it was started under and is not continued under another. Where
-    the node's URL comes from is left out: it changes no decision.
+    snapshot it was started under and is not continued under another. The
+    comparison is of the whole text: a key a later version adds, even at its
+    default, makes a new snapshot, and so a new run. The snapshot has the
+    config file's own shape, with every default written out. Where the
+    node's URL comes from is left out: it changes no decision.
     """
     try:
         return json.dumps(
@@ -318,7 +333,7 @@ def config_snapshot(config: UniswapConfig) -> str:
                     "params": _jsonable(config.strategy.params),
                 },
                 "bars": _jsonable(asdict(config.bars)),
-                "execution": _jsonable(asdict(config.execution)),
+                "execution": _jsonable(_execution_document(config.execution)),
             },
             sort_keys=True,
             separators=(",", ":"),

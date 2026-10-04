@@ -10,7 +10,9 @@ from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.records import (
     BarSeen,
     Decision,
+    FillRecord,
     Outcome,
+    RejectionCode,
     RunRecord,
     StepRecord,
     Valuation,
@@ -25,6 +27,7 @@ from contrib.uniswap_v3.tests.fakes.engine import (
 )
 
 D = Decimal
+_HASH = "0x" + "ab" * 32
 _TARGET = weights("0.5", "0.3", "0.2")
 _LEDGER = _ledger("100")
 _FILL = Fill(SwapIntent(USDC, (USDC_WETH,), D("30"), D("0")), D("0.01"), D("0"), 7)
@@ -39,7 +42,7 @@ def _valuation(time: int = 100) -> Valuation:
     return Valuation(time=time, ledger=_LEDGER, prices=PRICES, total_value=D("100"))
 
 
-def test_the_outcomes_are_the_five_the_schema_allows():
+def test_the_outcomes_are_the_five_a_step_can_end_in():
     assert {outcome.value for outcome in Outcome} == {
         "skipped_suspect",
         "hold",
@@ -55,7 +58,9 @@ def test_each_outcome_has_one_well_formed_decision():
     assert not _decision(Outcome.HOLD).suspect
     _decision(Outcome.NO_TRADE, target=_TARGET)
     _decision(Outcome.FILLED, target=_TARGET)
-    _decision(Outcome.REJECTED, target=_TARGET, reason="closed")
+    _decision(
+        Outcome.REJECTED, target=_TARGET, reason="closed", reason_code=RejectionCode.EXECUTOR
+    )
 
 
 @pytest.mark.parametrize(
@@ -66,7 +71,29 @@ def test_each_outcome_has_one_well_formed_decision():
         (Outcome.FILLED, {}, "carries a target exactly when"),
         (Outcome.NO_TRADE, {"target": {"USDC": D("1")}}, "carries a target exactly when"),
         (Outcome.REJECTED, {"target": _TARGET}, "and no other, carries a reason"),
+        (Outcome.REJECTED, {"target": _TARGET, "reason": "why"}, "carries a reason and a reason code"),
+        (
+            Outcome.REJECTED,
+            {"target": _TARGET, "reason_code": RejectionCode.GAS},
+            "carries a reason and a reason code",
+        ),
+        (
+            Outcome.REJECTED,
+            {"target": _TARGET, "reason": " ", "reason_code": RejectionCode.GAS},
+            "a reason is a non-empty string",
+        ),
+        (
+            Outcome.REJECTED,
+            {"target": _TARGET, "reason": "why", "reason_code": "gas"},
+            "a reason code a RejectionCode",
+        ),
         (Outcome.FILLED, {"target": _TARGET, "reason": "why"}, "and no other, carries a reason"),
+        (Outcome.HOLD, {"reason_code": RejectionCode.GAS}, "and no other, carries a reason"),
+        (
+            Outcome.HOLD,
+            {"seen": BarSeen(close_block=8, close_block_hash=_HASH, finality=Finality.FINAL)},
+            "seen describes block 8, and the bar closed on 9",
+        ),
         (Outcome.HOLD, {"time": -1}, "non-negative integers"),
         (Outcome.HOLD, {"close_block": True}, "non-negative integers"),
         ("hold", {}, "outcome must be an Outcome"),
@@ -80,12 +107,19 @@ def test_a_decision_that_contradicts_itself_is_refused(outcome, changes, match):
 
 @pytest.mark.parametrize(
     ("close_block_hash", "finality", "match"),
-    [("", Finality.FINAL, "close_block_hash"), (None, Finality.FINAL, "close_block_hash"),
-     ("0xab", "final", "finality must be a Finality")],
+    [
+        ("", Finality.FINAL, "64 lowercase hex digits"),
+        (None, Finality.FINAL, "64 lowercase hex digits"),
+        ("0xab", Finality.FINAL, "64 lowercase hex digits"),
+        (_HASH.upper(), Finality.FINAL, "64 lowercase hex digits"),
+        (_HASH, "final", "finality must be a Finality"),
+    ],
 )
 def test_a_malformed_bar_seen_is_refused(close_block_hash, finality, match):
     with pytest.raises(ValueError, match=match):
-        BarSeen(close_block_hash=close_block_hash, finality=finality)
+        BarSeen(close_block=9, close_block_hash=close_block_hash, finality=finality)
+    with pytest.raises(ValueError, match="close_block must be a non-negative integer"):
+        BarSeen(close_block=-1, close_block_hash=_HASH, finality=Finality.FINAL)
 
 
 def test_a_valuation_keeps_its_own_copy_of_the_prices():
@@ -98,6 +132,9 @@ def test_a_valuation_keeps_its_own_copy_of_the_prices():
         ({"ledger": {"USDC": D("1")}}, "ledger must be a Ledger"),
         ({"total_value": 100}, "total_value must be a finite Decimal"),
         ({"total_value": D("NaN")}, "total_value must be a finite Decimal"),
+        ({"prices": [("WETH", D("1"))]}, "prices must map token symbol to price"),
+        ({"prices": {"WETH": D("0")}}, r"prices\['WETH'\] must be a finite, positive Decimal"),
+        ({"prices": {"WETH": 2000.0}}, r"prices\['WETH'\] must be a finite, positive Decimal"),
     ):
         fields = {"time": 1, "ledger": _LEDGER, "prices": PRICES, "total_value": D("100")}
         with pytest.raises(ValueError, match=match):
@@ -113,6 +150,10 @@ def test_a_step_carries_fills_exactly_when_its_decision_is_filled():
             StepRecord(decision=decision, valuation=_valuation(), fills=fills)
     with pytest.raises(ValueError, match="the valuation at 200 is not of the decision at 100"):
         StepRecord(decision=_decision(), valuation=_valuation(200))
+    with pytest.raises(ValueError, match="a step's fills are Fill values"):
+        StepRecord(decision=filled, valuation=_valuation(), fills=("fill",))
+    with pytest.raises(ValueError, match="a step holds a Decision and a Valuation"):
+        StepRecord(decision=_decision(), valuation=_LEDGER)
 
 
 @pytest.mark.parametrize(
@@ -142,3 +183,39 @@ def test_a_malformed_run_is_refused(changes, match):
     assert RunRecord(**fields).run_id == "run-1"
     with pytest.raises(ValueError, match=match):
         RunRecord(**{**fields, **changes})
+
+
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [
+        ({"leg": -1}, "leg must be a non-negative integer"),
+        ({"block": True}, "block must be a non-negative integer"),
+        ({"token_in": ""}, "token_in must be a token symbol"),
+        ({"token_out": "USDC"}, "two different tokens"),
+        ({"route": ()}, "route must be a non-empty tuple of pool addresses"),
+        # What tuple() makes of a route stored as one string.
+        ({"route": tuple(USDC_WETH.address)}, "route must be a non-empty tuple of pool addresses"),
+        ({"route": [USDC_WETH.address]}, "route must be a non-empty tuple of pool addresses"),
+        ({"amount_in": D("0")}, "amount_in is not an amount a fill can have"),
+        ({"amount_out": D("NaN")}, "amount_out is not an amount a fill can have"),
+        ({"gas_cost_eth": D("-1")}, "gas_cost_eth is not an amount a fill can have"),
+        ({"min_amount_out": 1}, "min_amount_out is not an amount a fill can have"),
+        ({"min_amount_out": D("2")}, "amount_out 1.5 is below min_amount_out 2"),
+    ],
+)
+def test_a_malformed_fill_record_is_refused(changes, match):
+    fields = {
+        "time": 100,
+        "leg": 0,
+        "token_in": "USDC",
+        "token_out": "WETH",
+        "route": (USDC_WETH.address,),
+        "amount_in": D("3000"),
+        "min_amount_out": D("1.49"),
+        "amount_out": D("1.5"),
+        "gas_cost_eth": D("0"),
+        "block": 7,
+    }
+    assert FillRecord(**fields).route == (USDC_WETH.address,)
+    with pytest.raises(ValueError, match=match):
+        FillRecord(**{**fields, **changes})

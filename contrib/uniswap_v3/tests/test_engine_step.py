@@ -11,7 +11,7 @@ from contrib.uniswap_v3.config import ConfigError, StrategySpec
 from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.execution import ExecutionSettings
 from contrib.uniswap_v3.domain.ledger import Ledger
-from contrib.uniswap_v3.domain.records import BarSeen, Outcome
+from contrib.uniswap_v3.domain.records import BarSeen, Outcome, RejectionCode
 from contrib.uniswap_v3.domain.types import (
     Bar,
     Fill,
@@ -19,8 +19,10 @@ from contrib.uniswap_v3.domain.types import (
     MarketView,
     Rejection,
     RunMode,
+    SwapIntent,
     TargetWeights,
 )
+from contrib.uniswap_v3.engine import step as step_module
 from contrib.uniswap_v3.engine.executors import ModelExecutor
 from contrib.uniswap_v3.engine.step import Engine, EngineError, open_engine, start_run
 from contrib.uniswap_v3.store.repository import StoreError, open_store
@@ -231,6 +233,7 @@ def test_one_refused_leg_leaves_every_balance_as_it_was(store):
     result = engine.step(_view(bar(0)))
     assert result.decision.outcome is Outcome.REJECTED
     assert result.decision.reason == "leg 1 (USDC to WBTC) was refused: no liquidity"
+    assert result.decision.reason_code is RejectionCode.EXECUTOR
     assert result.decision.target == _TARGET
     assert store.fills(_RUN) == []
     assert store.ledger(_RUN) == _ledger()
@@ -253,18 +256,27 @@ def test_fills_whose_gas_the_gas_balance_does_not_cover_are_refused_together(sto
     result = engine.step(_view(bar(0)))
     assert result.decision.outcome is Outcome.REJECTED
     assert "the gas balance of 0.0015 ETH does not cover the 0.002 ETH" in result.decision.reason
+    assert result.decision.reason_code is RejectionCode.GAS
     assert store.ledger(_RUN) == _ledger(gas="0.0025")
     assert store.fills(_RUN) == []
 
 
 def test_what_the_store_said_of_the_bar_is_kept_with_the_decision(store):
     engine = _engine(store, ScriptedStrategy({}))
-    seen = BarSeen(close_block_hash="0x" + "ab" * 32, finality=Finality.PENDING)
+    seen = BarSeen(close_block=1_000, close_block_hash="0x" + "ab" * 32, finality=Finality.PENDING)
     engine.step(_view(bar(0)), seen=seen)
     engine.step(_view(bar(0), bar(1)))
     assert store.decision(_RUN, FIRST_DAY).seen == seen
     assert store.decision(_RUN, FIRST_DAY).close_block == 1_000
     assert store.decision(_RUN, FIRST_DAY + DAY).seen is None
+
+
+def test_what_is_said_of_another_block_than_the_bars_stops_the_run(store):
+    engine = _engine(store, ScriptedStrategy({}))
+    other = BarSeen(close_block=999, close_block_hash="0x" + "ab" * 32, finality=Finality.FINAL)
+    with pytest.raises(EngineError, match="seen describes block 999, and the bar at .* on 1000"):
+        engine.step(_view(bar(0)), seen=other)
+    assert store.decision(_RUN, FIRST_DAY) is None
 
 
 # --- what stops the run ----------------------------------------------------
@@ -325,6 +337,27 @@ def test_a_bar_before_the_latest_decided_one_stops_the_run(store):
     engine.step(_view(bar(1)))
     with pytest.raises(EngineError, match="is before it"):
         engine.step(_view(bar(0)))
+
+
+def test_a_plan_that_sells_more_than_the_ledger_holds_stops_the_run(store, monkeypatch):
+    # No plan does; one that did would be a fault to stop on, not a refusal to record.
+    oversold = SwapIntent(USDC, (USDC_WETH,), D("20000"), D("1"))
+    monkeypatch.setattr(step_module, "plan_swaps", lambda *args, **kwargs: (oversold,))
+    engine = _engine(store, ScriptedStrategy({FIRST_DAY: _TARGET}), ScriptedExecutor(_at_minimum))
+    with pytest.raises(EngineError, match="do not apply to the ledger .*holds 10000 USDC"):
+        engine.step(_view(bar(0)))
+    assert store.decision(_RUN, FIRST_DAY) is None
+
+
+def test_swaps_that_cannot_be_planned_stop_the_run(store, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ValueError("no pool path joins USDC to WBTC")
+
+    monkeypatch.setattr(step_module, "plan_swaps", refuse)
+    engine = _engine(store, ScriptedStrategy({FIRST_DAY: _TARGET}))
+    with pytest.raises(EngineError, match="cannot be planned .no pool path joins USDC to WBTC"):
+        engine.step(_view(bar(0)))
+    assert store.decision(_RUN, FIRST_DAY) is None
 
 
 @pytest.mark.parametrize("wrong", ["other swap", "not an answer"])
@@ -403,3 +436,22 @@ def test_a_run_cannot_be_started_twice_or_over_other_tokens(store):
     with pytest.raises(EngineError, match="run_id must be a non-empty string"):
         start_run(store, _CONFIG, run_id=" ", mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
     assert store.run("run-2") is None
+
+
+@pytest.mark.parametrize(
+    ("opening", "match"),
+    [
+        (_ledger("0", "0", "0"), "the opening balances are all zero"),
+        (_ledger("10000.0000001"), "the opening USDC balance 10000.0000001 has more than 6"),
+        (_ledger(wbtc="0.000000001"), "the opening WBTC balance 0.000000001 has more than 8"),
+        (_ledger(gas="0.0000000000000000001"), "the opening gas ETH balance .* more than 18"),
+    ],
+)
+def test_a_run_is_not_started_with_balances_it_could_not_trade_or_a_chain_could_not_hold(
+    store, opening, match
+):
+    with pytest.raises(EngineError, match=match):
+        start_run(
+            store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=opening, created_at=0
+        )
+    assert store.run(_RUN) is None

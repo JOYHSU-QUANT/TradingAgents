@@ -23,12 +23,13 @@ from pathlib import Path
 from typing import Any, Final
 
 from ..domain.bars import Finality, PoolBar
-from ..domain.ledger import Ledger
+from ..domain.ledger import Ledger, LedgerError
 from ..domain.records import (
     BarSeen,
     Decision,
     FillRecord,
     Outcome,
+    RejectionCode,
     RunRecord,
     StepRecord,
     Valuation,
@@ -108,7 +109,17 @@ def _amounts_text(amounts: Mapping[str, Decimal]) -> str:
 
 
 def _amounts(text: str) -> dict[str, Decimal]:
-    return {symbol: Decimal(amount) for symbol, amount in json.loads(text).items()}
+    amounts = json.loads(text)
+    if not isinstance(amounts, dict):
+        raise ValueError(f"expected a JSON object of amounts, got {text!r}")
+    return {symbol: Decimal(amount) for symbol, amount in amounts.items()}
+
+
+def _route(text: str) -> tuple[str, ...]:
+    route = json.loads(text)
+    if not isinstance(route, list):
+        raise ValueError(f"expected a JSON list of pool addresses, got {text!r}")
+    return tuple(route)
 
 
 def _ledger(balances: str, gas_eth: str) -> Ledger:
@@ -120,7 +131,7 @@ def _stored(what: str) -> Iterator[None]:
     """Turn a stored row that no longer reads as ``what`` into a :class:`StoreError`."""
     try:
         yield
-    except (TypeError, ValueError, AttributeError, InvalidOperation) as exc:
+    except (TypeError, ValueError, InvalidOperation) as exc:
         raise StoreError(f"the stored {what} is not valid ({exc})") from exc
 
 
@@ -306,13 +317,13 @@ class Store:
         """The run's decision on the bar at ``time``, when it has made one."""
         with _sqlite_errors("reading a decision"):
             row = self._connection.execute(
-                "SELECT outcome, target, reason, close_block, close_block_hash, finality "
-                "FROM decisions WHERE run_id = ? AND time = ?",
+                "SELECT outcome, target, reason, reason_code, close_block, close_block_hash, "
+                "finality FROM decisions WHERE run_id = ? AND time = ?",
                 (run_id, time),
             ).fetchone()
         if row is None:
             return None
-        outcome, target, reason, close_block, close_block_hash, finality = row
+        outcome, target, reason, reason_code, close_block, close_block_hash, finality = row
         with _stored(f"decision of run {run_id!r} at {time}"):
             return Decision(
                 time=time,
@@ -320,10 +331,15 @@ class Store:
                 close_block=close_block,
                 target=None if target is None else TargetWeights(_amounts(target)),
                 reason=reason,
+                reason_code=None if reason_code is None else RejectionCode(reason_code),
                 seen=(
                     None
                     if close_block_hash is None
-                    else BarSeen(close_block_hash=close_block_hash, finality=Finality(finality))
+                    else BarSeen(
+                        close_block=close_block,
+                        close_block_hash=close_block_hash,
+                        finality=Finality(finality),
+                    )
                 ),
             )
 
@@ -387,7 +403,7 @@ class Store:
                     leg=row[1],
                     token_in=row[2],
                     token_out=row[3],
-                    route=tuple(json.loads(row[4])),
+                    route=_route(row[4]),
                     amount_in=Decimal(row[5]),
                     min_amount_out=Decimal(row[6]),
                     amount_out=Decimal(row[7]),
@@ -397,21 +413,46 @@ class Store:
                 for row in rows
             ]
 
+    def _require_follows_on(self, run_id: str, step: StepRecord) -> None:
+        """Refuse a step that is not the next one of the run ``run_id``."""
+        time = step.decision.time
+        before = self.ledger(run_id)
+        latest = self.last_decided(run_id)
+        if latest is not None and latest >= time:
+            what = "the bar" if latest == time else f"the later bar at {latest}, so not the one"
+            raise StoreError(f"the run {run_id!r} has already decided {what} at {time}")
+        try:
+            expected = before.apply(step.fills)
+        except LedgerError as exc:
+            raise StoreError(
+                f"the fills of run {run_id!r} at {time} do not apply to its ledger ({exc})"
+            ) from exc
+        if step.valuation.ledger != expected:
+            raise StoreError(
+                f"the ledger of run {run_id!r} at {time} is not its ledger before with the "
+                f"step's fills applied"
+            )
+
     def record(self, run_id: str, step: StepRecord) -> None:
         """Write one step's decision, fills and valuation in one transaction: all, or none.
 
-        A bar the run has already decided, or a run that is not stored,
-        raises :class:`StoreError`.
+        The step must follow on from what is stored, and that is checked
+        inside the transaction, so that two writers on one run cannot both
+        pass: its bar is later than every bar the run has decided, and its
+        ledger is the run's current one with the step's fills applied. A
+        step that does not, or a run that is not stored, raises
+        :class:`StoreError`.
         """
         decision, valuation = step.decision, step.valuation
         seen = decision.seen
         with _sqlite_errors("recording a decision"):
             try:
                 with transaction(self._connection):
+                    self._require_follows_on(run_id, step)
                     self._connection.execute(
                         "INSERT INTO decisions (run_id, time, outcome, target, reason, "
-                        "close_block, close_block_hash, finality) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "reason_code, close_block, close_block_hash, finality) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             run_id,
                             decision.time,
@@ -420,6 +461,7 @@ class Store:
                             if decision.target is None
                             else _amounts_text(decision.target.weights),
                             decision.reason,
+                            None if decision.reason_code is None else decision.reason_code.value,
                             decision.close_block,
                             None if seen is None else seen.close_block_hash,
                             None if seen is None else seen.finality.value,
@@ -471,8 +513,10 @@ class Store:
 def open_store(path: Path, *, create: bool = True) -> Store:
     """Open the database at ``path`` and bring its schema up to date.
 
-    With ``create`` false a path that is not an existing file is refused, so
-    a command that only reads does not leave an empty database behind a
+    A store an older version of the package wrote is migrated here, whatever
+    opens it: a command that only reads its rows still writes the missing
+    tables. With ``create`` false a path that is not an existing file is
+    refused, so such a command does not leave an empty database behind a
     mistyped path.
     """
     if not create and not path.is_file():
@@ -485,6 +529,9 @@ def open_store(path: Path, *, create: bool = True) -> Store:
         # Off unless asked for, per connection: a fill or a valuation without
         # its decision, or a decision without its run, is refused.
         connection.execute("PRAGMA foreign_keys = ON")
+        # A build of SQLite without foreign keys takes the pragma and does nothing.
+        if connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
+            raise SchemaError("this SQLite does not enforce foreign keys")
         migrate(connection)
     except (sqlite3.Error, SchemaError) as exc:
         connection.close()

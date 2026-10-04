@@ -46,13 +46,17 @@ class StoredBar:
 
     @property
     def seen(self) -> BarSeen:
-        """What a decision on this bar keeps of it: the close block's hash, and the finality.
+        """What a decision on this bar keeps of it: the close block, its hash, and the finality.
 
         The hash is that of the reading the bar takes its close block from,
         the highest when the readings do not agree.
         """
         closing = max(self.readings, key=lambda reading: reading.close_block)
-        return BarSeen(close_block_hash=closing.close_block_hash, finality=self.finality)
+        return BarSeen(
+            close_block=closing.close_block,
+            close_block_hash=closing.close_block_hash,
+            finality=self.finality,
+        )
 
 
 def load_bar(store: Store, config: UniswapConfig, time: int) -> StoredBar | None:

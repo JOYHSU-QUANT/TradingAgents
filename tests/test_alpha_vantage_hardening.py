@@ -550,7 +550,7 @@ def test_an_unsupported_indicator_is_the_caller_mistake_type(monkeypatch):
 
 
 # Independently transcribed from the elif ladder the dispatch table replaced
-# (`origin/hyperliquid-adapter`), with the caller's time_period written out as
+# (`origin/develop`), with the caller's time_period written out as
 # the 9 the test below passes. Deriving these from `_INDICATOR_REQUESTS` would
 # make that table its own witness: a transcription slip such as
 # `close_50_sma -> ("SMA", "20")` renders a 20-period average under a

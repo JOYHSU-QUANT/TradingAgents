@@ -858,9 +858,10 @@ Breaking changes within the 0.x line are called out explicitly.
   `CallReverted`, `InsufficientLiquidity`, `MalformedResponse` and
   `RpcRejected`; and `RpcConfigError` (nothing will work until the setup is
   fixed: no URL or one that cannot be requested, the wrong chain, an HTTP
-  401 or 403, or a node that does not keep the history asked for). A call that does not fit its ABI raises
-  web3's own exception and asks the node nothing. No read answers with a
-  guess. The URL ends in the API key, so it is kept out of every exception,
+  401 or 403, or a node that does not keep the history asked for). A call
+  that does not fit its ABI raises web3's own exception and asks the node
+  nothing. No read answers with a guess. The URL ends in the API key, so it
+  is kept out of every exception,
   which does not carry the original as its cause or context either, and out
   of the log: once an endpoint is opened, the message and traceback of every
   log record of `web3`, `urllib3` and `requests` are scrubbed as the record

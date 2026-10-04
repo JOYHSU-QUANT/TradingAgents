@@ -44,8 +44,8 @@ class UnansweredRead(ChainError):
 class RpcConfigError(ChainError):
     """The endpoint cannot be used as set up.
 
-    No URL, the wrong chain, a refused key, or a node that does not keep the
-    history asked for.
+    No URL or one that cannot be requested, the wrong chain, a refused key,
+    or a node that does not keep the history asked for.
     """
 
 

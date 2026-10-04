@@ -47,6 +47,7 @@ from typing import Any, Final, TypeGuard, TypeVar
 from urllib.parse import parse_qsl, urlsplit
 
 import requests
+import urllib3
 from web3 import HTTPProvider, Web3
 from web3.exceptions import (
     BlockNotFound as _Web3BlockNotFound,
@@ -242,7 +243,14 @@ def _is_transient(exc: BaseException) -> bool:
 
 def _is_unusable_url(exc: BaseException) -> bool:
     kinds = requests.exceptions
-    return isinstance(exc, kinds.InvalidURL | kinds.MissingSchema | kinds.InvalidSchema)
+    return isinstance(
+        exc,
+        kinds.InvalidURL
+        | kinds.MissingSchema
+        | kinds.InvalidSchema
+        # A host urllib3 cannot parse: an empty label, or one too long.
+        | urllib3.exceptions.LocationValueError,
+    )
 
 
 class _ErrorTap(BaseProvider):
@@ -424,7 +432,8 @@ class Rpc:
         if _is_unusable_url(exc):
             # Its text is the URL, in pieces no scrubbing was registered for.
             return RpcConfigError(
-                f"the endpoint URL cannot be requested ({type(exc).__name__}) on {what}"
+                f"the endpoint URL, or the proxy set for it, cannot be requested "
+                f"({type(exc).__name__}) on {what}"
             )
         if _is_transient(exc):
             if not last:

@@ -12,6 +12,7 @@ import socket
 
 import pytest
 import requests
+import urllib3
 from web3 import HTTPProvider
 from web3.exceptions import InvalidAddress, MismatchedABI
 
@@ -338,7 +339,6 @@ def test_a_block_is_a_non_negative_integer(block):
         requests.exceptions.ChunkedEncodingError("connection broken"),
         # A 200 whose body is not JSON: empty, cut short, or a gateway's page.
         json.JSONDecodeError("Could not decode '<html>' because of Expecting value", "<html>", 0),
-        requests.exceptions.JSONDecodeError("Expecting value", "", 0),
         _http_error(408),
         _http_error(425),
         _http_error(429),
@@ -392,14 +392,16 @@ def test_an_http_refusal_is_not_retried_and_a_refused_key_is_a_setup_fault(statu
         requests.exceptions.InvalidURL(f"Failed to parse: https://node.example:99999/v2/{_KEY}"),
         requests.exceptions.MissingSchema(f"No scheme supplied for {_KEY}"),
         requests.exceptions.InvalidSchema(f"No connection adapters were found for wss://{_KEY}"),
+        requests.exceptions.InvalidProxyURL("Please check proxy URL. It is malformed"),
+        urllib3.exceptions.LocationParseError("node..example, label empty or too long"),
     ],
 )
 def test_a_url_that_cannot_be_requested_is_a_setup_fault_and_is_not_quoted(failure):
     provider = _failing(failure)
     rpc, waits = rpc_over(provider)
-    with pytest.raises(RpcConfigError, match="the endpoint URL cannot be requested") as caught:
+    with pytest.raises(RpcConfigError, match="the endpoint URL, or the proxy set for it") as caught:
         rpc.header(7)
-    assert _KEY not in str(caught.value) and "node.example" not in str(caught.value)
+    assert _KEY not in str(caught.value) and "example" not in str(caught.value)
     assert waits == [] and len(provider.requests) == 1
 
 

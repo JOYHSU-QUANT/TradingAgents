@@ -40,6 +40,7 @@ that holds the endpoint URL, never the URL; left out, the chain reader
 
 from __future__ import annotations
 
+import re
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,7 @@ _STRATEGY_KEYS: Final = frozenset({"name", "params"})
 _BARS_INTEGERS: Final = frozenset({"interval_seconds", "twap_window_seconds"})
 _BARS_DECIMALS: Final = frozenset({"max_twap_deviation", "max_move"})
 _RPC_KEYS: Final = frozenset({"url_env"})
+_ENV_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 _T = TypeVar("_T")
 
@@ -136,9 +138,13 @@ class UniswapConfig:
         if not isinstance(self.bars, BarSettings):
             raise ConfigError(f"bars must be a BarSettings, got {self.bars!r}")
         if self.rpc_url_env is not None and (
-            not isinstance(self.rpc_url_env, str) or not self.rpc_url_env.strip()
+            not isinstance(self.rpc_url_env, str) or not _ENV_NAME.fullmatch(self.rpc_url_env)
         ):
-            raise ConfigError(f"rpc.url_env must be a non-empty string, got {self.rpc_url_env!r}")
+            # The value is not quoted: a URL written here by mistake holds the API key.
+            raise ConfigError(
+                "rpc.url_env must be the name of an environment variable (letters, digits "
+                "and underscores), not the URL itself"
+            )
         known_tokens = list(TOKENS[self.chain_id].values())
         for token in (self.quote, *self.tokens):
             if token not in known_tokens:

@@ -855,8 +855,8 @@ Breaking changes within the 0.x line are called out explicitly.
   00:00 UTC. The engine's `Bar` is built on the way out
   (`store/bar_source.py`): each token priced in the quote token through the
   configured pools, and suspect when a pool's close is further from its TWAP
-  than `bars.max_twap_deviation` (5%) or its block turned out not to be on
-  the final chain. A gap in the series and a move beyond `bars.max_move`
+  than `bars.max_twap_deviation` (5%), its block turned out not to be on
+  the final chain, or the pools' readings disagree on the close block. A gap in the series and a move beyond `bars.max_move`
   (50%) are flagged and do not make a bar suspect. The flags are worked out
   when a bar is read, from the readings and the config's limits; they are
   not stored, and nothing is deleted. `backfill` can be repeated: a boundary
@@ -864,13 +864,18 @@ Breaking changes within the 0.x line are called out explicitly.
   transaction, and a duplicate row is impossible by the table's key. A
   reading taken from a block that could still be replaced is stored as
   `pending`, and the next run checks it against the final chain and marks it
-  `final` or `reorged`. A reverted call (an oracle that does not reach back
-  the TWAP window) leaves its boundary unwritten and the run goes on; any
-  other chain error ends the run, exit 3 when a later run may succeed and 1
-  otherwise. `backfill` refuses a range that starts before
+  `final` or `reorged`. A reverted TWAP read (an oracle that does not reach
+  back the window) leaves its boundary unwritten and the run goes on, with a
+  warning on stderr; any other chain error ends the run, exit 3 when a later
+  run may succeed (the node could not be reached, is behind, or answered a
+  read with an error) and 1 otherwise. `backfill` refuses a range that starts before
   `constants.EARLIEST_BAR_TIME`. `BlockHeader` now carries the block's hash.
   The config's new optional `rpc.url_env` names the environment variable the
-  node's URL is read from. The store's schema is versioned
+  node's URL is read from; a value that is not a variable's name is refused
+  without being echoed. A bar length must divide a day. A stored reading
+  whose TWAP window is not the config's is refused rather than mixed in, so
+  a changed `bars.twap_window_seconds` needs a new store. The store's schema
+  is versioned
   (`schema_migrations`), and a database some other program created is
   refused before anything is written to it.
 

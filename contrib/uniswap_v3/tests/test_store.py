@@ -15,7 +15,7 @@ from contrib.uniswap_v3.domain.prices import MAX_SQRT_RATIO
 from contrib.uniswap_v3.ports import BarSource
 from contrib.uniswap_v3.store.bar_source import StoreBarSource, load_bar
 from contrib.uniswap_v3.store.repository import StoreError, open_store
-from contrib.uniswap_v3.store.schema import APPLICATION_ID, SCHEMA_VERSION
+from contrib.uniswap_v3.store.schema import APPLICATION_ID, SCHEMA_VERSION, transaction
 from contrib.uniswap_v3.tests.fakes.node import (
     BTC_TICK as _BTC_TICK,
     DAY,
@@ -186,9 +186,38 @@ def test_pending_readings_are_listed_until_their_finality_is_recorded(store):
 def test_recording_finality_on_a_reading_that_is_not_stored_changes_nothing(store):
     stored = _reading(finality=Finality.PENDING)
     store.insert_bars([stored])
-    with pytest.raises(StoreError, match="is not in the store"):
+    with pytest.raises(StoreError, match="is not a pending reading in the store"):
         store.set_finality([stored, _reading(time=FIRST_DAY + DAY)], Finality.FINAL)
     assert store.bar(*_series(), FIRST_DAY) == stored
+
+
+def test_a_verdict_is_given_once_and_is_never_pending(store):
+    final = _reading()
+    reorged = _reading(_WBTC_WETH, finality=Finality.REORGED)
+    store.insert_bars([final, reorged])
+    with pytest.raises(StoreError, match="is not a pending reading in the store"):
+        store.set_finality([final], Finality.REORGED)
+    with pytest.raises(StoreError, match="is not a pending reading in the store"):
+        store.set_finality([reorged], Finality.FINAL)
+    with pytest.raises(ValueError, match="does not go back to pending"):
+        store.set_finality([final], Finality.PENDING)
+    assert store.bar(*_series(), FIRST_DAY) == final
+    assert store.bar(*_series(_WBTC_WETH), FIRST_DAY) == reorged
+
+
+def test_a_transaction_that_fails_leaves_the_connection_out_of_one(tmp_path):
+    connection = sqlite3.connect(tmp_path / "plain.db", isolation_level=None)
+    connection.execute("CREATE TABLE t (x INTEGER PRIMARY KEY)")
+    with pytest.raises(sqlite3.IntegrityError), transaction(connection):
+        connection.execute("INSERT INTO t VALUES (1)")
+        connection.execute("INSERT INTO t VALUES (1)")
+    assert connection.in_transaction is False
+    assert connection.execute("SELECT COUNT(*) FROM t").fetchone() == (0,)
+    # A transaction SQLite has already ended raises the first error, not the rollback's.
+    with pytest.raises(RuntimeError, match="the first error"), transaction(connection):
+        connection.execute("ROLLBACK")
+        raise RuntimeError("the first error")
+    connection.close()
 
 
 @pytest.mark.parametrize("finality", list(Finality))

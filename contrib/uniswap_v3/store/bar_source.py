@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from ..config import UniswapConfig
 from ..constants import pool_key
 from ..domain.bars import (
-    SUSPECT_FLAGS,
     BarFlag,
     Finality,
     PoolBar,
@@ -66,8 +65,7 @@ def load_bar(store: Store, config: UniswapConfig, time: int) -> StoredBar | None
             raise StoreError(
                 f"the stored reading of {pool_key(pool)} at {time} cannot be checked ({exc})"
             ) from exc
-    suspect = any(found & SUSPECT_FLAGS for found in flags)
-    bar = assemble_bar(config.quote, config.pools, readings, suspect=suspect)
+    bar = assemble_bar(config.quote, config.pools, readings, flags=flags)
     return StoredBar(bar=bar, readings=tuple(readings), flags=tuple(flags))
 
 

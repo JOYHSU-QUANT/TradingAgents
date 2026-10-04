@@ -60,14 +60,21 @@ class SchemaError(Exception):
 
 @contextmanager
 def transaction(connection: sqlite3.Connection) -> Iterator[None]:
-    """One write transaction on an autocommit connection: committed, or rolled back on a raise."""
+    """One write transaction on an autocommit connection: committed, or rolled back on a raise.
+
+    A commit that fails is rolled back as well, so the connection is never
+    left inside a transaction. SQLite ends a transaction itself on some
+    errors (a full disk); there is then nothing to roll back, and the error
+    that is raised is still the first one.
+    """
     connection.execute("BEGIN IMMEDIATE")
     try:
         yield
+        connection.execute("COMMIT")
     except BaseException:
-        connection.execute("ROLLBACK")
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
         raise
-    connection.execute("COMMIT")
 
 
 def migrate(connection: sqlite3.Connection) -> None:

@@ -25,7 +25,7 @@ from ..domain.bars import BarSettings, Finality, PoolBar
 from ..domain.types import Pool
 from ..ports import BlockLocator
 from .blocks import reading_block
-from .errors import MalformedResponse
+from .errors import CallReverted, MalformedResponse
 from .pool_price import read_slot0, read_twap_tick
 from .rpc import BlockHeader, Rpc
 
@@ -46,6 +46,11 @@ def read_pool_bars(
     ``final_block`` is the highest block number that is final. A reading
     whose boundary block is at or below it is ``FINAL`` as read; a later one
     is ``PENDING``.
+
+    A :class:`~.errors.CallReverted` raised here is the TWAP read's: a pool
+    whose oracle does not reach back the window has no TWAP at the block.
+    ``slot0`` is a plain view of an initialised pool, so a revert from it is
+    a node's fault and raises :class:`~.errors.MalformedResponse`.
     """
     boundary_block = locator.first_block_at_or_after(time)
     if boundary_block == 0:
@@ -65,7 +70,13 @@ def read_pool_bars(
     readings = []
     for pool in pools:
         with reading_block(close_block, final_block):
-            slot0 = read_slot0(rpc, pool, close_block)
+            try:
+                slot0 = read_slot0(rpc, pool, close_block)
+            except CallReverted as exc:
+                raise MalformedResponse(
+                    f"slot0 of {pool.address} reverted at block {close_block}, which a "
+                    f"pool's slot0 does not do ({exc})"
+                ) from None
             twap_tick = read_twap_tick(
                 rpc, pool, close_block, window_seconds=settings.twap_window_seconds
             )

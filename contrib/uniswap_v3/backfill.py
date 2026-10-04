@@ -46,8 +46,10 @@ __all__ = [
 ]
 
 
-# Roughly what reading one boundary costs: the block search reads about
-# thirteen headers, then one header, and two calls per pool.
+# Roughly what reading one boundary of a one-day bar costs once a run is
+# under way: the block search reads the head and about thirteen headers
+# (the first search of a run reads about twice that, and a shorter bar's
+# fewer), then the close block's header, and two calls per pool.
 _SEARCH_REQUESTS = 14
 _REQUESTS_PER_POOL = 2
 

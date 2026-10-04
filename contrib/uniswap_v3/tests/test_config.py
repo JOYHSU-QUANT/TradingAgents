@@ -294,13 +294,21 @@ def test_bars_keys_are_read_one_by_one_over_the_defaults():
         ({"bars": {"max_move": "0"}}, "bars: max_move must be a finite, positive Decimal"),
         ({"rpc": {"url": "https://node.example"}}, "rpc must be a mapping with keys from"),
         ({"rpc": "ETH_RPC_URL"}, "rpc must be a mapping"),
-        ({"rpc": {"url_env": ""}}, "rpc.url_env must be a non-empty string"),
-        ({"rpc": {"url_env": 7}}, "rpc.url_env must be a non-empty string"),
+        ({"rpc": {"url_env": ""}}, "rpc.url_env must be the name of an environment variable"),
+        ({"rpc": {"url_env": 7}}, "rpc.url_env must be the name of an environment variable"),
     ],
 )
 def test_a_malformed_bars_or_rpc_section_is_refused_by_name(overrides, match):
     with pytest.raises(ConfigError, match=match):
         parse_config(_document(**overrides))
+
+
+@pytest.mark.parametrize("value", ["https://node.example/v2/secret-key", "MY NODE", "1NODE", "a-b"])
+def test_a_url_env_that_is_not_a_variable_name_is_refused_without_being_echoed(value):
+    with pytest.raises(ConfigError) as refusal:
+        parse_config(_document(rpc={"url_env": value}))
+    assert "the name of an environment variable" in str(refusal.value)
+    assert value not in str(refusal.value)
 
 
 def test_a_config_built_by_hand_checks_its_bars_and_its_variable_name():
@@ -313,5 +321,5 @@ def test_a_config_built_by_hand_checks_its_bars_and_its_variable_name():
     }
     with pytest.raises(ConfigError, match="bars must be a BarSettings"):
         UniswapConfig(**fields, bars={"interval_seconds": 3_600})
-    with pytest.raises(ConfigError, match="rpc.url_env must be a non-empty string"):
+    with pytest.raises(ConfigError, match="rpc.url_env must be the name of an environment variable"):
         UniswapConfig(**fields, rpc_url_env=" ")

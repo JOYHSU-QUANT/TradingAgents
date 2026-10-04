@@ -204,6 +204,14 @@ def test_a_revert_leaves_its_boundary_unwritten_and_the_run_goes_on(store):
     assert _times(store) == set(_DAYS)
 
 
+def test_a_slot0_revert_ends_the_run_instead_of_leaving_a_gap(store):
+    node = FakeNode()
+    node.slot0_reverts.add((_USDC_WETH.address.lower(), block_at(FIRST_DAY + DAY) - 1))
+    with pytest.raises(MalformedResponse, match="slot0 of .* reverted"):
+        _run(node, store)
+    assert _times(store) == {FIRST_DAY}
+
+
 def test_a_node_error_ends_the_run_and_keeps_what_was_written_before_it(store):
     node = FakeNode()
     node.errors[block_at(FIRST_DAY + DAY) - 1] = {"code": -32000, "message": "internal error"}

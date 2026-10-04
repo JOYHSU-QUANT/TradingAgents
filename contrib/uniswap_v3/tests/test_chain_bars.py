@@ -147,6 +147,40 @@ def test_an_oracle_that_does_not_reach_back_the_window_reverts():
         _read(node)
 
 
+def test_a_slot0_that_reverts_is_a_wrong_answer_and_not_a_missing_one():
+    node = FakeNode()
+    node.slot0_reverts.add((_WBTC_WETH.address.lower(), _CLOSE))
+    with pytest.raises(MalformedResponse, match="slot0 of .* reverted at block"):
+        _read(node)
+
+
+class _FixedLocator:
+    """A locator that answers every time with one block."""
+
+    def __init__(self, block: int) -> None:
+        self._block = block
+
+    def first_block_at_or_after(self, time: int) -> int:
+        return self._block
+
+
+def test_a_locator_whose_block_does_not_fit_the_boundary_is_refused():
+    node = FakeNode()
+    rpc, _ = rpc_over(node.provider, attempts=1)
+
+    def read(block: int):
+        return read_pool_bars(
+            rpc, _FixedLocator(block), _POOLS, FIRST_DAY, settings=_SETTINGS, final_block=node.head
+        )
+
+    # The block before the one it names is itself at the boundary, not before it.
+    with pytest.raises(MalformedResponse, match="should be the last before the boundary"):
+        read(_CLOSE + 2)
+    with pytest.raises(MalformedResponse, match="no block comes before the boundary"):
+        read(0)
+    assert node.calls_at(_CLOSE + 1) == 0
+
+
 def test_a_node_error_on_a_pool_read_is_raised_as_it_is():
     node = FakeNode()
     node.errors[_CLOSE] = {"code": -32000, "message": "something went wrong"}

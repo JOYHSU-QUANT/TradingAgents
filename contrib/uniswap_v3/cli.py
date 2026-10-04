@@ -9,11 +9,14 @@
 names (``ETH_RPC_URL`` unless it names another); with the URL in a ``.env``
 file, run it as ``python -m dotenv run -- python -m contrib.uniswap_v3 ...``.
 
-Exit codes: 0 when the command did what it was asked, 1 when it could not
-and running it again unchanged will not help (the config, the store, the
-range, the node's setup, or an answer of the node's that cannot be used),
-3 when the node could not be reached or is behind and a later run may
-succeed. 2 is argparse's, for a command line it cannot read.
+Exit codes: 0 when the command ran to its end, 1 when it could not and
+running it again unchanged will not help (the config, the store, the range,
+the node's setup, or an answer of the node's that cannot be right), 3 when
+the node could not be reached, is behind, or answered a read with an error,
+and a later run may succeed. 2 is argparse's, for a command line it cannot
+read. A ``backfill`` that ran to its end exits 0 even when it left
+boundaries without an answer or not reached yet: its last lines count them,
+and a warning on stderr names the ones without an answer.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
-from .chain.errors import ChainError, TransientChainError
+from .chain.errors import ChainError, RpcRejected, TransientChainError
 from .config import ConfigError, UniswapConfig, load_config
 from .constants import pool_key
 from .store.bar_source import load_bar
@@ -56,7 +59,13 @@ def _parse_time(text: str) -> int:
         moment = moment.replace(tzinfo=timezone.utc)
     if moment.microsecond:
         raise argparse.ArgumentTypeError(f"{text!r} must be in whole seconds")
-    return int(moment.timestamp())
+    time = int(moment.timestamp())
+    try:
+        _iso(time)
+    except (OSError, OverflowError, ValueError):
+        # The platform cannot turn it back into a date to print.
+        raise argparse.ArgumentTypeError(f"{text!r} is outside the times supported") from None
+    return time
 
 
 def _positive(text: str) -> int:
@@ -119,7 +128,11 @@ def _config(args: argparse.Namespace) -> UniswapConfig:
     config = load_config(args.config)
     if args.interval_seconds is None:
         return config
-    return replace(config, bars=replace(config.bars, interval_seconds=args.interval_seconds))
+    try:
+        bars = replace(config.bars, interval_seconds=args.interval_seconds)
+    except ValueError as exc:
+        raise ConfigError(f"--interval-seconds: {exc}") from exc
+    return replace(config, bars=bars)
 
 
 def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
@@ -135,8 +148,8 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
         print(f"failed: {exc}", file=sys.stderr)
         return EXIT_FAILED
 
-    creates = not args.dry_run or args.db.is_file()
-    with open_store(args.db if creates else _NO_STORE) as store:
+    on_disk = not args.dry_run or args.db.is_file()
+    with open_store(args.db if on_disk else _NO_STORE) as store:
         plan = plan_backfill(store, config, start=args.start, end=end)
         out(
             f"{plan.boundaries} bar(s) from {_iso(args.start)} to {_iso(end)}: "
@@ -152,7 +165,11 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             config,
             start=args.start,
             end=end,
-            report=lambda time, text: out(f"{_iso(time)}  {text}"),
+            # What a node said is quoted in the text; it need not be ASCII,
+            # and a console may not be able to print it.
+            report=lambda time, text: out(
+                f"{_iso(time)}  {text.encode('ascii', 'backslashreplace').decode()}"
+            ),
         )
     out(
         f"wrote {summary.written} bar(s); {summary.already_stored} already stored, "
@@ -162,6 +179,13 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
         out(
             f"checked pending readings against the final chain: {summary.confirmed} final, "
             f"{summary.reorged} reorged"
+        )
+    if summary.unanswered:
+        print(
+            f"warning: {len(summary.unanswered)} boundary(ies) without an answer, from "
+            f"{_iso(summary.unanswered[0])} to {_iso(summary.unanswered[-1])}; a later run "
+            f"asks again",
+            file=sys.stderr,
         )
     return EXIT_OK
 
@@ -217,7 +241,9 @@ def main(
         if args.command == "backfill":
             return _backfill(args, out, now)
         return _status(args, out)
-    except TransientChainError as exc:
+    except (TransientChainError, RpcRejected) as exc:
+        # A node that answers a read with an error is as likely to be having
+        # a bad moment as to be broken; the run stopped, and a later one asks.
         print(f"try again later: {exc}", file=sys.stderr)
         return EXIT_RETRY
     except (ChainError, ConfigError, StoreError) as exc:

@@ -101,7 +101,7 @@ class FakeNode:
     - ``slot0`` and ``twap_tick``: ``(pool address in lowercase, block)`` to
       what the pool answers there, in place of the defaults.
     - ``reverts``: the ``(pool address in lowercase, block)`` pairs whose
-      ``observe`` reverts.
+      ``observe`` reverts, and ``slot0_reverts`` those whose ``slot0`` does.
     - ``errors``: ``block`` to the JSON-RPC error every ``eth_call`` at that
       block gets.
     - ``hashes`` and ``times``: ``block`` to a hash or timestamp in place of
@@ -117,6 +117,7 @@ class FakeNode:
         self.slot0: dict[tuple[str, int], tuple[int, int]] = {}
         self.twap_tick: dict[tuple[str, int], int] = {}
         self.reverts: set[tuple[str, int]] = set()
+        self.slot0_reverts: set[tuple[str, int]] = set()
         self.errors: dict[int, dict[str, Any]] = {}
         self.hashes: dict[int, str] = {}
         self.times: dict[int, int] = {}
@@ -148,6 +149,8 @@ class FakeNode:
                 return {"error": self.errors[block]}
             key = (call["to"].lower(), block)
             if call["data"].startswith(_SLOT0):
+                if key in self.slot0_reverts:
+                    return _REVERT
                 sqrt_price_x96, tick = self.slot0.get(key, self.default_slot0)
                 return {
                     "result": encoded(_SLOT0_TYPES, [sqrt_price_x96, tick, 0, 1, 1, 0, True])

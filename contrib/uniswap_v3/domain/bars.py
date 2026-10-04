@@ -46,6 +46,7 @@ __all__ = [
 
 _ADDRESS: Final = re.compile(r"0x[0-9a-fA-F]{40}")
 _BLOCK_HASH: Final = re.compile(r"0x[0-9a-f]{64}")
+_DAY: Final = 86_400
 # ``observe`` takes its ages as uint32.
 MAX_TWAP_WINDOW_SECONDS: Final = 2**32 - 1
 
@@ -93,8 +94,11 @@ def _is_fraction(value: object) -> bool:
 
 
 def _require_interval(value: object) -> None:
-    if not _is_int(value, minimum=1):
-        raise ValueError(f"interval_seconds must be a positive integer, got {value!r}")
+    if not _is_int(value, minimum=1) or _DAY % value:  # type: ignore[operator]
+        raise ValueError(
+            f"interval_seconds must be a positive integer that divides a day "
+            f"({_DAY} seconds), got {value!r}"
+        )
 
 
 def _require_window(value: object) -> None:
@@ -110,8 +114,10 @@ class BarSettings:
     """How long a bar is, and the limits its data checks hold a reading to.
 
     Boundaries are the multiples of ``interval_seconds`` since the epoch, so
-    a one-day bar closes at 00:00 UTC. ``max_twap_deviation`` and
-    ``max_move`` are relative: ``Decimal("0.05")`` is 5%.
+    a one-day bar closes at 00:00 UTC. The interval must divide a day: a
+    longer or an uneven one would put its boundaries on no fixed hour (a
+    week counted from the epoch starts on a Thursday). ``max_twap_deviation``
+    and ``max_move`` are relative: ``Decimal("0.05")`` is 5%.
     """
 
     interval_seconds: int = 86_400
@@ -294,19 +300,27 @@ def _quote_prices(
 
 
 def assemble_bar(
-    quote: Token, pools: Sequence[Pool], readings: Sequence[PoolBar], *, suspect: bool
+    quote: Token,
+    pools: Sequence[Pool],
+    readings: Sequence[PoolBar],
+    *,
+    flags: Sequence[frozenset[BarFlag]],
 ) -> Bar:
     """The bar at one boundary, from each pool's reading there.
 
-    ``readings`` are in the order of ``pools``, one each, all at the same
-    boundary of the same series. ``suspect`` is the caller's verdict from
-    :func:`pool_bar_flags`. Readings that do not agree on the close block
-    make the bar suspect whatever the caller says: at most one of them
-    describes the block the boundary closed on. The bar then carries the
-    highest of the blocks.
+    ``readings`` and ``flags`` are in the order of ``pools``, one each, all
+    at the same boundary of the same series; the flags are what
+    :func:`pool_bar_flags` found on each reading. The bar is suspect when
+    any reading carries one of :data:`SUSPECT_FLAGS` or is ``REORGED``, and
+    when the readings do not agree on the close block: at most one of them
+    then describes the block the boundary closed on, and the bar carries
+    the highest of the blocks.
     """
-    if not pools or len(pools) != len(readings):
-        raise ValueError(f"a bar needs one reading per pool: {len(pools)} pool(s), {len(readings)}")
+    if not pools or len(pools) != len(readings) or len(flags) != len(readings):
+        raise ValueError(
+            f"a bar needs one reading and one set of flags per pool: {len(pools)} pool(s), "
+            f"{len(readings)} reading(s) and {len(flags)} set(s) of flags"
+        )
     for pool, reading in zip(pools, readings, strict=True):
         _require_reading_of(pool, reading)
     series = {(reading.chain_id, reading.interval_seconds, reading.time) for reading in readings}
@@ -318,10 +332,12 @@ def assemble_bar(
         == (closing.close_block, closing.close_block_hash)
         for reading in readings
     )
+    flagged = any(found & SUSPECT_FLAGS for found in flags)
+    reorged = any(reading.finality is Finality.REORGED for reading in readings)
     return Bar(
         time=closing.time,
         close_block=closing.close_block,
         prices=_quote_prices(quote, pools, readings),
         base_fee_wei=closing.base_fee_wei,
-        suspect=suspect or not agreed,
+        suspect=flagged or reorged or not agreed,
     )

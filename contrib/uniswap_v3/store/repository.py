@@ -110,6 +110,10 @@ class Store:
                 with transaction(self._connection):
                     self._connection.executemany(statement, [_row(bar) for bar in bars])
             except sqlite3.IntegrityError as exc:
+                # The key is the table's one UNIQUE constraint; any other
+                # integrity failure is reported as what SQLite said it was.
+                if "UNIQUE constraint failed" not in str(exc):
+                    raise
                 raise StoreError(f"a reading to insert is already stored ({exc})") from exc
 
     def bar(self, chain_id: int, pool: str, interval_seconds: int, time: int) -> PoolBar | None:
@@ -173,16 +177,31 @@ class Store:
         return [_bar(row) for row in rows]
 
     def set_finality(self, bars: Sequence[PoolBar], finality: Finality) -> None:
-        """Record ``finality`` on the stored rows of ``bars``, in one transaction."""
+        """Record the verdict ``finality`` on the stored rows of ``bars``, in one transaction.
+
+        A verdict is ``FINAL`` or ``REORGED``, and it is given once: a row
+        that is not stored as ``PENDING`` raises :class:`StoreError` and
+        none of ``bars`` is changed.
+        """
+        if finality is Finality.PENDING:
+            raise ValueError("a reading does not go back to pending")
         with _sqlite_errors("recording finality"), transaction(self._connection):
             for bar in bars:
                 changed = self._connection.execute(
-                    f"UPDATE bars SET finality = ? WHERE {_SERIES} AND time = ?",
-                    (finality.value, bar.chain_id, bar.pool, bar.interval_seconds, bar.time),
+                    f"UPDATE bars SET finality = ? WHERE {_SERIES} AND time = ? AND finality = ?",
+                    (
+                        finality.value,
+                        bar.chain_id,
+                        bar.pool,
+                        bar.interval_seconds,
+                        bar.time,
+                        Finality.PENDING.value,
+                    ),
                 ).rowcount
                 if changed != 1:
                     raise StoreError(
-                        f"the reading of pool {bar.pool} at {bar.time} is not in the store"
+                        f"the reading of pool {bar.pool} at {bar.time} is not a pending "
+                        f"reading in the store"
                     )
 
 

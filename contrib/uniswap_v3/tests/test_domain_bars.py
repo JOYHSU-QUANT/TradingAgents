@@ -55,6 +55,8 @@ def test_the_default_bar_is_one_day_checked_against_a_thirty_minute_twap():
         ("interval_seconds", 0),
         ("interval_seconds", True),
         ("interval_seconds", 3600.0),
+        ("interval_seconds", 25_200),
+        ("interval_seconds", 604_800),
         ("twap_window_seconds", 0),
         ("twap_window_seconds", 2**32),
         ("max_twap_deviation", Decimal(0)),
@@ -67,6 +69,11 @@ def test_the_default_bar_is_one_day_checked_against_a_thirty_minute_twap():
 def test_bar_settings_refuse_a_value_that_is_not_a_length_or_a_limit(field, value):
     with pytest.raises(ValueError, match=field):
         BarSettings(**{field: value})
+
+
+@pytest.mark.parametrize("seconds", [1, 60, 3_600, 14_400, 43_200, 86_400])
+def test_a_bar_may_be_any_length_that_divides_a_day(seconds):
+    assert BarSettings(interval_seconds=seconds).interval_seconds == seconds
 
 
 # --- PoolBar ---------------------------------------------------------------
@@ -187,13 +194,19 @@ def test_the_checks_refuse_a_reading_of_another_pool():
 # --- assemble_bar ----------------------------------------------------------
 
 
+def _assemble(quote, pools, readings, flags=None):
+    """``assemble_bar`` with no flags on any reading unless ``flags`` says otherwise."""
+    flags = [frozenset()] * len(readings) if flags is None else flags
+    return assemble_bar(quote, pools, readings, flags=flags)
+
+
 def _both() -> tuple[PoolBar, PoolBar]:
     return _reading(), _reading(_WBTC_WETH, tick=_BTC_TICK)
 
 
 def test_a_bar_prices_every_token_in_the_quote_token():
     eth_reading, btc_reading = _both()
-    bar = assemble_bar(_USDC, (_USDC_WETH, _WBTC_WETH), (eth_reading, btc_reading), suspect=False)
+    bar = _assemble(_USDC, (_USDC_WETH, _WBTC_WETH), (eth_reading, btc_reading))
 
     eth = price_from_sqrt_price_x96(_USDC_WETH, eth_reading.sqrt_price_x96, base=_WETH)
     btc_in_eth = price_from_sqrt_price_x96(_WBTC_WETH, btc_reading.sqrt_price_x96, base=_WBTC)
@@ -206,22 +219,44 @@ def test_a_bar_prices_every_token_in_the_quote_token():
 
 def test_the_order_of_the_pools_does_not_change_the_prices():
     eth_reading, btc_reading = _both()
-    one = assemble_bar(_USDC, (_USDC_WETH, _WBTC_WETH), (eth_reading, btc_reading), suspect=False)
-    other = assemble_bar(_USDC, (_WBTC_WETH, _USDC_WETH), (btc_reading, eth_reading), suspect=False)
+    one = _assemble(_USDC, (_USDC_WETH, _WBTC_WETH), (eth_reading, btc_reading))
+    other = _assemble(_USDC, (_WBTC_WETH, _USDC_WETH), (btc_reading, eth_reading))
     assert dict(one.prices) == dict(other.prices)
 
 
 def test_a_bar_can_be_quoted_in_any_token_the_pools_reach():
     eth_reading, btc_reading = _both()
-    bar = assemble_bar(_WETH, (_USDC_WETH, _WBTC_WETH), (eth_reading, btc_reading), suspect=False)
+    bar = _assemble(_WETH, (_USDC_WETH, _WBTC_WETH), (eth_reading, btc_reading))
     assert dict(bar.prices) == {
         "USDC": price_from_sqrt_price_x96(_USDC_WETH, eth_reading.sqrt_price_x96, base=_USDC),
         "WBTC": price_from_sqrt_price_x96(_WBTC_WETH, btc_reading.sqrt_price_x96, base=_WBTC),
     }
 
 
-def test_the_callers_verdict_is_carried_onto_the_bar():
-    assert assemble_bar(_USDC, (_USDC_WETH, _WBTC_WETH), _both(), suspect=True).suspect is True
+@pytest.mark.parametrize(
+    ("flag", "suspect"),
+    [
+        (BarFlag.TWAP_DEVIATION, True),
+        (BarFlag.REORGED, True),
+        (BarFlag.GAP, False),
+        (BarFlag.LARGE_MOVE, False),
+    ],
+)
+def test_a_bar_is_suspect_when_a_reading_carries_a_flag_that_stops_trading(flag, suspect):
+    pools = (_USDC_WETH, _WBTC_WETH)
+    bar = _assemble(_USDC, pools, _both(), flags=[frozenset(), frozenset({flag})])
+    assert bar.suspect is suspect
+
+
+def test_a_reorged_reading_makes_the_bar_suspect_whatever_flags_it_is_handed():
+    eth_reading, btc_reading = _both()
+    reorged = replace(btc_reading, finality=Finality.REORGED)
+    assert _assemble(_USDC, (_USDC_WETH, _WBTC_WETH), (eth_reading, reorged)).suspect is True
+
+
+def test_a_bar_needs_one_set_of_flags_per_reading():
+    with pytest.raises(ValueError, match=r"2 pool\(s\), 2 reading\(s\) and 1 set\(s\) of flags"):
+        _assemble(_USDC, (_USDC_WETH, _WBTC_WETH), _both(), flags=[frozenset()])
 
 
 @pytest.mark.parametrize(
@@ -229,8 +264,8 @@ def test_the_callers_verdict_is_carried_onto_the_bar():
 )
 def test_readings_that_disagree_on_the_close_block_make_the_bar_suspect(changes):
     eth_reading, btc_reading = _both()
-    bar = assemble_bar(
-        _USDC, (_USDC_WETH, _WBTC_WETH), (eth_reading, replace(btc_reading, **changes)), suspect=False
+    bar = _assemble(
+        _USDC, (_USDC_WETH, _WBTC_WETH), (eth_reading, replace(btc_reading, **changes))
     )
     assert bar.suspect is True
     assert bar.close_block == 999
@@ -238,18 +273,18 @@ def test_readings_that_disagree_on_the_close_block_make_the_bar_suspect(changes)
 
 def test_a_pool_the_quote_token_cannot_be_reached_from_is_refused():
     with pytest.raises(ValueError, match=r"no pool joins \['WBTC', 'WETH'\] to the quote token USDC"):
-        assemble_bar(_USDC, (_WBTC_WETH,), (_reading(_WBTC_WETH, tick=_BTC_TICK),), suspect=False)
+        _assemble(_USDC, (_WBTC_WETH,), (_reading(_WBTC_WETH, tick=_BTC_TICK),))
 
 
 def test_a_bar_needs_one_reading_per_pool_all_at_one_boundary():
     eth_reading, btc_reading = _both()
     pools = (_USDC_WETH, _WBTC_WETH)
-    with pytest.raises(ValueError, match="one reading per pool"):
-        assemble_bar(_USDC, pools, (eth_reading,), suspect=False)
-    with pytest.raises(ValueError, match="one reading per pool"):
-        assemble_bar(_USDC, (), (), suspect=False)
+    with pytest.raises(ValueError, match="one reading and one set of flags per pool"):
+        _assemble(_USDC, pools, (eth_reading,))
+    with pytest.raises(ValueError, match="one reading and one set of flags per pool"):
+        _assemble(_USDC, (), ())
     with pytest.raises(ValueError, match="not of"):
-        assemble_bar(_USDC, pools, (btc_reading, eth_reading), suspect=False)
+        _assemble(_USDC, pools, (btc_reading, eth_reading))
     later = _reading(_WBTC_WETH, tick=_BTC_TICK, time=FIRST_DAY + DAY)
     with pytest.raises(ValueError, match="not of one boundary"):
-        assemble_bar(_USDC, pools, (eth_reading, later), suspect=False)
+        _assemble(_USDC, pools, (eth_reading, later))

@@ -143,7 +143,7 @@ def test_a_range_that_cannot_be_backfilled_exits_1(node, tmp_path, capsys):
     assert not (tmp_path / "store.db").exists()
 
 
-def test_a_node_that_cannot_be_reached_exits_3_and_one_that_refuses_exits_1(
+def test_a_node_that_fails_a_read_exits_3_and_a_wrong_answer_exits_1(
     node, tmp_path, capsys
 ):
     db = tmp_path / "store.db"
@@ -153,12 +153,46 @@ def test_a_node_that_cannot_be_reached_exits_3_and_one_that_refuses_exits_1(
     assert code == cli.EXIT_RETRY
     assert capsys.readouterr().err.startswith("try again later: ")
 
+    # A node that answers the read with an error may answer it next time.
     node.errors[close] = {"code": -32000, "message": "internal error"}
     code, lines = _backfill(db)
-    assert code == cli.EXIT_FAILED
-    assert capsys.readouterr().err.startswith("failed: ")
+    assert code == cli.EXIT_RETRY
+    assert capsys.readouterr().err.startswith("try again later: ")
     # What the first run wrote before it failed was not read again.
     assert lines[0].startswith("3 bar(s)") and "2 to read" in lines[0]
+
+    # An answer that cannot be right will be the same answer next time.
+    del node.errors[close]
+    node.slot0[(_USDC_WETH.address.lower(), close)] = (1, 0)
+    code, _ = _backfill(db)
+    assert code == cli.EXIT_FAILED
+    assert capsys.readouterr().err.startswith("failed: ")
+
+
+def test_boundaries_without_an_answer_exit_0_with_a_warning_on_stderr(node, tmp_path, capsys):
+    close = block_at(FIRST_DAY + DAY) - 1
+    node.reverts.add((_WBTC_WETH.address.lower(), close))
+    code, lines = _backfill(tmp_path / "store.db")
+    assert code == cli.EXIT_OK
+    assert lines[2].startswith("2024-01-02T00:00:00Z  no answer (")
+    assert lines[-1] == "wrote 2 bar(s); 0 already stored, 1 without an answer, 0 not reached yet"
+    assert capsys.readouterr().err == (
+        "warning: 1 boundary(ies) without an answer, from 2024-01-02T00:00:00Z to "
+        "2024-01-02T00:00:00Z; a later run asks again\n"
+    )
+
+
+def test_backfill_connects_with_the_variable_the_config_names(node, tmp_path):
+    named = tmp_path / "named.yaml"
+    named.write_text(
+        _EXAMPLE.read_text(encoding="utf-8").replace("url_env: ETH_RPC_URL", "url_env: MY_NODE"),
+        encoding="utf-8",
+    )
+    code, _ = _run(
+        "backfill", "--config", str(named), "--db", str(tmp_path / "s.db"), "--from", "2024-01-01"
+    )
+    assert code == cli.EXIT_OK
+    assert node.connections[0][1].url_env == "MY_NODE"
 
 
 def test_a_missing_url_exits_1_without_printing_the_environment(monkeypatch, tmp_path, capsys):
@@ -169,6 +203,15 @@ def test_a_missing_url_exits_1_without_printing_the_environment(monkeypatch, tmp
     code, _ = _backfill(tmp_path / "store.db")
     assert code == cli.EXIT_FAILED
     assert capsys.readouterr().err == "failed: the environment variable ETH_RPC_URL is not set\n"
+
+
+def test_an_interval_that_does_not_divide_a_day_exits_1(node, tmp_path, capsys):
+    code, lines = _backfill(tmp_path / "store.db", "--interval-seconds", "25200")
+    assert code == cli.EXIT_FAILED and lines == []
+    assert "--interval-seconds: interval_seconds must be a positive integer that divides a day" in (
+        capsys.readouterr().err
+    )
+    assert not (tmp_path / "store.db").exists()
 
 
 def test_a_config_that_cannot_be_read_exits_1(tmp_path, capsys):
@@ -186,6 +229,7 @@ def test_a_config_that_cannot_be_read_exits_1(tmp_path, capsys):
         ["backfill", "--config", "c.yaml", "--db", "s.db"],
         ["backfill", "--config", "c.yaml", "--db", "s.db", "--from", "yesterday"],
         ["backfill", "--config", "c.yaml", "--db", "s.db", "--from", "2024-01-01T00:00:00.5"],
+        ["status", "--config", "c.yaml", "--db", "s.db", "--interval-seconds", "0"],
         ["status", "--config", "c.yaml", "--db", "s.db", "--bars", "0"],
         ["status", "--config", "c.yaml", "--db", "s.db", "--interval-seconds", "-60"],
         ["trade"],
@@ -250,10 +294,12 @@ def test_status_shows_the_flags_and_the_verdict_of_a_bar(node, tmp_path):
 def test_status_says_when_a_boundary_lacks_a_pool(node, tmp_path):
     db = tmp_path / "store.db"
     _backfill(db)
-    with open_store(db) as store:
-        store._connection.execute(
-            "DELETE FROM bars WHERE pool = ? AND time = ?", (_WBTC_WETH.address, FIRST_DAY + DAY)
-        )
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "DELETE FROM bars WHERE pool = ? AND time = ?", (_WBTC_WETH.address, FIRST_DAY + DAY)
+    )
+    connection.commit()
+    connection.close()
     code, lines = _status(db)
     assert code == cli.EXIT_OK
     assert lines[4] == "2024-01-02T00:00:00Z  incomplete: a configured pool has no reading"

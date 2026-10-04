@@ -33,6 +33,7 @@ from ..domain.records import (
     BarSeen,
     Decision,
     FillRecord,
+    FillSource,
     Outcome,
     RejectionCode,
     RunRecord,
@@ -348,7 +349,8 @@ class Store:
                 with transaction(self._connection):
                     self._connection.execute(
                         "INSERT INTO runs (run_id, mode, chain_id, quote, strategy, config, "
-                        "balances, gas_eth, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "balances, gas_eth, created_at, fills) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             run.run_id,
                             run.mode.value,
@@ -359,6 +361,7 @@ class Store:
                             _amounts_text(run.ledger.balances),
                             str(run.ledger.gas_eth),
                             run.created_at,
+                            run.fills.value,
                         ),
                     )
             except sqlite3.IntegrityError as exc:
@@ -370,13 +373,14 @@ class Store:
         """The run ``run_id``, when there is one."""
         with _sqlite_errors("reading a run"):
             row = self._connection.execute(
-                "SELECT mode, chain_id, quote, strategy, config, balances, gas_eth, created_at "
+                "SELECT mode, chain_id, quote, strategy, config, balances, gas_eth, created_at, "
+                "fills "
                 "FROM runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
             return None
-        mode, chain_id, quote, strategy, config, balances, gas_eth, created_at = row
+        mode, chain_id, quote, strategy, config, balances, gas_eth, created_at, fills = row
         with _stored(f"run {run_id!r}"):
             return RunRecord(
                 run_id=run_id,
@@ -387,6 +391,7 @@ class Store:
                 config=config,
                 ledger=_ledger(balances, gas_eth),
                 created_at=created_at,
+                fills=FillSource(fills),
             )
 
     def decision(self, run_id: str, time: int) -> Decision | None:

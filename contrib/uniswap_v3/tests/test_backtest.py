@@ -10,7 +10,7 @@ import pytest
 
 from contrib.uniswap_v3.config import ConfigError, StrategySpec
 from contrib.uniswap_v3.domain.bars import Finality
-from contrib.uniswap_v3.domain.records import BarSeen, Outcome, SkipCode
+from contrib.uniswap_v3.domain.records import BarSeen, FillSource, Outcome, SkipCode
 from contrib.uniswap_v3.domain.types import Rejection, RunMode
 from contrib.uniswap_v3.engine import step as step_module
 from contrib.uniswap_v3.engine.backtest import BacktestRangeError, run_backtest
@@ -296,7 +296,13 @@ def test_a_new_run_needs_opening_balances_and_a_stored_one_keeps_its_own(store):
 def test_a_backtest_does_not_carry_on_a_run_of_another_mode(store):
     _put_days(store, [DEFAULT_TICK] * 2)
     start_run(
-        store, _CONFIG, run_id="paper", mode=RunMode.PAPER, ledger=_ledger(), created_at=FIRST_DAY
+        store,
+        _CONFIG,
+        run_id="paper",
+        mode=RunMode.PAPER,
+        ledger=_ledger(),
+        created_at=FIRST_DAY,
+        fills=FillSource.QUOTER,
     )
     with pytest.raises(EngineError, match="is a paper run, and is not carried on as a backtest"):
         _backtest(store, run_id="paper")

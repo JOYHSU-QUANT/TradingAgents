@@ -23,3 +23,10 @@ def test_a_block_before_london_has_no_base_fee_to_give():
     rpc, _ = rpc_over(answering({"result": block_result(7, 1_500_000_000, base_fee=None)}))
     with pytest.raises(MalformedResponse, match="block 7 has no base fee"):
         ChainGasOracle(rpc).base_fee_wei(7)
+
+
+def test_the_base_fee_of_the_block_just_asked_about_is_not_read_again():
+    provider = answering({"result": block_result(7, 100, base_fee=5)})
+    oracle = ChainGasOracle(rpc_over(provider)[0])
+    assert [oracle.base_fee_wei(7), oracle.base_fee_wei(7)] == [5, 5]
+    assert len(provider.requests) == 1

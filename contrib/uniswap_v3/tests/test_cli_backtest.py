@@ -201,12 +201,12 @@ def test_opening_balances_no_chain_could_hold_exit_1(db, capsys):
 def test_report_prints_a_run_of_any_mode(db):
     _backtest(db, *_OPENING)
     connection = sqlite3.connect(db)
-    connection.execute("UPDATE runs SET mode = 'paper'")
+    connection.execute("UPDATE runs SET mode = 'paper', fills = 'quoter'")
     connection.commit()
     connection.close()
     code, lines = _report(db)
     assert code == cli.EXIT_OK
-    assert lines[0] == "run bt: paper, fixed_weights, values in USDC"
+    assert lines[0] == "run bt: paper, fills from the quoter, fixed_weights, values in USDC"
 
 
 def test_backtest_takes_the_bar_length_from_the_command_line(db, capsys):
@@ -290,7 +290,7 @@ def test_other_opening_balances_for_a_stored_run_exit_1(db, capsys):
         ["--balance", "USDC=ten"],
         ["--gas-eth", "-1"],
         ["--gas-eth", "0.1.2"],
-        ["--fills", "quoter"],
+        ["--fills", "oracle"],
         ["--run-id", " "],
     ],
 )
@@ -351,7 +351,7 @@ def test_report_prints_the_run_beside_its_two_comparisons(db):
     code, lines = _report(db)
     assert code == cli.EXIT_OK
     assert lines[:5] == [
-        "run bt: backtest, fixed_weights, values in USDC",
+        "run bt: backtest, fills from the model, fixed_weights, values in USDC",
         "4 bar(s) decided from 2024-01-01T00:00:00Z to 2024-01-04T00:00:00Z",
         "decisions: filled 3, hold 1, no_trade 0, rejected 0, skipped_suspect 0",
         "measured on 4 bar(s) over 3.00 day(s)",
@@ -486,7 +486,7 @@ def test_report_reads_the_runs_own_config_and_no_file(db, tmp_path):
     custom.unlink()
     code, lines = _report(db)
     assert code == cli.EXIT_OK
-    assert lines[0] == "run bt: backtest, fixed_weights, values in USDC"
+    assert lines[0] == "run bt: backtest, fills from the model, fixed_weights, values in USDC"
 
 
 def test_a_run_that_is_not_there_or_has_decided_nothing_exits_1(db, capsys):

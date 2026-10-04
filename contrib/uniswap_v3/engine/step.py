@@ -45,6 +45,7 @@ from ..domain.ledger import InsufficientGas, Ledger, LedgerError
 from ..domain.records import (
     BarSeen,
     Decision,
+    FillSource,
     Outcome,
     RejectionCode,
     RunRecord,
@@ -279,8 +280,9 @@ def start_run(
     mode: RunMode,
     ledger: Ledger,
     created_at: int,
+    fills: FillSource = FillSource.MODEL,
 ) -> RunRecord:
-    """Start a run under ``config`` with ``ledger`` as its opening balances.
+    """Start a run under ``config`` with ``ledger`` as its opening balances, filled from ``fills``.
 
     The balances must name exactly the configured tokens, at zero for one
     the run starts without, though not all at zero: a run that holds nothing
@@ -320,6 +322,7 @@ def start_run(
             config=snapshot,
             ledger=ledger,
             created_at=created_at,
+            fills=fills,
         )
     except ValueError as exc:
         raise EngineError(f"the run cannot be started ({exc})") from exc
@@ -335,12 +338,14 @@ def start_or_continue_run(
     mode: RunMode,
     opening: Ledger | None,
     created_at: int,
+    fills: FillSource = FillSource.MODEL,
 ) -> None:
     """Start the run ``run_id`` in ``mode`` with ``opening``, or check that it can be carried on.
 
-    A run that is not there needs ``opening``. One that is there must be of
-    ``mode``, and an ``opening`` handed with it must be the balances it was
-    started with. Whether it was started under ``config`` is
+    A run that is not there needs ``opening``, and is started with ``fills``
+    as where its fills come from. One that is there must be of ``mode``,
+    and an ``opening`` handed with it must be the balances it was started
+    with. Whether it was started under ``config`` is
     :func:`open_engine`'s check.
     """
     run = journal.run(run_id)
@@ -348,7 +353,13 @@ def start_or_continue_run(
         if opening is None:
             raise EngineError(f"there is no run {run_id!r}, and a new run needs opening balances")
         start_run(
-            journal, config, run_id=run_id, mode=mode, ledger=opening, created_at=created_at
+            journal,
+            config,
+            run_id=run_id,
+            mode=mode,
+            ledger=opening,
+            created_at=created_at,
+            fills=fills,
         )
         return
     if run.mode is not mode:
@@ -368,8 +379,10 @@ def open_engine(
 ) -> Engine:
     """The engine of the run ``run_id``, with the config's strategy built.
 
-    A run is continued only under the config it was started with: a config
-    whose snapshot differs is refused, and so is a run that is not there.
+    A run is continued only under the config it was started with, and by an
+    executor whose fills come from where the run's do: a config whose
+    snapshot differs is refused, an executor of another source is, and so
+    is a run that is not there.
     A strategy the registry does not know, or whose params it refuses, is a
     :class:`~..config.ConfigError`.
     """
@@ -380,6 +393,12 @@ def open_engine(
         raise EngineError(
             f"the run {run_id!r} was started under another config; a changed config "
             f"needs a new run"
+        )
+    if run.fills is not executor.source:
+        raise EngineError(
+            f"the run {run_id!r} takes its fills from the {run.fills.value}, and is not "
+            f"carried on with fills from the {executor.source.value}; another source of "
+            f"fills needs a new run"
         )
     return Engine(
         run_id=run_id,

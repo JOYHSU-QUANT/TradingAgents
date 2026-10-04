@@ -1,9 +1,11 @@
-"""A scripted chain for the bar tests: blocks twelve seconds apart, and two pools.
+"""A scripted chain for the bar tests: blocks twelve seconds apart, two pools and a quoter.
 
 Block ``n`` is at ``GENESIS_TIME + 12 * n``, so with the default genesis a
 day boundary falls exactly on a block. Every pool answers ``slot0`` and
 ``observe`` with the node's defaults unless a test has set something else
-for that pool and block. A test changes the chain by assigning to the
+for that pool and block. QuoterV2 answers a quote with what each pool
+crossed returns at its ``slot0`` price in the quoted block, less its fee. A
+test changes the chain by assigning to the
 node's attributes between reads.
 """
 
@@ -12,9 +14,10 @@ from __future__ import annotations
 from decimal import Decimal, localcontext
 from typing import Any
 
+from eth_abi import decode
 from web3 import Web3
 
-from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
+from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, QUOTER_V2
 from contrib.uniswap_v3.domain.bars import Finality, PoolBar
 from contrib.uniswap_v3.domain.types import Pool
 from contrib.uniswap_v3.tests.fakes.rpc import (
@@ -59,6 +62,9 @@ def block_at(time: int) -> int:
 _SLOT0 = "0x" + Web3.keccak(text="slot0()")[:4].hex()
 _OBSERVE = "0x" + Web3.keccak(text="observe(uint32[])")[:4].hex()
 _SLOT0_TYPES = ["uint160", "int24", "uint16", "uint16", "uint16", "uint8", "bool"]
+_QUOTER = QUOTER_V2[ETHEREUM_MAINNET].lower()
+_QUOTE_SINGLE_TYPE = "(address,address,uint256,uint24,uint160)"
+_QUOTE_SINGLE = Web3.keccak(text=f"quoteExactInputSingle({_QUOTE_SINGLE_TYPE})")[:4]
 
 
 def sqrt_price_at(tick: int) -> int:
@@ -136,6 +142,11 @@ class FakeNode:
     - ``head``: the latest block's number.
     - ``slot0`` and ``twap_tick``: ``(pool address in lowercase, block)`` to
       what the pool answers there, in place of the defaults.
+    - ``pool_slot0`` and ``pool_twap_tick``: ``pool address in lowercase`` to
+      what the pool answers at every block the two above do not name.
+    - ``quote_bps``: what a quote returns of the output at the pools'
+      prices, in basis points; ``quote_gas`` its gas estimate per pool
+      crossed; ``quote_reverts`` the blocks at which a quote reverts.
     - ``reverts``: the ``(pool address in lowercase, block)`` pairs whose
       ``observe`` reverts, and ``slot0_reverts`` those whose ``slot0`` does;
       ``revert_message`` is what the node says when one does.
@@ -153,6 +164,11 @@ class FakeNode:
         self.default_twap_tick = DEFAULT_TICK
         self.slot0: dict[tuple[str, int], tuple[int, int]] = {}
         self.twap_tick: dict[tuple[str, int], int] = {}
+        self.pool_slot0: dict[str, tuple[int, int]] = {}
+        self.pool_twap_tick: dict[str, int] = {}
+        self.quote_bps = 10_000
+        self.quote_gas = 100_000
+        self.quote_reverts: set[int] = set()
         self.reverts: set[tuple[str, int]] = set()
         self.slot0_reverts: set[tuple[str, int]] = set()
         self.revert_message = "execution reverted: OLD"
@@ -173,6 +189,46 @@ class FakeNode:
             if method == "eth_call" and int(params[1], 16) == block
         )
 
+    def _slot0_at(self, key: tuple[str, int]) -> tuple[int, int]:
+        return self.slot0.get(key, self.pool_slot0.get(key[0], self.default_slot0))
+
+    def _quote(self, data: bytes, block: int) -> str:
+        """QuoterV2's answer: each pool crossed at its ``slot0`` price in ``block``, less its fee."""
+        single = data[:4] == _QUOTE_SINGLE
+        if single:
+            ((token_in, token_out, amount, fee, _),) = decode([_QUOTE_SINGLE_TYPE], data[4:])
+            hops = [(token_in, token_out, fee)]
+        else:
+            path, amount = decode(["bytes", "uint256"], data[4:])
+            tokens = ["0x" + path[at : at + 20].hex() for at in range(0, len(path), 23)]
+            fees = [int.from_bytes(path[at + 20 : at + 23], "big") for at in range(0, len(path) - 20, 23)]
+            hops = list(zip(tokens[:-1], tokens[1:], fees, strict=True))
+        after = []
+        for token_in, token_out, fee in hops:
+            pool = next(
+                pool
+                for pool in POOLS[ETHEREUM_MAINNET].values()
+                if pool.fee == fee
+                and {pool.token0.address.lower(), pool.token1.address.lower()}
+                == {token_in.lower(), token_out.lower()}
+            )
+            sqrt_price_x96, _ = self._slot0_at((pool.address.lower(), block))
+            # token1 per token0, in their smallest units, times 2**192.
+            ratio = sqrt_price_x96 * sqrt_price_x96
+            if token_in.lower() == pool.token0.address.lower():
+                amount = amount * ratio // 2**192
+            else:
+                amount = amount * 2**192 // ratio
+            amount = amount * (1_000_000 - fee) // 1_000_000
+            after.append(sqrt_price_x96)
+        amount = amount * self.quote_bps // 10_000
+        gas = self.quote_gas * len(hops)
+        if single:
+            return encoded(["uint256", "uint160", "uint32", "uint256"], [amount, after[0], 1, gas])
+        return encoded(
+            ["uint256", "uint160[]", "uint32[]", "uint256"], [amount, after, [1] * len(hops), gas]
+        )
+
     def _revert(self) -> dict[str, Any]:
         return {"error": {"code": 3, "message": self.revert_message}}
 
@@ -189,10 +245,14 @@ class FakeNode:
             if block in self.errors:
                 return {"error": self.errors[block]}
             key = (call["to"].lower(), block)
+            if key[0] == _QUOTER:
+                if block in self.quote_reverts:
+                    return self._revert()
+                return {"result": self._quote(bytes.fromhex(call["data"][2:]), block)}
             if call["data"].startswith(_SLOT0):
                 if key in self.slot0_reverts:
                     return self._revert()
-                sqrt_price_x96, tick = self.slot0.get(key, self.default_slot0)
+                sqrt_price_x96, tick = self._slot0_at(key)
                 return {
                     "result": encoded(_SLOT0_TYPES, [sqrt_price_x96, tick, 0, 1, 1, 0, True])
                 }
@@ -201,6 +261,8 @@ class FakeNode:
                     return self._revert()
                 # The window is the first of the two ages asked for.
                 window = int(call["data"][10 + 64 * 2 : 10 + 64 * 3], 16)
-                mean = self.twap_tick.get(key, self.default_twap_tick)
+                mean = self.twap_tick.get(
+                    key, self.pool_twap_tick.get(key[0], self.default_twap_tick)
+                )
                 return {"result": encoded(["int56[]", "uint160[]"], [[0, mean * window], [0, 0]])}
         raise AssertionError(f"the fake node has no answer for {method} {params!r}")

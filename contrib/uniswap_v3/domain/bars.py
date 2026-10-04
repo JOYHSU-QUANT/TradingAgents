@@ -117,7 +117,7 @@ class BarSettings:
 
     interval_seconds: int = 86_400
     twap_window_seconds: int = 1_800
-    max_twap_deviation: Decimal = Decimal("0.05")
+    max_twap_deviation: Decimal = Decimal("0.02")
     max_move: Decimal = Decimal("0.5")
 
     def __post_init__(self) -> None:

@@ -23,11 +23,12 @@ from typing import Any, Final
 from ..constants import QUOTER_V2
 from ..domain.prices import MAX_SQRT_RATIO, MIN_SQRT_RATIO
 from ..domain.types import Pool, Token, tokens_along
-from .errors import InsufficientLiquidity, MalformedResponse, RpcConfigError
+from ..ports import NoQuote
+from .errors import CallReverted, InsufficientLiquidity, MalformedResponse, RpcConfigError
 from .rpc import Rpc
 from .units import from_raw, to_raw
 
-__all__ = ["Quote", "quote_exact_input"]
+__all__ = ["ChainQuoter", "Quote", "quote_exact_input"]
 
 # From v3-periphery's IQuoterV2:
 # https://github.com/Uniswap/v3-periphery/blob/main/contracts/interfaces/IQuoterV2.sol
@@ -156,3 +157,24 @@ def quote_exact_input(
         gas_estimate=gas_estimate,
         block=block,
     )
+
+
+class ChainQuoter:
+    """A :class:`~..ports.Quoter` that asks QuoterV2 through a node."""
+
+    def __init__(self, rpc: Rpc) -> None:
+        self._rpc = rpc
+
+    def quote(
+        self, token_in: Token, route: Sequence[Pool], amount_in: Decimal, *, block: int
+    ) -> tuple[Decimal, int]:
+        """The output and the quoter's gas estimate of :func:`quote_exact_input` at ``block``.
+
+        A quote that reverts, and a pool that runs out of liquidity, are
+        :class:`~..ports.NoQuote`.
+        """
+        try:
+            quoted = quote_exact_input(self._rpc, token_in, route, amount_in, block=block)
+        except (CallReverted, InsufficientLiquidity) as exc:
+            raise NoQuote(str(exc)) from exc
+        return quoted.amount_out, quoted.gas_estimate

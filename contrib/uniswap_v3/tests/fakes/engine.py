@@ -11,15 +11,18 @@ from contrib.uniswap_v3.config import StrategySpec, UniswapConfig
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.execution import ExecutionSettings
 from contrib.uniswap_v3.domain.ledger import Ledger
+from contrib.uniswap_v3.domain.records import FillSource
 from contrib.uniswap_v3.domain.types import (
     Bar,
     Fill,
     Hold,
     MarketView,
+    Pool,
     Portfolio,
     Rejection,
     SwapIntent,
     TargetWeights,
+    Token,
 )
 
 __all__ = [
@@ -32,7 +35,9 @@ __all__ = [
     "WBTC",
     "WBTC_WETH",
     "WETH",
+    "FixedGas",
     "ScriptedExecutor",
+    "ScriptedQuoter",
     "ScriptedStrategy",
     "bar",
     "config",
@@ -119,6 +124,8 @@ class ScriptedStrategy:
 class ScriptedExecutor:
     """Answers each swap with what ``answer`` returns for it; ``swaps`` keeps every one asked."""
 
+    source = FillSource.MODEL
+
     def __init__(self, answer: Callable[[SwapIntent, Bar], Fill | Rejection]) -> None:
         self._answer = answer
         self.swaps: list[SwapIntent] = []
@@ -126,3 +133,32 @@ class ScriptedExecutor:
     def execute(self, swap: SwapIntent, bar: Bar) -> Fill | Rejection:
         self.swaps.append(swap)
         return self._answer(swap, bar)
+
+
+class ScriptedQuoter:
+    """Answers each quote with what ``answer`` returns, or raises it; ``asked`` keeps every one."""
+
+    def __init__(self, answer: Callable[[Token, tuple[Pool, ...], Decimal, int], object]) -> None:
+        self._answer = answer
+        self.asked: list[tuple[Token, tuple[Pool, ...], Decimal, int]] = []
+
+    def quote(
+        self, token_in: Token, route: Any, amount_in: Decimal, *, block: int
+    ) -> tuple[Decimal, int]:
+        self.asked.append((token_in, tuple(route), amount_in, block))
+        answer = self._answer(token_in, tuple(route), amount_in, block)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer  # type: ignore[return-value]
+
+
+class FixedGas:
+    """A gas oracle with one base fee for every block; ``blocks`` keeps each one asked about."""
+
+    def __init__(self, base_fee_wei: int) -> None:
+        self._base_fee_wei = base_fee_wei
+        self.blocks: list[int] = []
+
+    def base_fee_wei(self, block: int) -> int:
+        self.blocks.append(block)
+        return self._base_fee_wei

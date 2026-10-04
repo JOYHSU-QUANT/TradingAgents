@@ -13,6 +13,7 @@ from contrib.uniswap_v3.domain.execution import ExecutionSettings
 from contrib.uniswap_v3.domain.ledger import Ledger
 from contrib.uniswap_v3.domain.records import (
     BarSeen,
+    FillSource,
     Outcome,
     RejectionCode,
     SkipCode,
@@ -430,11 +431,17 @@ def test_an_executor_that_answers_for_another_swap_stops_the_run(store, wrong):
 
 def test_a_run_is_started_with_the_configs_snapshot_and_reopened_under_the_same_config(store):
     run = start_run(
-        store, _CONFIG, run_id=_RUN, mode=RunMode.PAPER, ledger=_ledger(), created_at=FIRST_DAY
+        store,
+        _CONFIG,
+        run_id=_RUN,
+        mode=RunMode.FORK,
+        ledger=_ledger(),
+        created_at=FIRST_DAY,
     )
     assert store.run(_RUN) == run
-    assert (run.mode, run.chain_id, run.quote, run.strategy) == (
-        RunMode.PAPER,
+    assert (run.fills, run.mode, run.chain_id, run.quote, run.strategy) == (
+        FillSource.MODEL,
+        RunMode.FORK,
         1,
         "USDC",
         "fixed_weights",
@@ -448,7 +455,12 @@ def test_a_run_is_started_with_the_configs_snapshot_and_reopened_under_the_same_
 
 def test_a_run_is_not_continued_under_a_changed_config(store):
     start_run(
-        store, _CONFIG, run_id=_RUN, mode=RunMode.PAPER, ledger=_ledger(), created_at=FIRST_DAY
+        store,
+        _CONFIG,
+        run_id=_RUN,
+        mode=RunMode.FORK,
+        ledger=_ledger(),
+        created_at=FIRST_DAY,
     )
     executor = ModelExecutor("USDC", _CONFIG.execution)
     changed = replace(_CONFIG, execution=ExecutionSettings(max_slippage=D("0.01")))
@@ -519,3 +531,21 @@ def test_a_run_is_not_started_with_balances_it_could_not_trade_or_a_chain_could_
             store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=opening, created_at=0
         )
     assert store.run(_RUN) is None
+
+
+def test_a_run_is_carried_on_only_by_an_executor_of_the_source_it_keeps(store):
+    start_run(
+        store,
+        _CONFIG,
+        run_id=_RUN,
+        mode=RunMode.PAPER,
+        ledger=_ledger(),
+        created_at=FIRST_DAY,
+        fills=FillSource.QUOTER,
+    )
+    modelled = ModelExecutor("USDC", _CONFIG.execution)
+    assert modelled.source is FillSource.MODEL
+    with pytest.raises(
+        EngineError, match="takes its fills from the quoter, and is not carried on with fills from the model"
+    ):
+        open_engine(store, _CONFIG, modelled, run_id=_RUN)

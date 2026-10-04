@@ -34,7 +34,8 @@ _WETH = TOKENS[ETHEREUM_MAINNET]["WETH"]
 _WBTC = TOKENS[ETHEREUM_MAINNET]["WBTC"]
 _USDC_WETH = POOLS[ETHEREUM_MAINNET]["USDC/WETH-500"]
 _WBTC_WETH = POOLS[ETHEREUM_MAINNET]["WBTC/WETH-500"]
-_SETTINGS = BarSettings()
+# The limit the readings below are set around.
+_SETTINGS = BarSettings(max_twap_deviation=Decimal("0.05"))
 
 
 # --- BarSettings -----------------------------------------------------------
@@ -44,7 +45,7 @@ def test_the_default_bar_is_one_day_checked_against_a_thirty_minute_twap():
     assert BarSettings() == BarSettings(
         interval_seconds=86_400,
         twap_window_seconds=1_800,
-        max_twap_deviation=Decimal("0.05"),
+        max_twap_deviation=Decimal("0.02"),
         max_move=Decimal("0.5"),
     )
 

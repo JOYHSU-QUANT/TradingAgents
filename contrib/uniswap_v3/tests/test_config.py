@@ -14,6 +14,7 @@ from contrib.uniswap_v3.config import (
     ConfigError,
     StrategySpec,
     UniswapConfig,
+    config_from_snapshot,
     config_snapshot,
     load_config,
     parse_config,
@@ -373,6 +374,10 @@ def test_execution_keys_are_read_one_by_one_over_the_defaults():
         ({"model": "cheap"}, "execution.model must be a mapping"),
         ({"model": {"slippage": 0.001}}, "execution.model.slippage must be a quoted decimal"),
         ({"model": {"gas_units_per_hop": 0}}, "execution: model_gas_units_per_hop"),
+        ({"quote": {"gas_overhead_units": -1}}, "execution: quote_gas_overhead_units"),
+        ({"quote": {"gas_overhead_units": "50000"}}, "execution: quote_gas_overhead_units"),
+        ({"quote": {"gas_units": 1}}, "execution.quote must be a mapping with keys from"),
+        ({"quote": 50_000}, "execution.quote must be a mapping with keys from"),
         ({"model": {"slippage": "0.01"}}, "execution: model_slippage 0.01 must not be above"),
     ],
 )
@@ -431,15 +436,16 @@ def test_a_snapshot_names_everything_a_run_depends_on_and_is_the_same_each_time(
         "bars": {
             "interval_seconds": 86_400,
             "twap_window_seconds": 1_800,
-            "max_twap_deviation": "0.05",
+            "max_twap_deviation": "0.02",
             "max_move": "0.5",
         },
-        # The config file's own shape, so the model's two keys sit under ``model``.
+        # The config file's own shape, so a section's keys sit under its name.
         "execution": {
             "min_trade_value": "10",
             "max_slippage": "0.005",
             "delay_blocks": 25,
             "model": {"slippage": "0.0005", "gas_units_per_hop": 150_000},
+            "quote": {"gas_overhead_units": 50_000},
         },
     }
 
@@ -483,3 +489,14 @@ def test_a_snapshot_writes_frozen_params_down_and_refuses_what_json_cannot_hold(
     for unwritable in (object(), float("nan")):
         with pytest.raises(ConfigError, match="cannot be written down as JSON"):
             config_snapshot(_config(strategy=StrategySpec(name="x", params={"odd": unwritable})))
+
+
+def test_the_quoted_fills_gas_overhead_is_read_and_may_be_zero():
+    assert parse_config(_document()).execution.quote_gas_overhead_units == 50_000
+    config = parse_config(_document(execution={"quote": {"gas_overhead_units": 0}}))
+    assert config.execution.quote_gas_overhead_units == 0
+    assert config_from_snapshot(config_snapshot(config)) == config
+
+
+def test_a_bar_is_suspect_two_percent_from_its_twap_unless_the_config_says_otherwise():
+    assert parse_config(_document()).bars.max_twap_deviation == Decimal("0.02")

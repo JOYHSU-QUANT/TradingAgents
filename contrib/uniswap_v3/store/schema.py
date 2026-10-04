@@ -17,8 +17,8 @@ is JSON text.
 ``bars`` is market data and belongs to no run. ``runs``, ``decisions``,
 ``fills`` and ``valuations`` are what a run writes, in any mode: a decision
 is keyed by its run and its bar's boundary, so a bar is decided once, and a
-decision's fills and its valuation hang off that key. ``decisions.outcome``
-and ``reason_code`` carry no CHECK of their values: SQLite cannot alter one,
+decision's fills and its valuation hang off that key. ``runs.fills``,
+``decisions.outcome`` and ``reason_code`` carry no CHECK of their values: SQLite cannot alter one,
 so a new outcome would mean rebuilding three tables, and a value this code
 does not know is refused when the row is read.
 """
@@ -120,6 +120,8 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         )
         """,
     ),
+    # Where a run's fills come from. Every run stored before this was filled by the model.
+    ("ALTER TABLE runs ADD COLUMN fills TEXT NOT NULL DEFAULT 'model'",),
 )
 
 SCHEMA_VERSION: Final = len(_MIGRATIONS)

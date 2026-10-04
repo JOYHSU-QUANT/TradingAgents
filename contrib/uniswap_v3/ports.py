@@ -14,19 +14,23 @@ timestamps are.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from .domain.ledger import Ledger
-from .domain.records import Decision, RunRecord, StepRecord
+from .domain.records import Decision, FillSource, RunRecord, StepRecord
 from .domain.types import (
     Bar,
     Fill,
     Hold,
     MarketView,
+    Pool,
     Portfolio,
     Rejection,
     SwapIntent,
     TargetWeights,
+    Token,
 )
 
 __all__ = [
@@ -36,6 +40,8 @@ __all__ = [
     "Executor",
     "GasOracle",
     "Journal",
+    "NoQuote",
+    "Quoter",
     "Strategy",
 ]
 
@@ -73,6 +79,11 @@ class BarSource(Protocol):
 @runtime_checkable
 class Executor(Protocol):
     """Turns one swap into a fill, or says why not."""
+
+    @property
+    def source(self) -> FillSource:
+        """Where this executor's fills come from. A run keeps it, and no other carries the run on."""
+        ...
 
     def execute(self, swap: SwapIntent, bar: Bar) -> Fill | Rejection:
         """Fill ``swap``, decided on ``bar``, or refuse it with a reason.
@@ -139,6 +150,27 @@ class GasOracle(Protocol):
         """The base fee per gas of ``block``, in wei.
 
         An implementation that cannot read it raises; it does not estimate.
+        """
+        ...
+
+
+class NoQuote(Exception):
+    """The pools give no answer for this swap at this block: the quote reverts, or a pool runs dry."""
+
+
+@runtime_checkable
+class Quoter(Protocol):
+    """Asks the pools what a swap would have returned at a block."""
+
+    def quote(
+        self, token_in: Token, route: Sequence[Pool], amount_in: Decimal, *, block: int
+    ) -> tuple[Decimal, int]:
+        """What selling ``amount_in`` of ``token_in`` through ``route`` returns at the end of ``block``.
+
+        The answer is the output in whole tokens, after the pools' fees,
+        and the gas the pools' swaps used, in gas units. A swap the pools
+        give no answer for raises :class:`NoQuote`. An implementation that
+        cannot read the answer raises what it has; it does not estimate.
         """
         ...
 

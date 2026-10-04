@@ -11,6 +11,7 @@ from contrib.uniswap_v3.domain.records import (
     BarSeen,
     Decision,
     FillRecord,
+    FillSource,
     Outcome,
     RejectionCode,
     RunRecord,
@@ -205,6 +206,8 @@ def test_a_step_carries_fills_exactly_when_its_decision_is_filled():
         ({"strategy": None}, "strategy must be a non-empty string"),
         ({"config": " "}, "config must be a non-empty string"),
         ({"mode": "paper"}, "mode must be a RunMode"),
+        ({"fills": "model"}, "fills must be a FillSource"),
+        ({"mode": RunMode.PAPER}, "a paper run fills from quotes, not from the model"),
         ({"chain_id": -1}, "non-negative integers"),
         ({"created_at": 1.5}, "non-negative integers"),
         ({"ledger": None}, "ledger must be a Ledger"),
@@ -222,7 +225,10 @@ def test_a_malformed_run_is_refused(changes, match):
         "ledger": _LEDGER,
         "created_at": 0,
     }
-    assert RunRecord(**fields).run_id == "run-1"
+    assert RunRecord(**fields).fills is FillSource.MODEL
+    quoted = {**fields, "fills": FillSource.QUOTER}
+    for mode in RunMode:
+        assert RunRecord(**{**quoted, "mode": mode}).mode is mode
     with pytest.raises(ValueError, match=match):
         RunRecord(**{**fields, **changes})
 

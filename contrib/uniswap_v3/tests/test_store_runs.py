@@ -14,6 +14,7 @@ from contrib.uniswap_v3.domain.records import (
     BarSeen,
     Decision,
     FillRecord,
+    FillSource,
     Outcome,
     RejectionCode,
     RunRecord,
@@ -118,7 +119,11 @@ def test_the_store_is_the_engines_journal(store):
 
 
 def test_a_run_comes_back_as_it_was_stored(store):
-    run = _run(mode=RunMode.PAPER, ledger=_ledger("1234.567891", weth="0.000000000000000001"))
+    run = _run(
+        mode=RunMode.PAPER,
+        fills=FillSource.QUOTER,
+        ledger=_ledger("1234.567891", weth="0.000000000000000001"),
+    )
     store.insert_run(run)
     assert store.run("run-1") == run
     assert store.run("run-2") is None
@@ -127,7 +132,7 @@ def test_a_run_comes_back_as_it_was_stored(store):
 def test_a_run_id_is_stored_once(store):
     store.insert_run(_run())
     with pytest.raises(StoreError, match="the run 'run-1' is already stored"):
-        store.insert_run(_run(mode=RunMode.PAPER))
+        store.insert_run(_run(mode=RunMode.FORK))
     assert store.run("run-1").mode is RunMode.BACKTEST
 
 
@@ -307,8 +312,21 @@ def test_fills_the_runs_ledger_does_not_cover_are_refused(store):
 
 @pytest.mark.parametrize("mode", list(RunMode))
 def test_the_schema_takes_every_run_mode(store, mode):
-    store.insert_run(_run(mode=mode))
+    store.insert_run(_run(mode=mode, fills=FillSource.QUOTER))
     assert store.run("run-1").mode is mode
+
+
+@pytest.mark.parametrize("fills", list(FillSource))
+def test_a_run_keeps_where_its_fills_come_from(store, fills):
+    store.insert_run(_run(fills=fills))
+    assert store.run("run-1").fills is fills
+
+
+def test_a_source_of_fills_this_code_does_not_know_is_refused_when_read(store, tmp_path):
+    store.insert_run(_run())
+    _tamper(tmp_path / "store.db", "UPDATE runs SET fills = 'oracle'")
+    with pytest.raises(StoreError, match="run 'run-1'"):
+        store.run("run-1")
 
 
 @pytest.mark.parametrize("finality", list(Finality))
@@ -440,3 +458,24 @@ def test_a_store_from_before_the_run_tables_gains_them_and_keeps_its_bars(tmp_pa
         store.record("run-1", _filled())
         assert store.bar(1, USDC_WETH.address, DAY, FIRST_DAY) == pool_bar()
         assert len(store.fills("run-1")) == 2
+
+
+def test_a_run_stored_before_fills_were_kept_reads_as_filled_by_the_model(tmp_path):
+    path = tmp_path / "store.db"
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
+    )
+    for version in (1, 2):
+        for statement in _MIGRATIONS[version - 1]:
+            connection.execute(statement)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, 0)", (version,))
+    connection.execute(
+        "INSERT INTO runs VALUES ('run-1', 'backtest', 1, 'USDC', 'fixed_weights', '{}', "
+        """'{"USDC": "10000", "WBTC": "0", "WETH": "0"}', '1', 0)"""
+    )
+    connection.close()
+    with open_store(path) as store:
+        run = store.run("run-1")
+        assert (run.fills, run.ledger) == (FillSource.MODEL, _ledger())

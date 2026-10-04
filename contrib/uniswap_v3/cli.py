@@ -5,17 +5,27 @@
 - ``status`` prints what the store holds and its latest bars. It reads no
   chain.
 - ``backtest`` replays the stored bars of a range through the engine as the
-  run ``--run-id``, with fills from the offline model. It reads no chain. A
-  new run takes its opening balances from ``--balance`` and ``--gas-eth``;
-  the same command run again decides nothing twice.
+  run ``--run-id``. With ``--fills model``, the default, fills come from
+  the offline model and no chain is read. With ``--fills quoter`` each swap
+  is quoted on the node at its bar's fill block, which takes an archive
+  node. A new run takes its opening balances from ``--balance`` and
+  ``--gas-eth``; the same command run again decides nothing twice.
+- ``paper`` is one visit of the paper run ``--run-id``. It reads the bars
+  the chain has closed since the run's latest decided one into the store,
+  which it creates when there is none, and decides them with fills quoted
+  at each bar's fill block. Run again before the next boundary, it says
+  that the latest bar is already decided, and decides nothing. Catching
+  up on bars whose visits were missed takes a node that still has the
+  state of their blocks: an archive node, for more than a short while.
 - ``report`` prints a run's return, drawdown, turnover and costs, beside
   what leaving the opening balances untouched, or in the quote token, would
   have come to. It reads the store alone, and takes the run's config from
   the run.
 
-``backfill`` takes the node's URL from the environment variable the config
-names (``ETH_RPC_URL`` unless it names another); with the URL in a ``.env``
-file, run it as ``python -m dotenv run -- python -m contrib.uniswap_v3 ...``.
+``backfill``, ``paper`` and ``backtest --fills quoter`` take the node's URL
+from the environment variable the config names (``ETH_RPC_URL`` unless it
+names another); with the URL in a ``.env`` file, run them as
+``python -m dotenv run -- python -m contrib.uniswap_v3 ...``.
 
 Exit codes: 0 when the command ran to its end, 1 when it could not and
 running it again unchanged will not help (the config, the store, the range,
@@ -35,6 +45,12 @@ reads differently in the store, and when rebalances were rejected for want
 of gas. A range without a single bar exits 1, and so does carrying a run on
 in a way that would leave a stored bar undecided behind it: from a later
 ``--from``, or over a boundary given its bar after the run had passed it.
+A ``paper`` visit exits 0 once the latest bar is decided, by this visit or
+an earlier one and whatever the decision, and also when the chain had no
+answer at the bar's boundary, which a warning on stderr says. It exits 3,
+having decided nothing, when the node's chain has not yet reached the
+boundary or the bar's fill block: whoever schedules the visit runs it
+again later.
 """
 
 from __future__ import annotations
@@ -48,7 +64,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from .chain.errors import ChainError, RpcRejected, TransientChainError
 from .config import ConfigError, UniswapConfig, config_from_snapshot, load_config
@@ -58,10 +74,15 @@ from .domain.decimal_context import parse_decimal, plain
 from .domain.ledger import Ledger
 from .domain.metrics import Curve, MetricsError, measurable, run_metrics
 from .domain.records import Outcome
-from .engine.backtest import BacktestRangeError, run_backtest
+from .engine.backtest import BacktestRangeError, BacktestSummary, run_backtest
+from .engine.executors import QuoteExecutor
 from .engine.step import EngineError
 from .store.bar_source import load_bar
 from .store.repository import Store, StoreError, open_store
+
+if TYPE_CHECKING:
+    from .backfill import BackfillSummary
+    from .chain.rpc import Rpc
 
 __all__ = ["EXIT_FAILED", "EXIT_OK", "EXIT_RETRY", "main"]
 
@@ -188,8 +209,30 @@ def _parser() -> argparse.ArgumentParser:
         "--bars", type=_positive, default=5, help="how many of the latest bars to print"
     )
 
-    backtest = add("backtest", "Replay the stored bars of a range through the engine. Offline.")
-    backtest.add_argument("--run-id", type=_run_id, required=True, help="the run to start or carry on")
+    def add_run(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--run-id", type=_run_id, required=True, help="the run to start or carry on"
+        )
+        command.add_argument(
+            "--balance",
+            dest="balances",
+            type=_balance,
+            action="append",
+            default=[],
+            metavar="TOKEN=AMOUNT",
+            help="an opening balance of a new run, in whole tokens: USDC=10000. Repeat it "
+            "for each token held; a token left out starts at zero. Given for a stored run, "
+            "the balances must be the ones it was started with",
+        )
+        command.add_argument(
+            "--gas-eth",
+            type=_amount,
+            metavar="AMOUNT",
+            help="the ETH a new run sets aside for gas: 0.5. It goes with --balance",
+        )
+
+    backtest = add("backtest", "Replay the stored bars of a range through the engine.")
+    add_run(backtest)
     backtest.add_argument(
         "--from",
         dest="start",
@@ -205,29 +248,18 @@ def _parser() -> argparse.ArgumentParser:
         "(default: the store's latest bar)",
     )
     backtest.add_argument(
-        "--balance",
-        dest="balances",
-        type=_balance,
-        action="append",
-        default=[],
-        metavar="TOKEN=AMOUNT",
-        help="an opening balance of a new run, in whole tokens: USDC=10000. Repeat it for "
-        "each token held; a token left out starts at zero. Given for a stored run, the "
-        "balances must be the ones it was started with",
-    )
-    backtest.add_argument(
-        "--gas-eth",
-        type=_amount,
-        metavar="AMOUNT",
-        help="the ETH a new run sets aside for gas: 0.5. It goes with --balance",
-    )
-    backtest.add_argument(
         "--fills",
-        choices=["model"],
+        choices=["model", "quoter"],
         default="model",
         help="where fills come from: the offline model (the bar's close, less fees, "
-        "execution.model.slippage and modelled gas)",
+        "execution.model.slippage and modelled gas), or the quoter (what the pools would "
+        "have returned at the bar's fill block, asked of an archive node)",
     )
+
+    paper = add(
+        "paper", "Read the bars the chain has closed since the run's last, and decide them."
+    )
+    add_run(paper)
 
     report = commands.add_parser(
         "report", help=_REPORT_SUMMARY, description=_REPORT_SUMMARY
@@ -248,11 +280,32 @@ def _config(args: argparse.Namespace) -> UniswapConfig:
     return replace(config, bars=bars)
 
 
+def _connect(config: UniswapConfig, command: str) -> Rpc:
+    """A connection to the config's node, for ``command``."""
+    # Imported here: a command that reads no chain should not wait on web3.
+    try:
+        from .chain.rpc import RpcSettings, connect
+    except ImportError as exc:
+        raise ConfigError(
+            f"{command} needs the packages in contrib/uniswap_v3/requirements.txt ({exc})"
+        ) from exc
+    settings = RpcSettings() if config.rpc_url_env is None else RpcSettings(config.rpc_url_env)
+    return connect(config.chain_id, settings=settings)
+
+
+def _pending_checked(read: BackfillSummary, out: Callable[[str], None]) -> None:
+    """Say how the pending readings a backfill checked came out, when it checked any."""
+    if read.confirmed or read.reorged:
+        out(
+            f"checked pending readings against the final chain: {read.confirmed} final, "
+            f"{read.reorged} reorged"
+        )
+
+
 def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
     # Imported here: ``status`` reads no chain and should not wait on web3.
     try:
         from .backfill import BackfillRangeError, backfill, check_range, plan_backfill
-        from .chain.rpc import RpcSettings, connect
     except ImportError as exc:
         raise ConfigError(
             f"backfill needs the packages in contrib/uniswap_v3/requirements.txt ({exc})"
@@ -277,8 +330,7 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
         )
         if args.dry_run:
             return EXIT_OK
-        settings = RpcSettings() if config.rpc_url_env is None else RpcSettings(config.rpc_url_env)
-        rpc = connect(config.chain_id, settings=settings)
+        rpc = _connect(config, "backfill")
         summary = backfill(
             rpc,
             store,
@@ -291,11 +343,7 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
         f"wrote {summary.written} bar(s); {summary.already_stored} already stored, "
         f"{len(summary.unanswered)} without an answer, {len(summary.not_reached)} not reached yet"
     )
-    if summary.confirmed or summary.reorged:
-        out(
-            f"checked pending readings against the final chain: {summary.confirmed} final, "
-            f"{summary.reorged} reorged"
-        )
+    _pending_checked(summary, out)
     if summary.unanswered:
         print(
             f"warning: {len(summary.unanswered)} boundary(ies) without an answer, from "
@@ -386,9 +434,25 @@ def _outcome_counts(counts: Mapping[Outcome, int]) -> str:
     return _counts({outcome.value: counts.get(outcome, 0) for outcome in Outcome})
 
 
+def _quoting(config: UniswapConfig, command: str) -> tuple[Rpc, QuoteExecutor]:
+    """A connection to the config's node, and an executor that fills from its quotes."""
+    try:
+        from .chain.gas import ChainGasOracle
+        from .chain.quoter import ChainQuoter
+    except ImportError as exc:
+        raise ConfigError(
+            f"{command} needs the packages in contrib/uniswap_v3/requirements.txt ({exc})"
+        ) from exc
+    rpc = _connect(config, command)
+    return rpc, QuoteExecutor(ChainQuoter(rpc), ChainGasOracle(rpc), config.execution)
+
+
 def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
     config = _config(args)
     opening = _opening(args, config)
+    quoted = None
+    if args.fills == "quoter":
+        _, quoted = _quoting(config, "backtest --fills quoter")
     # A backtest's rows can be made again, so its commits need not wait for the disk.
     with open_store(args.db, create=False, durable=False) as store:
         summary = run_backtest(
@@ -399,9 +463,22 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             end=args.end,
             opening=opening,
             created_at=int(now()),
+            executor=quoted,
         )
+    _replayed(args.run_id, summary, out)
+    return EXIT_OK
+
+
+def _replayed(
+    run_id: str, summary: BacktestSummary, out: Callable[[str], None], *, pending: bool = True
+) -> None:
+    """Print what a replay did, and warn on stderr of what a reader should know of it.
+
+    ``pending`` is whether bars decided on readings that were not final are worth a
+    warning: a paper run always decides its latest bar on one.
+    """
     out(
-        f"run {_one_ascii_line(args.run_id)}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
+        f"run {_one_ascii_line(run_id)}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
         f"{_iso(summary.end)}: {summary.decided} decided, {summary.already_decided} already "
         f"decided, {len(summary.missing)} without a bar"
     )
@@ -414,7 +491,7 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             f"One that is backfilled later is decided by a rerun only if the run has not gone "
             f"past it; otherwise the range needs a new run"
         )
-    if summary.on_pending:
+    if summary.on_pending and pending:
         warnings.append(
             f"{summary.on_pending} bar(s) were decided on readings that are not final yet; a "
             f"decision stands even if the chain later drops the block it was made on"
@@ -434,6 +511,41 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
         )
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
+
+
+def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
+    config = _config(args)
+    opening = _opening(args, config)
+    rpc, executor = _quoting(config, "paper")
+    from .paper import run_paper
+
+    with open_store(args.db) as store:
+        summary = run_paper(
+            rpc, store, config, executor, run_id=args.run_id, opening=opening, now=int(now())
+        )
+    read = summary.read
+    out(
+        f"read {read.written} bar(s); {read.already_stored} already stored, "
+        f"{len(read.unanswered)} without an answer"
+    )
+    _pending_checked(read, out)
+    if summary.replayed is not None:
+        _replayed(args.run_id, summary.replayed, out, pending=False)
+    decision = summary.decision
+    if decision is None:
+        print(
+            f"warning: the chain had no answer at the boundary {_iso(summary.latest)}, so it "
+            f"has no bar and was not decided; a later visit asks again, and decides it only "
+            f"if the run has not gone past it",
+            file=sys.stderr,
+        )
+        return EXIT_OK
+    made = summary.replayed is not None and summary.replayed.decided
+    why = "" if decision.reason is None else f" ({_one_ascii_line(decision.reason)})"
+    out(
+        f"the bar at {_iso(summary.latest)} {'is decided' if made else 'was already decided'}: "
+        f"{decision.outcome.value}{why}"
+    )
     return EXIT_OK
 
 
@@ -472,8 +584,8 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         fee_rates={pool.address: pool.fee_rate for pool in config.pools},
     )
     out(
-        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}, {_one_ascii_line(run.strategy)}, "
-        f"values in {quote}"
+        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}, fills from the {run.fills.value}, "
+        f"{_one_ascii_line(run.strategy)}, values in {quote}"
     )
     out(
         f"{len(decisions)} bar(s) decided from {_iso(decisions[0].time)} to "
@@ -536,6 +648,8 @@ def main(
             return _backfill(args, out, now)
         if args.command == "backtest":
             return _backtest(args, out, now)
+        if args.command == "paper":
+            return _paper(args, out, now)
         if args.command == "report":
             return _report(args, out)
         return _status(args, out)

@@ -9,12 +9,21 @@ for ticks, where the code uses an integer power.
 
 from __future__ import annotations
 
-from decimal import Context, Decimal, localcontext
+from decimal import (
+    ROUND_HALF_EVEN,
+    Context,
+    Decimal,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    localcontext,
+)
 from fractions import Fraction
 
 import pytest
 
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
+from contrib.uniswap_v3.domain.decimal_context import DECIMAL_CONTEXT
 from contrib.uniswap_v3.domain.prices import (
     MAX_SQRT_RATIO,
     MAX_TICK,
@@ -146,6 +155,24 @@ def test_the_tick_and_sqrt_price_conversions_agree_at_the_chains_own_pair():
 def test_a_tick_outside_the_range_is_refused(tick):
     with pytest.raises(ValueError, match="tick must be an integer in"):
         price_from_tick(A_B, tick, base=A)
+
+
+def test_the_decimal_context_spells_out_every_field():
+    # A context built with ``prec`` alone would inherit the rest from the
+    # mutable ``decimal.DefaultContext``.
+    context = DECIMAL_CONTEXT
+    assert (context.prec, context.rounding, context.Emin, context.Emax) == (
+        28,
+        ROUND_HALF_EVEN,
+        -999999,
+        999999,
+    )
+    assert (context.capitals, context.clamp) == (1, 0)
+    assert {trap for trap, armed in context.traps.items() if armed} == {
+        InvalidOperation,
+        DivisionByZero,
+        Overflow,
+    }
 
 
 def test_the_ambient_decimal_context_does_not_change_a_price():

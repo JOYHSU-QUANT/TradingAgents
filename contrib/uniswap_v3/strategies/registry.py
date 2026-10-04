@@ -29,6 +29,6 @@ def strategy_names() -> tuple[str, ...]:
 
 def build_strategy(name: str, params: Mapping[str, object]) -> Strategy:
     """The strategy registered as ``name``, built from ``params``."""
-    if name not in _FACTORIES:
+    if not isinstance(name, str) or name not in _FACTORIES:
         raise ValueError(f"unknown strategy {name!r}; known: {list(strategy_names())}")
     return _FACTORIES[name](params)

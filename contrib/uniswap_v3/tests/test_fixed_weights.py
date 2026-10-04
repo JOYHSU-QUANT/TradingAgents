@@ -97,7 +97,17 @@ def test_a_portfolio_with_other_tokens_than_the_targets_raises():
         ({**PARAMS, "band": None}, "quoted decimal"),
         ({**PARAMS, "band": "1"}, r"band must be a Decimal in \[0, 1\)"),
         ({**PARAMS, "band": "-0.01"}, r"band must be a Decimal in \[0, 1\)"),
-        ({**PARAMS, "band": "NaN"}, r"band must be a Decimal in \[0, 1\)"),
+        ({**PARAMS, "band": "-0"}, r"band must be a Decimal in \[0, 1\)"),
+        # Spellings ``Decimal`` would read but nobody means to write.
+        ({**PARAMS, "band": "NaN"}, "quoted decimal"),
+        ({**PARAMS, "band": " 0.05"}, "quoted decimal"),
+        ({**PARAMS, "band": "0.05\n"}, "quoted decimal"),
+        ({**PARAMS, "band": "0.0_5"}, "quoted decimal"),
+        ({**PARAMS, "band": "5e-2"}, "quoted decimal"),
+        ({**PARAMS, "band": "０.０５"}, "quoted decimal"),
+        ({**PARAMS, 1: 2}, "takes exactly the params"),
+        (["weights", "band"], "takes exactly the params"),
+        (None, "takes exactly the params"),
     ],
 )
 def test_malformed_params_are_refused(params, match):

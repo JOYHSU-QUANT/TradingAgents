@@ -14,7 +14,7 @@ tick at 60 working digits and then rounds into the same context.
 
 from __future__ import annotations
 
-from decimal import Context, Decimal
+from decimal import Decimal
 from fractions import Fraction
 from typing import Final
 
@@ -39,7 +39,9 @@ MAX_SQRT_RATIO: Final = 1461446703485210103287273052203988822378723970342
 
 _Q192: Final = 2**192
 _TICK_BASE: Final = Decimal("1.0001")
-_WORKING: Final = Context(prec=60)
+# The package's context, widened: the tick power is worked at 60 digits.
+_WORKING: Final = DECIMAL_CONTEXT.copy()
+_WORKING.prec = 60
 
 
 def _base_is_token0(pool: Pool, base: Token) -> bool:

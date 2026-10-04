@@ -1,12 +1,14 @@
 """Guards for the package's two import rules, read off the sources.
 
 - Isolation: nothing under ``contrib/uniswap_v3`` imports another package
-  under ``contrib/``, and none of the three neighbours imports this one.
+  under ``contrib/``, and no other package there imports this one.
 - Purity: ``domain/`` and ``ports.py`` import the standard library and each
   other only. CI type-checks them in a job that installs mypy alone.
 
-Both read every import in a file, at any depth: a lazy import inside a
-function and one under ``TYPE_CHECKING`` are the same dependency here.
+Both read every import statement in a file, at any depth: a lazy import
+inside a function and one under ``TYPE_CHECKING`` are the same dependency
+here. A dynamic import (``import_module`` or ``__import__``) is read when
+its module name is a string literal; one built at run time is not seen.
 """
 
 from __future__ import annotations
@@ -19,8 +21,14 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _OWN = "contrib.uniswap_v3"
-_NEIGHBOURS = ("contrib.hyperliquid_perp", "contrib.autoresearch", "contrib.replay")
 _PURE = (f"{_OWN}.domain", f"{_OWN}.ports")
+# Every other package under ``contrib/``, found on disk so that one added
+# later is guarded without being listed here.
+_NEIGHBOURS = sorted(
+    f"contrib.{path.name}"
+    for path in (_REPO_ROOT / "contrib").iterdir()
+    if (path / "__init__.py").is_file() and f"contrib.{path.name}" != _OWN
+)
 
 
 def _within(name: str, package: str) -> bool:
@@ -51,16 +59,38 @@ def _imports(source: Path, root: Path = _REPO_ROOT) -> set[str]:
             base = package[: max(0, len(package) - (node.level - 1))] if node.level else ()
             module = ".".join([*base, *([node.module] if node.module else [])])
             found.update(f"{module}.{alias.name}" if module else alias.name for alias in node.names)
+        elif (
+            isinstance(node, ast.Call)
+            and _is_dynamic_import(node.func)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            found.add(node.args[0].value)
     return found
 
 
+def _is_dynamic_import(func: ast.expr) -> bool:
+    """``__import__(...)``, ``import_module(...)`` or ``<anything>.import_module(...)``."""
+    if isinstance(func, ast.Name):
+        return func.id in ("__import__", "import_module")
+    return isinstance(func, ast.Attribute) and func.attr == "import_module"
+
+
 def _offenders(package: str, is_offender) -> list[tuple[str, str]]:
+    sources = _sources(package)
+    # An empty list would pass any check below without having read anything.
+    assert sources, f"{package} has no sources to read"
     return sorted(
         (source.relative_to(_REPO_ROOT).as_posix(), name)
-        for source in _sources(package)
+        for source in sources
         for name in _imports(source)
         if is_offender(name)
     )
+
+
+def test_the_neighbours_found_on_disk_include_the_three_known_ones():
+    assert {"contrib.hyperliquid_perp", "contrib.autoresearch", "contrib.replay"} <= set(_NEIGHBOURS)
 
 
 def test_the_package_imports_no_other_contrib_package():
@@ -70,8 +100,6 @@ def test_the_package_imports_no_other_contrib_package():
 
 @pytest.mark.parametrize("neighbour", _NEIGHBOURS)
 def test_no_neighbour_imports_the_package(neighbour):
-    # An empty list would pass the check below without having read anything.
-    assert _sources(neighbour), f"{neighbour} has no sources to read"
     offenders = _offenders(neighbour, lambda name: _within(name, _OWN))
     assert not offenders, f"{neighbour} imports contrib/uniswap_v3: {offenders}"
 
@@ -105,6 +133,10 @@ def test_the_import_scan_resolves_every_shape(tmp_path):
         "from contrib.autoresearch import split\n"
         "def lazy():\n"
         "    from contrib.hyperliquid_perp import config\n"
+        "    importlib.import_module('contrib.replay.pool')\n"
+        "    import_module('contrib.replay.probe')\n"
+        "    __import__('contrib.autoresearch.dsl')\n"
+        "    importlib.import_module(name)\n"
         "if TYPE_CHECKING:\n"
         "    from ...autoresearch.store import Store\n",
         encoding="utf-8",
@@ -121,6 +153,9 @@ def test_the_import_scan_resolves_every_shape(tmp_path):
         "contrib.replay.score.mark",
         "contrib.autoresearch.split",
         "contrib.hyperliquid_perp.config",
+        "contrib.replay.pool",
+        "contrib.replay.probe",
+        "contrib.autoresearch.dsl",
         "contrib.autoresearch.store.Store",
     }
     # A package's ``__init__`` resolves one dot to the package itself.

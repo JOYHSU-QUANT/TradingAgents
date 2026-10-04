@@ -7,8 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from contrib.uniswap_v3.config import ConfigError, StrategySpec, load_config, parse_config
+from contrib.uniswap_v3 import config as config_module
+from contrib.uniswap_v3.config import (
+    ConfigError,
+    StrategySpec,
+    UniswapConfig,
+    load_config,
+    parse_config,
+)
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
+from contrib.uniswap_v3.domain.types import Pool, Token
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
 from contrib.uniswap_v3.strategies.registry import build_strategy
 
@@ -122,9 +130,98 @@ def test_a_file_that_cannot_be_read_or_parsed_is_a_config_error(tmp_path):
         load_config(tmp_path / "absent.yaml")
     broken = tmp_path / "broken.yaml"
     broken.write_text("tokens: [USDC\n", encoding="utf-8")
-    with pytest.raises(ConfigError, match="is not YAML"):
+    with pytest.raises(ConfigError, match="cannot be parsed"):
         load_config(broken)
     empty = tmp_path / "empty.yaml"
     empty.write_text("", encoding="utf-8")
     with pytest.raises(ConfigError, match="must hold a mapping"):
         load_config(empty)
+    not_utf8 = tmp_path / "latin1.yaml"
+    not_utf8.write_bytes(b"chain_id: \xff\n")
+    with pytest.raises(ConfigError, match="cannot be read"):
+        load_config(not_utf8)
+
+
+@pytest.mark.parametrize(
+    ("repeat", "key"),
+    [
+        ("quote_token: WETH\n", "quote_token"),
+        ("tokens: [USDC, WETH]\n", "tokens"),
+        ("strategy:\n  name: other\n", "strategy"),
+    ],
+)
+def test_a_key_written_twice_is_refused_rather_than_the_last_winning(tmp_path, repeat, key):
+    doubled = tmp_path / "doubled.yaml"
+    doubled.write_text(EXAMPLE.read_text(encoding="utf-8") + repeat, encoding="utf-8")
+    with pytest.raises(ConfigError, match=f"the key '{key}' appears more than once"):
+        load_config(doubled)
+
+
+def test_a_key_written_twice_inside_the_strategy_is_refused_too(tmp_path):
+    doubled = tmp_path / "doubled.yaml"
+    doubled.write_text(
+        EXAMPLE.read_text(encoding="utf-8") + '    band: "0.5"\n', encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="the key 'band' appears more than once"):
+        load_config(doubled)
+
+
+def test_strategy_params_are_read_only_all_the_way_down():
+    params = load_config(EXAMPLE).strategy.params
+    with pytest.raises(TypeError):
+        params["weights"]["USDC"] = "1"  # type: ignore[index]
+    spec = StrategySpec(name="x", params={"levels": [{"a": 1}]})
+    assert spec.params["levels"] == ({"a": 1},)
+    with pytest.raises(TypeError):
+        spec.params["levels"][0]["a"] = 2  # type: ignore[index]
+
+
+def _config(**overrides: object) -> UniswapConfig:
+    fields: dict = {
+        "chain_id": 1,
+        "quote": _TOKENS["USDC"],
+        "tokens": (_TOKENS["USDC"], _TOKENS["WETH"]),
+        "pools": (_POOLS["USDC/WETH-500"],),
+        "strategy": StrategySpec(name="x", params={}),
+    }
+    return UniswapConfig(**{**fields, **overrides})
+
+
+def test_a_config_built_by_hand_from_the_tables_is_accepted():
+    assert _config().quote is _TOKENS["USDC"]
+
+
+IMPOSTOR = Token("WETH", "0x" + "f" * 40, 18)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"chain_id": 999}, "chain_id must be one of"),
+        ({"chain_id": True}, "chain_id must be one of"),
+        # The right symbol at another address is not the allowlisted token.
+        ({"tokens": (_TOKENS["USDC"], IMPOSTOR)}, "is not in chain 1's token table"),
+        ({"quote": "USDC"}, "is not in chain 1's token table"),
+        (
+            {"pools": (Pool("0x" + "1" * 40, _TOKENS["USDC"], _TOKENS["WETH"], 500),)},
+            "is not in chain 1's pool table",
+        ),
+        ({"tokens": [_TOKENS["USDC"], _TOKENS["WETH"]]}, "must be tuples"),
+        ({"pools": [_POOLS["USDC/WETH-500"]]}, "must be tuples"),
+        ({"strategy": {"name": "x"}}, "strategy must be a StrategySpec"),
+    ],
+)
+def test_a_config_built_by_hand_cannot_step_outside_the_tables(overrides, match):
+    with pytest.raises(ConfigError, match=match):
+        _config(**overrides)
+
+
+def test_two_pools_for_one_pair_are_refused(monkeypatch):
+    # The tables hold one pool per pair today, so a second fee tier is added
+    # for the test: a swap names two tokens and could not say which to use.
+    second = Pool("0x" + "1" * 40, _TOKENS["USDC"], _TOKENS["WETH"], 3000)
+    monkeypatch.setattr(
+        config_module, "POOLS", {ETHEREUM_MAINNET: {**_POOLS, "USDC/WETH-3000": second}}
+    )
+    with pytest.raises(ConfigError, match=r"more than one pool for the pair \['USDC', 'WETH'\]"):
+        parse_config(_document(pools=["USDC/WETH-500", "WBTC/WETH-500", "USDC/WETH-3000"]))

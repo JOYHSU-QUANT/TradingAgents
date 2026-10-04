@@ -25,6 +25,8 @@ def test_a_registered_name_builds_a_strategy_from_its_params():
 def test_an_unknown_name_is_refused_and_the_known_ones_are_listed():
     with pytest.raises(ValueError, match=r"unknown strategy 'momentum'; known: \['fixed_weights'\]"):
         build_strategy("momentum", PARAMS)
+    with pytest.raises(ValueError, match="unknown strategy"):
+        build_strategy(["fixed_weights"], PARAMS)  # type: ignore[arg-type]
 
 
 def test_the_factorys_own_refusal_reaches_the_caller():

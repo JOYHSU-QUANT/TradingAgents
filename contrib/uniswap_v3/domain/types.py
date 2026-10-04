@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Final
 
@@ -39,6 +40,10 @@ _ADDRESS: Final = re.compile(r"0x[0-9a-fA-F]{40}")
 _MAX_DECIMALS: Final = 255
 # A v3 fee is in hundredths of a basis point; 1_000_000 would be 100%.
 _FEE_DENOMINATOR: Final = 1_000_000
+# How many digits from the decimal point an amount's leading digit may sit. A
+# uint256 has 78 digits, so no token amount, price or weight is outside it,
+# and arithmetic on two checked values stays inside the context's exponents.
+_MAX_MAGNITUDE: Final = 77
 
 
 class RunMode(str, Enum):
@@ -66,15 +71,23 @@ def _require_address(value: object, what: str) -> None:
 
 
 def _require_amount(value: object, what: str, *, positive: bool = False) -> None:
-    """A finite ``Decimal`` that is not negative, and not zero when ``positive``."""
+    """A finite ``Decimal`` that is not negative, and not zero when ``positive``.
+
+    A negative zero is refused with the negatives, and so is a value whose
+    magnitude no amount on a chain can have.
+    """
     if (
         not isinstance(value, Decimal)
         or not value.is_finite()
-        or value < 0
+        or value.is_signed()
         or (positive and value == 0)
+        or abs(value.adjusted()) > _MAX_MAGNITUDE
     ):
         bound = "positive" if positive else "non-negative"
-        raise ValueError(f"{what} must be a finite, {bound} Decimal, got {value!r}")
+        raise ValueError(
+            f"{what} must be a finite, {bound} Decimal between 1e-{_MAX_MAGNITUDE} and "
+            f"1e{_MAX_MAGNITUDE}, got {value!r}"
+        )
 
 
 def _frozen_amounts(
@@ -165,9 +178,10 @@ class TargetWeights:
         weights = _frozen_amounts(self.weights, "weights")
         if not weights:
             raise ValueError("weights must name at least one token")
-        total = _sum(weights)
-        if total != 1:
-            raise ValueError(f"weights must sum to exactly 1, got {total}")
+        # Summed as fractions: the decimal context would round a sum of more
+        # than 28 digits before it was compared.
+        if sum(Fraction(weight) for weight in weights.values()) != 1:
+            raise ValueError(f"weights must sum to exactly 1, got about {_sum(weights)}")
         object.__setattr__(self, "weights", weights)
 
 
@@ -209,8 +223,10 @@ class Bar:
 class MarketView:
     """The bars a strategy may see: oldest first, ending at the bar being decided.
 
-    A view never holds a bar later than the one being decided; whoever builds
-    it cuts it there, so a strategy cannot look ahead by construction.
+    Whoever builds the view cuts it at the bar being decided; a strategy is
+    handed nothing else, which is what keeps it from looking ahead. The type
+    itself holds only the order: times strictly increase, and a later bar
+    does not close on an earlier block.
     """
 
     bars: tuple[Bar, ...]
@@ -225,6 +241,11 @@ class MarketView:
             if later.time <= earlier.time:
                 raise ValueError(
                     f"bars must be strictly increasing in time: {later.time} follows {earlier.time}"
+                )
+            if later.close_block < earlier.close_block:
+                raise ValueError(
+                    f"a later bar cannot close on an earlier block: {later.close_block} "
+                    f"follows {earlier.close_block}"
                 )
 
     @property

@@ -96,9 +96,15 @@ def test_target_weights_copy_their_mapping_and_expose_it_read_only():
     ("weights", "match"),
     [
         ({}, "at least one token"),
-        ({"A": D("0.4"), "B": D("0.5")}, "sum to exactly 1, got 0.9"),
-        ({"A": D("0.6"), "B": D("0.5")}, "sum to exactly 1, got 1.1"),
+        ({"A": D("0.4"), "B": D("0.5")}, "sum to exactly 1, got about 0.9"),
+        ({"A": D("0.6"), "B": D("0.5")}, "sum to exactly 1, got about 1.1"),
+        # Off by less than the context's 28 digits can show: still refused.
+        ({"A": D("0.5"), "B": D("0.5000000000000000000000000000001")}, "sum to exactly 1"),
+        ({"A": D("0.99999999999999999999999999999999")}, "sum to exactly 1"),
+        ({"A": D("0.5"), "B": D("0.5"), "C": D("1E-30")}, "sum to exactly 1"),
         ({"A": D("1.5"), "B": D("-0.5")}, "non-negative Decimal"),
+        ({"A": D("-0"), "B": D("1")}, "non-negative Decimal"),
+        ({"A": D("1E+1000000")}, "between 1e-77 and 1e77"),
         ({"A": 1}, "Decimal"),
         ({"A": 1.0}, "Decimal"),
         ({"A": D("NaN")}, "finite"),
@@ -140,6 +146,7 @@ def test_a_bar_is_not_suspect_unless_told_and_freezes_its_prices():
         ({"prices": {}}, "at least one token"),
         ({"prices": {"A": D("0")}}, "positive Decimal"),
         ({"prices": {"A": D("-1")}}, "positive Decimal"),
+        ({"prices": {"A": D("1E-9999999")}}, "between 1e-77 and 1e77"),
         ({"suspect": 1}, "suspect"),
     ],
 )
@@ -161,6 +168,7 @@ def test_a_market_view_ends_at_its_latest_bar():
         ((_bar(100), "bar"), "Bar values"),
         ((_bar(200), _bar(100)), "strictly increasing"),
         ((_bar(100), _bar(100)), "strictly increasing"),
+        ((_bar(100, close_block=9), _bar(200, close_block=8)), "earlier block"),
     ],
 )
 def test_a_malformed_market_view_is_refused(bars, match):
@@ -196,6 +204,8 @@ def test_a_portfolio_values_each_balance_in_the_quote_token():
         ),
         ("USDC", {"USDC": D("1")}, {"WETH": D("2000")}, "exactly the non-quote tokens"),
         ("USDC", {"USDC": D("-1")}, {}, "non-negative Decimal"),
+        ("USDC", {"USDC": D("-0")}, {}, "non-negative Decimal"),
+        ("USDC", {"USDC": D("9E+999999")}, {}, "between 1e-77 and 1e77"),
         ("USDC", {"USDC": D("1"), "WETH": D("1")}, {"WETH": D("0")}, "positive Decimal"),
         ("USDC", {"USDC": 1}, {}, "Decimal"),
     ],

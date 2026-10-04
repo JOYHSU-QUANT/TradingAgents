@@ -26,8 +26,8 @@ no stored bar behind undecided:
   decided without it in view. The range is replayed as a new run.
 
 A bar is decided on the reading the store holds at that moment, final or
-not. The summary counts the bars decided on a reading that was not final
-yet, and the bars decided earlier whose reading has changed since (another
+not. The summary counts the bars this call decided on a reading that was not
+final yet, and the bars decided earlier whose reading has changed since (another
 close block, or suspect now and not then, or the reverse). Their decisions
 stand: a new run decides them on what the store holds now.
 """
@@ -126,7 +126,9 @@ def run_backtest(
 
     Fills come from :class:`~.executors.ModelExecutor`. Whatever stops the
     engine's step (:class:`~.step.EngineError`, or what a strategy raised)
-    stops the backtest at that bar; the bars decided before it stay.
+    stops the backtest at that bar; the bars decided before it stay, and so
+    does a run that was started and stopped at its first bar: its id is
+    taken, with the opening balances it was given.
     """
     interval = config.bars.interval_seconds
     if start % interval:

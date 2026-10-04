@@ -217,6 +217,29 @@ def test_a_rejected_decision_and_a_skipped_one_keep_their_reasons(store):
     assert store.decisions("run-2") == [] and store.valuations("run-2") == []
 
 
+def test_reads_made_together_see_one_state_while_another_connection_writes(tmp_path):
+    path = tmp_path / "store.db"
+    with open_store(path) as writer, open_store(path) as reader:
+        writer.insert_run(_run())
+        writer.record("run-1", _held())
+        with reader.reading():
+            assert len(reader.decisions("run-1")) == 1
+            # The writer is not held up, and what it commits is not seen in here.
+            writer.record("run-1", _held(FIRST_DAY + DAY))
+            assert len(reader.decisions("run-1")) == 1
+            assert len(reader.valuations("run-1")) == 1
+        assert len(reader.decisions("run-1")) == 2
+
+
+def test_a_read_that_raises_leaves_the_store_usable(store):
+    store.insert_run(_run())
+    with pytest.raises(RuntimeError, match="stop"), store.reading():
+        store.run("run-1")
+        raise RuntimeError("stop")
+    store.record("run-1", _held())
+    assert store.last_decided("run-1") == FIRST_DAY
+
+
 def test_a_bar_is_decided_once_and_a_second_record_writes_nothing(store):
     store.insert_run(_run())
     store.record("run-1", _held())

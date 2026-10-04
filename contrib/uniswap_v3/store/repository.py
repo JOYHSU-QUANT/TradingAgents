@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Final
@@ -215,8 +215,11 @@ class Store:
         try:
             yield
         finally:
-            if self._connection.in_transaction:
-                self._connection.execute("ROLLBACK")
+            # Nothing was written, so there is nothing a failed rollback could lose,
+            # and what was raised inside is not to be replaced by it.
+            with suppress(sqlite3.Error):
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
 
     def insert_bars(self, bars: Sequence[PoolBar]) -> None:
         """Write ``bars`` in one transaction: all of them, or none.
@@ -605,8 +608,12 @@ def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Stor
             raise SchemaError("this SQLite does not enforce foreign keys")
         try:
             (journal_mode,) = connection.execute("PRAGMA journal_mode = WAL").fetchone()
-        except sqlite3.OperationalError:
-            # A file that cannot be written keeps the mode it has, and can still be read.
+        except sqlite3.OperationalError as exc:
+            # A file that cannot be written keeps the mode it has, and can still
+            # be read. The low byte is the error's kind; the rest says which
+            # read-only case it is. Any other failure, a lock among them, stops.
+            if exc.sqlite_errorcode & 0xFF != sqlite3.SQLITE_READONLY:
+                raise
             (journal_mode,) = connection.execute("PRAGMA journal_mode").fetchone()
         if not durable and journal_mode == "wal":
             connection.execute("PRAGMA synchronous = NORMAL")

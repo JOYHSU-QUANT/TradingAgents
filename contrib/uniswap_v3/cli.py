@@ -53,6 +53,7 @@ from typing import Final
 from .chain.errors import ChainError, RpcRejected, TransientChainError
 from .config import ConfigError, UniswapConfig, config_from_snapshot, load_config
 from .constants import WRAPPED_NATIVE, pool_key
+from .domain.bars import Finality
 from .domain.decimal_context import parse_decimal, plain
 from .domain.ledger import Ledger
 from .domain.metrics import Curve, MetricsError, run_metrics
@@ -450,7 +451,7 @@ def _curve_line(name: str, curve: Curve) -> str:
 
 
 def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
-    # One view for the three reads: a backtest may be writing the run meanwhile.
+    # One view for all the reads: a backtest may be writing the run meanwhile.
     with open_store(args.db, create=False) as store, store.reading():
         run = store.run(args.run_id)
         if run is None:
@@ -490,6 +491,17 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         )
         if codes:
             out(f"{outcome.value}: {_counts(codes)}")
+    # The report reads no bars, so it cannot tell whether such a reading held.
+    unsettled = sum(
+        1
+        for decision in decisions
+        if decision.seen is not None and decision.seen.finality is Finality.PENDING
+    )
+    if unsettled:
+        out(
+            f"{unsettled} bar(s) were decided on readings that were not final yet, and are "
+            f"measured as they were decided"
+        )
     days = Decimal(measured[-1].time - measured[0].time) / 86_400
     left_out = f"; {len(suspect)} suspect bar(s) left out" if suspect else ""
     out(f"measured on {metrics.bars} bar(s) over {_fixed(days)} day(s){left_out}")

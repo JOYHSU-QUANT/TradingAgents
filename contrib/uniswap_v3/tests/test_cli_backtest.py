@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import stat
@@ -127,6 +128,11 @@ def test_backtest_warns_of_readings_not_final_and_of_ones_that_changed_since(tmp
     assert capsys.readouterr().err == (
         "warning: 1 bar(s) were decided on readings that are not final yet; a decision stands "
         "even if the chain later drops the block it was made on\n"
+    )
+    # The report says so too: it measures the bar as it was decided.
+    assert _report(db)[1][3] == (
+        "1 bar(s) were decided on readings that were not final yet, and are measured as they "
+        "were decided"
     )
     # The chain dropped that block: the bar is suspect now, and was decided as if it were not.
     with open_store(db) as store:
@@ -394,7 +400,8 @@ def test_report_reads_its_rows_in_one_view_of_the_store(db, monkeypatch):
     assert inside == [True, True, True, True]
 
 
-def test_status_and_report_read_a_store_file_that_cannot_be_written(db, tmp_path):
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason="root writes a read-only file")
+def test_status_and_report_read_a_store_file_that_cannot_be_written(db):
     _backtest(db, *_OPENING)
     # As a store written before the write-ahead log was: in SQLite's default mode.
     connection = sqlite3.connect(db)

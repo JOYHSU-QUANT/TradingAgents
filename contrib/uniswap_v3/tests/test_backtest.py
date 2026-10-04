@@ -11,9 +11,10 @@ import pytest
 from contrib.uniswap_v3.config import ConfigError, StrategySpec
 from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.records import BarSeen, Outcome, SkipCode
-from contrib.uniswap_v3.domain.types import RunMode
+from contrib.uniswap_v3.domain.types import Rejection, RunMode
 from contrib.uniswap_v3.engine import step as step_module
 from contrib.uniswap_v3.engine.backtest import BacktestRangeError, run_backtest
+from contrib.uniswap_v3.engine.executors import ModelExecutor
 from contrib.uniswap_v3.engine.step import EngineError, start_run
 from contrib.uniswap_v3.store.repository import Store, open_store
 from contrib.uniswap_v3.tests.fakes.engine import (
@@ -332,6 +333,52 @@ def test_the_summary_counts_readings_not_final_and_ones_that_changed_since(store
     # The decision stands, and a new run skips the bar.
     assert store.decision(_RUN, _day(1)).outcome is Outcome.HOLD
     assert _backtest(store, run_id="again").outcomes[Outcome.SKIPPED_SUSPECT] == 1
+
+
+def test_a_reading_that_became_final_as_it_was_is_not_one_that_changed(store):
+    _put(store, 0, finality=Finality.PENDING)
+    assert _backtest(store).on_pending == 1
+    # Decided already, so a rerun counts no bar as decided on a pending reading.
+    still_pending = _backtest(store)
+    assert (still_pending.on_pending, still_pending.changed) == (0, ())
+    store.set_finality(store.pending_bars(1), Finality.FINAL)
+    assert _backtest(store).changed == ()
+
+
+def test_a_bar_that_now_closes_on_another_block_is_one_that_changed(store, tmp_path):
+    _put_days(store, [DEFAULT_TICK] * 2)
+    _backtest(store)
+    # The same block number under another hash, in both pools: not suspect, and not the same.
+    connection = sqlite3.connect(tmp_path / "store.db")
+    connection.execute(
+        "UPDATE bars SET close_block_hash = ? WHERE time = ?", ("0x" + "ee" * 32, _day(1))
+    )
+    connection.commit()
+    connection.close()
+    again = _backtest(store)
+    assert (again.already_decided, again.changed) == (2, (_day(1),))
+
+
+def test_a_bar_skipped_as_suspect_that_no_longer_is_counts_as_changed(store, tmp_path):
+    _put(store, 0, twap_tick=BTC_TICK + 600)
+    summary = _backtest(store)
+    # A suspect bar is skipped, whatever its finality, and is not one decided on a pending reading.
+    assert (summary.outcomes, summary.on_pending) == ({Outcome.SKIPPED_SUSPECT: 1}, 0)
+    connection = sqlite3.connect(tmp_path / "store.db")
+    connection.execute("UPDATE bars SET twap_tick = tick")
+    connection.commit()
+    connection.close()
+    assert _backtest(store).changed == (_day(0),)
+
+
+def test_a_rebalance_the_executor_refused_is_not_one_rejected_for_gas(store, monkeypatch):
+    monkeypatch.setattr(
+        ModelExecutor, "execute", lambda self, swap, bar: Rejection(swap, "the pool is closed")
+    )
+    _put_days(store, [DEFAULT_TICK])
+    summary = _backtest(store)
+    assert summary.outcomes == {Outcome.REJECTED: 1}
+    assert summary.gas_rejected == ()
 
 
 def test_the_summary_names_the_rebalances_rejected_for_want_of_gas(store):

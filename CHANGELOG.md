@@ -857,7 +857,7 @@ Breaking changes within the 0.x line are called out explicitly.
   again decides nothing twice, and a stored run is carried on without its
   opening balances. A run only goes forward: carrying one on from a `--from`
   that would leave stored bars undecided behind it exits 1, and so does a
-  bar that was backfilled after the run had passed its boundary. `backtest`
+  range that holds a bar backfilled after the run had passed its boundary. `backtest`
   also warns on stderr, still exiting 0, when bars were decided on readings
   that were not final yet, when a bar decided earlier now reads differently
   in the store, and when rebalances were rejected because the gas balance
@@ -870,7 +870,9 @@ Breaking changes within the 0.x line are called out explicitly.
   gas paid so far, each fill's gas valued at its bar's WETH price; the gas
   balance itself is not counted. Suspect bars are left out of the curves,
   and the two comparisons pay no cost. `report` reads its rows in one
-  transaction, so it can be run while a backtest is writing.
+  transaction, so what it prints is one view of the store even while a
+  backtest is writing, and it says how many bars were decided on readings
+  that were not final yet.
   `report` takes the run's config from the run, not from a file. A skipped
   decision now says why its bar was suspect: `reason` names every cause and
   `reason_code` (`SkipCode`) is the gravest of them, in the order

@@ -166,6 +166,30 @@ def test_a_key_written_twice_inside_the_strategy_is_refused_too(tmp_path):
         load_config(doubled)
 
 
+@pytest.mark.parametrize(
+    ("strategy", "match"),
+    [
+        # An anchor that contains itself loads, then never stops being frozen.
+        ("strategy: {name: x, params: &loop {again: *loop}}\n", "cannot be parsed"),
+        ("strategy: {name: x, params: {<<: {band: '0.05'}}}\n", "merge keys"),
+    ],
+)
+def test_yaml_that_loops_or_merges_is_refused(tmp_path, strategy, match):
+    path = tmp_path / "odd.yaml"
+    path.write_text(
+        "chain_id: 1\nquote_token: USDC\ntokens: [USDC, WETH]\npools: [USDC/WETH-500]\n"
+        + strategy,
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match=match):
+        load_config(path)
+
+
+def test_a_set_in_strategy_params_is_frozen_too():
+    assert StrategySpec(name="x", params={"only": {"USDC"}}).params["only"] == frozenset({"USDC"})
+    assert isinstance(StrategySpec(name="x", params={"only": {"USDC"}}).params["only"], frozenset)
+
+
 def test_strategy_params_are_read_only_all_the_way_down():
     params = load_config(EXAMPLE).strategy.params
     with pytest.raises(TypeError):

@@ -57,6 +57,8 @@ def _frozen(value: object) -> object:
         return MappingProxyType({key: _frozen(item) for key, item in value.items()})
     if isinstance(value, list | tuple):
         return tuple(_frozen(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(value)
     return value
 
 
@@ -198,11 +200,19 @@ def parse_config(document: object) -> UniswapConfig:
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
-    """``SafeLoader``, except that a key written twice in one mapping is an error."""
+    """``SafeLoader``, except that a key written twice in one mapping is an error.
+
+    A merge key (``<<``) is refused as well: what it merges in could repeat
+    a key without the repeat being written anywhere.
+    """
 
     def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
         seen: set[Hashable] = set()
         for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                raise yaml.constructor.ConstructorError(
+                    None, None, "merge keys (<<) are not supported", key_node.start_mark
+                )
             key = self.construct_object(key_node, deep=True)
             # An unhashable key is the base class's to refuse.
             if isinstance(key, Hashable):
@@ -220,8 +230,9 @@ def load_config(path: Path) -> UniswapConfig:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"config file {str(path)!r} cannot be read ({exc})") from exc
+    # The recursion guard spans both steps: an anchor that contains itself
+    # loads, and only runs away when its params are frozen.
     try:
-        document = yaml.load(text, Loader=_UniqueKeyLoader)
+        return parse_config(yaml.load(text, Loader=_UniqueKeyLoader))
     except (yaml.YAMLError, RecursionError) as exc:
         raise ConfigError(f"config file {str(path)!r} cannot be parsed ({exc})") from exc
-    return parse_config(document)

@@ -360,7 +360,7 @@ def test_a_bar_that_now_closes_on_another_block_is_one_that_changed(store, tmp_p
 
 
 def test_a_bar_skipped_as_suspect_that_no_longer_is_counts_as_changed(store, tmp_path):
-    _put(store, 0, twap_tick=BTC_TICK + 600)
+    _put(store, 0, twap_tick=BTC_TICK + 600, finality=Finality.PENDING)
     summary = _backtest(store)
     # A suspect bar is skipped, whatever its finality, and is not one decided on a pending reading.
     assert (summary.outcomes, summary.on_pending) == ({Outcome.SKIPPED_SUSPECT: 1}, 0)

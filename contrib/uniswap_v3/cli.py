@@ -495,7 +495,9 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     unsettled = sum(
         1
         for decision in decisions
-        if decision.seen is not None and decision.seen.finality is Finality.PENDING
+        if decision.seen is not None
+        and decision.seen.finality is Finality.PENDING
+        and not decision.suspect
     )
     if unsettled:
         out(

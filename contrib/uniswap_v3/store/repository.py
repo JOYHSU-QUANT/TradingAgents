@@ -59,7 +59,9 @@ _COLUMNS: Final = (
     "base_fee_wei",
     "finality",
 )
-_SELECT: Final = f"SELECT {', '.join(_COLUMNS)} FROM bars"
+# SQLite's primary result code for a write to a database that is read-only.
+_SQLITE_READONLY: Final = 8
+_SELECT: Final =f"SELECT {', '.join(_COLUMNS)} FROM bars"
 _SERIES: Final = "chain_id = ? AND pool = ? AND interval_seconds = ?"
 
 
@@ -612,7 +614,10 @@ def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Stor
             # A file that cannot be written keeps the mode it has, and can still
             # be read. The low byte is the error's kind; the rest says which
             # read-only case it is. Any other failure, a lock among them, stops.
-            if exc.sqlite_errorcode & 0xFF != sqlite3.SQLITE_READONLY:
+            # Before Python 3.11 the error carries no code, only SQLite's words.
+            code = getattr(exc, "sqlite_errorcode", None)
+            read_only = "readonly" in str(exc) if code is None else code & 0xFF == _SQLITE_READONLY
+            if not read_only:
                 raise
             (journal_mode,) = connection.execute("PRAGMA journal_mode").fetchone()
         if not durable and journal_mode == "wal":

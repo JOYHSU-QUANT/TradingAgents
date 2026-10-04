@@ -193,7 +193,8 @@ def run_backtest(
                 ) from exc
             decision = engine.step(view, seen=loaded.seen, suspicion=loaded.suspicion).decision
             decided += 1
-            on_pending += loaded.finality is Finality.PENDING
+            # A suspect bar is skipped whatever its finality: nothing was decided on it.
+            on_pending += loaded.finality is Finality.PENDING and not loaded.bar.suspect
         outcomes[decision.outcome] += 1
         if decision.reason_code is RejectionCode.GAS:
             gas_rejected.append(time)

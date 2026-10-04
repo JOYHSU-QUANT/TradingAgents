@@ -26,6 +26,7 @@ __all__ = [
     "BarSeen",
     "Decision",
     "FillRecord",
+    "FillSource",
     "Outcome",
     "RejectionCode",
     "RunRecord",
@@ -305,12 +306,21 @@ class FillRecord:
             )
 
 
+class FillSource(str, Enum):
+    """Where a run's fills come from. A run keeps to one, from its first bar to its last."""
+
+    MODEL = "model"
+    QUOTER = "quoter"
+
+
 @dataclass(frozen=True)
 class RunRecord:
     """One run: its mode, the config it was started under, and what it started with.
 
-    ``config`` is the config's snapshot (:func:`~..config.config_snapshot`)
-    and ``ledger`` the opening balances.
+    ``config`` is the config's snapshot (:func:`~..config.config_snapshot`),
+    ``ledger`` the opening balances, and ``fills`` where its fills come
+    from. A paper run fills from quotes: a model has nothing to say about
+    the chain the run is reading.
     """
 
     run_id: str
@@ -321,6 +331,7 @@ class RunRecord:
     config: str
     ledger: Ledger
     created_at: int
+    fills: FillSource = FillSource.MODEL
 
     def __post_init__(self) -> None:
         for name in ("run_id", "quote", "strategy", "config"):
@@ -329,6 +340,12 @@ class RunRecord:
                 raise ValueError(f"{name} must be a non-empty string, got {value!r}")
         if not isinstance(self.mode, RunMode):
             raise ValueError(f"mode must be a RunMode, got {self.mode!r}")
+        if not isinstance(self.fills, FillSource):
+            raise ValueError(f"fills must be a FillSource, got {self.fills!r}")
+        if self.mode is RunMode.PAPER and self.fills is not FillSource.QUOTER:
+            raise ValueError(
+                f"a paper run fills from quotes, not from the {self.fills.value}"
+            )
         if not _is_count(self.chain_id) or not _is_count(self.created_at):
             raise ValueError("chain_id and created_at must be non-negative integers")
         if not isinstance(self.ledger, Ledger):

@@ -842,6 +842,48 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: `paper`, and fills quoted by the pools.** The
+  package can now run a paper sandbox. `python -m contrib.uniswap_v3 paper
+  --run-id <id>` is one visit of a `mode=paper` run (`paper.py`): it reads
+  the bars the chain has closed since the run's latest decided one into the
+  store, creating the store when there is none, and decides them, oldest
+  first, through the same step a backtest uses. A new run starts at the
+  latest boundary, with `--balance` and `--gas-eth` as its opening balances.
+  Run again before the next boundary, it reports that the bar was already
+  decided and writes no decision. Fills come from the new `QuoteExecutor`
+  (`engine/executors.py`): each swap is quoted on QuoterV2 at the bar's fill
+  block, `execution.delay_blocks` after the first block of its boundary, the
+  block a modelled fill is dated. The block is fixed by the bar and not by
+  when the visit runs, so a late visit, or one that catches up on several
+  bars, fills each as an earlier visit would have. A quote below the swap's
+  `min_amount_out`, a quote of nothing, a quote that reverts with a reason
+  of a pool's and a pool out of liquidity reject the rebalance; any other
+  failed read leaves the bar undecided, and so does a revert QuoterV2 has
+  no reason for (a swap that ran out of gas under the node's cap for a call
+  reverts so), which exits 3. Gas is the quoter's estimate plus the new
+  `execution.quote.gas_overhead_units` (default 50000, once per swap: the
+  estimate covers the pools' swaps alone), at the fill block's base fee.
+  `backtest --fills quoter` fills a backtest the same way from an archive
+  node, so it repeats a paper run over the same bars, and beside a
+  `--fills model` run of the same range it shows what the model leaves out.
+  A run keeps where its fills come from (`runs.fills`, schema version 3;
+  runs stored earlier read as `model`), is not carried on from another
+  source, and `report` prints it. A paper visit exits 3, having decided
+  nothing, while the node's chain has not reached the latest boundary or
+  its bar's fill block; it exits 0 once the bar is decided, whatever the
+  decision, and also, with a warning, when the chain had no answer at the
+  boundary. It warns on stderr as well of a rejected rebalance, of a bar
+  skipped as suspect and of stored readings found to be off the final
+  chain, and exits 1 when its clock is behind the run. A store written
+  before this is brought to schema version 3 the first time any command
+  opens it; a file at an older version that cannot be written is refused.
+
+  **Two defaults moved, so a run stored before this is not carried on.**
+  `bars.max_twap_deviation` is now `"0.02"` (was `"0.05"`, which no bar
+  of the mainnet history since 2022 reached), and the config snapshot gained
+  `execution.quote`. A run is continued only under the snapshot it was
+  started with: use a new run id.
+
 - **`contrib/uniswap_v3`: `backtest` and `report`.** The package can now run
   a backtest: `python -m contrib.uniswap_v3 backtest --run-id <id> --from
   <date>` replays the stored bars of a range through the engine's step, one

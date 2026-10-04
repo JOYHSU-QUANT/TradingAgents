@@ -1,8 +1,13 @@
 """A backtest: the engine's step replayed over the store's bars, oldest first.
 
-The bars come from the store and the fills from the model, so a backtest
-reads no chain. Each bar is decided by the same :meth:`~.step.Engine.step`
-every other run mode uses.
+The bars come from the store. With fills from the model, a backtest reads
+no chain; with fills from quotes, the chain is asked what each swap would
+have returned at its fill block and for that block's base fee, and nothing
+else. Each bar is decided by
+the same :meth:`~.step.Engine.step` every other run mode uses.
+
+:func:`replay` is the loop itself, whatever the mode: a paper run is the
+same replay over the bars it has just read (:mod:`..paper`).
 
 The view a bar is decided on holds every bar the store has up to that bar,
 those from before the range included, and none after it. What a strategy
@@ -44,16 +49,21 @@ from ..domain.bars import Finality
 from ..domain.ledger import Ledger
 from ..domain.records import Decision, Outcome, RejectionCode
 from ..domain.types import Bar, MarketView, RunMode
+from ..ports import Executor
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
 from .executors import ModelExecutor
 from .step import EngineError, open_engine, start_or_continue_run
 
-__all__ = ["BacktestRangeError", "BacktestSummary", "run_backtest"]
+__all__ = ["BacktestRangeError", "BacktestSummary", "NoBarInRange", "replay", "run_backtest"]
 
 
 class BacktestRangeError(ValueError):
     """The range asked for is not one the store's bars can be replayed over."""
+
+
+class NoBarInRange(BacktestRangeError):
+    """The store holds no bar in the range asked for."""
 
 
 @dataclass(frozen=True)
@@ -66,7 +76,9 @@ class BacktestSummary:
     suspect bar is skipped, whatever its finality, and is not one of them. The
     rest are boundaries, oldest first: ``missing`` had no bar, ``changed``
     were decided earlier on a reading the store no longer holds as it was,
-    and ``gas_rejected`` had their rebalance refused for want of gas.
+    ``gas_rejected`` had their rebalance refused for want of gas,
+    ``executor_rejected`` had it refused by the executor, and
+    ``skipped`` were suspect and not traded on.
     """
 
     start: int
@@ -77,6 +89,8 @@ class BacktestSummary:
     missing: tuple[int, ...]
     changed: tuple[int, ...]
     gas_rejected: tuple[int, ...]
+    executor_rejected: tuple[int, ...]
+    skipped: tuple[int, ...]
     outcomes: Mapping[Outcome, int]
 
     @property
@@ -116,20 +130,54 @@ def run_backtest(
     end: int | None = None,
     opening: Ledger | None = None,
     created_at: int,
+    executor: Executor | None = None,
 ) -> BacktestSummary:
-    """Decide every stored bar from ``start`` to ``end`` for the run ``run_id``.
+    """Decide every stored bar from ``start`` to ``end`` for the backtest run ``run_id``.
+
+    Fills come from :class:`~.executors.ModelExecutor`, or from ``executor``
+    when one is handed. The rest is :func:`replay`'s.
+    """
+    return replay(
+        store,
+        config,
+        ModelExecutor(config.quote.symbol, config.execution) if executor is None else executor,
+        run_id=run_id,
+        mode=RunMode.BACKTEST,
+        start=start,
+        end=end,
+        opening=opening,
+        created_at=created_at,
+    )
+
+
+def replay(
+    store: Store,
+    config: UniswapConfig,
+    executor: Executor,
+    *,
+    run_id: str,
+    mode: RunMode,
+    start: int,
+    end: int | None = None,
+    opening: Ledger | None = None,
+    created_at: int,
+) -> BacktestSummary:
+    """Decide every stored bar from ``start`` to ``end`` for the run ``run_id``, filled by ``executor``.
 
     ``start`` is a boundary. The range ends at the last boundary at or
     before ``end``, or, with no ``end``, at the store's latest bar. A run
-    that is not stored is started with ``opening`` as its balances; one that
-    is stored is carried on, under the config it was started with, and an
-    ``opening`` handed with it must be the one it was started with.
+    that is not stored is started in ``mode`` with ``opening`` as its
+    balances, and keeps where ``executor``'s fills come from; one that is
+    stored is carried on, in the mode, from the source and under the
+    config it was started with, and an ``opening`` handed with it must be
+    the one it was started with. A range that holds no bar is
+    :class:`NoBarInRange`, raised before a run is started.
 
-    Fills come from :class:`~.executors.ModelExecutor`. Whatever stops the
-    engine's step (:class:`~.step.EngineError`, or what a strategy raised)
-    stops the backtest at that bar; the bars decided before it stay, and so
-    does a run that was started and stopped at its first bar: its id is
-    taken, with the opening balances it was given.
+    Whatever stops the engine's step (:class:`~.step.EngineError`, what a
+    strategy raised, or a chain read of the executor's that failed) stops
+    the replay at that bar; the bars decided before it stay, and so does a
+    run that was started and stopped at its first bar: its id is taken,
+    with the opening balances it was given.
     """
     interval = config.bars.interval_seconds
     if start % interval:
@@ -142,16 +190,17 @@ def run_backtest(
     in_range = {time for time in stored if time >= start}
     if not in_range:
         until = "the store's latest bar" if end is None else str(end)
-        raise BacktestRangeError(f"the store holds no bar from {start} to {until}")
+        raise NoBarInRange(f"the store holds no bar from {start} to {until}")
     last = max(in_range) if end is None else end - end % interval
 
     start_or_continue_run(
         store,
         config,
         run_id=run_id,
-        mode=RunMode.BACKTEST,
+        mode=mode,
         opening=opening,
         created_at=created_at,
+        fills=executor.source,
     )
     latest = store.last_decided(run_id)
     if latest is not None:
@@ -163,13 +212,14 @@ def run_backtest(
                 f"first at {passed_over[0]}, would be left undecided for good; start the "
                 f"range no later than {passed_over[0]}, or use a new run"
             )
-    executor = ModelExecutor(config.quote.symbol, config.execution)
     engine = open_engine(store, config, executor, run_id=run_id)
 
     bars: list[Bar] = []
     decided = already_decided = on_pending = 0
     changed: list[int] = []
     gas_rejected: list[int] = []
+    executor_rejected: list[int] = []
+    skipped: list[int] = []
     outcomes: Counter[Outcome] = Counter()
     for time in stored:
         loaded = load_bar(store, config, time)
@@ -199,6 +249,10 @@ def run_backtest(
         outcomes[decision.outcome] += 1
         if decision.reason_code is RejectionCode.GAS:
             gas_rejected.append(time)
+        elif decision.reason_code is RejectionCode.EXECUTOR:
+            executor_rejected.append(time)
+        elif decision.outcome is Outcome.SKIPPED_SUSPECT:
+            skipped.append(time)
     return BacktestSummary(
         start=start,
         end=last,
@@ -208,5 +262,7 @@ def run_backtest(
         missing=tuple(time for time in range(start, last + 1, interval) if time not in in_range),
         changed=tuple(changed),
         gas_rejected=tuple(gas_rejected),
+        executor_rejected=tuple(executor_rejected),
+        skipped=tuple(skipped),
         outcomes=MappingProxyType(dict(outcomes)),
     )

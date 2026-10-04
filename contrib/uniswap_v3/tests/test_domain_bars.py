@@ -34,7 +34,8 @@ _WETH = TOKENS[ETHEREUM_MAINNET]["WETH"]
 _WBTC = TOKENS[ETHEREUM_MAINNET]["WBTC"]
 _USDC_WETH = POOLS[ETHEREUM_MAINNET]["USDC/WETH-500"]
 _WBTC_WETH = POOLS[ETHEREUM_MAINNET]["WBTC/WETH-500"]
-_SETTINGS = BarSettings()
+# The limit the readings below are set around.
+_SETTINGS = BarSettings(max_twap_deviation=Decimal("0.05"))
 
 
 # --- BarSettings -----------------------------------------------------------
@@ -44,7 +45,7 @@ def test_the_default_bar_is_one_day_checked_against_a_thirty_minute_twap():
     assert BarSettings() == BarSettings(
         interval_seconds=86_400,
         twap_window_seconds=1_800,
-        max_twap_deviation=Decimal("0.05"),
+        max_twap_deviation=Decimal("0.02"),
         max_move=Decimal("0.5"),
     )
 
@@ -137,6 +138,14 @@ def test_a_close_further_from_the_twap_than_the_limit_is_flagged():
     assert pool_bar_flags(_USDC_WETH, below, None, _SETTINGS) == {BarFlag.TWAP_DEVIATION}
     loose = replace(_SETTINGS, max_twap_deviation=Decimal("0.06"))
     assert pool_bar_flags(_USDC_WETH, outside, None, loose) == frozenset()
+
+
+def test_under_the_default_limit_a_close_three_percent_from_its_twap_is_flagged():
+    # 1.0001 ** 150 is 1.5% and 1.0001 ** 300 is 3.0%.
+    inside = _reading(twap_tick=_ETH_TICK - 150)
+    outside = _reading(twap_tick=_ETH_TICK - 300)
+    assert pool_bar_flags(_USDC_WETH, inside, None, BarSettings()) == frozenset()
+    assert pool_bar_flags(_USDC_WETH, outside, None, BarSettings()) == {BarFlag.TWAP_DEVIATION}
 
 
 def test_a_reading_off_the_final_chain_is_flagged():

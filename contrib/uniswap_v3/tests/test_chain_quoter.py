@@ -11,15 +11,17 @@ from contrib.uniswap_v3.chain.errors import (
     InsufficientLiquidity,
     MalformedResponse,
     RpcConfigError,
+    RpcRejected,
 )
 from contrib.uniswap_v3.chain.pool_price import read_slot0
-from contrib.uniswap_v3.chain.quoter import Quote, quote_exact_input
+from contrib.uniswap_v3.chain.quoter import ChainQuoter, Quote, quote_exact_input
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, QUOTER_V2, TOKENS
 from contrib.uniswap_v3.domain.prices import (
     MAX_SQRT_RATIO,
     MIN_SQRT_RATIO,
     price_from_sqrt_price_x96,
 )
+from contrib.uniswap_v3.ports import NoQuote, Quoter
 from contrib.uniswap_v3.tests.fakes.rpc import (
     ReplayProvider,
     ScriptedProvider,
@@ -202,3 +204,59 @@ def test_a_gas_estimate_of_zero_is_refused():
     rpc, _ = rpc_over(_single(amount_out=1, gas=0))
     with pytest.raises(MalformedResponse, match="gas estimate of 0"):
         quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1), block=7)
+
+
+# --- the quoter port ---------------------------------------------------------
+
+
+def test_the_chain_quoter_answers_with_the_output_and_the_gas_estimate():
+    rpc, _ = rpc_over(_single(5 * 10**17, 90_000))
+    quoter = ChainQuoter(rpc)
+    assert isinstance(quoter, Quoter)
+    assert quoter.quote(_USDC, [_USDC_WETH], Decimal(1000), block=7) == (Decimal("0.5"), 90_000)
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        answering({"error": {"code": 3, "message": "execution reverted: SPL"}}),
+        _single(5 * 10**17, 90_000, after=MIN_SQRT_RATIO + 1),
+    ],
+)
+def test_a_quote_that_reverts_or_runs_a_pool_dry_is_no_quote(provider):
+    rpc, _ = rpc_over(provider, attempts=1)
+    with pytest.raises(NoQuote):
+        ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)
+
+
+def test_a_garbled_quote_is_not_taken_for_no_quote():
+    rpc, _ = rpc_over(_single(5 * 10**17, 0), attempts=1)
+    with pytest.raises(MalformedResponse):
+        ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": 3, "message": "execution reverted: Unexpected error"},
+        # A node that gives the reason only as revert data: Error("Unexpected error").
+        {
+            "code": 3,
+            "message": "execution reverted",
+            "data": "0x08c379a0" + encoded(["string"], ["Unexpected error"])[2:],
+        },
+    ],
+)
+def test_a_revert_quoterv2_has_no_reason_for_is_the_nodes_and_not_an_answer_about_the_swap(error):
+    provider = answering({"error": error})
+    rpc, _ = rpc_over(provider, attempts=1)
+    with pytest.raises(RpcRejected, match="gives no reason of a pool's"):
+        ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)
+
+
+def test_a_pools_own_reason_given_only_as_revert_data_is_still_no_quote():
+    data = "0x08c379a0" + encoded(["string"], ["SPL"])[2:]
+    provider = answering({"error": {"code": 3, "message": "execution reverted", "data": data}})
+    rpc, _ = rpc_over(provider, attempts=1)
+    with pytest.raises(NoQuote):
+        ChainQuoter(rpc).quote(_USDC, [_USDC_WETH], Decimal(1000), block=7)

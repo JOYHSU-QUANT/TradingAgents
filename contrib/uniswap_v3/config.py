@@ -14,7 +14,7 @@
     bars:                       # optional, and so is each key in it
       interval_seconds: 86400
       twap_window_seconds: 1800
-      max_twap_deviation: "0.05"
+      max_twap_deviation: "0.02"
       max_move: "0.5"
     execution:                  # optional, and so is each key in it
       min_trade_value: "10"
@@ -23,6 +23,8 @@
       model:
         slippage: "0.0005"
         gas_units_per_hop: 150000
+      quote:
+        gas_overhead_units: 50000
     rpc:                        # optional
       url_env: ETH_RPC_URL
 
@@ -43,7 +45,7 @@ it. They are kept as a read-only copy, so a list arrives as a tuple.
 stand for whatever is left out. Its two limits are quoted decimals, as a
 strategy's numbers are. ``execution`` is read the same way into an
 :class:`~.domain.execution.ExecutionSettings`; its ``model`` keys are the
-fill model's own.
+fill model's own, and its ``quote`` key the quoted fill's.
 
 A file named ``*.local.yaml`` is gitignored inside this package. The config
 holds no secret. ``rpc.url_env`` is the name of the environment variable
@@ -88,11 +90,16 @@ _BARS_INTEGERS: Final = frozenset({"interval_seconds", "twap_window_seconds"})
 _BARS_DECIMALS: Final = frozenset({"max_twap_deviation", "max_move"})
 _RPC_KEYS: Final = frozenset({"url_env"})
 _EXECUTION_DECIMALS: Final = frozenset({"min_trade_value", "max_slippage"})
-_EXECUTION_KEYS: Final = _EXECUTION_DECIMALS | {"delay_blocks", "model"}
-# ``execution.model``'s keys, and the setting each is read into.
-_MODEL_KEYS: Final = MappingProxyType(
-    {"slippage": "model_slippage", "gas_units_per_hop": "model_gas_units_per_hop"}
+# The sections inside ``execution``: each one's keys, and the setting each is read into.
+_NESTED_KEYS: Final[Mapping[str, Mapping[str, str]]] = MappingProxyType(
+    {
+        "model": {"slippage": "model_slippage", "gas_units_per_hop": "model_gas_units_per_hop"},
+        "quote": {"gas_overhead_units": "quote_gas_overhead_units"},
+    }
 )
+_EXECUTION_KEYS: Final = _EXECUTION_DECIMALS | {"delay_blocks", *_NESTED_KEYS}
+# The settings of those sections that are quoted decimals.
+_NESTED_DECIMALS: Final = frozenset({"model_slippage"})
 _ENV_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 _T = TypeVar("_T")
@@ -271,29 +278,37 @@ def _bar_settings(document: dict[Any, Any]) -> BarSettings:
 
 def _execution_settings(document: dict[Any, Any]) -> ExecutionSettings:
     section = _section(document, "execution", _EXECUTION_KEYS)
-    model = _section(section, "model", frozenset(_MODEL_KEYS), within="execution.")
+    nested = {
+        name: _section(section, name, frozenset(keys), within="execution.")
+        for name, keys in _NESTED_KEYS.items()
+    }
     try:
         settings: dict[str, object] = {
             key: parse_decimal(value, f"execution.{key}") if key in _EXECUTION_DECIMALS else value
             for key, value in section.items()
-            if key != "model"
+            if key not in _NESTED_KEYS
         }
-        for key, value in model.items():
-            name = f"execution.model.{key}"
-            settings[_MODEL_KEYS[key]] = parse_decimal(value, name) if key == "slippage" else value
+        for name, keys in _NESTED_KEYS.items():
+            for key, value in nested[name].items():
+                where = f"execution.{name}.{key}"
+                settings[keys[key]] = (
+                    parse_decimal(value, where) if keys[key] in _NESTED_DECIMALS else value
+                )
         return ExecutionSettings(**settings)  # type: ignore[arg-type]
     except ValueError as exc:
         raise ConfigError(f"execution: {exc}") from exc
 
 
 def _execution_document(settings: ExecutionSettings) -> dict[str, object]:
-    """``settings`` in the shape a config file writes them: the model's keys under ``model``."""
-    document: dict[str, object] = {}
-    model = {key: getattr(settings, name) for key, name in _MODEL_KEYS.items()}
+    """``settings`` in the shape a config file writes them: a section's keys under its name."""
+    document: dict[str, object] = {
+        section: {key: getattr(settings, name) for key, name in keys.items()}
+        for section, keys in _NESTED_KEYS.items()
+    }
+    nested = {name for keys in _NESTED_KEYS.values() for name in keys.values()}
     for name, value in asdict(settings).items():
-        if name not in _MODEL_KEYS.values():
+        if name not in nested:
             document[name] = value
-    document["model"] = model
     return document
 
 

@@ -23,11 +23,18 @@ from typing import Any, Final
 from ..constants import QUOTER_V2
 from ..domain.prices import MAX_SQRT_RATIO, MIN_SQRT_RATIO
 from ..domain.types import Pool, Token, tokens_along
-from .errors import InsufficientLiquidity, MalformedResponse, RpcConfigError
+from ..ports import NoQuote
+from .errors import (
+    CallReverted,
+    InsufficientLiquidity,
+    MalformedResponse,
+    RpcConfigError,
+    RpcRejected,
+)
 from .rpc import Rpc
 from .units import from_raw, to_raw
 
-__all__ = ["Quote", "quote_exact_input"]
+__all__ = ["ChainQuoter", "Quote", "quote_exact_input"]
 
 # From v3-periphery's IQuoterV2:
 # https://github.com/Uniswap/v3-periphery/blob/main/contracts/interfaces/IQuoterV2.sol
@@ -156,3 +163,42 @@ def quote_exact_input(
         gas_estimate=gas_estimate,
         block=block,
     )
+
+
+# What QuoterV2 reverts with when a pool's swap failed and left no reason of
+# its own: from v3-periphery's QuoterV2.parseRevertReason. A node gives it
+# as words in its message, or only as the bytes of the revert data, in hex.
+_NO_REASON: Final = "Unexpected error"
+_NO_REASON_FORMS: Final = (_NO_REASON.lower(), _NO_REASON.encode().hex())
+
+
+class ChainQuoter:
+    """A :class:`~..ports.Quoter` that asks QuoterV2 through a node."""
+
+    def __init__(self, rpc: Rpc) -> None:
+        self._rpc = rpc
+
+    def quote(
+        self, token_in: Token, route: Sequence[Pool], amount_in: Decimal, *, block: int
+    ) -> tuple[Decimal, int]:
+        """The output and the quoter's gas estimate of :func:`quote_exact_input` at ``block``.
+
+        A quote that reverts with a reason of a pool's, and a pool that
+        runs out of liquidity, are :class:`~..ports.NoQuote`. A revert
+        QuoterV2 has no reason for is not an answer about the swap: a swap
+        that ran out of gas under the node's cap for a call reverts so. It
+        is :class:`~.errors.RpcRejected`, and a later run asks again.
+        """
+        try:
+            quoted = quote_exact_input(self._rpc, token_in, route, amount_in, block=block)
+        except CallReverted as exc:
+            said = str(exc).lower()
+            if any(form in said for form in _NO_REASON_FORMS):
+                raise RpcRejected(
+                    f"{exc}: QuoterV2 gives no reason of a pool's, as when the node's gas "
+                    f"cap for a call is too low for the swap"
+                ) from exc
+            raise NoQuote(str(exc)) from exc
+        except InsufficientLiquidity as exc:
+            raise NoQuote(str(exc)) from exc
+        return quoted.amount_out, quoted.gas_estimate

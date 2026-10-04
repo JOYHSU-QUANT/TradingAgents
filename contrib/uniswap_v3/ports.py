@@ -73,7 +73,10 @@ class BlockLocator(Protocol):
     """Maps a time to a block."""
 
     def first_block_at_or_after(self, time: int) -> int:
-        """The number of the first block whose timestamp is at or after ``time``."""
+        """The number of the first block whose timestamp is at or after ``time``.
+
+        An implementation that cannot tell raises; it does not estimate.
+        """
         ...
 
 
@@ -82,7 +85,10 @@ class GasOracle(Protocol):
     """Reads what gas cost at a block."""
 
     def base_fee_wei(self, block: int) -> int:
-        """The base fee per gas of ``block``, in wei."""
+        """The base fee per gas of ``block``, in wei.
+
+        An implementation that cannot read it raises; it does not estimate.
+        """
         ...
 
 

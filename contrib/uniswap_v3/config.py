@@ -22,8 +22,9 @@ which checks them when :func:`~.strategies.registry.build_strategy` builds
 it. They are kept as a read-only copy, so a list arrives as a tuple.
 
 A file named ``*.local.yaml`` is gitignored inside this package. The config
-holds no secret and names no environment variable yet; the RPC endpoint
-arrives with the chain reader.
+holds no secret and names no environment variable: the chain reader
+(:mod:`.chain.rpc`) takes its endpoint from ``ETH_RPC_URL`` unless its own
+settings name another variable.
 """
 
 from __future__ import annotations

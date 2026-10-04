@@ -1,0 +1,8 @@
+# What contrib/uniswap_v3 needs beyond the core package. Kept out of the
+# repo-root requirements.txt, which the Hyperliquid paper deployment installs
+# on its server: that deployment does not run this package.
+PyYAML>=6.0
+# At least the release the suite has been run on. Below 8: web3 8 needs
+# eth-account>=0.14 and hyperliquid-python-sdk 0.22 allows only <0.14, so on
+# a machine that has both installed the two would not resolve.
+web3>=7.16,<8

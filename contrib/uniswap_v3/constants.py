@@ -1,4 +1,4 @@
-"""Token and pool addresses, one table per chain ID.
+"""Token, pool and quoter addresses, one table per chain ID.
 
 These tables are an allowlist. A config names tokens and pools by the keys
 used here and cannot bring an address of its own, so adding a token is one
@@ -13,6 +13,9 @@ How the Ethereum mainnet entries were checked (2026-10-04):
   (``0x1F98431c8aD98523631AE4a59f267346ea31F984``) derives from the two token
   addresses and the fee, with v3-core's pool init code hash. A wrong token
   address would not have reproduced the pool address.
+- QuoterV2 is the address that page lists, a valid EIP-55 checksum, and on
+  chain its ``factory()`` and ``WETH9()`` answer with the factory above and
+  the WETH below.
 
 Token pages, for the decimals:
 
@@ -29,7 +32,7 @@ from typing import Final
 
 from .domain.types import Pool, Token
 
-__all__ = ["ETHEREUM_MAINNET", "POOLS", "TOKENS", "pool_key"]
+__all__ = ["ETHEREUM_MAINNET", "POOLS", "QUOTER_V2", "TOKENS", "pool_key"]
 
 ETHEREUM_MAINNET: Final = 1
 
@@ -63,4 +66,9 @@ POOLS: Final[Mapping[int, Mapping[str, Pool]]] = MappingProxyType(
             Pool("0x4585FE77225b41b697C938B018E2Ac67Ac5a20c0", _WBTC, _WETH, 500),
         )
     }
+)
+
+# The periphery contract that quotes a swap without making it.
+QUOTER_V2: Final[Mapping[int, str]] = MappingProxyType(
+    {ETHEREUM_MAINNET: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"}
 )

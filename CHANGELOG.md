@@ -842,6 +842,52 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: the chain reader (`chain/`).** The package can now
+  read an Ethereum node; it still has no engine, holds no key and signs
+  nothing. `chain/rpc.py` opens the endpoint named by an environment variable
+  (`ETH_RPC_URL` by default), refuses a node on another chain before its
+  first read, and offers the latest block's header, the header of a named
+  block and a contract call at a named block. A connection error, a
+  timeout, a response cut short, a body that is not JSON, an HTTP 408, 425,
+  429 or 5xx and a JSON-RPC rate-limit error (code -32005 or 429) are
+  retried with a doubling wait;
+  every other failure raises at once. The `ChainError` classes in
+  `chain/errors.py` are grouped by what a caller can do: under
+  `TransientChainError` (try again later), `RpcUnavailable` and
+  `BlockNotFound`; under `UnansweredRead` (this read has no answer),
+  `CallReverted`, `InsufficientLiquidity`, `MalformedResponse` and
+  `RpcRejected`; and `RpcConfigError` (nothing will work until the setup is
+  fixed: no URL or one that cannot be requested, the wrong chain, an HTTP
+  401 or 403, or a node that does not keep the history asked for). A call
+  that does not fit its ABI raises web3's own exception and asks the node
+  nothing. No read answers with a guess. The URL ends in the API key, so it
+  is kept out of every exception,
+  which does not carry the original as its cause or context either, and out
+  of the log: once an endpoint is opened, the message and traceback of every
+  log record of `web3`, `urllib3` and `requests` are scrubbed as the record
+  is created, through a process-wide log record factory. On top of that:
+  `chain/blocks.py` finds the first block at or after a time by bisection
+  from the latest block, raises if the node reported block times out of
+  order, and keeps the timestamps of final blocks from a search that passed
+  that check to narrow later ones; `chain/pool_price.py` reads
+  a pool's `slot0` and its time-weighted mean tick from `observe`;
+  `chain/quoter.py` quotes an exact-input swap through QuoterV2 with
+  `eth_call`, over one pool or a packed path of several, and refuses a quote
+  in which a pool ran out of liquidity; `chain/gas.py` reads
+  a block's base fee; `chain/units.py` converts whole-token `Decimal` amounts
+  to raw integers and back exactly, refusing an amount with more decimal
+  places than its token has. `constants.py` gains the QuoterV2 address,
+  checked against Uniswap's deployments page and on chain. The suite replays
+  JSON-RPC responses recorded from an archive node
+  (`tests/fixtures/mainnet.json`, re-recorded by `tests/fixtures/record.py`)
+  and never reaches a node (two tests connect to a closed loopback port);
+  two `smoke` tests read a real node, are skipped without `ETH_RPC_URL`, and
+  are left out of CI. The package's extra dependencies are in its own
+  `contrib/uniswap_v3/requirements.txt` (`PyYAML`, and `web3>=7.16,<8`: web3
+  8 needs an `eth-account` the Hyperliquid SDK does not allow), not in the
+  repo-root `requirements.txt`, which the paper deployment installs on its
+  server.
+
 - **`contrib/uniswap_v3`: the skeleton of a Uniswap v3 spot execution
   package.** A strategy answers "what should the portfolio's weights be" and
   an engine, still to be built, turns the answer into swaps; the same engine

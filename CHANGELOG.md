@@ -842,6 +842,31 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: the skeleton of a Uniswap v3 spot execution
+  package.** A strategy answers "what should the portfolio's weights be" and
+  an engine, still to be built, turns the answer into swaps; the same engine
+  step is meant to run as a backtest, a paper run, a mainnet-fork run and a
+  live run. This first piece has no engine, reads no chain, holds no key and
+  signs nothing. It adds the value types (`domain/types.py`: `Token`, `Pool`,
+  `TargetWeights`, `Hold`, `Bar`, `MarketView`, `Portfolio`, `SwapIntent`,
+  `Fill`, `Rejection`, `RunMode`), each frozen and checked on construction;
+  the pool price conversion (`domain/prices.py`), which turns a
+  `sqrtPriceX96` or a tick into a whole-token `Decimal` price under one fixed
+  decimal context, in the direction the caller names; the ports
+  (`ports.py`: `Strategy`, `BarSource`, `Executor`, `BlockLocator`,
+  `GasOracle`, `Clock`); the Ethereum mainnet address tables for USDC, WETH
+  and WBTC and the two 0.05% pools between them (`constants.py`); a YAML
+  config loader (`config.py`) that names tokens and pools by their keys in
+  those tables, so a config cannot supply an address, and refuses unknown
+  keys; and a strategy registry with one placeholder, `fixed_weights`, which
+  asks for its fixed weights again whenever a token's share of portfolio
+  value is more than a band away from its target. The package imports no
+  other package under `contrib/` and none imports it; `domain/` and
+  `ports.py` import the standard library only and are type-checked by the
+  CI mypy job. `tests/test_isolation.py` reads the sources to hold both
+  rules. CI runs the package's suite in a new job, `uniswap_v3 tests
+  (py3.12)`.
+
 - **The trend guardrail's shadow report: `python -m contrib.replay guardrail
   --run-id A [--run-id B ...] --research-db PATH`.** The trend guardrail
   (decided 2026-10-02, not built into the trader) lets the book hold only the

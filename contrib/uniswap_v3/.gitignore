@@ -1,0 +1,2 @@
+# A local copy of configs/uniswap_v3.example.yaml stays on the machine it was written on.
+*.local.yaml

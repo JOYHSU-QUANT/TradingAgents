@@ -22,13 +22,16 @@ from .ledger import Ledger
 from .types import Fill, RunMode, TargetWeights
 
 __all__ = [
+    "REASON_CODES",
     "BarSeen",
     "Decision",
     "FillRecord",
     "Outcome",
     "RejectionCode",
     "RunRecord",
+    "SkipCode",
     "StepRecord",
+    "Suspicion",
     "Valuation",
 ]
 
@@ -55,6 +58,23 @@ class RejectionCode(str, Enum):
     EXECUTOR = "executor"
     # The gas balance did not cover the fills' gas. Nothing tops it up.
     GAS = "gas"
+
+
+class SkipCode(str, Enum):
+    """Why a suspect bar was skipped, for code to tell apart; the reason names every cause.
+
+    A bar can be suspect for more than one cause, and the code is the
+    gravest of them: a :class:`~.bars.SuspectCause`, under the same value.
+    """
+
+    # A reading's close block turned out not to be on the final chain.
+    REORGED = "reorged"
+    # The pools' readings do not agree on the close block.
+    CLOSE_BLOCK_MISMATCH = "close_block_mismatch"
+    # A pool's close price is further from its TWAP than the limit allows.
+    TWAP_DEVIATION = "twap_deviation"
+    # The bar came marked suspect, and nothing said why.
+    UNSPECIFIED = "unspecified"
 
 
 _BLOCK_HASH: Final = re.compile(r"0x[0-9a-f]{64}")
@@ -89,13 +109,39 @@ class BarSeen:
             raise ValueError(f"finality must be a Finality, got {self.finality!r}")
 
 
+# The outcomes that say why, and the codes each says it in.
+REASON_CODES: Final[Mapping[Outcome, type[RejectionCode] | type[SkipCode]]] = MappingProxyType(
+    {Outcome.REJECTED: RejectionCode, Outcome.SKIPPED_SUSPECT: SkipCode}
+)
+
+
+@dataclass(frozen=True)
+class Suspicion:
+    """Why a bar is suspect, as it was worked out when the bar was read.
+
+    A stored bar's flags and finality can differ later, so a decision that
+    skips the bar keeps this.
+    """
+
+    code: SkipCode
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.code, SkipCode):
+            raise ValueError(f"code must be a SkipCode, got {self.code!r}")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError(f"reason must be a non-empty string, got {self.reason!r}")
+
+
 @dataclass(frozen=True)
 class Decision:
     """One bar's decision.
 
-    A rejected decision, and no other, says why: ``reason`` in words and
-    ``reason_code`` for code. ``seen`` is ``None`` for a bar that came from
-    no store, and otherwise describes the block ``close_block`` names.
+    A rejected decision and a skipped one, and no other, say why: ``reason``
+    in words and ``reason_code`` for code, a :class:`RejectionCode` for the
+    one and a :class:`SkipCode` for the other. ``seen`` is ``None`` for a
+    bar that came from no store, and otherwise describes the block
+    ``close_block`` names.
     """
 
     time: int
@@ -103,7 +149,7 @@ class Decision:
     close_block: int
     target: TargetWeights | None = None
     reason: str | None = None
-    reason_code: RejectionCode | None = None
+    reason_code: RejectionCode | SkipCode | None = None
     seen: BarSeen | None = None
 
     def __post_init__(self) -> None:
@@ -117,19 +163,22 @@ class Decision:
                 f"a decision carries a target exactly when the strategy gave one: "
                 f"{self.outcome.value} with target {self.target!r}"
             )
-        rejected = self.outcome is Outcome.REJECTED
-        if rejected != (self.reason is not None) or rejected != (self.reason_code is not None):
+        code_type = REASON_CODES.get(self.outcome)
+        explained = code_type is not None
+        if explained != (self.reason is not None) or explained != (self.reason_code is not None):
             raise ValueError(
-                f"a rejected decision, and no other, carries a reason and a reason code: "
-                f"{self.outcome.value} with {self.reason!r} and {self.reason_code!r}"
+                f"a rejected or a skipped decision, and no other, carries a reason and a "
+                f"reason code: {self.outcome.value} with {self.reason!r} and "
+                f"{self.reason_code!r}"
             )
-        if rejected and (
+        if code_type is not None and (
             not isinstance(self.reason, str)
             or not self.reason.strip()
-            or not isinstance(self.reason_code, RejectionCode)
+            or not isinstance(self.reason_code, code_type)
         ):
             raise ValueError(
-                f"a reason is a non-empty string and a reason code a RejectionCode, "
+                f"a reason is a non-empty string and the reason code of a "
+                f"{self.outcome.value} decision a {code_type.__name__}, "
                 f"got {self.reason!r} and {self.reason_code!r}"
             )
         if self.seen is not None:

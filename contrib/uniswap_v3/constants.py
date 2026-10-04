@@ -32,7 +32,15 @@ from typing import Final
 
 from .domain.types import Pool, Token
 
-__all__ = ["EARLIEST_BAR_TIME", "ETHEREUM_MAINNET", "POOLS", "QUOTER_V2", "TOKENS", "pool_key"]
+__all__ = [
+    "EARLIEST_BAR_TIME",
+    "ETHEREUM_MAINNET",
+    "POOLS",
+    "QUOTER_V2",
+    "TOKENS",
+    "WRAPPED_NATIVE",
+    "pool_key",
+]
 
 ETHEREUM_MAINNET: Final = 1
 
@@ -57,6 +65,10 @@ _WBTC: Final = Token("WBTC", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", 8)
 TOKENS: Final[Mapping[int, Mapping[str, Token]]] = MappingProxyType(
     {ETHEREUM_MAINNET: _by_symbol(_USDC, _WETH, _WBTC)}
 )
+
+# The token whose price is the price of the chain's gas currency: one WETH is
+# redeemable for one ETH. A report values gas through it.
+WRAPPED_NATIVE: Final[Mapping[int, Token]] = MappingProxyType({ETHEREUM_MAINNET: _WETH})
 
 # Both are the 0.05% tier (fee 500).
 POOLS: Final[Mapping[int, Mapping[str, Pool]]] = MappingProxyType(

@@ -460,6 +460,22 @@ def test_a_snapshot_changes_with_what_changes_a_run_and_not_with_where_the_node_
         assert config_snapshot(parse_config(changed)) != snapshot
 
 
+def test_a_snapshot_reads_back_as_the_config_it_was_taken_of():
+    config = load_config(EXAMPLE)
+    read_back = config_module.config_from_snapshot(config_snapshot(config))
+    # Where the node's URL comes from is no part of a snapshot.
+    assert read_back.rpc_url_env is None
+    assert config_snapshot(read_back) == config_snapshot(config)
+    assert (read_back.tokens, read_back.pools, read_back.bars, read_back.execution) == (
+        config.tokens,
+        config.pools,
+        config.bars,
+        config.execution,
+    )
+    with pytest.raises(ConfigError, match="the config snapshot is not JSON"):
+        config_module.config_from_snapshot("chain_id: 1")
+
+
 def test_a_snapshot_writes_frozen_params_down_and_refuses_what_json_cannot_hold():
     spec = StrategySpec(name="x", params={"only": {"WETH", "USDC"}, "levels": [Decimal("0.1")]})
     snapshot = json.loads(config_snapshot(_config(strategy=spec)))

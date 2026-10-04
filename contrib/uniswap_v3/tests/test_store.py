@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -12,8 +13,9 @@ from contrib.uniswap_v3.config import StrategySpec, UniswapConfig
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarFlag, BarSettings, Finality
 from contrib.uniswap_v3.domain.prices import MAX_SQRT_RATIO
-from contrib.uniswap_v3.domain.records import BarSeen
+from contrib.uniswap_v3.domain.records import BarSeen, SkipCode, Suspicion
 from contrib.uniswap_v3.ports import BarSource
+from contrib.uniswap_v3.store import repository
 from contrib.uniswap_v3.store.bar_source import StoreBarSource, load_bar
 from contrib.uniswap_v3.store.repository import StoreError, open_store
 from contrib.uniswap_v3.store.schema import APPLICATION_ID, SCHEMA_VERSION, transaction
@@ -264,6 +266,7 @@ def test_a_bar_is_built_from_every_configured_pools_reading(store):
     assert stored.readings == (_reading(), _reading(_WBTC_WETH))
     assert stored.flags == (frozenset(), frozenset())
     assert stored.bar.suspect is False
+    assert stored.suspicion is None
     assert set(stored.bar.prices) == {"WETH", "WBTC"}
     assert Decimal(1_990) < stored.bar.prices["WETH"] < Decimal(2_010)
     assert Decimal(28_000) < stored.bar.prices["WBTC"] < Decimal(32_000)
@@ -316,6 +319,7 @@ def test_a_gap_alone_does_not_make_a_bar_suspect(store):
     stored = load_bar(store, _CONFIG, later)
     assert stored.flags == (frozenset({BarFlag.GAP}), frozenset({BarFlag.GAP}))
     assert stored.bar.suspect is False
+    assert stored.suspicion is None
 
 
 def test_a_reading_taken_over_another_twap_window_than_the_configs_is_refused(store):
@@ -340,6 +344,107 @@ def test_a_reorged_reading_makes_its_bar_suspect(store):
     stored = load_bar(store, _CONFIG, FIRST_DAY)
     assert stored.flags == (frozenset(), frozenset({BarFlag.REORGED}))
     assert stored.bar.suspect is True
+    assert stored.suspicion == Suspicion(
+        SkipCode.REORGED, "WBTC/WETH-500: its close block is not on the final chain"
+    )
+
+
+def test_a_suspect_bar_names_every_cause_and_is_coded_by_the_first_in_order(store):
+    later = "0x" + "cd" * 32
+    store.insert_bars(
+        [
+            _reading(twap_tick=_ETH_TICK + 600, finality=Finality.PENDING),
+            _reading(
+                _WBTC_WETH,
+                twap_tick=_BTC_TICK + 600,
+                close_block=1_000,
+                close_block_hash=later,
+            ),
+        ]
+    )
+    stored = load_bar(store, _CONFIG, FIRST_DAY)
+    assert stored.bar.suspect is True
+    assert stored.suspicion == Suspicion(
+        SkipCode.CLOSE_BLOCK_MISMATCH,
+        "the pools' readings do not agree on the close block (999 0x00000000, "
+        "1000 0xcdcdcdcd); "
+        "USDC/WETH-500: its close price is further from its TWAP than the limit; "
+        "WBTC/WETH-500: its close price is further from its TWAP than the limit",
+    )
+    # A block the chain dropped is graver than either, and is named first.
+    assert store.set_finality([_reading()], Finality.REORGED) is None
+    reorged = load_bar(store, _CONFIG, FIRST_DAY).suspicion
+    assert reorged.code is SkipCode.REORGED
+    assert reorged.reason.startswith(
+        "USDC/WETH-500: its close block is not on the final chain; the pools' readings"
+    )
+
+
+def test_a_store_is_kept_in_write_ahead_log_mode_and_syncs_every_commit_unless_told(tmp_path):
+    path = tmp_path / "store.db"
+    with open_store(path) as durable:
+        assert durable._connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        # 2 is FULL: a commit returns once it is on the disk.
+        assert durable._connection.execute("PRAGMA synchronous").fetchone() == (2,)
+    with open_store(path, durable=False) as relaxed:
+        assert relaxed._connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        # 1 is NORMAL: the log is synced at a checkpoint, not at every commit.
+        assert relaxed._connection.execute("PRAGMA synchronous").fetchone() == (1,)
+        relaxed.insert_bars([_reading()])
+    # The mode is the file's, and the setting only that connection's.
+    with open_store(path) as again:
+        assert again._connection.execute("PRAGMA synchronous").fetchone() == (2,)
+        assert again.bar(*_series(), FIRST_DAY) == _reading()
+
+
+@pytest.mark.parametrize(
+    ("code", "text", "read_only"),
+    [
+        (8, "attempt to write a readonly database", True),
+        # Extended codes: which read-only case it is sits above the low byte.
+        (8 | (1 << 8), "attempt to write a readonly database", True),
+        (8 | (5 << 8), "attempt to write a readonly database", True),
+        (5, "database is locked", False),
+        (5, "readonly", False),
+        # The code decides, whatever the words: 2056 is the read-only directory case.
+        (2056, "the words say nothing of it", True),
+        # Before Python 3.11 there is no code, and SQLite's words are all there is.
+        (None, "attempt to write a readonly database", True),
+        (None, "database is locked", False),
+    ],
+)
+def test_a_refused_write_is_read_only_by_its_code_or_failing_that_its_words(
+    code, text, read_only
+):
+    error = sqlite3.OperationalError(text)
+    if code is not None:
+        error.sqlite_errorcode = code
+    assert repository._is_read_only(error) is read_only
+
+
+def test_a_store_another_writer_holds_is_not_opened_in_the_mode_it_has(tmp_path, monkeypatch):
+    path = tmp_path / "store.db"
+    open_store(path).close()
+    other = sqlite3.connect(path, isolation_level=None)
+    other.execute("PRAGMA journal_mode = DELETE")
+    other.execute("BEGIN IMMEDIATE")
+    connect = sqlite3.connect
+    # Without the five seconds a connection waits for a lock by default.
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0})
+    )
+    try:
+        with pytest.raises(StoreError, match="cannot be used .*locked"):
+            open_store(path)
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+
+
+def test_a_store_in_memory_stays_durable():
+    with open_store(Path(":memory:"), durable=False) as store:
+        assert store._connection.execute("PRAGMA journal_mode").fetchone() == ("memory",)
+        assert store._connection.execute("PRAGMA synchronous").fetchone() == (2,)
 
 
 def test_a_stored_bar_says_what_a_decision_keeps_of_it(store):

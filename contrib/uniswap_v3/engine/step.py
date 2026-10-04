@@ -4,8 +4,8 @@ One step, for the bar a :class:`~..domain.types.MarketView` ends at:
 
 1. The run has already decided this bar: its decision is returned and
    nothing is written. This is what makes a rerun harmless.
-2. The bar is suspect: the step is recorded as skipped, and the strategy is
-   not asked.
+2. The bar is suspect: the step is recorded as skipped, with why, and the
+   strategy is not asked.
 3. The strategy answers ``Hold``: only the valuation changes.
 4. The strategy gives target weights: the swaps toward them are planned and
    each is handed to the executor. Only when every one fills, and the gas
@@ -29,9 +29,10 @@ configured tokens; a bar that does not price those tokens; an executor that
 fails, or answers for another swap than the one it was handed; a ledger
 that does not hold exactly the configured tokens; swaps that cannot be
 planned, or that sell more than the ledger holds; a ``seen`` that describes
-another block than the bar's; a bar before the latest one the run has
-decided. The bar is left undecided, so it can be decided once the cause is
-fixed.
+another block than the bar's; a ``suspicion`` of a bar that is not suspect,
+or a suspect bar with a ``seen`` and no ``suspicion``;
+a bar before the latest one the run has decided. The bar is left undecided,
+so it can be decided once the cause is fixed.
 """
 
 from __future__ import annotations
@@ -47,7 +48,9 @@ from ..domain.records import (
     Outcome,
     RejectionCode,
     RunRecord,
+    SkipCode,
     StepRecord,
+    Suspicion,
     Valuation,
 )
 from ..domain.routing import plan_swaps
@@ -64,7 +67,14 @@ from ..domain.types import (
 from ..ports import Executor, Journal, Strategy
 from ..strategies.registry import build_strategy
 
-__all__ = ["Engine", "EngineError", "StepResult", "open_engine", "start_run"]
+__all__ = [
+    "Engine",
+    "EngineError",
+    "StepResult",
+    "open_engine",
+    "start_or_continue_run",
+    "start_run",
+]
 
 
 class EngineError(Exception):
@@ -89,11 +99,19 @@ class Engine:
     executor: Executor
     journal: Journal
 
-    def step(self, view: MarketView, *, seen: BarSeen | None = None) -> StepResult:
+    def step(
+        self,
+        view: MarketView,
+        *,
+        seen: BarSeen | None = None,
+        suspicion: Suspicion | None = None,
+    ) -> StepResult:
         """Decide the bar ``view`` ends at, unless the run already has.
 
-        ``seen`` is what the store said of that bar's close block, kept with
-        the decision; a bar that came from no store has none.
+        ``seen`` is what the store said of that bar's close block, and
+        ``suspicion`` why it holds the bar suspect; both are kept with the
+        decision. A bar that came from no store has neither, and when such
+        a bar is suspect the decision says that nothing said why.
         """
         bar = view.latest
         decided = self.journal.decision(self.run_id, bar.time)
@@ -104,11 +122,24 @@ class Engine:
                 f"seen describes block {seen.close_block}, and the bar at {bar.time} closed "
                 f"on {bar.close_block}"
             )
+        if bar.suspect and seen is not None and suspicion is None:
+            # A bar that came with what its store said of it comes with why it is suspect.
+            raise EngineError(
+                f"the bar at {bar.time} is suspect and came from a store, and nothing says "
+                f"why it is suspect"
+            )
+        if suspicion is not None and not bar.suspect:
+            raise EngineError(
+                f"the bar at {bar.time} is not suspect, and it came with a reason to "
+                f"skip it ({suspicion.reason})"
+            )
         latest = self.journal.last_decided(self.run_id)
         if latest is not None and latest > bar.time:
+            # A run only goes forward: the bars after this one were decided without it in view.
             raise EngineError(
                 f"the run {self.run_id!r} has decided the bar at {latest}, and the bar at "
-                f"{bar.time} is before it"
+                f"{bar.time} is before it; a run only goes forward, so an earlier bar "
+                f"needs a new run"
             )
         ledger = self.journal.ledger(self.run_id)
         quote = self.config.quote.symbol
@@ -126,7 +157,12 @@ class Engine:
             ) from exc
 
         if bar.suspect:
-            return self._record(bar, seen, Outcome.SKIPPED_SUSPECT, ledger)
+            why = suspicion or Suspicion(
+                SkipCode.UNSPECIFIED, "the bar was marked suspect, and nothing said why"
+            )
+            return self._record(
+                bar, seen, Outcome.SKIPPED_SUSPECT, ledger, reason=why.reason, reason_code=why.code
+            )
         answer = self.strategy.decide(view, portfolio)
         if isinstance(answer, Hold):
             return self._record(bar, seen, Outcome.HOLD, ledger)
@@ -202,7 +238,7 @@ class Engine:
         *,
         target: TargetWeights | None = None,
         reason: str | None = None,
-        reason_code: RejectionCode | None = None,
+        reason_code: RejectionCode | SkipCode | None = None,
         fills: tuple[Fill, ...] = (),
     ) -> StepResult:
         """Write the bar's decision, with ``ledger`` (what the step leaves) valued at the bar."""
@@ -227,6 +263,14 @@ class Engine:
         return StepResult(decision, already_run=False)
 
 
+def _strategy(config: UniswapConfig) -> Strategy:
+    """The config's strategy, built; one the registry refuses is a :class:`~..config.ConfigError`."""
+    try:
+        return build_strategy(config.strategy.name, config.strategy.params)
+    except ValueError as exc:
+        raise ConfigError(f"strategy: {exc}") from exc
+
+
 def start_run(
     journal: Journal,
     config: UniswapConfig,
@@ -242,7 +286,10 @@ def start_run(
     the run starts without, though not all at zero: a run that holds nothing
     can never trade. No balance has more decimal places than its token, nor
     the gas balance more than ETH. The config's snapshot is kept with the run.
+    A config whose strategy cannot be built starts no run: the run could
+    never be opened, and its id would be taken.
     """
+    _strategy(config)
     symbols = {token.symbol for token in config.tokens}
     if set(ledger.balances) != symbols:
         raise EngineError(
@@ -280,6 +327,42 @@ def start_run(
     return run
 
 
+def start_or_continue_run(
+    journal: Journal,
+    config: UniswapConfig,
+    *,
+    run_id: str,
+    mode: RunMode,
+    opening: Ledger | None,
+    created_at: int,
+) -> None:
+    """Start the run ``run_id`` in ``mode`` with ``opening``, or check that it can be carried on.
+
+    A run that is not there needs ``opening``. One that is there must be of
+    ``mode``, and an ``opening`` handed with it must be the balances it was
+    started with. Whether it was started under ``config`` is
+    :func:`open_engine`'s check.
+    """
+    run = journal.run(run_id)
+    if run is None:
+        if opening is None:
+            raise EngineError(f"there is no run {run_id!r}, and a new run needs opening balances")
+        start_run(
+            journal, config, run_id=run_id, mode=mode, ledger=opening, created_at=created_at
+        )
+        return
+    if run.mode is not mode:
+        raise EngineError(
+            f"the run {run_id!r} is a {run.mode.value} run, and is not carried on as a "
+            f"{mode.value} run"
+        )
+    if opening is not None and opening != run.ledger:
+        raise EngineError(
+            f"the run {run_id!r} was started with other opening balances; other balances "
+            f"need a new run"
+        )
+
+
 def open_engine(
     journal: Journal, config: UniswapConfig, executor: Executor, *, run_id: str
 ) -> Engine:
@@ -298,10 +381,10 @@ def open_engine(
             f"the run {run_id!r} was started under another config; a changed config "
             f"needs a new run"
         )
-    try:
-        strategy = build_strategy(config.strategy.name, config.strategy.params)
-    except ValueError as exc:
-        raise ConfigError(f"strategy: {exc}") from exc
     return Engine(
-        run_id=run_id, config=config, strategy=strategy, executor=executor, journal=journal
+        run_id=run_id,
+        config=config,
+        strategy=_strategy(config),
+        executor=executor,
+        journal=journal,
     )

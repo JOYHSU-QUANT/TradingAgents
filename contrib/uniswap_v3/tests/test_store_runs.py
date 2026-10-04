@@ -17,6 +17,7 @@ from contrib.uniswap_v3.domain.records import (
     Outcome,
     RejectionCode,
     RunRecord,
+    SkipCode,
     StepRecord,
     Valuation,
 )
@@ -176,7 +177,7 @@ def test_a_step_comes_back_as_it_was_recorded(store):
     assert store.fills("run-1", FIRST_DAY + DAY) == []
 
 
-def test_a_rejected_decision_keeps_its_reason_and_a_skipped_one_its_flag(store):
+def test_a_rejected_decision_and_a_skipped_one_keep_their_reasons(store):
     store.insert_run(_run())
     ledger = _ledger()
     value = Valuation(time=FIRST_DAY, ledger=ledger, prices=PRICES, total_value=D("10000"))
@@ -188,7 +189,13 @@ def test_a_rejected_decision_keeps_its_reason_and_a_skipped_one_its_flag(store):
         reason="leg 0 (USDC to WETH) was refused: closed",
         reason_code=RejectionCode.EXECUTOR,
     )
-    skipped = Decision(time=FIRST_DAY + DAY, outcome=Outcome.SKIPPED_SUSPECT, close_block=8_199)
+    skipped = Decision(
+        time=FIRST_DAY + DAY,
+        outcome=Outcome.SKIPPED_SUSPECT,
+        close_block=8_199,
+        reason="WBTC/WETH-500: its close block is not on the final chain",
+        reason_code=SkipCode.REORGED,
+    )
     store.record("run-1", StepRecord(decision=rejected, valuation=value))
     store.record(
         "run-1",
@@ -201,6 +208,42 @@ def test_a_rejected_decision_keeps_its_reason_and_a_skipped_one_its_flag(store):
     )
     assert store.decision("run-1", FIRST_DAY) == rejected
     assert store.decision("run-1", FIRST_DAY + DAY) == skipped
+    assert store.decisions("run-1") == [rejected, skipped]
+    assert [valuation.time for valuation in store.valuations("run-1")] == [
+        FIRST_DAY,
+        FIRST_DAY + DAY,
+    ]
+    assert store.valuations("run-1")[0] == value
+    assert store.decisions("run-2") == [] and store.valuations("run-2") == []
+
+
+def test_reads_made_together_see_one_state_while_another_connection_writes(tmp_path):
+    path = tmp_path / "store.db"
+    with open_store(path) as writer, open_store(path) as reader:
+        writer.insert_run(_run())
+        writer.record("run-1", _held())
+        with reader.reading():
+            assert len(reader.decisions("run-1")) == 1
+            # The writer is not held up, and what it commits is not seen in here.
+            writer.record("run-1", _held(FIRST_DAY + DAY))
+            assert len(reader.decisions("run-1")) == 1
+            assert len(reader.valuations("run-1")) == 1
+        assert len(reader.decisions("run-1")) == 2
+
+
+def test_a_read_that_raises_leaves_the_store_usable(store):
+    store.insert_run(_run())
+    with pytest.raises(RuntimeError, match="stop"), store.reading():
+        store.run("run-1")
+        raise RuntimeError("stop")
+    store.record("run-1", _held())
+    assert store.last_decided("run-1") == FIRST_DAY
+
+
+def test_a_read_whose_store_was_closed_inside_it_raises_what_was_raised(store):
+    with pytest.raises(RuntimeError, match="stop"), store.reading():
+        store.close()
+        raise RuntimeError("stop")
 
 
 def test_a_bar_is_decided_once_and_a_second_record_writes_nothing(store):
@@ -291,6 +334,20 @@ def test_an_outcome_or_a_reason_code_this_code_does_not_know_is_refused_when_rea
         "reason = 'why', reason_code = 'weather'",
     )
     with open_store(path) as store, pytest.raises(StoreError, match="'weather' is not a valid"):
+        store.decision("run-1", FIRST_DAY)
+    # A skipped decision says why in the skip codes, and "gas" is not one of them.
+    _tamper(
+        path,
+        "UPDATE decisions SET outcome = 'skipped_suspect', target = NULL, reason_code = 'gas'",
+    )
+    with open_store(path) as store:
+        with pytest.raises(StoreError, match="'gas' is not a valid SkipCode"):
+            store.decision("run-1", FIRST_DAY)
+        with pytest.raises(StoreError, match=f"decision of run 'run-1' at {FIRST_DAY}"):
+            store.decisions("run-1")
+    # One written before a skipped decision said why no longer reads.
+    _tamper(path, "UPDATE decisions SET reason = NULL, reason_code = NULL")
+    with open_store(path) as store, pytest.raises(StoreError, match="carries a reason"):
         store.decision("run-1", FIRST_DAY)
 
 

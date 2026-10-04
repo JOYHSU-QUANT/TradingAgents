@@ -11,7 +11,13 @@ from contrib.uniswap_v3.config import ConfigError, StrategySpec
 from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.execution import ExecutionSettings
 from contrib.uniswap_v3.domain.ledger import Ledger
-from contrib.uniswap_v3.domain.records import BarSeen, Outcome, RejectionCode
+from contrib.uniswap_v3.domain.records import (
+    BarSeen,
+    Outcome,
+    RejectionCode,
+    SkipCode,
+    Suspicion,
+)
 from contrib.uniswap_v3.domain.types import (
     Bar,
     Fill,
@@ -187,8 +193,35 @@ def test_a_suspect_bar_is_recorded_as_skipped_without_asking_the_strategy(store)
     assert result.decision.outcome is Outcome.SKIPPED_SUSPECT
     assert result.decision.suspect
     assert result.decision.target is None
+    # The bar came from no store, so nothing said why.
+    assert result.decision.reason_code is SkipCode.UNSPECIFIED
+    assert result.decision.reason == "the bar was marked suspect, and nothing said why"
     assert strategy.calls == [] and executor.swaps == []
     assert _balances(store) == {"USDC": D("10000"), "WETH": D("0"), "WBTC": D("0")}
+
+
+def test_why_the_bar_is_suspect_is_kept_with_the_skipped_decision(store):
+    why = Suspicion(SkipCode.TWAP_DEVIATION, "WBTC/WETH-500: its close price is off its TWAP")
+    engine = _engine(store, ScriptedStrategy({}))
+    engine.step(_view(bar(0, suspect=True)), suspicion=why)
+    decision = store.decision(_RUN, FIRST_DAY)
+    assert (decision.reason_code, decision.reason) == (why.code, why.reason)
+
+
+def test_a_suspect_bar_from_a_store_that_does_not_say_why_stops_the_run(store):
+    seen = BarSeen(close_block=1_000, close_block_hash="0x" + "ab" * 32, finality=Finality.FINAL)
+    engine = _engine(store, ScriptedStrategy({}))
+    with pytest.raises(EngineError, match="came from a store, and nothing says why"):
+        engine.step(_view(bar(0, suspect=True)), seen=seen)
+    assert store.decision(_RUN, FIRST_DAY) is None
+
+
+def test_a_reason_to_skip_a_bar_that_is_not_suspect_stops_the_run(store):
+    why = Suspicion(SkipCode.REORGED, "USDC/WETH-500: its close block is gone")
+    engine = _engine(store, ScriptedStrategy({}))
+    with pytest.raises(EngineError, match="is not suspect, and it came with a reason to skip"):
+        engine.step(_view(bar(0)), suspicion=why)
+    assert store.decision(_RUN, FIRST_DAY) is None
 
 
 def test_a_hold_records_the_valuation_and_trades_nothing(store):
@@ -434,11 +467,23 @@ def test_a_strategy_the_registry_refuses_is_a_config_error(store):
     ):
         config = replace(_CONFIG, strategy=spec)
         run_id = f"run-{spec.name}-{len(spec.params)}"
-        start_run(
-            store, config, run_id=run_id, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0
-        )
+        # No run is started under it: the run could never be opened.
         with pytest.raises(ConfigError, match=match):
-            open_engine(store, config, ModelExecutor("USDC", config.execution), run_id=run_id)
+            start_run(
+                store, config, run_id=run_id, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0
+            )
+        assert store.run(run_id) is None
+
+
+def test_a_run_whose_strategy_can_no_longer_be_built_is_not_opened(store, monkeypatch):
+    start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
+
+    def refuse(name, params):
+        raise ValueError(f"unknown strategy {name!r}")
+
+    monkeypatch.setattr(step_module, "build_strategy", refuse)
+    with pytest.raises(ConfigError, match="strategy: unknown strategy 'fixed_weights'"):
+        open_engine(store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN)
 
 
 def test_a_run_cannot_be_started_twice_or_over_other_tokens(store):

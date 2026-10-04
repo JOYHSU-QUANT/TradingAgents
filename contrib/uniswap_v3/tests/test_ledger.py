@@ -49,7 +49,7 @@ def test_fills_are_applied_together_or_not_at_all():
         _fill(USDC, (USDC_WETH, WBTC_WETH), "2000", "0.0499"),
     ]
     # The second fill's gas is what the balance no longer covers.
-    with pytest.raises(LedgerError, match="USDC for WBTC"):
+    with pytest.raises(InsufficientGas, match="USDC for WBTC"):
         ledger.apply(fills)
     assert ledger == _ledger(gas="0.0015")
     assert _ledger(gas="0.002").apply(fills).gas_eth == 0
@@ -75,6 +75,13 @@ def test_a_balance_longer_than_the_money_context_is_not_rounded():
     ledger = _ledger(weth="1234567890123.123456789012345678")
     after = ledger.apply([_fill(WETH, (USDC_WETH,), "0.000000000000000001", "0.000001")])
     assert after.balances["WETH"] == D("1234567890123.123456789012345677")
+
+
+def test_fills_that_would_leave_a_balance_no_chain_could_carry_are_refused():
+    # Two amounts of 9e77 are each within bounds; their sum is not.
+    ledger = _ledger(weth="9E+77")
+    with pytest.raises(LedgerError, match="would leave a ledger that cannot be"):
+        ledger.apply([_fill(USDC, (USDC_WETH,), "1", "9E+77")])
 
 
 def test_a_ledger_is_valued_without_its_gas_balance():

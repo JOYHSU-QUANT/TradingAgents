@@ -26,7 +26,8 @@ rebalance as what it is.
 What is not recorded stops the run instead: a strategy that raises, or
 answers with something other than ``Hold`` or weights over exactly the
 configured tokens; a bar that does not price those tokens; an executor that
-answers for another swap than the one it was handed; swaps that cannot be
+fails, or answers for another swap than the one it was handed; a ledger
+that does not hold exactly the configured tokens; swaps that cannot be
 planned, or that sell more than the ledger holds; a ``seen`` that describes
 another block than the bar's; a bar before the latest one the run has
 decided. The bar is left undecided, so it can be decided once the cause is
@@ -151,7 +152,10 @@ class Engine:
             return self._record(bar, seen, Outcome.NO_TRADE, ledger, target=answer)
         fills: list[Fill] = []
         for leg, swap in enumerate(swaps):
-            answered = self.executor.execute(swap, bar)
+            try:
+                answered = self.executor.execute(swap, bar)
+            except (ValueError, ArithmeticError) as exc:
+                raise EngineError(f"the executor failed on leg {leg} ({exc!r})") from exc
             if not isinstance(answered, Fill | Rejection) or answered.swap != swap:
                 raise EngineError(f"the executor answered leg {leg} with {answered!r}")
             if isinstance(answered, Rejection):
@@ -257,6 +261,8 @@ def start_run(
             raise EngineError(
                 f"the opening {what} balance {plain(amount)} has more than {limit} decimal places"
             )
+    # Outside the try: a config that cannot be written down is a ConfigError, and stays one.
+    snapshot = config_snapshot(config)
     try:
         run = RunRecord(
             run_id=run_id,
@@ -264,7 +270,7 @@ def start_run(
             chain_id=config.chain_id,
             quote=config.quote.symbol,
             strategy=config.strategy.name,
-            config=config_snapshot(config),
+            config=snapshot,
             ledger=ledger,
             created_at=created_at,
         )

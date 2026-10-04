@@ -86,7 +86,8 @@ def plan_swaps(
     below, then the next, until one side is used up; a tie goes to the
     symbol that sorts first. A transfer worth less than
     ``settings.min_trade_value`` is left out, and so is one too small to
-    return a single unit of the token it buys. Each swap's ``amount_in`` is
+    sell a single unit of its token or to return a single unit of the token
+    it buys. Each swap's ``amount_in`` is
     cut to its token's decimal places, and its ``min_amount_out`` is what the
     route returns at the portfolio's prices after the pools' fees, less
     ``settings.max_slippage``.

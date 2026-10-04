@@ -30,6 +30,12 @@ class ModelExecutor:
     def execute(self, swap: SwapIntent, bar: Bar) -> Fill | Rejection:
         """Fill ``swap`` at ``bar``'s prices, or refuse it when that falls short of its minimum."""
         token_out = swap.token_out
+        if self._quote in bar.prices:
+            # A bar prices every token but the quote: this executor was built for another.
+            raise ValueError(
+                f"the bar at {bar.time} prices {self._quote}, which the executor takes for "
+                f"the quote token"
+            )
         for token in (swap.token_in, token_out):
             if token.symbol != self._quote and token.symbol not in bar.prices:
                 raise ValueError(f"the bar at {bar.time} has no price for {token.symbol}")

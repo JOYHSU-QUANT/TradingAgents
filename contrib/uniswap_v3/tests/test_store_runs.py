@@ -316,22 +316,40 @@ def test_the_schema_refuses_a_hash_without_a_finality(tmp_path):
         _tamper(path, f"UPDATE decisions SET close_block_hash = '{_HASH}'")
 
 
-def test_a_stored_row_that_no_longer_reads_is_a_store_error(tmp_path):
+@pytest.mark.parametrize(
+    ("statement", "match"),
+    [
+        (
+            "UPDATE valuations SET total_value = 'much'",
+            "the stored valuation of run 'run-1' at .* holds a value that is not a decimal",
+        ),
+        # A number where the store writes text: not what the store wrote.
+        (
+            "UPDATE valuations SET prices = '{\"WETH\": 2000, \"WBTC\": 40000}'",
+            "the stored valuation of run 'run-1' at .*expected every amount as decimal text",
+        ),
+        ("UPDATE valuations SET balances = '[]'", "expected a JSON object of amounts"),
+    ],
+)
+def test_a_stored_valuation_that_no_longer_reads_is_a_store_error(tmp_path, statement, match):
     path = tmp_path / "store.db"
     with open_store(path) as store:
         store.insert_run(_run())
         store.record("run-1", _held())
-    connection = sqlite3.connect(path)
-    connection.execute("UPDATE valuations SET total_value = 'much'")
-    connection.execute("UPDATE valuations SET prices = '{\"WETH\": 2000, \"WBTC\": 40000}'")
-    connection.execute("UPDATE runs SET balances = '{\"USDC\": \"-1\"}'")
-    connection.commit()
-    connection.close()
+    _tamper(path, statement)
+    with open_store(path) as store, pytest.raises(StoreError, match=match):
+        store.valuation("run-1", FIRST_DAY)
+
+
+def test_a_stored_run_that_no_longer_reads_is_a_store_error(tmp_path):
+    path = tmp_path / "store.db"
     with open_store(path) as store:
-        with pytest.raises(StoreError, match="the stored valuation of run 'run-1'"):
-            store.valuation("run-1", FIRST_DAY)
-        with pytest.raises(StoreError, match="the stored run 'run-1' is not valid"):
-            store.run("run-1")
+        store.insert_run(_run())
+    _tamper(path, "UPDATE runs SET balances = '{\"USDC\": \"-1\"}'")
+    with open_store(path) as store, pytest.raises(
+        StoreError, match="the stored run 'run-1' is not valid"
+    ):
+        store.run("run-1")
 
 
 def test_a_decision_whose_valuation_is_gone_leaves_the_run_without_a_ledger(tmp_path):
@@ -339,10 +357,7 @@ def test_a_decision_whose_valuation_is_gone_leaves_the_run_without_a_ledger(tmp_
     with open_store(path) as store:
         store.insert_run(_run())
         store.record("run-1", _held())
-    connection = sqlite3.connect(path)
-    connection.execute("DELETE FROM valuations")
-    connection.commit()
-    connection.close()
+    _tamper(path, "DELETE FROM valuations")
     # Not the opening balances: the run has moved on from them.
     with (
         open_store(path) as store,

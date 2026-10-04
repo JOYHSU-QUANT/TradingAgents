@@ -122,6 +122,9 @@ def test_a_decision_that_contradicts_itself_is_refused(outcome, changes, match):
 def test_a_malformed_bar_seen_is_refused(close_block_hash, finality, match):
     with pytest.raises(ValueError, match=match):
         BarSeen(close_block=9, close_block_hash=close_block_hash, finality=finality)
+
+
+def test_a_bar_seen_names_a_block_that_can_exist():
     with pytest.raises(ValueError, match="close_block must be a non-negative integer"):
         BarSeen(close_block=-1, close_block_hash=_HASH, finality=Finality.FINAL)
 

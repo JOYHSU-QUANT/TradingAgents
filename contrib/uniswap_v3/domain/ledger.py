@@ -20,7 +20,11 @@ __all__ = ["InsufficientGas", "Ledger", "LedgerError"]
 
 
 class LedgerError(ValueError):
-    """Fills the ledger cannot take: a balance, or the gas balance, does not cover them."""
+    """Fills the ledger cannot take.
+
+    They name a token it does not hold, a balance or the gas balance does
+    not cover them, or they would leave a balance no chain could carry.
+    """
 
 
 class InsufficientGas(LedgerError):
@@ -94,4 +98,7 @@ class Ledger:
             balances[sold] = EXACT_CONTEXT.subtract(balances[sold], fill.swap.amount_in)
             balances[bought] = EXACT_CONTEXT.add(balances[bought], fill.amount_out)
             gas_eth = EXACT_CONTEXT.subtract(gas_eth, fill.gas_cost_eth)
-        return Ledger(balances=balances, gas_eth=gas_eth)
+        try:
+            return Ledger(balances=balances, gas_eth=gas_eth)
+        except ValueError as exc:
+            raise LedgerError(f"the fills would leave a ledger that cannot be ({exc})") from exc

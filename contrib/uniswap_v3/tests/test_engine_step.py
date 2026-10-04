@@ -237,7 +237,7 @@ def test_one_refused_leg_leaves_every_balance_as_it_was(store):
     assert result.decision.target == _TARGET
     assert store.fills(_RUN) == []
     assert store.ledger(_RUN) == _ledger()
-    # The next bar starts from the unchanged balances and is decided afresh.
+    # The next bar starts from the unchanged balances; this script holds on it.
     executor_calls = len(executor.swaps)
     assert engine.step(_view(bar(0), bar(1))).decision.outcome is Outcome.HOLD
     assert len(executor.swaps) == executor_calls
@@ -349,6 +349,25 @@ def test_a_plan_that_sells_more_than_the_ledger_holds_stops_the_run(store, monke
     assert store.decision(_RUN, FIRST_DAY) is None
 
 
+def test_an_executor_that_fails_stops_the_run(store):
+    def fail(swap, bar):
+        raise ValueError("no price for WBTC")
+
+    engine = _engine(store, ScriptedStrategy({FIRST_DAY: _TARGET}), ScriptedExecutor(fail))
+    with pytest.raises(EngineError, match="the executor failed on leg 0 .*no price for WBTC"):
+        engine.step(_view(bar(0)))
+    assert store.decision(_RUN, FIRST_DAY) is None
+
+
+def test_an_executor_built_for_another_quote_token_stops_the_run(store):
+    # WETH is priced by the bar, so it is not the quote the bar was built for.
+    executor = ModelExecutor("WETH", _CONFIG.execution)
+    engine = _engine(store, ScriptedStrategy({FIRST_DAY: _TARGET}), executor)
+    with pytest.raises(EngineError, match="prices WETH, which the executor takes for the quote"):
+        engine.step(_view(bar(0)))
+    assert store.decision(_RUN, FIRST_DAY) is None
+
+
 def test_swaps_that_cannot_be_planned_stop_the_run(store, monkeypatch):
     def refuse(*args, **kwargs):
         raise ValueError("no pool path joins USDC to WBTC")
@@ -410,7 +429,7 @@ def test_a_run_is_not_continued_under_a_changed_config(store):
 
 def test_a_strategy_the_registry_refuses_is_a_config_error(store):
     for spec, match in (
-        (StrategySpec(name="momentum", params={}), "unknown strategy 'momentum'"),
+        (StrategySpec(name="no_such_strategy", params={}), "unknown strategy 'no_such_strategy'"),
         (StrategySpec(name="fixed_weights", params={"band": "0.05"}), "takes exactly the params"),
     ):
         config = replace(_CONFIG, strategy=spec)

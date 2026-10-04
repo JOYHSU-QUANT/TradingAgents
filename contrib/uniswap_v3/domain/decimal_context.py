@@ -7,11 +7,12 @@ digits on every run and every machine. Every field is spelled out, since a
 ``decimal.DefaultContext``: 28 significant digits, round half even, and the
 three default traps.
 
-Token amounts that are added, subtracted or cut to a token's decimal places
-go through :data:`EXACT_CONTEXT` instead: a balance of an 18-decimal token
-can hold more than 28 digits, and a ledger must not round one away. That
-context is wide enough for any two amounts a chain can carry and traps a
-result it would have had to round.
+Token amounts that are added or subtracted go through :data:`EXACT_CONTEXT`
+instead: a balance of an 18-decimal token can hold more than 28 digits, and
+a ledger must not round one away. That context is wide enough for any two
+amounts a chain can carry and traps a result it would have had to round. A
+cut to a token's decimal places (:func:`floor_to_places`) uses a context as
+wide that does not trap, since dropping digits is the point of a cut.
 """
 
 from __future__ import annotations

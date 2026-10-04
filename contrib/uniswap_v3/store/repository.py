@@ -134,7 +134,10 @@ def _stored(what: str) -> Iterator[None]:
     """Turn a stored row that no longer reads as ``what`` into a :class:`StoreError`."""
     try:
         yield
-    except (TypeError, ValueError, InvalidOperation) as exc:
+    except InvalidOperation as exc:
+        # The exception's own text is a list of signal classes.
+        raise StoreError(f"the stored {what} holds a value that is not a decimal") from exc
+    except (TypeError, ValueError) as exc:
         raise StoreError(f"the stored {what} is not valid ({exc})") from exc
 
 

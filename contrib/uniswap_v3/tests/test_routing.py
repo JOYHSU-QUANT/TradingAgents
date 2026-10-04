@@ -131,8 +131,9 @@ def test_a_transfer_too_small_to_buy_one_unit_is_left_out_rather_than_given_no_m
     # A cent buys units of WETH's eighteen places, and none of WBTC's eight after the cut.
     (swap,) = _plan(_portfolio("0.01", "0", "0"), weights("0", "1", "0"), **settings)
     assert swap.min_amount_out > 0
-    for swap in _plan(_portfolio("1000", "0.2", "0.01"), weights("0.5", "0.3", "0.2"), **settings):
-        assert swap.min_amount_out > 0
+    swaps = _plan(_portfolio("1000", "0.2", "0.01"), weights("0.5", "0.3", "0.2"), **settings)
+    assert swaps
+    assert all(swap.min_amount_out > 0 for swap in swaps)
 
 
 def test_amounts_fit_their_tokens_decimal_places_and_together_sell_down_to_the_target():

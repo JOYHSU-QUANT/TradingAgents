@@ -889,8 +889,8 @@ Breaking changes within the 0.x line are called out explicitly.
   the config it was started under, in the config file's own shape, and is
   not continued under a changed one: the comparison is of the whole text, so
   a config key a later version adds means a new run.
-  The config's new optional `execution` section holds the five numbers
-  above; a `model.slippage` above `max_slippage` is refused, since the model
+  The config's new optional `execution` section holds those four numbers
+  and `max_slippage`; a `model.slippage` above `max_slippage` is refused, since the model
   would then refuse every swap. **A config's pools must now form a tree that reaches every
   token from the quote token**: one path of pools then joins any two tokens.
   The shipped example already does.

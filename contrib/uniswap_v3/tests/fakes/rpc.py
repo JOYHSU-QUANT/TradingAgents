@@ -2,11 +2,16 @@
 
 - :class:`ReplayProvider` answers from a cassette: a JSON list of
   ``{"method", "params", "response"}`` entries, looked up by method and
-  params. A request that was not recorded fails the test.
+  params. A request that was not recorded fails the test, with an exception
+  the code under test cannot catch and turn into one of its own.
 - :class:`ScriptedProvider` hands every request to a function, which returns
   a response or raises.
 - :class:`RecordingProvider` wraps a real provider and keeps what passed
   through it; ``tests/fixtures/record.py`` writes cassettes with it.
+
+The first two keep ``eth_chainId``, which :class:`Rpc` asks once before its
+first read, out of ``requests`` and count it in ``chain_checks``, so a test
+reads ``requests`` as the reads it provoked.
 
 A cassette holds requests and responses only, never the endpoint URL.
 """
@@ -54,35 +59,55 @@ def _wrap(response: dict[str, Any]) -> Any:
     return {"jsonrpc": "2.0", "id": 1, **response}
 
 
+class CassetteMiss(BaseException):
+    """A request the cassette does not hold. Not an ``Exception``: nothing translates it."""
+
+
 class ReplayProvider(BaseProvider):
     def __init__(self, cassette: Path) -> None:
         super().__init__()
         entries = json.loads(cassette.read_text(encoding="utf-8"))
         self._responses = {_key(e["method"], e["params"]): e["response"] for e in entries}
         self.requests: list[tuple[str, Any]] = []
+        self.chain_checks = 0
 
     def make_request(self, method: Any, params: Any) -> Any:
-        self.requests.append((method, params))
+        if method == "eth_chainId":
+            self.chain_checks += 1
+        else:
+            self.requests.append((method, params))
         key = _key(method, params)
         if key not in self._responses:
-            raise AssertionError(f"not in the cassette: {method} {params!r}")
+            raise CassetteMiss(f"not in the cassette: {method} {params!r}")
         return _wrap(self._responses[key])
 
 
 class ScriptedProvider(BaseProvider):
-    def __init__(self, respond: Callable[[str, Any], dict[str, Any]]) -> None:
+    """``respond`` answers every request but the chain check, which gets ``chain_id``.
+
+    With ``chain_id=None`` the chain check goes to ``respond`` as well.
+    """
+
+    def __init__(
+        self, respond: Callable[[str, Any], dict[str, Any]], *, chain_id: int | None = 1
+    ) -> None:
         super().__init__()
         self._respond = respond
+        self._chain_id = chain_id
         self.requests: list[tuple[str, Any]] = []
+        self.chain_checks = 0
 
     def make_request(self, method: Any, params: Any) -> Any:
+        if method == "eth_chainId" and self._chain_id is not None:
+            self.chain_checks += 1
+            return _wrap({"result": hex(self._chain_id)})
         self.requests.append((method, params))
         return _wrap(self._respond(method, params))
 
 
-def answering(response: dict[str, Any]) -> ScriptedProvider:
-    """A node that gives ``response`` to every request."""
-    return ScriptedProvider(lambda method, params: response)
+def answering(response: dict[str, Any], *, chain_id: int | None = 1) -> ScriptedProvider:
+    """A node that gives ``response`` to every request but the chain check."""
+    return ScriptedProvider(lambda method, params: response, chain_id=chain_id)
 
 
 class RecordingProvider(BaseProvider):
@@ -109,7 +134,9 @@ class RecordingProvider(BaseProvider):
         cassette.write_text(text, encoding="utf-8", newline="\n")
 
 
-def rpc_over(provider: BaseProvider, *, chain_id: int = 1, attempts: int = 3) -> tuple[Rpc, list]:
+def rpc_over(
+    provider: BaseProvider, *, chain_id: int = 1, attempts: int = 3
+) -> tuple[Rpc, list[float]]:
     """An :class:`Rpc` on ``provider`` whose waits are recorded instead of slept."""
     waits: list[float] = []
     settings = RpcSettings(attempts=attempts)

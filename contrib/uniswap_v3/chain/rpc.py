@@ -1,21 +1,33 @@
-"""The connection to a node, and the two reads the rest of ``chain/`` is built on.
+"""The connection to a node, and the reads the rest of ``chain/`` is built on.
 
 :func:`connect` reads the endpoint URL from an environment variable, named
-by :class:`RpcSettings` (``ETH_RPC_URL`` unless told otherwise), and refuses
-a node that is on another chain. :class:`Rpc` then offers a block header and
-a contract call, each at a named block.
+by :class:`RpcSettings` (``ETH_RPC_URL`` unless told otherwise).
+:class:`Rpc` then offers the latest block's header, the header of a named
+block, and a contract call at a named block. Before its first read it asks
+the node for its chain ID and refuses a node on another chain.
 
-Failures: a connection error, a timeout, a response cut short, an HTTP 429
-and an HTTP 5xx are tried again, waiting twice as long each time; when the
-attempts run out the read raises :class:`~.errors.RpcUnavailable`. Anything
-else raises at once.
+Failures, by what the node or the transport said:
+
+- A connection error, a timeout, a response cut short, an HTTP 429, an HTTP
+  5xx and a JSON-RPC rate-limit error (code -32005 or 429) are tried again,
+  waiting twice as long each time. When the attempts run out the read raises
+  :class:`~.errors.RpcUnavailable`.
+- "header not found" and its like, which a node behind the head answers,
+  raise :class:`~.errors.BlockNotFound`.
+- An HTTP 401 or 403, and a node that says it no longer has the state asked
+  for (it is not an archive node), raise :class:`~.errors.RpcConfigError`.
+- A revert raises :class:`~.errors.CallReverted`, any other error the node
+  answers with :class:`~.errors.RpcRejected`, and a reply that cannot be
+  decoded :class:`~.errors.MalformedResponse`.
 
 The URL is a secret, since it ends in the API key. It is never put in an
 exception or a log line. The text of every exception caught here is scrubbed
 before it is quoted, and the error that replaces it is raised once the
 ``except`` block is over, so the original is neither its cause nor its
 context. Every log record of ``web3``, ``urllib3`` and ``requests``, which
-write the URL or its path, is scrubbed as it is created.
+write the URL or its path, has its message and its traceback scrubbed as it
+is created. What counts as secret is the URL, its path and each segment of
+it, its query and each value in it, and its password; the host name is not.
 """
 
 from __future__ import annotations
@@ -24,10 +36,11 @@ import logging
 import os
 import re
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, TypeVar
-from urllib.parse import urlsplit
+from typing import Any, Final, TypeGuard, TypeVar
+from urllib.parse import parse_qsl, urlsplit
 
 import requests
 from web3 import HTTPProvider, Web3
@@ -52,17 +65,24 @@ __all__ = ["DEFAULT_URL_ENV", "BlockHeader", "Rpc", "RpcSettings", "connect", "h
 
 DEFAULT_URL_ENV: Final = "ETH_RPC_URL"
 
-_TRANSIENT_STATUS: Final = frozenset({429, 500, 502, 503, 504})
 # A key the endpoint does not accept: no later request will fare better.
 _UNAUTHORISED_STATUS: Final = frozenset({401, 403})
+# JSON-RPC error codes. -32005 is EIP-1474's "limit exceeded"; some providers
+# send the HTTP status, 429, as the code. 3 is a revert.
+_RATE_LIMIT_CODES: Final = frozenset({-32005, 429})
+_REVERT_CODE: Final = 3
+# What a node says, under the catch-all code -32000, when it is behind the
+# block asked for, and when it no longer keeps that block's state.
+_BEHIND: Final = ("header not found", "block not found", "unknown block")
+_NO_STATE: Final = ("missing trie node", "state is not available", "pruned", "archive")
 # The packages under a request, whose loggers write the URL or its path:
 # web3's provider and urllib3's connection pool at DEBUG, urllib3's
 # connection at WARNING.
 _SCRUBBED_LOGGERS: Final = frozenset({"web3", "urllib3", "requests"})
 _URL: Final = re.compile(r"https?://[^\s'\"]+")
-# A piece of the URL shorter than this (``/v2``) is not a secret, and
+# A piece of the URL shorter than this (``v2``) is not a secret, and
 # scrubbing it would eat ordinary text.
-_MIN_SECRET: Final = 8
+_MIN_SECRET: Final = 6
 
 _T = TypeVar("_T")
 
@@ -72,12 +92,14 @@ class _Redactor:
 
     def __init__(self) -> None:
         self._secrets: list[str] = []
-        self._scrubbing_logs = False
+        self._factory: Callable[..., logging.LogRecord] | None = None
 
     def register(self, url: str) -> None:
-        """Treat ``url`` as secret, with its path and query: urllib3 quotes those alone."""
+        """Treat ``url`` as secret, with the pieces of it that are quoted alone."""
         parts = urlsplit(url)
-        pieces = {url, parts.path, parts.path.rsplit("/", 1)[-1], parts.query}
+        pieces = {url, parts.path, parts.query, parts.password or ""}
+        pieces.update(parts.path.split("/"))
+        pieces.update(value for _, value in parse_qsl(parts.query))
         if parts.query:
             pieces.add(f"{parts.path}?{parts.query}")
         known = set(self._secrets) | {piece for piece in pieces if len(piece) >= _MIN_SECRET}
@@ -91,31 +113,40 @@ class _Redactor:
         return _URL.sub("<url>", text)
 
     def _scrub_logs(self) -> None:
-        """From the first registered URL on, scrub the HTTP stack's log records.
+        """Scrub the HTTP stack's log records, from the first registered URL on.
 
         Done where records are created rather than with a filter per logger:
         a filter sees only its own logger's records, so each logger that
-        writes the URL would have to be found and named.
+        writes the URL would have to be found and named. The record factory
+        is one per process and stays in place; if another has replaced it
+        since, it is wrapped again.
         """
-        if self._scrubbing_logs:
-            return
-        self._scrubbing_logs = True
         create = logging.getLogRecordFactory()
+        if create is self._factory:
+            return
 
         def scrubbed(*args: Any, **kwargs: Any) -> logging.LogRecord:
             record = create(*args, **kwargs)
             if record.name.split(".", 1)[0] in _SCRUBBED_LOGGERS:
-                try:
-                    message = record.getMessage()
-                except Exception:
-                    # Arguments that do not fit the format; logging reports it.
-                    return record
-                cleaned = self.scrub(message)
-                if cleaned != message:
-                    record.msg, record.args = cleaned, ()
+                self._scrub_record(record)
             return record
 
+        self._factory = scrubbed
         logging.setLogRecordFactory(scrubbed)
+
+    def _scrub_record(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+        except Exception:
+            # Arguments that do not fit the format: they cannot be scrubbed
+            # one by one, and logging would print them as they are.
+            message = "<a log message that could not be formatted>"
+        record.msg, record.args = self.scrub(message), ()
+        if record.exc_info:
+            trace = "".join(traceback.format_exception(*record.exc_info)).rstrip("\n")
+            record.exc_text, record.exc_info = self.scrub(trace), None
+        if record.stack_info:
+            record.stack_info = self.scrub(record.stack_info)
 
 
 _REDACTOR: Final = _Redactor()
@@ -156,7 +187,7 @@ class BlockHeader:
     base_fee_wei: int | None
 
 
-def _is_count(value: object) -> bool:
+def _is_count(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
@@ -178,11 +209,32 @@ def _is_transient(exc: BaseException) -> bool:
         requests.Timeout,
         requests.exceptions.ChunkedEncodingError,
     )
-    return isinstance(exc, transport) or _status(exc) in _TRANSIENT_STATUS
+    status = _status(exc)
+    return isinstance(exc, transport) or (status is not None and (status == 429 or status >= 500))
+
+
+class _ErrorTap(BaseProvider):
+    """Passes requests through, keeping the JSON-RPC error of the last response.
+
+    web3 folds some node errors into ``ContractLogicError`` and drops their
+    code, so a rate limit and a revert cannot be told apart from the
+    exception alone.
+    """
+
+    def __init__(self, inner: BaseProvider) -> None:
+        super().__init__()
+        self._inner = inner
+        self.last_error: Mapping[str, Any] | None = None
+
+    def make_request(self, method: Any, params: Any) -> Any:
+        response = self._inner.make_request(method, params)
+        error = response.get("error") if isinstance(response, Mapping) else None
+        self.last_error = error if isinstance(error, Mapping) else None
+        return response
 
 
 class Rpc:
-    """A node on one chain: block headers and contract calls, each at a named block."""
+    """A node on one chain: block headers, and contract calls at a named block."""
 
     def __init__(
         self,
@@ -192,12 +244,18 @@ class Rpc:
         settings: RpcSettings | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._w3 = Web3(provider)
+        # Whoever built the provider, its URL is a secret from here on.
+        endpoint = getattr(provider, "endpoint_uri", None)
+        if endpoint:
+            _REDACTOR.register(str(endpoint))
+        self._tap = _ErrorTap(provider)
+        self._w3 = Web3(self._tap)
         # web3's validation middleware asks the node for its chain ID before
         # every eth_call, doubling the requests. The chain is checked once,
-        # by verify_chain.
+        # before the first read.
         self._w3.middleware_onion.remove("validation")
         self._chain_id = chain_id
+        self._chain_verified = False
         self._settings = settings if settings is not None else RpcSettings()
         self._sleep = sleep
 
@@ -207,35 +265,44 @@ class Rpc:
         return self._chain_id
 
     def verify_chain(self) -> None:
-        """Refuse a node that reports another chain ID than the one expected."""
+        """Refuse a node that reports another chain ID than the one expected.
+
+        Every read does this first, until it has passed once.
+        """
+        if self._chain_verified:
+            return
         reported = self._request("the chain ID", lambda: self._w3.eth.chain_id)
         if reported != self._chain_id:
             raise RpcConfigError(
                 f"the node is on chain {reported!r}, and chain {self._chain_id} was expected"
             )
+        self._chain_verified = True
 
-    def header(self, block: int | None = None) -> BlockHeader:
-        """The header of ``block``, or of the latest block when ``block`` is ``None``."""
-        if block is not None:
-            _require_block(block)
-        what = "the latest block" if block is None else f"block {block}"
-        raw = self._request(
-            what, lambda: self._w3.eth.get_block("latest" if block is None else block)
-        )
+    def latest_header(self) -> BlockHeader:
+        """The header of the latest block: the one read that names no block."""
+        return self._header("the latest block", "latest")
+
+    def header(self, block: int) -> BlockHeader:
+        """The header of ``block``."""
+        _require_block(block)
+        header = self._header(f"block {block}", block)
+        if header.number != block:
+            raise MalformedResponse(
+                f"asked for block {block}, and the node sent block {header.number}"
+            )
+        return header
+
+    def _header(self, what: str, block: Any) -> BlockHeader:
+        self.verify_chain()
+        raw = self._request(what, lambda: self._w3.eth.get_block(block))
         if not isinstance(raw, Mapping):
             raise MalformedResponse(f"{what} came back as {type(raw).__name__}, not a mapping")
         number, timestamp = raw.get("number"), raw.get("timestamp")
         base_fee = raw.get("baseFeePerGas")
-        if (
-            not _is_count(number)
-            or not _is_count(timestamp)
-            or not (base_fee is None or _is_count(base_fee))
-        ):
-            raise MalformedResponse(
-                f"{what} has number {number!r}, timestamp {timestamp!r} and base fee {base_fee!r}"
-            )
-        if block is not None and number != block:
-            raise MalformedResponse(f"asked for block {block}, and the node sent block {number}")
+        if not _is_count(number) or not _is_count(timestamp):
+            raise MalformedResponse(f"{what} has number {number!r} and timestamp {timestamp!r}")
+        if base_fee is not None and not _is_count(base_fee):
+            raise MalformedResponse(f"{what} has a base fee of {base_fee!r}")
         return BlockHeader(number=number, timestamp=timestamp, base_fee_wei=base_fee)
 
     def call(
@@ -251,12 +318,17 @@ class Rpc:
 
         An ``eth_call``: nothing is sent or signed. One output comes back
         bare and several come back as a sequence, decoded by the ABI entry.
+        An address, a name or an argument that does not fit the ABI raises
+        web3's own exception before anything is asked: that is the caller's
+        mistake, not an answer of the node's.
         """
         _require_block(block)
-        # Bound outside the request: an address, a name or an argument that
-        # does not fit the ABI is the caller's mistake, not the node's answer.
         contract = self._w3.eth.contract(address=address, abi=abi)  # type: ignore[call-overload]
+        # Encoded once here, outside the request, for the check alone: an
+        # address nested in a tuple argument is only looked at on encoding.
+        contract.encode_abi(function, args=list(args))
         bound = getattr(contract.functions, function)(*args)
+        self.verify_chain()
         return self._request(
             f"{function}() on {address} at block {block}",
             lambda: bound.call(block_identifier=block),
@@ -282,11 +354,29 @@ class Rpc:
     def _translate(self, what: str, exc: Exception, *, last: bool) -> ChainError | None:
         """The error to raise for ``exc``, or ``None`` to try the read again."""
         said = f"{type(exc).__name__}: {_REDACTOR.scrub(str(exc))}"
-        if isinstance(exc, ContractLogicError):
-            return CallReverted(f"{what} reverted ({said})")
         if isinstance(exc, _Web3BlockNotFound):
             return BlockNotFound(f"the node does not have {what}")
-        if isinstance(exc, Web3RPCError):
+        if isinstance(exc, ContractLogicError | Web3RPCError):
+            # The node answered with an error. It is read off the response
+            # itself: the exception no longer says which code it came with.
+            error = self._tap.last_error or {}
+            code, message = error.get("code"), str(error.get("message", "")).lower()
+            if code in _RATE_LIMIT_CODES:
+                if not last:
+                    return None
+                attempts = self._settings.attempts
+                return RpcUnavailable(f"{what} was rate-limited on {attempts} attempt(s) ({said})")
+            if isinstance(exc, ContractLogicError) and (
+                code == _REVERT_CODE or "execution reverted" in message
+            ):
+                return CallReverted(f"{what} reverted ({said})")
+            if any(phrase in message for phrase in _BEHIND):
+                return BlockNotFound(f"the node is behind {what} ({said})")
+            if any(phrase in message for phrase in _NO_STATE):
+                return RpcConfigError(
+                    f"the node no longer has the state for {what}; "
+                    f"an archive node is needed ({said})"
+                )
             return RpcRejected(f"the node refused {what} ({said})")
         if _is_transient(exc):
             if not last:
@@ -304,8 +394,9 @@ def http_provider(
 ) -> HTTPProvider:
     """The provider for the endpoint the environment names, its URL made a secret.
 
-    Every provider on a real endpoint is built here: a URL handed to
-    ``HTTPProvider`` directly would not be scrubbed from errors and logs.
+    From this call on, and for the life of the process, the log records of
+    ``web3``, ``urllib3`` and ``requests`` are scrubbed of the URL as they
+    are created (:func:`logging.setLogRecordFactory`).
     """
     settings = settings if settings is not None else RpcSettings()
     url = (os.environ if env is None else env).get(settings.url_env, "").strip()

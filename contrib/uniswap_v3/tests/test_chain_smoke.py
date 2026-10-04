@@ -40,7 +40,7 @@ def rpc() -> Rpc:
 
 
 def test_the_current_prices_and_a_quote_agree(rpc, capsys):
-    head = rpc.header().number
+    head = rpc.latest_header().number
     usdc_weth = read_slot0(rpc, _USDC_WETH, head)
     wbtc_weth = read_slot0(rpc, _WBTC_WETH, head)
     eth = price_from_sqrt_price_x96(_USDC_WETH, usdc_weth.sqrt_price_x96, base=_WETH)

@@ -7,11 +7,19 @@ from decimal import Decimal
 import pytest
 from eth_abi import decode
 
-from contrib.uniswap_v3.chain.errors import MalformedResponse, RpcConfigError
+from contrib.uniswap_v3.chain.errors import (
+    InsufficientLiquidity,
+    MalformedResponse,
+    RpcConfigError,
+)
 from contrib.uniswap_v3.chain.pool_price import read_slot0
 from contrib.uniswap_v3.chain.quoter import Quote, quote_exact_input
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, QUOTER_V2, TOKENS
-from contrib.uniswap_v3.domain.prices import price_from_sqrt_price_x96
+from contrib.uniswap_v3.domain.prices import (
+    MAX_SQRT_RATIO,
+    MIN_SQRT_RATIO,
+    price_from_sqrt_price_x96,
+)
 from contrib.uniswap_v3.tests.fakes.rpc import (
     ReplayProvider,
     ScriptedProvider,
@@ -31,12 +39,12 @@ _SINGLE_OUT = ["uint256", "uint160", "uint32", "uint256"]
 _PATH_OUT = ["uint256", "uint160[]", "uint32[]", "uint256"]
 
 
-def _single(amount_out: int, gas: int) -> ScriptedProvider:
-    return answering({"result": encoded(_SINGLE_OUT, [amount_out, 2**96, 1, gas])})
+def _single(amount_out: int, gas: int, *, after: int = 2**96) -> ScriptedProvider:
+    return answering({"result": encoded(_SINGLE_OUT, [amount_out, after, 1, gas])})
 
 
-def _path(amount_out: int, gas: int) -> ScriptedProvider:
-    return answering({"result": encoded(_PATH_OUT, [amount_out, [2**96, 2**96], [1, 1], gas])})
+def _path(amount_out: int, gas: int, *, after: tuple[int, int] = (2**96, 2**96)) -> ScriptedProvider:
+    return answering({"result": encoded(_PATH_OUT, [amount_out, list(after), [1, 1], gas])})
 
 
 def _arguments(provider, types: list[str]) -> tuple:
@@ -126,6 +134,7 @@ def test_a_quote_of_nothing_out_is_an_answer():
         (_USDC, [_WBTC_WETH], "holding USDC, which that pool does not trade"),
         (_WBTC, [_WBTC_WETH, _WBTC_WETH, _USDC_WETH], "holding WBTC, which that pool does not"),
         (_USDC, ["USDC/WETH-500"], "Pool values"),
+        (_USDC, [_USDC_WETH, _USDC_WETH], "ends in USDC, the token it started with"),
     ],
 )
 def test_a_route_the_token_cannot_walk_is_refused_before_any_request(token_in, route, message):
@@ -161,6 +170,25 @@ def test_a_chain_without_a_known_quoter_is_refused():
     with pytest.raises(RpcConfigError, match="no QuoterV2 address is known for chain 5"):
         quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1), block=7)
     assert provider.requests == []
+
+
+@pytest.mark.parametrize("after", [MIN_SQRT_RATIO + 1, MAX_SQRT_RATIO - 1, MIN_SQRT_RATIO])
+def test_a_pool_swapped_to_the_end_of_its_range_is_not_a_quote(after):
+    rpc, _ = rpc_over(_single(amount_out=5 * 10**17, gas=900_000, after=after))
+    with pytest.raises(InsufficientLiquidity, match="USDC/WETH .* ran out of liquidity at block 7"):
+        quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1000), block=7)
+
+    # On a path, whichever pool it was.
+    rpc, _ = rpc_over(_path(amount_out=3_800_000, gas=900_000, after=(2**96, after)))
+    with pytest.raises(InsufficientLiquidity, match="WBTC/WETH .* before 1000 USDC was swapped"):
+        quote_exact_input(rpc, _USDC, [_USDC_WETH, _WBTC_WETH], Decimal(1000), block=7)
+
+
+def test_a_price_one_step_inside_the_range_ends_is_a_quote():
+    rpc, _ = rpc_over(_single(amount_out=1, gas=70_000, after=MIN_SQRT_RATIO + 2))
+    assert quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1), block=7).gas_estimate == 70_000
+    rpc, _ = rpc_over(_single(amount_out=1, gas=70_000, after=MAX_SQRT_RATIO - 2))
+    assert quote_exact_input(rpc, _USDC, [_USDC_WETH], Decimal(1), block=7).gas_estimate == 70_000
 
 
 def test_a_gas_estimate_of_zero_is_refused():

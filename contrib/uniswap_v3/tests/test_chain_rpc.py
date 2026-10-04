@@ -1,16 +1,20 @@
 """The connection: what it reads, what it retries, and what it never says.
 
-The secret is the URL. Each test that provokes a failure also reads the
-exception, and the log where one is written, for the key.
+The secret is the URL. The tests that provoke a transport failure read the
+exception for the key, and the ones that write a log record read the log.
 """
 
 from __future__ import annotations
 
 import logging
+import socket
 
 import pytest
 import requests
+from web3 import HTTPProvider
+from web3.exceptions import InvalidAddress, MismatchedABI
 
+from contrib.uniswap_v3.chain import errors
 from contrib.uniswap_v3.chain.errors import (
     BlockNotFound,
     CallReverted,
@@ -19,10 +23,13 @@ from contrib.uniswap_v3.chain.errors import (
     RpcConfigError,
     RpcRejected,
     RpcUnavailable,
+    TransientChainError,
+    UnansweredRead,
 )
 from contrib.uniswap_v3.chain.pool_price import _POOL_ABI, read_slot0, read_twap_tick
-from contrib.uniswap_v3.chain.rpc import BlockHeader, RpcSettings, connect, http_provider
-from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
+from contrib.uniswap_v3.chain.quoter import _QUOTER_ABI
+from contrib.uniswap_v3.chain.rpc import BlockHeader, Rpc, RpcSettings, connect, http_provider
+from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, QUOTER_V2
 from contrib.uniswap_v3.tests.fakes.rpc import (
     ReplayProvider,
     ScriptedProvider,
@@ -74,14 +81,19 @@ def test_connect_refuses_a_value_that_is_not_an_http_url_without_quoting_it(valu
     assert _KEY not in str(caught.value)
 
 
+def _closed_port() -> int:
+    """A loopback port nothing listens on: one the system just handed out and took back."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
+
+
 def test_a_failed_connection_leaks_the_url_into_neither_the_error_nor_the_log(caplog):
     caplog.set_level(logging.DEBUG)
-    # Nothing listens on the discard port, so the connection is refused.
     settings = RpcSettings(timeout_seconds=2, attempts=1)
+    url = f"http://127.0.0.1:{_closed_port()}/v2/{_KEY}"
     with pytest.raises(RpcUnavailable) as caught:
-        connect(
-            ETHEREUM_MAINNET, settings=settings, env={"ETH_RPC_URL": f"http://127.0.0.1:9/v2/{_KEY}"}
-        )
+        connect(ETHEREUM_MAINNET, settings=settings, env={"ETH_RPC_URL": url})
     assert "the chain ID failed after 1 attempt(s)" in str(caught.value)
     assert _KEY not in str(caught.value)
     # The exception that held the URL is not reachable from this one.
@@ -116,6 +128,66 @@ def test_every_logger_of_the_http_stack_is_scrubbed_and_no_other(logger, caplog)
     assert "https://docs.example/page" in caplog.text
 
 
+def test_a_logged_traceback_and_an_unformattable_record_are_scrubbed(caplog):
+    caplog.set_level(logging.DEBUG)
+    http_provider(env={"ETH_RPC_URL": f"https://node.example/v2/{_KEY}"})
+    http_provider(env={"ETH_RPC_URL": "https://node.example/v2/key-spelled-out-in-a-source-line"})
+    log = logging.getLogger("urllib3.connection")
+    try:
+        raise requests.ConnectionError(f"Max retries exceeded with url: /v2/{_KEY}")
+    except requests.ConnectionError:
+        # The stack is printed as source lines, this one among them.
+        log.warning("the request failed", exc_info=True, stack_info=True)  # key-spelled-out-in-a-source-line
+    # More placeholders than arguments: logging would print the arguments raw.
+    log.warning("bad %s %s", f"/v2/{_KEY}")
+    assert _KEY not in caplog.text and "key-spelled-out" not in caplog.text
+    assert "stack_info=True)  # <redacted>" in caplog.text
+    assert "ConnectionError: Max retries exceeded with url: <redacted>" in caplog.text
+    assert "<a log message that could not be formatted>" in caplog.text
+
+
+def test_scrubbing_survives_another_record_factory_being_installed(caplog):
+    caplog.set_level(logging.DEBUG)
+    ours = logging.getLogRecordFactory()
+    try:
+        logging.setLogRecordFactory(logging.LogRecord)
+        http_provider(env={"ETH_RPC_URL": f"https://node.example/v2/{_KEY}"})
+        logging.getLogger("urllib3.connectionpool").debug("POST /v2/%s HTTP/1.1", _KEY)
+        assert _KEY not in caplog.text and "POST <redacted> HTTP/1.1" in caplog.text
+    finally:
+        logging.setLogRecordFactory(ours)
+
+
+@pytest.mark.parametrize(
+    ("url", "quoted"),
+    [
+        # A short key: the path it sits in is long enough to be registered.
+        ("https://node.example/v2/abc12", "POST /v2/abc12 HTTP/1.1"),
+        # One segment of the path, quoted without the rest.
+        ("https://node.example/v2/longer-key-1/eth", "the key longer-key-1 was refused"),
+        ("https://user:hunter2-pass@node.example/", "auth hunter2-pass refused"),
+        ("https://node.example/rpc?apikey=query-key-1&x=1", "sent query-key-1 to the node"),
+    ],
+)
+def test_the_pieces_of_a_url_that_are_quoted_alone_are_secret_too(url, quoted):
+    http_provider(env={"ETH_RPC_URL": url})
+    rpc, _ = rpc_over(_failing(requests.ConnectionError(quoted)), attempts=1)
+    with pytest.raises(RpcUnavailable) as caught:
+        rpc.header(7)
+    assert "<redacted>" in str(caught.value)
+    for secret in ("abc12", "longer-key-1", "hunter2-pass", "query-key-1"):
+        assert secret not in str(caught.value)
+
+
+def test_a_provider_built_by_hand_has_its_url_made_secret_all_the_same():
+    url = f"http://127.0.0.1:{_closed_port()}/v2/BUILT-BY-HAND-KEY"
+    provider = HTTPProvider(url, exception_retry_configuration=None)
+    rpc = Rpc(provider, ETHEREUM_MAINNET, settings=RpcSettings(timeout_seconds=2, attempts=1))
+    with pytest.raises(RpcUnavailable) as caught:
+        rpc.header(7)
+    assert "BUILT-BY-HAND-KEY" not in str(caught.value) and "<redacted>" in str(caught.value)
+
+
 def test_settings_refuse_values_that_cannot_work():
     for bad in (
         {"url_env": " "},
@@ -137,9 +209,27 @@ def test_verify_chain_passes_on_the_expected_chain_and_refuses_another():
     rpc.verify_chain()
     assert rpc.chain_id == ETHEREUM_MAINNET
 
-    other, _ = rpc_over(answering({"result": "0x5"}))
+    other, _ = rpc_over(answering({"result": "0x5"}, chain_id=None))
     with pytest.raises(RpcConfigError, match="on chain 5, and chain 1 was expected"):
         other.verify_chain()
+
+
+def test_every_read_checks_the_chain_first_until_it_has_passed_once():
+    provider = ReplayProvider(CASSETTE)
+    rpc, _ = rpc_over(provider)
+    assert provider.chain_checks == 0
+    rpc.header(BLOCK)
+    read_slot0(rpc, _POOL, BLOCK)
+    rpc.latest_header()
+    assert provider.chain_checks == 1
+
+    # A node on another chain answers no read, however the Rpc was built.
+    wrong = ScriptedProvider(lambda method, params: {"result": block_result(7, 1_500_000_000)})
+    rpc, _ = rpc_over(wrong, chain_id=5)
+    for read in (lambda: rpc.header(7), rpc.latest_header, lambda: read_slot0(rpc, _POOL, 7)):
+        with pytest.raises(RpcConfigError, match="on chain 1, and chain 5 was expected"):
+            read()
+    assert wrong.requests == [] and wrong.chain_checks == 3
 
 
 # --- headers ---------------------------------------------------------------
@@ -150,7 +240,7 @@ def test_header_reads_a_recorded_block_and_the_latest():
     assert rpc.header(BLOCK) == BlockHeader(
         number=BLOCK, timestamp=1_693_066_895, base_fee_wei=21_721_091_641
     )
-    latest = rpc.header()
+    latest = rpc.latest_header()
     assert latest.number > BLOCK and latest.timestamp > 1_693_066_895
 
 
@@ -205,7 +295,10 @@ def test_a_block_is_a_non_negative_integer(block):
         requests.Timeout("timed out"),
         requests.exceptions.ChunkedEncodingError("connection broken"),
         _http_error(429),
+        _http_error(500),
         _http_error(503),
+        # What a proxy in front of a node answers when the node is down.
+        _http_error(522),
     ],
 )
 def test_a_transient_failure_is_retried_with_a_doubling_wait(failure):
@@ -247,11 +340,93 @@ def test_an_http_refusal_is_not_retried_and_a_refused_key_is_a_setup_fault(statu
 
 
 def test_a_node_error_is_not_retried():
-    provider = answering({"error": {"code": -32000, "message": "missing trie node"}})
+    provider = answering({"error": {"code": -32602, "message": "invalid argument 0"}})
     rpc, waits = rpc_over(provider)
-    with pytest.raises(RpcRejected, match="missing trie node"):
+    with pytest.raises(RpcRejected, match="the node refused slot0.*invalid argument 0"):
         read_slot0(rpc, _POOL, 7)
     assert waits == [] and len(provider.requests) == 1
+
+
+_RATE_LIMITS = [
+    # Infura's shape: web3 reads the mapping under "data" as a revert.
+    {"code": -32005, "message": "daily request count exceeded", "data": {"see": "the dashboard"}},
+    {"code": -32005, "message": "limit exceeded", "data": None},
+    {"code": 429, "message": "Your app has exceeded its compute units per second capacity."},
+]
+
+
+@pytest.mark.parametrize("error", _RATE_LIMITS)
+def test_a_rate_limit_sent_as_a_json_rpc_error_is_retried(error):
+    remaining = [{"error": error}, {"error": error}]
+    slot0 = encoded(["uint160", "int24", "uint16", "uint16", "uint16", "uint8", "bool"],
+                    [2**96, 0, 0, 1, 1, 0, True])
+    provider = ScriptedProvider(
+        lambda method, params: remaining.pop(0) if remaining else {"result": slot0}
+    )
+    rpc, waits = rpc_over(provider)
+    assert read_slot0(rpc, _POOL, 7).sqrt_price_x96 == 2**96
+    assert waits == [0.5, 1.0] and len(provider.requests) == 3
+
+
+@pytest.mark.parametrize("error", _RATE_LIMITS)
+def test_a_rate_limit_that_outlasts_the_attempts_is_not_a_revert(error):
+    for read in (lambda rpc: read_slot0(rpc, _POOL, 7), lambda rpc: rpc.header(7)):
+        rpc, waits = rpc_over(answering({"error": error}))
+        with pytest.raises(RpcUnavailable, match=r"was rate-limited on 3 attempt\(s\)") as caught:
+            read(rpc)
+        assert type(caught.value) is RpcUnavailable and waits == [0.5, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("error", "kind", "message"),
+    [
+        # A node behind the block asked for: the block is not there yet.
+        ({"code": -32000, "message": "header not found"}, BlockNotFound, "the node is behind"),
+        ({"code": -32000, "message": "Unknown block"}, BlockNotFound, "the node is behind"),
+        # A node that has dropped the block's state: it is not an archive node.
+        (
+            {"code": -32000, "message": "missing trie node 5f1e (path ) state 0x9a is not available"},
+            RpcConfigError,
+            "an archive node is needed",
+        ),
+        (
+            {"code": -32000, "message": "historical state 9a2b is pruned", "data": None},
+            RpcConfigError,
+            "an archive node is needed",
+        ),
+        # An error with no revert in it that web3 nevertheless reads as one.
+        ({"code": -32000, "message": "out of gas", "data": None}, RpcRejected, "the node refused"),
+    ],
+)
+def test_a_node_error_is_classed_by_what_the_node_said(error, kind, message):
+    provider = answering({"error": error})
+    rpc, waits = rpc_over(provider)
+    with pytest.raises(kind, match=message) as caught:
+        read_twap_tick(rpc, _POOL, 7)
+    assert type(caught.value) is kind
+    assert waits == [] and len(provider.requests) == 1
+
+
+def test_the_error_classes_say_what_a_caller_can_do():
+    by_action = {
+        TransientChainError: {RpcUnavailable, BlockNotFound},
+        UnansweredRead: {
+            CallReverted,
+            MalformedResponse,
+            RpcRejected,
+            errors.InsufficientLiquidity,
+        },
+    }
+    for action, kinds in by_action.items():
+        assert all(issubclass(kind, action) for kind in kinds)
+    # Every class is in exactly one group; the setup fault is a group of its own.
+    leaves = {
+        kind
+        for kind in vars(errors).values()
+        if isinstance(kind, type) and issubclass(kind, ChainError) and not kind.__subclasses__()
+    }
+    assert leaves == by_action[TransientChainError] | by_action[UnansweredRead] | {RpcConfigError}
+    assert not issubclass(RpcConfigError, TransientChainError | UnansweredRead)
 
 
 # --- calls -----------------------------------------------------------------
@@ -277,34 +452,50 @@ def test_a_call_to_an_address_without_code_is_refused():
         read_slot0(rpc, _POOL, 7)
 
 
+_QUOTE_WITH_A_LOWERCASE_TOKEN = (
+    (_POOL.token0.address.lower(), _POOL.token1.address, 10, 500, 0),
+)
+
+
 @pytest.mark.parametrize(
-    ("address", "function", "args"),
+    ("address", "abi", "function", "args", "kind"),
     [
         # Not an EIP-55 checksum.
-        (_POOL.address.lower(), "slot0", ()),
-        ("0x88e6", "slot0", ()),
-        (_POOL.address, "slot1", ()),
-        (_POOL.address, "slot0", (1,)),
-        (_POOL.address, "observe", ("soon",)),
+        (_POOL.address.lower(), _POOL_ABI, "slot0", (), InvalidAddress),
+        ("0x88e6", _POOL_ABI, "slot0", (), InvalidAddress),
+        (_POOL.address, _POOL_ABI, "slot1", (), MismatchedABI),
+        (_POOL.address, _POOL_ABI, "slot0", (1,), MismatchedABI),
+        (_POOL.address, _POOL_ABI, "observe", ("soon",), MismatchedABI),
+        # An address inside a tuple argument, which only encoding looks at.
+        (
+            QUOTER_V2[ETHEREUM_MAINNET],
+            _QUOTER_ABI,
+            "quoteExactInputSingle",
+            _QUOTE_WITH_A_LOWERCASE_TOKEN,
+            InvalidAddress,
+        ),
     ],
 )
 def test_a_call_that_does_not_fit_the_abi_is_the_callers_error_and_sends_nothing(
-    address, function, args
+    address, abi, function, args, kind
 ):
     provider = ReplayProvider(CASSETTE)
     rpc, _ = rpc_over(provider)
-    with pytest.raises(Exception) as caught:  # noqa: B017, PT011 - whatever web3 raises
-        rpc.call(address, _POOL_ABI, function, args, block=BLOCK)
-    # Not a chain error: nothing a caller should skip a bar over.
+    # web3's own exception, not a chain error: nothing to skip a bar over.
+    with pytest.raises(kind) as caught:
+        rpc.call(address, abi, function, args, block=BLOCK)
     assert not isinstance(caught.value, ChainError)
-    assert provider.requests == []
+    assert provider.requests == [] and provider.chain_checks == 0
 
 
 def test_a_call_asks_the_node_once_and_at_the_block_named():
     provider = ReplayProvider(CASSETTE)
     rpc, _ = rpc_over(provider)
     read_slot0(rpc, _POOL, BLOCK)
-    # One request: web3's own chain-ID check before each call is switched off.
-    [(method, params)] = provider.requests
-    assert method == "eth_call"
+    read_slot0(rpc, _POOL, BLOCK)
+    # One request a call, and one chain check in all: web3's own check
+    # before each call is switched off.
+    [(method, params), again] = provider.requests
+    assert (method, params) == again and method == "eth_call"
     assert params[0]["to"] == _POOL.address and params[1] == hex(BLOCK)
+    assert provider.chain_checks == 1

@@ -1,9 +1,16 @@
 """Exact-input quotes from QuoterV2, over one pool or a path of them.
 
-QuoterV2's quote functions are not ``view``: each runs the swap and reverts
-to report the result. They are only ever reached with ``eth_call``, which
-sends nothing. A quote names its block, so a backtest can ask an archive
-node what the same swap would have returned then.
+QuoterV2's quote functions are not ``view``: each runs the swap inside a
+revert that QuoterV2 itself catches, and returns what the swap would have
+given. They are only ever reached with ``eth_call``, which sends nothing. A
+quote names its block, so a backtest can ask an archive node what the same
+swap would have returned then.
+
+No price limit is set, so a pool is swapped against for as long as it has
+liquidity. If it runs out, the pool stops at the end of its price range and
+QuoterV2 reports what the part it did swap returned; that is refused here
+(:class:`~.errors.InsufficientLiquidity`), since the quote would not be for
+the amount asked.
 """
 
 from __future__ import annotations
@@ -14,8 +21,9 @@ from decimal import Decimal
 from typing import Any, Final
 
 from ..constants import QUOTER_V2
+from ..domain.prices import MAX_SQRT_RATIO, MIN_SQRT_RATIO
 from ..domain.types import Pool, Token
-from .errors import MalformedResponse, RpcConfigError
+from .errors import InsufficientLiquidity, MalformedResponse, RpcConfigError
 from .rpc import Rpc
 from .units import from_raw, to_raw
 
@@ -71,9 +79,10 @@ class Quote:
     """What an exact-input swap would have returned at the end of ``block``.
 
     Amounts are whole tokens. ``amount_out`` is after the pool fees and can
-    be zero for a dust input. ``gas_estimate`` is the gas the swap itself
-    used inside the quoter, in gas units; a transaction pays its base cost
-    and its token approvals on top.
+    be zero for a dust input. ``gas_estimate`` is the gas the pools' swaps
+    used inside the quoter, in gas units. A real swap costs more: the
+    transaction's base cost, the router's own work, the transfer of the
+    input token and any token approval come on top.
     """
 
     token_in: Token
@@ -121,6 +130,8 @@ def quote_exact_input(
     cannot fill reverts, which raises :class:`~.errors.CallReverted`.
     """
     tokens = _tokens_along(token_in, route)
+    if tokens[-1] == token_in:
+        raise ValueError(f"the route ends in {token_in.symbol}, the token it started with")
     raw_in = to_raw(token_in, amount_in)
     if raw_in == 0:
         raise ValueError("amount_in must be above zero")
@@ -135,8 +146,17 @@ def quote_exact_input(
         path = _encode_path(tokens, route)
         result = rpc.call(quoter, _QUOTER_ABI, "quoteExactInput", (path, raw_in), block=block)
 
-    # Decoded by the ABI above: four outputs, the first and last uint256.
-    raw_out, _, _, gas_estimate = result
+    # Decoded by the ABI above: four outputs, the first and last uint256, the
+    # second one price for a single pool and a list of them for a path.
+    raw_out, after, _, gas_estimate = result
+    for pool, sqrt_price_x96 in zip(route, [after] if len(route) == 1 else after, strict=True):
+        # Where a swap with no price limit stops when nothing is left to
+        # swap against: one step inside TickMath's bounds.
+        if not MIN_SQRT_RATIO + 1 < sqrt_price_x96 < MAX_SQRT_RATIO - 1:
+            raise InsufficientLiquidity(
+                f"the pool {pool.token0.symbol}/{pool.token1.symbol} ({pool.address}) ran out "
+                f"of liquidity at block {block} before {amount_in} {token_in.symbol} was swapped"
+            )
     if gas_estimate <= 0:
         raise MalformedResponse(
             f"QuoterV2 at block {block} returned a gas estimate of {gas_estimate!r}"

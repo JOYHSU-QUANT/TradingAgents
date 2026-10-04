@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from contrib.uniswap_v3.chain.blocks import ChainBlockLocator
-from contrib.uniswap_v3.chain.errors import BlockNotFound, MalformedResponse
+from contrib.uniswap_v3.chain.errors import BlockNotFound, MalformedResponse, RpcConfigError
 from contrib.uniswap_v3.ports import BlockLocator
 from contrib.uniswap_v3.tests.fakes.rpc import (
     ReplayProvider,
@@ -166,6 +166,19 @@ def test_kept_blocks_are_held_against_what_a_later_search_reads():
     lies.update({number: timestamps[600] + number - 250 for number in range(250, 374)})
     with pytest.raises(MalformedResponse, match="block times must increase"):
         locator.first_block_at_or_after(timestamps[300])
+
+
+def test_a_node_that_lacks_a_block_below_its_head_is_a_setup_fault():
+    timestamps = _uneven(1_000)
+
+    def respond(method, params):
+        number = len(timestamps) - 1 if params[0] == "latest" else int(params[0], 16)
+        # Only the last 128 blocks are kept, as on a node that prunes history.
+        return {"result": block_result(number, timestamps[number]) if number > 871 else None}
+
+    rpc, _ = rpc_over(ScriptedProvider(respond))
+    with pytest.raises(RpcConfigError, match="does not keep block 499, which is below its head"):
+        ChainBlockLocator(rpc).first_block_at_or_after(timestamps[300])
 
 
 @pytest.mark.parametrize("time", [-1, 1.5, "10", True])

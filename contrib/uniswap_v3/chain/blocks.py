@@ -3,7 +3,9 @@
 A bisection over block numbers, since timestamps only grow. Before the
 answer is returned, every timestamp the search read is checked to be in
 block order; a node that reported two blocks out of order raises. A time
-the chain has not reached raises too; no block is extrapolated.
+the chain has not reached raises too; no block is extrapolated. So does a
+node that lacks a block below its own head: it does not keep the history the
+search needs.
 
 Timestamps read along the way are kept, and narrow the next search. They
 are kept only once the search they were read in has passed that check, and
@@ -16,7 +18,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from typing import Final
 
-from .errors import BlockNotFound, MalformedResponse
+from .errors import BlockNotFound, MalformedResponse, RpcConfigError
 from .rpc import Rpc
 
 __all__ = ["ChainBlockLocator"]
@@ -43,11 +45,25 @@ class ChainBlockLocator:
         index = bisect_left(self._numbers, block)
         return index if index < len(self._numbers) and self._numbers[index] == block else None
 
+    def _timestamp(self, block: int) -> int:
+        """The timestamp of ``block``, which is below the head."""
+        kept = self._kept_index(block)
+        if kept is not None:
+            return self._times[kept]
+        try:
+            return self._rpc.header(block).timestamp
+        except BlockNotFound:
+            # Not a block that is still to come: waiting will not bring it.
+            raise RpcConfigError(
+                f"the node does not keep block {block}, which is below its head; "
+                f"a node with full block history is needed"
+            ) from None
+
     def first_block_at_or_after(self, time: int) -> int:
         """The number of the first block whose timestamp is at or after ``time``."""
         if isinstance(time, bool) or not isinstance(time, int) or time < 0:
             raise ValueError(f"time is epoch seconds, a non-negative integer, got {time!r}")
-        head = self._rpc.header()
+        head = self._rpc.latest_header()
         if head.timestamp < time:
             raise BlockNotFound(
                 f"no block at or after {time} yet: the latest, block {head.number}, "
@@ -68,12 +84,7 @@ class ChainBlockLocator:
             seen[low - 1] = self._times[index - 1]
         while low < high:
             middle = (low + high) // 2
-            # A kept block lies between the bounds only when the head has
-            # moved back since it was kept.
-            kept = self._kept_index(middle)
-            seen[middle] = (
-                self._times[kept] if kept is not None else self._rpc.header(middle).timestamp
-            )
+            seen[middle] = self._timestamp(middle)
             if seen[middle] >= time:
                 high = middle
             else:

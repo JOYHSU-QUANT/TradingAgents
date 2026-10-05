@@ -10,22 +10,13 @@ from decimal import Decimal
 from typing import Final
 
 from ..domain.decimal_context import DECIMAL_CONTEXT, floor_to_places, plain
-from ..domain.execution import ExecutionSettings
+from ..domain.execution import ExecutionSettings, fill_block
 from ..domain.records import FillSource
 from ..domain.routing import amount_out_at
 from ..domain.types import Bar, Fill, Rejection, SwapIntent, eth_from_wei
 from ..ports import GasOracle, NoQuote, Quoter
 
 __all__ = ["ModelExecutor", "QuoteExecutor", "fill_block"]
-
-
-def fill_block(bar: Bar, settings: ExecutionSettings) -> int:
-    """The block a virtual fill decided on ``bar`` is taken at.
-
-    ``settings.delay_blocks`` after the first block of the bar's boundary,
-    which is the block after its close block.
-    """
-    return bar.close_block + 1 + settings.delay_blocks
 
 
 class ModelExecutor:

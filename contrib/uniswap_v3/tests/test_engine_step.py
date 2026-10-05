@@ -564,21 +564,14 @@ def test_a_run_is_carried_on_only_by_an_executor_of_the_source_it_keeps(store):
         open_engine(store, _CONFIG, modelled, run_id=_RUN, now=_DECIDED_AT)
 
 
-@pytest.mark.parametrize(
-    ("mode", "match"),
-    [
-        (RunMode.FORK, "a run whose fills come from the chain is not started: an executor"),
-        (RunMode.LIVE, "a live run is not started: trading with real funds"),
-    ],
-)
-def test_a_run_that_fills_from_the_chain_is_not_started_yet(store, mode, match):
+def test_a_live_run_is_not_started(store):
     # Its id is not taken: a run that could never be opened is not stored.
-    with pytest.raises(EngineError, match=match):
+    with pytest.raises(EngineError, match="a live run is not started: trading with real funds"):
         start_run(
             store,
             _CONFIG,
             run_id=_RUN,
-            mode=mode,
+            mode=RunMode.LIVE,
             ledger=_ledger(),
             created_at=0,
             fills=FillSource.CHAIN,
@@ -586,20 +579,67 @@ def test_a_run_that_fills_from_the_chain_is_not_started_yet(store, mode, match):
     assert store.run(_RUN) is None
 
 
-def test_an_executor_that_signs_is_not_opened_on_any_run(store):
+def test_a_fork_run_is_started_with_the_block_its_fork_was_at_and_no_other_run_is(store):
+    run = start_run(
+        store,
+        _CONFIG,
+        run_id=_RUN,
+        mode=RunMode.FORK,
+        ledger=_ledger(),
+        created_at=0,
+        fills=FillSource.CHAIN,
+        fork_block=26_100_000,
+    )
+    assert store.run(_RUN) == run and run.fork_block == 26_100_000
+    for mode, fills, block in (
+        (RunMode.FORK, FillSource.CHAIN, None),
+        (RunMode.BACKTEST, FillSource.MODEL, 26_100_000),
+    ):
+        with pytest.raises(EngineError, match="a fork run, and no other, names the block"):
+            start_run(
+                store,
+                _CONFIG,
+                run_id="another",
+                mode=mode,
+                ledger=_ledger(),
+                created_at=0,
+                fills=fills,
+                fork_block=block,
+            )
+    assert store.run("another") is None
+
+
+class _Signing:
+    source = FillSource.CHAIN
+
+    def execute(self, swap, bar):
+        raise AssertionError("never asked")
+
+
+def test_an_engine_has_a_wallet_exactly_when_its_executor_signs(store):
+    def engine(executor, wallet):
+        return Engine(
+            run_id=_RUN,
+            config=_CONFIG,
+            strategy=ScriptedStrategy({}),
+            executor=executor,
+            journal=store,
+            decided_at=_DECIDED_AT,
+            wallet=wallet,
+        )
+
+    with pytest.raises(EngineError, match="signs from a wallet, which is handed with it"):
+        engine(_Signing(), None)
+    modelled = ModelExecutor("USDC", _CONFIG.execution)
+    with pytest.raises(EngineError, match="from the model signs nothing, and is handed no wallet"):
+        engine(modelled, object())
+    assert engine(_Signing(), object()).wallet is not None
+
+
+def test_a_signing_executor_is_held_to_the_runs_source_like_any_other(store):
     start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
-
-    class Signing:
-        source = FillSource.CHAIN
-
-        def execute(self, swap, bar):
-            raise AssertionError("never asked")
-
-    with pytest.raises(EngineError, match="not wired to the step yet"):
-        open_engine(store, _CONFIG, Signing(), run_id=_RUN, now=_DECIDED_AT)
-    # Whatever the run: one that is not there gets the same answer, not "no run".
-    with pytest.raises(EngineError, match="not wired to the step yet"):
-        open_engine(store, _CONFIG, Signing(), run_id="no-such-run", now=_DECIDED_AT)
+    with pytest.raises(EngineError, match="takes its fills from the model"):
+        open_engine(store, _CONFIG, _Signing(), run_id=_RUN, now=_DECIDED_AT, wallet=object())
 
 
 @pytest.mark.parametrize("now", [-1, True, 1.5, None])

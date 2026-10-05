@@ -3,7 +3,7 @@
 The engine step is the same in every :class:`~.domain.types.RunMode`; what
 differs is the adapter behind each of these ``Protocol`` classes. A backtest
 replays stored bars and fills from a model, a paper run reads the chain and
-fills from quotes, and a fork or live run signs.
+fills from quotes, and a fork or live run signs, from a :class:`Wallet`.
 :class:`Strategy` is the only way a strategy enters the package, and
 :class:`Journal` is where every mode writes what it decided.
 
@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from .domain.ledger import Ledger
-from .domain.records import Decision, FillSource, RunRecord, StepRecord
+from .domain.records import Decision, FillSource, OpenSend, RunRecord, StepRecord
 from .domain.types import (
     Bar,
     Fill,
@@ -43,6 +43,7 @@ __all__ = [
     "NoQuote",
     "Quoter",
     "Strategy",
+    "Wallet",
 ]
 
 
@@ -93,11 +94,38 @@ class Executor(Protocol):
         lands where the chain puts it. The fill says which block it was. A
         swap that would deliver less than its ``min_amount_out`` is refused.
 
-        The engine applies a rebalance's fills only when every swap of it
-        filled, and drops the fills it already has when a later swap is
-        refused. That is sound only while a fill changes nothing outside
-        the ledger.
+        For an executor whose fills are virtual (from the model or the
+        quoter), the engine applies a rebalance's fills only when every swap
+        of it filled, and drops the fills it already has when a later swap
+        is refused: such a fill changes nothing outside the ledger. Fills
+        from the chain have changed a wallet, so the engine keeps each one
+        as it comes, and a later swap refused leaves the rebalance partial.
+        A refusal of a signing executor's means that nothing of that swap
+        was sent. So does an exception it raises without ``tx_hashes``; one
+        that may have left something sent names those transactions in a
+        non-empty ``tx_hashes``.
         """
+        ...
+
+
+@runtime_checkable
+class Wallet(Protocol):
+    """The wallet an executor that signs trades from, as the engine sees it.
+
+    The engine asks it to stand ready before a bar's swaps are sent, and
+    checks what it holds against the run's ledger before and after them.
+    """
+
+    def prepare(self, bar: Bar, ledger: Ledger) -> None:
+        """Bring the wallet to where ``bar``'s swaps are sent from, holding ``ledger``.
+
+        A fork's wallet resets the fork to the bar's fill block and is given
+        the ledger's balances. One that cannot raises; it does not send.
+        """
+        ...
+
+    def holdings(self) -> Ledger:
+        """What the wallet holds now: each of the run's tokens, and its ETH as the gas balance."""
         ...
 
 
@@ -126,7 +154,36 @@ class Journal(Protocol):
         ...
 
     def record(self, run_id: str, step: StepRecord) -> None:
-        """Write one step's decision, fills and valuation: all of them, or none."""
+        """Write one step's decision, fills and valuation: all of them, or none.
+
+        A bar whose send is open is settled by it, and its fills must then
+        be the legs written for the send.
+        """
+        ...
+
+    def open_send(self, run_id: str) -> OpenSend | None:
+        """The run's bar whose swaps began to be sent and which has no decision, when there is one."""
+        ...
+
+    def begin_send(self, run_id: str, time: int, *, started_at: int) -> None:
+        """Mark the bar at ``time`` as having its swaps sent, before the first one is.
+
+        A run with an open send, or that has decided the bar, raises.
+        """
+        ...
+
+    def abandon_send(self, run_id: str, time: int) -> None:
+        """Take back the open send at ``time``, begun with nothing of it sent: no leg, no failure."""
+        ...
+
+    def record_leg(self, run_id: str, time: int, leg: int, fill: Fill) -> None:
+        """Write the open send's swap ``leg``, which filled; legs are written in order."""
+        ...
+
+    def fail_send(
+        self, run_id: str, time: int, *, failure: str, gas_eth: Decimal | None
+    ) -> None:
+        """Say what stopped the open send at ``time``, and what gas its failed swap is known to have cost."""
         ...
 
 

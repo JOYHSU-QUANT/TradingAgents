@@ -11,6 +11,7 @@ node's attributes between reads.
 
 from __future__ import annotations
 
+import sqlite3
 from decimal import Decimal, localcontext
 from typing import Any
 
@@ -20,6 +21,7 @@ from web3 import Web3
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, QUOTER_V2
 from contrib.uniswap_v3.domain.bars import Finality, PoolBar
 from contrib.uniswap_v3.domain.types import Pool
+from contrib.uniswap_v3.store.schema import _MIGRATIONS, APPLICATION_ID
 from contrib.uniswap_v3.tests.fakes.rpc import (
     ScriptedProvider,
     block_hash,
@@ -272,3 +274,17 @@ class FakeNode:
                 )
                 return {"result": encoded(["int56[]", "uint160[]"], [[0, mean * window], [0, 0]])}
         raise AssertionError(f"the fake node has no answer for {method} {params!r}")
+
+
+def store_at(path, version: int) -> sqlite3.Connection:
+    """A store the package left at schema ``version``, open in autocommit mode."""
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
+    )
+    for applied in range(1, version + 1):
+        for statement in _MIGRATIONS[applied - 1]:
+            connection.execute(statement)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, 0)", (applied,))
+    return connection

@@ -29,10 +29,16 @@ One swap, from first to last:
    that of every transaction the swap took: the approval's and its own, at
    the price each paid.
 
-:class:`~..domain.types.Rejection` means the wallet is as it was. Once a
-transaction has been mined, a swap that does not fill raises
+A swap whose approval or own transaction the wallet's ETH cannot pay the gas
+of is refused as well, while nothing of it has been mined, and the refusal
+says it was short of gas.
+
+:class:`~..domain.types.Rejection` means the wallet is as it was. While
+nothing has been mined, any other error is raised as it is, and names no
+transaction. Once a transaction has been mined, every error names the
+transactions it took: a swap that does not fill raises
 :class:`~.errors.SwapNotFilled` with the gas spent (only gas moved); one
-that was mined and whose receipt cannot be read as a fill, as when it shows
+that was mined and whose fill cannot be made, as when its receipt shows
 less than the minimum paid, raises :class:`~.errors.SwapOutcomeUnknown`;
 and one whose receipt never came :class:`~.errors.TransactionUnconfirmed`.
 The wallet changed, or may yet change.
@@ -57,7 +63,7 @@ from ..domain.types import Bar, Fill, Rejection, SwapIntent, Token, eth_from_wei
 from ..ports import NoQuote
 from .errors import (
     CallReverted,
-    ChainError,
+    InsufficientFunds,
     RpcConfigError,
     SwapNotFilled,
     SwapOutcomeUnknown,
@@ -161,6 +167,7 @@ class ChainExecutor:
         require_anvil(rpc)
         if rpc.chain_id not in SWAP_ROUTER_02:
             raise RpcConfigError(f"no SwapRouter02 address is known for chain {rpc.chain_id}")
+        self._fork = fork
         self._rpc = rpc
         self._router = SWAP_ROUTER_02[rpc.chain_id]
         self._quoter = ChainQuoter(rpc)
@@ -173,6 +180,11 @@ class ChainExecutor:
     def address(self) -> str:
         """The wallet the swaps are signed by, sold from and paid to."""
         return self._sender.address
+
+    @property
+    def fork(self) -> Fork:
+        """The fork the swaps are sent on."""
+        return self._fork
 
     def balance(self, token: Token, *, block: int) -> Decimal:
         """What the wallet holds of ``token`` at the end of ``block``."""
@@ -232,6 +244,12 @@ class ChainExecutor:
                 return Rejection(
                     swap, f"the approval of {selling} would revert ({exc}); nothing was sent"
                 )
+            except InsufficientFunds as exc:
+                return Rejection(
+                    swap,
+                    f"the approval of {selling} cannot be paid for: {exc}",
+                    short_of_gas=True,
+                )
             except TransactionReverted as exc:
                 raise SwapNotFilled(
                     f"the approval of {selling} reverted ({exc})",
@@ -258,18 +276,38 @@ class ChainExecutor:
                 tx_hashes=_hashes(mined) + exc.tx_hashes,
                 gas_cost_eth=_gas_eth(mined) if mined else None,
             ) from exc
-        except ChainError as exc:
+        except Exception as exc:
+            # Not a send error: this swap's own transaction was not sent.
             if mined:
                 raise SwapNotFilled(
-                    f"{what} was not sent after its approval was mined ({exc})",
+                    f"{what} was not sent after its approval was mined ({exc!r})",
                     tx_hashes=_hashes(mined),
                     gas_cost_eth=_gas_eth(mined),
                 ) from exc
             if isinstance(exc, CallReverted):
                 return Rejection(swap, f"{what} would revert ({exc}); nothing was sent")
+            if isinstance(exc, InsufficientFunds):
+                return Rejection(swap, f"{what} cannot be paid for: {exc}", short_of_gas=True)
             raise
         mined.append(swapped)
+        try:
+            return self._filled(swap, swapped, mined, what)
+        except SwapOutcomeUnknown:
+            raise
+        except Exception as exc:
+            # Whatever else: the swap was mined, and it is named.
+            raise SwapOutcomeUnknown(
+                f"{what} ({swapped.tx_hash}) was mined, and its fill could not be made "
+                f"({exc!r})",
+                tx_hashes=_hashes(mined),
+                gas_cost_eth=_gas_eth(mined),
+            ) from exc
 
+    def _filled(
+        self, swap: SwapIntent, swapped: Receipt, mined: list[Receipt], what: str
+    ) -> Fill:
+        """The fill ``swapped``, the swap's mined transaction, paid; ``mined`` are all it took."""
+        token_out = swap.token_out
         gas_cost_eth = _gas_eth(mined)
 
         def unknown(why: str) -> SwapOutcomeUnknown:

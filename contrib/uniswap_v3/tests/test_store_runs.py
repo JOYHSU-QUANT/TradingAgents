@@ -25,7 +25,6 @@ from contrib.uniswap_v3.domain.records import (
 from contrib.uniswap_v3.domain.types import Fill, RunMode, SwapIntent
 from contrib.uniswap_v3.ports import Journal
 from contrib.uniswap_v3.store.repository import StoreError, open_store
-from contrib.uniswap_v3.store.schema import _MIGRATIONS, APPLICATION_ID
 from contrib.uniswap_v3.tests.fakes.engine import (
     DAY,
     FIRST_DAY,
@@ -36,7 +35,7 @@ from contrib.uniswap_v3.tests.fakes.engine import (
     ledger as _ledger,
     weights,
 )
-from contrib.uniswap_v3.tests.fakes.node import pool_bar
+from contrib.uniswap_v3.tests.fakes.node import pool_bar, store_at as _store_at
 
 D = Decimal
 _HASH = "0x" + "ab" * 32
@@ -59,6 +58,8 @@ def _run(run_id: str = "run-1", **changes) -> RunRecord:
         "ledger": _ledger(),
         "created_at": FIRST_DAY,
     }
+    if changes.get("mode") is RunMode.FORK:
+        fields["fork_block"] = 26_100_000
     return RunRecord(**{**fields, **changes})
 
 
@@ -318,7 +319,9 @@ def _signed(mode: RunMode) -> FillSource:
 @pytest.mark.parametrize("mode", list(RunMode))
 def test_the_schema_takes_every_run_mode(store, mode):
     store.insert_run(_run(mode=mode, fills=_signed(mode)))
-    assert store.run("run-1").mode is mode
+    run = store.run("run-1")
+    assert run.mode is mode
+    assert run.fork_block == (26_100_000 if mode is RunMode.FORK else None)
 
 
 @pytest.mark.parametrize("fills", list(FillSource))
@@ -349,8 +352,8 @@ def test_an_outcome_or_a_reason_code_this_code_does_not_know_is_refused_when_rea
     with open_store(path) as store:
         store.insert_run(_run())
         store.record("run-1", _held())
-    _tamper(path, "UPDATE decisions SET outcome = 'partial'")
-    with open_store(path) as store, pytest.raises(StoreError, match="'partial' is not a valid"):
+    _tamper(path, "UPDATE decisions SET outcome = 'abandoned'")
+    with open_store(path) as store, pytest.raises(StoreError, match="'abandoned' is not a valid"):
         store.decision("run-1", FIRST_DAY)
     _tamper(
         path,
@@ -445,20 +448,6 @@ def test_a_decision_whose_valuation_is_gone_leaves_the_run_without_a_ledger(tmp_
         pytest.raises(StoreError, match=f"at {FIRST_DAY} has no valuation"),
     ):
         store.ledger("run-1")
-
-
-def _store_at(path, version: int) -> sqlite3.Connection:
-    """A store the package left at schema ``version``, open in autocommit mode."""
-    connection = sqlite3.connect(path, isolation_level=None)
-    connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
-    connection.execute(
-        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
-    )
-    for applied in range(1, version + 1):
-        for statement in _MIGRATIONS[applied - 1]:
-            connection.execute(statement)
-        connection.execute("INSERT INTO schema_migrations VALUES (?, 0)", (applied,))
-    return connection
 
 
 def test_a_store_from_before_the_run_tables_gains_them_and_keeps_its_bars(tmp_path):

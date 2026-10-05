@@ -6,10 +6,14 @@ is ``finality``. Inserting a row whose key is already there raises, so a
 caller decides what is missing before it writes, and nothing is silently
 replaced.
 
-A run's rows are only ever added. :meth:`Store.record` writes one bar's
-decision, its fills and its valuation in one transaction, and a second
-decision on the same bar of the same run raises. The store is the engine's
-:class:`~..ports.Journal`.
+A run's rows are only ever added, but for what stopped a send, written once,
+and a send taken back before anything of it was sent.
+:meth:`Store.record` writes one bar's decision, its fills and its valuation
+in one transaction, and a second decision on the same bar of the same run
+raises. A run whose swaps are signed first writes the bar's send
+(:meth:`Store.begin_send`) and each leg as it fills
+(:meth:`Store.record_leg`); the decision then settles the send. The store
+is the engine's :class:`~..ports.Journal`.
 
 The database is kept in SQLite's write-ahead log mode, which
 :func:`open_store` turns on and the file then keeps: beside ``store.db``
@@ -34,13 +38,14 @@ from ..domain.records import (
     Decision,
     FillRecord,
     FillSource,
+    OpenSend,
     Outcome,
     RejectionCode,
     RunRecord,
     StepRecord,
     Valuation,
 )
-from ..domain.types import RunMode, TargetWeights
+from ..domain.types import Fill, RunMode, TargetWeights
 from .schema import SchemaError, migrate, transaction
 
 __all__ = ["Store", "StoreBusy", "StoreError", "open_store"]
@@ -165,6 +170,45 @@ def _route(text: str) -> tuple[str, ...]:
 
 def _ledger(balances: str, gas_eth: str) -> Ledger:
     return Ledger(balances=_amounts(balances), gas_eth=Decimal(gas_eth))
+
+
+_FILL_COLUMNS: Final = (
+    "time, leg, token_in, token_out, route, amount_in, min_amount_out, amount_out, "
+    "gas_cost_eth, block"
+)
+
+
+def _fill_row(run_id: str, time: int, leg: int, fill: Fill) -> tuple[Any, ...]:
+    """``fill``, leg ``leg`` of the bar at ``time``, as a row of ``fills`` or ``sent_legs``."""
+    return (
+        run_id,
+        time,
+        leg,
+        fill.swap.token_in.symbol,
+        fill.swap.token_out.symbol,
+        json.dumps([pool.address for pool in fill.swap.route]),
+        str(fill.swap.amount_in),
+        str(fill.swap.min_amount_out),
+        str(fill.amount_out),
+        str(fill.gas_cost_eth),
+        fill.block,
+    )
+
+
+def _fill_record(row: Sequence[Any]) -> FillRecord:
+    """A row of :data:`_FILL_COLUMNS` read back."""
+    return FillRecord(
+        time=row[0],
+        leg=row[1],
+        token_in=row[2],
+        token_out=row[3],
+        route=_route(row[4]),
+        amount_in=Decimal(row[5]),
+        min_amount_out=Decimal(row[6]),
+        amount_out=Decimal(row[7]),
+        gas_cost_eth=Decimal(row[8]),
+        block=row[9],
+    )
 
 
 _DECISION_COLUMNS: Final = (
@@ -391,8 +435,8 @@ class Store:
                 with transaction(self._connection):
                     self._connection.execute(
                         "INSERT INTO runs (run_id, mode, chain_id, quote, strategy, config, "
-                        "balances, gas_eth, created_at, fills) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "balances, gas_eth, created_at, fills, fork_block) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             run.run_id,
                             run.mode.value,
@@ -404,6 +448,7 @@ class Store:
                             str(run.ledger.gas_eth),
                             run.created_at,
                             run.fills.value,
+                            run.fork_block,
                         ),
                     )
             except sqlite3.IntegrityError as exc:
@@ -416,13 +461,24 @@ class Store:
         with _sqlite_errors("reading a run"):
             row = self._connection.execute(
                 "SELECT mode, chain_id, quote, strategy, config, balances, gas_eth, created_at, "
-                "fills "
+                "fills, fork_block "
                 "FROM runs WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
             return None
-        mode, chain_id, quote, strategy, config, balances, gas_eth, created_at, fills = row
+        (
+            mode,
+            chain_id,
+            quote,
+            strategy,
+            config,
+            balances,
+            gas_eth,
+            created_at,
+            fills,
+            fork_block,
+        ) = row
         with _stored(f"run {run_id!r}"):
             return RunRecord(
                 run_id=run_id,
@@ -434,6 +490,7 @@ class Store:
                 ledger=_ledger(balances, gas_eth),
                 created_at=created_at,
                 fills=FillSource(fills),
+                fork_block=fork_block,
             )
 
     def decision(self, run_id: str, time: int) -> Decision | None:
@@ -515,27 +572,167 @@ class Store:
         at = "" if time is None else " AND time = ?"
         with _sqlite_errors("reading fills"):
             rows = self._connection.execute(
-                "SELECT time, leg, token_in, token_out, route, amount_in, min_amount_out, "
-                f"amount_out, gas_cost_eth, block FROM fills WHERE run_id = ?{at} "
-                "ORDER BY time, leg",
+                f"SELECT {_FILL_COLUMNS} FROM fills WHERE run_id = ?{at} ORDER BY time, leg",
                 (run_id,) if time is None else (run_id, time),
             ).fetchall()
         with _stored(f"fills of run {run_id!r}"):
-            return [
-                FillRecord(
-                    time=row[0],
-                    leg=row[1],
-                    token_in=row[2],
-                    token_out=row[3],
-                    route=_route(row[4]),
-                    amount_in=Decimal(row[5]),
-                    min_amount_out=Decimal(row[6]),
-                    amount_out=Decimal(row[7]),
-                    gas_cost_eth=Decimal(row[8]),
-                    block=row[9],
+            return [_fill_record(row) for row in rows]
+
+    def _sent_legs(self, run_id: str, time: int) -> list[FillRecord]:
+        rows = self._connection.execute(
+            f"SELECT {_FILL_COLUMNS} FROM sent_legs WHERE run_id = ? AND time = ? ORDER BY leg",
+            (run_id, time),
+        ).fetchall()
+        with _stored(f"sent legs of run {run_id!r} at {time}"):
+            return [_fill_record(row) for row in rows]
+
+    def _sends_open(self, run_id: str) -> list[tuple[Any, ...]]:
+        """The rows of the run's sends that no decision has settled, oldest first."""
+        return self._connection.execute(
+            "SELECT time, started_at, failure, failed_gas_eth FROM sends s "
+            "WHERE run_id = ? AND NOT EXISTS (SELECT 1 FROM decisions d "
+            "WHERE d.run_id = s.run_id AND d.time = s.time) ORDER BY time",
+            (run_id,),
+        ).fetchall()
+
+    def _open_failure(self, run_id: str, time: int) -> str | None:
+        """What stopped the open send at ``time``, or ``None``; a send that is not open is :class:`StoreError`."""
+        found = self._connection.execute(
+            "SELECT failure FROM sends s WHERE run_id = ? AND time = ? AND NOT EXISTS "
+            "(SELECT 1 FROM decisions d WHERE d.run_id = s.run_id AND d.time = s.time)",
+            (run_id, time),
+        ).fetchone()
+        if found is None:
+            raise StoreError(f"the run {run_id!r} has no open send at {time}")
+        return found[0]
+
+    def _leg_count(self, run_id: str, time: int) -> int:
+        (count,) = self._connection.execute(
+            "SELECT COUNT(*) FROM sent_legs WHERE run_id = ? AND time = ?", (run_id, time)
+        ).fetchone()
+        return count
+
+    def open_send(self, run_id: str) -> OpenSend | None:
+        """The run's bar whose swaps began to be sent and which has no decision, when there is one.
+
+        A run is left with at most one: a second is refused when it is begun.
+        """
+        with _sqlite_errors("reading a run's open send"):
+            rows = self._sends_open(run_id)
+            if not rows:
+                return None
+            if len(rows) > 1:
+                raise StoreError(
+                    f"the run {run_id!r} has {len(rows)} open sends, at "
+                    f"{[row[0] for row in rows]}; a run is left with one at most"
                 )
-                for row in rows
-            ]
+            time, started_at, failure, failed_gas_eth = rows[0]
+            legs = self._sent_legs(run_id, time)
+        with _stored(f"send of run {run_id!r} at {time}"):
+            return OpenSend(
+                time=time,
+                started_at=started_at,
+                legs=tuple(legs),
+                failure=failure,
+                failed_gas_eth=None if failed_gas_eth is None else Decimal(failed_gas_eth),
+            )
+
+    def begin_send(self, run_id: str, time: int, *, started_at: int) -> None:
+        """Mark the bar at ``time`` as having its swaps sent, before the first one is.
+
+        Refused, with :class:`StoreError`, for a run that is not stored or
+        does not sign its swaps, that has an open send, or that has decided
+        this bar or a later one.
+        """
+        with _sqlite_errors("beginning a send"), transaction(self._connection):
+            run = self.run(run_id)
+            if run is None:
+                raise StoreError(f"there is no run {run_id!r} in the store")
+            if not run.fills.signs:
+                raise StoreError(
+                    f"the run {run_id!r} fills from the {run.fills.value} and signs nothing, "
+                    f"so it sends nothing"
+                )
+            opened = self._sends_open(run_id)
+            if opened:
+                raise StoreError(
+                    f"the run {run_id!r} has an open send at {opened[0][0]}; a send is "
+                    f"begun only when none is open"
+                )
+            latest = self.last_decided(run_id)
+            if latest is not None and latest >= time:
+                raise StoreError(
+                    f"the run {run_id!r} has decided the bar at {latest}, so no send is "
+                    f"begun at {time}"
+                )
+            try:
+                self._connection.execute(
+                    "INSERT INTO sends (run_id, time, started_at) VALUES (?, ?, ?)",
+                    (run_id, time, started_at),
+                )
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE constraint failed" not in str(exc):
+                    raise
+                raise StoreError(
+                    f"the run {run_id!r} has already begun a send at {time}"
+                ) from exc
+
+    def abandon_send(self, run_id: str, time: int) -> None:
+        """Delete the open send at ``time``, which has no leg and no failure: nothing of it was sent.
+
+        A send that is settled, has a leg, or has failed is
+        :class:`StoreError`, and stays.
+        """
+        with _sqlite_errors("abandoning a send"), transaction(self._connection):
+            if self._open_failure(run_id, time) is not None or self._leg_count(run_id, time):
+                raise StoreError(
+                    f"the send of run {run_id!r} at {time} has a leg or a failure, and stays"
+                )
+            self._connection.execute(
+                "DELETE FROM sends WHERE run_id = ? AND time = ?", (run_id, time)
+            )
+
+    def record_leg(self, run_id: str, time: int, leg: int, fill: Fill) -> None:
+        """Write ``fill`` as leg ``leg`` of the open send at ``time``.
+
+        The legs are written in order, from 0, and only to a send that is
+        open and has not failed; anything else is :class:`StoreError`.
+        """
+        with _sqlite_errors("recording a sent leg"), transaction(self._connection):
+            if self._open_failure(run_id, time) is not None:
+                raise StoreError(f"the send of run {run_id!r} at {time} has failed")
+            written = self._leg_count(run_id, time)
+            if leg != written:
+                raise StoreError(
+                    f"the send of run {run_id!r} at {time} has {written} leg(s), so the next "
+                    f"is leg {written}, not {leg}"
+                )
+            self._connection.execute(
+                f"INSERT INTO sent_legs (run_id, {_FILL_COLUMNS}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                _fill_row(run_id, time, leg, fill),
+            )
+
+    def fail_send(
+        self, run_id: str, time: int, *, failure: str, gas_eth: Decimal | None
+    ) -> None:
+        """Write what stopped the open send at ``time``, once, and the gas its failed swap cost.
+
+        ``gas_eth`` is ``None`` when that gas is not known.
+        """
+        if not isinstance(failure, str) or not failure.strip():
+            raise ValueError(f"failure must be a non-empty string, got {failure!r}")
+        if gas_eth is not None and (
+            not isinstance(gas_eth, Decimal) or not gas_eth.is_finite() or gas_eth.is_signed()
+        ):
+            raise ValueError(f"gas_eth must be a non-negative Decimal or None, got {gas_eth!r}")
+        with _sqlite_errors("recording a failed send"), transaction(self._connection):
+            if self._open_failure(run_id, time) is not None:
+                raise StoreError(f"the send of run {run_id!r} at {time} has already failed")
+            self._connection.execute(
+                "UPDATE sends SET failure = ?, failed_gas_eth = ? WHERE run_id = ? AND time = ?",
+                (failure, None if gas_eth is None else str(gas_eth), run_id, time),
+            )
 
     def _require_follows_on(self, run_id: str, step: StepRecord) -> None:
         """Refuse a step that is not the next one of the run ``run_id``."""
@@ -556,6 +753,54 @@ class Store:
                 f"the ledger of run {run_id!r} at {time} is not its ledger before with the "
                 f"step's fills applied"
             )
+        self._require_settles(run_id, step)
+
+    def _require_settles(self, run_id: str, step: StepRecord) -> None:
+        """Refuse a step that leaves a send open, or whose fills are not its send's legs.
+
+        A run whose fills come from the chain writes the legs of a step that
+        filled before the step itself: such a step without a send is refused.
+        """
+        time = step.decision.time
+        # The step's bar is later than every decided one, so a send of it is an open one.
+        failures = {opened: failure for opened, _, failure, _ in self._sends_open(run_id)}
+        for opened in failures:
+            if opened != time:
+                raise StoreError(
+                    f"the run {run_id!r} has an open send at {opened}, so the bar at {time} "
+                    f"is not decided"
+                )
+        if time not in failures:
+            partial = step.decision.outcome is Outcome.PARTIAL
+            run = self.run(run_id) if step.fills else None
+            if run is not None and run.fills.signs:
+                raise StoreError(
+                    f"the run {run_id!r} fills on the chain, and its fills at {time} were not "
+                    f"written as the legs of a send"
+                )
+            if partial:
+                # Only a signed rebalance is left half done, and its legs are a send's.
+                raise StoreError(
+                    f"the decision of run {run_id!r} at {time} is partial, and a partial "
+                    f"rebalance is a signing run's, written as a send"
+                )
+            return
+        if failures[time] is not None:
+            raise StoreError(
+                f"the send of run {run_id!r} at {time} failed, and a failed send is not "
+                f"settled by a decision"
+            )
+        legs = self._connection.execute(
+            f"SELECT {_FILL_COLUMNS} FROM sent_legs WHERE run_id = ? AND time = ? ORDER BY leg",
+            (run_id, time),
+        ).fetchall()
+        # Compared as the rows they are written as: the legs were written from the same fills.
+        fills = [_fill_row(run_id, time, leg, fill)[1:] for leg, fill in enumerate(step.fills)]
+        if [tuple(row) for row in legs] != fills:
+            raise StoreError(
+                f"the fills of run {run_id!r} at {time} are not the {len(legs)} leg(s) its "
+                f"send wrote"
+            )
 
     def record(self, run_id: str, step: StepRecord) -> None:
         """Write one step's decision, fills and valuation in one transaction: all, or none.
@@ -563,8 +808,10 @@ class Store:
         The step must follow on from what is stored, and that is checked
         inside the transaction, so that two writers on one run cannot both
         pass: its bar is later than every bar the run has decided, and its
-        ledger is the run's current one with the step's fills applied. A
-        step that does not, or a run that is not stored, raises
+        ledger is the run's current one with the step's fills applied. The
+        run has no open send but this bar's, which the decision settles;
+        that send has not failed, and its legs are the step's fills. A step
+        that does not, or a run that is not stored, raises
         :class:`StoreError`.
         """
         decision, valuation = step.decision, step.valuation
@@ -591,23 +838,10 @@ class Store:
                 ),
             )
             self._connection.executemany(
-                "INSERT INTO fills (run_id, time, leg, token_in, token_out, route, "
-                "amount_in, min_amount_out, amount_out, gas_cost_eth, block) "
+                f"INSERT INTO fills (run_id, {_FILL_COLUMNS}) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (
-                        run_id,
-                        decision.time,
-                        leg,
-                        fill.swap.token_in.symbol,
-                        fill.swap.token_out.symbol,
-                        json.dumps([pool.address for pool in fill.swap.route]),
-                        str(fill.swap.amount_in),
-                        str(fill.swap.min_amount_out),
-                        str(fill.amount_out),
-                        str(fill.gas_cost_eth),
-                        fill.block,
-                    )
+                    _fill_row(run_id, decision.time, leg, fill)
                     for leg, fill in enumerate(step.fills)
                 ],
             )

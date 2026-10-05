@@ -49,7 +49,7 @@ from ..domain.bars import Finality
 from ..domain.ledger import Ledger
 from ..domain.records import Decision, Outcome, RejectionCode
 from ..domain.types import Bar, MarketView, RunMode
-from ..ports import Executor
+from ..ports import Executor, Wallet
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
 from .executors import ModelExecutor
@@ -77,7 +77,8 @@ class BacktestSummary:
     rest are boundaries, oldest first: ``missing`` had no bar, ``changed``
     were decided earlier on a reading the store no longer holds as it was,
     ``gas_rejected`` had their rebalance refused for want of gas,
-    ``executor_rejected`` had it refused by the executor, and
+    ``executor_rejected`` had it refused by the executor (a rebalance a
+    signed swap left partial is in neither, and is counted in ``outcomes``), and
     ``skipped`` were suspect and not traded on.
     """
 
@@ -161,6 +162,8 @@ def replay(
     end: int | None = None,
     opening: Ledger | None = None,
     now: int,
+    wallet: Wallet | None = None,
+    fork_block: int | None = None,
 ) -> BacktestSummary:
     """Decide every stored bar from ``start`` to ``end`` for the run ``run_id``, filled by ``executor``.
 
@@ -173,7 +176,9 @@ def replay(
     the one it was started with. A range that holds no bar is
     :class:`NoBarInRange`, raised before a run is started. ``now`` is the
     time of the call: a run started here is created then, and every bar
-    decided here is decided then.
+    decided here is decided then. An executor that signs comes with the
+    ``wallet`` it signs from, and a fork run is started with ``fork_block``
+    (:func:`~.step.open_engine`, :func:`~.step.start_run`).
 
     Whatever stops the engine's step (:class:`~.step.EngineError`, what a
     strategy raised, or a chain read of the executor's that failed) stops
@@ -203,6 +208,7 @@ def replay(
         opening=opening,
         created_at=now,
         fills=executor.source,
+        fork_block=fork_block,
     )
     latest = store.last_decided(run_id)
     if latest is not None:
@@ -214,7 +220,7 @@ def replay(
                 f"first at {passed_over[0]}, would be left undecided for good; start the "
                 f"range no later than {passed_over[0]}, or use a new run"
             )
-    engine = open_engine(store, config, executor, run_id=run_id, now=now)
+    engine = open_engine(store, config, executor, run_id=run_id, now=now, wallet=wallet)
 
     bars: list[Bar] = []
     decided = already_decided = on_pending = 0
@@ -249,9 +255,11 @@ def replay(
             # A suspect bar is skipped whatever its finality: nothing was decided on it.
             on_pending += loaded.finality is Finality.PENDING and not loaded.bar.suspect
         outcomes[decision.outcome] += 1
-        if decision.reason_code is RejectionCode.GAS:
+        # A partial rebalance is counted by its outcome alone.
+        rejected = decision.outcome is Outcome.REJECTED
+        if rejected and decision.reason_code is RejectionCode.GAS:
             gas_rejected.append(time)
-        elif decision.reason_code is RejectionCode.EXECUTOR:
+        elif rejected and decision.reason_code is RejectionCode.EXECUTOR:
             executor_rejected.append(time)
         elif decision.outcome is Outcome.SKIPPED_SUSPECT:
             skipped.append(time)

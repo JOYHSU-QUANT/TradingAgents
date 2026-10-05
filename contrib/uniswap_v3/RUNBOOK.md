@@ -276,10 +276,49 @@ python -c "import sqlite3; c = sqlite3.connect('contrib/uniswap_v3/data/check.db
 
 ---
 
-## 10. 分叉沙盒：簽名 swap 的來回驗收
+## 10. 分叉沙盒：fork run
 
-`ChainExecutor` 還沒接進引擎（沒有 `fork` 指令）；現在能做的是跑分叉上的驗收測試，確認簽名、approve、
-SwapRouter02 的單跳與兩跳、收據解讀都對。
+fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在本機 anvil 分叉上真的簽名送出：先把分叉重設
+（`anvil_reset`）到這根 bar 的成交區塊、把開發帳戶的 ETH 與代幣餘額灌成 run 的帳本，再送；送前送後都對帳。
+用的是 anvil 的開發帳戶（公開的 test 助記詞），不碰任何真的錢包；分叉在 anvil 關掉時就消失。
+
+### 10.1 跑一個 fork run
+
+1. 裝好 Foundry（§10.3 第 1 條），`anvil --version` 確認。
+2. store 裡要有那段 bar（§1.3 的 `backfill`；在跑著 paper 的 store 上跑 fork 也可以，但建議用複本，§9 第一條的寫法）。
+3. 另開一個視窗起 anvil，分叉在哪一塊都可以（每根要交易的 bar 會自己重設到它的成交區塊；節點要 archive）：
+
+   ```powershell
+   python -m dotenv run -- powershell -Command 'anvil --fork-url $env:ETH_RPC_URL --fork-block-number <區塊> --port 8545 --silent'
+   ```
+
+   anvil 會把 `--fork-url` 印在自己的錯誤訊息裡，那就是含 API key 的 URL：這個視窗的輸出不要貼到別處。
+4. 跑（新 run 要給起始餘額；`--fork-url` 不給就是 `http://127.0.0.1:8545`，主機必須寫字面的 `127.0.0.1` 或 `::1`）：
+
+   ```powershell
+   python -m contrib.uniswap_v3 fork --config contrib/uniswap_v3/configs/paper.local.yaml --db contrib/uniswap_v3/data/check.db --run-id fork-1 --from <第一根> --to <最後一根> --balance USDC=10000 --gas-eth 1
+   python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/check.db --run-id fork-1
+   ```
+
+   簽名的帳戶與 swap 的 deadline 可以在設定檔加 `fork:` 區段（`account: 0`–`9`、`deadline_seconds`；範例檔裡是註解）。
+   加了這個區段設定快照就會變，**跑著 paper 的設定檔不要加**，另複製一份給 fork 用。
+5. 同一個指令再跑一次不會重送任何交易（決策過的 bar 不再決策）。結束碼同回測，另外：錢包與帳本不符、
+   run 有未結 send、URL 不是本機的 anvil 分叉都是 1。
+
+### 10.2 有未結 send 時
+
+某根 bar 的 swap 送到一半中斷（送出失敗、交易 revert、送完對帳不符）時，`fork` 指令印 `failed: ...` 並列出：
+
+- `open send at the bar ...`：哪根 bar、送了幾腿成交；`stopped by:` 是中斷的原因（含交易 hash）。
+- 每一腿寫下的成交、bar 之前的帳本、「帳本套用這些腿再扣掉失敗那筆的 gas」應有的持有量、錢包現在的持有量，
+  以及兩者一不一致。失敗那筆的 gas 不知道時不比 ETH。
+
+這個 run 不會再往前走，重跑也只會再印一次同樣的對照（不送任何交易）。處理：
+
+1. anvil 還開著、沒重設過的話，錢包的持有量就是鏈上真正的結果；用它（或你要的新餘額）照 §10.1 開**新的 run id**。
+2. anvil 已經關掉或重設過，錢包的讀數就沒有意義了（印出來的會是重設後的狀態）；看寫下的腿自己判斷，一樣開新 run。
+
+### 10.3 驗收測試
 
 1. 裝 Foundry（要能分叉現在的主網；舊版 anvil 會用舊的硬分叉規則，gas 不準）：從
    [Foundry 的 GitHub releases](https://github.com/foundry-rs/foundry/releases) 下載 `foundry_<版本>_win32_amd64.zip`，
@@ -290,14 +329,16 @@ SwapRouter02 的單跳與兩跳、收據解讀都對。
    python -m dotenv run -- pytest -m smoke contrib/uniswap_v3/tests/test_chain_fork_smoke.py -s
    ```
 
-   三個測試全過＝驗收成功：第二個是來回本身——每一筆 swap 後，錢包的輸入代幣、輸出代幣與 ETH 各自變動的量
-   與成交的 `swap.amount_in`、`amount_out`、`gas_cost_eth` 一致；第三個確認報價低於底線的 swap 被拒、什麼都沒送。
-   `-s` 會印每筆 swap 實際用的 gas 與 QuoterV2 估計的差（`execution.quote.gas_overhead_units` 代表的就是這個差）。
+   五個測試全過＝驗收成功。前三個是 `ChainExecutor` 本身：第二個是來回——每一筆 swap 後，錢包的輸入代幣、
+   輸出代幣與 ETH 各自變動的量與成交的 `swap.amount_in`、`amount_out`、`gas_cost_eth` 一致；第三個確認報價低於
+   底線的 swap 被拒、什麼都沒送。`-s` 會印每筆 swap 實際用的 gas 與 QuoterV2 估計的差
+   （`execution.quote.gas_overhead_units` 代表的就是這個差）。
+   後兩個是 fork run（先從節點回補兩根日線）：第四個確認錢包最後逐位元等於帳本、第一腿的成交量等於 QuoterV2 在
+   同一個成交區塊的報價（與 paper 同一塊），重跑不送任何交易；第五個故意讓第二腿失敗（要求兩倍的最低成交量，
+   報價達不到、什麼都不送），確認記成 `partial`、錢包仍等於帳本、重跑不送交易。
 3. 沒有 `ETH_RPC_URL` 或 PATH 上沒有 `anvil` 時，測試會略過（skipped）而不是失敗。
 4. 自己起 anvil、在程式裡用 `open_fork` 連的話，URL 的主機要寫字面的 `127.0.0.1`（或 `::1`）：
    `localhost` 這類名稱會被拒絕（hosts 檔可以把它改指到別處）；連線也不走環境變數設的 proxy。
-
-用的是 anvil 的開發帳戶（公開的 test 助記詞），不碰任何真的錢包；分叉在 anvil 關掉時就消失。
 
 ---
 

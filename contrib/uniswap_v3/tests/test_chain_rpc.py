@@ -511,7 +511,13 @@ def test_a_node_error_is_classed_by_what_the_node_said(error, kind, message):
 def test_the_error_classes_say_what_a_caller_can_do():
     by_action = {
         TransientChainError: {RpcUnavailable, BlockNotFound},
-        UnansweredRead: {CallReverted, InsufficientLiquidity, MalformedResponse, RpcRejected},
+        UnansweredRead: {
+            CallReverted,
+            InsufficientLiquidity,
+            MalformedResponse,
+            RpcRejected,
+            errors.InsufficientFunds,
+        },
         RpcConfigError: {errors.NotAFork},
         # A transaction was sent, or may have been: not "nothing happened".
         errors.SendError: {

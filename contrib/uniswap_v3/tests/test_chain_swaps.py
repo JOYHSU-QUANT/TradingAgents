@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal as D
+from types import SimpleNamespace
 
 import pytest
 from eth_abi import decode
@@ -218,6 +219,57 @@ def test_a_deadline_that_cannot_be_read_after_the_approval_was_mined_is_not_a_re
         _executor(anvil).execute(_SWAP, _BAR)
     assert caught.value.gas_cost_eth == eth_from_wei(APPROVE_GAS * _PRICE)
     assert len(anvil.sent) == 1
+
+
+def test_a_swap_the_wallets_eth_cannot_pay_for_is_refused_while_nothing_is_mined():
+    # An approval at most costs 55,200 gas at 2.1 gwei, 1.16e14 wei; a swap 3.78e14.
+    anvil = _anvil()
+    anvil.eth[_ME.lower()] = 10**14
+    refused = _executor(anvil).execute(_SWAP, _BAR)
+    assert isinstance(refused, Rejection)
+    assert refused.reason.startswith("the approval of 1000 USDC cannot be paid for: ")
+    assert "nothing was sent" in refused.reason and refused.short_of_gas
+
+    anvil = _anvil()
+    _allow(anvil, 1000 * 10**6)
+    anvil.eth[_ME.lower()] = 2 * 10**14
+    refused = _executor(anvil).execute(_SWAP, _BAR)
+    assert isinstance(refused, Rejection) and "cannot be paid for" in refused.reason
+    assert refused.short_of_gas
+    assert anvil.sent == []
+
+
+def test_a_swap_the_wallets_eth_cannot_pay_for_after_its_approval_was_mined_is_not_a_refusal():
+    anvil = _anvil()
+    anvil.eth[_ME.lower()] = 2 * 10**14
+    with pytest.raises(SwapNotFilled, match="InsufficientFunds") as caught:
+        _executor(anvil).execute(_SWAP, _BAR)
+    assert caught.value.gas_cost_eth == eth_from_wei(APPROVE_GAS * _PRICE)
+
+
+def test_anything_raised_after_the_approval_was_mined_carries_its_hash(monkeypatch):
+    anvil = _anvil()
+    executor = _executor(anvil)
+    # A deadline that cannot be added up: not an error of the chain's.
+    monkeypatch.setattr(executor, "_settings", SimpleNamespace(deadline_seconds=None))
+    with pytest.raises(SwapNotFilled, match="not sent after its approval was mined") as caught:
+        executor.execute(_SWAP, _BAR)
+    assert "TypeError" in str(caught.value)
+    assert caught.value.tx_hashes == tuple(anvil.receipts)
+
+
+def test_anything_raised_after_the_swap_was_mined_names_both_transactions(monkeypatch):
+    anvil = _anvil()
+    executor = _executor(anvil)
+
+    def unreadable(receipt, token):
+        raise TypeError("a log that is not one")
+
+    monkeypatch.setattr(executor, "_paid", unreadable)
+    with pytest.raises(SwapOutcomeUnknown, match="its fill could not be made") as caught:
+        executor.execute(_SWAP, _BAR)
+    assert caught.value.tx_hashes == tuple(anvil.receipts)
+    assert caught.value.gas_cost_eth == eth_from_wei((APPROVE_GAS + SWAP_GAS) * _PRICE)
 
 
 def test_a_swap_mined_and_reverted_reports_the_gas_of_every_transaction_it_took():

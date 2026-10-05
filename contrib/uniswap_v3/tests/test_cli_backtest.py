@@ -84,12 +84,12 @@ def test_backtest_decides_the_range_and_a_second_run_decides_nothing(db, capsys)
     assert lines == [
         "run bt: 4 boundary(ies) from 2024-01-01T00:00:00Z to 2024-01-04T00:00:00Z: "
         "4 decided, 0 already decided, 0 without a bar",
-        "filled 3, hold 1, no_trade 0, rejected 0, skipped_suspect 0",
+        "filled 3, hold 1, no_trade 0, partial 0, rejected 0, skipped_suspect 0",
     ]
     code, lines = _backtest(db, *_OPENING)
     assert code == cli.EXIT_OK
     assert lines[0].endswith("0 decided, 4 already decided, 0 without a bar")
-    assert lines[1] == "filled 3, hold 1, no_trade 0, rejected 0, skipped_suspect 0"
+    assert lines[1] == "filled 3, hold 1, no_trade 0, partial 0, rejected 0, skipped_suspect 0"
     # A run that is stored is carried on without its opening balances.
     code, lines = _backtest(db, "--to", "2024-01-02T12:00:00")
     assert code == cli.EXIT_OK
@@ -158,7 +158,7 @@ def test_a_skipped_bar_is_not_among_those_decided_on_readings_not_final(tmp_path
         put_day(store, 2)
     code, lines = _backtest(db, *_OPENING)
     assert code == cli.EXIT_OK
-    assert lines[1] == "filled 1, hold 1, no_trade 0, rejected 0, skipped_suspect 1"
+    assert lines[1] == "filled 1, hold 1, no_trade 0, partial 0, rejected 0, skipped_suspect 1"
     assert capsys.readouterr().err == ""
     code, lines = _report(db)
     assert code == cli.EXIT_OK and not any("not final yet" in line for line in lines)
@@ -180,7 +180,7 @@ def test_backtest_warns_when_the_gas_balance_runs_out(db, capsys):
     assert code == cli.EXIT_OK
     # The first rebalance costs 0.00315 ETH and the next is not covered; with the rise
     # undone on the last day, the balances left as they were are back on target.
-    assert lines[1] == "filled 1, hold 2, no_trade 0, rejected 1, skipped_suspect 0"
+    assert lines[1] == "filled 1, hold 2, no_trade 0, partial 0, rejected 1, skipped_suspect 0"
     assert capsys.readouterr().err == (
         "warning: 1 rebalance(s) were rejected because the gas balance did not cover them, "
         "the first at 2024-01-03T00:00:00Z; nothing tops a run's gas balance up\n"
@@ -355,7 +355,7 @@ def test_report_prints_the_run_beside_its_two_comparisons(db):
     assert lines[:5] == [
         "run bt: backtest, fills from the model, fixed_weights, values in USDC",
         "4 bar(s) decided from 2024-01-01T00:00:00Z to 2024-01-04T00:00:00Z",
-        "decisions: filled 3, hold 1, no_trade 0, rejected 0, skipped_suspect 0",
+        "decisions: filled 3, hold 1, no_trade 0, partial 0, rejected 0, skipped_suspect 0",
         "measured on 4 bar(s) over 3.00 day(s)",
         f"{'':<18}{'start':>14}{'end':>14}{'return':>11}{'max drawdown':>14}",
     ]
@@ -449,7 +449,7 @@ def test_report_counts_why_bars_were_skipped_and_leaves_them_out_of_the_curves(t
     _backtest(db, *_OPENING)
     code, lines = _report(db)
     assert code == cli.EXIT_OK
-    assert lines[2] == "decisions: filled 1, hold 2, no_trade 0, rejected 0, skipped_suspect 1"
+    assert lines[2] == "decisions: filled 1, hold 2, no_trade 0, partial 0, rejected 0, skipped_suspect 1"
     assert lines[3] == "skipped_suspect: twap_deviation 1"
     assert lines[4] == "measured on 3 bar(s) over 3.00 day(s); 1 suspect bar(s) left out"
     assert len(lines) == 12
@@ -471,7 +471,7 @@ def test_report_counts_why_rebalances_were_rejected(db):
     _backtest(db, "--balance", "USDC=10000", "--gas-eth", "0")
     code, lines = _report(db)
     assert code == cli.EXIT_OK
-    assert lines[2] == "decisions: filled 0, hold 0, no_trade 0, rejected 4, skipped_suspect 0"
+    assert lines[2] == "decisions: filled 0, hold 0, no_trade 0, partial 0, rejected 4, skipped_suspect 0"
     assert lines[3] == "rejected: gas 4"
     assert lines[-2].startswith("0 rebalance(s), 0 swap(s); 0.00 USDC sold")
 

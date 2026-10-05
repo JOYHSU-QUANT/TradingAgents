@@ -9,6 +9,7 @@ from eth_account import Account
 
 from contrib.uniswap_v3.chain.errors import (
     CallReverted,
+    InsufficientFunds,
     MalformedResponse,
     RpcConfigError,
     RpcRejected,
@@ -45,6 +46,19 @@ def _sender(anvil: FakeAnvil, **settings) -> tuple[TransactionSender, list[float
         sleep=slept.append,
     )
     return sender, slept
+
+
+def test_a_transaction_the_wallet_cannot_pay_the_most_gas_of_is_not_signed():
+    anvil = FakeAnvil()
+    # 55,200 gas at twice the base fee plus the tip, 2.1 gwei, is 1.1592e14 wei.
+    anvil.eth[dev_account(0).address.lower()] = 115_920_000_000_000 - 1
+    sender, _ = _sender(anvil)
+    with pytest.raises(InsufficientFunds, match="may cost up to 0.00011592 ETH"):
+        sender.send(_USDC, _APPROVE, what="an approval")
+    assert anvil.sent == []
+    assert anvil.calls("eth_sendRawTransaction") == []
+    anvil.eth[dev_account(0).address.lower()] += 1
+    assert sender.send(_USDC, _APPROVE, what="an approval").succeeded
 
 
 def test_a_transaction_is_estimated_signed_for_the_chain_sent_once_and_its_receipt_returned():

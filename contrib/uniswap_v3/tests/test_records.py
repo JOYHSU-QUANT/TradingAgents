@@ -13,6 +13,7 @@ from contrib.uniswap_v3.domain.records import (
     Decision,
     FillRecord,
     FillSource,
+    OpenSend,
     Outcome,
     RejectionCode,
     RunRecord,
@@ -46,13 +47,14 @@ def _valuation(time: int = 100) -> Valuation:
     return Valuation(time=time, ledger=_LEDGER, prices=PRICES, total_value=D("100"))
 
 
-def test_the_outcomes_are_the_five_a_step_can_end_in():
+def test_the_outcomes_are_the_six_a_step_can_end_in():
     assert {outcome.value for outcome in Outcome} == {
         "skipped_suspect",
         "hold",
         "no_trade",
         "filled",
         "rejected",
+        "partial",
     }
 
 
@@ -66,6 +68,9 @@ def test_each_outcome_has_one_well_formed_decision():
     _decision(Outcome.FILLED, target=_TARGET)
     _decision(
         Outcome.REJECTED, target=_TARGET, reason="closed", reason_code=RejectionCode.EXECUTOR
+    )
+    _decision(
+        Outcome.PARTIAL, target=_TARGET, reason="leg 1 refused", reason_code=RejectionCode.EXECUTOR
     )
 
 
@@ -188,13 +193,19 @@ def test_a_valuation_keeps_its_own_copy_of_the_prices():
             Valuation(**{**fields, **changes})
 
 
-def test_a_step_carries_fills_exactly_when_its_decision_is_filled():
+def test_a_step_carries_fills_exactly_when_its_decision_is_filled_or_partial():
     filled = _decision(Outcome.FILLED, target=_TARGET)
     assert StepRecord(decision=filled, valuation=_valuation(), fills=(_FILL,)).fills == (_FILL,)
     assert StepRecord(decision=_decision(), valuation=_valuation()).fills == ()
     for decision, fills in ((filled, ()), (_decision(), (_FILL,)), (filled, [_FILL])):
         with pytest.raises(ValueError, match="carries fills exactly when"):
             StepRecord(decision=decision, valuation=_valuation(), fills=fills)
+    partial = _decision(
+        Outcome.PARTIAL, target=_TARGET, reason="leg 1 refused", reason_code=RejectionCode.EXECUTOR
+    )
+    assert StepRecord(decision=partial, valuation=_valuation(), fills=(_FILL,)).fills == (_FILL,)
+    with pytest.raises(ValueError, match="carries fills exactly when its decision is filled or partial"):
+        StepRecord(decision=partial, valuation=_valuation())
     with pytest.raises(ValueError, match="the valuation at 200 is not of the decision at 100"):
         StepRecord(decision=_decision(), valuation=_valuation(200))
     with pytest.raises(ValueError, match="a step's fills are Fill values"):
@@ -242,6 +253,23 @@ def test_every_mode_takes_some_source_of_fills_and_only_a_signing_mode_the_chain
         ({"created_at": 1.5}, "non-negative integers"),
         ({"ledger": None}, "ledger must be a Ledger"),
         ({"quote": "DAI"}, "must include the quote token 'DAI'"),
+        (
+            {"mode": RunMode.FORK, "fills": FillSource.CHAIN},
+            "a fork run, and no other, names the block it was forked at",
+        ),
+        (
+            {"mode": RunMode.FORK, "fills": FillSource.CHAIN, "fork_block": -1},
+            "a fork run, and no other, names the block",
+        ),
+        (
+            {"mode": RunMode.FORK, "fills": FillSource.CHAIN, "fork_block": True},
+            "a fork run, and no other, names the block",
+        ),
+        ({"fork_block": 5}, "a backtest run with 5"),
+        (
+            {"mode": RunMode.LIVE, "fills": FillSource.CHAIN, "fork_block": 5},
+            "a live run with 5",
+        ),
     ],
 )
 def test_a_malformed_run_is_refused(changes, match):
@@ -263,7 +291,8 @@ def test_a_malformed_run_is_refused(changes, match):
         (RunMode.FORK, FillSource.CHAIN),
         (RunMode.LIVE, FillSource.CHAIN),
     ):
-        assert RunRecord(**{**fields, "mode": mode, "fills": fills}).mode is mode
+        forked = {"fork_block": 26_100_000} if mode is RunMode.FORK else {}
+        assert RunRecord(**{**fields, "mode": mode, "fills": fills, **forked}).mode is mode
     with pytest.raises(ValueError, match=match):
         RunRecord(**{**fields, **changes})
 
@@ -302,3 +331,47 @@ def test_a_malformed_fill_record_is_refused(changes, match):
     assert FillRecord(**fields).route == (USDC_WETH.address,)
     with pytest.raises(ValueError, match=match):
         FillRecord(**{**fields, **changes})
+
+
+def _leg(leg: int, time: int = 100) -> FillRecord:
+    return FillRecord(
+        time=time,
+        leg=leg,
+        token_in="USDC",
+        token_out="WETH",
+        route=(USDC_WETH.address,),
+        amount_in=D("3000"),
+        min_amount_out=D("1.49"),
+        amount_out=D("1.5"),
+        gas_cost_eth=D("0.001"),
+        block=7,
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [
+        ({"time": -1}, "time and started_at must be non-negative integers"),
+        ({"started_at": None}, "time and started_at must be non-negative integers"),
+        ({"legs": [_leg(0)]}, "legs must be the FillRecords of the bar at 100"),
+        ({"legs": (_leg(0, time=200),)}, "legs must be the FillRecords of the bar at 100"),
+        ({"legs": (_leg(1),)}, "legs must be numbered from 0, one after another"),
+        ({"legs": (_leg(0), _leg(0))}, "legs must be numbered from 0, one after another"),
+        ({"failure": " "}, "failure must be a non-empty string or None"),
+        ({"failure": None}, "failed_gas_eth is the gas of what stopped the send"),
+        ({"failed_gas_eth": D("-0.1")}, "failed_gas_eth must be a non-negative Decimal or None"),
+        ({"failed_gas_eth": 0.1}, "failed_gas_eth must be a non-negative Decimal or None"),
+    ],
+)
+def test_a_malformed_open_send_is_refused(changes, match):
+    fields = {
+        "time": 100,
+        "started_at": 160,
+        "legs": (_leg(0), _leg(1)),
+        "failure": "SwapNotFilled: reverted",
+        "failed_gas_eth": D("0.0004"),
+    }
+    assert OpenSend(**fields).legs == (_leg(0), _leg(1))
+    assert OpenSend(time=100, started_at=160).legs == ()
+    with pytest.raises(ValueError, match=match):
+        OpenSend(**{**fields, **changes})

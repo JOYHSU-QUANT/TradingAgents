@@ -8,7 +8,9 @@ do about it:
 - :class:`UnansweredRead`, this read has no answer: :class:`CallReverted`,
   :class:`InsufficientLiquidity`, :class:`MalformedResponse` and
   :class:`RpcRejected`. Asking again will not change the first three; the
-  last may be the node's bad moment.
+  last may be the node's bad moment. :class:`InsufficientFunds` is one too:
+  a transaction the wallet's ETH could not pay the gas of, read off its
+  balance before anything was signed.
 - :class:`RpcConfigError`, no read will work until the setup is fixed.
   :class:`NotAFork` is one: a node that is not a local anvil fork.
 
@@ -33,6 +35,7 @@ __all__ = [
     "BlockNotFound",
     "CallReverted",
     "ChainError",
+    "InsufficientFunds",
     "InsufficientLiquidity",
     "MalformedResponse",
     "NotAFork",
@@ -105,6 +108,10 @@ class CallReverted(UnansweredRead):
 
 class InsufficientLiquidity(UnansweredRead):
     """The pool ran out of liquidity before the whole input was swapped."""
+
+
+class InsufficientFunds(UnansweredRead):
+    """The wallet's ETH does not cover what a transaction may pay for gas, so it was not sent."""
 
 
 class MalformedResponse(UnansweredRead):

@@ -10,6 +10,12 @@ The round trip USDC -> WETH + WBTC -> USDC is the acceptance of PR 8: every
 balance the wallet holds moves by exactly what the fills say, its gas
 included. With ``-s`` it prints the gas each swap used beside the quoter's
 estimate, which is what ``execution.quote.gas_overhead_units`` stands for.
+
+The fork runs at the end are the acceptance of PR 9, on two daily bars
+backfilled from the node: the wallet ends where the run's ledger says, the
+first swap fills at what QuoterV2 quotes at the bar's fill block (a paper
+run's block), a second leg that fails leaves the rebalance partial and the
+wallet still where the ledger says, and a rerun sends nothing.
 """
 
 from __future__ import annotations
@@ -19,20 +25,27 @@ import shutil
 import subprocess
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 import requests
 from web3 import HTTPProvider, Web3
 
+from contrib.uniswap_v3.backfill import backfill
 from contrib.uniswap_v3.chain.fork import DEV_ACCOUNTS, Fork, open_fork
 from contrib.uniswap_v3.chain.quoter import quote_exact_input
-from contrib.uniswap_v3.chain.rpc import _REDACTOR, DEFAULT_URL_ENV, RpcSettings
+from contrib.uniswap_v3.chain.rpc import _REDACTOR, DEFAULT_URL_ENV, Rpc, RpcSettings, connect
 from contrib.uniswap_v3.chain.swaps import ChainExecutor
 from contrib.uniswap_v3.chain.units import from_raw
+from contrib.uniswap_v3.chain.wallet import ForkWallet
+from contrib.uniswap_v3.config import load_config
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.decimal_context import floor_to_places
-from contrib.uniswap_v3.domain.records import FillSource
+from contrib.uniswap_v3.domain.execution import fill_block
+from contrib.uniswap_v3.domain.ledger import Ledger
+from contrib.uniswap_v3.domain.records import FillSource, Outcome
 from contrib.uniswap_v3.domain.types import (
     Bar,
     Fill,
@@ -42,6 +55,9 @@ from contrib.uniswap_v3.domain.types import (
     Token,
     eth_from_wei,
 )
+from contrib.uniswap_v3.fork_run import run_fork
+from contrib.uniswap_v3.store.bar_source import load_bar
+from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.rpc import closed_port
 
 pytestmark = pytest.mark.smoke
@@ -225,3 +241,117 @@ def test_a_swap_whose_quote_is_below_its_minimum_is_refused_and_nothing_is_sent(
     refused = executor.execute(greedy, _BAR)
     assert isinstance(refused, Rejection) and "nothing was sent" in refused.reason
     assert (w3.eth.get_transaction_count(me), _balance(w3, None, me)) == (nonce, eth)
+
+
+# --- PR 9: fork runs over stored bars. These reset the fork, so they come last. ---
+
+# 2026-09-30 and 2026-10-01, 00:00 UTC: both closed before FORK_BLOCK.
+_DAYS = (1_790_726_400, 1_790_812_800)
+_CONFIG = load_config(Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml")
+_OPENING = Ledger(
+    balances={"USDC": Decimal(10_000), "WETH": Decimal(0), "WBTC": Decimal(0)}, gas_eth=Decimal(1)
+)
+
+
+@pytest.fixture(scope="module")
+def upstream() -> Rpc:
+    """The archive node the fork was made from, read directly."""
+    return connect(ETHEREUM_MAINNET, settings=RpcSettings(timeout_seconds=60))
+
+
+@pytest.fixture(scope="module")
+def bars_db(tmp_path_factory: pytest.TempPathFactory, fork_url: str, upstream: Rpc) -> Path:
+    path = tmp_path_factory.mktemp("fork-run") / "store.db"
+    with open_store(path) as store:
+        backfill(upstream, store, _CONFIG, start=_DAYS[0], end=_DAYS[1])
+    return path
+
+
+class _GreedySecondSwap:
+    """The chain executor, asking for twice the minimum on the second swap it is handed.
+
+    The quote falls short of that, and the swap is refused with nothing sent:
+    the second leg of the first rebalance fails after the first was mined.
+    """
+
+    source = FillSource.CHAIN
+
+    def __init__(self, executor: ChainExecutor) -> None:
+        self._executor = executor
+        self.asked = 0
+
+    def execute(self, swap: SwapIntent, bar: Bar) -> Fill | Rejection:
+        self.asked += 1
+        if self.asked != 2:
+            return self._executor.execute(swap, bar)
+        greedy = replace(swap, min_amount_out=swap.min_amount_out * 2)
+        refused = self._executor.execute(greedy, bar)
+        assert isinstance(refused, Rejection), refused
+        return Rejection(swap, refused.reason)
+
+
+def _fork_run(store, fork: Fork, executor, wallet: ForkWallet, run_id: str):
+    return run_fork(
+        store,
+        _CONFIG,
+        executor,
+        wallet,
+        run_id=run_id,
+        start=_DAYS[0],
+        end=_DAYS[1],
+        opening=_OPENING,
+        now=int(time.time()),
+        fork_block=fork.fork_block(),
+    )
+
+
+def test_a_fork_run_fills_as_the_quoter_says_and_its_wallet_is_its_ledger(
+    fork, w3, bars_db, upstream
+):
+    executor = ChainExecutor(fork, account=3)
+    wallet = ForkWallet(executor, tokens=_CONFIG.tokens, settings=_CONFIG.execution)
+    with open_store(bars_db) as store:
+        summary = _fork_run(store, fork, executor, wallet, "fork-acceptance")
+        print(f"\noutcomes {dict(summary.outcomes)}; holdings {wallet.holdings()}")
+        assert summary.decided == 2
+        assert store.ledger("fork-acceptance") == wallet.holdings()
+        assert store.decision("fork-acceptance", _DAYS[0]).outcome is Outcome.FILLED
+        # The first swap meets the pools as a paper run's quote of it does: same block, same answer.
+        first = store.fills("fork-acceptance", _DAYS[0])[0]
+        bar = load_bar(store, _CONFIG, _DAYS[0]).bar
+        pools = {pool.address: pool for pool in _CONFIG.pools}
+        quoted = quote_exact_input(
+            upstream,
+            _USDC,
+            tuple(pools[address] for address in first.route),
+            first.amount_in,
+            block=fill_block(bar, _CONFIG.execution),
+        )
+        assert first.amount_out == quoted.amount_out
+
+        # Run again: every bar is decided, and nothing is sent.
+        nonce = w3.eth.get_transaction_count(executor.address)
+        again = _fork_run(store, fork, executor, wallet, "fork-acceptance")
+        assert (again.decided, again.already_decided) == (0, 2)
+        assert w3.eth.get_transaction_count(executor.address) == nonce
+
+
+def test_a_second_leg_that_fails_leaves_the_rebalance_partial_with_the_wallet_still_its_ledger(
+    fork, w3, bars_db
+):
+    executor = ChainExecutor(fork, account=4)
+    wallet = ForkWallet(executor, tokens=_CONFIG.tokens, settings=_CONFIG.execution)
+    greedy = _GreedySecondSwap(executor)
+    with open_store(bars_db) as store:
+        summary = _fork_run(store, fork, greedy, wallet, "fork-partial")
+        decision = store.decision("fork-partial", _DAYS[0])
+        print(f"\noutcomes {dict(summary.outcomes)}; {decision.reason}")
+        assert decision.outcome is Outcome.PARTIAL
+        assert "nothing was sent" in decision.reason
+        assert [fill.token_out for fill in store.fills("fork-partial", _DAYS[0])] == ["WETH"]
+        assert store.ledger("fork-partial") == wallet.holdings()
+        assert store.open_send("fork-partial") is None
+
+        nonce = w3.eth.get_transaction_count(executor.address)
+        assert _fork_run(store, fork, greedy, wallet, "fork-partial").decided == 0
+        assert w3.eth.get_transaction_count(executor.address) == nonce

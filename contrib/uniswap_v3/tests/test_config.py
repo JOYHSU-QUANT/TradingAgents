@@ -21,7 +21,7 @@ from contrib.uniswap_v3.config import (
 )
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarSettings
-from contrib.uniswap_v3.domain.execution import ExecutionSettings
+from contrib.uniswap_v3.domain.execution import ExecutionSettings, ForkSettings
 from contrib.uniswap_v3.domain.types import Pool, Token
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
 from contrib.uniswap_v3.strategies.registry import build_strategy
@@ -489,6 +489,40 @@ def test_a_snapshot_writes_frozen_params_down_and_refuses_what_json_cannot_hold(
     for unwritable in (object(), float("nan")):
         with pytest.raises(ConfigError, match="cannot be written down as JSON"):
             config_snapshot(_config(strategy=StrategySpec(name="x", params={"odd": unwritable})))
+
+
+def test_the_fork_section_is_read_over_its_defaults_and_none_without_it():
+    assert parse_config(_document()).fork is None
+    assert load_config(EXAMPLE).fork is None
+    assert parse_config(_document(fork={})).fork == ForkSettings()
+    assert parse_config(_document(fork={"account": 3, "deadline_seconds": 60})).fork == (
+        ForkSettings(account=3, deadline_seconds=60)
+    )
+
+
+@pytest.mark.parametrize(
+    ("fork", "match"),
+    [
+        ({"account": 10}, r"fork: account must be an integer from 0 to 9, got 10"),
+        ({"account": True}, r"fork: account must be an integer from 0 to 9"),
+        ({"deadline_seconds": 0}, r"fork: deadline_seconds must be an integer of at least 1"),
+        ({"key": "0xabc"}, r"fork must be a mapping with keys from \['account', 'deadline_seconds'\]"),
+        ("0", r"fork must be a mapping"),
+    ],
+)
+def test_a_malformed_fork_section_is_refused_by_name(fork, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_config(_document(fork=fork))
+
+
+def test_a_snapshot_names_the_fork_section_only_when_the_config_has_one():
+    snapshot = config_snapshot(parse_config(_document()))
+    assert "fork" not in json.loads(snapshot)
+    forked = config_snapshot(parse_config(_document(fork={})))
+    assert forked != snapshot
+    assert json.loads(forked)["fork"] == {"account": 0, "deadline_seconds": 300}
+    assert config_module.config_from_snapshot(forked).fork == ForkSettings()
+    assert config_module.config_from_snapshot(snapshot).fork is None
 
 
 def test_the_quoted_fills_gas_overhead_is_read_and_may_be_zero():

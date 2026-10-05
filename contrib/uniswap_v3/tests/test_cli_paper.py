@@ -86,7 +86,7 @@ def test_paper_makes_the_store_reads_the_latest_bar_and_decides_it(node, tmp_pat
         "read 1 bar(s); 0 already stored, 0 without an answer",
         "run p: 1 boundary(ies) from 2024-01-01T00:00:00Z to 2024-01-01T00:00:00Z: 1 decided, "
         "0 already decided, 0 without a bar",
-        "filled 1, hold 0, no_trade 0, rejected 0, skipped_suspect 0",
+        "filled 1, hold 0, no_trade 0, partial 0, rejected 0, skipped_suspect 0",
         "the bar at 2024-01-01T00:00:00Z is decided: filled",
     ]
     # A visit made on time decides on a reading that is not final: that is not worth a warning.
@@ -106,7 +106,7 @@ def test_paper_run_twice_says_the_bar_was_already_decided_and_writes_no_second_r
         "checked pending readings against the final chain: 2 final, 0 reorged",
         "run p: 1 boundary(ies) from 2024-01-01T00:00:00Z to 2024-01-01T00:00:00Z: 0 decided, "
         "1 already decided, 0 without a bar",
-        "filled 1, hold 0, no_trade 0, rejected 0, skipped_suspect 0",
+        "filled 1, hold 0, no_trade 0, partial 0, rejected 0, skipped_suspect 0",
         "the bar at 2024-01-01T00:00:00Z was already decided: filled",
     ]
     assert capsys.readouterr().err == ""
@@ -361,7 +361,7 @@ def test_a_backtest_counts_a_rebalance_the_quote_refused_and_does_not_warn_of_it
         "--from", "2024-01-01", "--fills", "quoter", *_OPENING,
     )  # fmt: skip
     assert code == cli.EXIT_OK
-    assert lines[1] == "filled 0, hold 0, no_trade 0, rejected 1, skipped_suspect 0"
+    assert lines[1] == "filled 0, hold 0, no_trade 0, partial 0, rejected 1, skipped_suspect 0"
     assert "were rejected" not in capsys.readouterr().err
 
 
@@ -390,7 +390,7 @@ def test_status_of_a_run_prints_its_holdings_return_and_when_each_bar_was_decide
         "run p: paper, fills from the quoter, fixed_weights, values in USDC, started "
         "2024-01-01T00:10:00Z",
         "2 bar(s) decided from 2024-01-01T00:00:00Z to 2024-01-02T00:00:00Z: filled 1, hold 1, "
-        "no_trade 0, rejected 0, skipped_suspect 0",
+        "no_trade 0, partial 0, rejected 0, skipped_suspect 0",
         "behind: 1 boundary(ies) after the last decided bar have passed undecided, the latest at "
         "2024-01-03T00:00:00Z; a visit decides them, and the visit log says what stopped one",
         "holdings after the bar at 2024-01-02T00:00:00Z: USDC 5000, WBTC 0.06694505, "
@@ -426,7 +426,7 @@ def test_status_of_a_run_that_has_decided_nothing_prints_its_opening_balances(no
     _tamper(
         db,
         "INSERT INTO runs SELECT 'q', mode, chain_id, quote, strategy, config, balances, "
-        "gas_eth, created_at, fills FROM runs WHERE run_id = 'p'",
+        "gas_eth, created_at, fills, fork_block FROM runs WHERE run_id = 'p'",
     )
 
     code, lines = _run_status(node, db, run_id="q")

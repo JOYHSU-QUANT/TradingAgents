@@ -11,10 +11,19 @@ A test steers it through its attributes: what the quoter and the swap
 return, which calls a gas estimate reverts on, which mined transactions
 revert, whether a send's answer is lost, and whether the node answers
 ``anvil_nodeInfo`` at all.
+
+It also answers what a fork's wallet asks: ``anvil_reset`` (which drops
+every balance, allowance and storage word and moves the head), an
+account's ETH (``eth_getBalance``, ``anvil_setBalance``; a mined
+transaction pays its gas from it) and a token's storage
+(``eth_getStorageAt``, ``anvil_setStorageAt``), where a dev account's entry
+of the token's balance mapping (:attr:`FakeAnvil.balance_slots`) is its
+balance.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from eth_abi import decode, encode
@@ -23,13 +32,27 @@ from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
 from web3 import Web3
 
-from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, QUOTER_V2, SWAP_ROUTER_02
+from contrib.uniswap_v3.chain.fork import DEV_ACCOUNTS
+from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, QUOTER_V2, SWAP_ROUTER_02, TOKENS
 from contrib.uniswap_v3.tests.fakes.rpc import ScriptedProvider, block_hash, block_result, encoded
 
-__all__ = ["APPROVE_GAS", "FORK_URL", "SWAP_GAS", "FakeAnvil", "selector", "transfer"]
+__all__ = [
+    "APPROVE_GAS",
+    "DEV_ETH",
+    "FORK_URL",
+    "SWAP_GAS",
+    "FakeAnvil",
+    "balance_key",
+    "selector",
+    "transfer",
+]
 
 APPROVE_GAS = 46_000
 SWAP_GAS = 150_000
+# What anvil gives each dev account, and gives again on a reset.
+DEV_ETH = 10_000 * 10**18
+# Where mainnet's three tokens keep their balances, as anvil finds them.
+_BALANCE_SLOTS = {"USDC": 9, "WETH": 3, "WBTC": 0}
 # The URL the fake says it was forked from.
 FORK_URL = "https://upstream.invalid/fake-anvil-upstream-key"
 _ROUTER = SWAP_ROUTER_02[ETHEREUM_MAINNET].lower()
@@ -80,6 +103,12 @@ def _topic(address: str) -> str:
     return "0x" + "0" * 24 + address[2:].lower()
 
 
+def balance_key(owner: str, slot: int) -> int:
+    """Where ``owner``'s entry of a mapping declared at ``slot`` is stored, as an integer."""
+    word = bytes(12) + bytes.fromhex(owner[2:]) + slot.to_bytes(32, "big")
+    return int.from_bytes(Web3.keccak(word), "big")
+
+
 class FakeAnvil:
     def __init__(
         self, *, head: int = 100, timestamp: int = 1_700_000_000, chain_id: int = 1
@@ -97,6 +126,19 @@ class FakeAnvil:
         self.allowances: dict[tuple[str, str, str], int] = {}
         self.nonces: dict[str, int] = {}
         self.quote_out = 0
+        # What a swap of (token in, token out, raw amount in), all lowercase, quotes and pays;
+        # in place of ``quote_out`` when set.
+        self.quote_for: Callable[[str, str, int], int] | None = None
+        # The ETH each account holds, lowercase; a dev account not here holds DEV_ETH.
+        self.eth: dict[str, int] = {}
+        # Each token's balance mapping slot (lowercase address), and its other storage words.
+        self.balance_slots: dict[str, int] = {
+            TOKENS[ETHEREUM_MAINNET][symbol].address.lower(): slot
+            for symbol, slot in _BALANCE_SLOTS.items()
+        }
+        self.storage: dict[tuple[str, int], int] = {}
+        # The blocks the fork was reset to, oldest first.
+        self.resets: list[int] = []
         self.quote_reverts: str | None = None
         # What a mined swap pays; ``None`` pays the quote.
         self.swap_out: int | None = None
@@ -147,6 +189,33 @@ class FakeAnvil:
     def calls(self, method: str) -> list[Any]:
         return [params for name, params in self.provider.requests if name == method]
 
+    def eth_of(self, owner: str) -> int:
+        return self.eth.get(owner.lower(), DEV_ETH)
+
+    def _balance_owner(self, token: str, key: int) -> str | None:
+        """The dev account whose balance of ``token`` is stored at ``key``, when one's is."""
+        slot = self.balance_slots.get(token)
+        if slot is None:
+            return None
+        for owner in DEV_ACCOUNTS:
+            if balance_key(owner, slot) == key:
+                return owner.lower()
+        return None
+
+    def _storage(self, token: str, key: int) -> int:
+        owner = self._balance_owner(token, key)
+        return self.balance(token, owner) if owner else self.storage.get((token, key), 0)
+
+    def _reset(self, block: int) -> None:
+        self.resets.append(block)
+        self.head = block
+        self.balances.clear()
+        self.allowances.clear()
+        self.storage.clear()
+        self.eth.clear()
+        if self.node_info is not None:
+            self.node_info["forkConfig"]["forkBlockNumber"] = block
+
     # --- the node --------------------------------------------------------------
 
     def respond(self, method: str, params: Any) -> dict[str, Any]:
@@ -164,6 +233,25 @@ class FakeAnvil:
             return {"result": block_result(self.head, self.timestamp, base_fee=self.base_fee)}
         if method == "eth_maxPriorityFeePerGas":
             return {"result": hex(self.tip)}
+        if method == "anvil_reset":
+            self._reset(params[0]["forking"]["blockNumber"])
+            return {"result": None}
+        if method == "anvil_setBalance":
+            self.eth[params[0].lower()] = int(params[1], 16)
+            return {"result": None}
+        if method == "anvil_setStorageAt":
+            token, key, value = params[0].lower(), int(params[1], 16), int(params[2], 16)
+            owner = self._balance_owner(token, key)
+            if owner:
+                self.fund(token, owner, value)
+            else:
+                self.storage[(token, key)] = value
+            return {"result": True}
+        if method == "eth_getStorageAt":
+            word = self._storage(params[0].lower(), int(params[1], 16))
+            return {"result": "0x" + f"{word:064x}"}
+        if method == "eth_getBalance":
+            return {"result": hex(self.eth_of(params[0]))}
         if method == "eth_getTransactionCount":
             return {"result": hex(self.nonces.get(params[0].lower(), 0))}
         if method == "eth_call":
@@ -184,14 +272,19 @@ class FakeAnvil:
             if self.quote_reverts is not None:
                 return _revert(self.quote_reverts)
             if data[:4] == _QUOTE_SINGLE:
-                return {"result": encoded(["uint256", "uint160", "uint32", "uint256"], [self.quote_out, 2**96, 1, 100_000])}
+                ((token_in, token_out, amount_in, _, _),) = decode(
+                    ["(address,address,uint256,uint24,uint160)"], data[4:]
+                )
+                out = self._out(token_in, token_out, amount_in)
+                return {"result": encoded(["uint256", "uint160", "uint32", "uint256"], [out, 2**96, 1, 100_000])}
             assert data[:4] == _QUOTE_PATH
-            path, _ = decode(["bytes", "uint256"], data[4:])
+            path, amount_in = decode(["bytes", "uint256"], data[4:])
             hops = (len(path) - 20) // 23
+            out = self._out("0x" + path[:20].hex(), "0x" + path[-20:].hex(), amount_in)
             return {
                 "result": encoded(
                     ["uint256", "uint160[]", "uint32[]", "uint256"],
-                    [self.quote_out, [2**96] * hops, [1] * hops, 180_000],
+                    [out, [2**96] * hops, [1] * hops, 180_000],
                 )
             }
         if data[:4] == _BALANCE_OF:
@@ -228,6 +321,12 @@ class FakeAnvil:
     def _next_time(self) -> int:
         return max(self.timestamp + 12, self.clock)
 
+    def _out(self, token_in: str, token_out: str, amount_in: int) -> int:
+        """What a swap of ``amount_in`` of ``token_in`` for ``token_out`` quotes, and pays."""
+        if self.quote_for is None:
+            return self.quote_out
+        return self.quote_for(token_in.lower(), token_out.lower(), amount_in)
+
     def _mine(self, tx_hash: str, sender: str, transaction: dict[str, Any]) -> None:
         self.head += 1
         self.timestamp = self._next_time()
@@ -250,6 +349,7 @@ class FakeAnvil:
             if succeeded:
                 logs = self._swap(owner, inner)
                 succeeded = logs is not None
+        self.eth[owner] = self.eth_of(owner) - gas * (self.base_fee + self.tip)
         self.receipts[tx_hash] = {
             "transactionHash": tx_hash,
             "transactionIndex": "0x0",
@@ -283,7 +383,7 @@ class FakeAnvil:
             )
             token_in, token_out = "0x" + path[:20].hex(), "0x" + path[-20:].hex()
         token_in, token_out, recipient = token_in.lower(), token_out.lower(), recipient.lower()
-        out = self.quote_out if self.swap_out is None else self.swap_out
+        out = self._out(token_in, token_out, amount_in) if self.swap_out is None else self.swap_out
         allowed = self.allowance(token_in, owner, _ROUTER)
         if out < minimum or allowed < amount_in or self.balance(token_in, owner) < amount_in:
             return None

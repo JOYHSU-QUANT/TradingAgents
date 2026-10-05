@@ -10,7 +10,9 @@ the node for its chain ID and refuses a node on another chain.
 For a wallet that signs, it also offers what sending takes: an account's
 next nonce, a gas estimate, the priority fee, a receipt, and the sending of
 a signed transaction. The send alone is never tried again: the caller holds
-the transaction's hash, and looks for its receipt instead.
+the transaction's hash, and looks for its receipt instead. And for a fork's
+wallet, an account's ETH, a contract's storage, and anvil's own methods that
+reset the fork and write an account's ETH or a contract's storage.
 
 Failures, by what the node or the transport said:
 
@@ -315,6 +317,11 @@ def _is_count(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _require_word(slot: object) -> None:
+    if not isinstance(slot, bytes) or len(slot) != _HASH_BYTES:
+        raise ValueError(f"a storage slot is 32 bytes, got {slot!r}")
+
+
 def _require_block(block: object) -> None:
     if not _is_count(block):
         raise ValueError(f"a block is a non-negative integer, got {block!r}")
@@ -580,6 +587,66 @@ class Rpc:
         if isinstance(fork, Mapping) and isinstance(fork.get("forkUrl"), str) and fork["forkUrl"]:
             _REDACTOR.register(fork["forkUrl"])
         return info
+
+    def balance(self, address: str, *, block: int) -> int:
+        """The ETH ``address`` holds at the end of ``block``, in wei."""
+        _require_block(block)
+        self.verify_chain()
+        wei = self._request(
+            f"the balance of {address} at block {block}",
+            lambda: self._w3.eth.get_balance(address, block),  # type: ignore[arg-type]
+        )
+        if not _is_count(wei):
+            raise MalformedResponse(f"the balance of {address} came back as {wei!r}")
+        return wei
+
+    def storage_at(self, address: str, slot: bytes, *, block: int) -> int:
+        """The word stored at ``slot`` (32 bytes) of the contract at ``address``, at the end of ``block``."""
+        _require_block(block)
+        _require_word(slot)
+        self.verify_chain()
+        position = int.from_bytes(slot, "big")
+        word = self._request(
+            f"a storage slot of {address} at block {block}",
+            lambda: self._w3.eth.get_storage_at(address, position, block),  # type: ignore[arg-type]
+        )
+        if not isinstance(word, bytes) or len(word) > _HASH_BYTES:
+            raise MalformedResponse(f"a storage slot of {address} came back as {word!r}")
+        return int.from_bytes(word, "big")
+
+    def reset_fork(self, block: int) -> None:
+        """Fork anew at ``block`` from the URL the anvil node was forked from (``anvil_reset``).
+
+        Every change made on the fork is dropped, the dev accounts are
+        funded afresh, and the latest block is ``block``. The URL is not
+        sent: anvil keeps its own.
+        """
+        _require_block(block)
+        self._anvil("anvil_reset", [{"forking": {"blockNumber": block}}], f"a reset to block {block}")
+
+    def set_balance(self, address: str, wei: int) -> None:
+        """Make ``address`` hold ``wei`` of ETH on the anvil node (``anvil_setBalance``)."""
+        if not _is_count(wei):
+            raise ValueError(f"a balance is a non-negative integer of wei, got {wei!r}")
+        self._anvil("anvil_setBalance", [address, hex(wei)], f"setting the balance of {address}")
+
+    def set_storage(self, address: str, slot: bytes, value: int) -> None:
+        """Write ``value`` to ``slot`` of the contract at ``address`` on the anvil node (``anvil_setStorageAt``)."""
+        _require_word(slot)
+        if not _is_count(value) or value >= 2**256:
+            raise ValueError(f"a storage word is an integer that fits 256 bits, got {value!r}")
+        self._anvil(
+            "anvil_setStorageAt",
+            [address, "0x" + slot.hex(), "0x" + value.to_bytes(32, "big").hex()],
+            f"writing a storage slot of {address}",
+        )
+
+    def _anvil(self, method: str, params: list[Any], what: str) -> None:
+        """Call ``method``, one of anvil's own; what it answers is not read."""
+        self.verify_chain()
+        self._request(
+            what, lambda: self._w3.manager.request_blocking(RPCEndpoint(method), params)
+        )
 
     def _request(self, what: str, read: Callable[[], _T], *, attempts: int | None = None) -> _T:
         """Run one read, retrying a transient failure and translating every other one.

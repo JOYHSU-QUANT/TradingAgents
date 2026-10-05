@@ -25,6 +25,9 @@
         gas_units_per_hop: 150000
       quote:
         gas_overhead_units: 50000
+    fork:                       # optional, and so is each key in it
+      account: 0
+      deadline_seconds: 300
     rpc:                        # optional
       url_env: ETH_RPC_URL
 
@@ -46,6 +49,13 @@ stand for whatever is left out. Its two limits are quoted decimals, as a
 strategy's numbers are. ``execution`` is read the same way into an
 :class:`~.domain.execution.ExecutionSettings`; its ``model`` keys are the
 fill model's own, and its ``quote`` key the quoted fill's.
+
+``fork`` is read into a :class:`~.domain.execution.ForkSettings`: which of
+anvil's dev accounts a fork run signs with, and its swaps' deadline. Only a
+fork run reads it. A config without the section is one whose snapshot has
+no ``fork`` key, so a run started before the section existed is carried on
+under it; a config with the section, even at its defaults, is another
+snapshot.
 
 A file named ``*.local.yaml`` is gitignored inside this package. The config
 holds no secret. ``rpc.url_env`` is the name of the environment variable
@@ -69,7 +79,7 @@ import yaml
 from .constants import POOLS, TOKENS, pool_key
 from .domain.bars import BarSettings
 from .domain.decimal_context import parse_decimal, plain
-from .domain.execution import ExecutionSettings
+from .domain.execution import ExecutionSettings, ForkSettings
 from .domain.routing import find_route
 from .domain.types import Pool, Token
 
@@ -84,7 +94,8 @@ __all__ = [
 ]
 
 _REQUIRED_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
-_KEYS: Final = _REQUIRED_KEYS | {"bars", "execution", "rpc"}
+_KEYS: Final = _REQUIRED_KEYS | {"bars", "execution", "fork", "rpc"}
+_FORK_KEYS: Final = frozenset({"account", "deadline_seconds"})
 _STRATEGY_KEYS: Final = frozenset({"name", "params"})
 _BARS_INTEGERS: Final = frozenset({"interval_seconds", "twap_window_seconds"})
 _BARS_DECIMALS: Final = frozenset({"max_twap_deviation", "max_move"})
@@ -162,6 +173,9 @@ class UniswapConfig:
     # The environment variable that names the endpoint; ``None`` leaves it
     # to the chain reader's default.
     rpc_url_env: str | None = None
+    # How a fork run signs; ``None`` when the config has no ``fork`` section,
+    # which a fork run reads as the defaults.
+    fork: ForkSettings | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -178,6 +192,8 @@ class UniswapConfig:
             raise ConfigError(f"bars must be a BarSettings, got {self.bars!r}")
         if not isinstance(self.execution, ExecutionSettings):
             raise ConfigError(f"execution must be an ExecutionSettings, got {self.execution!r}")
+        if self.fork is not None and not isinstance(self.fork, ForkSettings):
+            raise ConfigError(f"fork must be a ForkSettings or None, got {self.fork!r}")
         if self.rpc_url_env is not None and (
             not isinstance(self.rpc_url_env, str) or not _ENV_NAME.fullmatch(self.rpc_url_env)
         ):
@@ -299,6 +315,16 @@ def _execution_settings(document: dict[Any, Any]) -> ExecutionSettings:
         raise ConfigError(f"execution: {exc}") from exc
 
 
+def _fork_settings(document: dict[Any, Any]) -> ForkSettings | None:
+    if "fork" not in document:
+        return None
+    section = _section(document, "fork", _FORK_KEYS)
+    try:
+        return ForkSettings(**section)
+    except ValueError as exc:
+        raise ConfigError(f"fork: {exc}") from exc
+
+
 def _execution_document(settings: ExecutionSettings) -> dict[str, object]:
     """``settings`` in the shape a config file writes them: a section's keys under its name."""
     document: dict[str, object] = {
@@ -336,22 +362,27 @@ def config_snapshot(config: UniswapConfig) -> str:
     comparison is of the whole text: a key a later version adds, even at its
     default, makes a new snapshot, and so a new run. The snapshot has the
     config file's own shape, with every default written out. Where the
-    node's URL comes from is left out: it changes no decision.
+    node's URL comes from is left out: it changes no decision. So is the
+    ``fork`` section when the config has none, which keeps the snapshot of
+    every config written before the section existed as it was.
     """
+    document: dict[str, object] = {
+        "chain_id": config.chain_id,
+        "quote_token": config.quote.symbol,
+        "tokens": [token.symbol for token in config.tokens],
+        "pools": [pool_key(pool) for pool in config.pools],
+        "strategy": {
+            "name": config.strategy.name,
+            "params": _jsonable(config.strategy.params),
+        },
+        "bars": _jsonable(asdict(config.bars)),
+        "execution": _jsonable(_execution_document(config.execution)),
+    }
+    if config.fork is not None:
+        document["fork"] = asdict(config.fork)
     try:
         return json.dumps(
-            {
-                "chain_id": config.chain_id,
-                "quote_token": config.quote.symbol,
-                "tokens": [token.symbol for token in config.tokens],
-                "pools": [pool_key(pool) for pool in config.pools],
-                "strategy": {
-                    "name": config.strategy.name,
-                    "params": _jsonable(config.strategy.params),
-                },
-                "bars": _jsonable(asdict(config.bars)),
-                "execution": _jsonable(_execution_document(config.execution)),
-            },
+            document,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
@@ -408,6 +439,7 @@ def parse_config(document: object) -> UniswapConfig:
         bars=_bar_settings(document),
         execution=_execution_settings(document),
         rpc_url_env=_section(document, "rpc", _RPC_KEYS).get("url_env"),
+        fork=_fork_settings(document),
     )
 
 

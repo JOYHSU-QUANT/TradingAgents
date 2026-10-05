@@ -1,6 +1,7 @@
-"""What a chain read raises instead of answering.
+"""What a chain read raises instead of answering, and what a send raises once it may have changed the wallet.
 
-The classes are grouped by what a caller can do about each:
+A :class:`ChainError` is a read with no answer, grouped by what a caller can
+do about it:
 
 - :class:`TransientChainError`, try again later: :class:`RpcUnavailable`
   and :class:`BlockNotFound`.
@@ -10,10 +11,14 @@ The classes are grouped by what a caller can do about each:
   last may be the node's bad moment.
 - :class:`RpcConfigError`, no read will work until the setup is fixed.
   :class:`NotAFork` is one: a node that is not a local anvil fork.
-- :class:`SendError`, a transaction was sent, or may have been, and did
-  not end as asked: the wallet may have changed, so the caller cannot take
-  it for "nothing happened". :class:`TransactionReverted`,
-  :class:`TransactionUnconfirmed` and :class:`SwapNotFilled`.
+
+A :class:`SendError` is not a :class:`ChainError`, so no handler of reads
+catches it: a transaction was sent, or may have been, and did not end as
+asked. The wallet may have changed, and the caller cannot take it for
+"nothing happened". :class:`TransactionReverted`,
+:class:`TransactionUnconfirmed`, :class:`SwapNotFilled` (only gas was
+spent) and :class:`SwapOutcomeUnknown` (a swap was mined and what it did
+cannot be read).
 
 The messages never hold the RPC URL: :class:`~.rpc.Rpc` scrubs it from the
 text of whatever it caught before it builds one of these.
@@ -35,6 +40,7 @@ __all__ = [
     "RpcUnavailable",
     "SendError",
     "SwapNotFilled",
+    "SwapOutcomeUnknown",
     "TransactionReverted",
     "TransactionUnconfirmed",
     "TransientChainError",
@@ -106,7 +112,7 @@ class NotAFork(RpcConfigError):
     """The node is not a local anvil fork, and only a fork is signed for."""
 
 
-class SendError(ChainError):
+class SendError(Exception):
     """A transaction was sent, or may have been, and did not end as asked.
 
     ``tx_hashes`` are the transactions concerned, oldest first. Unlike the
@@ -116,7 +122,7 @@ class SendError(ChainError):
 
     def __init__(self, message: str, *, tx_hashes: tuple[str, ...] = ()) -> None:
         super().__init__(message)
-        self.tx_hashes = tx_hashes
+        self.tx_hashes = tuple(tx_hashes)
 
 
 class TransactionReverted(SendError):
@@ -134,13 +140,26 @@ class TransactionUnconfirmed(SendError):
     """No receipt came for the transaction: it may be mined later, or never."""
 
 
-class SwapNotFilled(SendError):
-    """A swap did not fill, after a transaction for it was mined.
-
-    ``gas_cost_eth`` is the gas every mined transaction of the swap cost,
-    which the wallet has paid.
-    """
+class _MinedSwapError(SendError):
+    """A swap's error once one of its transactions was mined: ``gas_cost_eth`` is what they all cost."""
 
     def __init__(self, message: str, *, tx_hashes: tuple[str, ...], gas_cost_eth: Decimal) -> None:
         super().__init__(message, tx_hashes=tx_hashes)
         self.gas_cost_eth = gas_cost_eth
+
+
+class SwapNotFilled(_MinedSwapError):
+    """A swap did not fill, after a transaction for it was mined: only gas was spent.
+
+    An approval that reverted, a swap that reverted, or a swap not sent
+    after its approval was mined. No token moved, beyond what the approval
+    allows. The wallet has paid ``gas_cost_eth``.
+    """
+
+
+class SwapOutcomeUnknown(_MinedSwapError):
+    """A swap was mined and succeeded, and what it did cannot be read off its receipt.
+
+    Tokens may have moved, so the wallet has to be read to know where it
+    stands. The wallet has paid ``gas_cost_eth``.
+    """

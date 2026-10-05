@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import requests
 from eth_abi import encode
+from eth_account import Account
 
 from contrib.uniswap_v3.chain.errors import (
     CallReverted,
@@ -15,7 +16,7 @@ from contrib.uniswap_v3.chain.errors import (
     TransactionUnconfirmed,
 )
 from contrib.uniswap_v3.chain.fork import dev_account
-from contrib.uniswap_v3.chain.rpc import Log, Receipt
+from contrib.uniswap_v3.chain.rpc import Log, Receipt, _receipt as _parse_receipt
 from contrib.uniswap_v3.chain.transactions import SendSettings, TransactionSender
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, SWAP_ROUTER_02, TOKENS
 from contrib.uniswap_v3.tests.fakes.fork import APPROVE_GAS, FakeAnvil, selector
@@ -94,21 +95,19 @@ def test_a_send_whose_answer_is_lost_before_it_arrived_is_unconfirmed_and_not_se
     assert len(anvil.calls("eth_sendRawTransaction")) == 1
 
 
-def _answering_sends_with(anvil: FakeAnvil, result: str) -> None:
-    """The node mines each send and then answers it with ``result`` in place of its hash."""
-    respond = anvil.respond
-
-    def respond_with(method, params):
-        answer = respond(method, params)
-        return {"result": result} if method == "eth_sendRawTransaction" else answer
-
-    anvil.provider = ScriptedProvider(respond_with)
+def test_a_lost_send_whose_receipt_cannot_be_read_says_both():
+    anvil = FakeAnvil()
+    anvil.lose_send = "dropped"
+    anvil.receipt_error = {"error": {"code": -32000, "message": "receipts are down"}}
+    sender, _ = _sender(anvil)
+    with pytest.raises(TransactionUnconfirmed, match="could not be read either .*receipts are down"):
+        sender.send(_USDC, _APPROVE, what="an approval")
 
 
 def test_a_send_answered_with_another_hash_is_unconfirmed_naming_both():
     anvil = FakeAnvil()
     other = "0x" + "cd" * 32
-    _answering_sends_with(anvil, other)
+    anvil.send_answer = {"result": other}
     sender, _ = _sender(anvil)
     with pytest.raises(TransactionUnconfirmed, match="the node took it as") as caught:
         sender.send(_USDC, _APPROVE, what="an approval")
@@ -116,13 +115,28 @@ def test_a_send_answered_with_another_hash_is_unconfirmed_naming_both():
     assert caught.value.tx_hashes == (signed, other)
 
 
-def test_a_send_answered_with_something_not_a_hash_goes_on_to_its_receipt():
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"result": "0x1234"},
+        # A refusal, and yet the node took the transaction: it is mined.
+        {"error": {"code": -32000, "message": "already known"}},
+    ],
+)
+def test_a_send_answered_with_something_else_goes_on_to_the_receipt_it_has(answer):
     anvil = FakeAnvil()
-    _answering_sends_with(anvil, "0x1234")
+    anvil.send_answer = answer
     sender, _ = _sender(anvil)
     receipt = sender.send(_USDC, _APPROVE, what="an approval")
     assert receipt.succeeded and receipt.tx_hash in anvil.receipts
     assert len(anvil.calls("eth_sendRawTransaction")) == 1
+
+
+def test_only_an_anvil_dev_account_is_signed_with():
+    rpc, _ = rpc_over(FakeAnvil().provider)
+    stranger = Account.from_key("0x" + "42" * 32)
+    with pytest.raises(ValueError, match=f"{stranger.address} is not one"):
+        TransactionSender(rpc, stranger)
 
 
 def test_a_transaction_mined_and_reverted_raises_with_its_gas():
@@ -147,14 +161,7 @@ def test_a_receipt_that_does_not_come_in_time_is_unconfirmed_after_polling():
 
 def test_a_receipt_that_cannot_be_read_after_the_send_is_unconfirmed():
     anvil = FakeAnvil()
-    respond = anvil.respond
-
-    def failing_receipts(method, params):
-        if method == "eth_getTransactionReceipt":
-            raise requests.ConnectionError("refused")
-        return respond(method, params)
-
-    anvil.provider = ScriptedProvider(failing_receipts)
+    anvil.receipt_error = requests.ConnectionError("refused")
     sender, _ = _sender(anvil)
     with pytest.raises(TransactionUnconfirmed, match="could not be read"):
         sender.send(_USDC, _APPROVE, what="an approval")
@@ -178,6 +185,8 @@ def test_a_head_without_a_base_fee_sends_nothing():
         {"receipt_timeout_seconds": 0},
         {"poll_seconds": -1},
         {"poll_seconds": True},
+        {"poll_seconds": float("inf")},
+        {"receipt_timeout_seconds": float("nan")},
     ],
 )
 def test_send_settings_refuse_values_that_cannot_work(settings):
@@ -249,13 +258,22 @@ def test_a_receipt_the_node_does_not_have_is_none():
     [
         ({"transactionHash": "0x" + "ef" * 32}, "is of the transaction"),
         ({"status": "0x2"}, "has {"),
-        ({"logs": "nope"}, "the receipt of"),
+        # web3 hands a string of logs on character by character.
+        ({"logs": "nope"}, "has a log of"),
     ],
 )
 def test_a_receipt_that_cannot_be_right_is_refused(changes, said):
     rpc, _ = rpc_over(answering({"result": _receipt(**changes)}))
     with pytest.raises(MalformedResponse, match=said):
         rpc.receipt(_HASH)
+
+
+@pytest.mark.parametrize("logs", ["nope", None, 5])
+def test_logs_that_are_not_a_list_are_refused_as_they_come(logs):
+    # As another source than web3 would hand them on, unformatted.
+    with pytest.raises(MalformedResponse, match="has logs of"):
+        _parse_receipt(_HASH, {**_receipt(), "logs": logs, "blockNumber": 7, "status": 1,
+                               "gasUsed": 16, "effectiveGasPrice": 3})
 
 
 def test_the_node_reads_a_sender_needs_come_back_as_integers():

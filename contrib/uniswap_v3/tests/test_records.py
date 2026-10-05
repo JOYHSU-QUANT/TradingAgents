@@ -8,6 +8,7 @@ import pytest
 
 from contrib.uniswap_v3.domain.bars import Finality, SuspectCause
 from contrib.uniswap_v3.domain.records import (
+    _FILLS_BY_MODE,
     BarSeen,
     Decision,
     FillRecord,
@@ -200,6 +201,14 @@ def test_a_step_carries_fills_exactly_when_its_decision_is_filled():
         StepRecord(decision=filled, valuation=_valuation(), fills=("fill",))
     with pytest.raises(ValueError, match="a step holds a Decision and a Valuation"):
         StepRecord(decision=_decision(), valuation=_LEDGER)
+
+
+def test_every_mode_takes_some_source_of_fills_and_only_a_signing_mode_the_chain():
+    # A mode added without an entry would be a KeyError on every run of it.
+    assert set(_FILLS_BY_MODE) == set(RunMode)
+    assert all(_FILLS_BY_MODE.values())
+    signing = {mode for mode, taken in _FILLS_BY_MODE.items() if FillSource.CHAIN in taken}
+    assert signing == {RunMode.FORK, RunMode.LIVE}
 
 
 @pytest.mark.parametrize(

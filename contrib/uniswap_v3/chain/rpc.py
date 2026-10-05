@@ -282,10 +282,10 @@ def _receipt(tx_hash: str, raw: object) -> Receipt:
         if not isinstance(log, Mapping) or not isinstance(log.get("topics"), Sequence):
             raise MalformedResponse(f"{what} has a log of {log!r}")
         address, data = _hex(log.get("address")), _hex(log.get("data"))
-        topics = tuple(_hex(topic) for topic in log["topics"])
-        if address is None or data is None or None in topics:
+        topics = tuple(hexed for topic in log["topics"] if (hexed := _hex(topic)) is not None)
+        if address is None or data is None or len(topics) != len(log["topics"]):
             raise MalformedResponse(f"{what} has a log of {log!r}")
-        kept.append(Log(address, topics, data))  # type: ignore[arg-type]
+        kept.append(Log(address, topics, data))
     return Receipt(
         tx_hash=tx_hash.lower(),
         block=numbers["blockNumber"],
@@ -421,6 +421,14 @@ class Rpc:
     def latest_header(self) -> BlockHeader:
         """The header of the latest block: the one read that names no block."""
         return self._header("the latest block", "latest")
+
+    def pending_header(self) -> BlockHeader:
+        """The header of the block the node would mine next, whose time is the node's clock now.
+
+        The latest block's time stands still while no block is mined, as on
+        an idle anvil; the pending block's does not.
+        """
+        return self._header("the pending block", "pending")
 
     def header(self, block: int) -> BlockHeader:
         """The header of ``block``."""

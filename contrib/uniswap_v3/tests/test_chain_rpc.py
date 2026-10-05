@@ -522,6 +522,7 @@ def test_the_error_classes_say_what_a_caller_can_do():
             errors.TransactionReverted,
             errors.TransactionUnconfirmed,
             errors.SwapNotFilled,
+            errors.SwapOutcomeUnknown,
         },
     }
     groups = list(by_action)
@@ -529,11 +530,15 @@ def test_the_error_classes_say_what_a_caller_can_do():
         assert not any(issubclass(group, other) for other in groups if other is not group)
     for action, kinds in by_action.items():
         assert all(issubclass(kind, action) for kind in kinds)
+    # A send that may have changed the wallet is no read: no handler of reads catches it.
+    assert not issubclass(errors.SendError, ChainError)
     # Every class is in exactly one group.
     leaves = {
         kind
         for kind in vars(errors).values()
-        if isinstance(kind, type) and issubclass(kind, ChainError) and not kind.__subclasses__()
+        if isinstance(kind, type)
+        and issubclass(kind, ChainError | errors.SendError)
+        and not kind.__subclasses__()
     }
     assert leaves == set().union(*by_action.values())
 

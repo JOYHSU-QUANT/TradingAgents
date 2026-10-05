@@ -28,11 +28,16 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 
 backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecutor`，而且只在分叉上：
 
-- 只接受本機（loopback）URL，且節點要回應 `anvil_nodeInfo`——anvil 分叉沿用主網的 chain ID，
+- 只接受主機是字面 loopback IP（127.0.0.1、::1）的 URL——`localhost` 這類名稱不收（hosts 檔可以改指）；
+  節點的 `anvil_nodeInfo` 還要寫著它從哪個 URL 分叉，未分叉的 anvil 不收。anvil 分叉沿用主網的 chain ID，
   所以不能靠 chain ID 分辨分叉與主網（`chain/fork.py`）。
-- 只用 anvil 公開的 test 助記詞推導出的 10 個開發帳戶簽名；程式沒有接受其他私鑰的入口。
-- 每筆 swap 只 approve 剛好的量；`amountOutMinimum` 就是 swap 的 `min_amount_out`（與其他 executor 同一條底線），
-  送出前先在最新區塊報價，低於底線就拒絕、什麼都不送。
+- 只用 anvil 公開的 test 助記詞推導出的 10 個開發帳戶簽名；送交易的 `TransactionSender` 拿到其他帳戶就拒絕，
+  程式沒有接受其他私鑰的入口。
+- 每筆 swap 把 allowance 設成剛好的量（多的也調回來）；`amountOutMinimum` 就是 swap 的 `min_amount_out`
+  （與其他 executor 同一條底線），送出前先在最新區塊報價，低於底線就拒絕、什麼都不送。deadline 取 pending
+  區塊的時間（節點的時鐘），閒置的 anvil 最新區塊時間不會走。
+- `Rejection`＝錢包沒動；有交易上鏈後才失敗丟 `SendError`（不是 `ChainError`，讀取端的處理接不到它）：
+  只花了 gas 是 `SwapNotFilled`，swap 上鏈了但結果讀不出來是 `SwapOutcomeUnknown`，收據沒來是 `TransactionUnconfirmed`。
 - 成交來源 `chain` 只屬於 fork／live run，fork／live run 也只能用它；在引擎能記下「第一腿上鏈、後腿失敗」之前，
   `open_engine` 拒絕任何會簽名的 executor。
 

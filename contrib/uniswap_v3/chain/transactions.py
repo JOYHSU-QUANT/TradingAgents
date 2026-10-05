@@ -1,8 +1,8 @@
 """Signing one transaction, sending it once, and waiting for its receipt.
 
-:class:`TransactionSender` signs with the account it is handed. What hands
-it an account is the guard's business: in this package that is a
-:class:`~.swaps.ChainExecutor`, which hands it an anvil dev account only.
+:class:`TransactionSender` signs only as one of anvil's dev accounts
+(:data:`~.fork.DEV_ACCOUNTS`), and refuses any other account it is handed:
+this package has no way to sign with a key that could hold anything.
 
 One transaction, from first to last:
 
@@ -11,10 +11,12 @@ One transaction, from first to last:
 2. It is signed as an EIP-1559 transaction for the connection's chain ID,
    named explicitly, with the account's next nonce. The fee cap is twice
    the latest base fee plus the node's suggested priority fee.
-3. It is sent once. A send the node refuses raises what the node said, and
-   nothing was sent. A send whose answer is lost, or cannot be read, may
-   have reached the node: its receipt is looked for, and without one the
-   send raises :class:`~.errors.TransactionUnconfirmed`.
+3. It is sent once. When the send fails, the transaction's receipt is
+   looked for, since the node may have taken it all the same; with one,
+   the send goes on to it. Without one, a send the node refused raises
+   what the node said, and nothing was sent; a send whose answer was lost,
+   or cannot be read, may have reached the node, and raises
+   :class:`~.errors.TransactionUnconfirmed`.
 4. Its receipt is waited for. One that does not come in time, or cannot be
    read, raises :class:`~.errors.TransactionUnconfirmed`, and one that says
    it reverted :class:`~.errors.TransactionReverted`.
@@ -25,6 +27,7 @@ the transaction may yet change the wallet.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,10 +38,12 @@ from eth_account.signers.local import LocalAccount
 from .errors import (
     ChainError,
     MalformedResponse,
+    RpcRejected,
     RpcUnavailable,
     TransactionReverted,
     TransactionUnconfirmed,
 )
+from .fork import DEV_ACCOUNTS
 from .rpc import Receipt, Rpc
 
 __all__ = ["SendSettings", "TransactionSender"]
@@ -63,12 +68,16 @@ class SendSettings:
             raise ValueError(f"gas_margin_percent must be a non-negative integer, got {margin!r}")
         for name in ("receipt_timeout_seconds", "poll_seconds"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int | float) or not value > 0:
-                raise ValueError(f"{name} must be a number above zero, got {value!r}")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not 0 < value < math.inf
+            ):
+                raise ValueError(f"{name} must be a finite number above zero, got {value!r}")
 
 
 class TransactionSender:
-    """Signs with ``account`` and sends through ``rpc``, one transaction at a time.
+    """Signs with ``account``, an anvil dev account, and sends through ``rpc``, one transaction at a time.
 
     For one thread: each send reads the account's next nonce, which a
     second sender on the same account would read as well.
@@ -83,6 +92,10 @@ class TransactionSender:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        if account.address not in DEV_ACCOUNTS:
+            raise ValueError(
+                f"only an anvil dev account is signed with, and {account.address} is not one"
+            )
         self._rpc = rpc
         self._account = account
         self._settings = settings if settings is not None else SendSettings()
@@ -126,13 +139,24 @@ class TransactionSender:
         }
         signed = self._account.sign_transaction(transaction)
         tx_hash = "0x" + bytes(signed.hash).hex()
+        # Asked before the send, so that a failure of it is not taken for the send's.
+        rpc.verify_chain()
         try:
             sent = rpc.send_raw_transaction(bytes(signed.raw_transaction))
-        except (RpcUnavailable, MalformedResponse) as exc:
-            # The answer was lost or garbled, and the transaction may have arrived.
-            if self._receipt_now(tx_hash) is None:
+        except (RpcRejected, RpcUnavailable, MalformedResponse) as exc:
+            # The node may have taken the transaction all the same.
+            unread: ChainError | None = None
+            try:
+                receipt = rpc.receipt(tx_hash)
+            except ChainError as failed:
+                receipt, unread = None, failed
+            if receipt is None:
+                if isinstance(exc, RpcRejected):
+                    raise
+                # The answer was lost or garbled, and the transaction may have arrived.
+                looked = f"; its receipt could not be read either ({unread})" if unread else ""
                 raise TransactionUnconfirmed(
-                    f"{what} ({tx_hash}) may or may not have reached the node ({exc})",
+                    f"{what} ({tx_hash}) may or may not have reached the node ({exc}){looked}",
                     tx_hashes=(tx_hash,),
                 ) from exc
             sent = tx_hash
@@ -149,13 +173,6 @@ class TransactionSender:
                 gas_cost_wei=receipt.gas_cost_wei,
             )
         return receipt
-
-    def _receipt_now(self, tx_hash: str) -> Receipt | None:
-        """The receipt, when the node has one; a read that fails counts as none."""
-        try:
-            return self._rpc.receipt(tx_hash)
-        except ChainError:
-            return None
 
     def _wait(self, tx_hash: str, what: str) -> Receipt:
         deadline = self._clock() + self._settings.receipt_timeout_seconds

@@ -12,25 +12,28 @@ One swap, from first to last:
 2. The wallet must hold what the swap sells. One that does not is not the
    market's answer but a wallet out of step with its ledger, and raises
    ``ValueError``.
-3. When the router may not take that much of the token yet, an ERC-20
-   approval of exactly the amount is sent first. Nothing is approved
-   beyond what one swap sells.
+3. Unless the router may take exactly that much of the token already, an
+   ERC-20 approval of exactly the amount is sent first, setting the
+   allowance down as well as up. Nothing is approved beyond what one swap
+   sells. An approval whose gas estimate says it would revert is refused.
 4. The swap is sent to SwapRouter02 inside ``multicall(deadline, ...)``,
    with ``amountOutMinimum`` the swap's ``min_amount_out``: the same floor
-   every executor holds a swap to. The deadline is the latest block's time
-   plus :attr:`SwapSettings.deadline_seconds`. A swap whose gas estimate
-   says it would revert is refused while nothing has been sent.
+   every executor holds a swap to. The deadline is the pending block's
+   time, which is the node's clock, plus
+   :attr:`SwapSettings.deadline_seconds`. A swap whose gas estimate says it
+   would revert is refused while nothing has been sent.
 5. The fill is what the receipt's ``Transfer`` events of the output token
    paid the wallet, in the block the swap was mined in, and its gas is
    that of every transaction the swap took: the approval's and its own, at
-   the price each paid. A receipt that shows less than the minimum paid is
-   not taken for a fill.
+   the price each paid.
 
 :class:`~..domain.types.Rejection` means the wallet is as it was. Once a
 transaction has been mined, a swap that does not fill raises
-:class:`~.errors.SwapNotFilled` with the gas spent, and one whose receipt
-never came :class:`~.errors.TransactionUnconfirmed`: the wallet changed, or
-may yet change.
+:class:`~.errors.SwapNotFilled` with the gas spent (only gas moved); one
+that was mined and whose receipt cannot be read as a fill, as when it shows
+less than the minimum paid, raises :class:`~.errors.SwapOutcomeUnknown`;
+and one whose receipt never came :class:`~.errors.TransactionUnconfirmed`.
+The wallet changed, or may yet change.
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ from .errors import (
     ChainError,
     RpcConfigError,
     SwapNotFilled,
+    SwapOutcomeUnknown,
     TransactionReverted,
     TransactionUnconfirmed,
 )
@@ -205,6 +209,8 @@ class ChainExecutor:
                 f"{token_in.symbol} at block {head.number}, and the swap sells {selling}"
             )
 
+        # Built before anything is sent: a swap that cannot be encoded leaves no approval behind.
+        call = self._swap_call(swap, raw_in)
         mined: list[Receipt] = []
         allowance = rpc.call(
             token_in.address,
@@ -213,11 +219,16 @@ class ChainExecutor:
             (self.address, self._router),
             block=head.number,
         )
-        if allowance < raw_in:
+        if allowance != raw_in:
+            # Set to the amount, down as well as up: nothing beyond this swap stays approved.
             approve = _calldata(_APPROVE, [self._router, raw_in])
             try:
                 mined.append(
                     self._sender.send(token_in.address, approve, what=f"approving {selling}")
+                )
+            except CallReverted as exc:
+                return Rejection(
+                    swap, f"the approval of {selling} would revert ({exc}); nothing was sent"
                 )
             except TransactionReverted as exc:
                 raise SwapNotFilled(
@@ -226,12 +237,12 @@ class ChainExecutor:
                     gas_cost_eth=eth_from_wei(exc.gas_cost_wei),
                 ) from exc
 
-        data = _calldata(
-            _MULTICALL,
-            [head.timestamp + self._settings.deadline_seconds, [self._swap_call(swap, raw_in)]],
-        )
         what = f"the swap of {selling} for {token_out.symbol}"
         try:
+            # From the pending block, whose time is the node's clock: the latest block's
+            # stands still while none is mined, and would leave a deadline already past.
+            deadline = rpc.pending_header().timestamp + self._settings.deadline_seconds
+            data = _calldata(_MULTICALL, [deadline, [call]])
             swapped = self._sender.send(self._router, data, what=what)
         except TransactionReverted as exc:
             raise SwapNotFilled(
@@ -255,19 +266,29 @@ class ChainExecutor:
             raise
         mined.append(swapped)
 
-        amount_out = from_raw(token_out, self._paid(swapped, token_out))
-        if amount_out == 0 or amount_out < swap.min_amount_out:
-            # The router holds a swap to its minimum, so the receipt is not what was asked
-            # for; the swap was mined all the same, and its gas spent.
-            raise SwapNotFilled(
-                f"{what} ({swapped.tx_hash}) was mined, and its receipt shows "
-                f"{plain(amount_out)} {token_out.symbol} paid to the wallet, "
-                f"below the swap's minimum of {plain(swap.min_amount_out)}",
+        gas_cost_eth = _gas_eth(mined)
+
+        def unknown(why: str) -> SwapOutcomeUnknown:
+            # The swap was mined and succeeded: tokens moved, and how is not known here.
+            return SwapOutcomeUnknown(
+                f"{what} ({swapped.tx_hash}) was mined, and what it paid cannot be read "
+                f"off its receipt ({why})",
                 tx_hashes=_hashes(mined),
-                gas_cost_eth=_gas_eth(mined),
+                gas_cost_eth=gas_cost_eth,
+            )
+
+        try:
+            amount_out = from_raw(token_out, self._paid(swapped, token_out))
+        except ValueError as exc:
+            raise unknown(str(exc)) from exc
+        if amount_out == 0 or amount_out < swap.min_amount_out:
+            # The router holds a swap to its minimum: this receipt is not read right.
+            raise unknown(
+                f"its receipt shows {plain(amount_out)} {token_out.symbol} paid to the "
+                f"wallet, below the swap's minimum of {plain(swap.min_amount_out)}"
             )
         return Fill(
-            swap=swap, amount_out=amount_out, gas_cost_eth=_gas_eth(mined), block=swapped.block
+            swap=swap, amount_out=amount_out, gas_cost_eth=gas_cost_eth, block=swapped.block
         )
 
     def _swap_call(self, swap: SwapIntent, raw_in: int) -> bytes:

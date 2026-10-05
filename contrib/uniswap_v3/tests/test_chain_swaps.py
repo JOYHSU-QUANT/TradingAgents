@@ -8,10 +8,12 @@ import pytest
 from eth_abi import decode
 
 from contrib.uniswap_v3.chain.errors import (
+    ChainError,
     NotAFork,
     RpcConfigError,
     RpcRejected,
     SwapNotFilled,
+    SwapOutcomeUnknown,
     TransactionUnconfirmed,
 )
 from contrib.uniswap_v3.chain.fork import DEV_ACCOUNTS, Fork
@@ -79,8 +81,11 @@ def test_a_swap_is_approved_exactly_then_sent_through_the_routers_multicall_and_
     assert (approve["gas"], swapped["gas"]) == (55_200, 180_000)
     assert (swapped["maxFeePerGas"], swapped["maxPriorityFeePerGas"]) == (2 * 10**9 + 10**8, 10**8)
 
+    # Every read the swap made was of the block it started from.
+    assert {params[1] for params in anvil.calls("eth_call")} == {hex(100)}
     deadline, inner = _multicall(swapped)
-    assert deadline == 1_700_000_000 + 300
+    # The pending block's time when the swap was sent (the approval's block, 12 s on) and 300 s.
+    assert deadline == 1_700_000_024 + 300
     assert inner[:4] == selector(
         "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))"
     )
@@ -116,12 +121,35 @@ def test_a_two_hop_swap_is_one_exact_input_along_the_packed_path():
     assert (recipient, amount_in, minimum) == (_ME.lower(), 1000 * 10**6, 2_990_000)
 
 
-def test_an_allowance_that_already_covers_the_swap_sends_no_approval():
+def _allow(anvil: FakeAnvil, raw: int) -> None:
+    anvil.allow(_USDC.address, _ME, _ROUTER, raw)
+
+
+def test_an_allowance_of_exactly_the_swap_sends_no_approval():
     anvil = _anvil()
-    anvil.allowances[(_USDC.address.lower(), _ME.lower(), _ROUTER.lower())] = 10**12
+    _allow(anvil, 1000 * 10**6)
     fill = _executor(anvil).execute(_SWAP, _BAR)
     assert isinstance(fill, Fill) and fill.gas_cost_eth == eth_from_wei(SWAP_GAS * _PRICE)
     assert len(anvil.sent) == 1 and fill.block == 101
+
+
+def test_a_larger_allowance_left_behind_is_set_back_to_the_swaps_amount():
+    anvil = _anvil()
+    _allow(anvil, 10**12)
+    fill = _executor(anvil).execute(_SWAP, _BAR)
+    assert isinstance(fill, Fill) and len(anvil.sent) == 2
+    assert anvil.allowance(_USDC.address, _ME, _ROUTER) == 0
+
+
+def test_a_deadline_is_set_by_the_nodes_clock_and_not_by_a_latest_block_long_past():
+    # An anvil left idle mines nothing: its latest block is an hour old, its clock is not.
+    anvil = _anvil()
+    _allow(anvil, 1000 * 10**6)
+    anvil.clock = anvil.timestamp + 3_600
+    fill = _executor(anvil).execute(_SWAP, _BAR)
+    assert isinstance(fill, Fill)
+    deadline, _ = _multicall(anvil.sent[-1])
+    assert deadline == anvil.clock + 300
 
 
 @pytest.mark.parametrize(
@@ -158,7 +186,7 @@ def test_a_wallet_that_holds_less_than_the_swap_sells_is_a_fault_and_not_a_refus
 
 def test_a_swap_whose_estimate_reverts_before_anything_is_mined_is_refused():
     anvil = _anvil()
-    anvil.allowances[(_USDC.address.lower(), _ME.lower(), _ROUTER.lower())] = 10**12
+    _allow(anvil, 1000 * 10**6)
     anvil.estimate_reverts = {_ROUTER.lower()}
     refused = _executor(anvil).execute(_SWAP, _BAR)
     assert isinstance(refused, Rejection)
@@ -186,6 +214,15 @@ def test_a_swap_mined_and_reverted_reports_the_gas_of_every_transaction_it_took(
     assert anvil.balance(_USDC.address, _ME) == 1000 * 10**6
 
 
+def test_an_approval_whose_estimate_reverts_is_refused_and_nothing_is_sent():
+    anvil = _anvil()
+    anvil.estimate_reverts = {_USDC.address.lower()}
+    refused = _executor(anvil).execute(_SWAP, _BAR)
+    assert isinstance(refused, Rejection)
+    assert "approval of 1000 USDC would revert" in refused.reason
+    assert "nothing was sent" in refused.reason and anvil.sent == []
+
+
 def test_an_approval_mined_and_reverted_reports_its_gas():
     anvil = _anvil()
     anvil.mined_reverts = {_USDC.address.lower()}
@@ -198,13 +235,7 @@ def test_an_approval_mined_and_reverted_reports_its_gas():
 def test_a_swap_whose_receipt_never_comes_names_every_transaction_sent():
     anvil = _anvil()
     # The approval is mined; the swap is taken and never mined.
-    original = anvil._mine
-
-    def mine_approvals_only(tx_hash, sender, transaction):
-        if bytes(transaction["data"])[:4] == selector("approve(address,uint256)"):
-            original(tx_hash, sender, transaction)
-
-    anvil._mine = mine_approvals_only
+    anvil.mine_only = {selector("approve(address,uint256)")}
     clock = iter(range(0, 1_000, 30))
     executor = ChainExecutor(
         Fork(rpc_over(anvil.provider)[0]), clock=lambda: next(clock), sleep=lambda s: None
@@ -216,22 +247,27 @@ def test_a_swap_whose_receipt_never_comes_names_every_transaction_sent():
     assert caught.value.tx_hashes[1] not in anvil.receipts
 
 
-def test_a_receipt_that_pays_the_wallet_less_than_the_minimum_is_not_read_as_a_fill():
+@pytest.mark.parametrize(
+    ("pay_to", "swap_out", "said"),
+    [
+        # The output is paid to another address than the wallet, as far as the receipt says.
+        ("0x" + "11" * 20, None, "shows 0 WETH paid to the wallet, below the swap's minimum"),
+        # The output Transfer carries more than any token amount can be.
+        (None, 2**256, "fits a uint256"),
+    ],
+)
+def test_a_mined_swap_whose_receipt_cannot_be_read_as_a_fill_has_an_unknown_outcome(
+    pay_to, swap_out, said
+):
     anvil = _anvil()
-    executor = _executor(anvil)
-    original = anvil._swap
-
-    def pay_someone_else(owner, inner):
-        logs = original(owner, inner)
-        logs[1]["topics"][2] = "0x" + "0" * 24 + "11" * 20
-        return logs
-
-    anvil._swap = pay_someone_else
-    # Mined all the same: not a read with no answer, but a swap that did not fill, with its gas.
-    with pytest.raises(SwapNotFilled, match="0 WETH paid to the wallet") as caught:
-        executor.execute(_SWAP, _BAR)
+    anvil.pay_to, anvil.swap_out = pay_to, swap_out
+    # Mined and succeeded: tokens moved, so this is neither a read without an answer nor
+    # a swap that only spent gas.
+    with pytest.raises(SwapOutcomeUnknown, match=said) as caught:
+        _executor(anvil).execute(_SWAP, _BAR)
     assert caught.value.tx_hashes == tuple(anvil.receipts)
     assert caught.value.gas_cost_eth == eth_from_wei((APPROVE_GAS + SWAP_GAS) * _PRICE)
+    assert not isinstance(caught.value, SwapNotFilled | ChainError)
 
 
 def test_the_executor_signs_on_a_fork_as_a_dev_account_and_is_an_executor():

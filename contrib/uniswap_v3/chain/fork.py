@@ -2,8 +2,10 @@
 
 An anvil fork of mainnet answers to mainnet's chain ID, so the chain ID
 cannot tell a fork from mainnet. A fork is told apart by where it is and
-what it is: :func:`open_fork` takes only a loopback URL, with a node behind
-it that answers ``anvil_nodeInfo``, and a :class:`Fork` is what it returns.
+what it is: :func:`open_fork` takes only a URL whose host is a literal
+loopback address (not ``localhost``, which a hosts file can point
+elsewhere), with a node behind it whose ``anvil_nodeInfo`` names the URL it
+was forked from, and a :class:`Fork` is what it returns.
 
 A wallet signs only with an account anvil makes from its public test
 mnemonic (:func:`dev_account`). Their keys are published with anvil, so
@@ -14,6 +16,7 @@ handed in: this package has no way to sign with a key of the user's.
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
@@ -75,7 +78,7 @@ def dev_account(index: int) -> LocalAccount:
 
 
 def _is_loopback(url: str) -> bool:
-    """Whether ``url`` is an http(s) URL whose host is this machine."""
+    """Whether ``url`` is an http(s) URL whose host is a literal loopback address."""
     try:
         parts = urlsplit(url)
         host, _ = parts.hostname, parts.port
@@ -83,26 +86,33 @@ def _is_loopback(url: str) -> bool:
         return False
     if parts.scheme not in ("http", "https") or not host:
         return False
-    if host == "localhost":
-        return True
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
+        # A name, ``localhost`` included: what it resolves to is not this code's to know.
         return False
 
 
 def require_anvil(rpc: Rpc) -> None:
-    """Refuse a node that does not answer ``anvil_nodeInfo``.
+    """Refuse a node that is not an anvil fork: its ``anvil_nodeInfo`` must name a fork URL.
 
-    What it answers is not quoted: it holds the URL the fork was made from.
+    A fresh anvil, not forked from anything, has no fork URL, and neither
+    has a proxy that answers the method with something else. What the node
+    answers is not quoted: the fork URL holds the upstream node's key.
     """
     try:
-        rpc.node_info()
+        info = rpc.node_info()
     except (RpcRejected, MalformedResponse) as exc:
         raise NotAFork(
             f"the node does not answer anvil_nodeInfo as anvil does, and only an anvil "
             f"fork is signed for ({type(exc).__name__})"
         ) from None
+    fork = info.get("forkConfig")
+    if not isinstance(fork, Mapping) or not isinstance(fork.get("forkUrl"), str) or not fork["forkUrl"]:
+        raise NotAFork(
+            "the node answers anvil_nodeInfo without the URL it was forked from: it is "
+            "not a fork, and only an anvil fork is signed for"
+        )
 
 
 @dataclass(frozen=True)
@@ -121,14 +131,14 @@ def open_fork(
 ) -> Fork:
     """Open the anvil fork at ``url``, which must be on this machine, of the chain ``chain_id``.
 
-    A URL whose host is not a loopback address is refused before anything is
-    asked of it. The node must then report ``chain_id`` and answer
-    ``anvil_nodeInfo``.
+    A URL whose host is not a literal loopback address is refused before
+    anything is asked of it. The node must then report ``chain_id``, and
+    name in ``anvil_nodeInfo`` the URL it was forked from.
     """
     if not isinstance(url, str) or not _is_loopback(url):
         raise NotAFork(
-            "a fork is opened only at an http(s) URL on this machine (localhost, or a "
-            "loopback address)"
+            "a fork is opened only at an http(s) URL on this machine, whose host is a "
+            "loopback address (127.0.0.1 or ::1; not a name such as localhost)"
         )
     settings = settings if settings is not None else RpcSettings()
     provider = HTTPProvider(

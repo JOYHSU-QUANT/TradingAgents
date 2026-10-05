@@ -23,11 +23,12 @@ from collections.abc import Iterator
 from decimal import Decimal
 
 import pytest
+import requests
 from web3 import HTTPProvider, Web3
 
 from contrib.uniswap_v3.chain.fork import DEV_ACCOUNTS, Fork, open_fork
 from contrib.uniswap_v3.chain.quoter import quote_exact_input
-from contrib.uniswap_v3.chain.rpc import DEFAULT_URL_ENV
+from contrib.uniswap_v3.chain.rpc import DEFAULT_URL_ENV, RpcSettings
 from contrib.uniswap_v3.chain.swaps import ChainExecutor
 from contrib.uniswap_v3.chain.units import from_raw
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
@@ -73,7 +74,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture(scope="module")
-def fork_url() -> Iterator[str]:
+def fork_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     upstream = os.environ.get(DEFAULT_URL_ENV, "")
     anvil = shutil.which("anvil")
     if not upstream:
@@ -81,34 +82,48 @@ def fork_url() -> Iterator[str]:
     if anvil is None:
         pytest.skip("anvil is not on the PATH")
     port = _free_port()
-    process = subprocess.Popen(
-        [anvil, "--fork-url", upstream, "--fork-block-number", str(FORK_BLOCK)]
-        + ["--port", str(port), "--silent"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    log = tmp_path_factory.mktemp("anvil") / "stderr.log"
+    with log.open("wb") as stderr:
+        process = subprocess.Popen(
+            [anvil, "--fork-url", upstream, "--fork-block-number", str(FORK_BLOCK)]
+            + ["--port", str(port), "--silent"],
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+        )
+
+    def said() -> str:
+        # anvil quotes the upstream URL, which ends in the node's key.
+        text = log.read_text(encoding="utf-8", errors="replace").replace(upstream, "<url>")
+        return text[-1_000:]
+
     url = f"http://127.0.0.1:{port}"
     try:
         w3 = Web3(HTTPProvider(url))
         for _ in range(120):
             if process.poll() is not None:
-                pytest.fail(f"anvil exited with {process.returncode} before it answered")
+                pytest.fail(f"anvil exited with {process.returncode} before it answered: {said()}")
             try:
                 if w3.eth.chain_id:
                     break
-            except Exception:
+            except requests.ConnectionError:
                 time.sleep(0.5)
         else:
-            pytest.fail("anvil did not answer within a minute")
+            pytest.fail(f"anvil did not answer within a minute: {said()}")
         yield url
     finally:
         process.terminate()
-        process.wait(timeout=30)
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 @pytest.fixture(scope="module")
 def fork(fork_url: str) -> Fork:
-    return open_fork(ETHEREUM_MAINNET, url=fork_url)
+    # A cold fork reads every account and slot it meets from the archive node: a read,
+    # or the one send, can take longer than a warm node's ten seconds.
+    return open_fork(ETHEREUM_MAINNET, url=fork_url, settings=RpcSettings(timeout_seconds=60))
 
 
 @pytest.fixture(scope="module")

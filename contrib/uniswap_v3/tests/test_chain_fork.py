@@ -32,7 +32,6 @@ def test_only_the_ten_dev_accounts_can_be_asked_for(index):
     "url",
     [
         DEFAULT_FORK_URL,
-        "http://localhost:8545",
         "http://127.0.0.2:9000",
         "http://[::1]:8545",
         "https://127.0.0.1:8545/",
@@ -46,6 +45,8 @@ def test_a_url_on_this_machine_is_a_place_a_fork_may_be(url):
     "url",
     [
         "https://eth-mainnet.g.alchemy.com/v2/KEY",
+        # A name, though it usually means this machine: a hosts file can point it elsewhere.
+        "http://localhost:8545",
         "http://10.0.0.5:8545",
         "http://192.168.1.2:8545",
         "http://localhost.example.com:8545",
@@ -64,9 +65,30 @@ def test_any_other_url_is_refused_before_anything_is_asked_of_it(url):
     assert "KEY" not in str(caught.value)
 
 
-def test_a_node_that_answers_anvil_node_info_is_taken_for_anvil():
+def test_a_node_whose_anvil_node_info_names_a_fork_url_is_taken_for_an_anvil_fork():
     rpc, _ = rpc_over(FakeAnvil().provider)
     require_anvil(rpc)
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        # A fresh anvil, forked from nothing.
+        {"hardFork": "prague"},
+        {"forkConfig": {}},
+        {"forkConfig": {"forkUrl": ""}},
+        {"forkConfig": {"forkUrl": None}},
+        # A proxy that answers the method with nothing in it.
+        {},
+    ],
+)
+def test_a_node_that_names_no_fork_url_is_not_a_fork_and_the_answer_is_not_quoted(info):
+    anvil = FakeAnvil()
+    anvil.node_info = info
+    rpc, _ = rpc_over(anvil.provider)
+    with pytest.raises(NotAFork, match="without the URL it was forked from") as caught:
+        require_anvil(rpc)
+    assert "forkConfig" not in str(caught.value)
 
 
 @pytest.mark.parametrize(

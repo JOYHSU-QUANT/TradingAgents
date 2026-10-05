@@ -2,8 +2,9 @@
 
 :func:`connect` reads the endpoint URL from an environment variable, named
 by :class:`RpcSettings` (``ETH_RPC_URL`` unless told otherwise).
-:class:`Rpc` then offers the latest block's header, the header of a named
-block, and a contract call at a named block. Before its first read it asks
+:class:`Rpc` then offers the latest block's header, the pending block's
+(whose time is the node's clock), the header of a named block, a contract
+call at a named block, and what an anvil node says of itself. Before its first read it asks
 the node for its chain ID and refuses a node on another chain.
 
 For a wallet that signs, it also offers what sending takes: an account's
@@ -35,7 +36,10 @@ context. Every log record of ``web3``, ``urllib3`` and ``requests``, which
 write the URL or its path, has its message and its traceback scrubbed as it
 is created. What counts as secret is the URL and, where they are six
 characters or longer, its path and each segment of it, its query and each
-value in it, and its password; the host name is not.
+value in it, and its password, each as written and percent-decoded; the
+host name is not. The URL an anvil fork was made from, which it names in
+``anvil_nodeInfo``, is made a secret the same way once it is read; until
+then, as anything shaped like a URL, it is scrubbed whole.
 """
 
 from __future__ import annotations
@@ -82,6 +86,7 @@ __all__ = [
     "RpcSettings",
     "connect",
     "http_provider",
+    "http_provider_at",
 ]
 
 DEFAULT_URL_ENV: Final = "ETH_RPC_URL"
@@ -372,7 +377,7 @@ class _ErrorTap(BaseProvider):
 
 
 class Rpc:
-    """A node on one chain: block headers, and contract calls at a named block.
+    """A node on one chain: block headers, contract calls at a named block, and what sending takes.
 
     For one thread at a time: the error of the last response and the chain
     check are plain attributes.
@@ -675,10 +680,25 @@ def http_provider(
     if not usable:
         # The value is not quoted: a key pasted without its URL is still a key.
         raise RpcConfigError(f"the environment variable {settings.url_env} must hold an http(s) URL")
+    return http_provider_at(url, settings=settings)
+
+
+def http_provider_at(
+    url: str, *, settings: RpcSettings | None = None, direct: bool = False
+) -> HTTPProvider:
+    """The provider for ``url``, made a secret; ``direct`` goes past any proxy the environment names.
+
+    A provider for a loopback address is ``direct``: a proxy named in
+    ``HTTP(S)_PROXY`` could forward the request anywhere.
+    """
+    settings = settings if settings is not None else RpcSettings()
     _REDACTOR.register(url)
+    request_kwargs: dict[str, Any] = {"timeout": settings.timeout_seconds}
+    if direct:
+        request_kwargs["proxies"] = {"http": None, "https": None}
     return _HTTPProvider(
         url,
-        request_kwargs={"timeout": settings.timeout_seconds},
+        request_kwargs=request_kwargs,
         # Retries are counted in Rpc._request alone.
         exception_retry_configuration=None,
     )

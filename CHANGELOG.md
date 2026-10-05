@@ -845,7 +845,8 @@ Breaking changes within the 0.x line are called out explicitly.
 - **`contrib/uniswap_v3`: an executor that signs, on a local anvil fork
   only (`chain/swaps.py`).** `ChainExecutor` quotes a swap at the latest
   block and refuses it, sending nothing, when the quote is below the swap's
-  `min_amount_out`; it then sets the router's allowance to exactly the
+  `min_amount_out` or the pools give none (as it does when the approval's
+  or the swap's gas estimate says it would revert); it then sets the router's allowance to exactly the
   amount sold (down as well as up), sends the swap to SwapRouter02 inside
   `multicall(deadline, ...)` with that same minimum as `amountOutMinimum`
   and a deadline from the pending block's time (an idle anvil's latest
@@ -870,8 +871,9 @@ Breaking changes within the 0.x line are called out explicitly.
   with the chain ID named, sends it once (never retried: a send that fails
   looks for the receipt instead), and waits for the receipt. `Rpc` gains the reads
   a sender needs (`transaction_count`, `estimate_gas`,
-  `max_priority_fee_wei`, `receipt`, `node_info`) and
-  `send_raw_transaction`; `constants.SWAP_ROUTER_02` is checked on chain as
+  `max_priority_fee_wei`, `receipt`, `pending_header`, `node_info`) and
+  `send_raw_transaction`; a fork is reached directly, past any proxy the
+  environment names; `constants.SWAP_ROUTER_02` is checked on chain as
   QuoterV2 was. A run's source of fills gains `chain`, which a fork or a live
   run must use and no other run may; `open_engine` refuses an executor that
   signs until the step can record a rebalance a signed swap left half done,

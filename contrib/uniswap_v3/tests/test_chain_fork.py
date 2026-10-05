@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
+from contrib.uniswap_v3.chain import fork as fork_module
 from contrib.uniswap_v3.chain.errors import NotAFork, RpcConfigError, RpcRejected
 from contrib.uniswap_v3.chain.fork import (
     DEFAULT_FORK_URL,
     DEV_ACCOUNTS,
+    Fork,
     _is_loopback,
     dev_account,
     open_fork,
     require_anvil,
 )
+from contrib.uniswap_v3.chain.rpc import http_provider_at
 from contrib.uniswap_v3.tests.fakes.fork import FORK_URL, FakeAnvil
 from contrib.uniswap_v3.tests.fakes.rpc import answering, rpc_over
 
@@ -113,6 +118,58 @@ def test_a_node_that_does_not_answer_anvil_node_info_is_not_a_fork(response):
     rpc, _ = rpc_over(answering(response))
     with pytest.raises(NotAFork, match="only an anvil fork is signed for"):
         require_anvil(rpc)
+
+
+def _opening(monkeypatch, anvil: FakeAnvil) -> dict:
+    """``open_fork`` builds its provider on ``anvil``; what it was asked for is kept."""
+    made: dict = {}
+
+    def provider(url, **kwargs):
+        made.update(url=url, **kwargs)
+        return anvil.provider
+
+    monkeypatch.setattr(fork_module, "http_provider_at", provider)
+    return made
+
+
+def test_open_fork_opens_an_anvil_fork_at_a_loopback_address_directly_past_any_proxy(monkeypatch):
+    anvil = FakeAnvil()
+    made = _opening(monkeypatch, anvil)
+    fork = open_fork(1, url="http://127.0.0.1:9545")
+    assert isinstance(fork, Fork) and fork.rpc.chain_id == 1
+    assert made["url"] == "http://127.0.0.1:9545"
+    # A proxy named in the environment could forward "loopback" anywhere.
+    assert made["direct"] is True
+    assert anvil.provider.chain_checks == 1 and anvil.calls("anvil_nodeInfo")
+
+
+def test_open_fork_refuses_another_chain_and_a_node_that_is_not_a_fork(monkeypatch):
+    anvil = FakeAnvil()
+    _opening(monkeypatch, anvil)
+    with pytest.raises(RpcConfigError, match="the node is on chain 1, and chain 5 was expected"):
+        open_fork(5)
+    anvil.node_info = None
+    with pytest.raises(NotAFork):
+        open_fork(1)
+
+
+def test_a_fork_url_in_the_http_stacks_logs_is_scrubbed_even_before_it_is_known(caplog):
+    # A node's answer can be logged as it arrives, before anvil_nodeInfo is read.
+    rpc, _ = rpc_over(FakeAnvil().provider)
+    require_anvil(rpc)
+    unknown = "https://never-registered.invalid/an-upstream-key-1"
+    with caplog.at_level(logging.DEBUG, logger="web3"):
+        logging.getLogger("web3.manager.RequestManager").debug(
+            "response: %s", {"forkConfig": {"forkUrl": unknown}}
+        )
+    assert "an-upstream-key-1" not in caplog.text and "<url>" in caplog.text
+
+
+def test_a_direct_provider_goes_past_the_environments_proxies_and_hides_its_url():
+    direct = http_provider_at("http://127.0.0.1:9545", direct=True)
+    assert direct._request_kwargs["proxies"] == {"http": None, "https": None}
+    assert "127.0.0.1" not in str(direct)
+    assert "proxies" not in http_provider_at("http://127.0.0.1:9545")._request_kwargs
 
 
 def test_a_fork_is_a_setup_fault_like_any_other():

@@ -62,6 +62,15 @@ def test_a_transaction_is_estimated_signed_for_the_chain_sent_once_and_its_recei
     assert slept == []
 
 
+def test_the_chain_id_signed_for_is_the_connections_and_the_value_is_the_one_asked():
+    anvil = FakeAnvil(chain_id=5)
+    rpc, _ = rpc_over(anvil.provider, chain_id=5)
+    sender = TransactionSender(rpc, dev_account(0), sleep=lambda seconds: None)
+    sender.send(_USDC, _APPROVE, what="an approval", value=7)
+    [sent] = anvil.sent
+    assert (sent["chainId"], sent["value"]) == (5, 7)
+
+
 def test_a_call_whose_estimate_reverts_is_not_sent():
     anvil = FakeAnvil()
     anvil.estimate_reverts = {_USDC.lower()}
@@ -292,6 +301,7 @@ def test_a_receipt_the_node_does_not_have_is_none():
     [
         ({"transactionHash": "0x" + "ef" * 32}, "is of the transaction"),
         ({"status": "0x2"}, "has {"),
+        ({"effectiveGasPrice": None}, "has {"),
         # web3 hands a string of logs on character by character.
         ({"logs": "nope"}, "has a log of"),
     ],

@@ -223,6 +223,18 @@ def test_every_mode_takes_some_source_of_fills_and_only_a_signing_mode_the_chain
         ({"mode": RunMode.FORK}, "a fork run fills from the chain, not from the model"),
         ({"mode": RunMode.LIVE}, "a live run fills from the chain, not from the model"),
         (
+            {"mode": RunMode.FORK, "fills": FillSource.QUOTER},
+            "a fork run fills from the chain, not from the quoter",
+        ),
+        (
+            {"mode": RunMode.LIVE, "fills": FillSource.QUOTER},
+            "a live run fills from the chain, not from the quoter",
+        ),
+        (
+            {"mode": RunMode.PAPER, "fills": FillSource.CHAIN},
+            "a paper run fills from the quoter, not from the chain",
+        ),
+        (
             {"fills": FillSource.CHAIN},
             "a backtest run fills from the model or the quoter, not from the chain",
         ),

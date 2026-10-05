@@ -11,20 +11,24 @@ One transaction, from first to last:
 2. It is signed as an EIP-1559 transaction for the connection's chain ID,
    named explicitly, with the account's next nonce. The fee cap is twice
    the latest base fee plus the node's suggested priority fee.
-3. It is sent once. A send the endpoint turned away before any node saw it
-   (:class:`~.errors.RpcConfigError`) raises as it is, and nothing was
-   sent. When the send fails otherwise, the transaction's receipt is looked
-   for, since the node may have taken it all the same; with one, the send
-   goes on to it. A send the node refused, with no receipt to be found,
-   raises what the node said, and nothing was sent. Any other failure, and
-   a refusal whose receipt could not be looked for, may have reached the
-   node, and raises :class:`~.errors.TransactionUnconfirmed`.
+3. It is sent once. A send that fails as setup does
+   (:class:`~.errors.RpcConfigError`: a refused key, an unusable URL, a
+   node that says it lacks state) raises as it is, taken for not sent. When
+   the send fails otherwise, the transaction's receipt is looked for, since
+   the node may have taken it all the same; with one, the send goes on to
+   it. A send the node answered with an error of its own
+   (:class:`~.errors.RpcRejected`), with no receipt to be found, raises
+   what the node said, and nothing was sent. Any other failure (a lost or
+   garbled answer, a revert, the node behind), a refusal whose receipt
+   could not be looked for, and a node that took it under another hash than
+   the one signed, may have reached the node, and raises
+   :class:`~.errors.TransactionUnconfirmed`.
 4. Its receipt is waited for. One that does not come in time, or cannot be
    read, raises :class:`~.errors.TransactionUnconfirmed`, and one that says
    it reverted :class:`~.errors.TransactionReverted`.
 
-Everything that fails after the send raises a :class:`~.errors.SendError`:
-the transaction may yet change the wallet.
+Everything that fails once the send may have been taken raises a
+:class:`~.errors.SendError`: the transaction may yet change the wallet.
 """
 
 from __future__ import annotations
@@ -144,8 +148,8 @@ class TransactionSender:
         try:
             sent = rpc.send_raw_transaction(bytes(signed.raw_transaction))
         except RpcConfigError:
-            # The endpoint turned the request away (a refused key, an unusable URL):
-            # it never reached a node.
+            # A refused key or an unusable URL, which never reached a node; or a node
+            # saying it lacks state, which no send needs: taken for not sent.
             raise
         except ChainError as exc:
             # The node may have taken the transaction all the same.

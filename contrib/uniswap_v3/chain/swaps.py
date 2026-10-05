@@ -1,8 +1,10 @@
 """The executor that signs: swaps sent to SwapRouter02 from an anvil dev account on a local fork.
 
 A :class:`ChainExecutor` is built on a :class:`~.fork.Fork` and nothing
-else, and signs with one of anvil's public dev accounts. A live chain has
-no way in: that is a later phase, with its own guard.
+else (:func:`~.fork.open_fork` checks that it is local; the executor asks
+again that it is an anvil fork), and signs with one of anvil's public dev
+accounts, which hold nothing on a real chain. Trading on a live chain is a
+later phase, with its own guard.
 
 One swap, from first to last:
 
@@ -123,7 +125,7 @@ def _hashes(receipts: list[Receipt]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class SwapSettings:
-    """``deadline_seconds``: how long after the latest block's time a sent swap may still be mined."""
+    """``deadline_seconds``: how long after the pending block's time (the node's clock) a sent swap may still be mined."""
 
     deadline_seconds: int = 300
 
@@ -252,7 +254,9 @@ class ChainExecutor:
             ) from exc
         except TransactionUnconfirmed as exc:
             raise TransactionUnconfirmed(
-                str(exc), tx_hashes=_hashes(mined) + exc.tx_hashes
+                str(exc),
+                tx_hashes=_hashes(mined) + exc.tx_hashes,
+                gas_cost_eth=_gas_eth(mined) if mined else None,
             ) from exc
         except ChainError as exc:
             if mined:
@@ -280,7 +284,9 @@ class ChainExecutor:
         try:
             amount_out = from_raw(token_out, self._paid(swapped, token_out))
         except ValueError as exc:
-            raise unknown(f"its Transfer events add up to no amount of {token_out.symbol} ({exc})") from exc
+            raise unknown(
+                f"its Transfer events add up to no amount of {token_out.symbol} ({exc})"
+            ) from exc
         if amount_out == 0 or amount_out < swap.min_amount_out:
             # The router holds a swap to its minimum: this receipt is not read right.
             raise unknown(

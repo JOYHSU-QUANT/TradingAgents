@@ -34,10 +34,12 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 - 只用 anvil 公開的 test 助記詞推導出的 10 個開發帳戶簽名；送交易的 `TransactionSender` 拿到其他帳戶就拒絕，
   程式沒有接受其他私鑰的入口。
 - 每筆 swap 把 allowance 設成剛好的量（多的也調回來）；`amountOutMinimum` 就是 swap 的 `min_amount_out`
-  （與其他 executor 同一條底線），送出前先在最新區塊報價，低於底線就拒絕、什麼都不送。deadline 取 pending
+  （與其他 executor 同一條底線），送出前先在最新區塊報價，低於底線或池子沒答案就拒絕、什麼都不送；
+  approve 或 swap 的 gas 估計說會 revert（還沒送出任何東西時）也是拒絕。deadline 取 pending
   區塊的時間（節點的時鐘），閒置的 anvil 最新區塊時間不會走。
 - `Rejection`＝錢包沒動；有交易上鏈後才失敗丟 `SendError`（不是 `ChainError`，讀取端的處理接不到它）：
-  只花了 gas 是 `SwapNotFilled`，swap 上鏈了但結果讀不出來是 `SwapOutcomeUnknown`，收據沒來是 `TransactionUnconfirmed`。
+  只花了 gas 是 `SwapNotFilled`，swap 上鏈了但結果讀不出來是 `SwapOutcomeUnknown`，收據沒來或讀不到是 `TransactionUnconfirmed`。
+- 分叉只認 `open_fork` 開的：自己手建的 `Fork` 不保證在本機，`ChainExecutor` 只會再確認它是 anvil 分叉。
 - 成交來源 `chain` 只屬於 fork／live run，fork／live run 也只能用它；在引擎能記下「第一腿上鏈、後腿失敗」之前，
   `open_engine` 拒絕任何會簽名的 executor。
 

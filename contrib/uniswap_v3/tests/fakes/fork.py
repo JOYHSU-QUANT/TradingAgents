@@ -1,7 +1,8 @@
 """A scripted anvil fork: one chain, its token balances and allowances, QuoterV2 and SwapRouter02.
 
-Every transaction is mined as it is sent, one block each, as anvil mines by
-default. A sent transaction is decoded from its signed bytes, so a test sees
+Every transaction is mined as it is sent (unless ``mine``/``mine_only`` say
+otherwise), one block each, as anvil does. A sent transaction is decoded
+from its signed bytes, so a test sees
 what was signed (``sent``), and it acts on the fake's state as the real
 contracts would for what this package sends: an ERC-20 ``approve``, and a
 router ``multicall`` around one ``exactInputSingle`` or ``exactInput``.
@@ -25,7 +26,7 @@ from web3 import Web3
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, QUOTER_V2, SWAP_ROUTER_02
 from contrib.uniswap_v3.tests.fakes.rpc import ScriptedProvider, block_hash, block_result, encoded
 
-__all__ = ["APPROVE_GAS", "FORK_URL", "SWAP_GAS", "FakeAnvil", "selector"]
+__all__ = ["APPROVE_GAS", "FORK_URL", "SWAP_GAS", "FakeAnvil", "selector", "transfer"]
 
 APPROVE_GAS = 46_000
 SWAP_GAS = 150_000
@@ -64,12 +65,25 @@ def _answer(answer: dict[str, Any] | Exception) -> dict[str, Any]:
     return answer
 
 
+def transfer(
+    token: str, to: str, raw: int, *, from_: str = _POOL, topic0: str | None = None
+) -> dict[str, Any]:
+    """A log of ``token``'s ``Transfer`` of ``raw`` from ``from_`` (a pool) to ``to``; ``topic0`` another event."""
+    return {
+        "address": Web3.to_checksum_address(token),
+        "topics": [topic0 or _TRANSFER, _topic(from_), _topic(to)],
+        "data": "0x" + f"{raw:064x}",
+    }
+
+
 def _topic(address: str) -> str:
     return "0x" + "0" * 24 + address[2:].lower()
 
 
 class FakeAnvil:
-    def __init__(self, *, head: int = 100, timestamp: int = 1_700_000_000) -> None:
+    def __init__(
+        self, *, head: int = 100, timestamp: int = 1_700_000_000, chain_id: int = 1
+    ) -> None:
         self.head = head
         # The latest block's time, and the node's clock: the pending block, and the
         # next one mined, are at the later of the clock and twelve seconds on. An idle
@@ -104,6 +118,8 @@ class FakeAnvil:
         self.receipt_error: dict[str, Any] | Exception | None = None
         # What a read of the pending block is answered with (an error response).
         self.pending_error: dict[str, Any] | None = None
+        # Logs a mined swap emits after its own two Transfers.
+        self.extra_logs: list[dict[str, Any]] = []
         # Whether sent transactions are mined; ``mine_only`` limits it to calls of those selectors.
         self.mine = True
         self.mine_only: set[bytes] | None = None
@@ -112,7 +128,7 @@ class FakeAnvil:
         self.sent: list[dict[str, Any]] = []
         self.senders: list[str] = []
         self.receipts: dict[str, dict[str, Any]] = {}
-        self.provider = ScriptedProvider(self.respond)
+        self.provider = ScriptedProvider(self.respond, chain_id=chain_id)
 
     # --- what a test sets up and reads ---------------------------------------
 
@@ -275,14 +291,7 @@ class FakeAnvil:
         self.balances[(token_in, owner)] = self.balance(token_in, owner) - amount_in
         self.balances[(token_out, recipient)] = self.balance(token_out, recipient) + out
         return [
-            {
-                "address": Web3.to_checksum_address(token_in),
-                "topics": [_TRANSFER, _topic(owner), _topic(_POOL)],
-                "data": "0x" + f"{amount_in:064x}",
-            },
-            {
-                "address": Web3.to_checksum_address(token_out),
-                "topics": [_TRANSFER, _topic(_POOL), _topic(self.pay_to or recipient)],
-                "data": "0x" + f"{out:064x}",
-            },
+            transfer(token_in, _POOL, amount_in, from_=owner),
+            transfer(token_out, self.pay_to or recipient, out),
+            *self.extra_logs,
         ]

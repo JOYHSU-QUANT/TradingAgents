@@ -20,7 +20,8 @@ asked. The wallet may have changed, and the caller cannot take it for
 spent) and :class:`SwapOutcomeUnknown` (a swap was mined and what it did
 cannot be read).
 
-The messages never hold the RPC URL: :class:`~.rpc.Rpc` scrubs it from the
+The messages never hold the node's URL, nor the URL a fork was made from:
+:class:`~.rpc.Rpc` scrubs them, and anything shaped like a URL, from the
 text of whatever it caught before it builds one of these.
 """
 
@@ -68,7 +69,9 @@ class RpcConfigError(ChainError):
     """The endpoint cannot be used as set up.
 
     No URL or one that cannot be requested, the wrong chain, a refused key,
-    or a node that does not keep the history asked for.
+    a node that does not keep the history asked for, a chain this package
+    knows no quoter or router for, or (:class:`NotAFork`) a node that is not
+    an anvil fork where only a fork is signed for.
     """
 
 
@@ -137,7 +140,23 @@ class TransactionReverted(SendError):
 
 
 class TransactionUnconfirmed(SendError):
-    """No receipt came for the transaction: it may be mined later, or never."""
+    """A transaction may or may not have reached the chain: it may be mined later, or never.
+
+    No receipt came in time, or none could be read, or the node took the
+    transaction under another hash than the one signed. ``gas_cost_eth`` is
+    the gas of the transactions before it that were mined (an approval
+    before a swap), which the wallet has paid; ``None`` when there were none.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tx_hashes: tuple[str, ...] = (),
+        gas_cost_eth: Decimal | None = None,
+    ) -> None:
+        super().__init__(message, tx_hashes=tx_hashes)
+        self.gas_cost_eth = gas_cost_eth
 
 
 class _MinedSwapError(SendError):

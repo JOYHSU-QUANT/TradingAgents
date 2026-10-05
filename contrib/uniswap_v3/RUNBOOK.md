@@ -290,10 +290,12 @@ SwapRouter02 的單跳與兩跳、收據解讀都對。
    python -m dotenv run -- pytest -m smoke contrib/uniswap_v3/tests/test_chain_fork_smoke.py -s
    ```
 
-   三個測試全過＝來回成功：每一筆 swap 後，錢包的輸入代幣、輸出代幣與 ETH 各自變動的量
-   與 Fill 的 `amount_in`、`amount_out`、`gas_cost_eth` 一致。`-s` 會印每筆 swap 實際用的 gas 與
-   QuoterV2 估計的差（`execution.quote.gas_overhead_units` 代表的就是這個差）。
+   三個測試全過＝驗收成功：第二個是來回本身——每一筆 swap 後，錢包的輸入代幣、輸出代幣與 ETH 各自變動的量
+   與成交的 `swap.amount_in`、`amount_out`、`gas_cost_eth` 一致；第三個確認報價低於底線的 swap 被拒、什麼都沒送。
+   `-s` 會印每筆 swap 實際用的 gas 與 QuoterV2 估計的差（`execution.quote.gas_overhead_units` 代表的就是這個差）。
 3. 沒有 `ETH_RPC_URL` 或 PATH 上沒有 `anvil` 時，測試會略過（skipped）而不是失敗。
+4. 自己起 anvil、在程式裡用 `open_fork` 連的話，URL 的主機要寫字面的 `127.0.0.1`（或 `::1`）：
+   `localhost` 這類名稱會被拒絕（hosts 檔可以把它改指到別處）；連線也不走環境變數設的 proxy。
 
 用的是 anvil 的開發帳戶（公開的 test 助記詞），不碰任何真的錢包；分叉在 anvil 關掉時就消失。
 

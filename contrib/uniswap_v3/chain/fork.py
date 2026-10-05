@@ -24,10 +24,9 @@ from urllib.parse import urlsplit
 from eth_account import Account
 from eth_account.hdaccount import key_from_seed, seed_from_mnemonic
 from eth_account.signers.local import LocalAccount
-from web3 import HTTPProvider
 
 from .errors import MalformedResponse, NotAFork, RpcRejected
-from .rpc import Rpc, RpcSettings
+from .rpc import Rpc, RpcSettings, http_provider_at
 
 __all__ = [
     "ANVIL_MNEMONIC",
@@ -119,8 +118,9 @@ def require_anvil(rpc: Rpc) -> None:
 class Fork:
     """A connection to a node :func:`open_fork` found to be a local anvil fork.
 
-    Built by :func:`open_fork`; whoever builds one by hand has skipped the
-    guard, and a signing wallet still asks ``anvil_nodeInfo`` again.
+    Built by :func:`open_fork`. One built by hand is not known to be local:
+    a signing wallet asks ``anvil_nodeInfo`` again, that it be an anvil
+    fork, and nothing more.
     """
 
     rpc: Rpc
@@ -129,11 +129,12 @@ class Fork:
 def open_fork(
     chain_id: int, *, url: str = DEFAULT_FORK_URL, settings: RpcSettings | None = None
 ) -> Fork:
-    """Open the anvil fork at ``url``, which must be on this machine, of the chain ``chain_id``.
+    """Open the anvil fork at ``url``, a loopback address, of the chain ``chain_id``.
 
     A URL whose host is not a literal loopback address is refused before
-    anything is asked of it. The node must then report ``chain_id``, and
-    name in ``anvil_nodeInfo`` the URL it was forked from.
+    anything is asked of it, and the request goes there directly, past any
+    proxy the environment names. The node must then report ``chain_id``,
+    and name in ``anvil_nodeInfo`` the URL it was forked from.
     """
     if not isinstance(url, str) or not _is_loopback(url):
         raise NotAFork(
@@ -141,13 +142,7 @@ def open_fork(
             "loopback address (127.0.0.1 or ::1; not a name such as localhost)"
         )
     settings = settings if settings is not None else RpcSettings()
-    provider = HTTPProvider(
-        url,
-        request_kwargs={"timeout": settings.timeout_seconds},
-        # Retries are counted in Rpc._request alone.
-        exception_retry_configuration=None,
-    )
-    rpc = Rpc(provider, chain_id, settings=settings)
+    rpc = Rpc(http_provider_at(url, settings=settings, direct=True), chain_id, settings=settings)
     rpc.verify_chain()
     require_anvil(rpc)
     return Fork(rpc)

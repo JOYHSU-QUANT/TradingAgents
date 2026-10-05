@@ -23,8 +23,14 @@ from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, SWAP_ROUTER_02
 from contrib.uniswap_v3.domain.records import FillSource
 from contrib.uniswap_v3.domain.types import Bar, Fill, Rejection, SwapIntent, eth_from_wei
 from contrib.uniswap_v3.ports import Executor
-from contrib.uniswap_v3.tests.fakes.fork import APPROVE_GAS, SWAP_GAS, FakeAnvil, selector
-from contrib.uniswap_v3.tests.fakes.rpc import ScriptedProvider, rpc_over
+from contrib.uniswap_v3.tests.fakes.fork import (
+    APPROVE_GAS,
+    SWAP_GAS,
+    FakeAnvil,
+    selector,
+    transfer,
+)
+from contrib.uniswap_v3.tests.fakes.rpc import rpc_over
 
 _USDC = TOKENS[ETHEREUM_MAINNET]["USDC"]
 _WETH = TOKENS[ETHEREUM_MAINNET]["WETH"]
@@ -81,8 +87,9 @@ def test_a_swap_is_approved_exactly_then_sent_through_the_routers_multicall_and_
     assert (approve["gas"], swapped["gas"]) == (55_200, 180_000)
     assert (swapped["maxFeePerGas"], swapped["maxPriorityFeePerGas"]) == (2 * 10**9 + 10**8, 10**8)
 
-    # Every read the swap made was of the block it started from.
+    # Every read the swap made was of the block it started from; every estimate was the wallet's.
     assert {params[1] for params in anvil.calls("eth_call")} == {hex(100)}
+    assert {params[0]["from"].lower() for params in anvil.calls("eth_estimateGas")} == {_ME.lower()}
     deadline, inner = _multicall(swapped)
     # The pending block's time when the swap was sent (the approval's block, 12 s on) and 300 s.
     assert deadline == 1_700_000_024 + 300
@@ -254,6 +261,41 @@ def test_a_swap_whose_receipt_never_comes_names_every_transaction_sent():
     assert len(caught.value.tx_hashes) == 2
     assert caught.value.tx_hashes[0] in anvil.receipts
     assert caught.value.tx_hashes[1] not in anvil.receipts
+    # The approval was mined, and its gas is known.
+    assert caught.value.gas_cost_eth == eth_from_wei(APPROVE_GAS * _PRICE)
+
+
+def test_only_the_output_tokens_transfers_to_the_wallet_count_and_they_add_up():
+    anvil = _anvil()
+    anvil.extra_logs = [
+        # Another token paid to the wallet, another event of the output token, the output
+        # token paid to someone else: none of them is the fill.
+        transfer(_USDC.address, _ME, 10**6),
+        transfer(_WETH.address, _ME, 10**17, topic0="0x" + "ee" * 32),
+        transfer(_WETH.address, "0x" + "11" * 20, 10**17),
+        # A second payment of the output token to the wallet: it is.
+        transfer(_WETH.address, _ME, 2 * 10**16),
+    ]
+    fill = _executor(anvil).execute(_SWAP, _BAR)
+    assert isinstance(fill, Fill) and fill.amount_out == D("0.52")
+
+
+def test_a_receipt_paying_the_wallet_something_below_the_minimum_has_an_unknown_outcome():
+    anvil = _anvil()
+    anvil.pay_to = "0x" + "11" * 20
+    anvil.extra_logs = [transfer(_WETH.address, _ME, 10**17)]
+    with pytest.raises(SwapOutcomeUnknown, match="shows 0.1 WETH paid to the wallet, below"):
+        _executor(anvil).execute(_SWAP, _BAR)
+
+
+def test_a_swap_the_node_refuses_to_take_is_raised_as_it_is_and_not_a_refusal():
+    # Nothing was mined and the node said why: not the market's answer, so not a Rejection.
+    anvil = _anvil()
+    _allow(anvil, 1000 * 10**6)
+    anvil.send_before = {"error": {"code": -32000, "message": "nonce too low"}}
+    with pytest.raises(RpcRejected, match="nonce too low"):
+        _executor(anvil).execute(_SWAP, _BAR)
+    assert anvil.receipts == {}
 
 
 @pytest.mark.parametrize(
@@ -301,8 +343,7 @@ def test_the_executor_is_built_on_a_fork_and_asks_the_node_whether_it_is_anvil()
 
 
 def test_a_chain_without_a_known_router_is_refused_when_the_executor_is_built():
-    anvil = FakeAnvil()
-    rpc, _ = rpc_over(ScriptedProvider(anvil.respond, chain_id=5), chain_id=5)
+    rpc, _ = rpc_over(FakeAnvil(chain_id=5).provider, chain_id=5)
     with pytest.raises(RpcConfigError, match="no SwapRouter02 address is known for chain 5"):
         ChainExecutor(Fork(rpc))
 

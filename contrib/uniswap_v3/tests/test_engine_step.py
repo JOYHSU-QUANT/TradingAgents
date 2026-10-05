@@ -597,6 +597,9 @@ def test_an_executor_that_signs_is_not_opened_on_any_run(store):
 
     with pytest.raises(EngineError, match="not wired to the step yet"):
         open_engine(store, _CONFIG, Signing(), run_id=_RUN, now=_DECIDED_AT)
+    # Whatever the run: one that is not there gets the same answer, not "no run".
+    with pytest.raises(EngineError, match="not wired to the step yet"):
+        open_engine(store, _CONFIG, Signing(), run_id="no-such-run", now=_DECIDED_AT)
 
 
 @pytest.mark.parametrize("now", [-1, True, 1.5, None])

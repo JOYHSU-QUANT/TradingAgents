@@ -208,6 +208,8 @@ def test_a_read_puts_the_scrubbing_back_if_another_record_factory_took_its_place
         ("https://node.example/v2/longer-key-1/eth", "the key longer-key-1 was refused"),
         ("https://user:hunter2-pass@node.example/", "auth hunter2-pass refused"),
         ("https://node.example/rpc?apikey=query-key-1&x=1", "sent query-key-1 to the node"),
+        # A key written percent-encoded in the URL, and quoted decoded.
+        ("https://node.example/v2/encoded%2Bkey-1", "the key encoded+key-1 was refused"),
     ],
 )
 def test_the_pieces_of_a_url_that_are_quoted_alone_are_secret_too(url, quoted):
@@ -216,7 +218,7 @@ def test_the_pieces_of_a_url_that_are_quoted_alone_are_secret_too(url, quoted):
     with pytest.raises(RpcUnavailable) as caught:
         rpc.header(7)
     assert "<redacted>" in str(caught.value)
-    for secret in ("abc12", "longer-key-1", "hunter2-pass", "query-key-1"):
+    for secret in ("abc12", "longer-key-1", "hunter2-pass", "query-key-1", "encoded+key-1"):
         assert secret not in str(caught.value)
 
 

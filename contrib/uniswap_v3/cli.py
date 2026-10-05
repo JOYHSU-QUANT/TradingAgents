@@ -478,7 +478,12 @@ def _behind(config: UniswapConfig, last: int, now: int) -> str:
     """How far a paper run whose latest decided bar is at ``last`` is behind the clock at ``now``."""
     interval = config.bars.interval_seconds
     latest = now - now % interval
-    if latest <= last:
+    if latest < last:
+        return (
+            f"the clock is behind the run: it is at {_iso(now)}, and the run has decided the "
+            f"bar at {_iso(last)}"
+        )
+    if latest == last:
         return "up to date: the latest boundary that has passed is decided"
     return (
         f"behind: {(latest - last) // interval} boundary(ies) after the last decided bar have "

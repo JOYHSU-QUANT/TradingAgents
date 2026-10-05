@@ -516,3 +516,20 @@ def test_status_of_a_run_whose_latest_valuation_is_gone_exits_1(node, tmp_path, 
     assert capsys.readouterr().err == (
         f"failed: the decision of run 'p' at {FIRST_DAY + DAY} has no valuation\n"
     )
+
+
+def test_status_of_a_paper_run_says_when_the_clock_is_behind_it(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _paper(node, db, now=_TEN_PAST + DAY)
+
+    code, lines = _run(
+        node, "status", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", "p",
+        now=_TEN_PAST,
+    )  # fmt: skip
+
+    assert code == cli.EXIT_OK
+    assert (
+        "the clock is behind the run: it is at 2024-01-01T00:10:00Z, and the run has decided "
+        "the bar at 2024-01-02T00:00:00Z"
+    ) in lines

@@ -31,9 +31,11 @@ Set-Location ..\TradingAgents-uniswap-paper
 
 ```powershell
 Disable-ScheduledTask -TaskName 'uniswap-v3-paper'
+Stop-ScheduledTask -TaskName 'uniswap-v3-paper'      # 正在跑的 visit 也停掉，才不會換程式換到它腳下
 git fetch origin
 git checkout --detach origin/develop
 python -m pytest -q -m "not smoke" contrib/uniswap_v3/tests
+if ($LASTEXITCODE -ne 0) { throw 'tests failed: go back to the commit you came from' }
 Enable-ScheduledTask -TaskName 'uniswap-v3-paper'
 Start-ScheduledTask -TaskName 'uniswap-v3-paper'
 ```
@@ -41,8 +43,9 @@ Start-ScheduledTask -TaskName 'uniswap-v3-paper'
 升級後看一下 log（§4）：若是 `failed: the run '...' was started under another config`，新版改了設定預設值，
 照 §6 開新 run。
 
-**不要刪這個 worktree 或對它 `git clean -fdx`**：`data\` 裡是 store 與 log。`git worktree remove`
-看到未追蹤的檔案會要求 `--force`——看到這個要求就先停下來備份 `data\`。
+**不要刪這個 worktree 或對它 `git clean -fdx`**：`data\` 裡是 store 與 log，而它是 gitignored——
+`git worktree remove` **不會問、直接連它一起刪掉**。真的要移掉這個 worktree，先用 §9 第一條的寫法把
+`paper.db` 備份到 worktree 外面（log 直接複製）。
 
 ---
 
@@ -133,12 +136,13 @@ set "RUN_ID=paper-1"
 | 變數 | 預設 | 要不要改 |
 |---|---|---|
 | `RUN_ID` | `paper-1` | 與 §2 開的 run 一致 |
-| `CONFIG` | `configs\paper.local.yaml` | 通常不用 |
-| `DB` | `data\paper.db` | 通常不用 |
-| `LOG` | `data\paper-visits.log` | 通常不用 |
+| `CONFIG` | `contrib\uniswap_v3\configs\paper.local.yaml` | 通常不用 |
+| `DB` | `contrib\uniswap_v3\data\paper.db` | 通常不用 |
+| `LOG` | `contrib\uniswap_v3\data\paper-visits.log` | 通常不用 |
 | `PYTHON` | `python`（排程用你的 PATH） | 建議改成 §1.1 記下的完整路徑；要是 `python.exe`，不能是 `.cmd`／`.bat` |
 
-相對路徑以 repo 根目錄為準（visit 在那裡跑）。
+相對路徑以 repo 根目錄為準（visit 在那裡跑）。這個檔**只放 `set` 行**：`setlocal` 會讓設定失效，
+`exit` 會讓 visit 不跑、也不留 log。log 每次 visit 的第一行會印出用的 `DB` 與 `PYTHON`。
 
 ### 3.2 註冊
 
@@ -180,9 +184,10 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 ```
 
 - log 每次 visit 有一行 `==== <本地時間> visit of paper-1`、指令的輸出、一行 `==== exit <碼>`。
-- `status --run-id` 的第三行說 run 跟不跟得上時鐘：`up to date` 是最近一個已過的邊界已決策；
-  `behind: N boundary(ies) ...` 是有 N 根已過但還沒決策——00:00 到 00:10 之間是 1、正常；
-  **過了 01:10 還是 behind**，就去 log 看那天的 visit 為什麼沒成功。
+- `status --run-id` 從 `run paper-1: ...` 那行算起的第三行，說 run 跟不跟得上時鐘：`up to date` 是最近一個
+  已過的邊界已決策；`behind: N boundary(ies) ...` 是有 N 根已過但還沒決策——00:00 到 00:10 之間是 1、正常；
+  **過了 01:35（第三次 visit 的時限）還是 behind**，就去 log 看那天的 visit 為什麼沒成功。
+  run 還沒決策過任何一根時沒有這一行。
 - 接著是持倉、價值、報酬（與 `report` 同一個算法：扣掉累計 gas）、最近幾筆決策，
   每筆附「邊界後多久決策的」——準時的應該是 `00:10:xx`；`1d ...` 表示是隔天補決策的。
 - 這兩個指令不讀鏈，隨時可以跑。
@@ -205,6 +210,7 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: paper needs the packages in contrib/uniswap_v3/requirements.txt` | 排程用的 Python 不是裝了相依的那個 | 改 §3.1 的 `PYTHON` |
 | `'python' is not recognized ...` 接 `==== exit 9009` | 排程找不到 `PYTHON` | 改 §3.1 的 `PYTHON` 成完整路徑 |
+| `==== there is no ...python.exe: fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.cmd` |
 | `Error: Invalid value: Invalid value for '-f' "...\.env" does not exist.` 接 `==== exit 2` | repo 根目錄沒有 `.env` | 補上 `.env`（§0） |
 | 其他 `usage: ...` 接 `==== exit 2` | visit 的指令被改壞 | 對照 git 版的 `paper-visit.cmd`；設定只放在 `paper-visit.local.cmd` |
 | 有 `==== ... visit of` 卻沒有 `==== exit` | visit 跑超過 25 分鐘被排程停掉（`LastTaskResult` 267014）；印到一半的輸出還在 | 多半是節點卡住；下一次 visit 會重來 |
@@ -259,11 +265,12 @@ paper 決策過幾根之後，可以對同一段跑一次報價級回測，確�
 做出相同的決策）。在 store 的**複本**上跑，不動排程用的那份；避開 visit 時段（00:10–01:35 UTC）：
 
 ```powershell
-python -c "import sqlite3; sqlite3.connect('contrib/uniswap_v3/data/paper.db').backup(sqlite3.connect('contrib/uniswap_v3/data/check.db'))"
+python -c "import sqlite3; sqlite3.connect('file:contrib/uniswap_v3/data/paper.db?mode=ro', uri=True).backup(sqlite3.connect('contrib/uniswap_v3/data/check.db'))"
 python -m dotenv run -- python -m contrib.uniswap_v3 backtest --config contrib/uniswap_v3/configs/paper.local.yaml --db contrib/uniswap_v3/data/check.db --run-id check-1 --fills quoter --from <run 的第一根> --to <最後決策的那根> --balance USDC=10000 --gas-eth 1
 python -c "import sqlite3; c = sqlite3.connect('contrib/uniswap_v3/data/check.db'); print(c.execute('SELECT p.time, p.outcome, b.outcome FROM decisions p LEFT JOIN decisions b ON b.time = p.time AND b.run_id = ? WHERE p.run_id = ? AND (p.outcome IS NOT b.outcome OR p.target IS NOT b.target)', ('check-1', 'paper-1')).fetchall())"
 ```
 
+第一條讀不到 store 時會報錯（`unable to open database file`），那就不要往下跑。
 起始餘額要與 paper run 開的時候相同。第三條印 `[]` 就是逐根一致（回測少決策的那根也會被列出來）；
 兩個 run 的 `report` 裡報酬與成本也應該相同（成交區塊相同，所以報價相同）。用完可以刪掉 `check.db`。
 

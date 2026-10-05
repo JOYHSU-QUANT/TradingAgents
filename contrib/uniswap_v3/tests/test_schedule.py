@@ -98,3 +98,10 @@ def test_a_visit_takes_its_settings_from_a_local_file_and_prints_unbuffered():
     defaults = [_at(f'set "{name}=') for name in ("RUN_ID", "CONFIG", "DB", "LOG", "PYTHON")]
     assert max(defaults) < _at('if exist "%~dp0paper-visit.local.cmd" call ') < _at("cd /d ")
     assert 'set "PYTHONUNBUFFERED=1"' in _visit_lines()
+
+
+def test_a_visit_whose_python_path_is_not_there_exits_4_before_running():
+    check = _at('if not "%PYTHON:\\=%"=="%PYTHON%" if not exist "%PYTHON%" (')
+    lines = _visit_lines()
+    assert _at('>>"%LOG%" echo ==== %DATE%') < check < _at('"%PYTHON%" -m')
+    assert lines[check + 3].strip() == "exit /b 4"

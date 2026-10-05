@@ -204,6 +204,15 @@ def test_a_swap_whose_estimate_reverts_after_its_approval_was_mined_is_not_a_ref
     assert caught.value.gas_cost_eth == eth_from_wei(APPROVE_GAS * _PRICE)
 
 
+def test_a_deadline_that_cannot_be_read_after_the_approval_was_mined_is_not_a_refusal():
+    anvil = _anvil()
+    anvil.pending_error = {"error": {"code": -32000, "message": "pending block unavailable"}}
+    with pytest.raises(SwapNotFilled, match="not sent after its approval was mined") as caught:
+        _executor(anvil).execute(_SWAP, _BAR)
+    assert caught.value.gas_cost_eth == eth_from_wei(APPROVE_GAS * _PRICE)
+    assert len(anvil.sent) == 1
+
+
 def test_a_swap_mined_and_reverted_reports_the_gas_of_every_transaction_it_took():
     anvil = _anvil()
     anvil.mined_reverts = {_ROUTER.lower()}

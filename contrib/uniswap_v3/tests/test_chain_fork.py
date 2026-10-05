@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from contrib.uniswap_v3.chain.errors import NotAFork, RpcConfigError
+from contrib.uniswap_v3.chain.errors import NotAFork, RpcConfigError, RpcRejected
 from contrib.uniswap_v3.chain.fork import (
     DEFAULT_FORK_URL,
     DEV_ACCOUNTS,
@@ -13,7 +13,7 @@ from contrib.uniswap_v3.chain.fork import (
     open_fork,
     require_anvil,
 )
-from contrib.uniswap_v3.tests.fakes.fork import FakeAnvil
+from contrib.uniswap_v3.tests.fakes.fork import FORK_URL, FakeAnvil
 from contrib.uniswap_v3.tests.fakes.rpc import answering, rpc_over
 
 
@@ -68,6 +68,17 @@ def test_any_other_url_is_refused_before_anything_is_asked_of_it(url):
 def test_a_node_whose_anvil_node_info_names_a_fork_url_is_taken_for_an_anvil_fork():
     rpc, _ = rpc_over(FakeAnvil().provider)
     require_anvil(rpc)
+
+
+def test_the_url_a_fork_was_made_from_is_kept_out_of_its_errors_from_then_on():
+    rpc, _ = rpc_over(FakeAnvil().provider)
+    require_anvil(rpc)
+    # A fork's error quoting where it reads from, its key alone and not as a URL.
+    key = FORK_URL.rsplit("/", 1)[-1]
+    failing, _ = rpc_over(answering({"error": {"code": -32000, "message": f"upstream {key} failed"}}))
+    with pytest.raises(RpcRejected) as caught:
+        failing.latest_header()
+    assert key not in str(caught.value) and "<redacted>" in str(caught.value)
 
 
 @pytest.mark.parametrize(

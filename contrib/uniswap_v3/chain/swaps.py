@@ -272,7 +272,7 @@ class ChainExecutor:
             # The swap was mined and succeeded: tokens moved, and how is not known here.
             return SwapOutcomeUnknown(
                 f"{what} ({swapped.tx_hash}) was mined, and what it paid cannot be read "
-                f"off its receipt ({why})",
+                f"off its receipt: {why}",
                 tx_hashes=_hashes(mined),
                 gas_cost_eth=gas_cost_eth,
             )
@@ -280,12 +280,12 @@ class ChainExecutor:
         try:
             amount_out = from_raw(token_out, self._paid(swapped, token_out))
         except ValueError as exc:
-            raise unknown(str(exc)) from exc
+            raise unknown(f"its Transfer events add up to no amount of {token_out.symbol} ({exc})") from exc
         if amount_out == 0 or amount_out < swap.min_amount_out:
             # The router holds a swap to its minimum: this receipt is not read right.
             raise unknown(
-                f"its receipt shows {plain(amount_out)} {token_out.symbol} paid to the "
-                f"wallet, below the swap's minimum of {plain(swap.min_amount_out)}"
+                f"it shows {plain(amount_out)} {token_out.symbol} paid to the wallet, below "
+                f"the swap's minimum of {plain(swap.min_amount_out)}"
             )
         return Fill(
             swap=swap, amount_out=amount_out, gas_cost_eth=gas_cost_eth, block=swapped.block

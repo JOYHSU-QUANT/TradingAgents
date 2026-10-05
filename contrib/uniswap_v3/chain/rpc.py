@@ -49,7 +49,7 @@ import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, TypeGuard, TypeVar
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import requests
 import urllib3
@@ -135,6 +135,8 @@ class _Redactor:
             pieces.update(value for _, value in parse_qsl(parts.query))
             if parts.query:
                 pieces.add(f"{parts.path}?{parts.query}")
+        # A piece can be quoted percent-decoded as well as it is written.
+        pieces.update({unquote(piece) for piece in pieces})
         known = set(self._secrets) | {piece for piece in pieces if len(piece) >= _MIN_SECRET}
         # Longest first, so the whole URL goes before the key inside it.
         self._secrets = sorted(known, key=len, reverse=True)
@@ -558,7 +560,9 @@ class Rpc:
         """What an anvil node says of itself (``anvil_nodeInfo``); another node refuses the method.
 
         The answer holds the URL the fork was made from, which is a secret
-        of its own: it is never to be quoted.
+        of its own: it is never to be quoted, and from here on it is
+        scrubbed from every error and log line as this connection's own URL
+        is, since the fork's errors can quote it.
         """
         self.verify_chain()
         info = self._request(
@@ -567,6 +571,9 @@ class Rpc:
         )
         if not isinstance(info, Mapping):
             raise MalformedResponse(f"anvil_nodeInfo came back as {type(info).__name__}")
+        fork = info.get("forkConfig")
+        if isinstance(fork, Mapping) and isinstance(fork.get("forkUrl"), str) and fork["forkUrl"]:
+            _REDACTOR.register(fork["forkUrl"])
         return info
 
     def _request(self, what: str, read: Callable[[], _T], *, attempts: int | None = None) -> _T:

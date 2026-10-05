@@ -11,12 +11,14 @@ One transaction, from first to last:
 2. It is signed as an EIP-1559 transaction for the connection's chain ID,
    named explicitly, with the account's next nonce. The fee cap is twice
    the latest base fee plus the node's suggested priority fee.
-3. It is sent once. When the send fails, the transaction's receipt is
-   looked for, since the node may have taken it all the same; with one,
-   the send goes on to it. Without one, a send the node refused raises
-   what the node said, and nothing was sent; a send whose answer was lost,
-   or cannot be read, may have reached the node, and raises
-   :class:`~.errors.TransactionUnconfirmed`.
+3. It is sent once. A send the endpoint turned away before any node saw it
+   (:class:`~.errors.RpcConfigError`) raises as it is, and nothing was
+   sent. When the send fails otherwise, the transaction's receipt is looked
+   for, since the node may have taken it all the same; with one, the send
+   goes on to it. A send the node refused, with no receipt to be found,
+   raises what the node said, and nothing was sent. Any other failure, and
+   a refusal whose receipt could not be looked for, may have reached the
+   node, and raises :class:`~.errors.TransactionUnconfirmed`.
 4. Its receipt is waited for. One that does not come in time, or cannot be
    read, raises :class:`~.errors.TransactionUnconfirmed`, and one that says
    it reverted :class:`~.errors.TransactionReverted`.
@@ -38,8 +40,8 @@ from eth_account.signers.local import LocalAccount
 from .errors import (
     ChainError,
     MalformedResponse,
+    RpcConfigError,
     RpcRejected,
-    RpcUnavailable,
     TransactionReverted,
     TransactionUnconfirmed,
 )
@@ -139,11 +141,13 @@ class TransactionSender:
         }
         signed = self._account.sign_transaction(transaction)
         tx_hash = "0x" + bytes(signed.hash).hex()
-        # Asked before the send, so that a failure of it is not taken for the send's.
-        rpc.verify_chain()
         try:
             sent = rpc.send_raw_transaction(bytes(signed.raw_transaction))
-        except (RpcRejected, RpcUnavailable, MalformedResponse) as exc:
+        except RpcConfigError:
+            # The endpoint turned the request away (a refused key, an unusable URL):
+            # it never reached a node.
+            raise
+        except ChainError as exc:
             # The node may have taken the transaction all the same.
             unread: ChainError | None = None
             try:
@@ -151,9 +155,11 @@ class TransactionSender:
             except ChainError as failed:
                 receipt, unread = None, failed
             if receipt is None:
-                if isinstance(exc, RpcRejected):
+                if isinstance(exc, RpcRejected) and unread is None:
+                    # The node refused it, and holds no receipt of it.
                     raise
-                # The answer was lost or garbled, and the transaction may have arrived.
+                # The answer was lost or garbled, or the receipt could not be looked
+                # for: the transaction may have arrived.
                 looked = f"; its receipt could not be read either ({unread})" if unread else ""
                 raise TransactionUnconfirmed(
                     f"{what} ({tx_hash}) may or may not have reached the node ({exc}){looked}",

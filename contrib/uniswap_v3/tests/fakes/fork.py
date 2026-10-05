@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
 from eth_abi import decode, encode
 from eth_account import Account
 from eth_account.typed_transactions import TypedTransaction
@@ -26,10 +25,12 @@ from web3 import Web3
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, QUOTER_V2, SWAP_ROUTER_02
 from contrib.uniswap_v3.tests.fakes.rpc import ScriptedProvider, block_hash, block_result, encoded
 
-__all__ = ["APPROVE_GAS", "SWAP_GAS", "FakeAnvil", "selector"]
+__all__ = ["APPROVE_GAS", "FORK_URL", "SWAP_GAS", "FakeAnvil", "selector"]
 
 APPROVE_GAS = 46_000
 SWAP_GAS = 150_000
+# The URL the fake says it was forked from.
+FORK_URL = "https://upstream.invalid/fake-anvil-upstream-key"
 _ROUTER = SWAP_ROUTER_02[ETHEREUM_MAINNET].lower()
 _QUOTER = QUOTER_V2[ETHEREUM_MAINNET].lower()
 _TRANSFER = "0x" + bytes(Web3.keccak(text="Transfer(address,address,uint256)")).hex()
@@ -54,6 +55,13 @@ _QUOTE_PATH = selector("quoteExactInput(bytes,uint256)")
 def _revert(reason: str) -> dict[str, Any]:
     data = "0x08c379a0" + encode(["string"], [reason]).hex()
     return {"error": {"code": 3, "message": f"execution reverted: {reason}", "data": data}}
+
+
+def _answer(answer: dict[str, Any] | Exception) -> dict[str, Any]:
+    """``answer`` as the node's response: an error response returned, an exception raised."""
+    if isinstance(answer, Exception):
+        raise answer
+    return answer
 
 
 def _topic(address: str) -> str:
@@ -83,16 +91,19 @@ class FakeAnvil:
         self.mined_reverts: set[str] = set()
         self.node_info: dict[str, Any] | None = {
             "hardFork": "prague",
-            "forkConfig": {"forkUrl": "https://node.example/v2/SECRET", "forkBlockNumber": 99},
+            # Its pieces become secrets for the whole test run: none may be text other tests read.
+            "forkConfig": {"forkUrl": FORK_URL, "forkBlockNumber": 99},
         }
-        # "mined": the send's answer is lost after it was mined; "dropped": before.
-        self.lose_send: str | None = None
-        # The error message a send is refused with, when it is.
-        self.refuse_send: str | None = None
-        # What a send is answered with in place of its hash, after it is mined.
-        self.send_answer: dict[str, Any] | None = None
+        # How a send is answered in place of its hash: an error response is returned, an
+        # exception raised. ``send_before`` answers before the transaction is taken, which
+        # is then neither recorded nor mined; ``send_answer`` after it is taken (and mined,
+        # unless ``mine``/``mine_only`` say not).
+        self.send_before: dict[str, Any] | Exception | None = None
+        self.send_answer: dict[str, Any] | Exception | None = None
         # What a receipt read is answered with (an error response), or raises.
         self.receipt_error: dict[str, Any] | Exception | None = None
+        # What a read of the pending block is answered with (an error response).
+        self.pending_error: dict[str, Any] | None = None
         # Whether sent transactions are mined; ``mine_only`` limits it to calls of those selectors.
         self.mine = True
         self.mine_only: set[bytes] | None = None
@@ -129,6 +140,8 @@ class FakeAnvil:
             return {"result": self.node_info}
         if method == "eth_getBlockByNumber":
             if params[0] == "pending":
+                if self.pending_error is not None:
+                    return self.pending_error
                 return {
                     "result": block_result(self.head + 1, self._next_time(), base_fee=self.base_fee)
                 }
@@ -144,10 +157,8 @@ class FakeAnvil:
         if method == "eth_sendRawTransaction":
             return self._send(params[0])
         if method == "eth_getTransactionReceipt":
-            if isinstance(self.receipt_error, Exception):
-                raise self.receipt_error
             if self.receipt_error is not None:
-                return self.receipt_error
+                return _answer(self.receipt_error)
             return {"result": self.receipts.get(params[0].lower())}
         raise AssertionError(f"the fake anvil does not answer {method}")
 
@@ -185,19 +196,15 @@ class FakeAnvil:
         transaction = TypedTransaction.from_bytes(raw).as_dict()
         sender = Account.recover_transaction(raw)
         tx_hash = "0x" + bytes(Web3.keccak(raw)).hex()
-        if self.refuse_send is not None:
-            return {"error": {"code": -32000, "message": self.refuse_send}}
-        if self.lose_send == "dropped":
-            raise requests.ConnectionError("connection reset before the answer")
+        if self.send_before is not None:
+            return _answer(self.send_before)
         self.sent.append(transaction)
         self.senders.append(sender)
         selector_sent = bytes(transaction["data"])[:4]
         if self.mine and (self.mine_only is None or selector_sent in self.mine_only):
             self._mine(tx_hash, sender, transaction)
-        if self.lose_send == "mined":
-            raise requests.ConnectionError("connection reset before the answer")
         if self.send_answer is not None:
-            return self.send_answer
+            return _answer(self.send_answer)
         return {"result": tx_hash}
 
     # --- mining ---------------------------------------------------------------

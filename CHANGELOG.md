@@ -861,8 +861,10 @@ Breaking changes within the 0.x line are called out explicitly.
   host is a literal loopback address (`localhost` is refused, since a hosts
   file can point it elsewhere), and the node there must name in
   `anvil_nodeInfo` the URL it was forked from (a fork answers to mainnet's
-  chain ID, which cannot tell it from mainnet); the executor asks again
-  when it is built. It signs only as one of anvil's ten dev accounts,
+  chain ID, which cannot tell it from mainnet), which `Rpc.node_info` then
+  scrubs from every error and log line as it does the node's own URL; the
+  executor asks again when it is built. The scrubbing now also covers a
+  URL's pieces percent-decoded. It signs only as one of anvil's ten dev accounts,
   derived from the public test mnemonic, and `TransactionSender` refuses
   any other account. `chain/transactions.py` signs an EIP-1559 transaction
   with the chain ID named, sends it once (never retried: a send that fails

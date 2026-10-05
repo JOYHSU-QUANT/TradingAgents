@@ -28,7 +28,7 @@ from web3 import HTTPProvider, Web3
 
 from contrib.uniswap_v3.chain.fork import DEV_ACCOUNTS, Fork, open_fork
 from contrib.uniswap_v3.chain.quoter import quote_exact_input
-from contrib.uniswap_v3.chain.rpc import DEFAULT_URL_ENV, RpcSettings
+from contrib.uniswap_v3.chain.rpc import _REDACTOR, DEFAULT_URL_ENV, RpcSettings
 from contrib.uniswap_v3.chain.swaps import ChainExecutor
 from contrib.uniswap_v3.chain.units import from_raw
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
@@ -92,9 +92,10 @@ def fork_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         )
 
     def said() -> str:
-        # anvil quotes the upstream URL, which ends in the node's key.
-        text = log.read_text(encoding="utf-8", errors="replace").replace(upstream, "<url>")
-        return text[-1_000:]
+        # anvil quotes the upstream URL, which ends in the node's key: scrubbed as the
+        # package scrubs its own node's URL.
+        _REDACTOR.register(upstream.strip())
+        return _REDACTOR.scrub(log.read_text(encoding="utf-8", errors="replace"))[-1_000:]
 
     url = f"http://127.0.0.1:{port}"
     try:
@@ -105,7 +106,7 @@ def fork_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
             try:
                 if w3.eth.chain_id:
                     break
-            except requests.ConnectionError:
+            except (requests.ConnectionError, requests.Timeout):
                 time.sleep(0.5)
         else:
             pytest.fail(f"anvil did not answer within a minute: {said()}")
@@ -117,6 +118,8 @@ def fork_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        # What anvil wrote holds the upstream URL as it is.
+        log.unlink(missing_ok=True)
 
 
 @pytest.fixture(scope="module")

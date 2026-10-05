@@ -10,6 +10,7 @@ from eth_account import Account
 from contrib.uniswap_v3.chain.errors import (
     CallReverted,
     MalformedResponse,
+    RpcConfigError,
     RpcRejected,
     RpcUnavailable,
     TransactionReverted,
@@ -20,13 +21,16 @@ from contrib.uniswap_v3.chain.rpc import Log, Receipt, _receipt as _parse_receip
 from contrib.uniswap_v3.chain.transactions import SendSettings, TransactionSender
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, SWAP_ROUTER_02, TOKENS
 from contrib.uniswap_v3.tests.fakes.fork import APPROVE_GAS, FakeAnvil, selector
-from contrib.uniswap_v3.tests.fakes.rpc import ScriptedProvider, answering, rpc_over
+from contrib.uniswap_v3.tests.fakes.rpc import ScriptedProvider, answering, block_result, rpc_over
 
 _USDC = TOKENS[ETHEREUM_MAINNET]["USDC"].address
 _APPROVE = selector("approve(address,uint256)") + encode(
     ["address", "uint256"], [SWAP_ROUTER_02[ETHEREUM_MAINNET], 5]
 )
 _HASH = "0x" + "ab" * 32
+# A node refusing a send, and a send whose answer the connection loses.
+_REFUSED = {"error": {"code": -32000, "message": "nonce too low"}}
+_LOST = requests.ConnectionError("connection reset before the answer")
 
 
 def _sender(anvil: FakeAnvil, **settings) -> tuple[TransactionSender, list[float]]:
@@ -69,7 +73,7 @@ def test_a_call_whose_estimate_reverts_is_not_sent():
 
 def test_a_send_the_node_refuses_is_raised_as_the_node_said_and_not_retried():
     anvil = FakeAnvil()
-    anvil.refuse_send = "nonce too low"
+    anvil.send_before = _REFUSED
     sender, _ = _sender(anvil)
     with pytest.raises(RpcRejected, match="nonce too low"):
         sender.send(_USDC, _APPROVE, what="an approval")
@@ -78,7 +82,7 @@ def test_a_send_the_node_refuses_is_raised_as_the_node_said_and_not_retried():
 
 def test_a_send_whose_answer_is_lost_after_it_was_mined_goes_on_to_its_receipt():
     anvil = FakeAnvil()
-    anvil.lose_send = "mined"
+    anvil.send_answer = _LOST
     sender, _ = _sender(anvil)
     receipt = sender.send(_USDC, _APPROVE, what="an approval")
     assert receipt.succeeded
@@ -87,7 +91,7 @@ def test_a_send_whose_answer_is_lost_after_it_was_mined_goes_on_to_its_receipt()
 
 def test_a_send_whose_answer_is_lost_before_it_arrived_is_unconfirmed_and_not_sent_again():
     anvil = FakeAnvil()
-    anvil.lose_send = "dropped"
+    anvil.send_before = _LOST
     sender, _ = _sender(anvil)
     with pytest.raises(TransactionUnconfirmed, match="may or may not have reached") as caught:
         sender.send(_USDC, _APPROVE, what="an approval")
@@ -97,10 +101,40 @@ def test_a_send_whose_answer_is_lost_before_it_arrived_is_unconfirmed_and_not_se
 
 def test_a_lost_send_whose_receipt_cannot_be_read_says_both():
     anvil = FakeAnvil()
-    anvil.lose_send = "dropped"
+    anvil.send_before = _LOST
     anvil.receipt_error = {"error": {"code": -32000, "message": "receipts are down"}}
     sender, _ = _sender(anvil)
     with pytest.raises(TransactionUnconfirmed, match="could not be read either .*receipts are down"):
+        sender.send(_USDC, _APPROVE, what="an approval")
+
+
+def test_a_send_the_endpoint_turns_away_was_never_sent_and_no_receipt_is_looked_for():
+    anvil = FakeAnvil()
+    response = requests.Response()
+    response.status_code = 401
+    anvil.send_before = requests.HTTPError("401 Client Error", response=response)
+    sender, _ = _sender(anvil)
+    with pytest.raises(RpcConfigError, match="refused the credentials"):
+        sender.send(_USDC, _APPROVE, what="an approval")
+    assert anvil.calls("eth_getTransactionReceipt") == []
+
+
+def test_a_refused_send_whose_receipt_cannot_be_looked_for_is_unconfirmed():
+    anvil = FakeAnvil()
+    anvil.send_before = _REFUSED
+    anvil.receipt_error = {"error": {"code": -32000, "message": "receipts are down"}}
+    sender, _ = _sender(anvil)
+    with pytest.raises(TransactionUnconfirmed, match="nonce too low.*could not be read either"):
+        sender.send(_USDC, _APPROVE, what="an approval")
+
+
+def test_a_send_answered_with_any_other_node_error_and_no_receipt_is_unconfirmed():
+    # "header not found" is read as the node being behind: the transaction may be in its pool.
+    anvil = FakeAnvil()
+    anvil.mine = False
+    anvil.send_answer = {"error": {"code": -32000, "message": "header not found"}}
+    sender, _ = _sender(anvil)
+    with pytest.raises(TransactionUnconfirmed, match="may or may not have reached"):
         sender.send(_USDC, _APPROVE, what="an approval")
 
 
@@ -271,9 +305,25 @@ def test_a_receipt_that_cannot_be_right_is_refused(changes, said):
 @pytest.mark.parametrize("logs", ["nope", None, 5])
 def test_logs_that_are_not_a_list_are_refused_as_they_come(logs):
     # As another source than web3 would hand them on, unformatted.
+    decoded = {
+        **_receipt(),
+        "logs": logs,
+        "blockNumber": 7,
+        "status": 1,
+        "gasUsed": 16,
+        "effectiveGasPrice": 3,
+    }
     with pytest.raises(MalformedResponse, match="has logs of"):
-        _parse_receipt(_HASH, {**_receipt(), "logs": logs, "blockNumber": 7, "status": 1,
-                               "gasUsed": 16, "effectiveGasPrice": 3})
+        _parse_receipt(_HASH, decoded)
+
+
+def test_the_pending_block_is_read_as_a_header():
+    provider = answering({"result": block_result(8, 1_700_000_096)})
+    rpc, _ = rpc_over(provider)
+    header = rpc.pending_header()
+    assert (header.number, header.timestamp) == (8, 1_700_000_096)
+    method, params = provider.requests[-1]
+    assert (method, list(params)) == ("eth_getBlockByNumber", ["pending", False])
 
 
 def test_the_node_reads_a_sender_needs_come_back_as_integers():

@@ -77,8 +77,8 @@ class BacktestSummary:
     rest are boundaries, oldest first: ``missing`` had no bar, ``changed``
     were decided earlier on a reading the store no longer holds as it was,
     ``gas_rejected`` had their rebalance refused for want of gas,
-    ``executor_rejected`` had a swap of it refused by the executor (all of
-    it rejected, or, signed, left partial), and
+    ``executor_rejected`` had it refused by the executor (a rebalance a
+    signed swap left partial is in neither, and is counted in ``outcomes``), and
     ``skipped`` were suspect and not traded on.
     """
 
@@ -255,9 +255,11 @@ def replay(
             # A suspect bar is skipped whatever its finality: nothing was decided on it.
             on_pending += loaded.finality is Finality.PENDING and not loaded.bar.suspect
         outcomes[decision.outcome] += 1
-        if decision.reason_code is RejectionCode.GAS:
+        # A partial rebalance is counted by its outcome alone.
+        rejected = decision.outcome is Outcome.REJECTED
+        if rejected and decision.reason_code is RejectionCode.GAS:
             gas_rejected.append(time)
-        elif decision.reason_code is RejectionCode.EXECUTOR:
+        elif rejected and decision.reason_code is RejectionCode.EXECUTOR:
             executor_rejected.append(time)
         elif decision.outcome is Outcome.SKIPPED_SUSPECT:
             skipped.append(time)

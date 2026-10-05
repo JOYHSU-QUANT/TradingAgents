@@ -142,13 +142,23 @@ def _refused(leg: int, swap: SwapIntent, rejection: Rejection) -> str:
     )
 
 
+def _chain(exc: BaseException) -> list[BaseException]:
+    """``exc`` and the errors it was raised from, each once, oldest last."""
+    chain: list[BaseException] = []
+    error: BaseException | None = exc
+    while error is not None and error not in chain:
+        chain.append(error)
+        error = error.__cause__
+    return chain
+
+
 def _hashes(exc: BaseException) -> tuple[str, ...]:
-    """The transactions ``exc``, or the error it was raised from, says may have been sent.
+    """The transactions ``exc``, or an error it was raised from, says may have been sent.
 
     A send error names them in ``tx_hashes``; the engine does not know the
     chain's errors, and reads them by that name.
     """
-    for error in (exc, exc.__cause__):
+    for error in _chain(exc):
         hashes = getattr(error, "tx_hashes", None)
         if isinstance(hashes, tuple) and hashes and all(isinstance(h, str) for h in hashes):
             return hashes
@@ -354,6 +364,8 @@ class Engine:
         refused: Rejection | None = None
         reason: str | None = None
         unsent: Exception | None = None
+        # An answer the executor gave and the journal has not taken: what it cost is not known.
+        unwritten: object | None = None
         try:
             for leg, swap in enumerate(swaps):
                 try:
@@ -364,14 +376,17 @@ class Engine:
                     # Nothing of the rebalance was sent (the port's contract).
                     unsent = exc
                     break
+                unwritten = raw
                 # An answer that is not one may follow a send: it stops the run.
                 answered = _checked(leg, swap, raw)
                 if isinstance(answered, Rejection):
                     # Nothing of it was sent; the legs after it are not asked for.
                     refused, reason = answered, _refused(leg, swap, answered)
+                    unwritten = None
                     break
-                fills.append(answered)
                 self.journal.record_leg(self.run_id, time, leg, answered)
+                fills.append(answered)
+                unwritten = None
             if unsent is None:
                 try:
                     after = ledger.apply(fills)
@@ -382,7 +397,7 @@ class Engine:
                     ) from exc
                 self._require_holds(wallet, after, f"after the swaps of the bar at {time}")
         except Exception as exc:
-            raise self._stopped(time, exc) from exc
+            raise self._stopped(time, exc, unwritten=unwritten) from exc
         if unsent is not None:
             # The bar is left undecided, as a read that failed leaves one, and can be tried again.
             try:
@@ -422,21 +437,28 @@ class Engine:
                 f"{holdings_text(expected)}"
             )
 
-    def _stopped(self, time: int, exc: Exception) -> UnsettledSend:
+    def _stopped(
+        self, time: int, exc: Exception, *, unwritten: object | None = None
+    ) -> UnsettledSend:
         """Write what stopped the send at ``time``, and the error that stops the run.
 
         A send error says which transactions it concerns and what gas they
-        cost; it is read here by those names, from it or the error it was
+        cost; it is read here by those names, from it or the errors it was
         raised from, since the engine does not know the chain's errors. An
         error that names no transaction cost none: nothing of its swap was
-        sent. One that names some and no usable cost leaves the gas unknown.
+        sent, and the legs that filled carry their own gas. One that names
+        some and no usable cost leaves the gas unknown, and so does an answer
+        of the executor's, ``unwritten``, that was given and not written as
+        a leg: a swap of it may have been mined.
         """
         failure = f"{type(exc).__name__}: {exc}"
         hashes = _hashes(exc)
         if hashes:
             failure += f" (transactions {', '.join(hashes)})"
-        gas: Decimal | None = Decimal(0) if not hashes else None
-        for error in (exc, exc.__cause__):
+        if unwritten is not None:
+            failure += f" (the executor's answer was not written as a leg: {unwritten!r})"
+        gas: Decimal | None = Decimal(0) if not hashes and unwritten is None else None
+        for error in _chain(exc):
             cost = getattr(error, "gas_cost_eth", None)
             if isinstance(cost, Decimal) and cost.is_finite() and not cost.is_signed():
                 gas = cost

@@ -333,6 +333,44 @@ def test_the_gas_a_wrapped_send_error_names_is_kept(store):
     assert opened.failed_gas_eth == D("0.0004")
 
 
+def test_a_send_error_wrapped_twice_still_names_its_transactions(store):
+    wallet = _Wallet()
+
+    def twice(leg, swap):
+        try:
+            try:
+                raise _SendFailed()
+            except _SendFailed as exc:
+                raise RuntimeError("inner") from exc
+        except RuntimeError as exc:
+            raise LookupError("outer") from exc
+
+    with pytest.raises(UnsettledSend):
+        _engine(store, _Signer(wallet, twice), wallet).step(_view(0))
+    # Not taken for "nothing was sent": the send stays open, with its transactions.
+    opened = store.open_send(_RUN)
+    assert "transactions 0x" in opened.failure and opened.failed_gas_eth == D("0.0004")
+
+
+def test_a_fill_the_journal_did_not_take_leaves_its_gas_unknown(store):
+    wallet = _Wallet()
+
+    class Unwriting(_Unrecording):
+        def record_leg(self, run_id, time, leg, fill):
+            if leg == 1:
+                raise RuntimeError("database is locked")
+            self._store.record_leg(run_id, time, leg, fill)
+
+    engine = _engine(store, _Signer(wallet), wallet)
+    engine = Engine(**{**engine.__dict__, "journal": Unwriting(store)})
+    with pytest.raises(UnsettledSend):
+        engine.step(_view(0))
+    opened = store.open_send(_RUN)
+    assert len(opened.legs) == 1
+    assert "the executor's answer was not written as a leg: Fill(" in opened.failure
+    assert opened.failed_gas_eth is None
+
+
 def test_a_swap_the_wallets_eth_cannot_pay_for_is_a_want_of_gas(store):
     wallet = _Wallet()
 

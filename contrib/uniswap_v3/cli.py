@@ -877,7 +877,7 @@ def _fork(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[]
                 # The run needs a person either way: not a reason to say "try again later".
                 print(
                     f"the open send could not be set beside the wallet: "
-                    f"{_one_ascii_line(failed)}",
+                    f"{type(failed).__name__}: {_one_ascii_line(failed)}",
                     file=sys.stderr,
                 )
                 return EXIT_FAILED

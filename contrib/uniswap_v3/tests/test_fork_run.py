@@ -122,7 +122,8 @@ def test_a_second_leg_refused_leaves_the_run_partial_with_the_wallet_where_the_l
         assert "leg 1 (USDC to WBTC) was refused" in decision.reason
         assert "nothing was sent" in decision.reason
         # The next bars are decided from the partial holdings: the run still wants WBTC.
-        assert summary.executor_rejected == (FIRST_DAY, FIRST_DAY + DAY, FIRST_DAY + 2 * DAY)
+        assert summary.outcomes[Outcome.PARTIAL] == 1
+        assert summary.executor_rejected == (FIRST_DAY + DAY, FIRST_DAY + 2 * DAY)
         assert [fill.token_out for fill in store.fills(_RUN)] == ["WETH"]
         assert store.ledger(_RUN).balances["WBTC"] == 0
         assert store.ledger(_RUN) == wallet.holdings()

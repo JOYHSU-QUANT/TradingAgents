@@ -428,12 +428,20 @@ class Fill:
 
 @dataclass(frozen=True)
 class Rejection:
-    """A swap that did not go through, and why."""
+    """A swap that did not go through, and why.
+
+    ``short_of_gas`` marks a swap the wallet's ETH could not pay the gas
+    of, which the engine records as a want of gas, as it does a virtual
+    run's gas balance that does not cover its fills.
+    """
 
     swap: SwapIntent
     reason: str
+    short_of_gas: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.swap, SwapIntent):
             raise ValueError(f"a rejection names the SwapIntent it refused, got {self.swap!r}")
         _require_symbol(self.reason, "reason")
+        if not isinstance(self.short_of_gas, bool):
+            raise ValueError(f"short_of_gas must be a bool, got {self.short_of_gas!r}")

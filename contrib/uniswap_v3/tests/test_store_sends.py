@@ -252,5 +252,24 @@ def test_a_store_from_before_the_sends_gains_them_and_its_runs_no_fork_block(tmp
     with open_store(path) as store:
         assert store.run("run-1").fork_block is None
         assert store.open_send("run-1") is None
-        store.begin_send("run-1", FIRST_DAY, started_at=0)
-        assert store.open_send("run-1").time == FIRST_DAY
+        # A backtest signs nothing, and so sends nothing.
+        with pytest.raises(StoreError, match="fills from the model and signs nothing"):
+            store.begin_send("run-1", FIRST_DAY, started_at=0)
+
+
+def test_a_partial_decision_of_a_run_that_signs_nothing_is_refused(tmp_path):
+    with open_store(tmp_path / "virtual.db") as store:
+        store.insert_run(
+            RunRecord(
+                run_id="bt",
+                mode=RunMode.BACKTEST,
+                chain_id=1,
+                quote="USDC",
+                strategy="fixed_weights",
+                config="{}",
+                ledger=_ledger(),
+                created_at=FIRST_DAY,
+            )
+        )
+        with pytest.raises(StoreError, match="a partial rebalance is a signing run's"):
+            store.record("bt", _step(_LEG_0, outcome=Outcome.PARTIAL))

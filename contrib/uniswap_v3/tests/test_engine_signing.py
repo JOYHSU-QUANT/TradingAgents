@@ -22,6 +22,7 @@ from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.engine import (
     DAY,
     FIRST_DAY,
+    ScriptedExecutor,
     ScriptedStrategy,
     bar,
     config as _config,
@@ -116,6 +117,21 @@ def _engine(store, executor, wallet, script=None) -> Engine:
 
 def _view(*days: int) -> MarketView:
     return MarketView(tuple(bar(day) for day in days))
+
+
+def test_a_virtual_executors_refusal_for_want_of_gas_is_recorded_as_gas(tmp_path):
+    with open_store(tmp_path / "virtual.db") as store:
+        start_run(store, _CONFIG, run_id="bt", mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
+        executor = ScriptedExecutor(lambda swap, bar: Rejection(swap, "no ETH", short_of_gas=True))
+        engine = Engine(
+            run_id="bt",
+            config=_CONFIG,
+            strategy=ScriptedStrategy({FIRST_DAY: _TARGET}),
+            executor=executor,
+            journal=store,
+            decided_at=0,
+        )
+        assert engine.step(_view(0)).decision.reason_code is RejectionCode.GAS
 
 
 def test_a_fake_wallet_is_a_wallet():
@@ -242,7 +258,8 @@ def test_a_wallet_that_does_not_hold_the_fills_afterwards_leaves_the_send_open(s
     opened = store.open_send(_RUN)
     assert len(opened.legs) == 2
     assert opened.failure.startswith("EngineError: after the swaps of the bar at")
-    assert opened.failed_gas_eth is None
+    # The error names no transaction: nothing it stopped cost gas, and ETH is compared.
+    assert opened.failed_gas_eth == D(0)
 
 
 def test_an_answer_for_another_swap_leaves_the_send_open(store):
@@ -292,7 +309,56 @@ def test_a_later_swap_that_fails_with_no_transaction_named_still_leaves_the_send
     signer = _Signer(wallet, lambda leg, swap: _ReadFailed("timed out") if leg else None)
     with pytest.raises(UnsettledSend, match="_ReadFailed: timed out"):
         _engine(store, signer, wallet).step(_view(0))
-    assert len(store.open_send(_RUN).legs) == 1
+    opened = store.open_send(_RUN)
+    assert len(opened.legs) == 1
+    # It names no transaction: the leg it stopped sent nothing, and cost no gas.
+    assert opened.failed_gas_eth == D(0)
+
+
+def test_the_gas_a_wrapped_send_error_names_is_kept(store):
+    wallet = _Wallet()
+
+    def wrapped(leg, swap):
+        if not leg:
+            return None
+        try:
+            raise _SendFailed()
+        except _SendFailed as exc:
+            raise RuntimeError("the swap could not be made") from exc
+
+    with pytest.raises(UnsettledSend):
+        _engine(store, _Signer(wallet, wrapped), wallet).step(_view(0))
+    opened = store.open_send(_RUN)
+    assert "transactions 0x" in opened.failure
+    assert opened.failed_gas_eth == D("0.0004")
+
+
+def test_a_swap_the_wallets_eth_cannot_pay_for_is_a_want_of_gas(store):
+    wallet = _Wallet()
+
+    def short(leg, swap):
+        return Rejection(swap, "cannot be paid for", short_of_gas=True) if leg else None
+
+    decision = _engine(store, _Signer(wallet, short), wallet).step(_view(0)).decision
+    assert (decision.outcome, decision.reason_code) == (Outcome.PARTIAL, RejectionCode.GAS)
+
+
+def test_a_send_that_cannot_be_taken_back_stays_open_saying_nothing_was_sent(store):
+    wallet = _Wallet()
+
+    class Unabandoning(_Unrecording):
+        def record(self, run_id, step):
+            return self._store.record(run_id, step)
+
+        def abandon_send(self, run_id, time):
+            raise RuntimeError("database is locked")
+
+    engine = _engine(store, _Signer(wallet, lambda leg, swap: _ReadFailed("timed out")), wallet)
+    engine = Engine(**{**engine.__dict__, "journal": Unabandoning(store)})
+    with pytest.raises(UnsettledSend, match="_ReadFailed: timed out"):
+        engine.step(_view(0))
+    opened = store.open_send(_RUN)
+    assert opened.legs == () and opened.failed_gas_eth == D(0)
 
 
 class _Unrecording:

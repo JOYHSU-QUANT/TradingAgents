@@ -286,7 +286,7 @@ fork run 用 store 裡的 bar（同回測），但每根要交易的 bar 都在�
 
 1. 裝好 Foundry（§10.3 第 1 條），`anvil --version` 確認。
 2. store 裡要有那段 bar（§1.3 的 `backfill`；在跑著 paper 的 store 上跑 fork 也可以，但建議用複本，§9 第一條的寫法）。
-3. 另開一個視窗起 anvil，分叉的區塊要晚於那段最後一根 bar 的成交區塊（節點要 archive；之後每根 bar 會自己重設）：
+3. 另開一個視窗起 anvil，分叉在哪一塊都可以（每根要交易的 bar 會自己重設到它的成交區塊；節點要 archive）：
 
    ```powershell
    python -m dotenv run -- powershell -Command 'anvil --fork-url $env:ETH_RPC_URL --fork-block-number <區塊> --port 8545 --silent'

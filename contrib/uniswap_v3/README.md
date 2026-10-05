@@ -131,7 +131,8 @@ contrib/uniswap_v3/
 同一根 bar 不會決策兩次；它也記下決策當下 bar 的 close block hash 與 finality，以及
 `decided_at`（決策那次呼叫的時間；schema v4 之前的列是空的）。
 會簽名的 run 另寫 `sends`（每根開始送的 bar 一列，記下中斷的原因與已知花掉的 gas）與 `sent_legs`
-（每一腿成交就寫），fork run 在 `runs.fork_block` 記下建立當時分叉所在的區塊（schema v5）。
+（每一腿成交就寫），fork run 在 `runs.fork_block` 記下建立當時分叉所在的區塊（schema v5；status／report 的標頭會印，
+但成交不在那一塊——每根要交易的 bar 都重設到自己的成交區塊，成交記錄的 `block` 才是實際的區塊）。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---
@@ -209,7 +210,9 @@ contrib/uniswap_v3/
   每根 bar 的成交與對帳。重設會讓 anvil 重新向 archive 節點取狀態，每根要交易的 bar 多花幾秒到幾十秒。
 - fork 錢包的代幣餘額是直接寫進代幣 storage 的：只認 Solidity `mapping(address => uint256)` 放在前 64 個 slot 的代幣
   （USDC、WETH、WBTC 都是），找不到就拒絕。
-- fork 錢包的 ETH 不夠付 gas 時，節點拒收交易，run 會停在未結 send（不會像回測那樣記成 gas 不足的 `rejected`）。
+- fork 錢包的 ETH 在簽名前就檢查（gas 上限 × 最高費率，比實際花費嚴）：不夠就是那一腿被拒、什麼都沒送，記成
+  `reason_code=gas` 的 `rejected`（前面有腿成交就是 `partial`），與回測的 gas 不足同一個碼與警告。只有 approve
+  已上鏈、swap 才付不起 gas 時會停在未結 send。
 - 未結 send 沒有自動結清的指令：照 RUNBOOK §10 看對照、用錢包的持有量開新 run。
 - fork 的成交含 approve 的 gas（每筆約 46k–55k），報價成交不含，所以 fork 的 gas 成本會比 paper 高。
 - 報價成交的 gas 加成（`execution.quote.gas_overhead_units`，預設 50,000）：分叉上實測 swap 交易本身比 QuoterV2 的

@@ -228,13 +228,14 @@ def test_a_swap_the_wallets_eth_cannot_pay_for_is_refused_while_nothing_is_mined
     refused = _executor(anvil).execute(_SWAP, _BAR)
     assert isinstance(refused, Rejection)
     assert refused.reason.startswith("the approval of 1000 USDC cannot be paid for: ")
-    assert "nothing was sent" in refused.reason
+    assert "nothing was sent" in refused.reason and refused.short_of_gas
 
     anvil = _anvil()
     _allow(anvil, 1000 * 10**6)
     anvil.eth[_ME.lower()] = 2 * 10**14
     refused = _executor(anvil).execute(_SWAP, _BAR)
     assert isinstance(refused, Rejection) and "cannot be paid for" in refused.reason
+    assert refused.short_of_gas
     assert anvil.sent == []
 
 
@@ -246,14 +247,29 @@ def test_a_swap_the_wallets_eth_cannot_pay_for_after_its_approval_was_mined_is_n
     assert caught.value.gas_cost_eth == eth_from_wei(APPROVE_GAS * _PRICE)
 
 
-def test_anything_raised_after_the_approval_was_mined_names_the_approval(monkeypatch):
+def test_anything_raised_after_the_approval_was_mined_carries_its_hash(monkeypatch):
     anvil = _anvil()
     executor = _executor(anvil)
     # A deadline that cannot be added up: not an error of the chain's.
     monkeypatch.setattr(executor, "_settings", SimpleNamespace(deadline_seconds=None))
-    with pytest.raises(SwapNotFilled, match="TypeError") as caught:
+    with pytest.raises(SwapNotFilled, match="not sent after its approval was mined") as caught:
+        executor.execute(_SWAP, _BAR)
+    assert "TypeError" in str(caught.value)
+    assert caught.value.tx_hashes == tuple(anvil.receipts)
+
+
+def test_anything_raised_after_the_swap_was_mined_names_both_transactions(monkeypatch):
+    anvil = _anvil()
+    executor = _executor(anvil)
+
+    def unreadable(receipt, token):
+        raise TypeError("a log that is not one")
+
+    monkeypatch.setattr(executor, "_paid", unreadable)
+    with pytest.raises(SwapOutcomeUnknown, match="its fill could not be made") as caught:
         executor.execute(_SWAP, _BAR)
     assert caught.value.tx_hashes == tuple(anvil.receipts)
+    assert caught.value.gas_cost_eth == eth_from_wei((APPROVE_GAS + SWAP_GAS) * _PRICE)
 
 
 def test_a_swap_mined_and_reverted_reports_the_gas_of_every_transaction_it_took():

@@ -30,13 +30,15 @@ One swap, from first to last:
    the price each paid.
 
 A swap whose approval or own transaction the wallet's ETH cannot pay the gas
-of is refused as well, while nothing of it has been mined.
+of is refused as well, while nothing of it has been mined, and the refusal
+says it was short of gas.
 
-:class:`~..domain.types.Rejection` means the wallet is as it was. Anything
-else raised while nothing was mined is not a send error, and carries no
-transaction hashes. Once a transaction has been mined, a swap that does not fill raises
+:class:`~..domain.types.Rejection` means the wallet is as it was. While
+nothing has been mined, any other error is raised as it is, and names no
+transaction. Once a transaction has been mined, every error names the
+transactions it took: a swap that does not fill raises
 :class:`~.errors.SwapNotFilled` with the gas spent (only gas moved); one
-that was mined and whose receipt cannot be read as a fill, as when it shows
+that was mined and whose fill cannot be made, as when its receipt shows
 less than the minimum paid, raises :class:`~.errors.SwapOutcomeUnknown`;
 and one whose receipt never came :class:`~.errors.TransactionUnconfirmed`.
 The wallet changed, or may yet change.
@@ -243,7 +245,11 @@ class ChainExecutor:
                     swap, f"the approval of {selling} would revert ({exc}); nothing was sent"
                 )
             except InsufficientFunds as exc:
-                return Rejection(swap, f"the approval of {selling} cannot be paid for: {exc}")
+                return Rejection(
+                    swap,
+                    f"the approval of {selling} cannot be paid for: {exc}",
+                    short_of_gas=True,
+                )
             except TransactionReverted as exc:
                 raise SwapNotFilled(
                     f"the approval of {selling} reverted ({exc})",
@@ -281,10 +287,27 @@ class ChainExecutor:
             if isinstance(exc, CallReverted):
                 return Rejection(swap, f"{what} would revert ({exc}); nothing was sent")
             if isinstance(exc, InsufficientFunds):
-                return Rejection(swap, f"{what} cannot be paid for: {exc}")
+                return Rejection(swap, f"{what} cannot be paid for: {exc}", short_of_gas=True)
             raise
         mined.append(swapped)
+        try:
+            return self._filled(swap, swapped, mined, what)
+        except SwapOutcomeUnknown:
+            raise
+        except Exception as exc:
+            # Whatever else: the swap was mined, and it is named.
+            raise SwapOutcomeUnknown(
+                f"{what} ({swapped.tx_hash}) was mined, and its fill could not be made "
+                f"({exc!r})",
+                tx_hashes=_hashes(mined),
+                gas_cost_eth=_gas_eth(mined),
+            ) from exc
 
+    def _filled(
+        self, swap: SwapIntent, swapped: Receipt, mined: list[Receipt], what: str
+    ) -> Fill:
+        """The fill ``swapped``, the swap's mined transaction, paid; ``mined`` are all it took."""
+        token_out = swap.token_out
         gas_cost_eth = _gas_eth(mined)
 
         def unknown(why: str) -> SwapOutcomeUnknown:

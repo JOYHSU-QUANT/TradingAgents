@@ -130,6 +130,11 @@ def _checked(leg: int, swap: SwapIntent, answered: object) -> Fill | Rejection:
     return answered
 
 
+def _code(rejection: Rejection) -> RejectionCode:
+    """What a refusal is recorded as: a want of gas, or the executor's answer."""
+    return RejectionCode.GAS if rejection.short_of_gas else RejectionCode.EXECUTOR
+
+
 def _refused(leg: int, swap: SwapIntent, rejection: Rejection) -> str:
     return (
         f"leg {leg} ({swap.token_in.symbol} to {swap.token_out.symbol}) was refused: "
@@ -185,6 +190,17 @@ class Engine:
     journal: Journal
     decided_at: int
     wallet: Wallet | None = None
+
+    def __post_init__(self) -> None:
+        signs = self.executor.source.signs
+        if signs != (self.wallet is not None):
+            raise EngineError(
+                "an executor whose fills come from the chain signs from a wallet, which is "
+                "handed with it"
+                if signs
+                else f"an executor whose fills come from the {self.executor.source.value} "
+                f"signs nothing, and is handed no wallet"
+            )
 
     def step(
         self,
@@ -291,7 +307,7 @@ class Engine:
                     ledger,
                     target=answer,
                     reason=_refused(leg, swap, answered),
-                    reason_code=RejectionCode.EXECUTOR,
+                    reason_code=_code(answered),
                 )
             fills.append(answered)
         try:
@@ -335,7 +351,8 @@ class Engine:
         self._require_holds(wallet, ledger, f"before the swaps of the bar at {time}, nothing sent")
         self.journal.begin_send(self.run_id, time, started_at=self.decided_at)
         fills: list[Fill] = []
-        refused: str | None = None
+        refused: Rejection | None = None
+        reason: str | None = None
         unsent: Exception | None = None
         try:
             for leg, swap in enumerate(swaps):
@@ -351,7 +368,7 @@ class Engine:
                 answered = _checked(leg, swap, raw)
                 if isinstance(answered, Rejection):
                     # Nothing of it was sent; the legs after it are not asked for.
-                    refused = _refused(leg, swap, answered)
+                    refused, reason = answered, _refused(leg, swap, answered)
                     break
                 fills.append(answered)
                 self.journal.record_leg(self.run_id, time, leg, answered)
@@ -368,15 +385,19 @@ class Engine:
             raise self._stopped(time, exc) from exc
         if unsent is not None:
             # The bar is left undecided, as a read that failed leaves one, and can be tried again.
-            self.journal.abandon_send(self.run_id, time)
+            try:
+                self.journal.abandon_send(self.run_id, time)
+            except Exception as exc:
+                # The send stays: it says what stopped it, which sent nothing.
+                raise self._stopped(time, unsent) from exc
             raise unsent
         if refused is None:
-            outcome, reason = Outcome.FILLED, None
+            outcome = Outcome.FILLED
         elif fills:
             outcome = Outcome.PARTIAL
-            reason = f"{refused}; the {len(fills)} leg(s) before it filled, and stand"
+            reason = f"{reason}; the {len(fills)} leg(s) before it filled, and stand"
         else:
-            outcome, reason = Outcome.REJECTED, refused
+            outcome = Outcome.REJECTED
         try:
             return self._record(
                 bar,
@@ -385,7 +406,7 @@ class Engine:
                 after,
                 target=target,
                 reason=reason,
-                reason_code=None if reason is None else RejectionCode.EXECUTOR,
+                reason_code=None if refused is None else _code(refused),
                 fills=tuple(fills),
             )
         except Exception as exc:
@@ -405,21 +426,23 @@ class Engine:
         """Write what stopped the send at ``time``, and the error that stops the run.
 
         A send error says which transactions it concerns and what gas they
-        cost; it is read here by those names, since the engine does not
-        know the chain's errors.
+        cost; it is read here by those names, from it or the error it was
+        raised from, since the engine does not know the chain's errors. An
+        error that names no transaction cost none: nothing of its swap was
+        sent. One that names some and no usable cost leaves the gas unknown.
         """
         failure = f"{type(exc).__name__}: {exc}"
         hashes = _hashes(exc)
         if hashes:
             failure += f" (transactions {', '.join(hashes)})"
-        gas = getattr(exc, "gas_cost_eth", None)
+        gas: Decimal | None = Decimal(0) if not hashes else None
+        for error in (exc, exc.__cause__):
+            cost = getattr(error, "gas_cost_eth", None)
+            if isinstance(cost, Decimal) and cost.is_finite() and not cost.is_signed():
+                gas = cost
+                break
         try:
-            self.journal.fail_send(
-                self.run_id,
-                time,
-                failure=failure,
-                gas_eth=gas if isinstance(gas, Decimal) else None,
-            )
+            self.journal.fail_send(self.run_id, time, failure=failure, gas_eth=gas)
         except Exception as failed:
             # A store that failed the step may fail this too; the send stays open either way.
             unwritten = f"; what stopped it could not be written ({failed})"
@@ -607,15 +630,6 @@ def open_engine(
     """
     if not isinstance(now, int) or isinstance(now, bool) or now < 0:
         raise EngineError(f"now must be a non-negative integer of seconds, got {now!r}")
-    signs = executor.source.signs
-    if signs != (wallet is not None):
-        raise EngineError(
-            "an executor whose fills come from the chain signs from a wallet, which is handed "
-            "with it"
-            if signs
-            else f"an executor whose fills come from the {executor.source.value} signs nothing, "
-            f"and is handed no wallet"
-        )
     run = journal.run(run_id)
     if run is None:
         raise EngineError(f"there is no run {run_id!r}")

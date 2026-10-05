@@ -367,6 +367,8 @@ class OpenSend:
             not isinstance(gas, Decimal) or not gas.is_finite() or gas.is_signed()
         ):
             raise ValueError(f"failed_gas_eth must be a non-negative Decimal or None, got {gas!r}")
+        if gas is not None and self.failure is None:
+            raise ValueError("failed_gas_eth is the gas of what stopped the send, and none is named")
 
 
 class FillSource(str, Enum):

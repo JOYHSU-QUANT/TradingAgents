@@ -9,6 +9,7 @@ import pytest
 
 from contrib.uniswap_v3 import cli
 from contrib.uniswap_v3.chain import fork as fork_module
+from contrib.uniswap_v3.chain.errors import RpcUnavailable, TransactionUnconfirmed
 from contrib.uniswap_v3.chain.fork import DEV_ACCOUNTS, Fork
 from contrib.uniswap_v3.chain.swaps import ChainExecutor
 from contrib.uniswap_v3.chain.units import from_raw
@@ -233,7 +234,8 @@ def test_the_fork_command_replays_the_range_on_the_fork_and_report_names_the_for
     report: list[str] = []
     assert cli.main(["report", "--db", str(db), "--run-id", _RUN], out=report.append) == 0
     assert report[0] == (
-        "run f: fork forked at block 99, fills from the chain, fixed_weights, values in USDC"
+        "run f: fork (the fork was at block 99 when it started), fills from the chain, "
+        "fixed_weights, values in USDC"
     )
     # Run again, it decides nothing, and sends nothing.
     sent = len(forked["anvil"].sent)
@@ -287,6 +289,25 @@ def test_report_counts_why_rebalances_were_left_partial(db, forked):
 def test_an_open_send_whose_failed_gas_is_not_known_is_compared_without_eth(
     db, forked, monkeypatch
 ):
+    forked["anvil"] = _anvil(db)
+    real = ChainExecutor.execute
+    asked = []
+
+    def second_lost(self, swap, bar):
+        asked.append(swap)
+        if len(asked) == 2:
+            raise TransactionUnconfirmed("no receipt came", tx_hashes=("0x" + "cd" * 32,))
+        return real(self, swap, bar)
+
+    monkeypatch.setattr(ChainExecutor, "execute", second_lost)
+    code, lines = _fork_cli(db, "--balance", "USDC=10000", "--gas-eth", "1")
+    assert code == cli.EXIT_FAILED
+    assert lines[1].startswith("stopped by: TransactionUnconfirmed: no receipt came")
+    assert any("the failed swap's gas not known, so ETH is not compared" in line for line in lines)
+    assert lines[-2] == "the wallet agrees with what was written"
+
+
+def test_a_wallet_moved_beside_the_swaps_does_not_agree(db, forked, monkeypatch):
     anvil = forked["anvil"] = _anvil(db)
     real = ChainExecutor.execute
 
@@ -301,8 +322,41 @@ def test_an_open_send_whose_failed_gas_is_not_known_is_compared_without_eth(
     code, lines = _fork_cli(db, "--balance", "USDC=10000", "--gas-eth", "1")
     assert code == cli.EXIT_FAILED
     assert lines[1].startswith("stopped by: EngineError: after the swaps of the bar at")
-    assert any("the failed swap's gas not known, so ETH is not compared" in line for line in lines)
-    assert lines[-2] == "the wallet agrees with what was written"
+    assert lines[-2] == "the wallet does NOT agree with what was written"
+
+
+def test_an_open_send_the_wallet_cannot_be_read_beside_still_exits_1(
+    db, forked, monkeypatch, capsys
+):
+    anvil = forked["anvil"] = _anvil(db)
+    with open_store(db) as store:
+        _, wallet = _parts(anvil)
+        with pytest.raises(UnsettledSend):
+            _run_fork(store, _FailsOnTheSecondSwap(_parts(anvil)[0], anvil), wallet, opening=_ledger())
+
+    def unreadable(self):
+        raise RpcUnavailable("the node is down")
+
+    monkeypatch.setattr(ForkWallet, "holdings", unreadable)
+    code, lines = _fork_cli(db)
+    assert code == cli.EXIT_FAILED and lines == []
+    assert "the open send could not be set beside the wallet" in capsys.readouterr().err
+
+
+def test_a_fork_run_warns_of_rebalances_left_partial(db, forked, capsys):
+    forked["anvil"] = _anvil(db, refuse="WBTC")
+    code, _ = _fork_cli(db, "--balance", "USDC=10000", "--gas-eth", "1")
+    assert code == cli.EXIT_OK
+    err = capsys.readouterr().err
+    assert "rebalance(s) were left partial" in err
+    assert "rebalance(s) were rejected because a swap was refused" in err
+
+
+def test_a_carried_on_fork_run_does_not_ask_where_the_fork_is(db, forked):
+    anvil = forked["anvil"] = _anvil(db)
+    assert _fork_cli(db, "--balance", "USDC=10000", "--gas-eth", "1")[0] == cli.EXIT_OK
+    anvil.node_info["forkConfig"]["forkBlockNumber"] = "not a block"
+    assert _fork_cli(db)[0] == cli.EXIT_OK
 
 
 def test_a_send_settled_before_it_could_be_compared_says_so():

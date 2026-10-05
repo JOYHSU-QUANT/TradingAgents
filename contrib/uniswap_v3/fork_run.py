@@ -44,12 +44,13 @@ def run_fork(
     end: int | None = None,
     opening: Ledger | None = None,
     now: int,
-    fork_block: int,
+    fork_block: int | None,
 ) -> BacktestSummary:
     """Decide every stored bar from ``start`` to ``end`` for the fork run ``run_id``.
 
     ``executor`` signs from ``wallet``; ``fork_block`` is the block the fork
-    is at, kept by a run started here. The rest is
+    is at, kept by a run started here, which needs it (a run carried on
+    does not). The rest is
     :func:`~.engine.backtest.replay`'s: an executor that does not sign
     fills no fork run. A run with an open send raises
     :class:`~.engine.step.UnsettledSend` before anything is sent.

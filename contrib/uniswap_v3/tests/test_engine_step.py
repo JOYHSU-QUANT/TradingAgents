@@ -616,14 +616,28 @@ class _Signing:
         raise AssertionError("never asked")
 
 
-def test_an_executor_that_signs_is_opened_with_a_wallet_and_no_other_executor_is(store):
-    start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
+def test_an_engine_has_a_wallet_exactly_when_its_executor_signs(store):
+    def engine(executor, wallet):
+        return Engine(
+            run_id=_RUN,
+            config=_CONFIG,
+            strategy=ScriptedStrategy({}),
+            executor=executor,
+            journal=store,
+            decided_at=_DECIDED_AT,
+            wallet=wallet,
+        )
+
     with pytest.raises(EngineError, match="signs from a wallet, which is handed with it"):
-        open_engine(store, _CONFIG, _Signing(), run_id=_RUN, now=_DECIDED_AT)
+        engine(_Signing(), None)
     modelled = ModelExecutor("USDC", _CONFIG.execution)
     with pytest.raises(EngineError, match="from the model signs nothing, and is handed no wallet"):
-        open_engine(store, _CONFIG, modelled, run_id=_RUN, now=_DECIDED_AT, wallet=object())
-    # A signing executor with its wallet is held to the run's source like any other.
+        engine(modelled, object())
+    assert engine(_Signing(), object()).wallet is not None
+
+
+def test_a_signing_executor_is_held_to_the_runs_source_like_any_other(store):
+    start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
     with pytest.raises(EngineError, match="takes its fills from the model"):
         open_engine(store, _CONFIG, _Signing(), run_id=_RUN, now=_DECIDED_AT, wallet=object())
 

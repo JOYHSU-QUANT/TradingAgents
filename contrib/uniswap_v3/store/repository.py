@@ -640,12 +640,19 @@ class Store:
     def begin_send(self, run_id: str, time: int, *, started_at: int) -> None:
         """Mark the bar at ``time`` as having its swaps sent, before the first one is.
 
-        Refused, with :class:`StoreError`, for a run that is not stored,
-        that has an open send, or that has decided this bar or a later one.
+        Refused, with :class:`StoreError`, for a run that is not stored or
+        does not sign its swaps, that has an open send, or that has decided
+        this bar or a later one.
         """
         with _sqlite_errors("beginning a send"), transaction(self._connection):
-            if self.run(run_id) is None:
+            run = self.run(run_id)
+            if run is None:
                 raise StoreError(f"there is no run {run_id!r} in the store")
+            if not run.fills.signs:
+                raise StoreError(
+                    f"the run {run_id!r} fills from the {run.fills.value} and signs nothing, "
+                    f"so it sends nothing"
+                )
             opened = self._sends_open(run_id)
             if opened:
                 raise StoreError(
@@ -764,11 +771,18 @@ class Store:
                     f"is not decided"
                 )
         if time not in failures:
+            partial = step.decision.outcome is Outcome.PARTIAL
             run = self.run(run_id) if step.fills else None
             if run is not None and run.fills.signs:
                 raise StoreError(
                     f"the run {run_id!r} fills on the chain, and its fills at {time} were not "
                     f"written as the legs of a send"
+                )
+            if partial:
+                # Only a signed rebalance is left half done, and its legs are a send's.
+                raise StoreError(
+                    f"the decision of run {run_id!r} at {time} is partial, and a partial "
+                    f"rebalance is a signing run's, written as a send"
                 )
             return
         if failures[time] is not None:

@@ -475,7 +475,11 @@ def _stored_run(store: Store, run_id: str) -> RunRecord:
 
 
 def _run_header(run: RunRecord) -> str:
-    forked = "" if run.fork_block is None else f" forked at block {run.fork_block}"
+    forked = (
+        ""
+        if run.fork_block is None
+        else f" (the fork was at block {run.fork_block} when it started)"
+    )
     return (
         f"run {_one_ascii_line(run.run_id)}: {run.mode.value}{forked}, fills from the "
         f"{run.fills.value}, {_one_ascii_line(run.strategy)}, values in {run.quote}"
@@ -655,7 +659,12 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
 
 
 def _replayed(
-    run_id: str, summary: BacktestSummary, out: Callable[[str], None], *, paper: bool = False
+    run_id: str,
+    summary: BacktestSummary,
+    out: Callable[[str], None],
+    *,
+    paper: bool = False,
+    signs: bool = False,
 ) -> None:
     """Print what a replay did, and warn on stderr of what a reader should know of it.
 
@@ -663,6 +672,8 @@ def _replayed(
     warned of a rebalance the executor rejected and of a bar skipped as suspect, which
     in a backtest are counted and no more. It is not warned of bars decided on readings
     that were not final: a visit made on time always decides its latest bar on one.
+    A run whose swaps are signed, ``signs``, is warned of rejected rebalances as well,
+    and of those left partial, which hold a wallet half rebalanced.
     """
     out(
         f"run {_one_ascii_line(run_id)}: {summary.boundaries} boundary(ies) from {_iso(summary.start)} to "
@@ -702,7 +713,13 @@ def _replayed(
             f"did not cover them, the first at {_iso(summary.gas_rejected[0])}; nothing tops a "
             f"run's gas balance up"
         )
-    if summary.executor_rejected and paper:
+    partial = summary.outcomes.get(Outcome.PARTIAL, 0)
+    if partial:
+        warnings.append(
+            f"{partial} rebalance(s) were left partial: a swap was refused after earlier ones "
+            f"had filled on the chain, which stand; the next bar is decided from there"
+        )
+    if summary.executor_rejected and (paper or signs):
         warnings.append(
             f"{len(summary.executor_rejected)} rebalance(s) were rejected because a swap was "
             f"refused, the first at {_iso(summary.executor_rejected[0])}; the decision keeps "
@@ -849,16 +866,25 @@ def _fork(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[]
                 end=args.end,
                 opening=opening,
                 now=int(now()),
-                fork_block=fork.fork_block(),
+                # Kept by a run started here, and read only for one.
+                fork_block=fork.fork_block() if store.run(args.run_id) is None else None,
             )
         except UnsettledSend as exc:
             print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
-            for line in _reconciliation_lines(
-                reconcile_open_send(store, config, wallet, args.run_id)
-            ):
+            try:
+                found = reconcile_open_send(store, config, wallet, args.run_id)
+            except Exception as failed:
+                # The run needs a person either way: not a reason to say "try again later".
+                print(
+                    f"the open send could not be set beside the wallet: "
+                    f"{_one_ascii_line(failed)}",
+                    file=sys.stderr,
+                )
+                return EXIT_FAILED
+            for line in _reconciliation_lines(found):
                 out(line)
             return EXIT_FAILED
-    _replayed(args.run_id, summary, out)
+    _replayed(args.run_id, summary, out, signs=True)
     return EXIT_OK
 
 

@@ -193,7 +193,7 @@ def test_a_valuation_keeps_its_own_copy_of_the_prices():
             Valuation(**{**fields, **changes})
 
 
-def test_a_step_carries_fills_exactly_when_its_decision_is_filled():
+def test_a_step_carries_fills_exactly_when_its_decision_is_filled_or_partial():
     filled = _decision(Outcome.FILLED, target=_TARGET)
     assert StepRecord(decision=filled, valuation=_valuation(), fills=(_FILL,)).fills == (_FILL,)
     assert StepRecord(decision=_decision(), valuation=_valuation()).fills == ()
@@ -358,6 +358,7 @@ def _leg(leg: int, time: int = 100) -> FillRecord:
         ({"legs": (_leg(1),)}, "legs must be numbered from 0, one after another"),
         ({"legs": (_leg(0), _leg(0))}, "legs must be numbered from 0, one after another"),
         ({"failure": " "}, "failure must be a non-empty string or None"),
+        ({"failure": None}, "failed_gas_eth is the gas of what stopped the send"),
         ({"failed_gas_eth": D("-0.1")}, "failed_gas_eth must be a non-negative Decimal or None"),
         ({"failed_gas_eth": 0.1}, "failed_gas_eth must be a non-negative Decimal or None"),
     ],

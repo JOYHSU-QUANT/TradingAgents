@@ -21,10 +21,27 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 | backtest | `backtest --fills model` | store 裡回補好的歷史 bar | 離線模型：收盤價扣池子費率、`execution.model.slippage`，gas＝固定單位 × 該 bar 的 base fee | 可用 |
 | backtest | `backtest --fills quoter` | 同上 | 每根 bar 的成交區塊上對 QuoterV2 做歷史 `eth_call`（要 archive 節點） | 可用 |
 | paper | `paper` | 每次 visit 從鏈上讀新收盤的 bar 寫進 store | 同 `--fills quoter`，不送交易 | 可用 |
-| fork | — | — | 在 anvil 主網分叉上簽名送出 | 還沒做 |
+| fork | — | — | `chain/swaps.py` 的 `ChainExecutor`：在本機 anvil 主網分叉上簽名送出 | executor 與防線已做、還沒接進引擎（下一步）；分叉上的來回驗收見 RUNBOOK §10 |
 | live | — | — | 主網 | 還沒做（另開計畫） |
 
-全程沒有私鑰、不簽交易。
+`start_run` 目前拒絕 fork 與 live run（兩者都從鏈上成交，而引擎還不接會簽名的 executor），所以不會建出打不開的 run。
+
+backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecutor`，而且只在分叉上：
+
+- 只接受主機是字面 loopback IP（127.0.0.1、::1）的 URL——`localhost` 這類名稱不收（hosts 檔可以改指）；
+  節點的 `anvil_nodeInfo` 還要寫著它從哪個 URL 分叉，未分叉的 anvil 不收。anvil 分叉沿用主網的 chain ID，
+  所以不能靠 chain ID 分辨分叉與主網（`chain/fork.py`）。
+- 只用 anvil 公開的 test 助記詞推導出的 10 個開發帳戶簽名；送交易的 `TransactionSender` 拿到其他帳戶就拒絕，
+  程式沒有接受其他私鑰的入口。
+- 每筆 swap 把 allowance 設成剛好的量（多的也調回來）；`amountOutMinimum` 就是 swap 的 `min_amount_out`
+  （與其他 executor 同一條底線），送出前先在最新區塊報價，低於底線或池子沒答案就拒絕、什麼都不送；
+  approve 或 swap 的 gas 估計說會 revert（還沒送出任何東西時）也是拒絕。deadline 取 pending
+  區塊的時間（節點的時鐘），閒置的 anvil 最新區塊時間不會走。
+- `Rejection`＝錢包沒動；有交易上鏈後才失敗丟 `SendError`（不是 `ChainError`，讀取端的處理接不到它）：
+  只花了 gas 是 `SwapNotFilled`，swap 上鏈了但結果讀不出來是 `SwapOutcomeUnknown`，收據沒來或讀不到是 `TransactionUnconfirmed`。
+- 分叉只認 `open_fork` 開的：自己手建的 `Fork` 不保證在本機，`ChainExecutor` 只會再確認它是 anvil 分叉。
+- 成交來源 `chain` 只屬於 fork／live run，fork／live run 也只能用它；在引擎能記下「第一腿上鏈、後腿失敗」之前，
+  `open_engine` 拒絕任何會簽名的 executor。
 
 ---
 
@@ -52,7 +69,7 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 | Port | 做什麼 | 實作 |
 |---|---|---|
 | `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py` |
-| `Executor` | `execute(swap, bar) -> Fill \| Rejection`，並宣告成交來源 | `engine/executors.py` 的 `ModelExecutor`、`QuoteExecutor` |
+| `Executor` | `execute(swap, bar) -> Fill \| Rejection`，並宣告成交來源 | `engine/executors.py` 的 `ModelExecutor`、`QuoteExecutor`；`chain/swaps.py` 的 `ChainExecutor`（分叉上簽名，還沒接進引擎） |
 | `Journal` | run、decision、帳本的讀寫 | `store/repository.py` 的 `Store` |
 | `Quoter`、`GasOracle`、`BlockLocator` | 報價、base fee、時間→區塊 | `chain/` |
 
@@ -72,12 +89,13 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 contrib/uniswap_v3/
   cli.py, __main__.py   python -m contrib.uniswap_v3 <backfill|status|backtest|paper|report>
   config.py             讀 YAML（凍結 dataclass）；run 會存一份設定快照
-  constants.py          以 chain ID 分表的代幣、池子、QuoterV2 地址
+  constants.py          以 chain ID 分表的代幣、池子、QuoterV2 與 SwapRouter02 地址
   ports.py              上表的 Protocol
   domain/               純邏輯：價格換算、bar、路徑、帳本、紀錄、績效（只 import 標準函式庫）
   strategies/           registry 與佔位策略 fixed_weights
   engine/               step、回測迴圈 replay、兩個 executor
-  chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee
+  chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee；
+                        分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）
   store/                SQLite schema（含版本號與 migration）與讀寫
   backfill.py           把一段 bar 從 archive 節點讀進 store
   paper.py              paper 的一次 visit
@@ -166,3 +184,7 @@ contrib/uniswap_v3/
 - paper 的成交區塊在 visit 當下還不是 final；之後 reorg 的話同一區塊號的報價可能不同，目前不偵測。
 - reorg 的 bar 讀數沒有重抓的指令（處理方式見 RUNBOOK）。
 - 主網 gas 對小資金很重：每筆 swap 是幾美元起跳。
+- `ChainExecutor` 還沒接進引擎：多腿再平衡在鏈上不是原子的，第一腿上鏈、後腿失敗時引擎還記不下來，
+  所以 `open_engine` 拒絕它；`fork` 指令與鏈上餘額對帳也還沒做。
+- 報價成交的 gas 加成（`execution.quote.gas_overhead_units`，預設 50,000）：分叉上實測 swap 交易本身比 QuoterV2 的
+  估計多 18k–58k gas，另外每次 approve 約 46k–55k，預設值沒改。

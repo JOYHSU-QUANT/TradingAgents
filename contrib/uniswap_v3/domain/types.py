@@ -35,6 +35,7 @@ __all__ = [
     "SwapIntent",
     "TargetWeights",
     "Token",
+    "eth_from_wei",
     "tokens_along",
 ]
 
@@ -374,6 +375,14 @@ class SwapIntent:
 
 # Gas is paid in ETH, which has 18 decimal places.
 ETH_DECIMALS: Final = 18
+_UINT256_MAX: Final = 2**256 - 1
+
+
+def eth_from_wei(wei: int) -> Decimal:
+    """``wei`` as whole ETH, exactly: built from its digits, so no decimal context rounds it."""
+    if isinstance(wei, bool) or not isinstance(wei, int) or not 0 <= wei <= _UINT256_MAX:
+        raise ValueError(f"an amount of wei is an integer that fits a uint256, got {wei!r}")
+    return Decimal((0, Decimal(wei).as_tuple().digits, -ETH_DECIMALS))
 
 
 @dataclass(frozen=True)

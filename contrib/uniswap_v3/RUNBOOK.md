@@ -276,6 +276,31 @@ python -c "import sqlite3; c = sqlite3.connect('contrib/uniswap_v3/data/check.db
 
 ---
 
+## 10. 分叉沙盒：簽名 swap 的來回驗收
+
+`ChainExecutor` 還沒接進引擎（沒有 `fork` 指令）；現在能做的是跑分叉上的驗收測試，確認簽名、approve、
+SwapRouter02 的單跳與兩跳、收據解讀都對。
+
+1. 裝 Foundry（要能分叉現在的主網；舊版 anvil 會用舊的硬分叉規則，gas 不準）：從
+   [Foundry 的 GitHub releases](https://github.com/foundry-rs/foundry/releases) 下載 `foundry_<版本>_win32_amd64.zip`，
+   核對同頁的 `.sha256`，解到 `%USERPROFILE%\.foundry\bin` 並放進 PATH 最前面。`anvil --version` 確認。
+2. 跑（測試自己起 anvil、分叉在固定的歷史區塊，所以節點要 archive；跑完自己關掉）：
+
+   ```powershell
+   python -m dotenv run -- pytest -m smoke contrib/uniswap_v3/tests/test_chain_fork_smoke.py -s
+   ```
+
+   三個測試全過＝驗收成功：第二個是來回本身——每一筆 swap 後，錢包的輸入代幣、輸出代幣與 ETH 各自變動的量
+   與成交的 `swap.amount_in`、`amount_out`、`gas_cost_eth` 一致；第三個確認報價低於底線的 swap 被拒、什麼都沒送。
+   `-s` 會印每筆 swap 實際用的 gas 與 QuoterV2 估計的差（`execution.quote.gas_overhead_units` 代表的就是這個差）。
+3. 沒有 `ETH_RPC_URL` 或 PATH 上沒有 `anvil` 時，測試會略過（skipped）而不是失敗。
+4. 自己起 anvil、在程式裡用 `open_fork` 連的話，URL 的主機要寫字面的 `127.0.0.1`（或 `::1`）：
+   `localhost` 這類名稱會被拒絕（hosts 檔可以把它改指到別處）；連線也不走環境變數設的 proxy。
+
+用的是 anvil 的開發帳戶（公開的 test 助記詞），不碰任何真的錢包；分叉在 anvil 關掉時就消失。
+
+---
+
 ## 附錄：Linux（systemd timer）
 
 在個人 Linux 主機上跑的對應寫法（使用者層級的 unit；`loginctl enable-linger` 讓它登出後也跑）。

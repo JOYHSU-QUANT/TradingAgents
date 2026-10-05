@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -18,6 +18,7 @@ from contrib.uniswap_v3.domain.types import (
     SwapIntent,
     TargetWeights,
     Token,
+    eth_from_wei,
     tokens_along,
 )
 
@@ -291,3 +292,19 @@ def test_a_malformed_fill_is_refused(swap, amount_out, gas_cost_eth, block, matc
 def test_a_malformed_rejection_is_refused(swap, reason, match):
     with pytest.raises(ValueError, match=match):
         Rejection(swap, reason)
+
+
+def test_eth_from_wei_is_whole_eth_to_the_last_wei_whatever_the_ambient_context():
+    with localcontext() as ambient:
+        ambient.prec = 3
+        assert str(eth_from_wei(1_234_567_890_123_456_789)) == "1.234567890123456789"
+    # Kept at 18 places, as a ledger's gas balance is.
+    assert eth_from_wei(1) == Decimal("1E-18")
+    assert eth_from_wei(1).as_tuple().exponent == eth_from_wei(0).as_tuple().exponent == -18
+    assert eth_from_wei(0) == 0
+
+
+@pytest.mark.parametrize("wei", [-1, 2**256, 1.0, "1", True])
+def test_eth_from_wei_refuses_what_is_not_a_uint256(wei):
+    with pytest.raises(ValueError, match="fits a uint256"):
+        eth_from_wei(wei)

@@ -8,6 +8,7 @@ import pytest
 
 from contrib.uniswap_v3.domain.bars import Finality, SuspectCause
 from contrib.uniswap_v3.domain.records import (
+    _FILLS_BY_MODE,
     BarSeen,
     Decision,
     FillRecord,
@@ -202,6 +203,14 @@ def test_a_step_carries_fills_exactly_when_its_decision_is_filled():
         StepRecord(decision=_decision(), valuation=_LEDGER)
 
 
+def test_every_mode_takes_some_source_of_fills_and_only_a_signing_mode_the_chain():
+    # A mode added without an entry would be a KeyError on every run of it.
+    assert set(_FILLS_BY_MODE) == set(RunMode)
+    assert all(_FILLS_BY_MODE.values())
+    signing = {mode for mode, taken in _FILLS_BY_MODE.items() if FillSource.CHAIN in taken}
+    assert signing == {RunMode.FORK, RunMode.LIVE}
+
+
 @pytest.mark.parametrize(
     ("changes", "match"),
     [
@@ -210,7 +219,25 @@ def test_a_step_carries_fills_exactly_when_its_decision_is_filled():
         ({"config": " "}, "config must be a non-empty string"),
         ({"mode": "paper"}, "mode must be a RunMode"),
         ({"fills": "model"}, "fills must be a FillSource"),
-        ({"mode": RunMode.PAPER}, "a paper run fills from quotes, not from the model"),
+        ({"mode": RunMode.PAPER}, "a paper run fills from the quoter, not from the model"),
+        ({"mode": RunMode.FORK}, "a fork run fills from the chain, not from the model"),
+        ({"mode": RunMode.LIVE}, "a live run fills from the chain, not from the model"),
+        (
+            {"mode": RunMode.FORK, "fills": FillSource.QUOTER},
+            "a fork run fills from the chain, not from the quoter",
+        ),
+        (
+            {"mode": RunMode.LIVE, "fills": FillSource.QUOTER},
+            "a live run fills from the chain, not from the quoter",
+        ),
+        (
+            {"mode": RunMode.PAPER, "fills": FillSource.CHAIN},
+            "a paper run fills from the quoter, not from the chain",
+        ),
+        (
+            {"fills": FillSource.CHAIN},
+            "a backtest run fills from the model or the quoter, not from the chain",
+        ),
         ({"chain_id": -1}, "non-negative integers"),
         ({"created_at": 1.5}, "non-negative integers"),
         ({"ledger": None}, "ledger must be a Ledger"),
@@ -229,9 +256,14 @@ def test_a_malformed_run_is_refused(changes, match):
         "created_at": 0,
     }
     assert RunRecord(**fields).fills is FillSource.MODEL
-    quoted = {**fields, "fills": FillSource.QUOTER}
-    for mode in RunMode:
-        assert RunRecord(**{**quoted, "mode": mode}).mode is mode
+    # Each mode with a source of fills it takes: a fork or a live run fills on the chain alone.
+    for mode, fills in (
+        (RunMode.BACKTEST, FillSource.QUOTER),
+        (RunMode.PAPER, FillSource.QUOTER),
+        (RunMode.FORK, FillSource.CHAIN),
+        (RunMode.LIVE, FillSource.CHAIN),
+    ):
+        assert RunRecord(**{**fields, "mode": mode, "fills": fills}).mode is mode
     with pytest.raises(ValueError, match=match):
         RunRecord(**{**fields, **changes})
 

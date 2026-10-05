@@ -318,6 +318,21 @@ class FillSource(str, Enum):
 
     MODEL = "model"
     QUOTER = "quoter"
+    # Swaps signed and mined: on a local fork, or (later) on the chain itself.
+    CHAIN = "chain"
+
+
+# The sources of fills each mode takes. A paper run fills from quotes: a model has
+# nothing to say about the chain the run is reading. A fork or a live run fills on
+# the chain, and no other run does: a backtest or a paper run signs nothing.
+_FILLS_BY_MODE: Final[Mapping[RunMode, tuple[FillSource, ...]]] = MappingProxyType(
+    {
+        RunMode.BACKTEST: (FillSource.MODEL, FillSource.QUOTER),
+        RunMode.PAPER: (FillSource.QUOTER,),
+        RunMode.FORK: (FillSource.CHAIN,),
+        RunMode.LIVE: (FillSource.CHAIN,),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -326,8 +341,8 @@ class RunRecord:
 
     ``config`` is the config's snapshot (:func:`~..config.config_snapshot`),
     ``ledger`` the opening balances, and ``fills`` where its fills come
-    from. A paper run fills from quotes: a model has nothing to say about
-    the chain the run is reading.
+    from, one of those its mode takes: a backtest from the model or the
+    quoter, a paper run from the quoter, a fork or a live run from the chain.
     """
 
     run_id: str
@@ -349,9 +364,12 @@ class RunRecord:
             raise ValueError(f"mode must be a RunMode, got {self.mode!r}")
         if not isinstance(self.fills, FillSource):
             raise ValueError(f"fills must be a FillSource, got {self.fills!r}")
-        if self.mode is RunMode.PAPER and self.fills is not FillSource.QUOTER:
+        taken = _FILLS_BY_MODE[self.mode]
+        if self.fills not in taken:
             raise ValueError(
-                f"a paper run fills from quotes, not from the {self.fills.value}"
+                f"a {self.mode.value} run fills from the "
+                f"{' or the '.join(source.value for source in taken)}, "
+                f"not from the {self.fills.value}"
             )
         if not _is_count(self.chain_id) or not _is_count(self.created_at):
             raise ValueError("chain_id and created_at must be non-negative integers")

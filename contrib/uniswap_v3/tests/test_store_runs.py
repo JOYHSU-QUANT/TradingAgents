@@ -132,7 +132,7 @@ def test_a_run_comes_back_as_it_was_stored(store):
 def test_a_run_id_is_stored_once(store):
     store.insert_run(_run())
     with pytest.raises(StoreError, match="the run 'run-1' is already stored"):
-        store.insert_run(_run(mode=RunMode.FORK))
+        store.insert_run(_run(mode=RunMode.FORK, fills=FillSource.CHAIN))
     assert store.run("run-1").mode is RunMode.BACKTEST
 
 
@@ -310,15 +310,21 @@ def test_fills_the_runs_ledger_does_not_cover_are_refused(store):
     assert store.decision("run-1", FIRST_DAY) is None
 
 
+def _signed(mode: RunMode) -> FillSource:
+    """A source of fills ``mode`` takes: the chain for a fork or a live run, quotes for the rest."""
+    return FillSource.CHAIN if mode in (RunMode.FORK, RunMode.LIVE) else FillSource.QUOTER
+
+
 @pytest.mark.parametrize("mode", list(RunMode))
 def test_the_schema_takes_every_run_mode(store, mode):
-    store.insert_run(_run(mode=mode, fills=FillSource.QUOTER))
+    store.insert_run(_run(mode=mode, fills=_signed(mode)))
     assert store.run("run-1").mode is mode
 
 
 @pytest.mark.parametrize("fills", list(FillSource))
 def test_a_run_keeps_where_its_fills_come_from(store, fills):
-    store.insert_run(_run(fills=fills))
+    mode = RunMode.FORK if fills is FillSource.CHAIN else RunMode.BACKTEST
+    store.insert_run(_run(mode=mode, fills=fills))
     assert store.run("run-1").fills is fills
 
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import socket
 
 import pytest
 import requests
@@ -39,6 +38,7 @@ from contrib.uniswap_v3.tests.fakes.rpc import (
     ScriptedProvider,
     answering,
     block_result,
+    closed_port,
     encoded,
     rpc_over,
 )
@@ -99,17 +99,11 @@ def test_connect_refuses_a_value_that_is_not_an_http_url_without_quoting_it(valu
     assert _KEY not in str(caught.value)
 
 
-def _closed_port() -> int:
-    """A loopback port nothing listens on: one the system just handed out and took back."""
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
-
 
 def test_a_failed_connection_leaks_the_url_into_neither_the_error_nor_the_log(caplog):
     caplog.set_level(logging.DEBUG)
     settings = RpcSettings(timeout_seconds=2, attempts=1)
-    url = f"http://127.0.0.1:{_closed_port()}/v2/{_KEY}"
+    url = f"http://127.0.0.1:{closed_port()}/v2/{_KEY}"
     with pytest.raises(RpcUnavailable) as caught:
         connect(ETHEREUM_MAINNET, settings=settings, env={"ETH_RPC_URL": url})
     assert "the chain ID failed after 1 attempt(s)" in str(caught.value)
@@ -208,6 +202,8 @@ def test_a_read_puts_the_scrubbing_back_if_another_record_factory_took_its_place
         ("https://node.example/v2/longer-key-1/eth", "the key longer-key-1 was refused"),
         ("https://user:hunter2-pass@node.example/", "auth hunter2-pass refused"),
         ("https://node.example/rpc?apikey=query-key-1&x=1", "sent query-key-1 to the node"),
+        # A key written percent-encoded in the URL, and quoted decoded.
+        ("https://node.example/v2/encoded%2Bkey-1", "the key encoded+key-1 was refused"),
     ],
 )
 def test_the_pieces_of_a_url_that_are_quoted_alone_are_secret_too(url, quoted):
@@ -216,12 +212,12 @@ def test_the_pieces_of_a_url_that_are_quoted_alone_are_secret_too(url, quoted):
     with pytest.raises(RpcUnavailable) as caught:
         rpc.header(7)
     assert "<redacted>" in str(caught.value)
-    for secret in ("abc12", "longer-key-1", "hunter2-pass", "query-key-1"):
+    for secret in ("abc12", "longer-key-1", "hunter2-pass", "query-key-1", "encoded+key-1"):
         assert secret not in str(caught.value)
 
 
 def test_a_provider_built_by_hand_has_its_url_made_secret_all_the_same():
-    url = f"http://127.0.0.1:{_closed_port()}/v2/BUILT-BY-HAND-KEY"
+    url = f"http://127.0.0.1:{closed_port()}/v2/BUILT-BY-HAND-KEY"
     provider = HTTPProvider(
         url, request_kwargs={"timeout": 2}, exception_retry_configuration=None
     )
@@ -516,20 +512,31 @@ def test_the_error_classes_say_what_a_caller_can_do():
     by_action = {
         TransientChainError: {RpcUnavailable, BlockNotFound},
         UnansweredRead: {CallReverted, InsufficientLiquidity, MalformedResponse, RpcRejected},
+        RpcConfigError: {errors.NotAFork},
+        # A transaction was sent, or may have been: not "nothing happened".
+        errors.SendError: {
+            errors.TransactionReverted,
+            errors.TransactionUnconfirmed,
+            errors.SwapNotFilled,
+            errors.SwapOutcomeUnknown,
+        },
     }
-    assert not by_action[TransientChainError] & by_action[UnansweredRead]
-    assert not issubclass(TransientChainError, UnansweredRead)
-    assert not issubclass(UnansweredRead, TransientChainError)
+    groups = list(by_action)
+    for group in groups:
+        assert not any(issubclass(group, other) for other in groups if other is not group)
     for action, kinds in by_action.items():
         assert all(issubclass(kind, action) for kind in kinds)
-    # Every class is in exactly one group; the setup fault is a group of its own.
+    # A send that may have changed the wallet is no read: no handler of reads catches it.
+    assert not issubclass(errors.SendError, ChainError)
+    # Every class is in exactly one group.
     leaves = {
         kind
         for kind in vars(errors).values()
-        if isinstance(kind, type) and issubclass(kind, ChainError) and not kind.__subclasses__()
+        if isinstance(kind, type)
+        and issubclass(kind, ChainError | errors.SendError)
+        and not kind.__subclasses__()
     }
-    assert leaves == by_action[TransientChainError] | by_action[UnansweredRead] | {RpcConfigError}
-    assert not issubclass(RpcConfigError, TransientChainError | UnansweredRead)
+    assert leaves == set().union(*by_action.values())
 
 
 # --- calls -----------------------------------------------------------------

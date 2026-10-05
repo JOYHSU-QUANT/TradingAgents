@@ -686,19 +686,23 @@ def http_provider(
 def http_provider_at(
     url: str, *, settings: RpcSettings | None = None, direct: bool = False
 ) -> HTTPProvider:
-    """The provider for ``url``, made a secret; ``direct`` goes past any proxy the environment names.
+    """The provider for ``url``, made a secret; ``direct`` takes nothing from the environment.
 
-    A provider for a loopback address is ``direct``: a proxy named in
-    ``HTTP(S)_PROXY`` could forward the request anywhere.
+    Pass ``direct`` for a loopback address: a proxy the environment names
+    (``HTTP(S)_PROXY``, ``ALL_PROXY``, a system setting) could forward the
+    request anywhere. A direct provider has a session of its own that
+    reads no proxy, no ``.netrc`` and no CA bundle from the environment.
     """
     settings = settings if settings is not None else RpcSettings()
     _REDACTOR.register(url)
-    request_kwargs: dict[str, Any] = {"timeout": settings.timeout_seconds}
+    session = None
     if direct:
-        request_kwargs["proxies"] = {"http": None, "https": None}
+        session = requests.Session()
+        session.trust_env = False
     return _HTTPProvider(
         url,
-        request_kwargs=request_kwargs,
+        request_kwargs={"timeout": settings.timeout_seconds},
+        session=session,
         # Retries are counted in Rpc._request alone.
         exception_retry_configuration=None,
     )

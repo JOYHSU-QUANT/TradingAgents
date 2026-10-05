@@ -19,6 +19,7 @@ A cassette holds requests and responses only, never the endpoint URL.
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,13 @@ from contrib.uniswap_v3.chain.rpc import Rpc, RpcSettings
 # All the package reads off a block. A recorded block is cut down to these:
 # its transaction list alone would be most of the cassette.
 _HEADER_KEYS = ("number", "hash", "parentHash", "timestamp", "baseFeePerGas")
+
+
+def closed_port() -> int:
+    """A loopback port nothing listens on: one the system just handed out and took back."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
 
 
 def block_hash(number: int) -> str:

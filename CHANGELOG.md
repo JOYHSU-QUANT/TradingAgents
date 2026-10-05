@@ -846,8 +846,9 @@ Breaking changes within the 0.x line are called out explicitly.
   only (`chain/swaps.py`).** `ChainExecutor` quotes a swap at the latest
   block and refuses it, sending nothing, when the quote is below the swap's
   `min_amount_out` or the pools give none (as it does when the approval's
-  or the swap's gas estimate says it would revert); it then sets the router's allowance to exactly the
-  amount sold (down as well as up), sends the swap to SwapRouter02 inside
+  or the swap's gas estimate says it would revert); it then sets the
+  router's allowance to exactly the amount sold (down as well as up),
+  sends the swap to SwapRouter02 inside
   `multicall(deadline, ...)` with that same minimum as `amountOutMinimum`
   and a deadline from the pending block's time (an idle anvil's latest
   block does not move), and fills it with what the receipt's `Transfer`
@@ -872,15 +873,17 @@ Breaking changes within the 0.x line are called out explicitly.
   looks for the receipt instead), and waits for the receipt. `Rpc` gains the reads
   a sender needs (`transaction_count`, `estimate_gas`,
   `max_priority_fee_wei`, `receipt`, `pending_header`, `node_info`) and
-  `send_raw_transaction`; a fork is reached directly, past any proxy the
-  environment names; `constants.SWAP_ROUTER_02` is checked on chain as
-  QuoterV2 was. A run's source of fills gains `chain`, which a fork or a live
-  run must use and no other run may; `open_engine` refuses an executor that
-  signs until the step can record a rebalance a signed swap left half done,
-  so `start_run` refuses a fork or a live run for now rather than store one
-  that could never be opened. A fork or a live run stored earlier with
-  model or quoted fills (only tests ever started one) is no longer read. The executor is not wired to the
-  engine yet. `tests/test_chain_fork_smoke.py` (smoke: needs `anvil` and an
+  `send_raw_transaction`; a fork is reached directly, on a session that
+  reads no proxy (`HTTP(S)_PROXY`, `ALL_PROXY`) or other setting from the
+  environment (`rpc.http_provider_at(..., direct=True)`);
+  `constants.SWAP_ROUTER_02` is checked on chain as QuoterV2 was. A run's
+  source of fills gains `chain`, which a fork or a live run must use and no
+  other run may; `open_engine` refuses an executor that signs until the
+  step can record a rebalance a signed swap left half done, so `start_run`
+  refuses a fork or a live run for now rather than store one that could
+  never be opened. A fork or a live run stored earlier with model or quoted
+  fills (only tests ever started one) is no longer read. The executor is
+  not wired to the engine yet. `tests/test_chain_fork_smoke.py` (smoke: needs `anvil` and an
   archive `ETH_RPC_URL`) starts its own fork and runs the round trip USDC ->
   WETH + WBTC -> USDC, checking each balance against the fills; RUNBOOK §10
   says how.

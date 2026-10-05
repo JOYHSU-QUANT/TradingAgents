@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import socket
 
 import pytest
 import requests
@@ -39,6 +38,7 @@ from contrib.uniswap_v3.tests.fakes.rpc import (
     ScriptedProvider,
     answering,
     block_result,
+    closed_port,
     encoded,
     rpc_over,
 )
@@ -99,17 +99,11 @@ def test_connect_refuses_a_value_that_is_not_an_http_url_without_quoting_it(valu
     assert _KEY not in str(caught.value)
 
 
-def _closed_port() -> int:
-    """A loopback port nothing listens on: one the system just handed out and took back."""
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
-
 
 def test_a_failed_connection_leaks_the_url_into_neither_the_error_nor_the_log(caplog):
     caplog.set_level(logging.DEBUG)
     settings = RpcSettings(timeout_seconds=2, attempts=1)
-    url = f"http://127.0.0.1:{_closed_port()}/v2/{_KEY}"
+    url = f"http://127.0.0.1:{closed_port()}/v2/{_KEY}"
     with pytest.raises(RpcUnavailable) as caught:
         connect(ETHEREUM_MAINNET, settings=settings, env={"ETH_RPC_URL": url})
     assert "the chain ID failed after 1 attempt(s)" in str(caught.value)
@@ -223,7 +217,7 @@ def test_the_pieces_of_a_url_that_are_quoted_alone_are_secret_too(url, quoted):
 
 
 def test_a_provider_built_by_hand_has_its_url_made_secret_all_the_same():
-    url = f"http://127.0.0.1:{_closed_port()}/v2/BUILT-BY-HAND-KEY"
+    url = f"http://127.0.0.1:{closed_port()}/v2/BUILT-BY-HAND-KEY"
     provider = HTTPProvider(
         url, request_kwargs={"timeout": 2}, exception_retry_configuration=None
     )

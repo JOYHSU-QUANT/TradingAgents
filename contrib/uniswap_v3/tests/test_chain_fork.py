@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
@@ -17,9 +20,9 @@ from contrib.uniswap_v3.chain.fork import (
     open_fork,
     require_anvil,
 )
-from contrib.uniswap_v3.chain.rpc import http_provider_at
+from contrib.uniswap_v3.chain.rpc import Rpc, RpcSettings, http_provider_at
 from contrib.uniswap_v3.tests.fakes.fork import FORK_URL, FakeAnvil
-from contrib.uniswap_v3.tests.fakes.rpc import answering, rpc_over
+from contrib.uniswap_v3.tests.fakes.rpc import answering, closed_port, rpc_over
 
 
 @pytest.mark.parametrize("index", range(10))
@@ -165,11 +168,43 @@ def test_a_fork_url_in_the_http_stacks_logs_is_scrubbed_even_before_it_is_known(
     assert "an-upstream-key-1" not in caplog.text and "<url>" in caplog.text
 
 
-def test_a_direct_provider_goes_past_the_environments_proxies_and_hides_its_url():
-    direct = http_provider_at("http://127.0.0.1:9545", direct=True)
-    assert direct._request_kwargs["proxies"] == {"http": None, "https": None}
-    assert "127.0.0.1" not in str(direct)
-    assert "proxies" not in http_provider_at("http://127.0.0.1:9545")._request_kwargs
+class _ChainIdNode(BaseHTTPRequestHandler):
+    """A node on this machine that answers every JSON-RPC request with chain 1."""
+
+    def do_POST(self):  # noqa: N802 (the name http.server calls)
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": "0x1"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_a_direct_provider_reaches_a_loopback_node_whatever_proxy_the_environment_names(
+    monkeypatch,
+):
+    # Every proxy variable requests reads points at a port nothing listens on: a
+    # request that took any of them would fail to connect.
+    dead = f"http://127.0.0.1:{closed_port()}"
+    for name in ("ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, dead)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    server = HTTPServer(("127.0.0.1", 0), _ChainIdNode)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        settings = RpcSettings(attempts=1)
+        direct = http_provider_at(url, settings=settings, direct=True)
+        Rpc(direct, 1, settings=settings).verify_chain()
+        assert url not in str(direct)
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_a_fork_is_a_setup_fault_like_any_other():

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
 import subprocess
 import time
 from collections.abc import Iterator
@@ -43,6 +42,7 @@ from contrib.uniswap_v3.domain.types import (
     Token,
     eth_from_wei,
 )
+from contrib.uniswap_v3.tests.fakes.rpc import closed_port
 
 pytestmark = pytest.mark.smoke
 
@@ -67,12 +67,6 @@ _ERC20 = [
 _BAR = Bar(time=0, close_block=0, prices={"WETH": Decimal(1)}, base_fee_wei=0)
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 @pytest.fixture(scope="module")
 def fork_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     upstream = os.environ.get(DEFAULT_URL_ENV, "")
@@ -81,7 +75,7 @@ def fork_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         pytest.skip(f"{DEFAULT_URL_ENV} is not set")
     if anvil is None:
         pytest.skip("anvil is not on the PATH")
-    port = _free_port()
+    port = closed_port()
     log = tmp_path_factory.mktemp("anvil") / "stderr.log"
     with log.open("wb") as stderr:
         process = subprocess.Popen(

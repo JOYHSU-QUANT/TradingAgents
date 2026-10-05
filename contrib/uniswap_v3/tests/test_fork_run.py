@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
 
@@ -181,6 +182,19 @@ def test_a_wallet_changed_since_the_send_does_not_agree_with_what_was_written(db
         assert not reconcile_open_send(store, _CONFIG, wallet, _RUN).agrees
 
 
+def test_a_failed_gas_beyond_the_ledgers_eth_is_named_as_such(db):
+    anvil = _anvil(db)
+    executor, wallet = _parts(anvil)
+    with open_store(db) as store, pytest.raises(UnsettledSend):
+        _run_fork(store, _FailsOnTheSecondSwap(executor, anvil), wallet, opening=_ledger())
+    connection = sqlite3.connect(db)
+    connection.execute("UPDATE sends SET failed_gas_eth = '5'")
+    connection.commit()
+    connection.close()
+    with open_store(db) as store, pytest.raises(EngineError, match="is said to have cost 5 ETH"):
+        reconcile_open_send(store, _CONFIG, wallet, _RUN)
+
+
 def test_a_run_without_an_open_send_has_nothing_to_reconcile(db):
     _, wallet = _parts(_anvil(db))
     with open_store(db) as store:
@@ -331,9 +345,9 @@ def test_an_open_send_the_wallet_cannot_be_read_beside_still_exits_1(
 ):
     anvil = forked["anvil"] = _anvil(db)
     with open_store(db) as store:
-        _, wallet = _parts(anvil)
+        executor, wallet = _parts(anvil)
         with pytest.raises(UnsettledSend):
-            _run_fork(store, _FailsOnTheSecondSwap(_parts(anvil)[0], anvil), wallet, opening=_ledger())
+            _run_fork(store, _FailsOnTheSecondSwap(executor, anvil), wallet, opening=_ledger())
 
     def unreadable(self):
         raise RpcUnavailable("the node is down")

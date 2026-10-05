@@ -136,18 +136,23 @@ def reconcile_open_send(
     before = store.ledger(run_id)
     try:
         applied = before.apply([_fill(config, leg) for leg in send.legs])
-        failed_gas = send.failed_gas_eth
-        expected = (
-            applied
-            if failed_gas is None
-            else Ledger(
-                balances=applied.balances,
-                gas_eth=EXACT_CONTEXT.subtract(applied.gas_eth, failed_gas),
-            )
-        )
     except (LedgerError, ValueError) as exc:
         raise EngineError(
             f"the legs written for the send of run {run_id!r} at {send.time} do not apply "
             f"to its ledger ({exc})"
         ) from exc
+    failed_gas = send.failed_gas_eth
+    if failed_gas is not None and failed_gas > applied.gas_eth:
+        raise EngineError(
+            f"the failed swap of run {run_id!r} at {send.time} is said to have cost "
+            f"{failed_gas} ETH, more than the {applied.gas_eth} its ledger holds"
+        )
+    expected = (
+        applied
+        if failed_gas is None
+        else Ledger(
+            balances=applied.balances,
+            gas_eth=EXACT_CONTEXT.subtract(applied.gas_eth, failed_gas),
+        )
+    )
     return Reconciliation(send=send, before=before, expected=expected, held=wallet.holdings())

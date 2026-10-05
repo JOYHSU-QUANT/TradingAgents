@@ -371,6 +371,21 @@ def test_a_fill_the_journal_did_not_take_leaves_its_gas_unknown(store):
     assert opened.failed_gas_eth is None
 
 
+def test_an_answer_that_is_not_one_leaves_its_gas_unknown_even_when_it_is_none(store):
+    wallet = _Wallet()
+
+    class Mute(_Signer):
+        def execute(self, swap, bar):
+            # It may have sent the swap: it does not say.
+            return None
+
+    with pytest.raises(UnsettledSend, match="the executor answered leg 0 with None"):
+        _engine(store, Mute(wallet), wallet).step(_view(0))
+    opened = store.open_send(_RUN)
+    assert "the executor's answer was not written as a leg: None" in opened.failure
+    assert opened.failed_gas_eth is None
+
+
 def test_a_swap_the_wallets_eth_cannot_pay_for_is_a_want_of_gas(store):
     wallet = _Wallet()
 

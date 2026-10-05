@@ -365,7 +365,7 @@ class Engine:
         reason: str | None = None
         unsent: Exception | None = None
         # An answer the executor gave and the journal has not taken: what it cost is not known.
-        unwritten: object | None = None
+        unwritten: list[object] = []
         try:
             for leg, swap in enumerate(swaps):
                 try:
@@ -376,17 +376,17 @@ class Engine:
                     # Nothing of the rebalance was sent (the port's contract).
                     unsent = exc
                     break
-                unwritten = raw
+                unwritten[:] = [raw]
                 # An answer that is not one may follow a send: it stops the run.
                 answered = _checked(leg, swap, raw)
                 if isinstance(answered, Rejection):
                     # Nothing of it was sent; the legs after it are not asked for.
                     refused, reason = answered, _refused(leg, swap, answered)
-                    unwritten = None
+                    unwritten.clear()
                     break
                 self.journal.record_leg(self.run_id, time, leg, answered)
                 fills.append(answered)
-                unwritten = None
+                unwritten.clear()
             if unsent is None:
                 try:
                     after = ledger.apply(fills)
@@ -397,7 +397,7 @@ class Engine:
                     ) from exc
                 self._require_holds(wallet, after, f"after the swaps of the bar at {time}")
         except Exception as exc:
-            raise self._stopped(time, exc, unwritten=unwritten) from exc
+            raise self._stopped(time, exc, unwritten=tuple(unwritten)) from exc
         if unsent is not None:
             # The bar is left undecided, as a read that failed leaves one, and can be tried again.
             try:
@@ -438,7 +438,7 @@ class Engine:
             )
 
     def _stopped(
-        self, time: int, exc: Exception, *, unwritten: object | None = None
+        self, time: int, exc: Exception, *, unwritten: tuple[object, ...] = ()
     ) -> UnsettledSend:
         """Write what stopped the send at ``time``, and the error that stops the run.
 
@@ -448,16 +448,20 @@ class Engine:
         error that names no transaction cost none: nothing of its swap was
         sent, and the legs that filled carry their own gas. One that names
         some and no usable cost leaves the gas unknown, and so does an answer
-        of the executor's, ``unwritten``, that was given and not written as
-        a leg: a swap of it may have been mined.
+        of the executor's, the one in ``unwritten``, that was given and not
+        written as a leg: a swap of it may have been mined.
         """
         failure = f"{type(exc).__name__}: {exc}"
         hashes = _hashes(exc)
         if hashes:
             failure += f" (transactions {', '.join(hashes)})"
-        if unwritten is not None:
-            failure += f" (the executor's answer was not written as a leg: {unwritten!r})"
-        gas: Decimal | None = Decimal(0) if not hashes and unwritten is None else None
+        for answer in unwritten:
+            try:
+                shown = repr(answer)
+            except Exception:
+                shown = f"a {type(answer).__name__} that cannot be shown"
+            failure += f" (the executor's answer was not written as a leg: {shown})"
+        gas: Decimal | None = Decimal(0) if not hashes and not unwritten else None
         for error in _chain(exc):
             cost = getattr(error, "gas_cost_eth", None)
             if isinstance(cost, Decimal) and cost.is_finite() and not cost.is_signed():
@@ -467,12 +471,12 @@ class Engine:
             self.journal.fail_send(self.run_id, time, failure=failure, gas_eth=gas)
         except Exception as failed:
             # A store that failed the step may fail this too; the send stays open either way.
-            unwritten = f"; what stopped it could not be written ({failed})"
+            lost = f"; what stopped it could not be written ({failed})"
         else:
-            unwritten = ""
+            lost = ""
         return UnsettledSend(
             f"the swaps of the bar at {time} were being sent when the step stopped "
-            f"({failure}){unwritten}; the send is left open, and the run goes no further until "
+            f"({failure}){lost}; the send is left open, and the run goes no further until "
             f"what the wallet holds is reconciled with what was written"
         )
 

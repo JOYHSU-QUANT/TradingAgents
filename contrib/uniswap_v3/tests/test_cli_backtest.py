@@ -103,6 +103,8 @@ def test_backtest_decides_the_range_and_a_second_run_decides_nothing(db, capsys)
         assert run.mode is RunMode.BACKTEST and run.created_at == FIRST_DAY + 30 * DAY
         assert run.ledger == _ledger()
         assert len(store.decisions("bt")) == 4
+        # Every bar is recorded as decided when the command that decided it ran.
+        assert {decision.decided_at for decision in store.decisions("bt")} == {FIRST_DAY + 30 * DAY}
 
 
 def test_boundaries_without_a_bar_exit_0_with_a_warning_on_stderr(tmp_path, capsys):

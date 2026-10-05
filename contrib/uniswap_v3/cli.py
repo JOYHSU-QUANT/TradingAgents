@@ -2,8 +2,10 @@
 
 - ``backfill`` reads the bars of a range from an archive node into the
   store. It can be repeated; what is stored is not read again.
-- ``status`` prints what the store holds and its latest bars. It reads no
-  chain.
+- ``status`` prints what the store holds and its latest bars. With
+  ``--run-id`` it goes on to print that run's holdings, value and return
+  (measured as ``report`` measures it), and its latest decisions with when
+  each was made. It reads no chain.
 - ``backtest`` replays the stored bars of a range through the engine as the
   run ``--run-id``. With ``--fills model``, the default, fills come from
   the offline model and no chain is read. With ``--fills quoter`` each swap
@@ -75,8 +77,8 @@ from .constants import WRAPPED_NATIVE, pool_key
 from .domain.bars import Finality
 from .domain.decimal_context import parse_decimal, plain
 from .domain.ledger import Ledger
-from .domain.metrics import Curve, MetricsError, measurable, run_metrics
-from .domain.records import Outcome
+from .domain.metrics import Curve, MetricsError, RunMetrics, measurable, run_metrics
+from .domain.records import Decision, FillRecord, Outcome, RunRecord, Valuation
 from .engine.backtest import BacktestRangeError, BacktestSummary, run_backtest
 from .engine.executors import QuoteExecutor
 from .engine.step import EngineError
@@ -207,9 +209,17 @@ def _parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would be read, and read nothing"
     )
 
-    status = add("status", "Print what the store holds and its latest bars.")
+    status = add("status", "Print what the store holds and its latest bars, and a run's state.")
     status.add_argument(
-        "--bars", type=_positive, default=5, help="how many of the latest bars to print"
+        "--bars",
+        type=_positive,
+        default=5,
+        help="how many of the latest bars, and of the run's latest decisions, to print",
+    )
+    status.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="also print this run's holdings, value, return and latest decisions",
     )
 
     def add_run(command: argparse.ArgumentParser) -> None:
@@ -396,11 +406,119 @@ def _status_lines(store: Store, config: UniswapConfig, bars: int) -> list[str]:
     return lines
 
 
+def _after(seconds: int) -> str:
+    """A span of seconds as ``[-][<days>d ]HH:MM:SS``."""
+    sign = "-" if seconds < 0 else ""
+    days, rest = divmod(abs(seconds), 86_400)
+    hours, rest = divmod(rest, 3_600)
+    minutes, rest = divmod(rest, 60)
+    clock = f"{hours:02}:{minutes:02}:{rest:02}"
+    return f"{sign}{days}d {clock}" if days else f"{sign}{clock}"
+
+
+def _holdings(ledger: Ledger) -> str:
+    amounts = ", ".join(
+        f"{symbol} {plain(amount)}" for symbol, amount in sorted(ledger.balances.items())
+    )
+    return f"{amounts}; gas ETH {plain(ledger.gas_eth)}"
+
+
+def _measured(
+    run: RunRecord,
+    decisions: Sequence[Decision],
+    valuations: Sequence[Valuation],
+    fills: Sequence[FillRecord],
+) -> tuple[list[Valuation], RunMetrics]:
+    """The valuations a run is measured on, and the run measured on them, as ``report`` does."""
+    config = config_from_snapshot(run.config)
+    measured = measurable(decisions, valuations)
+    metrics = run_metrics(
+        quote=run.quote,
+        gas_token=WRAPPED_NATIVE[config.chain_id].symbol,
+        opening=run.ledger,
+        valuations=measured,
+        fills=fills,
+        fee_rates={pool.address: pool.fee_rate for pool in config.pools},
+    )
+    return measured, metrics
+
+
+def _stored_run(store: Store, run_id: str) -> RunRecord:
+    run = store.run(run_id)
+    if run is None:
+        raise StoreError(f"there is no run {run_id!r} in the store")
+    return run
+
+
+def _run_header(run: RunRecord) -> str:
+    return (
+        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}, fills from the {run.fills.value}, "
+        f"{_one_ascii_line(run.strategy)}, values in {run.quote}"
+    )
+
+
+def _decided_span(decisions: Sequence[Decision]) -> str:
+    return (
+        f"{len(decisions)} bar(s) decided from {_iso(decisions[0].time)} to "
+        f"{_iso(decisions[-1].time)}"
+    )
+
+
+def _why(decision: Decision) -> str:
+    """A rejected or a skipped decision's reason, as `` (<reason>)``; nothing for another."""
+    return "" if decision.reason is None else f" ({_one_ascii_line(decision.reason)})"
+
+
+def _run_status_lines(store: Store, run_id: str, latest: int) -> list[str]:
+    """A run's state: its holdings, value and return, and its ``latest`` decisions."""
+    run = _stored_run(store, run_id)
+    decisions = store.decisions(run_id)
+    lines = [f"{_run_header(run)}, started {_iso(run.created_at)}"]
+    if not decisions:
+        lines.append(f"no bar decided yet; opening balances {_holdings(run.ledger)}")
+        return lines
+    lines.append(
+        f"{_decided_span(decisions)}: "
+        + _outcome_counts(Counter(decision.outcome for decision in decisions))
+    )
+    valuations = store.valuations(run_id)
+    last = valuations[-1]
+    lines.append(f"holdings after the bar at {_iso(last.time)}: {_holdings(last.ledger)}")
+    try:
+        measured, metrics = _measured(run, decisions, valuations, store.fills(run_id))
+    except MetricsError as exc:
+        lines.append(
+            f"value {_fixed(last.total_value)} {run.quote}; return not measured "
+            f"({_one_ascii_line(exc)})"
+        )
+    else:
+        change = _fixed(metrics.strategy.total_return * 100, signed=True)
+        lines.append(
+            f"value {_fixed(last.total_value)} {run.quote}; return {change}% from "
+            f"{_iso(measured[0].time)} to {_iso(measured[-1].time)}, after gas, as report "
+            f"measures it"
+        )
+    lines.append(f"latest {min(latest, len(decisions))} decision(s):")
+    for decision in decisions[-latest:]:
+        when = (
+            "decided at a time that was not kept"
+            if decision.decided_at is None
+            else f"decided {_iso(decision.decided_at)}, "
+            f"{_after(decision.decided_at - decision.time)} after the boundary"
+        )
+        lines.append(f"{_iso(decision.time)}  {decision.outcome.value}  {when}{_why(decision)}")
+    return lines
+
+
 def _status(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     config = _config(args)
-    with open_store(args.db, create=False) as store:
-        for line in _status_lines(store, config, args.bars):
-            out(line)
+    # One view for all the reads: a paper visit may be writing meanwhile.
+    with open_store(args.db, create=False) as store, store.reading():
+        lines = _status_lines(store, config, args.bars)
+        if args.run_id is not None:
+            lines += _run_status_lines(store, args.run_id, args.bars)
+    for line in lines:
+        out(line)
     return EXIT_OK
 
 
@@ -465,7 +583,7 @@ def _backtest(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
             start=args.start,
             end=args.end,
             opening=opening,
-            created_at=int(now()),
+            now=int(now()),
             executor=executor,
         )
     _replayed(args.run_id, summary, out)
@@ -589,10 +707,9 @@ def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[
             )
         return EXIT_OK
     made = summary.replayed is not None and summary.replayed.decided
-    why = "" if decision.reason is None else f" ({_one_ascii_line(decision.reason)})"
     out(
         f"the bar at {_iso(summary.latest)} {'is decided' if made else 'was already decided'}: "
-        f"{decision.outcome.value}{why}"
+        f"{decision.outcome.value}{_why(decision)}"
     )
     return EXIT_OK
 
@@ -614,31 +731,14 @@ def _curve_line(name: str, curve: Curve) -> str:
 def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     # One view for all the reads: a backtest may be writing the run meanwhile.
     with open_store(args.db, create=False) as store, store.reading():
-        run = store.run(args.run_id)
-        if run is None:
-            raise StoreError(f"there is no run {args.run_id!r} in the store")
+        run = _stored_run(store, args.run_id)
         decisions = store.decisions(args.run_id)
         valuations = store.valuations(args.run_id)
         fills = store.fills(args.run_id)
-    config = config_from_snapshot(run.config)
-    measured = measurable(decisions, valuations)
+    measured, metrics = _measured(run, decisions, valuations, fills)
     quote = run.quote
-    metrics = run_metrics(
-        quote=quote,
-        gas_token=WRAPPED_NATIVE[config.chain_id].symbol,
-        opening=run.ledger,
-        valuations=measured,
-        fills=fills,
-        fee_rates={pool.address: pool.fee_rate for pool in config.pools},
-    )
-    out(
-        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}, fills from the {run.fills.value}, "
-        f"{_one_ascii_line(run.strategy)}, values in {quote}"
-    )
-    out(
-        f"{len(decisions)} bar(s) decided from {_iso(decisions[0].time)} to "
-        f"{_iso(decisions[-1].time)}"
-    )
+    out(_run_header(run))
+    out(_decided_span(decisions))
     out("decisions: " + _outcome_counts(Counter(decision.outcome for decision in decisions)))
     for outcome in (Outcome.SKIPPED_SUSPECT, Outcome.REJECTED):
         codes = Counter(

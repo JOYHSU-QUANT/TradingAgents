@@ -129,7 +129,7 @@ def run_backtest(
     start: int,
     end: int | None = None,
     opening: Ledger | None = None,
-    created_at: int,
+    now: int,
     executor: Executor | None = None,
 ) -> BacktestSummary:
     """Decide every stored bar from ``start`` to ``end`` for the backtest run ``run_id``.
@@ -146,7 +146,7 @@ def run_backtest(
         start=start,
         end=end,
         opening=opening,
-        created_at=created_at,
+        now=now,
     )
 
 
@@ -160,7 +160,7 @@ def replay(
     start: int,
     end: int | None = None,
     opening: Ledger | None = None,
-    created_at: int,
+    now: int,
 ) -> BacktestSummary:
     """Decide every stored bar from ``start`` to ``end`` for the run ``run_id``, filled by ``executor``.
 
@@ -171,7 +171,9 @@ def replay(
     stored is carried on, in the mode, from the source and under the
     config it was started with, and an ``opening`` handed with it must be
     the one it was started with. A range that holds no bar is
-    :class:`NoBarInRange`, raised before a run is started.
+    :class:`NoBarInRange`, raised before a run is started. ``now`` is the
+    time of the call: a run started here is created then, and every bar
+    decided here is decided then.
 
     Whatever stops the engine's step (:class:`~.step.EngineError`, what a
     strategy raised, or a chain read of the executor's that failed) stops
@@ -199,7 +201,7 @@ def replay(
         run_id=run_id,
         mode=mode,
         opening=opening,
-        created_at=created_at,
+        created_at=now,
         fills=executor.source,
     )
     latest = store.last_decided(run_id)
@@ -212,7 +214,7 @@ def replay(
                 f"first at {passed_over[0]}, would be left undecided for good; start the "
                 f"range no later than {passed_over[0]}, or use a new run"
             )
-    engine = open_engine(store, config, executor, run_id=run_id)
+    engine = open_engine(store, config, executor, run_id=run_id, now=now)
 
     bars: list[Bar] = []
     decided = already_decided = on_pending = 0

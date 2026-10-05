@@ -92,13 +92,18 @@ class StepResult:
 
 @dataclass(frozen=True)
 class Engine:
-    """One run's step. Built by :func:`open_engine`, which checks what it is handed."""
+    """One run's step. Built by :func:`open_engine`, which checks what it is handed.
+
+    ``decided_at`` is the time of the call the engine was opened for; every
+    bar it decides is recorded as decided then.
+    """
 
     run_id: str
     config: UniswapConfig
     strategy: Strategy
     executor: Executor
     journal: Journal
+    decided_at: int
 
     def step(
         self,
@@ -251,6 +256,7 @@ class Engine:
             reason=reason,
             reason_code=reason_code,
             seen=seen,
+            decided_at=self.decided_at,
         )
         valuation = Valuation(
             time=bar.time,
@@ -375,9 +381,9 @@ def start_or_continue_run(
 
 
 def open_engine(
-    journal: Journal, config: UniswapConfig, executor: Executor, *, run_id: str
+    journal: Journal, config: UniswapConfig, executor: Executor, *, run_id: str, now: int
 ) -> Engine:
-    """The engine of the run ``run_id``, with the config's strategy built.
+    """The engine of the run ``run_id``, with the config's strategy built, for a call at ``now``.
 
     A run is continued only under the config it was started with, and by an
     executor whose fills come from where the run's do: a config whose
@@ -406,4 +412,5 @@ def open_engine(
         strategy=_strategy(config),
         executor=executor,
         journal=journal,
+        decided_at=now,
     )

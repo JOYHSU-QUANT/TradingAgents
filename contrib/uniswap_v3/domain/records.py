@@ -142,7 +142,9 @@ class Decision:
     in words and ``reason_code`` for code, a :class:`RejectionCode` for the
     one and a :class:`SkipCode` for the other. ``seen`` is ``None`` for a
     bar that came from no store, and otherwise describes the block
-    ``close_block`` names.
+    ``close_block`` names. ``decided_at`` is when the call that decided the
+    bar was made, in epoch seconds (a paper visit's time, or a backtest's),
+    and ``None`` for a decision stored before that was kept.
     """
 
     time: int
@@ -152,10 +154,15 @@ class Decision:
     reason: str | None = None
     reason_code: RejectionCode | SkipCode | None = None
     seen: BarSeen | None = None
+    decided_at: int | None = None
 
     def __post_init__(self) -> None:
         if not _is_count(self.time) or not _is_count(self.close_block):
             raise ValueError("time and close_block must be non-negative integers")
+        if self.decided_at is not None and not _is_count(self.decided_at):
+            raise ValueError(
+                f"decided_at must be a non-negative integer or None, got {self.decided_at!r}"
+            )
         if not isinstance(self.outcome, Outcome):
             raise ValueError(f"outcome must be an Outcome, got {self.outcome!r}")
         targeted = self.outcome in (Outcome.NO_TRADE, Outcome.FILLED, Outcome.REJECTED)

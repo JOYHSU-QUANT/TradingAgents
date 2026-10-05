@@ -113,7 +113,7 @@ def run_paper(
             opening=opening,
             created_at=now,
         )
-        open_engine(store, config, executor, run_id=run_id)
+        open_engine(store, config, executor, run_id=run_id, now=now)
     # ``reached`` is the latest boundary the run has come to, and ``first`` the one it
     # goes on from.
     decided = store.last_decided(run_id)
@@ -158,7 +158,7 @@ def run_paper(
             start=start,
             end=latest,
             opening=opening,
-            created_at=now,
+            now=now,
         )
     except NoBarInRange:
         # The chain had no answer at any boundary of the visit, so none has a bar.

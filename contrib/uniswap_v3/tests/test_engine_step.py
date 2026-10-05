@@ -54,6 +54,8 @@ _RUN = "run-1"
 # A model that is easy to work by hand: 0.1% off the close, 100,000 gas a hop.
 _CONFIG = _config(model_slippage=D("0.001"), model_gas_units_per_hop=100_000)
 _TARGET = weights("0.5", "0.3", "0.2")
+# When the tests' engine decides: ten minutes after the first boundary.
+_DECIDED_AT = FIRST_DAY + 600
 
 
 @pytest.fixture
@@ -77,6 +79,7 @@ def _engine(store, strategy, executor=None, *, config=_CONFIG, ledger=None) -> E
         strategy=strategy,
         executor=executor or ModelExecutor("USDC", config.execution),
         journal=store,
+        decided_at=_DECIDED_AT,
     )
 
 
@@ -182,6 +185,7 @@ def test_a_bar_already_decided_is_reported_and_nothing_is_done_again(store):
     again = engine.step(_view(bar(0)))
     assert (first.already_run, again.already_run) == (False, True)
     assert again.decision == first.decision
+    assert first.decision.decided_at == _DECIDED_AT
     assert len(strategy.calls) == 1
     assert len(executor.swaps) == 2
     assert len(store.fills(_RUN)) == 2
@@ -446,7 +450,10 @@ def test_a_run_is_started_with_the_configs_snapshot_and_reopened_under_the_same_
         "USDC",
         "fixed_weights",
     )
-    engine = open_engine(store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN)
+    engine = open_engine(
+        store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN, now=FIRST_DAY + DAY
+    )
+    assert engine.decided_at == FIRST_DAY + DAY
     assert isinstance(engine.strategy, FixedWeights)
     # The shipped placeholder drives the same step.
     assert engine.step(_view(bar(0))).decision.outcome is Outcome.FILLED
@@ -465,11 +472,17 @@ def test_a_run_is_not_continued_under_a_changed_config(store):
     executor = ModelExecutor("USDC", _CONFIG.execution)
     changed = replace(_CONFIG, execution=ExecutionSettings(max_slippage=D("0.01")))
     with pytest.raises(EngineError, match="started under another config"):
-        open_engine(store, changed, executor, run_id=_RUN)
+        open_engine(store, changed, executor, run_id=_RUN, now=_DECIDED_AT)
     # Where the node's URL comes from changes no decision.
-    open_engine(store, replace(_CONFIG, rpc_url_env="OTHER_RPC_URL"), executor, run_id=_RUN)
+    open_engine(
+        store,
+        replace(_CONFIG, rpc_url_env="OTHER_RPC_URL"),
+        executor,
+        run_id=_RUN,
+        now=_DECIDED_AT,
+    )
     with pytest.raises(EngineError, match="there is no run 'run-2'"):
-        open_engine(store, _CONFIG, executor, run_id="run-2")
+        open_engine(store, _CONFIG, executor, run_id="run-2", now=_DECIDED_AT)
 
 
 def test_a_strategy_the_registry_refuses_is_a_config_error(store):
@@ -495,7 +508,7 @@ def test_a_run_whose_strategy_can_no_longer_be_built_is_not_opened(store, monkey
 
     monkeypatch.setattr(step_module, "build_strategy", refuse)
     with pytest.raises(ConfigError, match="strategy: unknown strategy 'fixed_weights'"):
-        open_engine(store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN)
+        open_engine(store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN, now=_DECIDED_AT)
 
 
 def test_a_run_cannot_be_started_twice_or_over_other_tokens(store):
@@ -548,4 +561,4 @@ def test_a_run_is_carried_on_only_by_an_executor_of_the_source_it_keeps(store):
     with pytest.raises(
         EngineError, match="takes its fills from the quoter, and is not carried on with fills from the model"
     ):
-        open_engine(store, _CONFIG, modelled, run_id=_RUN)
+        open_engine(store, _CONFIG, modelled, run_id=_RUN, now=_DECIDED_AT)

@@ -138,13 +138,24 @@ def _ledger(balances: str, gas_eth: str) -> Ledger:
 
 
 _DECISION_COLUMNS: Final = (
-    "time, outcome, target, reason, reason_code, close_block, close_block_hash, finality"
+    "time, outcome, target, reason, reason_code, close_block, close_block_hash, finality, "
+    "decided_at"
 )
 _VALUATION_COLUMNS: Final = "time, balances, gas_eth, prices, total_value"
 
 
 def _decision(row: Sequence[Any]) -> Decision:
-    time, outcome_text, target, reason, code, close_block, close_block_hash, finality = row
+    (
+        time,
+        outcome_text,
+        target,
+        reason,
+        code,
+        close_block,
+        close_block_hash,
+        finality,
+        decided_at,
+    ) = row
     outcome = Outcome(outcome_text)
     # An outcome that says nothing has no codes of its own to read one in; the
     # row is then refused, by the enum or by the decision, for carrying one.
@@ -165,6 +176,7 @@ def _decision(row: Sequence[Any]) -> Decision:
                 finality=Finality(finality),
             )
         ),
+        decided_at=decided_at,
     )
 
 
@@ -531,8 +543,8 @@ class Store:
             self._require_follows_on(run_id, step)
             self._connection.execute(
                 "INSERT INTO decisions (run_id, time, outcome, target, reason, "
-                "reason_code, close_block, close_block_hash, finality) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "reason_code, close_block, close_block_hash, finality, decided_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     decision.time,
@@ -545,6 +557,7 @@ class Store:
                     decision.close_block,
                     None if seen is None else seen.close_block_hash,
                     None if seen is None else seen.finality.value,
+                    decision.decided_at,
                 ),
             )
             self._connection.executemany(

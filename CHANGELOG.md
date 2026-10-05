@@ -842,6 +842,32 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: a schedule for the paper run, `status --run-id`,
+  when each bar was decided, and the package's README and RUNBOOK.**
+  `schedule/paper-visit.xml` is a Windows Task Scheduler task that runs
+  `schedule/paper-visit.cmd` at 00:10, 00:40 and 01:10 UTC every day: the
+  first visit decides the bar that closed at 00:00, and the other two find
+  it decided (exit 0) or retry one that exited 3. The task never starts a
+  visit beside a running one, stops one after 25 minutes, and runs a visit
+  missed while the machine was off once it is back. The script appends each
+  visit's output to `data/paper-visits.log` (the new, gitignored `data/` of
+  the package) between a header line and an `exit <code>` line, and exits
+  with the visit's code. It passes no opening balances, so a mistyped
+  `--db` or `--run-id` exits 1 instead of starting a run. A decision now
+  keeps `decided_at`, the time of the call that decided it: a paper
+  visit's, or a backtest's (`decisions.decided_at`, schema version 4; a
+  decision stored earlier has none). `status --run-id <id>` prints, after
+  the store's bars, the run's holdings, its value, its return as `report`
+  measures it, and its latest `--bars` decisions with how long after the
+  boundary each was made; it still prints when the run has decided nothing
+  or cannot be measured, and says why. `README.md` describes the package's
+  modes, architecture, commands, exit codes, config and how to add a
+  strategy; `RUNBOOK.md` covers starting a paper run, registering the task,
+  the daily check, what each log line means, starting over, data gaps,
+  changing the node, checking a paper run against a quoted backtest, and a
+  systemd timer for Linux. `engine.backtest.replay` and `run_backtest` take
+  `now` in place of `created_at`, and `open_engine` takes `now`.
+
 - **`contrib/uniswap_v3`: `paper`, and fills quoted by the pools.** The
   package can now run a paper sandbox. `python -m contrib.uniswap_v3 paper
   --run-id <id>` is one visit of a `mode=paper` run (`paper.py`): it reads

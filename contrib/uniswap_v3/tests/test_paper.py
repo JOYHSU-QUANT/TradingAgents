@@ -221,7 +221,7 @@ def test_a_node_error_on_a_quote_leaves_the_bar_undecided_for_the_next_visit(nod
 
 def test_a_backtest_run_is_not_carried_on_as_a_paper_run(node, store):
     _visit(node, store, day=0)
-    run_backtest(store, _CONFIG, run_id="bt", start=_day(0), opening=_OPENING, created_at=0)
+    run_backtest(store, _CONFIG, run_id="bt", start=_day(0), opening=_OPENING, now=0)
     rpc, executor = _executor(node)
     requests = len(node.provider.requests)
     with pytest.raises(EngineError, match="is a backtest run, and is not carried on as a paper run"):
@@ -243,14 +243,14 @@ def test_a_paper_run_is_not_carried_on_under_another_config_and_the_chain_is_not
 def test_a_run_keeps_to_the_source_of_its_fills(node, store):
     _visit(node, store, day=0)
     _, executor = _executor(node)
-    run_backtest(store, _CONFIG, run_id="model", start=_day(0), opening=_OPENING, created_at=0)
+    run_backtest(store, _CONFIG, run_id="model", start=_day(0), opening=_OPENING, now=0)
     with pytest.raises(EngineError, match="takes its fills from the model, and is not carried on"):
-        run_backtest(store, _CONFIG, run_id="model", start=_day(0), created_at=0, executor=executor)
+        run_backtest(store, _CONFIG, run_id="model", start=_day(0), now=0, executor=executor)
     run_backtest(
-        store, _CONFIG, run_id="quoted", start=_day(0), opening=_OPENING, created_at=0, executor=executor
+        store, _CONFIG, run_id="quoted", start=_day(0), opening=_OPENING, now=0, executor=executor
     )
     with pytest.raises(EngineError, match="takes its fills from the quoter, and is not carried on"):
-        run_backtest(store, _CONFIG, run_id="quoted", start=_day(0), created_at=0)
+        run_backtest(store, _CONFIG, run_id="quoted", start=_day(0), now=0)
 
 
 def test_a_quoted_backtest_over_the_same_bars_repeats_the_paper_run(node, store):
@@ -260,7 +260,7 @@ def test_a_quoted_backtest_over_the_same_bars_repeats_the_paper_run(node, store)
     _, executor = _executor(node)
 
     summary = run_backtest(
-        store, _CONFIG, run_id="quoted", start=_day(0), opening=_OPENING, created_at=0, executor=executor
+        store, _CONFIG, run_id="quoted", start=_day(0), opening=_OPENING, now=0, executor=executor
     )
 
     assert summary.decided == 3
@@ -279,7 +279,7 @@ def test_the_model_and_the_quoter_decide_alike_and_fill_differently(node, store)
     _weth_up_on(node, 1)
     for day in range(3):
         _visit(node, store, day=day)
-    run_backtest(store, _CONFIG, run_id="model", start=_day(0), opening=_OPENING, created_at=0)
+    run_backtest(store, _CONFIG, run_id="model", start=_day(0), opening=_OPENING, now=0)
 
     paper, model = store.decisions(_RUN), store.decisions("model")
     assert [(d.time, d.outcome, d.target) for d in model] == [
@@ -293,6 +293,18 @@ def test_the_model_and_the_quoter_decide_alike_and_fill_differently(node, store)
     first_quoted, first_modelled = quoted_fills[0], modelled_fills[0]
     assert first_modelled.amount_in == first_quoted.amount_in
     assert first_modelled.amount_out < first_quoted.amount_out
+
+
+def test_a_bar_is_recorded_as_decided_at_the_visit_that_decided_it(node, store):
+    _visit(node, store, day=0)
+    # Day 1's visit was missed: day 2's decides both, at its own time.
+    _visit(node, store, day=2, minutes=40, opening=None)
+
+    assert [(d.time, d.decided_at) for d in store.decisions(_RUN)] == [
+        (_day(0), _day(0) + 600),
+        (_day(1), _day(2) + 2400),
+        (_day(2), _day(2) + 2400),
+    ]
 
 
 def test_missed_bars_are_decided_even_when_the_latest_boundary_has_no_answer(node, store):
@@ -388,7 +400,7 @@ def test_a_quoted_backtest_whose_node_has_not_reached_a_fill_block_stops_there(n
     _, executor = _executor(node)
     with pytest.raises(BlockNotFound):
         run_backtest(
-            store, _CONFIG, run_id="quoted", start=_day(0), opening=_OPENING, created_at=0,
+            store, _CONFIG, run_id="quoted", start=_day(0), opening=_OPENING, now=0,
             executor=executor,
         )  # fmt: skip
     assert store.last_decided("quoted") is None

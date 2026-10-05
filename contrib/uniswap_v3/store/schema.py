@@ -122,6 +122,8 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     ),
     # Where a run's fills come from. Every run stored before this was filled by the model.
     ("ALTER TABLE runs ADD COLUMN fills TEXT NOT NULL DEFAULT 'model'",),
+    # When each decision was made. A decision stored before this has none.
+    ("ALTER TABLE decisions ADD COLUMN decided_at INTEGER",),
 )
 
 SCHEMA_VERSION: Final = len(_MIGRATIONS)

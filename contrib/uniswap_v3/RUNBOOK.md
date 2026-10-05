@@ -162,7 +162,7 @@ Get-Content contrib\uniswap_v3\data\paper-visits.log -Tail 20
 | `0` | 跑完了 |
 | `1` | 要修，看 log（§5） |
 | `3` | 稍後再試，當天後面的 visit 會重試 |
-| `4` | visit 腳本進不了 repo 目錄或寫不了 log，visit **沒有跑**（§5） |
+| `4` | visit 腳本進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit **沒有跑**（§5） |
 | `9009` | 找不到 `PYTHON`（§3.1） |
 | `267009` | 還在跑，等一下再查 |
 | `267014` | 跑超過 25 分鐘被排程停掉了（§5） |
@@ -198,7 +198,7 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 
 | 看到 | 意思 | 做什麼 |
 |---|---|---|
-| `==== exit 0` | 決策了，或這根已經決策過 | 沒事 |
+| `==== exit 0` | visit 跑完了：決策了、這根已經決策過，或鏈在邊界沒有答案（前面會有 `warning: the chain had no answer`，見下面那一列） | 沒事；有 warning 就照那一列 |
 | `exit 0` 前有 `warning: ... rebalance(s) were rejected` | 報價低於 `max_slippage` 容許的下限，或 gas 不夠；這根不再平衡 | 不重試，是設計；gas 不夠的話見 §6 |
 | `warning: ... skipped as suspect` | bar 的收盤價與 TWAP 偏離太大（或被 reorg），不交易 | 沒事；連續很多根就看一下 `status` 的 flags |
 | `warning: the chain had no answer at the boundary` | 池子在那個邊界讀不到 TWAP | 下一次 visit 會再問；run 走過去之後就永遠不決策它 |
@@ -209,7 +209,7 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 | `failed: the run 'paper-1' was started under another config` | 設定檔改了，或新版程式改了預設值 | run 只能在開它的設定下接續：見 §6 開新 run |
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: paper needs the packages in contrib/uniswap_v3/requirements.txt` | 排程用的 Python 不是裝了相依的那個 | 改 §3.1 的 `PYTHON` |
-| `'python' is not recognized ...` 接 `==== exit 9009` | 排程找不到 `PYTHON` | 改 §3.1 的 `PYTHON` 成完整路徑 |
+| `'python' is not recognized ...`（中文 Windows 是「不是內部或外部命令」）接 `==== exit 9009` | 排程找不到 `PYTHON` | 改 §3.1 的 `PYTHON` 成完整路徑 |
 | `==== there is no "...python.exe": fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.cmd` |
 | `Error: Invalid value: Invalid value for '-f' "...\.env" does not exist.` 接 `==== exit 2` | repo 根目錄沒有 `.env` | 補上 `.env`（§0） |
 | 其他 `usage: ...` 接 `==== exit 2` | visit 的指令被改壞 | 對照 git 版的 `paper-visit.cmd`；設定只放在 `paper-visit.local.cmd` |

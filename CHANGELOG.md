@@ -853,7 +853,8 @@ Breaking changes within the 0.x line are called out explicitly.
   visit's output, unbuffered, to `data/paper-visits.log` (the new, gitignored
   `data/` of the package) between a header line and an `exit <code>` line,
   and exits with the visit's code; it exits 4 without running the visit when
-  it cannot get to the repository or write the log. Its settings are
+  it cannot get to the repository or write the log, or when `PYTHON` names a
+  path that is not there. Its settings are
   defaults, overridden by a gitignored `schedule/paper-visit.local.cmd`. It
   passes no opening balances, so a mistyped `--db` or `--run-id` exits 1
   instead of starting a run. The RUNBOOK runs the schedule from a worktree of

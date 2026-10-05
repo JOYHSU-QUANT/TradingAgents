@@ -59,6 +59,17 @@ def _paper(node: FakeNode, db: Path, *extra: str, run_id: str = "p", **kwargs) -
     )  # fmt: skip
 
 
+def _tamper(db: Path, *statements: str) -> None:
+    """Change the database behind the store's back."""
+    connection = sqlite3.connect(db)
+    try:
+        for statement in statements:
+            connection.execute(statement)
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _count(db: Path, table: str) -> int:
     connection = sqlite3.connect(db)
     try:
@@ -352,3 +363,173 @@ def test_a_backtest_counts_a_rebalance_the_quote_refused_and_does_not_warn_of_it
     assert code == cli.EXIT_OK
     assert lines[1] == "filled 0, hold 0, no_trade 0, rejected 1, skipped_suspect 0"
     assert "were rejected" not in capsys.readouterr().err
+
+
+# --- status of a run ---------------------------------------------------------
+
+
+def _run_status(node: FakeNode, db: Path, *extra: str, run_id: str = "p") -> tuple[int, list[str]]:
+    """``status --run-id``, its lines after the store's own."""
+    code, lines = _run(
+        node, "status", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", run_id, *extra,
+        now=_TEN_PAST + 2 * DAY,
+    )  # fmt: skip
+    first = next((index for index, line in enumerate(lines) if line.startswith("run ")), None)
+    return code, lines if first is None else lines[first:]
+
+
+def test_status_of_a_run_prints_its_holdings_return_and_when_each_bar_was_decided(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _paper(node, db, now=_TEN_PAST + DAY + 1800)
+
+    code, lines = _run_status(node, db)
+
+    assert code == cli.EXIT_OK
+    assert lines == [
+        "run p: paper, fills from the quoter, fixed_weights, values in USDC, started "
+        "2024-01-01T00:10:00Z",
+        "2 bar(s) decided from 2024-01-01T00:00:00Z to 2024-01-02T00:00:00Z: filled 1, hold 1, "
+        "no_trade 0, rejected 0, skipped_suspect 0",
+        "behind: 1 boundary(ies) after the last decided bar have passed undecided, the latest at "
+        "2024-01-03T00:00:00Z; a visit decides them, and the visit log says what stopped one",
+        "holdings after the bar at 2024-01-02T00:00:00Z: USDC 5000, WBTC 0.06694505, "
+        "WETH 1.499219798480956123; gas ETH 0.9972",
+        "value 9996.50 USDC; return -0.09% from 2024-01-01T00:00:00Z to 2024-01-02T00:00:00Z, "
+        "after gas, as report measures it",
+        "latest 2 decision(s):",
+        "2024-01-01T00:00:00Z  filled  decided 2024-01-01T00:10:00Z, 00:10:00 after the boundary",
+        "2024-01-02T00:00:00Z  hold  decided 2024-01-02T00:40:00Z, 00:40:00 after the boundary",
+    ]
+
+
+def test_status_of_a_run_prints_as_many_decisions_as_bars_asks_for(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    # Day 1's visit was missed: day 2's decides both, at its own time.
+    _paper(node, db, now=_TEN_PAST + 2 * DAY)
+
+    code, lines = _run_status(node, db, "--bars", "2")
+
+    assert code == cli.EXIT_OK
+    assert lines[2] == "up to date: the latest boundary that has passed is decided"
+    assert lines[-3:] == [
+        "latest 2 decision(s):",
+        "2024-01-02T00:00:00Z  hold  decided 2024-01-03T00:10:00Z, 1d 00:10:00 after the boundary",
+        "2024-01-03T00:00:00Z  hold  decided 2024-01-03T00:10:00Z, 00:10:00 after the boundary",
+    ]
+
+
+def test_status_of_a_run_that_has_decided_nothing_prints_its_opening_balances(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _tamper(
+        db,
+        "INSERT INTO runs SELECT 'q', mode, chain_id, quote, strategy, config, balances, "
+        "gas_eth, created_at, fills FROM runs WHERE run_id = 'p'",
+    )
+
+    code, lines = _run_status(node, db, run_id="q")
+
+    assert code == cli.EXIT_OK
+    assert lines[1:] == [
+        "no bar decided yet; opening balances USDC 10000, WBTC 0, WETH 0; gas ETH 1"
+    ]
+
+
+def test_status_of_a_run_says_why_its_return_is_not_measured(node, tmp_path):
+    node.twap_tick[(_USDC_WETH, block_at(FIRST_DAY) - 1)] = DEFAULT_TICK + 600
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+
+    code, lines = _run_status(node, db)
+
+    assert code == cli.EXIT_OK
+    assert lines[4] == (
+        "value 10000.00 USDC; return not measured (every one of the run's 1 decided bar(s) "
+        "was suspect, so there is none to measure it on)"
+    )
+    assert lines[6].startswith(
+        "2024-01-01T00:00:00Z  skipped_suspect  decided 2024-01-01T00:10:00Z, 00:10:00 after "
+        "the boundary ("
+    )
+
+
+def test_status_of_a_decision_stored_without_its_time_says_so(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _tamper(db, "UPDATE decisions SET decided_at = NULL")
+
+    code, lines = _run_status(node, db)
+
+    assert code == cli.EXIT_OK
+    assert lines[-1] == "2024-01-01T00:00:00Z  filled  decided at a time that was not kept"
+
+
+def test_status_of_a_run_that_is_not_there_exits_1(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    capsys.readouterr()
+
+    code, lines = _run_status(node, db, run_id="nothing")
+
+    assert code == cli.EXIT_FAILED and lines == []
+    assert capsys.readouterr().err == "failed: there is no run 'nothing' in the store\n"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [(0, "00:00:00"), (600, "00:10:00"), (86_400 + 61, "1d 00:01:01"), (-90, "-00:01:30")],
+)
+def test_a_decision_is_said_to_be_made_a_span_after_its_boundary(seconds, text):
+    assert cli._after(seconds) == text
+
+
+def test_status_of_a_backtest_says_when_it_decided_and_not_how_late(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _paper(node, db, now=_TEN_PAST + DAY)
+    backtest = [
+        "backtest", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", "bt",
+        "--from", "2024-01-01", *_OPENING,
+    ]  # fmt: skip
+    assert _run(node, *backtest, now=_TEN_PAST + 2 * DAY)[0] == cli.EXIT_OK
+
+    code, lines = _run_status(node, db, run_id="bt")
+
+    assert code == cli.EXIT_OK
+    # A backtest is not behind the clock, and decides long after its boundaries by design.
+    assert lines[2].startswith("holdings after the bar at 2024-01-02T00:00:00Z: ")
+    assert lines[-1] == "2024-01-02T00:00:00Z  hold  decided 2024-01-03T00:10:00Z"
+
+
+def test_status_of_a_run_whose_latest_valuation_is_gone_exits_1(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _paper(node, db, now=_TEN_PAST + DAY)
+    _tamper(db, f"DELETE FROM valuations WHERE time = {FIRST_DAY + DAY}")
+    capsys.readouterr()
+
+    code, lines = _run_status(node, db)
+
+    assert code == cli.EXIT_FAILED and lines == []
+    assert capsys.readouterr().err == (
+        f"failed: the decision of run 'p' at {FIRST_DAY + DAY} has no valuation\n"
+    )
+
+
+def test_status_of_a_paper_run_says_when_the_clock_is_behind_it(node, tmp_path):
+    db = tmp_path / "store.db"
+    _paper(node, db, *_OPENING)
+    _paper(node, db, now=_TEN_PAST + DAY)
+
+    code, lines = _run(
+        node, "status", "--config", str(_EXAMPLE), "--db", str(db), "--run-id", "p",
+        now=_TEN_PAST,
+    )  # fmt: skip
+
+    assert code == cli.EXIT_OK
+    assert (
+        "the clock is behind the run: it is at 2024-01-01T00:10:00Z, and the run has decided "
+        "the bar at 2024-01-02T00:00:00Z"
+    ) in lines

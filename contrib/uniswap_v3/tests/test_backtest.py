@@ -64,7 +64,7 @@ def _backtest(store: Store, *, opening=_OPENING, run_id: str = _RUN, config=_CON
         run_id=run_id,
         start=range_.pop("start", FIRST_DAY),
         opening=opening,
-        created_at=FIRST_DAY,
+        now=FIRST_DAY,
         **range_,
     )
 

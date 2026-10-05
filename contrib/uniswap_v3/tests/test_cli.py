@@ -381,19 +381,27 @@ def test_status_says_when_a_boundary_lacks_a_pool(node, tmp_path):
     assert lines[4] == "2024-01-02T00:00:00Z  incomplete: a configured pool has no reading"
 
 
-def test_a_store_locked_by_another_writer_exits_1_with_one_line(node, tmp_path, capsys):
+def test_a_store_locked_by_another_writer_exits_3_with_one_line(
+    node, tmp_path, capsys, monkeypatch
+):
     db = tmp_path / "store.db"
     open_store(db).close()
-    other = sqlite3.connect(db, isolation_level=None)
+    connect = sqlite3.connect
+    # Without the five seconds a connection waits for a lock by default.
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0})
+    )
+    other = connect(db, isolation_level=None)
     other.execute("BEGIN EXCLUSIVE")
     try:
         code, _ = _backfill(db)
     finally:
         other.execute("ROLLBACK")
         other.close()
-    assert code == cli.EXIT_FAILED
+    # The lock is let go of, so a later run may get through: try again.
+    assert code == cli.EXIT_RETRY
     error = capsys.readouterr().err
-    assert error.startswith("failed: the store") and "locked" in error
+    assert error.startswith("try again later: the store") and "locked" in error
     assert "Traceback" not in error
 
 

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows Task Scheduler: one contrib/uniswap_v3 paper visit at 00:10, 00:40
+  and 01:10 UTC every day. The first visit decides the bar that closed at
+  00:00 UTC; the later two find it decided and exit 0, or, when the first
+  could not finish (exit 3: the node had not reached the bar's fill block,
+  or answered with an error), try again. Register it as RUNBOOK.md says: the
+  path C:\path\to\TradingAgents below is replaced with the repository's;
+  it is quoted, since a repository's path may hold a space.
+
+  The times are UTC (the Z) whatever the machine's time zone. A daily bar
+  fills delay_blocks (25 by default) blocks after the boundary, about five
+  minutes on mainnet, so the first visit is ten minutes after it.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>contrib/uniswap_v3 paper visit: decide the bar that closed at 00:00 UTC. Output goes to contrib\uniswap_v3\data\paper-visits.log.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2026-10-06T00:10:00Z</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+    <CalendarTrigger>
+      <StartBoundary>2026-10-06T00:40:00Z</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+    <CalendarTrigger>
+      <StartBoundary>2026-10-06T01:10:00Z</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <!-- A visit still running when the next one is due is left alone: two at once would contend for the store. -->
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <!-- A visit missed while the machine was off runs once it is back; a late visit decides as an on-time one would. -->
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <!-- Stopped before the next visit is due. -->
+    <ExecutionTimeLimit>PT25M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>"C:\path\to\TradingAgents\contrib\uniswap_v3\schedule\paper-visit.cmd"</Command>
+    </Exec>
+  </Actions>
+</Task>

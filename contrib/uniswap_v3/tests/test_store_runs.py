@@ -441,17 +441,23 @@ def test_a_decision_whose_valuation_is_gone_leaves_the_run_without_a_ledger(tmp_
         store.ledger("run-1")
 
 
-def test_a_store_from_before_the_run_tables_gains_them_and_keeps_its_bars(tmp_path):
-    path = tmp_path / "store.db"
+def _store_at(path, version: int) -> sqlite3.Connection:
+    """A store the package left at schema ``version``, open in autocommit mode."""
     connection = sqlite3.connect(path, isolation_level=None)
     connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
     connection.execute(
         "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
     )
-    for statement in _MIGRATIONS[0]:
-        connection.execute(statement)
-    connection.execute("INSERT INTO schema_migrations VALUES (1, 0)")
-    connection.close()
+    for applied in range(1, version + 1):
+        for statement in _MIGRATIONS[applied - 1]:
+            connection.execute(statement)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, 0)", (applied,))
+    return connection
+
+
+def test_a_store_from_before_the_run_tables_gains_them_and_keeps_its_bars(tmp_path):
+    path = tmp_path / "store.db"
+    _store_at(path, 1).close()
     with open_store(path) as store:
         store.insert_bars([pool_bar()])
         store.insert_run(_run())
@@ -462,15 +468,7 @@ def test_a_store_from_before_the_run_tables_gains_them_and_keeps_its_bars(tmp_pa
 
 def test_a_run_stored_before_fills_were_kept_reads_as_filled_by_the_model(tmp_path):
     path = tmp_path / "store.db"
-    connection = sqlite3.connect(path, isolation_level=None)
-    connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
-    connection.execute(
-        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
-    )
-    for version in (1, 2):
-        for statement in _MIGRATIONS[version - 1]:
-            connection.execute(statement)
-        connection.execute("INSERT INTO schema_migrations VALUES (?, 0)", (version,))
+    connection = _store_at(path, 2)
     connection.execute(
         "INSERT INTO runs VALUES ('run-1', 'backtest', 1, 'USDC', 'fixed_weights', '{}', "
         """'{"USDC": "10000", "WBTC": "0", "WETH": "0"}', '1', 0)"""
@@ -479,3 +477,31 @@ def test_a_run_stored_before_fills_were_kept_reads_as_filled_by_the_model(tmp_pa
     with open_store(path) as store:
         run = store.run("run-1")
         assert (run.fills, run.ledger) == (FillSource.MODEL, _ledger())
+
+
+def test_a_decision_keeps_when_it_was_made(store):
+    store.insert_run(_run())
+    held = _held()
+    step = replace(held, decision=replace(held.decision, decided_at=FIRST_DAY + 600))
+    store.record("run-1", step)
+    assert store.decision("run-1", FIRST_DAY).decided_at == FIRST_DAY + 600
+    assert store.decisions("run-1") == [step.decision]
+
+
+def test_a_decision_stored_before_decision_times_were_kept_reads_without_one(tmp_path):
+    path = tmp_path / "store.db"
+    connection = _store_at(path, 3)
+    connection.execute(
+        "INSERT INTO runs VALUES ('run-1', 'backtest', 1, 'USDC', 'fixed_weights', '{}', "
+        """'{"USDC": "10000", "WBTC": "0", "WETH": "0"}', '1', 0, 'model')"""
+    )
+    connection.execute(
+        "INSERT INTO decisions (run_id, time, outcome, close_block) VALUES (?, ?, 'hold', 9)",
+        ("run-1", FIRST_DAY),
+    )
+    connection.close()
+    with open_store(path) as store:
+        assert store.decision("run-1", FIRST_DAY) == Decision(
+            time=FIRST_DAY, outcome=Outcome.HOLD, close_block=9
+        )
+        assert store.decision("run-1", FIRST_DAY).decided_at is None

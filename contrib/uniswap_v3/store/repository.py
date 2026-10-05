@@ -43,7 +43,7 @@ from ..domain.records import (
 from ..domain.types import RunMode, TargetWeights
 from .schema import SchemaError, migrate, transaction
 
-__all__ = ["Store", "StoreError", "open_store"]
+__all__ = ["Store", "StoreBusy", "StoreError", "open_store"]
 
 _COLUMNS: Final = (
     "chain_id",
@@ -61,13 +61,43 @@ _COLUMNS: Final = (
     "finality",
 )
 # SQLite's primary result code for a write to a database that is read-only.
-_SQLITE_READONLY: Final = 8
+_SQLITE_READONLY: Final = frozenset({8})
+# SQLite's primary result codes for a database, or a table, another connection holds.
+_SQLITE_BUSY: Final = frozenset({5, 6})
 _SELECT: Final = f"SELECT {', '.join(_COLUMNS)} FROM bars"
 _SERIES: Final = "chain_id = ? AND pool = ? AND interval_seconds = ?"
 
 
 class StoreError(Exception):
     """The store cannot be opened, read or written, or holds something it should not."""
+
+
+class StoreBusy(StoreError):
+    """Another connection held the store for longer than this one waits: later, it may not."""
+
+
+def _is_kind(error: sqlite3.Error, codes: frozenset[int], words: str) -> bool:
+    """Whether SQLite's error is of one of the primary result ``codes``.
+
+    The low byte of an error's code is its kind, and the rest says which
+    case of it the error is. Before Python 3.11 an error carries no code,
+    only SQLite's words, which are then looked for.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return words in str(error)
+    return code & 0xFF in codes
+
+
+def _is_busy(error: sqlite3.Error) -> bool:
+    """Whether SQLite refused because another connection holds the database or a table."""
+    return _is_kind(error, _SQLITE_BUSY, "is locked")
+
+
+def _store_error(message: str, error: Exception) -> StoreError:
+    """``message`` as a :class:`StoreBusy` when ``error`` is a lock, else a :class:`StoreError`."""
+    busy = isinstance(error, sqlite3.Error) and _is_busy(error)
+    return (StoreBusy if busy else StoreError)(f"{message} ({error})")
 
 
 @contextmanager
@@ -77,7 +107,7 @@ def _sqlite_errors(doing: str) -> Iterator[None]:
         yield
     except (sqlite3.Error, OverflowError) as exc:
         # OverflowError: an integer SQLite's 64 bits cannot hold.
-        raise StoreError(f"the store failed while {doing} ({exc})") from exc
+        raise _store_error(f"the store failed while {doing}", exc) from exc
 
 
 def _row(bar: PoolBar) -> tuple[Any, ...]:
@@ -138,13 +168,24 @@ def _ledger(balances: str, gas_eth: str) -> Ledger:
 
 
 _DECISION_COLUMNS: Final = (
-    "time, outcome, target, reason, reason_code, close_block, close_block_hash, finality"
+    "time, outcome, target, reason, reason_code, close_block, close_block_hash, finality, "
+    "decided_at"
 )
 _VALUATION_COLUMNS: Final = "time, balances, gas_eth, prices, total_value"
 
 
 def _decision(row: Sequence[Any]) -> Decision:
-    time, outcome_text, target, reason, code, close_block, close_block_hash, finality = row
+    (
+        time,
+        outcome_text,
+        target,
+        reason,
+        code,
+        close_block,
+        close_block_hash,
+        finality,
+        decided_at,
+    ) = row
     outcome = Outcome(outcome_text)
     # An outcome that says nothing has no codes of its own to read one in; the
     # row is then refused, by the enum or by the decision, for carrying one.
@@ -165,6 +206,7 @@ def _decision(row: Sequence[Any]) -> Decision:
                 finality=Finality(finality),
             )
         ),
+        decided_at=decided_at,
     )
 
 
@@ -531,8 +573,8 @@ class Store:
             self._require_follows_on(run_id, step)
             self._connection.execute(
                 "INSERT INTO decisions (run_id, time, outcome, target, reason, "
-                "reason_code, close_block, close_block_hash, finality) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "reason_code, close_block, close_block_hash, finality, decided_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     decision.time,
@@ -545,6 +587,7 @@ class Store:
                     decision.close_block,
                     None if seen is None else seen.close_block_hash,
                     None if seen is None else seen.finality.value,
+                    decision.decided_at,
                 ),
             )
             self._connection.executemany(
@@ -583,16 +626,8 @@ class Store:
 
 
 def _is_read_only(error: sqlite3.OperationalError) -> bool:
-    """Whether SQLite refused a write because the database is read-only.
-
-    The low byte of the error's code is its kind, and the rest says which
-    read-only case it is. Before Python 3.11 an error carries no code, only
-    SQLite's words.
-    """
-    code = getattr(error, "sqlite_errorcode", None)
-    if code is None:
-        return "readonly" in str(error)
-    return bool(code & 0xFF == _SQLITE_READONLY)
+    """Whether SQLite refused a write because the database is read-only."""
+    return _is_kind(error, _SQLITE_READONLY, "readonly")
 
 
 def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Store:
@@ -639,5 +674,5 @@ def open_store(path: Path, *, create: bool = True, durable: bool = True) -> Stor
         migrate(connection)
     except (sqlite3.Error, SchemaError) as exc:
         connection.close()
-        raise StoreError(f"the store at {str(path)!r} cannot be used ({exc})") from exc
+        raise _store_error(f"the store at {str(path)!r} cannot be used", exc) from exc
     return Store(connection)

@@ -1,11 +1,13 @@
-"""The numbers that decide which swaps are asked for and how a virtual fill is taken."""
+"""The numbers that decide which swaps are asked for, how a virtual fill is taken, and how a fork signs."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
 
-__all__ = ["ExecutionSettings"]
+from .types import Bar
+
+__all__ = ["ExecutionSettings", "ForkSettings", "fill_block"]
 
 
 def _is_amount(value: object) -> bool:
@@ -65,3 +67,44 @@ class ExecutionSettings:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"{name} must be an integer of at least {minimum}, got {value!r}")
+
+
+def fill_block(bar: Bar, settings: ExecutionSettings) -> int:
+    """The block the swaps decided on ``bar`` are taken at.
+
+    ``settings.delay_blocks`` after the first block of the bar's boundary,
+    which is the block after its close block. A modelled or quoted fill is
+    priced at the end of it, and a fork run signs its swaps on a fork of
+    it, so that all three meet the same pools.
+    """
+    return bar.close_block + 1 + settings.delay_blocks
+
+
+# How many dev accounts anvil makes from its mnemonic.
+_DEV_ACCOUNTS = 10
+
+
+@dataclass(frozen=True)
+class ForkSettings:
+    """How a fork run signs: as which of anvil's dev accounts, and with how long a deadline.
+
+    - ``account``: the dev account, 0 to 9, the swaps are signed by.
+    - ``deadline_seconds``: how long after the node's clock a sent swap may
+      still be mined.
+    """
+
+    account: int = 0
+    deadline_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        account, deadline = self.account, self.deadline_seconds
+        if isinstance(account, bool) or not isinstance(account, int) or not (
+            0 <= account < _DEV_ACCOUNTS
+        ):
+            raise ValueError(
+                f"account must be an integer from 0 to {_DEV_ACCOUNTS - 1}, got {account!r}"
+            )
+        if isinstance(deadline, bool) or not isinstance(deadline, int) or deadline < 1:
+            raise ValueError(
+                f"deadline_seconds must be an integer of at least 1, got {deadline!r}"
+            )

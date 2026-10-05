@@ -22,11 +22,13 @@ from .ledger import Ledger
 from .types import Fill, RunMode, TargetWeights
 
 __all__ = [
+    "FILLED_OUTCOMES",
     "REASON_CODES",
     "BarSeen",
     "Decision",
     "FillRecord",
     "FillSource",
+    "OpenSend",
     "Outcome",
     "RejectionCode",
     "RunRecord",
@@ -50,10 +52,13 @@ class Outcome(str, Enum):
     FILLED = "filled"
     # A swap was refused, or the gas balance did not cover the fills: nothing was applied.
     REJECTED = "rejected"
+    # Signed swaps only: a swap was refused after earlier ones had filled on the chain.
+    # Those stand, and are applied; the swaps after the refused one were not asked for.
+    PARTIAL = "partial"
 
 
 class RejectionCode(str, Enum):
-    """Why a rebalance was rejected, for code to tell apart; the reason says it in words."""
+    """Why a rebalance was rejected, or left partial, for code to tell apart; the reason says it in words."""
 
     # The executor refused a swap: what this bar's market gave.
     EXECUTOR = "executor"
@@ -112,8 +117,14 @@ class BarSeen:
 
 # The outcomes that say why, and the codes each says it in.
 REASON_CODES: Final[Mapping[Outcome, type[RejectionCode] | type[SkipCode]]] = MappingProxyType(
-    {Outcome.REJECTED: RejectionCode, Outcome.SKIPPED_SUSPECT: SkipCode}
+    {
+        Outcome.REJECTED: RejectionCode,
+        Outcome.PARTIAL: RejectionCode,
+        Outcome.SKIPPED_SUSPECT: SkipCode,
+    }
 )
+# The outcomes whose decision applied fills.
+FILLED_OUTCOMES: Final = frozenset({Outcome.FILLED, Outcome.PARTIAL})
 
 
 @dataclass(frozen=True)
@@ -138,9 +149,10 @@ class Suspicion:
 class Decision:
     """One bar's decision.
 
-    A rejected decision and a skipped one, and no other, say why: ``reason``
-    in words and ``reason_code`` for code, a :class:`RejectionCode` for the
-    one and a :class:`SkipCode` for the other. ``seen`` is ``None`` for a
+    A rejected, a partial and a skipped decision, and no other, say why:
+    ``reason`` in words and ``reason_code`` for code, a
+    :class:`RejectionCode` for the first two and a :class:`SkipCode` for
+    the last. ``seen`` is ``None`` for a
     bar that came from no store, and otherwise describes the block
     ``close_block`` names. ``decided_at`` is when the call that decided the
     bar was made, in epoch seconds (a paper visit's time, or a backtest's),
@@ -165,7 +177,12 @@ class Decision:
             )
         if not isinstance(self.outcome, Outcome):
             raise ValueError(f"outcome must be an Outcome, got {self.outcome!r}")
-        targeted = self.outcome in (Outcome.NO_TRADE, Outcome.FILLED, Outcome.REJECTED)
+        targeted = self.outcome in (
+            Outcome.NO_TRADE,
+            Outcome.FILLED,
+            Outcome.REJECTED,
+            Outcome.PARTIAL,
+        )
         if targeted != isinstance(self.target, TargetWeights):
             raise ValueError(
                 f"a decision carries a target exactly when the strategy gave one: "
@@ -175,8 +192,8 @@ class Decision:
         explained = code_type is not None
         if explained != (self.reason is not None) or explained != (self.reason_code is not None):
             raise ValueError(
-                f"a rejected or a skipped decision, and no other, carries a reason and a "
-                f"reason code: {self.outcome.value} with {self.reason!r} and "
+                f"a rejected, a partial or a skipped decision, and no other, carries a reason "
+                f"and a reason code: {self.outcome.value} with {self.reason!r} and "
                 f"{self.reason_code!r}"
             )
         if code_type is not None and (
@@ -250,9 +267,9 @@ class StepRecord:
                 f"{self.decision.time}"
             )
         if not isinstance(self.fills, tuple) or bool(self.fills) != (
-            self.decision.outcome is Outcome.FILLED
+            self.decision.outcome in FILLED_OUTCOMES
         ):
-            raise ValueError("a step carries fills exactly when its decision is filled")
+            raise ValueError("a step carries fills exactly when its decision is filled or partial")
         for fill in self.fills:
             if not isinstance(fill, Fill):
                 raise ValueError(f"a step's fills are Fill values, got {fill!r}")
@@ -313,6 +330,45 @@ class FillRecord:
             )
 
 
+@dataclass(frozen=True)
+class OpenSend:
+    """A bar whose swaps began to be signed and sent, and which has no decision yet.
+
+    Written before the first swap is sent, with each swap that fills
+    written as it fills (``legs``, oldest first), so that what reached the
+    chain is known even when the step never ends. A step that ends records
+    the bar's decision, which settles the send. ``failure`` is what stopped
+    a step that did not end, when it got to say so, and ``failed_gas_eth``
+    the gas that the transactions of the failed swap are known to have
+    cost; ``None`` when nothing says.
+    """
+
+    time: int
+    started_at: int
+    legs: tuple[FillRecord, ...] = ()
+    failure: str | None = None
+    failed_gas_eth: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if not _is_count(self.time) or not _is_count(self.started_at):
+            raise ValueError("time and started_at must be non-negative integers")
+        if not isinstance(self.legs, tuple) or not all(
+            isinstance(leg, FillRecord) and leg.time == self.time for leg in self.legs
+        ):
+            raise ValueError(f"legs must be the FillRecords of the bar at {self.time}")
+        if [leg.leg for leg in self.legs] != list(range(len(self.legs))):
+            raise ValueError("legs must be numbered from 0, one after another")
+        if self.failure is not None and (
+            not isinstance(self.failure, str) or not self.failure.strip()
+        ):
+            raise ValueError(f"failure must be a non-empty string or None, got {self.failure!r}")
+        gas = self.failed_gas_eth
+        if gas is not None and (
+            not isinstance(gas, Decimal) or not gas.is_finite() or gas.is_signed()
+        ):
+            raise ValueError(f"failed_gas_eth must be a non-negative Decimal or None, got {gas!r}")
+
+
 class FillSource(str, Enum):
     """Where a run's fills come from. A run keeps to one, from its first bar to its last."""
 
@@ -320,6 +376,11 @@ class FillSource(str, Enum):
     QUOTER = "quoter"
     # Swaps signed and mined: on a local fork, or (later) on the chain itself.
     CHAIN = "chain"
+
+    @property
+    def signs(self) -> bool:
+        """Whether these fills are swaps signed and mined, which change a wallet as they come."""
+        return self is FillSource.CHAIN
 
 
 # The sources of fills each mode takes. A paper run fills from quotes: a model has
@@ -343,6 +404,8 @@ class RunRecord:
     ``ledger`` the opening balances, and ``fills`` where its fills come
     from, one of those its mode takes: a backtest from the model or the
     quoter, a paper run from the quoter, a fork or a live run from the chain.
+    ``fork_block`` is the block the local fork was forked at when a fork
+    run was started, which a fork run has and no other run does.
     """
 
     run_id: str
@@ -354,6 +417,7 @@ class RunRecord:
     ledger: Ledger
     created_at: int
     fills: FillSource = FillSource.MODEL
+    fork_block: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("run_id", "quote", "strategy", "config"):
@@ -373,6 +437,14 @@ class RunRecord:
             )
         if not _is_count(self.chain_id) or not _is_count(self.created_at):
             raise ValueError("chain_id and created_at must be non-negative integers")
+        forked = self.mode is RunMode.FORK
+        if forked != (self.fork_block is not None) or (
+            forked and not _is_count(self.fork_block)
+        ):
+            raise ValueError(
+                f"a fork run, and no other, names the block it was forked at as a "
+                f"non-negative integer: a {self.mode.value} run with {self.fork_block!r}"
+            )
         if not isinstance(self.ledger, Ledger):
             raise ValueError(f"ledger must be a Ledger, got {self.ledger!r}")
         if self.quote not in self.ledger.balances:

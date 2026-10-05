@@ -21,10 +21,10 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 | backtest | `backtest --fills model` | store 裡回補好的歷史 bar | 離線模型：收盤價扣池子費率、`execution.model.slippage`，gas＝固定單位 × 該 bar 的 base fee | 可用 |
 | backtest | `backtest --fills quoter` | 同上 | 每根 bar 的成交區塊上對 QuoterV2 做歷史 `eth_call`（要 archive 節點） | 可用 |
 | paper | `paper` | 每次 visit 從鏈上讀新收盤的 bar 寫進 store | 同 `--fills quoter`，不送交易 | 可用 |
-| fork | — | — | `chain/swaps.py` 的 `ChainExecutor`：在本機 anvil 主網分叉上簽名送出 | executor 與防線已做、還沒接進引擎（下一步）；分叉上的來回驗收見 RUNBOOK §10 |
+| fork | `fork` | 同 backtest | `chain/swaps.py` 的 `ChainExecutor`：每根要交易的 bar 先把本機 anvil 分叉重設到該 bar 的成交區塊、把錢包灌成帳本的餘額，再簽名送出 | 可用（RUNBOOK §10） |
 | live | — | — | 主網 | 還沒做（另開計畫） |
 
-`start_run` 目前拒絕 fork 與 live run（兩者都從鏈上成交，而引擎還不接會簽名的 executor），所以不會建出打不開的 run。
+`start_run` 拒絕 live run（真錢的交易還沒做），所以不會建出打不開的 run。
 
 backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecutor`，而且只在分叉上：
 
@@ -40,8 +40,9 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 - `Rejection`＝錢包沒動；有交易上鏈後才失敗丟 `SendError`（不是 `ChainError`，讀取端的處理接不到它）：
   只花了 gas 是 `SwapNotFilled`，swap 上鏈了但結果讀不出來是 `SwapOutcomeUnknown`，收據沒來或讀不到是 `TransactionUnconfirmed`。
 - 分叉只認 `open_fork` 開的：自己手建的 `Fork` 不保證在本機，`ChainExecutor` 只會再確認它是 anvil 分叉。
-- 成交來源 `chain` 只屬於 fork／live run，fork／live run 也只能用它；在引擎能記下「第一腿上鏈、後腿失敗」之前，
-  `open_engine` 拒絕任何會簽名的 executor。
+- 成交來源 `chain` 只屬於 fork／live run，fork／live run 也只能用它；會簽名的 executor 一定帶著它的錢包
+  （`ports.Wallet`）一起交給 `open_engine`，其他 executor 不帶。
+- 錢包每根 bar 交易前後都和帳本對帳（每個代幣的 `balanceOf` 與 ETH 餘額，逐位元相等），不一致就停下（fail closed）。
 
 ---
 
@@ -64,13 +65,27 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 
 每根決策過的 bar 都有一筆 decision 與一筆估值，同一個交易寫入。
 
+第 4 步的「一起套用或都不做」只對虛擬成交（model、quoter）成立。會簽名的 executor（fork）上鏈的那一腿已經動了錢包，
+所以改成：
+
+1. 錢包準備好這根 bar（分叉重設到成交區塊、灌入帳本餘額），持有量必須等於帳本，否則什麼都不送就停。
+2. 送第一筆之前先在 store 寫下這根 bar 的 **send**（`sends` 表），每一腿成交就寫一筆（`sent_legs` 表）。
+3. 某一腿被拒（被拒＝那一腿什麼都沒送）就停在那裡：一腿都沒成交記 `rejected`，有成交的記 **`partial`**，
+   已成交的腿照實套用，下一根由策略從那裡重新決定。
+4. 送完再對帳一次：錢包必須等於「帳本套用已成交的腿」。decision 寫入時同時結清 send。
+
+其他任何讓這一步中斷的狀況（送出失敗、對帳不符）都讓 send 保持未結、記下原因（有的話連交易 hash 與已花的 gas），
+並丟 `UnsettledSend`。有未結 send 的 run 不再往前走，那根 bar 也不會重新決策——重跑不會重送交易。
+`fork` 指令遇到時會把寫下的腿與錢包現在的持有量並列印出，交給人處理（RUNBOOK §10）。
+
 ### Ports（`ports.py`）
 
 | Port | 做什麼 | 實作 |
 |---|---|---|
 | `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py` |
-| `Executor` | `execute(swap, bar) -> Fill \| Rejection`，並宣告成交來源 | `engine/executors.py` 的 `ModelExecutor`、`QuoteExecutor`；`chain/swaps.py` 的 `ChainExecutor`（分叉上簽名，還沒接進引擎） |
-| `Journal` | run、decision、帳本的讀寫 | `store/repository.py` 的 `Store` |
+| `Executor` | `execute(swap, bar) -> Fill \| Rejection`，並宣告成交來源 | `engine/executors.py` 的 `ModelExecutor`、`QuoteExecutor`；`chain/swaps.py` 的 `ChainExecutor`（分叉上簽名） |
+| `Wallet` | `prepare(bar, ledger)`、`holdings()`：會簽名的 executor 從哪個錢包交易，引擎拿它對帳 | `chain/wallet.py` 的 `ForkWallet` |
+| `Journal` | run、decision、帳本、send 的讀寫 | `store/repository.py` 的 `Store` |
 | `Quoter`、`GasOracle`、`BlockLocator` | 報價、base fee、時間→區塊 | `chain/` |
 
 ### bar 與成交時點（無前視）
@@ -79,7 +94,8 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 - 價格以 USDC 計：ETH/USD 取 USDC/WETH 0.05% 池，BTC/USD＝ETH/USD × WBTC/WETH 0.05% 池。
 - 策略看到的 view＝store 裡到這根為止的**全部** bar，沒有之後的。
 - **成交**一律取在 B＋`execution.delay_blocks`（預設 25 塊，約 5 分鐘）。這個區塊由 bar 決定、
-  與 visit 什麼時候跑無關，所以晚到或補跑的 visit 與準時的成交在同一塊。
+  與 visit 什麼時候跑無關，所以晚到或補跑的 visit 與準時的成交在同一塊。fork run 也把分叉重設到這一塊再送，
+  所以第一腿遇到的池子與 paper／報價回測的報價完全相同（之後的腿會受前一腿影響）。
 - 路徑不尋路：池子在設定裡必須成一棵以計價代幣為根的樹，任兩個代幣之間的路徑唯一
   （USDC↔WBTC 是經 WETH 的兩跳、一筆 swap）。
 
@@ -87,7 +103,7 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 
 ```
 contrib/uniswap_v3/
-  cli.py, __main__.py   python -m contrib.uniswap_v3 <backfill|status|backtest|paper|report>
+  cli.py, __main__.py   python -m contrib.uniswap_v3 <backfill|status|backtest|paper|fork|report>
   config.py             讀 YAML（凍結 dataclass）；run 會存一份設定快照
   constants.py          以 chain ID 分表的代幣、池子、QuoterV2 與 SwapRouter02 地址
   ports.py              上表的 Protocol
@@ -95,10 +111,12 @@ contrib/uniswap_v3/
   strategies/           registry 與佔位策略 fixed_weights
   engine/               step、回測迴圈 replay、兩個 executor
   chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee；
-                        分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）
+                        分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
+                        fork run 的錢包（wallet.py）
   store/                SQLite schema（含版本號與 migration）與讀寫
   backfill.py           把一段 bar 從 archive 節點讀進 store
   paper.py              paper 的一次 visit
+  fork_run.py           fork run，以及未結 send 與錢包的對照
   schedule/             Windows 工作排程器的 task 與 visit 腳本（本機設定放 *.local.cmd）
   data/                 （gitignored）排程的 store 與 log
   configs/              設定範例
@@ -112,6 +130,8 @@ contrib/uniswap_v3/
 四種模式同一組表，所以 `status`／`report` 對任何 run 都能用。decision 以（run、bar 邊界）為鍵，
 同一根 bar 不會決策兩次；它也記下決策當下 bar 的 close block hash 與 finality，以及
 `decided_at`（決策那次呼叫的時間；schema v4 之前的列是空的）。
+會簽名的 run 另寫 `sends`（每根開始送的 bar 一列，記下中斷的原因與已知花掉的 gas）與 `sent_legs`
+（每一腿成交就寫），fork run 在 `runs.fork_block` 記下建立當時分叉所在的區塊（schema v5）。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---
@@ -127,6 +147,7 @@ contrib/uniswap_v3/
 | `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間）；paper run 另印跟不跟得上時鐘 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
 | `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策 | 是 |
+| `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |
 | `report --db D --run-id R` | 報酬、最大回撤、周轉、成本拆解，並列「起始持倉不動」與「全放 USDC」兩個對照組 | 否 |
 
 結束碼：
@@ -134,7 +155,7 @@ contrib/uniswap_v3/
 | 碼 | 意思 | 排程該怎麼做 |
 |---|---|---|
 | 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告） | 不用動 |
-| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run | 看 log、修好 |
+| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send | 看 log、修好 |
 | 2 | 命令列打錯（argparse） | 修排程的指令 |
 | 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住 | 稍後再跑（排程一天三次就是為了這個） |
 | 4 | 只有排程的 visit 腳本會給：進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit 沒有跑 | 看 RUNBOOK §5 |
@@ -184,7 +205,12 @@ contrib/uniswap_v3/
 - paper 的成交區塊在 visit 當下還不是 final；之後 reorg 的話同一區塊號的報價可能不同，目前不偵測。
 - reorg 的 bar 讀數沒有重抓的指令（處理方式見 RUNBOOK）。
 - 主網 gas 對小資金很重：每筆 swap 是幾美元起跳。
-- `ChainExecutor` 還沒接進引擎：多腿再平衡在鏈上不是原子的，第一腿上鏈、後腿失敗時引擎還記不下來，
-  所以 `open_engine` 拒絕它；`fork` 指令與鏈上餘額對帳也還沒做。
+- fork run 每根要交易的 bar 都重設分叉、從帳本灌錢包：鏈上狀態不跨 bar 延續，帳本才是真相、分叉只負責
+  每根 bar 的成交與對帳。重設會讓 anvil 重新向 archive 節點取狀態，每根要交易的 bar 多花幾秒到幾十秒。
+- fork 錢包的代幣餘額是直接寫進代幣 storage 的：只認 Solidity `mapping(address => uint256)` 放在前 64 個 slot 的代幣
+  （USDC、WETH、WBTC 都是），找不到就拒絕。
+- fork 錢包的 ETH 不夠付 gas 時，節點拒收交易，run 會停在未結 send（不會像回測那樣記成 gas 不足的 `rejected`）。
+- 未結 send 沒有自動結清的指令：照 RUNBOOK §10 看對照、用錢包的持有量開新 run。
+- fork 的成交含 approve 的 gas（每筆約 46k–55k），報價成交不含，所以 fork 的 gas 成本會比 paper 高。
 - 報價成交的 gas 加成（`execution.quote.gas_overhead_units`，預設 50,000）：分叉上實測 swap 交易本身比 QuoterV2 的
   估計多 18k–58k gas，另外每次 approve 約 46k–55k，預設值沒改。

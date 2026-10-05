@@ -10,7 +10,10 @@ One transaction, from first to last:
    revert raises :class:`~.errors.CallReverted`, and nothing is sent.
 2. It is signed as an EIP-1559 transaction for the connection's chain ID,
    named explicitly, with the account's next nonce. The fee cap is twice
-   the latest base fee plus the node's suggested priority fee.
+   the latest base fee plus the node's suggested priority fee. A wallet
+   whose ETH does not cover the gas limit at that cap, and the value, is
+   refused with :class:`~.errors.InsufficientFunds` before it is signed,
+   as a node would refuse the transaction.
 3. It is sent once. A send that fails as setup does
    (:class:`~.errors.RpcConfigError`: a refused key, an unusable URL, a
    node that says it lacks state) raises as it is, taken for not sent. When
@@ -41,8 +44,11 @@ from typing import Any
 
 from eth_account.signers.local import LocalAccount
 
+from ..domain.decimal_context import plain
+from ..domain.types import eth_from_wei
 from .errors import (
     ChainError,
+    InsufficientFunds,
     MalformedResponse,
     RpcConfigError,
     RpcRejected,
@@ -131,6 +137,15 @@ class TransactionSender:
         if head.base_fee_wei is None:
             raise MalformedResponse(f"block {head.number} has no base fee to price {what} by")
         tip = rpc.max_priority_fee_wei()
+        gas = estimate + estimate * self._settings.gas_margin_percent // 100
+        max_fee = 2 * head.base_fee_wei + tip
+        # What a node checks before it takes the transaction: the most it may cost.
+        held = rpc.balance(self.address, block=head.number)
+        if held < gas * max_fee + value:
+            raise InsufficientFunds(
+                f"{what} may cost up to {plain(eth_from_wei(gas * max_fee + value))} ETH, and "
+                f"the wallet holds {plain(eth_from_wei(held))}; nothing was sent"
+            )
         transaction = {
             "type": 2,
             # Named here: the validation that would fill it in is not run (Rpc).
@@ -139,8 +154,8 @@ class TransactionSender:
             "to": to,
             "value": value,
             "data": data,
-            "gas": estimate + estimate * self._settings.gas_margin_percent // 100,
-            "maxFeePerGas": 2 * head.base_fee_wei + tip,
+            "gas": gas,
+            "maxFeePerGas": max_fee,
             "maxPriorityFeePerGas": tip,
         }
         signed = self._account.sign_transaction(transaction)

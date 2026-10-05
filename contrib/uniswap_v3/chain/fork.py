@@ -125,6 +125,14 @@ class Fork:
 
     rpc: Rpc
 
+    def fork_block(self) -> int:
+        """The block the node was forked at, or last reset to, as its ``anvil_nodeInfo`` says."""
+        fork = self.rpc.node_info().get("forkConfig")
+        block = fork.get("forkBlockNumber") if isinstance(fork, Mapping) else None
+        if isinstance(block, bool) or not isinstance(block, int) or block < 0:
+            raise MalformedResponse(f"anvil_nodeInfo names the fork block as {block!r}")
+        return block
+
 
 def open_fork(
     chain_id: int, *, url: str = DEFAULT_FORK_URL, settings: RpcSettings | None = None

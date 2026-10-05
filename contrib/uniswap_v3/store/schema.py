@@ -21,6 +21,12 @@ decision's fills and its valuation hang off that key. ``runs.fills``,
 ``decisions.outcome`` and ``reason_code`` carry no CHECK of their values: SQLite cannot alter one,
 so a new outcome would mean rebuilding three tables, and a value this code
 does not know is refused when the row is read.
+
+``sends`` and ``sent_legs`` are what a run whose swaps are signed writes
+while it sends them: a ``sends`` row before the first swap of a bar is
+sent, and a ``sent_legs`` row as each one fills. The bar's decision, written
+when its step ends, settles the send; a ``sends`` row without a decision is
+a send that never ended.
 """
 
 from __future__ import annotations
@@ -124,6 +130,38 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     ("ALTER TABLE runs ADD COLUMN fills TEXT NOT NULL DEFAULT 'model'",),
     # When each decision was made. A decision stored before this has none.
     ("ALTER TABLE decisions ADD COLUMN decided_at INTEGER",),
+    # Signed swaps: the block a fork run was forked at, and each bar whose swaps began to
+    # be sent, with the legs that filled, written before the bar's decision.
+    (
+        "ALTER TABLE runs ADD COLUMN fork_block INTEGER",
+        """
+        CREATE TABLE sends (
+            run_id TEXT NOT NULL REFERENCES runs (run_id),
+            time INTEGER NOT NULL,
+            started_at INTEGER NOT NULL,
+            failure TEXT,
+            failed_gas_eth TEXT,
+            PRIMARY KEY (run_id, time)
+        )
+        """,
+        """
+        CREATE TABLE sent_legs (
+            run_id TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            leg INTEGER NOT NULL,
+            token_in TEXT NOT NULL,
+            token_out TEXT NOT NULL,
+            route TEXT NOT NULL,
+            amount_in TEXT NOT NULL,
+            min_amount_out TEXT NOT NULL,
+            amount_out TEXT NOT NULL,
+            gas_cost_eth TEXT NOT NULL,
+            block INTEGER NOT NULL,
+            PRIMARY KEY (run_id, time, leg),
+            FOREIGN KEY (run_id, time) REFERENCES sends (run_id, time)
+        )
+        """,
+    ),
 )
 
 SCHEMA_VERSION: Final = len(_MIGRATIONS)

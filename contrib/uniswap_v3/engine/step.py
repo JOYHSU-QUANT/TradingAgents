@@ -17,12 +17,31 @@ Every decided bar gets one decision and one valuation, written together.
 
 "Together or not at all" holds for an executor whose fills are virtual, as a
 modelled or a quoted one is: a fill that is not applied never happened. It
-does not hold for an executor that signs. A leg that is already mined when a
-later one is refused has changed the wallet, and this step would still
-record the bar as rejected with the balances unchanged. So a signing
-executor (one whose fills come from the chain) is refused by
-:func:`open_engine` until the step records such a partial rebalance as
-what it is.
+does not hold for an executor that signs (one whose fills come from the
+chain), and the step trades from that executor's :class:`~..ports.Wallet`
+another way:
+
+1. The wallet is prepared for the bar and must hold what the ledger says,
+   or the step stops with nothing sent.
+2. The bar's send is written to the journal, and then each swap in turn is
+   sent. Each one that fills is written as a leg of the send as it fills.
+3. A swap refused (nothing of it was sent) ends the rebalance there: with
+   no leg filled it is rejected, and otherwise it is partial, its filled
+   legs applied as they stand. The strategy decides the next bar from
+   there.
+4. The wallet must then hold the ledger with the filled legs applied. The
+   decision settles the send.
+
+Anything else that stops such a step after the send was written (a failed
+send, a wallet that does not hold what it should, a decision that cannot
+be written) leaves the send open and says what stopped it, and
+:class:`UnsettledSend` is raised. The one exception is the first swap's
+executor raising with no transaction named (``tx_hashes``), which by the
+:class:`~..ports.Executor` contract means nothing was sent: the send is
+taken back, the error is raised as it is, and the bar is left undecided to
+be tried again, as a failed read leaves a bar in every other mode. A run with an
+open send goes no further, and its bar is not decided again: what reached
+the chain is known only from the legs written and from the wallet.
 
 What is not recorded stops the run instead: a strategy that raises, or
 answers with something other than ``Hold`` or weights over exactly the
@@ -38,8 +57,9 @@ so it can be decided once the cause is fixed.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final
+from decimal import Decimal
 
 from ..config import ConfigError, UniswapConfig, config_snapshot
 from ..domain.decimal_context import plain
@@ -48,6 +68,7 @@ from ..domain.records import (
     BarSeen,
     Decision,
     FillSource,
+    OpenSend,
     Outcome,
     RejectionCode,
     RunRecord,
@@ -65,15 +86,18 @@ from ..domain.types import (
     MarketView,
     Rejection,
     RunMode,
+    SwapIntent,
     TargetWeights,
 )
-from ..ports import Executor, Journal, Strategy
+from ..ports import Executor, Journal, Strategy, Wallet
 from ..strategies.registry import build_strategy
 
 __all__ = [
     "Engine",
     "EngineError",
     "StepResult",
+    "UnsettledSend",
+    "holdings_text",
     "open_engine",
     "start_or_continue_run",
     "start_run",
@@ -82,6 +106,58 @@ __all__ = [
 
 class EngineError(Exception):
     """The step cannot go on, and the bar is left undecided."""
+
+
+class UnsettledSend(EngineError):
+    """A bar's swaps were being sent and its step did not end: the run goes no further.
+
+    What was written of the send is the journal's :meth:`~..ports.Journal.open_send`.
+    """
+
+
+def holdings_text(ledger: Ledger) -> str:
+    """``ledger`` as one line: each token's balance, then the gas balance."""
+    amounts = ", ".join(
+        f"{symbol} {plain(amount)}" for symbol, amount in sorted(ledger.balances.items())
+    )
+    return f"{amounts}; gas ETH {plain(ledger.gas_eth)}"
+
+
+def _checked(leg: int, swap: SwapIntent, answered: object) -> Fill | Rejection:
+    """``answered``, an executor's answer to ``swap``, when it is a fill or a refusal of it."""
+    if not isinstance(answered, Fill | Rejection) or answered.swap != swap:
+        raise EngineError(f"the executor answered leg {leg} with {answered!r}")
+    return answered
+
+
+def _refused(leg: int, swap: SwapIntent, rejection: Rejection) -> str:
+    return (
+        f"leg {leg} ({swap.token_in.symbol} to {swap.token_out.symbol}) was refused: "
+        f"{rejection.reason}"
+    )
+
+
+def _hashes(exc: BaseException) -> tuple[str, ...]:
+    """The transactions ``exc``, or the error it was raised from, says may have been sent.
+
+    A send error names them in ``tx_hashes``; the engine does not know the
+    chain's errors, and reads them by that name.
+    """
+    for error in (exc, exc.__cause__):
+        hashes = getattr(error, "tx_hashes", None)
+        if isinstance(hashes, tuple) and hashes and all(isinstance(h, str) for h in hashes):
+            return hashes
+    return ()
+
+
+def _unsettled(run_id: str, send: OpenSend) -> UnsettledSend:
+    stopped = f" ({send.failure})" if send.failure else ""
+    return UnsettledSend(
+        f"the run {run_id!r} has an open send at the bar {send.time}: its swaps were being "
+        f"sent and its step did not end{stopped}, after {len(send.legs)} leg(s) filled; "
+        f"what the wallet holds is to be reconciled with what was written, and the run "
+        f"goes no further"
+    )
 
 
 @dataclass(frozen=True)
@@ -97,7 +173,9 @@ class Engine:
     """One run's step. Built by :func:`open_engine`, which checks what it is handed.
 
     ``decided_at`` is the time of the call the engine was opened for; every
-    bar it decides is recorded as decided then.
+    bar it decides is recorded as decided then. ``wallet`` is what an
+    executor that signs trades from, and an engine has one exactly when its
+    executor signs.
     """
 
     run_id: str
@@ -106,6 +184,7 @@ class Engine:
     executor: Executor
     journal: Journal
     decided_at: int
+    wallet: Wallet | None = None
 
     def step(
         self,
@@ -125,6 +204,10 @@ class Engine:
         decided = self.journal.decision(self.run_id, bar.time)
         if decided is not None:
             return StepResult(decided, already_run=True)
+        if self.wallet is not None:
+            opened = self.journal.open_send(self.run_id)
+            if opened is not None:
+                raise _unsettled(self.run_id, opened)
         if seen is not None and seen.close_block != bar.close_block:
             raise EngineError(
                 f"seen describes block {seen.close_block}, and the bar at {bar.time} closed "
@@ -194,27 +277,20 @@ class Engine:
             raise EngineError(f"the swaps at {bar.time} cannot be planned ({exc!r})") from exc
         if not swaps:
             return self._record(bar, seen, Outcome.NO_TRADE, ledger, target=answer)
+        if self.wallet is not None:
+            return self._sign(bar, seen, answer, ledger, swaps, self.wallet)
         fills: list[Fill] = []
         for leg, swap in enumerate(swaps):
-            try:
-                answered = self.executor.execute(swap, bar)
-            except (ValueError, ArithmeticError) as exc:
-                raise EngineError(f"the executor failed on leg {leg} ({exc!r})") from exc
-            if not isinstance(answered, Fill | Rejection) or answered.swap != swap:
-                raise EngineError(f"the executor answered leg {leg} with {answered!r}")
+            answered = _checked(leg, swap, self._execute(leg, swap, bar))
             if isinstance(answered, Rejection):
                 # The legs after a refused one are not asked for.
-                reason = (
-                    f"leg {leg} ({swap.token_in.symbol} to {swap.token_out.symbol}) was "
-                    f"refused: {answered.reason}"
-                )
                 return self._record(
                     bar,
                     seen,
                     Outcome.REJECTED,
                     ledger,
                     target=answer,
-                    reason=reason,
+                    reason=_refused(leg, swap, answered),
                     reason_code=RejectionCode.EXECUTOR,
                 )
             fills.append(answered)
@@ -236,6 +312,124 @@ class Engine:
                 f"the fills at {bar.time} do not apply to the ledger ({exc})"
             ) from exc
         return self._record(bar, seen, Outcome.FILLED, after, target=answer, fills=tuple(fills))
+
+    def _execute(self, leg: int, swap: SwapIntent, bar: Bar) -> object:
+        """What the executor answers to ``swap``, leg ``leg`` of the bar's rebalance, unchecked."""
+        try:
+            return self.executor.execute(swap, bar)
+        except (ValueError, ArithmeticError) as exc:
+            raise EngineError(f"the executor failed on leg {leg} ({exc!r})") from exc
+
+    def _sign(
+        self,
+        bar: Bar,
+        seen: BarSeen | None,
+        target: TargetWeights,
+        ledger: Ledger,
+        swaps: Sequence[SwapIntent],
+        wallet: Wallet,
+    ) -> StepResult:
+        """Send ``swaps`` from ``wallet``, which holds ``ledger``, keeping each leg as it fills."""
+        time = bar.time
+        wallet.prepare(bar, ledger)
+        self._require_holds(wallet, ledger, f"before the swaps of the bar at {time}, nothing sent")
+        self.journal.begin_send(self.run_id, time, started_at=self.decided_at)
+        fills: list[Fill] = []
+        refused: str | None = None
+        unsent: Exception | None = None
+        try:
+            for leg, swap in enumerate(swaps):
+                try:
+                    raw = self._execute(leg, swap, bar)
+                except Exception as exc:
+                    if fills or _hashes(exc):
+                        raise
+                    # Nothing of the rebalance was sent (the port's contract).
+                    unsent = exc
+                    break
+                # An answer that is not one may follow a send: it stops the run.
+                answered = _checked(leg, swap, raw)
+                if isinstance(answered, Rejection):
+                    # Nothing of it was sent; the legs after it are not asked for.
+                    refused = _refused(leg, swap, answered)
+                    break
+                fills.append(answered)
+                self.journal.record_leg(self.run_id, time, leg, answered)
+            if unsent is None:
+                try:
+                    after = ledger.apply(fills)
+                except LedgerError as exc:
+                    # The wallet held the ledger, and paid no more than it held.
+                    raise EngineError(
+                        f"the fills at {time} do not apply to the ledger ({exc})"
+                    ) from exc
+                self._require_holds(wallet, after, f"after the swaps of the bar at {time}")
+        except Exception as exc:
+            raise self._stopped(time, exc) from exc
+        if unsent is not None:
+            # The bar is left undecided, as a read that failed leaves one, and can be tried again.
+            self.journal.abandon_send(self.run_id, time)
+            raise unsent
+        if refused is None:
+            outcome, reason = Outcome.FILLED, None
+        elif fills:
+            outcome = Outcome.PARTIAL
+            reason = f"{refused}; the {len(fills)} leg(s) before it filled, and stand"
+        else:
+            outcome, reason = Outcome.REJECTED, refused
+        try:
+            return self._record(
+                bar,
+                seen,
+                outcome,
+                after,
+                target=target,
+                reason=reason,
+                reason_code=None if reason is None else RejectionCode.EXECUTOR,
+                fills=tuple(fills),
+            )
+        except Exception as exc:
+            # The swaps were sent; the decision that settles them was not written.
+            raise self._stopped(time, exc) from exc
+
+    @staticmethod
+    def _require_holds(wallet: Wallet, expected: Ledger, when: str) -> None:
+        held = wallet.holdings()
+        if held != expected:
+            raise EngineError(
+                f"{when}: the wallet holds {holdings_text(held)}, and the run's ledger says "
+                f"{holdings_text(expected)}"
+            )
+
+    def _stopped(self, time: int, exc: Exception) -> UnsettledSend:
+        """Write what stopped the send at ``time``, and the error that stops the run.
+
+        A send error says which transactions it concerns and what gas they
+        cost; it is read here by those names, since the engine does not
+        know the chain's errors.
+        """
+        failure = f"{type(exc).__name__}: {exc}"
+        hashes = _hashes(exc)
+        if hashes:
+            failure += f" (transactions {', '.join(hashes)})"
+        gas = getattr(exc, "gas_cost_eth", None)
+        try:
+            self.journal.fail_send(
+                self.run_id,
+                time,
+                failure=failure,
+                gas_eth=gas if isinstance(gas, Decimal) else None,
+            )
+        except Exception as failed:
+            # A store that failed the step may fail this too; the send stays open either way.
+            unwritten = f"; what stopped it could not be written ({failed})"
+        else:
+            unwritten = ""
+        return UnsettledSend(
+            f"the swaps of the bar at {time} were being sent when the step stopped "
+            f"({failure}){unwritten}; the send is left open, and the run goes no further until "
+            f"what the wallet holds is reconciled with what was written"
+        )
 
     def _record(
         self,
@@ -272,18 +466,6 @@ class Engine:
         return StepResult(decision, already_run=False)
 
 
-# The sources of fills the step cannot take yet: a signed swap can be left half done
-# (a leg mined, a later one refused), and the step cannot record that.
-_UNWIRED_FILLS: Final = frozenset({FillSource.CHAIN})
-
-
-def _unwired(what: str) -> EngineError:
-    return EngineError(
-        f"{what}: an executor that signs is not wired to the step yet, since the step "
-        f"cannot record a rebalance a signed swap left half done"
-    )
-
-
 def _strategy(config: UniswapConfig) -> Strategy:
     """The config's strategy, built; one the registry refuses is a :class:`~..config.ConfigError`."""
     try:
@@ -301,22 +483,21 @@ def start_run(
     ledger: Ledger,
     created_at: int,
     fills: FillSource = FillSource.MODEL,
+    fork_block: int | None = None,
 ) -> RunRecord:
     """Start a run under ``config`` with ``ledger`` as its opening balances, filled from ``fills``.
 
     The balances must name exactly the configured tokens, at zero for one
     the run starts without, though not all at zero: a run that holds nothing
     can never trade. No balance has more decimal places than its token, nor
-    the gas balance more than ETH. The config's snapshot is kept with the run.
-    A config whose strategy cannot be built starts no run: the run could
-    never be opened, and its id would be taken. Nor does a live run (trading
-    with real funds is not built), nor, for now, a run whose fills come from
-    the chain: :func:`open_engine` refuses every executor of theirs.
+    the gas balance more than ETH. The config's snapshot is kept with the run,
+    and a fork run keeps ``fork_block``, the block its fork was at, which no
+    other run has. A config whose strategy cannot be built starts no run: the
+    run could never be opened, and its id would be taken. Nor does a live run:
+    trading with real funds is not built.
     """
     if mode is RunMode.LIVE:
         raise EngineError("a live run is not started: trading with real funds is not built yet")
-    if fills in _UNWIRED_FILLS:
-        raise _unwired(f"a run whose fills come from the {fills.value} is not started")
     _strategy(config)
     symbols = {token.symbol for token in config.tokens}
     if set(ledger.balances) != symbols:
@@ -349,6 +530,7 @@ def start_run(
             ledger=ledger,
             created_at=created_at,
             fills=fills,
+            fork_block=fork_block,
         )
     except ValueError as exc:
         raise EngineError(f"the run cannot be started ({exc})") from exc
@@ -365,11 +547,13 @@ def start_or_continue_run(
     opening: Ledger | None,
     created_at: int,
     fills: FillSource = FillSource.MODEL,
+    fork_block: int | None = None,
 ) -> None:
     """Start the run ``run_id`` in ``mode`` with ``opening``, or check that it can be carried on.
 
     A run that is not there needs ``opening``, and is started with ``fills``
-    as where its fills come from. One that is there must be of ``mode``,
+    as where its fills come from (and, a fork run, with ``fork_block`` as
+    the block its fork was at). One that is there must be of ``mode``,
     and an ``opening`` handed with it must be the balances it was started
     with. Whether it was started under ``config`` is
     :func:`open_engine`'s check.
@@ -386,6 +570,7 @@ def start_or_continue_run(
             ledger=opening,
             created_at=created_at,
             fills=fills,
+            fork_block=fork_block,
         )
         return
     if run.mode is not mode:
@@ -401,26 +586,42 @@ def start_or_continue_run(
 
 
 def open_engine(
-    journal: Journal, config: UniswapConfig, executor: Executor, *, run_id: str, now: int
+    journal: Journal,
+    config: UniswapConfig,
+    executor: Executor,
+    *,
+    run_id: str,
+    now: int,
+    wallet: Wallet | None = None,
 ) -> Engine:
     """The engine of the run ``run_id``, with the config's strategy built, for a call at ``now``.
 
     A run is continued only under the config it was started with, and by an
     executor whose fills come from where the run's do: a config whose
     snapshot differs is refused, an executor of another source is, and so
-    is a run that is not there. An executor whose fills come from the
-    chain is refused whatever the run: the step cannot yet record a
-    rebalance that a signed swap left half done.
+    is a run that is not there. An executor whose fills come from the chain
+    comes with the ``wallet`` it signs from, and no other executor does. A
+    run with an open send is refused with :class:`UnsettledSend`.
     A strategy the registry does not know, or whose params it refuses, is a
     :class:`~..config.ConfigError`.
     """
     if not isinstance(now, int) or isinstance(now, bool) or now < 0:
         raise EngineError(f"now must be a non-negative integer of seconds, got {now!r}")
-    if executor.source in _UNWIRED_FILLS:
-        raise _unwired(f"an executor whose fills come from the {executor.source.value} is not opened")
+    signs = executor.source.signs
+    if signs != (wallet is not None):
+        raise EngineError(
+            "an executor whose fills come from the chain signs from a wallet, which is handed "
+            "with it"
+            if signs
+            else f"an executor whose fills come from the {executor.source.value} signs nothing, "
+            f"and is handed no wallet"
+        )
     run = journal.run(run_id)
     if run is None:
         raise EngineError(f"there is no run {run_id!r}")
+    opened = journal.open_send(run_id)
+    if opened is not None:
+        raise _unsettled(run_id, opened)
     if run.config != config_snapshot(config):
         raise EngineError(
             f"the run {run_id!r} was started under another config; a changed config "
@@ -439,4 +640,5 @@ def open_engine(
         executor=executor,
         journal=journal,
         decided_at=now,
+        wallet=wallet,
     )

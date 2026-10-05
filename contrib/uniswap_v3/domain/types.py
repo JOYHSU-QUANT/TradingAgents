@@ -37,6 +37,7 @@ __all__ = [
     "Token",
     "eth_from_wei",
     "tokens_along",
+    "wei_from_eth",
 ]
 
 _ADDRESS: Final = re.compile(r"0x[0-9a-fA-F]{40}")
@@ -383,6 +384,17 @@ def eth_from_wei(wei: int) -> Decimal:
     if isinstance(wei, bool) or not isinstance(wei, int) or not 0 <= wei <= _UINT256_MAX:
         raise ValueError(f"an amount of wei is an integer that fits a uint256, got {wei!r}")
     return Decimal((0, Decimal(wei).as_tuple().digits, -ETH_DECIMALS))
+
+
+def wei_from_eth(amount: Decimal) -> int:
+    """``amount`` whole ETH in wei, exactly; one with more than 18 decimal places is refused."""
+    _require_amount(amount, "an amount of ETH")
+    # As a ratio of integers, so no decimal context takes part.
+    numerator, denominator = amount.as_integer_ratio()
+    wei, remainder = divmod(numerator * 10**ETH_DECIMALS, denominator)
+    if remainder or wei > _UINT256_MAX:
+        raise ValueError(f"{amount} ETH is not a whole number of wei that fits a uint256")
+    return wei
 
 
 @dataclass(frozen=True)

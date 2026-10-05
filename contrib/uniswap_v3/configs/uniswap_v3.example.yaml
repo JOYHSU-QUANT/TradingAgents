@@ -42,6 +42,15 @@ execution:
   quote:
     gas_overhead_units: 50000
 
+# A fork run signs as one of anvil's ten public dev accounts (0-9) and gives each
+# swap deadline_seconds after the fork's clock to be mined. Left out, a fork run
+# signs as account 0 with a 300-second deadline. Adding the section changes the
+# config's snapshot, so a run started without it cannot be carried on with it:
+# add it to a config of its own for fork runs, not to the one a paper run uses.
+# fork:
+#   account: 0
+#   deadline_seconds: 300
+
 # The name of the environment variable that holds the node's URL, never the
 # URL itself. Backfilling and quoted backtests need an archive node, and so
 # does a paper run that has to catch up on bars whose visits were missed.

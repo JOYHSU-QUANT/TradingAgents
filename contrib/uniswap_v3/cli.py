@@ -19,6 +19,14 @@
   that the latest bar is already decided, and decides nothing. Catching
   up on bars whose visits were missed takes a node that still has the
   state of their blocks: an archive node, for more than a short while.
+- ``fork`` replays the stored bars of a range as the fork run ``--run-id``,
+  like ``backtest``, except that each bar's swaps are signed and sent on a
+  local anvil fork (``--fork-url``, a loopback address; 127.0.0.1:8545
+  unless given), reset to the bar's fill block and given the run's balances
+  first. The wallet is checked against the run's ledger before and after
+  each bar's swaps. A run whose step stopped while it was sending goes no
+  further: the command prints what was written of the send beside what the
+  wallet holds, and exits 1. The fork is started separately (RUNBOOK.md).
 - ``report`` prints a run's return, drawdown, turnover and costs, beside
   what leaving the opening balances untouched, or in the quote token, would
   have come to. It reads the store alone, and takes the run's config from
@@ -57,6 +65,9 @@ final chain. It exits 3, having decided nothing of the latest bar, when
 the node's chain has not yet reached the boundary or the bar's fill block,
 and when a quote reverted without a reason of a pool's: whoever schedules
 the visit runs it again later. It exits 1 when its clock is behind the run.
+A ``fork`` run exits as a ``backtest`` does, and also 1 when the fork is not
+an anvil fork on a loopback address, when the wallet does not hold what the
+run's ledger says, and when the run has an open send.
 """
 
 from __future__ import annotations
@@ -77,19 +88,21 @@ from .config import ConfigError, UniswapConfig, config_from_snapshot, load_confi
 from .constants import WRAPPED_NATIVE, pool_key
 from .domain.bars import Finality
 from .domain.decimal_context import parse_decimal, plain
+from .domain.execution import ForkSettings
 from .domain.ledger import Ledger
 from .domain.metrics import Curve, MetricsError, RunMetrics, measurable, run_metrics
 from .domain.records import Decision, FillRecord, Outcome, RunRecord, Valuation
 from .domain.types import RunMode
 from .engine.backtest import BacktestRangeError, BacktestSummary, run_backtest
 from .engine.executors import QuoteExecutor
-from .engine.step import EngineError
+from .engine.step import EngineError, UnsettledSend, holdings_text
 from .store.bar_source import load_bar
 from .store.repository import Store, StoreBusy, StoreError, open_store
 
 if TYPE_CHECKING:
     from .backfill import BackfillSummary
     from .chain.rpc import Rpc
+    from .fork_run import Reconciliation
 
 __all__ = ["EXIT_FAILED", "EXIT_OK", "EXIT_RETRY", "main"]
 
@@ -246,22 +259,25 @@ def _parser() -> argparse.ArgumentParser:
             help="the ETH a new run sets aside for gas: 0.5. It goes with --balance",
         )
 
+    def add_range(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--from",
+            dest="start",
+            type=_parse_time,
+            required=True,
+            help="the first bar boundary, in UTC: 2024-01-01 or 2024-01-01T12:00:00",
+        )
+        command.add_argument(
+            "--to",
+            dest="end",
+            type=_parse_time,
+            help="the range ends at the last boundary at or before this time "
+            "(default: the store's latest bar)",
+        )
+
     backtest = add("backtest", "Replay the stored bars of a range through the engine.")
     add_run(backtest)
-    backtest.add_argument(
-        "--from",
-        dest="start",
-        type=_parse_time,
-        required=True,
-        help="the first bar boundary, in UTC: 2024-01-01 or 2024-01-01T12:00:00",
-    )
-    backtest.add_argument(
-        "--to",
-        dest="end",
-        type=_parse_time,
-        help="the range ends at the last boundary at or before this time "
-        "(default: the store's latest bar)",
-    )
+    add_range(backtest)
     backtest.add_argument(
         "--fills",
         choices=["model", "quoter"],
@@ -275,6 +291,16 @@ def _parser() -> argparse.ArgumentParser:
         "paper", "Read the bars the chain has closed since the run's last, and decide them."
     )
     add_run(paper)
+
+    fork = add(
+        "fork", "Replay the stored bars of a range, signing each bar's swaps on a local fork."
+    )
+    add_run(fork)
+    add_range(fork)
+    fork.add_argument(
+        "--fork-url",
+        help="the anvil fork's URL, on a loopback address (default: http://127.0.0.1:8545)",
+    )
 
     report = commands.add_parser(
         "report", help=_REPORT_SUMMARY, description=_REPORT_SUMMARY
@@ -418,13 +444,6 @@ def _after(seconds: int) -> str:
     return f"{sign}{days}d {clock}" if days else f"{sign}{clock}"
 
 
-def _holdings(ledger: Ledger) -> str:
-    amounts = ", ".join(
-        f"{symbol} {plain(amount)}" for symbol, amount in sorted(ledger.balances.items())
-    )
-    return f"{amounts}; gas ETH {plain(ledger.gas_eth)}"
-
-
 def _measured(
     run: RunRecord,
     config: UniswapConfig,
@@ -456,9 +475,10 @@ def _stored_run(store: Store, run_id: str) -> RunRecord:
 
 
 def _run_header(run: RunRecord) -> str:
+    forked = "" if run.fork_block is None else f" forked at block {run.fork_block}"
     return (
-        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}, fills from the {run.fills.value}, "
-        f"{_one_ascii_line(run.strategy)}, values in {run.quote}"
+        f"run {_one_ascii_line(run.run_id)}: {run.mode.value}{forked}, fills from the "
+        f"{run.fills.value}, {_one_ascii_line(run.strategy)}, values in {run.quote}"
     )
 
 
@@ -522,7 +542,7 @@ def _run_status_lines(store: Store, run_id: str, latest: int, now: int) -> list[
     decisions = store.decisions(run_id)
     lines = [f"{_run_header(run)}, started {_iso(run.created_at)}"]
     if not decisions:
-        lines.append(f"no bar decided yet; opening balances {_holdings(run.ledger)}")
+        lines.append(f"no bar decided yet; opening balances {holdings_text(run.ledger)}")
         return lines
     valuations = store.valuations(run_id)
     if not valuations or valuations[-1].time != decisions[-1].time:
@@ -536,7 +556,7 @@ def _run_status_lines(store: Store, run_id: str, latest: int, now: int) -> list[
     if paper:
         lines.append(_behind(config, decisions[-1].time, now))
     last = valuations[-1]
-    lines.append(f"holdings after the bar at {_iso(last.time)}: {_holdings(last.ledger)}")
+    lines.append(f"holdings after the bar at {_iso(last.time)}: {holdings_text(last.ledger)}")
     lines.append(_value_line(run, config, decisions, valuations, store.fills(run_id)))
     lines.append(f"latest {min(latest, len(decisions))} decision(s):")
     for decision in decisions[-latest:]:
@@ -758,6 +778,90 @@ def _paper(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[
     return EXIT_OK
 
 
+def _reconciliation_lines(found: Reconciliation | None) -> list[str]:
+    """What was written of an open send beside what the wallet holds, as lines to print."""
+    if found is None:
+        return ["the run has no open send any more"]
+    send = found.send
+    lines = [
+        f"open send at the bar {_iso(send.time)}, begun {_iso(send.started_at)}: "
+        f"{len(send.legs)} leg(s) filled"
+    ]
+    if send.failure is not None:
+        lines.append(f"stopped by: {_one_ascii_line(send.failure)}")
+    for leg in send.legs:
+        lines.append(
+            f"leg {leg.leg}: {plain(leg.amount_in)} {leg.token_in} for {plain(leg.amount_out)} "
+            f"{leg.token_out} in block {leg.block}, gas {plain(leg.gas_cost_eth)} ETH"
+        )
+    gas = (
+        f"the failed swap's gas, {plain(send.failed_gas_eth)} ETH, taken off"
+        if found.gas_known
+        else "the failed swap's gas not known, so ETH is not compared"
+    )
+    lines += [
+        f"ledger before the bar: {holdings_text(found.before)}",
+        f"written, with the legs applied and {gas}: {holdings_text(found.expected)}",
+        f"the wallet holds now: {holdings_text(found.held)}",
+        "the wallet agrees with what was written"
+        if found.agrees
+        else "the wallet does NOT agree with what was written",
+        "the run goes no further: start a new run from what the wallet holds (RUNBOOK.md, "
+        "fork runs)",
+    ]
+    return lines
+
+
+def _fork(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
+    config = _config(args)
+    opening = _opening(args, config)
+    try:
+        from .chain.fork import DEFAULT_FORK_URL, open_fork
+        from .chain.rpc import RpcSettings
+        from .chain.swaps import ChainExecutor, SwapSettings
+        from .chain.wallet import ForkWallet
+    except ImportError as exc:
+        raise ConfigError(
+            f"fork needs the packages in contrib/uniswap_v3/requirements.txt ({exc})"
+        ) from exc
+    from .fork_run import reconcile_open_send, run_fork
+
+    settings = config.fork if config.fork is not None else ForkSettings()
+    # A fork reads every account and slot it meets from its upstream node: slower than a node.
+    fork = open_fork(
+        config.chain_id,
+        url=args.fork_url or DEFAULT_FORK_URL,
+        settings=RpcSettings(timeout_seconds=60),
+    )
+    executor = ChainExecutor(
+        fork, account=settings.account, settings=SwapSettings(settings.deadline_seconds)
+    )
+    wallet = ForkWallet(executor, tokens=config.tokens, settings=config.execution)
+    with open_store(args.db, create=False) as store:
+        try:
+            summary = run_fork(
+                store,
+                config,
+                executor,
+                wallet,
+                run_id=args.run_id,
+                start=args.start,
+                end=args.end,
+                opening=opening,
+                now=int(now()),
+                fork_block=fork.fork_block(),
+            )
+        except UnsettledSend as exc:
+            print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
+            for line in _reconciliation_lines(
+                reconcile_open_send(store, config, wallet, args.run_id)
+            ):
+                out(line)
+            return EXIT_FAILED
+    _replayed(args.run_id, summary, out)
+    return EXIT_OK
+
+
 def _fixed(value: Decimal, *, signed: bool = False) -> str:
     """``value`` to two decimal places, with its sign when ``signed``, and never a negative zero."""
     text = f"{value:+.2f}" if signed else f"{value:.2f}"
@@ -786,7 +890,7 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
     out(_run_header(run))
     out(_decided_span(decisions))
     out("decisions: " + _outcome_counts(Counter(decision.outcome for decision in decisions)))
-    for outcome in (Outcome.SKIPPED_SUSPECT, Outcome.REJECTED):
+    for outcome in (Outcome.SKIPPED_SUSPECT, Outcome.REJECTED, Outcome.PARTIAL):
         codes = Counter(
             decision.reason_code.value
             for decision in decisions
@@ -844,6 +948,8 @@ def main(
             return _backtest(args, out, now)
         if args.command == "paper":
             return _paper(args, out, now)
+        if args.command == "fork":
+            return _fork(args, out, now)
         if args.command == "report":
             return _report(args, out)
         return _status(args, out, now)

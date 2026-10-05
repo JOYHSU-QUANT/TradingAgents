@@ -562,3 +562,10 @@ def test_a_run_is_carried_on_only_by_an_executor_of_the_source_it_keeps(store):
         EngineError, match="takes its fills from the quoter, and is not carried on with fills from the model"
     ):
         open_engine(store, _CONFIG, modelled, run_id=_RUN, now=_DECIDED_AT)
+
+
+@pytest.mark.parametrize("now", [-1, True, 1.5, None])
+def test_an_engine_is_opened_only_for_a_time_of_whole_seconds(store, now):
+    start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
+    with pytest.raises(EngineError, match="now must be a non-negative integer of seconds"):
+        open_engine(store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN, now=now)

@@ -33,7 +33,8 @@ Exit codes: 0 when the command ran to its end, 1 when it could not and
 running it again unchanged will not help (the config, the store, the range,
 the node's setup, or an answer of the node's that cannot be right), 3 when
 the node could not be reached, is behind, or answered a read with an error,
-and a later run may succeed. 2 is argparse's, for a command line it cannot
+or another program held the store for longer than a command waits, and a
+later run may succeed. 2 is argparse's, for a command line it cannot
 read. A ``backfill`` that ran to its end exits 0 even when it left
 boundaries without an answer: its last lines count them, and a warning on
 stderr gives their count and the first and last of them. A ``backfill``
@@ -79,11 +80,12 @@ from .domain.decimal_context import parse_decimal, plain
 from .domain.ledger import Ledger
 from .domain.metrics import Curve, MetricsError, RunMetrics, measurable, run_metrics
 from .domain.records import Decision, FillRecord, Outcome, RunRecord, Valuation
+from .domain.types import RunMode
 from .engine.backtest import BacktestRangeError, BacktestSummary, run_backtest
 from .engine.executors import QuoteExecutor
 from .engine.step import EngineError
 from .store.bar_source import load_bar
-from .store.repository import Store, StoreError, open_store
+from .store.repository import Store, StoreBusy, StoreError, open_store
 
 if TYPE_CHECKING:
     from .backfill import BackfillSummary
@@ -425,12 +427,15 @@ def _holdings(ledger: Ledger) -> str:
 
 def _measured(
     run: RunRecord,
+    config: UniswapConfig,
     decisions: Sequence[Decision],
     valuations: Sequence[Valuation],
     fills: Sequence[FillRecord],
 ) -> tuple[list[Valuation], RunMetrics]:
-    """The valuations a run is measured on, and the run measured on them, as ``report`` does."""
-    config = config_from_snapshot(run.config)
+    """The valuations a run is measured on, and the run, started under ``config``, measured on them.
+
+    As ``report`` measures it.
+    """
     measured = measurable(decisions, valuations)
     metrics = run_metrics(
         quote=run.quote,
@@ -469,54 +474,88 @@ def _why(decision: Decision) -> str:
     return "" if decision.reason is None else f" ({_one_ascii_line(decision.reason)})"
 
 
-def _run_status_lines(store: Store, run_id: str, latest: int) -> list[str]:
-    """A run's state: its holdings, value and return, and its ``latest`` decisions."""
+def _behind(config: UniswapConfig, last: int, now: int) -> str:
+    """How far a paper run whose latest decided bar is at ``last`` is behind the clock at ``now``."""
+    interval = config.bars.interval_seconds
+    latest = now - now % interval
+    if latest <= last:
+        return "up to date: the latest boundary that has passed is decided"
+    return (
+        f"behind: {(latest - last) // interval} boundary(ies) after the last decided bar have "
+        f"passed undecided, the latest at {_iso(latest)}; a visit decides them, and the visit "
+        f"log says what stopped one"
+    )
+
+
+def _value_line(
+    run: RunRecord,
+    config: UniswapConfig,
+    decisions: Sequence[Decision],
+    valuations: Sequence[Valuation],
+    fills: Sequence[FillRecord],
+) -> str:
+    """The run's latest value, and its return as ``report`` measures it, or why it has none."""
+    value = f"value {_fixed(valuations[-1].total_value)} {run.quote}"
+    try:
+        measured, metrics = _measured(run, config, decisions, valuations, fills)
+    except MetricsError as exc:
+        return f"{value}; return not measured ({_one_ascii_line(exc)})"
+    change = _fixed(metrics.strategy.total_return * 100, signed=True)
+    return (
+        f"{value}; return {change}% from {_iso(measured[0].time)} to "
+        f"{_iso(measured[-1].time)}, after gas, as report measures it"
+    )
+
+
+def _run_status_lines(store: Store, run_id: str, latest: int, now: int) -> list[str]:
+    """A run's state at ``now``: its holdings, value and return, and its ``latest`` decisions.
+
+    A paper run is also said to be up to date with the clock, or behind it,
+    and its decisions to have been made so long after their boundaries.
+    """
     run = _stored_run(store, run_id)
     decisions = store.decisions(run_id)
     lines = [f"{_run_header(run)}, started {_iso(run.created_at)}"]
     if not decisions:
         lines.append(f"no bar decided yet; opening balances {_holdings(run.ledger)}")
         return lines
+    valuations = store.valuations(run_id)
+    if not valuations or valuations[-1].time != decisions[-1].time:
+        raise StoreError(f"the decision of run {run_id!r} at {decisions[-1].time} has no valuation")
+    config = config_from_snapshot(run.config)
+    paper = run.mode is RunMode.PAPER
     lines.append(
         f"{_decided_span(decisions)}: "
         + _outcome_counts(Counter(decision.outcome for decision in decisions))
     )
-    valuations = store.valuations(run_id)
+    if paper:
+        lines.append(_behind(config, decisions[-1].time, now))
     last = valuations[-1]
     lines.append(f"holdings after the bar at {_iso(last.time)}: {_holdings(last.ledger)}")
-    try:
-        measured, metrics = _measured(run, decisions, valuations, store.fills(run_id))
-    except MetricsError as exc:
-        lines.append(
-            f"value {_fixed(last.total_value)} {run.quote}; return not measured "
-            f"({_one_ascii_line(exc)})"
-        )
-    else:
-        change = _fixed(metrics.strategy.total_return * 100, signed=True)
-        lines.append(
-            f"value {_fixed(last.total_value)} {run.quote}; return {change}% from "
-            f"{_iso(measured[0].time)} to {_iso(measured[-1].time)}, after gas, as report "
-            f"measures it"
-        )
+    lines.append(_value_line(run, config, decisions, valuations, store.fills(run_id)))
     lines.append(f"latest {min(latest, len(decisions))} decision(s):")
     for decision in decisions[-latest:]:
-        when = (
-            "decided at a time that was not kept"
-            if decision.decided_at is None
-            else f"decided {_iso(decision.decided_at)}, "
-            f"{_after(decision.decided_at - decision.time)} after the boundary"
-        )
+        if decision.decided_at is None:
+            when = "decided at a time that was not kept"
+        elif paper:
+            # How late the visit came. A backtest decides its bars long after, by design.
+            when = (
+                f"decided {_iso(decision.decided_at)}, "
+                f"{_after(decision.decided_at - decision.time)} after the boundary"
+            )
+        else:
+            when = f"decided {_iso(decision.decided_at)}"
         lines.append(f"{_iso(decision.time)}  {decision.outcome.value}  {when}{_why(decision)}")
     return lines
 
 
-def _status(args: argparse.Namespace, out: Callable[[str], None]) -> int:
+def _status(args: argparse.Namespace, out: Callable[[str], None], now: Callable[[], float]) -> int:
     config = _config(args)
     # One view for all the reads: a paper visit may be writing meanwhile.
     with open_store(args.db, create=False) as store, store.reading():
         lines = _status_lines(store, config, args.bars)
         if args.run_id is not None:
-            lines += _run_status_lines(store, args.run_id, args.bars)
+            lines += _run_status_lines(store, args.run_id, args.bars, int(now()))
     for line in lines:
         out(line)
     return EXIT_OK
@@ -735,7 +774,9 @@ def _report(args: argparse.Namespace, out: Callable[[str], None]) -> int:
         decisions = store.decisions(args.run_id)
         valuations = store.valuations(args.run_id)
         fills = store.fills(args.run_id)
-    measured, metrics = _measured(run, decisions, valuations, fills)
+    measured, metrics = _measured(
+        run, config_from_snapshot(run.config), decisions, valuations, fills
+    )
     quote = run.quote
     out(_run_header(run))
     out(_decided_span(decisions))
@@ -800,10 +841,11 @@ def main(
             return _paper(args, out, now)
         if args.command == "report":
             return _report(args, out)
-        return _status(args, out)
-    except (TransientChainError, RpcRejected) as exc:
+        return _status(args, out, now)
+    except (TransientChainError, RpcRejected, StoreBusy) as exc:
         # A node that answers a read with an error is as likely to be having
-        # a bad moment as to be broken; the run stopped, and a later one asks.
+        # a bad moment as to be broken, and a store another program holds is
+        # let go of; the run stopped, and a later one asks.
         print(f"try again later: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_RETRY
     except (

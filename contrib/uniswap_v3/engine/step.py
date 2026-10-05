@@ -392,6 +392,8 @@ def open_engine(
     A strategy the registry does not know, or whose params it refuses, is a
     :class:`~..config.ConfigError`.
     """
+    if not isinstance(now, int) or isinstance(now, bool) or now < 0:
+        raise EngineError(f"now must be a non-negative integer of seconds, got {now!r}")
     run = journal.run(run_id)
     if run is None:
         raise EngineError(f"there is no run {run_id!r}")

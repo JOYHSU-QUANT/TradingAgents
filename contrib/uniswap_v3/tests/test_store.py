@@ -17,7 +17,7 @@ from contrib.uniswap_v3.domain.records import BarSeen, SkipCode, Suspicion
 from contrib.uniswap_v3.ports import BarSource
 from contrib.uniswap_v3.store import repository
 from contrib.uniswap_v3.store.bar_source import StoreBarSource, load_bar
-from contrib.uniswap_v3.store.repository import StoreError, open_store
+from contrib.uniswap_v3.store.repository import StoreBusy, StoreError, open_store
 from contrib.uniswap_v3.store.schema import APPLICATION_ID, SCHEMA_VERSION, transaction
 from contrib.uniswap_v3.tests.fakes.node import (
     BTC_TICK as _BTC_TICK,
@@ -422,19 +422,27 @@ def test_a_refused_write_is_read_only_by_its_code_or_failing_that_its_words(
     assert repository._is_read_only(error) is read_only
 
 
-def test_a_store_another_writer_holds_is_not_opened_in_the_mode_it_has(tmp_path, monkeypatch):
-    path = tmp_path / "store.db"
-    open_store(path).close()
-    other = sqlite3.connect(path, isolation_level=None)
-    other.execute("PRAGMA journal_mode = DELETE")
-    other.execute("BEGIN IMMEDIATE")
+@pytest.fixture
+def no_lock_wait(monkeypatch):
+    """The store's connections give up on a lock at once; the original ``connect`` is returned.
+
+    Without this a connection waits five seconds for a lock by default.
+    """
     connect = sqlite3.connect
-    # Without the five seconds a connection waits for a lock by default.
     monkeypatch.setattr(
         sqlite3, "connect", lambda *args, **kwargs: connect(*args, **{**kwargs, "timeout": 0})
     )
+    return connect
+
+
+def test_a_store_another_writer_holds_is_not_opened_in_the_mode_it_has(tmp_path, no_lock_wait):
+    path = tmp_path / "store.db"
+    open_store(path).close()
+    other = no_lock_wait(path, isolation_level=None)
+    other.execute("PRAGMA journal_mode = DELETE")
+    other.execute("BEGIN IMMEDIATE")
     try:
-        with pytest.raises(StoreError, match="cannot be used .*locked"):
+        with pytest.raises(StoreBusy, match="cannot be used .*locked"):
             open_store(path)
     finally:
         other.execute("ROLLBACK")
@@ -464,3 +472,38 @@ def test_where_the_readings_close_on_different_blocks_the_hash_kept_is_the_highe
     stored = load_bar(store, _CONFIG, FIRST_DAY)
     assert stored.bar.close_block == 1_000
     assert (stored.seen.close_block, stored.seen.close_block_hash) == (1_000, later)
+
+
+@pytest.mark.parametrize(
+    ("code", "text", "busy"),
+    [
+        (5, "database is locked", True),
+        (6, "database table is locked", True),
+        # Extended codes: which busy case it is sits above the low byte.
+        (5 | (1 << 8), "database is locked", True),
+        (8, "attempt to write a readonly database", False),
+        (1, "no such table: bars", False),
+        # Before Python 3.11 there is no code, and SQLite's words are all there is.
+        (None, "database is locked", True),
+        (None, "attempt to write a readonly database", False),
+    ],
+)
+def test_a_lock_is_told_by_its_code_or_failing_that_its_words(code, text, busy):
+    error = sqlite3.OperationalError(text)
+    if code is not None:
+        error.sqlite_errorcode = code
+    assert repository._is_busy(error) is busy
+
+
+def test_a_write_another_writer_holds_up_is_store_busy(tmp_path, no_lock_wait):
+    path = tmp_path / "store.db"
+    with open_store(path) as store:
+        other = no_lock_wait(path, isolation_level=None)
+        other.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(StoreBusy, match="the store failed while writing readings"):
+                store.insert_bars([_reading()])
+        finally:
+            other.execute("ROLLBACK")
+            other.close()
+        store.insert_bars([_reading()])

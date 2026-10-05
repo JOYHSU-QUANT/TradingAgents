@@ -81,7 +81,8 @@ contrib/uniswap_v3/
   store/                SQLite schema（含版本號與 migration）與讀寫
   backfill.py           把一段 bar 從 archive 節點讀進 store
   paper.py              paper 的一次 visit
-  schedule/             Windows 工作排程器的 task 與 visit 腳本
+  schedule/             Windows 工作排程器的 task 與 visit 腳本（本機設定放 *.local.cmd）
+  data/                 （gitignored）排程的 store 與 log
   configs/              設定範例
   tests/                全部用 fake 或錄好的回應；打真節點的只有標成 smoke 的
 ```
@@ -105,7 +106,7 @@ contrib/uniswap_v3/
 | 指令 | 做什麼 | 讀鏈 |
 |---|---|---|
 | `backfill --config C --db D --from 2022-01-01 [--to …] [--dry-run]` | 把一段 bar 讀進 store；可重複執行，已有的不重讀 | 是（archive） |
-| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間） | 否 |
+| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間）；paper run 另印跟不跟得上時鐘 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
 | `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策 | 是 |
 | `report --db D --run-id R` | 報酬、最大回撤、周轉、成本拆解，並列「起始持倉不動」與「全放 USDC」兩個對照組 | 否 |
@@ -117,7 +118,8 @@ contrib/uniswap_v3/
 | 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告） | 不用動 |
 | 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run | 看 log、修好 |
 | 2 | 命令列打錯（argparse） | 修排程的指令 |
-| 3 | 節點連不上、落後（還沒到邊界或成交區塊）、或回了錯誤 | 稍後再跑（排程一天三次就是為了這個） |
+| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住 | 稍後再跑（排程一天三次就是為了這個） |
+| 4 | 只有排程的 visit 腳本會給：進不了 repo 目錄或寫不了 log，visit 沒有跑 | 看 RUNBOOK §5 |
 
 ---
 

@@ -5,7 +5,8 @@
   00:00 UTC; the later two find it decided and exit 0, or, when the first
   could not finish (exit 3: the node had not reached the bar's fill block,
   or answered with an error), try again. Register it as RUNBOOK.md says: the
-  path C:\path\to\TradingAgents below is replaced with the repository's.
+  path C:\path\to\TradingAgents below is replaced with the repository's;
+  it is quoted, since a repository's path may hold a space.
 
   The times are UTC (the Z) whatever the machine's time zone. A daily bar
   fills delay_blocks (25 by default) blocks after the boundary, about five
@@ -57,7 +58,7 @@
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>C:\path\to\TradingAgents\contrib\uniswap_v3\schedule\paper-visit.cmd</Command>
+      <Command>"C:\path\to\TradingAgents\contrib\uniswap_v3\schedule\paper-visit.cmd"</Command>
     </Exec>
   </Actions>
 </Task>

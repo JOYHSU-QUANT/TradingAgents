@@ -33,6 +33,15 @@ def _visit_times() -> list[int]:
     return times
 
 
+def _visit_lines() -> list[str]:
+    return _VISIT.read_text(encoding="ascii").splitlines()
+
+
+def _at(prefix: str) -> int:
+    """The index of the visit script's first line that starts with ``prefix``."""
+    return next(index for index, line in enumerate(_visit_lines()) if line.startswith(prefix))
+
+
 def _limit_seconds() -> int:
     limit = _task().findtext("task:Settings/task:ExecutionTimeLimit", namespaces=_NS)
     assert limit is not None and limit.startswith("PT") and limit.endswith("M")
@@ -58,7 +67,8 @@ def test_a_visit_is_stopped_before_the_next_is_due_and_never_runs_beside_another
 
 def test_the_task_runs_the_visit_script_under_the_repository_placeholder():
     command = _task().findtext("task:Actions/task:Exec/task:Command", namespaces=_NS)
-    assert command == r"C:\path\to\TradingAgents\contrib\uniswap_v3\schedule\paper-visit.cmd"
+    # Quoted: a repository's path may hold a space.
+    assert command == r'"C:\path\to\TradingAgents\contrib\uniswap_v3\schedule\paper-visit.cmd"'
 
 
 def test_a_visit_runs_paper_with_no_opening_balances():
@@ -74,3 +84,17 @@ def test_a_visit_runs_paper_with_no_opening_balances():
     assert paper[0].endswith('>>"%LOG%" 2>&1')
     # The visit's exit code is the script's, for Task Scheduler's last run result.
     assert commands[-2:] == ['>>"%LOG%" echo ==== exit %CODE%', "exit /b %CODE%"]
+
+
+def test_a_visit_that_cannot_reach_the_repository_or_its_log_exits_4_and_runs_nothing():
+    lines = _visit_lines()
+    cd, header, paper = _at("cd /d "), _at('>>"%LOG%" echo ==== %DATE%'), _at('"%PYTHON%" -m')
+    assert lines[cd].endswith("|| exit /b 4") and lines[header].endswith("|| exit /b 4")
+    assert cd < header < paper
+
+
+def test_a_visit_takes_its_settings_from_a_local_file_and_prints_unbuffered():
+    # The local file is read after the defaults it overrides, and before they are used.
+    defaults = [_at(f'set "{name}=') for name in ("RUN_ID", "CONFIG", "DB", "LOG", "PYTHON")]
+    assert max(defaults) < _at('if exist "%~dp0paper-visit.local.cmd" call ') < _at("cd /d ")
+    assert 'set "PYTHONUNBUFFERED=1"' in _visit_lines()

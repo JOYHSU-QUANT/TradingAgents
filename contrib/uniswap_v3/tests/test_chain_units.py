@@ -67,3 +67,4 @@ def test_from_raw_is_exact_whatever_the_ambient_context():
 def test_from_raw_refuses_what_is_not_a_uint256(raw):
     with pytest.raises(ValueError, match="fits a uint256"):
         from_raw(_USDC, raw)
+

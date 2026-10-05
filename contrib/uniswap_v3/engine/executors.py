@@ -9,11 +9,11 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Final
 
-from ..domain.decimal_context import DECIMAL_CONTEXT, EXACT_CONTEXT, floor_to_places, plain
+from ..domain.decimal_context import DECIMAL_CONTEXT, floor_to_places, plain
 from ..domain.execution import ExecutionSettings
 from ..domain.records import FillSource
 from ..domain.routing import amount_out_at
-from ..domain.types import ETH_DECIMALS, Bar, Fill, Rejection, SwapIntent
+from ..domain.types import Bar, Fill, Rejection, SwapIntent, eth_from_wei
 from ..ports import GasOracle, NoQuote, Quoter
 
 __all__ = ["ModelExecutor", "QuoteExecutor", "fill_block"]
@@ -26,11 +26,6 @@ def fill_block(bar: Bar, settings: ExecutionSettings) -> int:
     which is the block after its close block.
     """
     return bar.close_block + 1 + settings.delay_blocks
-
-
-def _gas_cost_eth(gas_wei: int) -> Decimal:
-    """An integer of wei as ETH, under the context that traps a result it would have to round."""
-    return Decimal(gas_wei).scaleb(-ETH_DECIMALS, context=EXACT_CONTEXT)
 
 
 class ModelExecutor:
@@ -80,7 +75,7 @@ class ModelExecutor:
         return Fill(
             swap=swap,
             amount_out=modelled,
-            gas_cost_eth=_gas_cost_eth(gas_wei),
+            gas_cost_eth=eth_from_wei(gas_wei),
             block=fill_block(bar, self._settings),
         )
 
@@ -133,5 +128,5 @@ class QuoteExecutor:
             block
         )
         return Fill(
-            swap=swap, amount_out=amount_out, gas_cost_eth=_gas_cost_eth(gas_wei), block=block
+            swap=swap, amount_out=amount_out, gas_cost_eth=eth_from_wei(gas_wei), block=block
         )

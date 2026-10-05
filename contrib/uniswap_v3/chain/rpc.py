@@ -6,6 +6,11 @@ by :class:`RpcSettings` (``ETH_RPC_URL`` unless told otherwise).
 block, and a contract call at a named block. Before its first read it asks
 the node for its chain ID and refuses a node on another chain.
 
+For a wallet that signs, it also offers what sending takes: an account's
+next nonce, a gas estimate, the priority fee, a receipt, and the sending of
+a signed transaction. The send alone is never tried again: the caller holds
+the transaction's hash, and looks for its receipt instead.
+
 Failures, by what the node or the transport said:
 
 - A connection error, a timeout, a response cut short, a body that is not
@@ -52,9 +57,11 @@ from web3 import HTTPProvider, Web3
 from web3.exceptions import (
     BlockNotFound as _Web3BlockNotFound,
     ContractLogicError,
+    TransactionNotFound,
     Web3RPCError,
 )
 from web3.providers.base import BaseProvider
+from web3.types import RPCEndpoint
 
 from .errors import (
     BlockNotFound,
@@ -66,7 +73,16 @@ from .errors import (
     RpcUnavailable,
 )
 
-__all__ = ["DEFAULT_URL_ENV", "BlockHeader", "Rpc", "RpcSettings", "connect", "http_provider"]
+__all__ = [
+    "DEFAULT_URL_ENV",
+    "BlockHeader",
+    "Log",
+    "Receipt",
+    "Rpc",
+    "RpcSettings",
+    "connect",
+    "http_provider",
+]
 
 DEFAULT_URL_ENV: Final = "ETH_RPC_URL"
 
@@ -207,6 +223,77 @@ class BlockHeader:
     hash: str
     timestamp: int
     base_fee_wei: int | None
+
+
+@dataclass(frozen=True)
+class Log:
+    """One event a transaction emitted. Every field is ``0x`` and lowercase hex."""
+
+    address: str
+    topics: tuple[str, ...]
+    data: str
+
+
+@dataclass(frozen=True)
+class Receipt:
+    """What the chain says of a mined transaction.
+
+    ``succeeded`` is false for one that reverted, which still paid its gas:
+    ``gas_used`` at ``effective_gas_price_wei``.
+    """
+
+    tx_hash: str
+    block: int
+    succeeded: bool
+    gas_used: int
+    effective_gas_price_wei: int
+    logs: tuple[Log, ...]
+
+    @property
+    def gas_cost_wei(self) -> int:
+        """What the transaction's gas cost, in wei."""
+        return self.gas_used * self.effective_gas_price_wei
+
+
+def _hex(value: object) -> str | None:
+    """``value`` (bytes, or a hex string) as ``0x`` and lowercase hex; ``None`` when it is neither."""
+    if isinstance(value, bytes):
+        return "0x" + value.hex()
+    if isinstance(value, str) and re.fullmatch(r"0x[0-9a-fA-F]*", value):
+        return value.lower()
+    return None
+
+
+def _receipt(tx_hash: str, raw: object) -> Receipt:
+    """``raw``, a receipt as web3 decodes it, checked and kept as a :class:`Receipt`."""
+    what = f"the receipt of {tx_hash}"
+    if not isinstance(raw, Mapping):
+        raise MalformedResponse(f"{what} came back as {type(raw).__name__}, not a mapping")
+    numbers = {name: raw.get(name) for name in ("blockNumber", "status", "gasUsed", "effectiveGasPrice")}
+    if not all(_is_count(value) for value in numbers.values()) or numbers["status"] not in (0, 1):
+        raise MalformedResponse(f"{what} has {numbers!r}")
+    if _hex(raw.get("transactionHash")) != tx_hash.lower():
+        raise MalformedResponse(f"{what} is of the transaction {raw.get('transactionHash')!r}")
+    logs = raw.get("logs")
+    if not isinstance(logs, Sequence) or isinstance(logs, str | bytes):
+        raise MalformedResponse(f"{what} has logs of {logs!r}")
+    kept: list[Log] = []
+    for log in logs:
+        if not isinstance(log, Mapping) or not isinstance(log.get("topics"), Sequence):
+            raise MalformedResponse(f"{what} has a log of {log!r}")
+        address, data = _hex(log.get("address")), _hex(log.get("data"))
+        topics = tuple(_hex(topic) for topic in log["topics"])
+        if address is None or data is None or None in topics:
+            raise MalformedResponse(f"{what} has a log of {log!r}")
+        kept.append(Log(address, topics, data))  # type: ignore[arg-type]
+    return Receipt(
+        tx_hash=tx_hash.lower(),
+        block=numbers["blockNumber"],
+        succeeded=numbers["status"] == 1,
+        gas_used=numbers["gasUsed"],
+        effective_gas_price_wei=numbers["effectiveGasPrice"],
+        logs=tuple(kept),
+    )
 
 
 def _lacks_state(message: str) -> bool:
@@ -395,9 +482,91 @@ class Rpc:
             lambda: bound.call(block_identifier=block),
         )
 
-    def _request(self, what: str, read: Callable[[], _T]) -> _T:
-        """Run one read, retrying a transient failure and translating every other one."""
-        attempts = self._settings.attempts
+    def transaction_count(self, address: str) -> int:
+        """The next nonce of ``address``: its transactions, the ones the node holds unmined included."""
+        self.verify_chain()
+        count = self._request(
+            f"the nonce of {address}",
+            lambda: self._w3.eth.get_transaction_count(address, "pending"),  # type: ignore[arg-type]
+        )
+        if not _is_count(count):
+            raise MalformedResponse(f"the nonce of {address} came back as {count!r}")
+        return count
+
+    def estimate_gas(self, transaction: Mapping[str, Any]) -> int:
+        """The gas ``transaction`` would use on top of the latest block.
+
+        One that would revert raises :class:`~.errors.CallReverted`, and
+        nothing is sent.
+        """
+        self.verify_chain()
+        gas = self._request(
+            f"a gas estimate for a call to {transaction.get('to')}",
+            lambda: self._w3.eth.estimate_gas(dict(transaction)),  # type: ignore[arg-type]
+        )
+        if not _is_count(gas) or gas == 0:
+            raise MalformedResponse(f"a gas estimate came back as {gas!r}")
+        return gas
+
+    def max_priority_fee_wei(self) -> int:
+        """The priority fee per gas the node suggests, in wei."""
+        self.verify_chain()
+        fee = self._request("the priority fee", lambda: self._w3.eth.max_priority_fee)
+        if not _is_count(fee):
+            raise MalformedResponse(f"the priority fee came back as {fee!r}")
+        return fee
+
+    def send_raw_transaction(self, raw: bytes) -> str:
+        """Hand the signed transaction ``raw`` to the node, and return its hash.
+
+        Tried once, whatever the failure: the signed bytes name their own
+        hash, so the caller looks for a receipt rather than sending again.
+        """
+        self.verify_chain()
+        sent = self._request(
+            "sending a transaction", lambda: self._w3.eth.send_raw_transaction(raw), attempts=1
+        )
+        tx_hash = _hex(sent)
+        if tx_hash is None or len(tx_hash) != 2 + 2 * _HASH_BYTES:
+            raise MalformedResponse(f"a sent transaction's hash came back as {sent!r}")
+        return tx_hash
+
+    def receipt(self, tx_hash: str) -> Receipt | None:
+        """The receipt of ``tx_hash``, or ``None`` while the node has none: not mined, or unknown."""
+        self.verify_chain()
+
+        def read() -> Any:
+            try:
+                return self._w3.eth.get_transaction_receipt(tx_hash)  # type: ignore[arg-type]
+            except TransactionNotFound:
+                return None
+
+        raw = self._request(f"the receipt of {tx_hash}", read)
+        if raw is None:
+            return None
+        return _receipt(tx_hash, raw)
+
+    def node_info(self) -> Mapping[str, Any]:
+        """What an anvil node says of itself (``anvil_nodeInfo``); another node refuses the method.
+
+        The answer holds the URL the fork was made from, which is a secret
+        of its own: it is never to be quoted.
+        """
+        self.verify_chain()
+        info = self._request(
+            "anvil_nodeInfo",
+            lambda: self._w3.manager.request_blocking(RPCEndpoint("anvil_nodeInfo"), []),
+        )
+        if not isinstance(info, Mapping):
+            raise MalformedResponse(f"anvil_nodeInfo came back as {type(info).__name__}")
+        return info
+
+    def _request(self, what: str, read: Callable[[], _T], *, attempts: int | None = None) -> _T:
+        """Run one read, retrying a transient failure and translating every other one.
+
+        ``attempts`` overrides the settings' count: a send is made once.
+        """
+        attempts = self._settings.attempts if attempts is None else attempts
         for attempt in range(1, attempts + 1):
             _REDACTOR.scrub_logs()
             try:
@@ -405,7 +574,7 @@ class Rpc:
             except Exception as exc:
                 # Whatever a provider or a decoder raises: its text may quote
                 # the URL, so nothing of it leaves here unscrubbed.
-                failure = self._translate(what, exc, last=attempt == attempts)
+                failure = self._translate(what, exc, attempt=attempt, attempts=attempts)
             # Raised out here, where the caught exception is no longer being
             # handled and so does not become the new one's context.
             if failure is not None:
@@ -413,8 +582,11 @@ class Rpc:
             self._sleep(self._settings.backoff_seconds * 2 ** (attempt - 1))
         raise AssertionError("unreachable: the last attempt returns or raises")
 
-    def _translate(self, what: str, exc: Exception, *, last: bool) -> ChainError | None:
-        """The error to raise for ``exc``, or ``None`` to try the read again."""
+    def _translate(
+        self, what: str, exc: Exception, *, attempt: int, attempts: int
+    ) -> ChainError | None:
+        """The error to raise for ``exc`` on ``attempt`` of ``attempts``, or ``None`` to try again."""
+        last = attempt == attempts
         text = _REDACTOR.scrub(str(exc))
         if len(text) > _MAX_QUOTE:
             text = f"{text[:_MAX_QUOTE]}... ({len(text) - _MAX_QUOTE} more characters)"
@@ -429,7 +601,6 @@ class Rpc:
             if code in _RATE_LIMIT_CODES:
                 if not last:
                     return None
-                attempts = self._settings.attempts
                 return RpcUnavailable(f"{what} was rate-limited on {attempts} attempt(s) ({said})")
             if isinstance(exc, ContractLogicError) and (
                 code == _REVERT_CODE or "execution reverted" in message
@@ -452,7 +623,7 @@ class Rpc:
         if _is_transient(exc):
             if not last:
                 return None
-            return RpcUnavailable(f"{what} failed after {self._settings.attempts} attempt(s) ({said})")
+            return RpcUnavailable(f"{what} failed after {attempts} attempt(s) ({said})")
         if _status(exc) in _UNAUTHORISED_STATUS:
             return RpcConfigError(f"the endpoint refused the credentials on {what} ({said})")
         if isinstance(exc, requests.HTTPError):

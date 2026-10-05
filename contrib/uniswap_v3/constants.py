@@ -16,6 +16,9 @@ How the Ethereum mainnet entries were checked (2026-10-04):
 - QuoterV2 is the address that page lists, a valid EIP-55 checksum, and on
   chain its ``factory()`` and ``WETH9()`` answer with the factory above and
   the WETH below.
+- SwapRouter02 likewise (checked 2026-10-05): the address on that page, a
+  valid EIP-55 checksum, and on chain ``factory()`` and ``WETH9()`` answer
+  with the same factory and WETH.
 
 Token pages, for the decimals:
 
@@ -37,6 +40,7 @@ __all__ = [
     "ETHEREUM_MAINNET",
     "POOLS",
     "QUOTER_V2",
+    "SWAP_ROUTER_02",
     "TOKENS",
     "WRAPPED_NATIVE",
     "pool_key",
@@ -92,4 +96,9 @@ EARLIEST_BAR_TIME: Final[Mapping[int, int]] = MappingProxyType({ETHEREUM_MAINNET
 # The periphery contract that quotes a swap without making it.
 QUOTER_V2: Final[Mapping[int, str]] = MappingProxyType(
     {ETHEREUM_MAINNET: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"}
+)
+
+# The periphery contract a signed swap is sent to.
+SWAP_ROUTER_02: Final[Mapping[int, str]] = MappingProxyType(
+    {ETHEREUM_MAINNET: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"}
 )

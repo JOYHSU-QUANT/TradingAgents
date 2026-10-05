@@ -516,20 +516,26 @@ def test_the_error_classes_say_what_a_caller_can_do():
     by_action = {
         TransientChainError: {RpcUnavailable, BlockNotFound},
         UnansweredRead: {CallReverted, InsufficientLiquidity, MalformedResponse, RpcRejected},
+        RpcConfigError: {errors.NotAFork},
+        # A transaction was sent, or may have been: not "nothing happened".
+        errors.SendError: {
+            errors.TransactionReverted,
+            errors.TransactionUnconfirmed,
+            errors.SwapNotFilled,
+        },
     }
-    assert not by_action[TransientChainError] & by_action[UnansweredRead]
-    assert not issubclass(TransientChainError, UnansweredRead)
-    assert not issubclass(UnansweredRead, TransientChainError)
+    groups = list(by_action)
+    for group in groups:
+        assert not any(issubclass(group, other) for other in groups if other is not group)
     for action, kinds in by_action.items():
         assert all(issubclass(kind, action) for kind in kinds)
-    # Every class is in exactly one group; the setup fault is a group of its own.
+    # Every class is in exactly one group.
     leaves = {
         kind
         for kind in vars(errors).values()
         if isinstance(kind, type) and issubclass(kind, ChainError) and not kind.__subclasses__()
     }
-    assert leaves == by_action[TransientChainError] | by_action[UnansweredRead] | {RpcConfigError}
-    assert not issubclass(RpcConfigError, TransientChainError | UnansweredRead)
+    assert leaves == set().union(*by_action.values())
 
 
 # --- calls -----------------------------------------------------------------

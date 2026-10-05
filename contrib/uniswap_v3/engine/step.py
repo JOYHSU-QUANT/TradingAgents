@@ -19,9 +19,10 @@ Every decided bar gets one decision and one valuation, written together.
 modelled or a quoted one is: a fill that is not applied never happened. It
 does not hold for an executor that signs. A leg that is already mined when a
 later one is refused has changed the wallet, and this step would still
-record the bar as rejected with the balances unchanged. A signing executor
-is not to be wired to this step until the step records such a partial
-rebalance as what it is.
+record the bar as rejected with the balances unchanged. So a signing
+executor (one whose fills come from the chain) is refused by
+:func:`open_engine` until the step records such a partial rebalance as
+what it is.
 
 What is not recorded stops the run instead: a strategy that raises, or
 answers with something other than ``Hold`` or weights over exactly the
@@ -38,6 +39,7 @@ so it can be decided once the cause is fixed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 from ..config import ConfigError, UniswapConfig, config_snapshot
 from ..domain.decimal_context import plain
@@ -270,6 +272,18 @@ class Engine:
         return StepResult(decision, already_run=False)
 
 
+# The sources of fills the step cannot take yet: a signed swap can be left half done
+# (a leg mined, a later one refused), and the step cannot record that.
+_UNWIRED_FILLS: Final = frozenset({FillSource.CHAIN})
+
+
+def _unwired(what: str) -> EngineError:
+    return EngineError(
+        f"{what}: an executor that signs is not wired to the step yet, since the step "
+        f"cannot record a rebalance a signed swap left half done"
+    )
+
+
 def _strategy(config: UniswapConfig) -> Strategy:
     """The config's strategy, built; one the registry refuses is a :class:`~..config.ConfigError`."""
     try:
@@ -295,8 +309,14 @@ def start_run(
     can never trade. No balance has more decimal places than its token, nor
     the gas balance more than ETH. The config's snapshot is kept with the run.
     A config whose strategy cannot be built starts no run: the run could
-    never be opened, and its id would be taken.
+    never be opened, and its id would be taken. Nor does a live run (trading
+    with real funds is not built), nor, for now, a run whose fills come from
+    the chain: :func:`open_engine` refuses every executor of theirs.
     """
+    if mode is RunMode.LIVE:
+        raise EngineError("a live run is not started: trading with real funds is not built yet")
+    if fills in _UNWIRED_FILLS:
+        raise _unwired(f"a run whose fills come from the {fills.value} is not started")
     _strategy(config)
     symbols = {token.symbol for token in config.tokens}
     if set(ledger.balances) != symbols:
@@ -388,12 +408,16 @@ def open_engine(
     A run is continued only under the config it was started with, and by an
     executor whose fills come from where the run's do: a config whose
     snapshot differs is refused, an executor of another source is, and so
-    is a run that is not there.
+    is a run that is not there. An executor whose fills come from the
+    chain is refused whatever the run: the step cannot yet record a
+    rebalance that a signed swap left half done.
     A strategy the registry does not know, or whose params it refuses, is a
     :class:`~..config.ConfigError`.
     """
     if not isinstance(now, int) or isinstance(now, bool) or now < 0:
         raise EngineError(f"now must be a non-negative integer of seconds, got {now!r}")
+    if executor.source in _UNWIRED_FILLS:
+        raise _unwired(f"an executor whose fills come from the {executor.source.value} is not opened")
     run = journal.run(run_id)
     if run is None:
         raise EngineError(f"there is no run {run_id!r}")

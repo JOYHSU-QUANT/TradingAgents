@@ -438,14 +438,14 @@ def test_a_run_is_started_with_the_configs_snapshot_and_reopened_under_the_same_
         store,
         _CONFIG,
         run_id=_RUN,
-        mode=RunMode.FORK,
+        mode=RunMode.BACKTEST,
         ledger=_ledger(),
         created_at=FIRST_DAY,
     )
     assert store.run(_RUN) == run
     assert (run.fills, run.mode, run.chain_id, run.quote, run.strategy) == (
         FillSource.MODEL,
-        RunMode.FORK,
+        RunMode.BACKTEST,
         1,
         "USDC",
         "fixed_weights",
@@ -465,7 +465,7 @@ def test_a_run_is_not_continued_under_a_changed_config(store):
         store,
         _CONFIG,
         run_id=_RUN,
-        mode=RunMode.FORK,
+        mode=RunMode.BACKTEST,
         ledger=_ledger(),
         created_at=FIRST_DAY,
     )
@@ -562,6 +562,41 @@ def test_a_run_is_carried_on_only_by_an_executor_of_the_source_it_keeps(store):
         EngineError, match="takes its fills from the quoter, and is not carried on with fills from the model"
     ):
         open_engine(store, _CONFIG, modelled, run_id=_RUN, now=_DECIDED_AT)
+
+
+@pytest.mark.parametrize(
+    ("mode", "match"),
+    [
+        (RunMode.FORK, "a run whose fills come from the chain is not started: an executor"),
+        (RunMode.LIVE, "a live run is not started: trading with real funds"),
+    ],
+)
+def test_a_run_that_fills_from_the_chain_is_not_started_yet(store, mode, match):
+    # Its id is not taken: a run that could never be opened is not stored.
+    with pytest.raises(EngineError, match=match):
+        start_run(
+            store,
+            _CONFIG,
+            run_id=_RUN,
+            mode=mode,
+            ledger=_ledger(),
+            created_at=0,
+            fills=FillSource.CHAIN,
+        )
+    assert store.run(_RUN) is None
+
+
+def test_an_executor_that_signs_is_not_opened_on_any_run(store):
+    start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
+
+    class Signing:
+        source = FillSource.CHAIN
+
+        def execute(self, swap, bar):
+            raise AssertionError("never asked")
+
+    with pytest.raises(EngineError, match="not wired to the step yet"):
+        open_engine(store, _CONFIG, Signing(), run_id=_RUN, now=_DECIDED_AT)
 
 
 @pytest.mark.parametrize("now", [-1, True, 1.5, None])

@@ -34,7 +34,7 @@ from .errors import (
 from .rpc import Rpc
 from .units import from_raw, to_raw
 
-__all__ = ["ChainQuoter", "Quote", "quote_exact_input"]
+__all__ = ["ChainQuoter", "Quote", "encode_path", "quote_exact_input"]
 
 # From v3-periphery's IQuoterV2:
 # https://github.com/Uniswap/v3-periphery/blob/main/contracts/interfaces/IQuoterV2.sol
@@ -100,8 +100,11 @@ class Quote:
     block: int
 
 
-def _encode_path(tokens: Sequence[Token], route: Sequence[Pool]) -> bytes:
-    """The packed path v3-periphery reads: token, then (3-byte fee, token) per hop."""
+def encode_path(tokens: Sequence[Token], route: Sequence[Pool]) -> bytes:
+    """The packed path v3-periphery reads, QuoterV2's and the router's alike.
+
+    The first token, then a 3-byte fee and the next token for each hop.
+    """
     path = bytes.fromhex(tokens[0].address[2:])
     for pool, token in zip(route, tokens[1:], strict=True):
         path += pool.fee.to_bytes(3, "big") + bytes.fromhex(token.address[2:])
@@ -132,7 +135,7 @@ def quote_exact_input(
         params = (token_in.address, tokens[-1].address, raw_in, route[0].fee, 0)
         result = rpc.call(quoter, _QUOTER_ABI, "quoteExactInputSingle", (params,), block=block)
     else:
-        path = _encode_path(tokens, route)
+        path = encode_path(tokens, route)
         result = rpc.call(quoter, _QUOTER_ABI, "quoteExactInput", (path, raw_in), block=block)
 
     # Decoded by the ABI above: four outputs, the first and last uint256, the

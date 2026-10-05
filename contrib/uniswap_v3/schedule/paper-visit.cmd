@@ -27,11 +27,12 @@ rem The repository root, where the .env file with ETH_RPC_URL is.
 cd /d "%~dp0..\..\.." || exit /b 4
 for %%F in ("%LOG%") do if not exist "%%~dpF" mkdir "%%~dpF"
 rem A log that cannot be written would hide whatever the visit did: stop.
->>"%LOG%" echo ==== %DATE% %TIME% visit of %RUN_ID% (db %DB%, python %PYTHON%) || exit /b 4
+rem Settings are echoed in quotes: a path may hold an & or a parenthesis.
+>>"%LOG%" echo ==== %DATE% %TIME% visit of "%RUN_ID%" (db "%DB%", python "%PYTHON%") || exit /b 4
 rem A PYTHON given as a path that is not there: cmd would exit 3 for a missing
 rem directory, which reads as "try again later". It is a setting to fix.
 if not "%PYTHON:\=%"=="%PYTHON%" if not exist "%PYTHON%" (
-    >>"%LOG%" echo ==== there is no %PYTHON%: fix PYTHON in paper-visit.local.cmd
+    >>"%LOG%" echo ==== there is no "%PYTHON%": fix PYTHON in paper-visit.local.cmd
     >>"%LOG%" echo ==== exit 4
     exit /b 4
 )

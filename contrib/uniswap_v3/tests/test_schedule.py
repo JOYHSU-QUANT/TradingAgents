@@ -105,3 +105,12 @@ def test_a_visit_whose_python_path_is_not_there_exits_4_before_running():
     lines = _visit_lines()
     assert _at('>>"%LOG%" echo ==== %DATE%') < check < _at('"%PYTHON%" -m')
     assert lines[check + 3].strip() == "exit /b 4"
+
+
+def test_a_visit_echoes_its_settings_in_quotes():
+    # Unquoted, a path's ")" (Program Files (x86)) would end the block it is echoed in,
+    # and its "&" would start another command.
+    echoes = [line for line in _visit_lines() if " echo " in line]
+    for name in ("RUN_ID", "DB", "PYTHON"):
+        uses = [line for line in echoes if f"%{name}%" in line]
+        assert uses and all(f'"%{name}%"' in line for line in uses), name

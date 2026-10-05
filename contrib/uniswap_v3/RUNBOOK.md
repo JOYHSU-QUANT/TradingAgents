@@ -183,7 +183,7 @@ python -m contrib.uniswap_v3 status --config contrib/uniswap_v3/configs/paper.lo
 python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-id paper-1
 ```
 
-- log 每次 visit 有一行 `==== <本地時間> visit of paper-1`、指令的輸出、一行 `==== exit <碼>`。
+- log 每次 visit 有一行 `==== <本地時間> visit of "paper-1" (db ..., python ...)`、指令的輸出、一行 `==== exit <碼>`。
 - `status --run-id` 從 `run paper-1: ...` 那行算起的第三行，說 run 跟不跟得上時鐘：`up to date` 是最近一個
   已過的邊界已決策；`behind: N boundary(ies) ...` 是有 N 根已過但還沒決策——00:00 到 00:10 之間是 1、正常；
   **過了 01:35（第三次 visit 的時限）還是 behind**，就去 log 看那天的 visit 為什麼沒成功。
@@ -210,7 +210,7 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
 | `failed: paper needs the packages in contrib/uniswap_v3/requirements.txt` | 排程用的 Python 不是裝了相依的那個 | 改 §3.1 的 `PYTHON` |
 | `'python' is not recognized ...` 接 `==== exit 9009` | 排程找不到 `PYTHON` | 改 §3.1 的 `PYTHON` 成完整路徑 |
-| `==== there is no ...python.exe: fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.cmd` |
+| `==== there is no "...python.exe": fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.cmd` |
 | `Error: Invalid value: Invalid value for '-f' "...\.env" does not exist.` 接 `==== exit 2` | repo 根目錄沒有 `.env` | 補上 `.env`（§0） |
 | 其他 `usage: ...` 接 `==== exit 2` | visit 的指令被改壞 | 對照 git 版的 `paper-visit.cmd`；設定只放在 `paper-visit.local.cmd` |
 | 有 `==== ... visit of` 卻沒有 `==== exit` | visit 跑超過 25 分鐘被排程停掉（`LastTaskResult` 267014）；印到一半的輸出還在 | 多半是節點卡住；下一次 visit 會重來 |

@@ -27,6 +27,13 @@ while it sends them: a ``sends`` row before the first swap of a bar is
 sent, and a ``sent_legs`` row as each one fills. The bar's decision, written
 when its step ends, settles the send; a ``sends`` row without a decision is
 a send that never ended.
+
+``verdicts`` is what an outside judge said of a token at a bar, keyed by
+(source, time, symbol), in that order so that a bar's verdicts are one
+seek; like ``bars`` it belongs to no run, and a row is never rewritten. ``rating`` carries no CHECK of its values, for the same
+reason as ``outcome``. ``decisions.verdict_digests`` is JSON text of the
+verdict digests the decision saw, by symbol, and NULL for a run that reads
+no verdicts or a decision stored before the column existed.
 """
 
 from __future__ import annotations
@@ -161,6 +168,27 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
             FOREIGN KEY (run_id, time) REFERENCES sends (run_id, time)
         )
         """,
+    ),
+    # Verdicts: what an outside judge said of a token at a bar, and, on each
+    # decision, the digests of the verdicts it saw.
+    (
+        """
+        CREATE TABLE verdicts (
+            source TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            time INTEGER NOT NULL,
+            rating TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            asked_at INTEGER NOT NULL,
+            text_digest TEXT NOT NULL,
+            sidecar_path TEXT,
+            sidecar_digest TEXT,
+            CHECK ((sidecar_path IS NULL) = (sidecar_digest IS NULL)),
+            PRIMARY KEY (source, time, symbol)
+        )
+        """,
+        "ALTER TABLE decisions ADD COLUMN verdict_digests TEXT",
     ),
 )
 

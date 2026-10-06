@@ -12,6 +12,7 @@ from contrib.uniswap_v3.config import ConfigError, StrategySpec
 from contrib.uniswap_v3.domain.bars import Finality
 from contrib.uniswap_v3.domain.records import BarSeen, FillSource, Outcome, SkipCode
 from contrib.uniswap_v3.domain.types import Rejection, RunMode
+from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.engine import step as step_module
 from contrib.uniswap_v3.engine.backtest import BacktestRangeError, run_backtest
 from contrib.uniswap_v3.engine.executors import ModelExecutor
@@ -34,6 +35,12 @@ from contrib.uniswap_v3.tests.fakes.node import (
     block_hash,
     pool_bar,
     put_day as _put,
+)
+from contrib.uniswap_v3.tests.fakes.verdicts import (
+    SOURCE,
+    config as _verdict_config,
+    record,
+    verdict,
 )
 
 _CONFIG = _config()
@@ -413,3 +420,68 @@ def test_a_strategy_that_raises_stops_the_backtest_and_keeps_what_was_decided(st
     _recorder(monkeypatch)
     carried = _backtest(store)
     assert (carried.decided, carried.already_decided) == (3, 1)
+
+
+# --- verdicts ----------------------------------------------------------------
+
+
+def test_the_strategy_sees_the_verdicts_up_to_the_bar_decided_and_none_after(store, monkeypatch):
+    strategy = _recorder(monkeypatch)
+    _put_days(store, [DEFAULT_TICK] * 4)
+    for said in (
+        record("WETH", 0),
+        record("WBTC", 0, Rating.HOLD),
+        record("WETH", 2, Rating.OVERWEIGHT),
+        record("WETH", 3, Rating.SELL),
+        # Another source's, and one on a token the config does not trade: not carried.
+        record("WETH", 1, source="another-judge"),
+        record("LINK", 1),
+    ):
+        store.insert_verdict(said)
+
+    summary = _backtest(store, config=_verdict_config(), end=_day(2))
+
+    assert summary.decided == 3
+    views = [view for view, _ in strategy.calls]
+    assert [sorted(view.verdicts) for view in views] == [[_day(0)], [_day(0)], [_day(0), _day(2)]]
+    assert views[0].latest_verdicts == {
+        "WETH": verdict("WETH", 0),
+        "WBTC": verdict("WBTC", 0, Rating.HOLD),
+    }
+    assert views[1].latest_verdicts == {}
+    assert views[2].latest_verdicts == {"WETH": verdict("WETH", 2, Rating.OVERWEIGHT)}
+    assert {view.verdict_source for view in views} == {SOURCE}
+    # Each decision kept what its view carried at its bar: the digests, or that there were none.
+    assert [decision.verdicts for decision in store.decisions(_RUN)] == [
+        {"WETH": verdict("WETH", 0).digest, "WBTC": verdict("WBTC", 0, Rating.HOLD).digest},
+        {},
+        {"WETH": verdict("WETH", 2, Rating.OVERWEIGHT).digest},
+    ]
+
+
+def test_a_run_that_reads_no_verdicts_is_handed_none_and_keeps_none(store, monkeypatch):
+    strategy = _recorder(monkeypatch)
+    _put_days(store, [DEFAULT_TICK] * 2)
+    store.insert_verdict(record("WETH", 0))
+
+    _backtest(store)
+
+    assert [dict(view.verdicts) for view, _ in strategy.calls] == [{}, {}]
+    assert {view.verdict_source for view, _ in strategy.calls} == {None}
+    assert [decision.verdicts for decision in store.decisions(_RUN)] == [None, None]
+
+
+def test_a_verdict_recorded_after_its_bar_was_decided_is_seen_later_and_changes_no_decision(
+    store, monkeypatch
+):
+    strategy = _recorder(monkeypatch)
+    _put_days(store, [DEFAULT_TICK] * 2)
+    first = _backtest(store, config=_verdict_config(), end=_day(0))
+    store.insert_verdict(record("WETH", 0))
+
+    again = _backtest(store, config=_verdict_config())
+
+    assert (first.decided, again.decided, again.already_decided) == (1, 1, 1)
+    # The late verdict is in the next bar's view, as history; the decided bar keeps that it saw none.
+    assert sorted(strategy.calls[-1][0].verdicts) == [_day(0)]
+    assert [decision.verdicts for decision in store.decisions(_RUN)] == [{}, {}]

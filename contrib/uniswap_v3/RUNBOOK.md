@@ -198,6 +198,9 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
   run 還沒決策過任何一根時沒有這一行。
 - 接著是持倉、價值、報酬（與 `report` 同一個算法：扣掉累計 gas）、最近幾筆決策，
   每筆附「邊界後多久決策的」——準時的應該是 `00:10:xx`；`1d ...` 表示是隔天補決策的。
+- 設定檔有 `verdicts` 區塊時，bar 列表後多一行 `verdicts from <source>: N of the latest M boundary(ies) have one for every token (...)`，
+  是最近 M 根裡每個代幣都有判斷的根數與各代幣各自的根數；每筆決策另附 `verdicts: WBTC, WETH` 或 `verdicts: none`
+  （none＝那根 bar 沒有判斷，策略走的是「沒判斷」的政策）。沒有 `verdicts` 區塊的 run 不印這些。
 - 這兩個指令不讀鏈，隨時可以跑。
 
 ---

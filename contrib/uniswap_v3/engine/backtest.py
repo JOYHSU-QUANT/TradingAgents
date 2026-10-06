@@ -13,7 +13,10 @@ The view a bar is decided on holds every bar the store has up to that bar,
 those from before the range included, and none after it. What a strategy
 sees therefore does not depend on where a run was started or carried on
 from, and a bar stored later than the one being decided cannot reach its
-decision.
+decision. A config that reads verdicts (a ``verdicts`` section) has the
+view carry, at each of those bars, what its source said of the traded
+tokens there (:func:`~..store.verdict_source.load_verdicts`); a verdict
+stored at a later bar cannot reach the decision either.
 
 A boundary of the range that lacks the reading of a configured pool has no
 bar: it is not decided, the view simply does not hold it, and the summary
@@ -49,9 +52,11 @@ from ..domain.bars import Finality
 from ..domain.ledger import Ledger
 from ..domain.records import Decision, Outcome, RejectionCode
 from ..domain.types import Bar, MarketView, RunMode
+from ..domain.verdicts import Verdict
 from ..ports import Executor, Wallet
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
+from ..store.verdict_source import load_verdicts
 from .executors import ModelExecutor
 from .step import EngineError, open_engine, start_or_continue_run
 
@@ -223,6 +228,9 @@ def replay(
     engine = open_engine(store, config, executor, run_id=run_id, now=now, wallet=wallet)
 
     bars: list[Bar] = []
+    # What the config's source said at each bar so far, for bars it said anything at.
+    verdicts: dict[int, Mapping[str, Verdict]] = {}
+    source = None if config.verdicts is None else config.verdicts.source
     decided = already_decided = on_pending = 0
     changed: list[int] = []
     gas_rejected: list[int] = []
@@ -235,6 +243,9 @@ def replay(
             # Only a writer taking a reading away mid-run could bring this about.
             raise EngineError(f"the bar at {time} is no longer in the store")
         bars.append(loaded.bar)
+        said = load_verdicts(store, config, time)
+        if said:
+            verdicts[time] = said
         if time < start:
             continue
         # Asked here as well as in the step, so that a bar already decided costs no view.
@@ -245,7 +256,7 @@ def replay(
                 changed.append(time)
         else:
             try:
-                view = MarketView(tuple(bars))
+                view = MarketView(tuple(bars), verdicts, source)
             except ValueError as exc:
                 raise EngineError(
                     f"the stored bars up to {time} do not make a view ({exc})"

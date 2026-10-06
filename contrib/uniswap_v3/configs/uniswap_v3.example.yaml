@@ -57,6 +57,15 @@ execution:
 rpc:
   url_env: ETH_RPC_URL
 
+# Verdicts: what an outside judge said of each traded token at each bar, read
+# from the store's verdicts table by source and carried in the strategy's view.
+# Left out, the run reads none and its view carries none. Adding the section
+# changes the config's snapshot, so a run started without it cannot be carried
+# on with it. Nothing writes verdicts yet; the command that asks the judge
+# comes with the agent layer.
+# verdicts:
+#   source: tradingagents-rating-v1
+
 # fixed_weights is a placeholder that drives the engine: hold these shares of
 # portfolio value, and rebalance when one is more than `band` (absolute
 # weight) away from its target. Numbers are quoted so no float digits are lost.

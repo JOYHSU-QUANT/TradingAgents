@@ -15,6 +15,10 @@ raises. A run whose swaps are signed first writes the bar's send
 (:meth:`Store.record_leg`); the decision then settles the send. The store
 is the engine's :class:`~..ports.Journal`.
 
+A ``verdicts`` row is one :class:`~..domain.verdicts.VerdictRecord`. It
+belongs to no run and is written once: inserting a row whose key is already
+there raises, as a bar's does, and nothing updates one.
+
 The database is kept in SQLite's write-ahead log mode, which
 :func:`open_store` turns on and the file then keeps: beside ``store.db``
 there are a ``store.db-wal`` and a ``store.db-shm`` while it is open.
@@ -46,6 +50,7 @@ from ..domain.records import (
     Valuation,
 )
 from ..domain.types import Fill, RunMode, TargetWeights
+from ..domain.verdicts import Rating, Verdict, VerdictRecord
 from .schema import SchemaError, migrate, transaction
 
 __all__ = ["Store", "StoreBusy", "StoreError", "open_store"]
@@ -213,9 +218,58 @@ def _fill_record(row: Sequence[Any]) -> FillRecord:
 
 _DECISION_COLUMNS: Final = (
     "time, outcome, target, reason, reason_code, close_block, close_block_hash, finality, "
-    "decided_at"
+    "decided_at, verdict_digests"
 )
 _VALUATION_COLUMNS: Final = "time, balances, gas_eth, prices, total_value"
+_VERDICT_COLUMNS: Final = (
+    "source",
+    "symbol",
+    "time",
+    "rating",
+    "model",
+    "prompt_version",
+    "asked_at",
+    "text_digest",
+    "sidecar_path",
+    "sidecar_digest",
+)
+_SELECT_VERDICT: Final = f"SELECT {', '.join(_VERDICT_COLUMNS)} FROM verdicts"
+
+
+def _digests_text(digests: Mapping[str, str]) -> str:
+    """A symbol -> digest mapping as JSON."""
+    return json.dumps(dict(digests), sort_keys=True)
+
+
+def _verdict_row(record: VerdictRecord) -> tuple[Any, ...]:
+    verdict = record.verdict
+    return (
+        verdict.source,
+        verdict.symbol,
+        verdict.time,
+        verdict.rating.value,
+        record.model,
+        record.prompt_version,
+        record.asked_at,
+        verdict.digest,
+        record.sidecar_path,
+        record.sidecar_digest,
+    )
+
+
+def _verdict_record(row: Sequence[Any]) -> VerdictRecord:
+    """A row of :data:`_VERDICT_COLUMNS` read back."""
+    source, symbol, time, rating, model, prompt_version, asked_at, digest, path, path_digest = row
+    return VerdictRecord(
+        verdict=Verdict(
+            source=source, symbol=symbol, time=time, rating=Rating(rating), digest=digest
+        ),
+        model=model,
+        prompt_version=prompt_version,
+        asked_at=asked_at,
+        sidecar_path=path,
+        sidecar_digest=path_digest,
+    )
 
 
 def _decision(row: Sequence[Any]) -> Decision:
@@ -229,6 +283,7 @@ def _decision(row: Sequence[Any]) -> Decision:
         close_block_hash,
         finality,
         decided_at,
+        verdict_digests,
     ) = row
     outcome = Outcome(outcome_text)
     # An outcome that says nothing has no codes of its own to read one in; the
@@ -251,6 +306,8 @@ def _decision(row: Sequence[Any]) -> Decision:
             )
         ),
         decided_at=decided_at,
+        # The decision checks the shape; a text that is not JSON is a ValueError too.
+        verdicts=None if verdict_digests is None else json.loads(verdict_digests),
     )
 
 
@@ -427,6 +484,54 @@ class Store:
                         f"the reading of pool {bar.pool} at {bar.time} is not a pending "
                         f"reading in the store"
                     )
+
+    def insert_verdict(self, record: VerdictRecord) -> None:
+        """Write ``record``; a verdict of its source, token and bar that is already stored raises.
+
+        A verdict is never rewritten: :class:`StoreError`, and nothing changes.
+        """
+        placeholders = ", ".join("?" for _ in _VERDICT_COLUMNS)
+        with _sqlite_errors("writing a verdict"):
+            try:
+                with transaction(self._connection):
+                    self._connection.execute(
+                        f"INSERT INTO verdicts ({', '.join(_VERDICT_COLUMNS)}) "
+                        f"VALUES ({placeholders})",
+                        _verdict_row(record),
+                    )
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE constraint failed" not in str(exc):
+                    raise
+                verdict = record.verdict
+                raise StoreError(
+                    f"the verdict of {verdict.source!r} on {verdict.symbol} at {verdict.time} "
+                    f"is already stored, and a verdict is never rewritten"
+                ) from exc
+
+    def verdict(self, source: str, symbol: str, time: int) -> VerdictRecord | None:
+        """What ``source`` said of ``symbol`` at the bar ``time``, when it said anything."""
+        with _sqlite_errors("reading a verdict"):
+            row = self._connection.execute(
+                f"{_SELECT_VERDICT} WHERE source = ? AND symbol = ? AND time = ?",
+                (source, symbol, time),
+            ).fetchone()
+        if row is None:
+            return None
+        with _stored(f"verdict of {source!r} on {symbol} at {time}"):
+            return _verdict_record(row)
+
+    def verdicts_at(self, source: str, time: int) -> list[VerdictRecord]:
+        """Every verdict of ``source`` at the bar ``time``, by token symbol."""
+        with _sqlite_errors("reading verdicts"):
+            rows = self._connection.execute(
+                f"{_SELECT_VERDICT} WHERE source = ? AND time = ? ORDER BY symbol",
+                (source, time),
+            ).fetchall()
+        records = []
+        for row in rows:
+            with _stored(f"verdict of {source!r} on {row[1]} at {time}"):
+                records.append(_verdict_record(row))
+        return records
 
     def insert_run(self, run: RunRecord) -> None:
         """Start ``run``; a run with its id that is already stored raises :class:`StoreError`."""
@@ -820,8 +925,9 @@ class Store:
             self._require_follows_on(run_id, step)
             self._connection.execute(
                 "INSERT INTO decisions (run_id, time, outcome, target, reason, "
-                "reason_code, close_block, close_block_hash, finality, decided_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "reason_code, close_block, close_block_hash, finality, decided_at, "
+                "verdict_digests) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     decision.time,
@@ -835,6 +941,7 @@ class Store:
                     None if seen is None else seen.close_block_hash,
                     None if seen is None else seen.finality.value,
                     decision.decided_at,
+                    None if decision.verdicts is None else _digests_text(decision.verdicts),
                 ),
             )
             self._connection.executemany(

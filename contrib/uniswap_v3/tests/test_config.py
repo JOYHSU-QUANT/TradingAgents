@@ -23,6 +23,7 @@ from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS, TOKENS
 from contrib.uniswap_v3.domain.bars import BarSettings
 from contrib.uniswap_v3.domain.execution import ExecutionSettings, ForkSettings
 from contrib.uniswap_v3.domain.types import Pool, Token
+from contrib.uniswap_v3.domain.verdicts import VerdictSettings
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
 from contrib.uniswap_v3.strategies.registry import build_strategy
 from contrib.uniswap_v3.strategies.trend_vol_weights import TrendVolWeights
@@ -558,3 +559,44 @@ def test_a_bar_is_suspect_two_percent_from_its_twap_unless_the_config_says_other
     assert parse_config(_document()).bars.max_twap_deviation == Decimal("0.02")
     looser = parse_config(_document(bars={"max_twap_deviation": "0.05"}))
     assert looser.bars.max_twap_deviation == Decimal("0.05")
+
+
+# --- verdicts ----------------------------------------------------------------
+
+
+def test_the_verdicts_section_names_a_source_and_none_without_it():
+    assert parse_config(_document()).verdicts is None
+    assert load_config(EXAMPLE).verdicts is None
+    read = parse_config(_document(verdicts={"source": "tradingagents-rating-v1"}))
+    assert read.verdicts == VerdictSettings(source="tradingagents-rating-v1")
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "match"),
+    [
+        ({}, r"verdicts: the section names a source, and has none"),
+        ({"source": "two words"}, r"verdicts: source must be letters"),
+        ({"source": ""}, r"verdicts: source must be letters"),
+        ({"source": "x", "model": "y"}, r"verdicts must be a mapping with keys from \['source'\]"),
+        ("tradingagents", r"verdicts must be a mapping"),
+    ],
+)
+def test_a_malformed_verdicts_section_is_refused_by_name(verdicts, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_config(_document(verdicts=verdicts))
+
+
+def test_a_snapshot_names_the_verdicts_section_only_when_the_config_has_one():
+    snapshot = config_snapshot(parse_config(_document()))
+    assert "verdicts" not in json.loads(snapshot)
+    reading = config_snapshot(parse_config(_document(verdicts={"source": "judge-1"})))
+    assert reading != snapshot
+    assert json.loads(reading)["verdicts"] == {"source": "judge-1"}
+    assert config_from_snapshot(reading).verdicts == VerdictSettings(source="judge-1")
+    assert config_snapshot(config_from_snapshot(reading)) == reading
+
+
+def test_a_config_built_by_hand_checks_its_verdicts():
+    assert _config(verdicts=VerdictSettings(source="judge-1")).verdicts.source == "judge-1"
+    with pytest.raises(ConfigError, match="verdicts must be a VerdictSettings or None"):
+        _config(verdicts="judge-1")

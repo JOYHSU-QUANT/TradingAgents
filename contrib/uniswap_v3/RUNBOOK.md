@@ -72,7 +72,8 @@ Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/
 ```
 
 要改的只有 `strategy`（`fixed_weights` 是佔位策略；要跑規則策略就把 example 裡註解掉的
-`trend_vol_weights` 區塊換上去）。其餘照預設：一天一根 bar、
+`trend_vol_weights` 區塊換上去；要跑 AI 閘門策略 `ai_gated_weights` 則換上它的區塊，**並把 `verdicts` 區塊打開**——
+沒有判斷來源的 run 會在第一根就停）。其餘照預設：一天一根 bar、
 成交在邊界後 25 塊（`execution.delay_blocks`）——排程時間是照這個值排的，
 改大到超過 45 塊（約 9 分鐘）就要把排程一起往後挪。
 
@@ -200,7 +201,8 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
   每筆附「邊界後多久決策的」——準時的應該是 `00:10:xx`；`1d ...` 表示是隔天補決策的。
 - 設定檔有 `verdicts` 區塊時，bar 列表後多一行 `verdicts from <source>: N of the latest M bar(s) have one for every token (...)`，
   是最近 M 根**成得了 bar 的**邊界裡每個代幣都有判斷的根數與各代幣各自的根數（列表裡 `incomplete` 的邊界不算，策略永遠不會決策它）；
-  每筆決策另附 `verdicts: WBTC, WETH` 或 `verdicts: none`（none＝那根 bar 沒有判斷，策略走的是「沒判斷」的政策）。
+  每筆決策另附 `verdicts: WBTC=Buy, WETH=Hold`（每個代幣看到的評等；`changed`＝store 裡現在已不是決策時那份判斷）
+  或 `verdicts: none`（那根 bar 沒有判斷，策略走的是「沒判斷」的政策）。
   沒有 `verdicts` 區塊的 run 不印這些。
 - 這兩個指令不讀鏈，隨時可以跑。
 

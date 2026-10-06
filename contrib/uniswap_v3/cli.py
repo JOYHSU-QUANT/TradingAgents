@@ -520,11 +520,28 @@ def _decided_span(decisions: Sequence[Decision]) -> str:
     )
 
 
-def _saw(decision: Decision) -> str:
-    """Which tokens the decision saw a verdict for; nothing for a run that reads none."""
+def _saw(store: Store, config: UniswapConfig, decision: Decision) -> str:
+    """The verdict the decision saw on each token, as ``<token>=<rating>``; nothing for a run that reads none.
+
+    The rating is read back from the store by the digest the decision kept;
+    a token whose verdict the store no longer holds under that digest reads
+    ``changed``.
+    """
     if decision.verdicts is None:
         return ""
-    return f"  verdicts: {', '.join(sorted(decision.verdicts)) or 'none'}"
+    if config.verdicts is None:
+        raise StoreError(
+            f"the decision at {decision.time} saw verdicts, and the run's config reads none"
+        )
+    now = {
+        said.digest: said.rating.value
+        for said in load_verdicts(store, config, decision.time).values()
+    }
+    seen = ", ".join(
+        f"{symbol}={now.get(digest, 'changed')}"
+        for symbol, digest in sorted(decision.verdicts.items())
+    )
+    return f"  verdicts: {seen or 'none'}"
 
 
 def _why(decision: Decision) -> str:
@@ -609,7 +626,8 @@ def _run_status_lines(store: Store, run_id: str, latest: int, now: int) -> list[
         else:
             when = f"decided {_iso(decision.decided_at)}"
         lines.append(
-            f"{_iso(decision.time)}  {decision.outcome.value}  {when}{_saw(decision)}"
+            f"{_iso(decision.time)}  {decision.outcome.value}  {when}"
+            f"{_saw(store, config, decision)}"
             f"{_why(decision)}"
         )
     return lines

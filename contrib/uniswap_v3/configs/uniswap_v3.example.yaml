@@ -93,3 +93,30 @@ strategy:
 #     target_vol: "0.40"
 #     max_weight: "0.5"
 #     band: "0.05"
+
+# ai_gated_weights holds trend_vol_weights' weights (its `rule`, every param of
+# it) cut by what an outside judge said of each token at the bar: the view's
+# verdicts, read by the verdicts section above, which this strategy needs. A
+# token with a verdict is held at the rule's weight times its rating's
+# multiplier; one with no verdict at the bar, or a REVIEW one, takes no new
+# risk, held at its present share capped at the rule's weight; one out of
+# trend is at zero whatever was said. Every param is required; the policy is
+# defined in strategies/ai_gated_weights.py. Multipliers are in [0, 1] and do
+# not rise from Buy to Sell.
+#
+# strategy:
+#   name: ai_gated_weights
+#   params:
+#     rule:
+#       trend_window: 50
+#       vol_window: 20
+#       bars_per_year: 365
+#       target_vol: "0.40"
+#       max_weight: "0.5"
+#       band: "0.05"
+#     multipliers:
+#       Buy: "1"
+#       Overweight: "0.75"
+#       Hold: "0.5"
+#       Underweight: "0.25"
+#       Sell: "0"

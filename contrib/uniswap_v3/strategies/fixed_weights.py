@@ -22,8 +22,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
 
-from ..domain.decimal_context import DECIMAL_CONTEXT, parse_decimal
+from ..domain.decimal_context import parse_decimal
 from ..domain.types import Hold, MarketView, Portfolio, TargetWeights
+from .rebalance import rebalance_or_hold, require_band, require_params
 
 __all__ = ["FixedWeights"]
 
@@ -40,22 +41,12 @@ class FixedWeights:
     def __post_init__(self) -> None:
         if not isinstance(self.target, TargetWeights):
             raise ValueError(f"target must be TargetWeights, got {self.target!r}")
-        if (
-            not isinstance(self.band, Decimal)
-            or not self.band.is_finite()
-            or self.band.is_signed()
-            or self.band >= 1
-        ):
-            raise ValueError(f"band must be a Decimal in [0, 1), got {self.band!r}")
+        require_band(self.band)
 
     @classmethod
     def from_params(cls, params: Mapping[str, object]) -> FixedWeights:
         """Build from a config's ``strategy.params``."""
-        if not isinstance(params, Mapping) or set(params) != _PARAMS:
-            got = sorted(map(str, params)) if isinstance(params, Mapping) else params
-            raise ValueError(
-                f"fixed_weights takes exactly the params {sorted(_PARAMS)}, got {got!r}"
-            )
+        params = require_params("fixed_weights", params, _PARAMS)
         weights = params["weights"]
         if not isinstance(weights, Mapping):
             raise ValueError(f"weights must map token symbol to weight, got {weights!r}")
@@ -82,11 +73,4 @@ class FixedWeights:
                 f"fixed_weights targets {sorted(targets)} but the portfolio holds "
                 f"{sorted(portfolio.balances)}"
             )
-        total = portfolio.total_value
-        if total == 0:
-            return Hold()
-        for symbol, target in targets.items():
-            share = DECIMAL_CONTEXT.divide(portfolio.value_of(symbol), total)
-            if DECIMAL_CONTEXT.subtract(share, target).copy_abs() > self.band:
-                return self.target
-        return Hold()
+        return rebalance_or_hold(portfolio, self.target, self.band)

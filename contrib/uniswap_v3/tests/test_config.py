@@ -25,6 +25,7 @@ from contrib.uniswap_v3.domain.execution import ExecutionSettings, ForkSettings
 from contrib.uniswap_v3.domain.types import Pool, Token
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
 from contrib.uniswap_v3.strategies.registry import build_strategy
+from contrib.uniswap_v3.strategies.trend_vol_weights import TrendVolWeights
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
 _TOKENS = TOKENS[ETHEREUM_MAINNET]
@@ -61,6 +62,27 @@ def test_the_shipped_examples_strategy_builds_and_targets_the_configured_tokens(
     assert isinstance(strategy, FixedWeights)
     assert strategy.band == Decimal("0.05")
     assert set(strategy.target.weights) == {token.symbol for token in config.tokens}
+
+
+TREND_PARAMS = {
+    "trend_window": 50,
+    "vol_window": 20,
+    "bars_per_year": 365,
+    "target_vol": "0.4",
+    "max_weight": "0.5",
+    "band": "0.05",
+}
+
+
+def test_a_trend_vol_weights_config_builds_and_survives_the_snapshot_round_trip():
+    config = parse_config(_document(strategy={"name": "trend_vol_weights", "params": TREND_PARAMS}))
+    built = build_strategy(config.strategy.name, config.strategy.params)
+    assert built == TrendVolWeights.from_params(TREND_PARAMS)
+    restored = config_module.config_from_snapshot(config_module.config_snapshot(config))
+    assert build_strategy(restored.strategy.name, restored.strategy.params) == built
+    # A YAML float is refused by name, as the quoted-decimal rule says.
+    with pytest.raises(ValueError, match="target_vol"):
+        build_strategy("trend_vol_weights", {**TREND_PARAMS, "target_vol": 0.4})
 
 
 def test_strategy_params_may_be_left_out_and_are_read_only():

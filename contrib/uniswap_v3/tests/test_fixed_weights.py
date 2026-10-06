@@ -55,6 +55,7 @@ def test_a_portfolio_inside_the_band_is_held(usdc, weth, wbtc):
         ("551", "0.1245", "0.004"),  # 55.1 / 24.9 / 20: USDC and WETH just outside
         ("1000", "0", "0"),  # all in the quote token
         ("500", "0.12", "0.0052"),  # 50 / 24 / 26: only the non-quote tokens drift
+        ("440", "0.165", "0.0046"),  # 44 / 33 / 23: only USDC is out, and under its target
     ],
 )
 def test_a_portfolio_outside_the_band_is_sent_back_to_the_target(usdc, weth, wbtc):

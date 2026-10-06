@@ -34,6 +34,7 @@ from contrib.uniswap_v3.engine.executors import ModelExecutor
 from contrib.uniswap_v3.engine.step import Engine, EngineError, open_engine, start_run
 from contrib.uniswap_v3.store.repository import StoreError, open_store
 from contrib.uniswap_v3.strategies.fixed_weights import FixedWeights
+from contrib.uniswap_v3.strategies.trend_vol_weights import TrendVolWeights
 from contrib.uniswap_v3.tests.fakes.engine import (
     DAY,
     FIRST_DAY,
@@ -458,6 +459,30 @@ def test_a_run_is_started_with_the_configs_snapshot_and_reopened_under_the_same_
     # The shipped placeholder drives the same step.
     assert engine.step(_view(bar(0))).decision.outcome is Outcome.FILLED
     assert engine.step(_view(bar(0), bar(1))).decision.outcome is Outcome.HOLD
+
+
+def test_the_rule_strategy_drives_the_step_and_its_target_names_the_configured_tokens(store):
+    rule = TrendVolWeights.from_params(
+        {
+            "trend_window": 3,
+            "vol_window": 2,
+            "bars_per_year": 1,
+            "target_vol": "0.05",
+            "max_weight": "0.5",
+            "band": "0.05",
+        }
+    )
+    engine = _engine(store, rule)
+    rising = [bar(0, weth="2000"), bar(1, weth="2200"), bar(2, weth="2420")]
+    # Too few bars: all quote is what the ledger already holds.
+    assert engine.step(_view(rising[0])).decision.outcome is Outcome.HOLD
+    assert engine.step(_view(*rising[:2])).decision.outcome is Outcome.HOLD
+    # WETH in trend at the cap: half the portfolio moves into it.
+    decision = engine.step(_view(*rising)).decision
+    assert decision.outcome is Outcome.FILLED
+    assert decision.target == weights("0.5000", "0.5000", "0")
+    balances = store.ledger(_RUN).balances
+    assert balances["WETH"] > 0 and balances["USDC"] < D("10000") and balances["WBTC"] == 0
 
 
 def test_a_run_is_not_continued_under_a_changed_config(store):

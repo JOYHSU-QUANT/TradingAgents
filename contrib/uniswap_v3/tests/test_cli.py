@@ -20,6 +20,7 @@ from contrib.uniswap_v3.tests.fakes.node import (
     FIRST_DAY,
     FakeNode,
     block_at,
+    put_day,
     sqrt_price_at,
 )
 from contrib.uniswap_v3.tests.fakes.rpc import rpc_over
@@ -472,14 +473,25 @@ def test_status_counts_the_latest_boundaries_with_a_verdict_for_every_token(node
 
     assert code == cli.EXIT_OK
     assert lines[-1] == (
-        "verdicts from test-judge: 1 of the latest 3 boundary(ies) have one for every token "
+        "verdicts from test-judge: 1 of the latest 3 bar(s) have one for every token "
         "(WBTC 1, WETH 2)"
     )
     code, lines = _run("status", "--config", str(reading), "--db", str(db), "--bars", "1")
     assert code == cli.EXIT_OK
     assert lines[-1] == (
-        "verdicts from test-judge: 0 of the latest 1 boundary(ies) have one for every token "
+        "verdicts from test-judge: 0 of the latest 1 bar(s) have one for every token "
         "(WBTC 0, WETH 1)"
+    )
+    # A boundary that lacks a pool's reading makes no bar, and is not counted.
+    with open_store(db) as store:
+        put_day(store, 3, pools=(_USDC_WETH,))
+        store.insert_verdict(record("WETH", 3))
+    code, lines = _run("status", "--config", str(reading), "--db", str(db), "--bars", "4")
+    assert code == cli.EXIT_OK
+    assert any(line.endswith("incomplete: a configured pool has no reading") for line in lines)
+    assert lines[-1] == (
+        "verdicts from test-judge: 1 of the latest 3 bar(s) have one for every token "
+        "(WBTC 1, WETH 2)"
     )
     # The shipped example reads no verdicts, and says nothing of them.
     code, plain = _status(db)
@@ -508,3 +520,23 @@ def test_status_of_a_run_says_which_tokens_each_decision_saw_a_verdict_for(node,
     assert code == cli.EXIT_OK
     assert len([line for line in plain if "  decided 20" in line]) == 3
     assert not any("verdicts" in line for line in plain)
+
+
+def test_a_replay_warns_of_decided_bars_whose_verdicts_changed_since(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    reading = _reading_verdicts(tmp_path)
+    assert _backtest_reading(reading, db, "reads") == cli.EXIT_OK
+    with open_store(db) as store:
+        store.insert_verdict(record("WETH", 1))
+    capsys.readouterr()
+
+    assert _backtest_reading(reading, db, "reads") == cli.EXIT_OK
+
+    err = capsys.readouterr().err
+    assert (
+        "warning: 1 bar(s) decided earlier now have other verdicts in the store than their "
+        "decisions saw, from 2024-01-02T00:00:00Z to 2024-01-02T00:00:00Z; their decisions stand"
+    ) in err
+    with open_store(db) as store:
+        assert store.decision("reads", FIRST_DAY + DAY).verdicts == {}

@@ -285,6 +285,11 @@ def _decision(row: Sequence[Any]) -> Decision:
         decided_at,
         verdict_digests,
     ) = row
+    # The decision checks the shape of what was written; the text ``null``, which
+    # the store never writes, would otherwise read as a run that reads no verdicts.
+    digests = None if verdict_digests is None else json.loads(verdict_digests)
+    if verdict_digests is not None and digests is None:
+        raise ValueError("verdict_digests holds the JSON null, and the store writes NULL for none")
     outcome = Outcome(outcome_text)
     # An outcome that says nothing has no codes of its own to read one in; the
     # row is then refused, by the enum or by the decision, for carrying one.
@@ -306,8 +311,7 @@ def _decision(row: Sequence[Any]) -> Decision:
             )
         ),
         decided_at=decided_at,
-        # The decision checks the shape; a text that is not JSON is a ValueError too.
-        verdicts=None if verdict_digests is None else json.loads(verdict_digests),
+        verdicts=digests,
     )
 
 

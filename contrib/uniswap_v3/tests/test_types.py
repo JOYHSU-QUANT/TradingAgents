@@ -314,6 +314,8 @@ def test_eth_from_wei_refuses_what_is_not_a_uint256(wei):
 # --- verdicts in the view ---------------------------------------------------
 
 _DIGEST = "ab" * 32
+# Bars that price both tokens the verdicts below are on.
+_PRICED = {"A": D("2"), "B": D("3")}
 
 
 def _verdict(symbol: str = "A", time: int = 100, source: str = "judge") -> Verdict:
@@ -321,7 +323,7 @@ def _verdict(symbol: str = "A", time: int = 100, source: str = "judge") -> Verdi
 
 
 def test_a_market_view_carries_verdicts_at_its_bars_and_tells_the_latest():
-    bars = (_bar(100), _bar(200), _bar(300))
+    bars = tuple(_bar(time, prices=_PRICED) for time in (100, 200, 300))
     first, latest_a, latest_b = _verdict(), _verdict(time=300), _verdict("B", 300)
     view = MarketView(
         bars, {100: {"A": first}, 300: {"A": latest_a, "B": latest_b}}, "judge"
@@ -349,6 +351,7 @@ def test_a_market_view_carries_verdicts_at_its_bars_and_tells_the_latest():
         ({150: {"A": _verdict(time=150)}}, "holds no bar at 150"),
         ({100: {}}, "non-empty mapping"),
         ({100: {"A": "Buy"}}, "Verdict values"),
+        ({100: {"B": _verdict("B")}}, "the bar at 100 does not price 'B'"),
         ({100: {"B": _verdict()}}, "filed under 'B' at 100 is of 'A' at 100"),
         ({200: {"A": _verdict()}}, "filed under 'A' at 200 is of 'A' at 100"),
         (

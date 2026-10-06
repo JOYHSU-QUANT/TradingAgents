@@ -405,7 +405,11 @@ def _backfill(args: argparse.Namespace, out: Callable[[str], None], now: Callabl
 
 
 def _coverage_lines(store: Store, config: UniswapConfig, times: Sequence[int]) -> list[str]:
-    """How many of the boundaries ``times`` have a verdict from the config's source, in all and per token."""
+    """How many of the bars at ``times`` have a verdict from the config's source for every token, and how many each token has.
+
+    ``times`` are the boundaries that make a bar: one that lacks a pool's
+    reading is never decided, so a verdict missing there is nothing missing.
+    """
     settings = config.verdicts
     if settings is None:
         return []
@@ -419,8 +423,8 @@ def _coverage_lines(store: Store, config: UniswapConfig, times: Sequence[int]) -
         complete += len(said) == len(per_token)
     counts = ", ".join(f"{symbol} {count}" for symbol, count in per_token.items())
     return [
-        f"verdicts from {settings.source}: {complete} of the latest {len(times)} boundary(ies) "
-        f"have one for every token ({counts})"
+        f"verdicts from {settings.source}: {complete} of the latest {len(times)} bar(s) have "
+        f"one for every token ({counts})"
     ]
 
 
@@ -433,11 +437,13 @@ def _status_lines(store: Store, config: UniswapConfig, bars: int) -> list[str]:
         span = "" if first is None or last is None else f", {_iso(first)} to {_iso(last)}"
         lines.append(f"{pool_key(pool)}: {count} reading(s){span}")
         times.update(store.latest_times(config.chain_id, pool.address, interval, bars))
+    with_bar: list[int] = []
     for time in sorted(times)[-bars:]:
         stored = load_bar(store, config, time)
         if stored is None:
             lines.append(f"{_iso(time)}  incomplete: a configured pool has no reading")
             continue
+        with_bar.append(time)
         # Two decimal places for a price of 1 or more, six digits for a smaller one.
         prices = "  ".join(
             f"{symbol} {price:.2f}" if price >= 1 else f"{symbol} {price:.6g}"
@@ -452,7 +458,7 @@ def _status_lines(store: Store, config: UniswapConfig, bars: int) -> list[str]:
             f"{_iso(time)}  block {stored.bar.close_block}  {prices}  {stored.finality.value}  "
             f"{'suspect' if stored.bar.suspect else 'ok'}  flags: {', '.join(flags) or 'none'}"
         )
-    return lines + _coverage_lines(store, config, sorted(times)[-bars:])
+    return lines + _coverage_lines(store, config, with_bar)
 
 
 def _after(seconds: int) -> str:
@@ -737,6 +743,13 @@ def _replayed(
             f"(another close block, or another verdict on whether they are suspect), from "
             f"{_iso(summary.changed[0])} to {_iso(summary.changed[-1])}; their decisions stand, "
             f"and a new run decides them on what the store holds now"
+        )
+    if summary.verdicts_changed:
+        warnings.append(
+            f"{len(summary.verdicts_changed)} bar(s) decided earlier now have other verdicts in "
+            f"the store than their decisions saw, from {_iso(summary.verdicts_changed[0])} to "
+            f"{_iso(summary.verdicts_changed[-1])}; their decisions stand, and a new run decides "
+            f"them on what the store holds now"
         )
     if summary.gas_rejected:
         warnings.append(

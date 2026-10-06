@@ -139,9 +139,10 @@ contrib/uniswap_v3/
 但成交不在那一塊——每根要交易的 bar 都重設到自己的成交區塊，成交記錄的 `block` 才是實際的區塊）。
 `verdicts` 是外部判斷：某個 source 對某代幣在某根 bar 的五級評等（`Buy`／`Overweight`／`Hold`／`Underweight`／`Sell`，
 讀不出評等時是 `REVIEW`）＋模型、prompt 版本、問的時間、原文 digest 與 sidecar 位置；同 `bars` 不屬於任何 run，
-寫入後不改。設定檔有 `verdicts.source` 的 run，策略拿到的 view 帶該 source 對設定代幣的判斷（只到被決策的那根為止），
+寫入後不改。設定檔有 `verdicts.source` 的 run，策略拿到的 view 帶該 source 對交易代幣（計價代幣除外）的判斷（只到被決策的那根為止），
 每筆 decision 在 `verdict_digests` 記下當時看到的判斷 digest——`{}` 是「有讀判斷但那天沒有」，NULL 是「這個 run 不讀判斷」
-（schema v6）。目前沒有指令會寫判斷，寫入端（問 TradingAgents）是下一張 PR。
+（schema v6）。重放時已決策的 bar 若 store 裡的判斷與記下的 digest 不同，像 bar 讀數變了一樣只計數、警告，決策不改。
+目前沒有指令會寫判斷，寫入端（問 TradingAgents）是下一張 PR。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---

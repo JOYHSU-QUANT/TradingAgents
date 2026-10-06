@@ -247,7 +247,8 @@ class MarketView:
     of the bar each was said at and then by token
     (:class:`~.verdicts.Verdict`); empty when it said nothing at any bar
     in view. Every boundary in it is one of the view's bars, so a verdict is
-    seen no earlier than its bar, and every verdict is the named source's.
+    seen no earlier than its bar; every token in it is one that bar prices,
+    so a strategy could act on it; and every verdict is the named source's.
     """
 
     bars: tuple[Bar, ...]
@@ -282,10 +283,10 @@ class MarketView:
             )
         if self.verdicts and self.verdict_source is None:
             raise ValueError("the view carries verdicts and names no source for them")
-        times = {bar.time for bar in self.bars}
+        priced = {bar.time: bar.prices for bar in self.bars}
         frozen: dict[int, Mapping[str, Verdict]] = {}
         for time, at_time in self.verdicts.items():
-            if time not in times:
+            if time not in priced:
                 raise ValueError(f"the view holds no bar at {time!r} to carry verdicts at")
             if not isinstance(at_time, Mapping) or not at_time:
                 raise ValueError(
@@ -299,6 +300,11 @@ class MarketView:
                     raise ValueError(
                         f"the verdict filed under {symbol!r} at {time} is of {verdict.symbol!r} "
                         f"at {verdict.time}"
+                    )
+                if symbol not in priced[time]:
+                    raise ValueError(
+                        f"the bar at {time} does not price {symbol!r}, so a verdict on it is "
+                        f"not carried"
                     )
                 if verdict.source != self.verdict_source:
                     raise ValueError(

@@ -469,6 +469,8 @@ def test_a_run_that_reads_no_verdicts_is_handed_none_and_keeps_none(store, monke
     assert [dict(view.verdicts) for view, _ in strategy.calls] == [{}, {}]
     assert {view.verdict_source for view, _ in strategy.calls} == {None}
     assert [decision.verdicts for decision in store.decisions(_RUN)] == [None, None]
+    # A run that reads none saw none, and is compared with nothing on a rerun.
+    assert _backtest(store).verdicts_changed == ()
 
 
 def test_a_verdict_recorded_after_its_bar_was_decided_is_seen_later_and_changes_no_decision(
@@ -485,3 +487,6 @@ def test_a_verdict_recorded_after_its_bar_was_decided_is_seen_later_and_changes_
     # The late verdict is in the next bar's view, as history; the decided bar keeps that it saw none.
     assert sorted(strategy.calls[-1][0].verdicts) == [_day(0)]
     assert [decision.verdicts for decision in store.decisions(_RUN)] == [{}, {}]
+    # The decided bar is counted as judged differently now, as a changed reading would be.
+    assert (first.verdicts_changed, again.verdicts_changed) == ((), (_day(0),))
+    assert _backtest(store, config=_verdict_config()).verdicts_changed == (_day(0),)

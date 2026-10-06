@@ -194,13 +194,14 @@ def test_a_decision_keeps_the_digests_of_the_verdicts_it_saw(store):
     ]
 
 
-def test_stored_digests_that_no_longer_read_are_a_store_error(tmp_path):
+@pytest.mark.parametrize("text", ["[1]", "null", "not json", '{"WETH": "xyz"}'])
+def test_stored_digests_that_no_longer_read_are_a_store_error(tmp_path, text):
     path = tmp_path / "store.db"
     with open_store(path) as store:
         store.insert_run(_run())
         store.record("run-1", _held(verdicts={"WETH": _DIGEST}))
     connection = sqlite3.connect(path)
-    connection.execute("UPDATE decisions SET verdict_digests = '[1]'")
+    connection.execute("UPDATE decisions SET verdict_digests = ?", (text,))
     connection.commit()
     connection.close()
     with open_store(path) as store, pytest.raises(StoreError, match="is not valid"):

@@ -37,7 +37,10 @@ A bar is decided on the reading the store holds at that moment, final or
 not. The summary counts the bars this call decided on a reading that was not
 final yet, and the bars decided earlier whose reading has changed since (another
 close block, or suspect now and not then, or the reverse). Their decisions
-stand: a new run decides them on what the store holds now.
+stand: a new run decides them on what the store holds now. The same goes for
+the verdicts: a bar decided earlier whose verdicts in the store are no longer
+the ones its decision saw (:attr:`~..domain.records.Decision.verdicts`) is
+counted, and its decision stands.
 """
 
 from __future__ import annotations
@@ -83,8 +86,10 @@ class BacktestSummary:
     were decided earlier on a reading the store no longer holds as it was,
     ``gas_rejected`` had their rebalance refused for want of gas,
     ``executor_rejected`` had it refused by the executor (a rebalance a
-    signed swap left partial is in neither, and is counted in ``outcomes``), and
-    ``skipped`` were suspect and not traded on.
+    signed swap left partial is in neither, and is counted in ``outcomes``),
+    ``skipped`` were suspect and not traded on, and ``verdicts_changed`` were
+    decided earlier on other verdicts than the store holds for them now (a
+    verdict recorded after the bar was decided, most often).
     """
 
     start: int
@@ -98,6 +103,9 @@ class BacktestSummary:
     executor_rejected: tuple[int, ...]
     skipped: tuple[int, ...]
     outcomes: Mapping[Outcome, int]
+    # Boundaries decided earlier, by a run that reads verdicts, whose verdicts in the
+    # store are no longer the ones the decision saw. Like ``changed``, the decisions stand.
+    verdicts_changed: tuple[int, ...] = ()
 
     @property
     def boundaries(self) -> int:
@@ -125,6 +133,18 @@ def _reads_differently(decision: Decision, loaded: StoredBar) -> bool:
     return decision.suspect != loaded.bar.suspect or (
         seen is not None and seen.close_block_hash != loaded.seen.close_block_hash
     )
+
+
+def _judged_differently(decision: Decision, said: Mapping[str, Verdict]) -> bool:
+    """Whether the stored verdicts at the bar are no longer the ones ``decision`` saw.
+
+    A decision of a run that reads no verdicts saw none, and is compared
+    with nothing.
+    """
+    saw = decision.verdicts
+    return saw is not None and dict(saw) != {
+        symbol: verdict.digest for symbol, verdict in said.items()
+    }
 
 
 def run_backtest(
@@ -233,6 +253,7 @@ def replay(
     source = None if config.verdicts is None else config.verdicts.source
     decided = already_decided = on_pending = 0
     changed: list[int] = []
+    verdicts_changed: list[int] = []
     gas_rejected: list[int] = []
     executor_rejected: list[int] = []
     skipped: list[int] = []
@@ -254,6 +275,8 @@ def replay(
             already_decided += 1
             if _reads_differently(decision, loaded):
                 changed.append(time)
+            if _judged_differently(decision, said):
+                verdicts_changed.append(time)
         else:
             try:
                 view = MarketView(tuple(bars), verdicts, source)
@@ -286,4 +309,5 @@ def replay(
         executor_rejected=tuple(executor_rejected),
         skipped=tuple(skipped),
         outcomes=MappingProxyType(dict(outcomes)),
+        verdicts_changed=tuple(verdicts_changed),
     )

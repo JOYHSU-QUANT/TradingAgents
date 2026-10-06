@@ -2,11 +2,10 @@
 
 A strategy's weights are cut to four decimal places (:func:`floor_weight`),
 so that what they leave to the quote token (:func:`weights_with_quote`) is
-exact. A strategy with a ``band`` answers
-its target only when some token's actual share of the portfolio sits more
-than ``band`` (absolute weight) away from its target; otherwise the
-portfolio is held. The trigger lives here so that every strategy with a
-band means the same thing by it.
+exact. A strategy with a ``band`` answers its target only when some
+token's actual share of the portfolio sits more than ``band`` (absolute
+weight) away from its target; otherwise the portfolio is held. The trigger
+lives here so that every strategy with a band means the same thing by it.
 """
 
 from __future__ import annotations

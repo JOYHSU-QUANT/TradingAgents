@@ -61,9 +61,10 @@ class Strategy(Protocol):
         portfolio then give the same answer in a backtest, a paper run and a
         rerun, which the engine relies on and does not check.
 
-        A strategy that cannot decide raises; it does not guess. The raise
-        stops the run at that bar, which is left undecided and can be
-        decided once the cause is fixed.
+        A strategy that cannot decide raises ``ValueError``; it does not
+        guess. The engine reports the raise as its own failure and stops the
+        run at that bar, which is left undecided and can be decided once the
+        cause is fixed. Any other exception is a bug, and comes out as it is.
         """
         ...
 

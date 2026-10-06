@@ -854,22 +854,25 @@ Breaking changes within the 0.x line are called out explicitly.
   target is its present share (cut to the weights' four places) capped at
   the rule's weight, so it is neither bought nor added to, and is still
   sold down when the rule says so; a token the rule has out of trend is at
-  zero whatever was said. So every token's target is at most the rule's. The band and the rebalance
-  trigger are the rule's. A view without a verdict source (the strategy in
-  a config with no `verdicts` section) is refused on the first bar, so the
-  strategy cannot run on as the rule with a judge that is never heard. The
+  zero whatever was said. So every token's target is at most the rule's.
+  The band and the rebalance trigger are the rule's. A view without a
+  verdict source (the strategy in a config with no `verdicts` section) is
+  refused on the first bar, so the strategy cannot run on as the rule with
+  a judge that is never heard; the engine now reports a strategy's
+  `ValueError` as `failed: the strategy refused the bar at ...` and stops,
+  as it does its other failures, instead of letting a traceback out. The
   path a decision took is read back from the store, not from a new column:
   `decisions.verdict_digests` is `{}` for a bar with no verdict and holds a
   `REVIEW`'s digest for one with that, and `status --run-id` now prints
-  each decision's verdicts as `<token>=<rating>` (`changed` when the store
-  no longer holds a verdict under that digest at that bar) instead of the
-  tokens alone. What the two weight strategies share now lives in
+  what each decision saw of every traded token as `<token>=<rating>`,
+  `none` for a token without a verdict, or `changed` when the store now
+  holds something else at that bar than the decision saw, the difference a
+  replay warns of. What the two weight strategies share now lives in
   `strategies/rebalance.py`: the bounded-decimal check (`require_decimal`),
   the cut to a weight's four places (`floor_weight`) and the exact
   remainder to the quote token (`weights_with_quote`). Nothing writes
-  verdicts yet:
-  a backtest replays the ones the store holds and asks no judge, and the
-  agent layer that asks TradingAgents is the next PR.
+  verdicts yet: a backtest replays the ones the store holds and asks no
+  judge, and the agent layer that asks TradingAgents is the next PR.
 
 - **`contrib/uniswap_v3`: a rule strategy, `trend_vol_weights`
   (`strategies/trend_vol_weights.py`).** A second strategy next to the

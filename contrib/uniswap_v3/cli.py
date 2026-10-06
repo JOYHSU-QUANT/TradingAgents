@@ -521,11 +521,13 @@ def _decided_span(decisions: Sequence[Decision]) -> str:
 
 
 def _saw(store: Store, config: UniswapConfig, decision: Decision) -> str:
-    """The verdict the decision saw on each token, as ``<token>=<rating>``; nothing for a run that reads none.
+    """What the decision saw of each traded token's verdict, as ``<token>=<rating>``; nothing for a run that reads none.
 
-    The rating is read back from the store by the digest the decision kept;
-    a token whose verdict the store no longer holds under that digest reads
-    ``changed``.
+    The rating is read back from the store by the digest the decision kept.
+    A token the decision saw no verdict on reads ``none``, and one whose
+    verdict the store now holds differently from what the decision saw, or
+    did not hold then, or does not hold now, reads ``changed``: the same
+    difference a replay warns of.
     """
     if decision.verdicts is None:
         return ""
@@ -533,15 +535,17 @@ def _saw(store: Store, config: UniswapConfig, decision: Decision) -> str:
         raise StoreError(
             f"the decision at {decision.time} saw verdicts, and the run's config reads none"
         )
-    now = {
-        said.digest: said.rating.value
-        for said in load_verdicts(store, config, decision.time).values()
-    }
-    seen = ", ".join(
-        f"{symbol}={now.get(digest, 'changed')}"
-        for symbol, digest in sorted(decision.verdicts.items())
-    )
-    return f"  verdicts: {seen or 'none'}"
+    now = load_verdicts(store, config, decision.time)
+    seen = []
+    for symbol in sorted(config.traded_symbols):
+        kept, held = decision.verdicts.get(symbol), now.get(symbol)
+        if kept is None and held is None:
+            seen.append(f"{symbol}=none")
+        elif kept is not None and held is not None and held.digest == kept:
+            seen.append(f"{symbol}={held.rating.value}")
+        else:
+            seen.append(f"{symbol}=changed")
+    return f"  verdicts: {', '.join(seen)}"
 
 
 def _why(decision: Decision) -> str:

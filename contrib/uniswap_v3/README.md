@@ -11,7 +11,8 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 - `ai_gated_weights`：AI 閘門策略。拿 `trend_vol_weights` 的目標當護欄，每個代幣再乘上該代幣在這根 bar 的判斷
   （store 的 `verdicts`，見下）評等對應的倍率（範例：Buy 1／Overweight 0.75／Hold 0.5／Underweight 0.25／Sell 0）。
   沒判斷或 `REVIEW` 時不加新風險：目標＝目前佔比（截到權重的四位精度）、上限是規則的權重，該賣的照賣；不在趨勢上的代幣一律 0，
-  所以每個代幣的目標永遠 ≤ 規則的目標。設定檔要有 `verdicts` 區塊，沒有的話 run 停在第一根。
+  所以每個代幣的目標永遠 ≤ 規則的目標。band 沿用規則的：判斷把目標砍到持倉 band 以內（例如小持倉收到 Sell）要等下次
+  再平衡才一起賣。設定檔要有 `verdicts` 區塊，沒有的話第一根就 `failed: the strategy refused the bar …`。
   政策與參數的定義在 `strategies/ai_gated_weights.py` 的 docstring。
 
 它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay` 完全隔離：
@@ -160,7 +161,7 @@ contrib/uniswap_v3/
 | 指令 | 做什麼 | 讀鏈 |
 |---|---|---|
 | `backfill --config C --db D --from 2022-01-01 [--to …] [--dry-run]` | 把一段 bar 讀進 store；可重複執行，已有的不重讀 | 是（archive） |
-| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts` 區塊時另印最近 N 根有判斷的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個代幣的評等，store 裡已不是那份判斷的印 `changed`）；paper run 另印跟不跟得上時鐘 | 否 |
+| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts` 區塊時另印最近 N 根有判斷的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個交易代幣的評等：`WBTC=none, WETH=Buy`，store 裡的判斷與決策看到的不同——事後補進、改了或刪了——印 `changed`）；paper run 另印跟不跟得上時鐘 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
 | `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策 | 是 |
 | `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |
@@ -202,12 +203,14 @@ contrib/uniswap_v3/
    答案只能取決於這兩個參數——不讀時鐘、不用亂數、不保留上次呼叫的狀態、不讀外部資料——
    這樣同樣的 bar 在回測、paper、分叉上才會做出同樣的決策。
 2. 給它一個 `from_params(params)` 工廠，自己檢查參數（參考 `FixedWeights.from_params`；
-   `strategies/rebalance.py` 有現成的 `require_params`、`require_band`，要「偏離超過 band 才再平衡」
+   `strategies/rebalance.py` 有現成的 `require_params`、`require_band`、`require_decimal`（有界 Decimal），
+   權重要截到四位、餘數給計價代幣就用 `floor_weight`／`weights_with_quote`，要「偏離超過 band 才再平衡」
    就用 `rebalance_or_hold`，別自己再寫一份）。
 3. 在 `strategies/registry.py` 的 `_FACTORIES` 登記名字。
 4. 設定檔寫 `strategy: {name: <名字>, params: {...}}`。
 
-策略拋例外或回答不合格，run 會停在那根 bar、不記 decision，修好後重跑會從那根接著決策。
+策略拋 `ValueError`（不能決策）或回答不合格，run 會以 `failed: the strategy refused the bar at …` 停在那根 bar、
+不記 decision，修好後重跑會從那根接著決策；其他例外是 bug，原樣冒出。
 
 ---
 

@@ -21,7 +21,13 @@ TREND_PARAMS = {
 }
 GATED_PARAMS = {
     "rule": TREND_PARAMS,
-    "multipliers": {"Buy": "1", "Overweight": "0.75", "Hold": "0.5", "Underweight": "0.25", "Sell": "0"},
+    "multipliers": {
+        "Buy": "1",
+        "Overweight": "0.75",
+        "Hold": "0.5",
+        "Underweight": "0.25",
+        "Sell": "0",
+    },
 }
 
 

@@ -17,11 +17,18 @@ from contrib.uniswap_v3.domain.records import Outcome
 from contrib.uniswap_v3.domain.types import Hold, MarketView, Portfolio
 from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.engine.backtest import run_backtest
+from contrib.uniswap_v3.engine.step import EngineError
 from contrib.uniswap_v3.ports import Strategy
 from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.strategies.ai_gated_weights import AiGatedWeights
 from contrib.uniswap_v3.strategies.trend_vol_weights import TrendVolWeights
-from contrib.uniswap_v3.tests.fakes.engine import FIRST_DAY, bar, ledger, weights
+from contrib.uniswap_v3.tests.fakes.engine import (
+    FIRST_DAY,
+    bar,
+    config as _plain_config,
+    ledger,
+    weights,
+)
 from contrib.uniswap_v3.tests.fakes.node import DEFAULT_TICK, UP_HALF_TICK, put_day
 from contrib.uniswap_v3.tests.fakes.verdicts import (
     SOURCE,
@@ -192,8 +199,9 @@ def test_a_review_verdict_is_handled_as_no_verdict():
 
 def test_without_a_verdict_a_token_in_trend_is_held_at_its_share_up_to_the_rules_weight():
     view = _view(RISING)  # the rule: WETH 0.5
-    # Nothing held: nothing is bought.
+    # Nothing held: nothing is bought; nor from a portfolio worth nothing, whose shares are zero.
     assert STRATEGY.target_for(view, _portfolio(view, "1000", "0", "0")) == ALL_QUOTE
+    assert STRATEGY.target_for(view, _portfolio(view, "0", "0", "0")) == ALL_QUOTE
     # 30% held (2.4793 WETH at 121 is 299.99): kept, not added to; the share is cut to four places.
     assert STRATEGY.target_for(view, _portfolio(view, "700", "2.4793", "0")) == weights(
         "0.7001", "0.2999", "0"
@@ -275,7 +283,6 @@ def test_without_a_verdict_a_holding_below_the_rules_weight_is_not_traded():
 def test_a_portfolio_worth_nothing_is_held():
     view = _view(RISING, said={"WETH": Rating.BUY})
     assert STRATEGY.decide(view, _portfolio(view, "0", "0", "0")) == Hold()
-    assert STRATEGY.target_for(_view(RISING), _portfolio(view, "0", "0", "0")) == ALL_QUOTE
 
 
 def test_the_same_view_and_portfolio_give_the_same_answer_whatever_was_decided_before():
@@ -326,3 +333,21 @@ def test_a_backtest_replays_the_stored_verdicts_through_the_gate(tmp_path):
     # weight, and WBTC, which nothing said to hold, is not bought.
     assert decisions[3].verdicts == {}
     assert decisions[3].target == weights("0.5", "0.5", "0")
+
+
+def test_a_config_without_a_verdicts_section_fails_the_first_bar_and_decides_nothing(tmp_path):
+    config = replace(
+        _plain_config(),
+        strategy=StrategySpec(name="ai_gated_weights", params=PARAMS),
+    )
+    with open_store(tmp_path / "store.db") as store:
+        put_day(store, 0)
+        with pytest.raises(
+            EngineError,
+            match=r"the strategy refused the bar at \d+ \(ai_gated_weights reads verdicts, and "
+            r"the view carries none: the config needs a verdicts section",
+        ):
+            run_backtest(
+                store, config, run_id="unjudged", start=FIRST_DAY, opening=ledger(), now=FIRST_DAY
+            )
+        assert store.decisions("unjudged") == []

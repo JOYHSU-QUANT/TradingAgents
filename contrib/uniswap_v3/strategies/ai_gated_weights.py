@@ -5,7 +5,7 @@ its ``rule``, and gates the rule's target with the verdicts the view carries
 at the bar being decided (:attr:`~..domain.types.MarketView.latest_verdicts`):
 
 - A token the rule holds, with a verdict on it, is held at the rule's weight
-  times the multiplier of the verdict's rating: with the defaults, all of it
+  times the multiplier of the verdict's rating: with the example's, all of it
   on ``Buy``, three quarters on ``Overweight``, half on ``Hold``, a quarter
   on ``Underweight`` and none on ``Sell``.
 - A token with no verdict at the bar, or a ``REVIEW`` one (the judge was
@@ -25,12 +25,16 @@ only when another token takes the portfolio out of its band, and then only
 when it is worth the execution's ``min_trade_value``, which on a portfolio
 under some 100,000 of the quote it never is. The band is the rule's, and
 the target is answered only when some share has drifted more than it
-(:func:`.rebalance.rebalance_or_hold`).
+(:func:`.rebalance.rebalance_or_hold`): a verdict that cuts a token's
+target to below the band of its share, a ``Sell`` on a small holding
+among them, is acted on when something next drifts out of band, not at
+once, as a trend that flips under the rule is.
 
 The verdicts are those of the source the run's config names
 (``verdicts.source``). A config that names none hands the strategy a view
-without one, and the strategy raises on the first bar: it does not run on
-as the rule with a judge that is never heard, which nothing would show.
+without one, and the strategy refuses the first bar, which the engine
+reports and stops the run on: it does not run on as the rule with a judge
+that is never heard, which nothing would show.
 
 Params, as a config writes them, every one of them required::
 

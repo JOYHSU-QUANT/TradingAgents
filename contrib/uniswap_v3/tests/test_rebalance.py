@@ -89,6 +89,7 @@ def test_a_portfolio_inside_the_band_is_held(usdc, weth, wbtc):
     [
         ("551", "0.1245", "0.005"),  # 55.1 / 24.9 / 20: USDC just over, WETH just under
         ("440", "0.165", "0.00575"),  # 44 / 33 / 23: only USDC is out, and under its target
+        ("560", "0.135", "0.00425"),  # 56 / 27 / 17: only USDC is out, and over its target
         ("1000", "0", "0"),  # all in the quote token
     ],
 )

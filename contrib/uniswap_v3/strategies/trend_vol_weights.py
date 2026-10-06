@@ -14,9 +14,9 @@ view, suspect bars left out:
 - When the weights of the tokens in trend add up to more than 1, they are
   scaled down to add up to 1. What is left goes to the quote token.
 
-``target_vol`` is a risk budget per token, not for the portfolio: two
-tokens in trend together, each sized to it, leave the portfolio more
-volatile than it when they move together, up to the sum of their weights.
+``target_vol`` is a risk budget per token, not for the portfolio: tokens
+in trend together, each sized to it, leave the portfolio more volatile
+than it when they move together, up to their number times it.
 
 The windows count bars, not time, and the series is the view's unsuspect
 bars joined across any gap: after a suspect or missing stretch the window

@@ -112,12 +112,34 @@ def test_direct_construction_is_checked_too(fields, match):
         TrendVolWeights(**{**by_hand, **fields})
 
 
-def test_the_bars_needed_are_the_longer_of_the_trend_window_and_the_returns_window():
-    long_vol = TrendVolWeights.from_params({**PARAMS, "trend_window": 2, "vol_window": 4})
-    assert long_vol.bars_needed == 5  # four returns need five closes
+@pytest.mark.parametrize(
+    ("trend_window", "vol_window"),
+    [(2, 4), (5, 2)],  # four returns need five closes; a five-close average needs five
+)
+def test_the_bars_needed_are_the_longer_of_the_trend_window_and_the_returns_window(
+    trend_window, vol_window
+):
+    strategy = TrendVolWeights.from_params(
+        {**PARAMS, "trend_window": trend_window, "vol_window": vol_window}
+    )
+    assert strategy.bars_needed == 5
     rising = ["100", "110", "121", "133"]
-    assert long_vol.target(_view(rising), "USDC") == ALL_QUOTE
-    assert long_vol.target(_view([*rising, "146"]), "USDC") == HALF_WETH
+    assert strategy.target(_view(rising), "USDC") == ALL_QUOTE
+    assert strategy.target(_view([*rising, "146"]), "USDC") == HALF_WETH
+
+
+def test_the_trend_window_reads_only_its_last_closes():
+    # Five bars in view for the four returns, two closes for the trend: 95 is below the
+    # average of 100 and 95, while an average over all five, pulled down by the 10, is not.
+    short_trend = TrendVolWeights.from_params({**PARAMS, "trend_window": 2, "vol_window": 4})
+    assert short_trend.target(_view(["10", "100", "100", "100", "95"]), "USDC") == ALL_QUOTE
+
+
+def test_the_volatility_window_reads_only_its_last_closes():
+    # Five bars in view for the trend, three closes for the two returns: the halving and
+    # doubling early on would size the weight far below the cap if they were counted.
+    short_vol = TrendVolWeights.from_params({**PARAMS, "trend_window": 5, "vol_window": 2})
+    assert short_vol.target(_view(["100", "50", "100", "110", "121"]), "USDC") == HALF_WETH
 
 
 def test_a_max_weight_of_one_lets_a_token_take_the_whole_portfolio():
@@ -141,9 +163,6 @@ def test_a_token_closing_at_or_below_its_average_is_out_of_trend():
     assert STRATEGY.target(_view(["100", "130", "110"]), "USDC") == ALL_QUOTE
     # 90, 110, 100 average 100: at the average is not above it.
     assert STRATEGY.target(_view(["90", "110", "100"]), "USDC") == ALL_QUOTE
-    # The average is over the last three closes only: 100, 90, 95 average 95, and the
-    # earlier 10 would have pulled a four-close average below the latest close.
-    assert STRATEGY.target(_view(["10", "100", "90", "95"]), "USDC") == ALL_QUOTE
 
 
 def test_a_trending_token_with_no_volatility_takes_the_cap():

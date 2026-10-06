@@ -92,8 +92,9 @@ paper 當時看到的與事後回測看到的就不一樣了。所以：**歷史
 跑著的 run 後面再 backfill**（visit 自己會補新的 bar）。
 
 跑 `trend_vol_weights` 還有一件事：它的視窗要夠長的歷史才會進場（`max(trend_window, vol_window + 1)` 根，
-預設 50 根），歷史不夠時目標是全 USDC——開 run 時若 `--balance` 給了 WETH／WBTC，第一根就會賣掉。
-所以要嘛歷史補到開 run 前至少 50 根（照上面從 2022 年補就夠），要嘛開 run 只給 USDC。
+example 的 `trend_window` 設 50 就是 50 根），歷史不夠時目標是全 USDC——開 run 時若 `--balance` 給了
+WETH／WBTC，第一根就會賣掉。所以要嘛歷史補到開 run 前至少那麼多根（照上面從 2022 年補就夠），
+要嘛開 run 只給 USDC。
 `bars_per_year`、`trend_window`、`vol_window` 都以 bar 為單位，改了 `interval_seconds` 要一起改。
 
 ---

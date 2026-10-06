@@ -50,9 +50,14 @@ fails, or answers for another swap than the one it was handed; a ledger
 that does not hold exactly the configured tokens; swaps that cannot be
 planned, or that sell more than the ledger holds; a ``seen`` that describes
 another block than the bar's; a ``suspicion`` of a bar that is not suspect,
-or a suspect bar with a ``seen`` and no ``suspicion``;
-a bar before the latest one the run has decided. The bar is left undecided,
-so it can be decided once the cause is fixed.
+or a suspect bar with a ``seen`` and no ``suspicion``; a view whose
+``verdict_source`` is not the one the config reads (none, for a config
+that reads no verdicts); a bar before the latest one the run has decided.
+The bar is left undecided, so it can be decided once the cause is fixed.
+
+A run whose config reads verdicts keeps, with every decision, the digest of
+each verdict the view carried at the bar (:attr:`~..domain.records.Decision.verdicts`),
+empty when it carried none there; a run that reads none keeps ``None``.
 """
 
 from __future__ import annotations
@@ -165,6 +170,11 @@ def _hashes(exc: BaseException) -> tuple[str, ...]:
     return ()
 
 
+def _verdicts_of(source: str | None) -> str:
+    """``source``'s verdicts in words, for a message: ``no verdicts`` when there is no source."""
+    return "no verdicts" if source is None else f"the verdicts of {source!r}"
+
+
 def _unsettled(run_id: str, send: OpenSend) -> UnsettledSend:
     stopped = f" ({send.failure})" if send.failure else ""
     return UnsettledSend(
@@ -250,6 +260,7 @@ class Engine:
                 f"the bar at {bar.time} is not suspect, and it came with a reason to "
                 f"skip it ({suspicion.reason})"
             )
+        self._require_reads(view)
         latest = self.journal.last_decided(self.run_id)
         if latest is not None and latest > bar.time:
             # A run only goes forward: the bars after this one were decided without it in view.
@@ -278,11 +289,11 @@ class Engine:
                 SkipCode.UNSPECIFIED, "the bar was marked suspect, and nothing said why"
             )
             return self._record(
-                bar, seen, Outcome.SKIPPED_SUSPECT, ledger, reason=why.reason, reason_code=why.code
+                view, seen, Outcome.SKIPPED_SUSPECT, ledger, reason=why.reason, reason_code=why.code
             )
         answer = self.strategy.decide(view, portfolio)
         if isinstance(answer, Hold):
-            return self._record(bar, seen, Outcome.HOLD, ledger)
+            return self._record(view, seen, Outcome.HOLD, ledger)
         if not isinstance(answer, TargetWeights):
             raise EngineError(f"the strategy answered {answer!r}, neither Hold nor TargetWeights")
         if set(answer.weights) != symbols:
@@ -302,16 +313,16 @@ class Engine:
         except (ValueError, ArithmeticError) as exc:
             raise EngineError(f"the swaps at {bar.time} cannot be planned ({exc!r})") from exc
         if not swaps:
-            return self._record(bar, seen, Outcome.NO_TRADE, ledger, target=answer)
+            return self._record(view, seen, Outcome.NO_TRADE, ledger, target=answer)
         if self.wallet is not None:
-            return self._sign(bar, seen, answer, ledger, swaps, self.wallet)
+            return self._sign(view, seen, answer, ledger, swaps, self.wallet)
         fills: list[Fill] = []
         for leg, swap in enumerate(swaps):
             answered = _checked(leg, swap, self._execute(leg, swap, bar))
             if isinstance(answered, Rejection):
                 # The legs after a refused one are not asked for.
                 return self._record(
-                    bar,
+                    view,
                     seen,
                     Outcome.REJECTED,
                     ledger,
@@ -324,7 +335,7 @@ class Engine:
             after = ledger.apply(fills)
         except InsufficientGas as exc:
             return self._record(
-                bar,
+                view,
                 seen,
                 Outcome.REJECTED,
                 ledger,
@@ -337,7 +348,22 @@ class Engine:
             raise EngineError(
                 f"the fills at {bar.time} do not apply to the ledger ({exc})"
             ) from exc
-        return self._record(bar, seen, Outcome.FILLED, after, target=answer, fills=tuple(fills))
+        return self._record(view, seen, Outcome.FILLED, after, target=answer, fills=tuple(fills))
+
+    def _require_reads(self, view: MarketView) -> None:
+        """Refuse a view whose verdicts are not the ones the run's config reads.
+
+        A config that reads no verdicts is handed a view that names no
+        source; one that reads a source is handed a view naming that
+        source, whether or not it said anything at the bar. Anything else
+        was not built for this run.
+        """
+        reads = None if self.config.verdicts is None else self.config.verdicts.source
+        if view.verdict_source != reads:
+            raise EngineError(
+                f"the run {self.run_id!r} reads {_verdicts_of(reads)}, and the view at "
+                f"{view.latest.time} carries {_verdicts_of(view.verdict_source)}"
+            )
 
     def _execute(self, leg: int, swap: SwapIntent, bar: Bar) -> object:
         """What the executor answers to ``swap``, leg ``leg`` of the bar's rebalance, unchecked."""
@@ -348,7 +374,7 @@ class Engine:
 
     def _sign(
         self,
-        bar: Bar,
+        view: MarketView,
         seen: BarSeen | None,
         target: TargetWeights,
         ledger: Ledger,
@@ -356,6 +382,7 @@ class Engine:
         wallet: Wallet,
     ) -> StepResult:
         """Send ``swaps`` from ``wallet``, which holds ``ledger``, keeping each leg as it fills."""
+        bar = view.latest
         time = bar.time
         wallet.prepare(bar, ledger)
         self._require_holds(wallet, ledger, f"before the swaps of the bar at {time}, nothing sent")
@@ -415,7 +442,7 @@ class Engine:
             outcome = Outcome.REJECTED
         try:
             return self._record(
-                bar,
+                view,
                 seen,
                 outcome,
                 after,
@@ -482,7 +509,7 @@ class Engine:
 
     def _record(
         self,
-        bar: Bar,
+        view: MarketView,
         seen: BarSeen | None,
         outcome: Outcome,
         ledger: Ledger,
@@ -492,7 +519,12 @@ class Engine:
         reason_code: RejectionCode | SkipCode | None = None,
         fills: tuple[Fill, ...] = (),
     ) -> StepResult:
-        """Write the bar's decision, with ``ledger`` (what the step leaves) valued at the bar."""
+        """Write the decision on the bar ``view`` ends at, with ``ledger`` (what the step leaves) valued there.
+
+        The decision keeps the digest of each verdict the view carries at
+        that bar, and ``None`` when the view names no source.
+        """
+        bar = view.latest
         decision = Decision(
             time=bar.time,
             outcome=outcome,
@@ -502,6 +534,9 @@ class Engine:
             reason_code=reason_code,
             seen=seen,
             decided_at=self.decided_at,
+            verdicts=None
+            if view.verdict_source is None
+            else {symbol: verdict.digest for symbol, verdict in view.latest_verdicts.items()},
         )
         valuation = Valuation(
             time=bar.time,

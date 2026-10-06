@@ -18,8 +18,10 @@ the routing, the ledger and the run metrics (:mod:`.domain`), the ports,
 the address tables
 (:mod:`.constants`), the config loader, the strategy registry, reads of
 blocks, pool prices, quotes and the base fee from a node (:mod:`.chain`), an
-SQLite store of each pool's reading at every bar boundary and of what each
-run decided (:mod:`.store`), the step that decides one bar, an executor
+SQLite store of each pool's reading at every bar boundary, of what an
+outside judge said of each token there (verdicts, which a config may have
+the strategy's view carry) and of what each run decided (:mod:`.store`),
+the step that decides one bar, an executor
 that fills from the bar alone, one that fills from the pools' quotes, and
 the loop that replays stored bars through the step (:mod:`.engine`), a
 paper run's visit (:mod:`.paper`), and six commands (:mod:`.cli`):

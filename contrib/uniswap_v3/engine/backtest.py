@@ -13,7 +13,10 @@ The view a bar is decided on holds every bar the store has up to that bar,
 those from before the range included, and none after it. What a strategy
 sees therefore does not depend on where a run was started or carried on
 from, and a bar stored later than the one being decided cannot reach its
-decision.
+decision. A config that reads verdicts (a ``verdicts`` section) has the
+view carry, at each of those bars, what its source said of the traded
+tokens there (:func:`~..store.verdict_source.load_verdicts`); a verdict
+stored at a later bar cannot reach the decision either.
 
 A boundary of the range that lacks the reading of a configured pool has no
 bar: it is not decided, the view simply does not hold it, and the summary
@@ -34,7 +37,10 @@ A bar is decided on the reading the store holds at that moment, final or
 not. The summary counts the bars this call decided on a reading that was not
 final yet, and the bars decided earlier whose reading has changed since (another
 close block, or suspect now and not then, or the reverse). Their decisions
-stand: a new run decides them on what the store holds now.
+stand: a new run decides them on what the store holds now. The same goes for
+the verdicts: a bar decided earlier whose verdicts in the store are no longer
+the ones its decision saw (:attr:`~..domain.records.Decision.verdicts`) is
+counted, and its decision stands.
 """
 
 from __future__ import annotations
@@ -49,9 +55,11 @@ from ..domain.bars import Finality
 from ..domain.ledger import Ledger
 from ..domain.records import Decision, Outcome, RejectionCode
 from ..domain.types import Bar, MarketView, RunMode
+from ..domain.verdicts import Verdict
 from ..ports import Executor, Wallet
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
+from ..store.verdict_source import load_verdicts
 from .executors import ModelExecutor
 from .step import EngineError, open_engine, start_or_continue_run
 
@@ -78,8 +86,10 @@ class BacktestSummary:
     were decided earlier on a reading the store no longer holds as it was,
     ``gas_rejected`` had their rebalance refused for want of gas,
     ``executor_rejected`` had it refused by the executor (a rebalance a
-    signed swap left partial is in neither, and is counted in ``outcomes``), and
-    ``skipped`` were suspect and not traded on.
+    signed swap left partial is in neither, and is counted in ``outcomes``),
+    ``skipped`` were suspect and not traded on, and ``verdicts_changed`` were
+    decided earlier on other verdicts than the store holds for them now (a
+    verdict recorded after the bar was decided, most often).
     """
 
     start: int
@@ -93,6 +103,9 @@ class BacktestSummary:
     executor_rejected: tuple[int, ...]
     skipped: tuple[int, ...]
     outcomes: Mapping[Outcome, int]
+    # Boundaries decided earlier, by a run that reads verdicts, whose verdicts in the
+    # store are no longer the ones the decision saw. Like ``changed``, the decisions stand.
+    verdicts_changed: tuple[int, ...] = ()
 
     @property
     def boundaries(self) -> int:
@@ -120,6 +133,18 @@ def _reads_differently(decision: Decision, loaded: StoredBar) -> bool:
     return decision.suspect != loaded.bar.suspect or (
         seen is not None and seen.close_block_hash != loaded.seen.close_block_hash
     )
+
+
+def _judged_differently(decision: Decision, said: Mapping[str, Verdict]) -> bool:
+    """Whether the stored verdicts at the bar are no longer the ones ``decision`` saw.
+
+    A decision of a run that reads no verdicts saw none, and is compared
+    with nothing.
+    """
+    saw = decision.verdicts
+    return saw is not None and dict(saw) != {
+        symbol: verdict.digest for symbol, verdict in said.items()
+    }
 
 
 def run_backtest(
@@ -223,8 +248,12 @@ def replay(
     engine = open_engine(store, config, executor, run_id=run_id, now=now, wallet=wallet)
 
     bars: list[Bar] = []
+    # What the config's source said at each bar so far, for bars it said anything at.
+    verdicts: dict[int, Mapping[str, Verdict]] = {}
+    source = None if config.verdicts is None else config.verdicts.source
     decided = already_decided = on_pending = 0
     changed: list[int] = []
+    verdicts_changed: list[int] = []
     gas_rejected: list[int] = []
     executor_rejected: list[int] = []
     skipped: list[int] = []
@@ -235,6 +264,9 @@ def replay(
             # Only a writer taking a reading away mid-run could bring this about.
             raise EngineError(f"the bar at {time} is no longer in the store")
         bars.append(loaded.bar)
+        said = load_verdicts(store, config, time)
+        if said:
+            verdicts[time] = said
         if time < start:
             continue
         # Asked here as well as in the step, so that a bar already decided costs no view.
@@ -243,9 +275,11 @@ def replay(
             already_decided += 1
             if _reads_differently(decision, loaded):
                 changed.append(time)
+            if _judged_differently(decision, said):
+                verdicts_changed.append(time)
         else:
             try:
-                view = MarketView(tuple(bars))
+                view = MarketView(tuple(bars), verdicts, source)
             except ValueError as exc:
                 raise EngineError(
                     f"the stored bars up to {time} do not make a view ({exc})"
@@ -275,4 +309,5 @@ def replay(
         executor_rejected=tuple(executor_rejected),
         skipped=tuple(skipped),
         outcomes=MappingProxyType(dict(outcomes)),
+        verdicts_changed=tuple(verdicts_changed),
     )

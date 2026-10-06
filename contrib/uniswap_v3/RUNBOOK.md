@@ -198,6 +198,10 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
   run 還沒決策過任何一根時沒有這一行。
 - 接著是持倉、價值、報酬（與 `report` 同一個算法：扣掉累計 gas）、最近幾筆決策，
   每筆附「邊界後多久決策的」——準時的應該是 `00:10:xx`；`1d ...` 表示是隔天補決策的。
+- 設定檔有 `verdicts` 區塊時，bar 列表後多一行 `verdicts from <source>: N of the latest M bar(s) have one for every token (...)`，
+  是最近 M 根**成得了 bar 的**邊界裡每個代幣都有判斷的根數與各代幣各自的根數（列表裡 `incomplete` 的邊界不算，策略永遠不會決策它）；
+  每筆決策另附 `verdicts: WBTC, WETH` 或 `verdicts: none`（none＝那根 bar 沒有判斷，策略走的是「沒判斷」的政策）。
+  沒有 `verdicts` 區塊的 run 不印這些。
 - 這兩個指令不讀鏈，隨時可以跑。
 
 ---
@@ -211,6 +215,7 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 | `warning: ... skipped as suspect` | bar 的收盤價與 TWAP 偏離太大（或被 reorg），不交易 | 沒事；連續很多根就看一下 `status` 的 flags |
 | `warning: the chain had no answer at the boundary` | 池子在那個邊界讀不到 TWAP | 下一次 visit 會再問；run 走過去之後就永遠不決策它 |
 | `warning: ... no longer on the final chain` | 先前存的讀數被 reorg | 見 §7 |
+| `warning: ... now have other verdicts in the store than their decisions saw` | 某些已決策的 bar，store 裡的判斷後來變了（多半是決策時沒判斷、事後才補進） | 決策不改、照常跑；要讓判斷生效就開新的 run 重放 |
 | `try again later: ...` 接 `==== exit 3` | 節點落後、成交區塊還沒出現、或節點回錯誤 | 當天後面的 visit 會重試；**一整天三次都是 3** 就查節點（額度、URL、服務狀態） |
 | `try again later: the store ... (database is locked)` 接 `==== exit 3` | 有別的程式開著同一個 store：同時在跑回測、用 DB 瀏覽器開著，或前一次 visit 被排程停掉、它啟動的 python 還沒結束 | 關掉它（工作管理員裡找 `python.exe`）；當天後面的 visit 會重試 |
 | `failed: there is no run 'paper-1', and a new run needs opening balances` | `RUN_ID` 或 `DB` 打錯，或 run 還沒開 | 對照 §2、§3.1 |

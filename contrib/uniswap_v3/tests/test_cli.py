@@ -12,6 +12,7 @@ from contrib.uniswap_v3 import cli
 from contrib.uniswap_v3.chain import rpc as chain_rpc
 from contrib.uniswap_v3.chain.errors import RpcConfigError
 from contrib.uniswap_v3.constants import ETHEREUM_MAINNET, POOLS
+from contrib.uniswap_v3.domain.verdicts import Rating
 from contrib.uniswap_v3.store.repository import open_store
 from contrib.uniswap_v3.tests.fakes.node import (
     BTC_TICK as _BTC_TICK,
@@ -19,9 +20,11 @@ from contrib.uniswap_v3.tests.fakes.node import (
     FIRST_DAY,
     FakeNode,
     block_at,
+    put_day,
     sqrt_price_at,
 )
 from contrib.uniswap_v3.tests.fakes.rpc import rpc_over
+from contrib.uniswap_v3.tests.fakes.verdicts import record
 
 _EXAMPLE = Path(__file__).resolve().parents[1] / "configs" / "uniswap_v3.example.yaml"
 _USDC_WETH = POOLS[ETHEREUM_MAINNET]["USDC/WETH-500"]
@@ -435,3 +438,105 @@ def test_status_of_an_empty_store_and_of_no_store(tmp_path, capsys):
     assert code == cli.EXIT_FAILED and lines == []
     assert "there is no store at" in capsys.readouterr().err
     assert not (tmp_path / "nowhere.db").exists()
+
+
+# --- verdicts ----------------------------------------------------------------
+
+
+def _reading_verdicts(tmp_path: Path) -> Path:
+    """The shipped example, reading the verdicts of the tests' source."""
+    path = tmp_path / "verdicts.yaml"
+    path.write_text(
+        _EXAMPLE.read_text(encoding="utf-8") + "\nverdicts:\n  source: test-judge\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _backtest_reading(config: Path, db: Path, run_id: str) -> int:
+    code, _ = _run(
+        "backtest", "--config", str(config), "--db", str(db), "--run-id", run_id,
+        "--from", "2024-01-01", "--balance", "USDC=10000", "--gas-eth", "1",
+    )  # fmt: skip
+    return code
+
+
+def test_status_counts_the_latest_boundaries_with_a_verdict_for_every_token(node, tmp_path):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    with open_store(db) as store:
+        for said in (record("WETH", 0), record("WBTC", 0, Rating.HOLD), record("WETH", 2)):
+            store.insert_verdict(said)
+    reading = _reading_verdicts(tmp_path)
+
+    code, lines = _run("status", "--config", str(reading), "--db", str(db), "--bars", "3")
+
+    assert code == cli.EXIT_OK
+    assert lines[-1] == (
+        "verdicts from test-judge: 1 of the latest 3 bar(s) have one for every token "
+        "(WBTC 1, WETH 2)"
+    )
+    code, lines = _run("status", "--config", str(reading), "--db", str(db), "--bars", "1")
+    assert code == cli.EXIT_OK
+    assert lines[-1] == (
+        "verdicts from test-judge: 0 of the latest 1 bar(s) have one for every token "
+        "(WBTC 0, WETH 1)"
+    )
+    # A boundary that lacks a pool's reading makes no bar, and is not counted.
+    with open_store(db) as store:
+        put_day(store, 3, pools=(_USDC_WETH,))
+        store.insert_verdict(record("WETH", 3))
+    code, lines = _run("status", "--config", str(reading), "--db", str(db), "--bars", "4")
+    assert code == cli.EXIT_OK
+    assert any(line.endswith("incomplete: a configured pool has no reading") for line in lines)
+    assert lines[-1] == (
+        "verdicts from test-judge: 1 of the latest 3 bar(s) have one for every token "
+        "(WBTC 1, WETH 2)"
+    )
+    # The shipped example reads no verdicts, and says nothing of them.
+    code, plain = _status(db)
+    assert code == cli.EXIT_OK and not any("verdicts" in line for line in plain)
+
+
+def test_status_of_a_run_says_which_tokens_each_decision_saw_a_verdict_for(node, tmp_path):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    with open_store(db) as store:
+        for said in (record("WETH", 0), record("WBTC", 0), record("WBTC", 2)):
+            store.insert_verdict(said)
+    reading = _reading_verdicts(tmp_path)
+    assert _backtest_reading(reading, db, "reads") == cli.EXIT_OK
+    assert _backtest_reading(_EXAMPLE, db, "plain") == cli.EXIT_OK
+
+    code, lines = _run(
+        "status", "--config", str(reading), "--db", str(db), "--run-id", "reads", "--bars", "3"
+    )
+
+    assert code == cli.EXIT_OK
+    decided = [line for line in lines if "  decided 20" in line]
+    assert [line.split("  verdicts: ")[1] for line in decided] == ["WBTC, WETH", "none", "WBTC"]
+    # A run that reads no verdicts says nothing of them.
+    code, plain = _status(db, "--run-id", "plain", "--bars", "3")
+    assert code == cli.EXIT_OK
+    assert len([line for line in plain if "  decided 20" in line]) == 3
+    assert not any("verdicts" in line for line in plain)
+
+
+def test_a_replay_warns_of_decided_bars_whose_verdicts_changed_since(node, tmp_path, capsys):
+    db = tmp_path / "store.db"
+    _backfill(db)
+    reading = _reading_verdicts(tmp_path)
+    assert _backtest_reading(reading, db, "reads") == cli.EXIT_OK
+    with open_store(db) as store:
+        store.insert_verdict(record("WETH", 1))
+    capsys.readouterr()
+
+    assert _backtest_reading(reading, db, "reads") == cli.EXIT_OK
+
+    err = capsys.readouterr().err
+    assert (
+        "warning: 1 bar(s) decided earlier now have other verdicts in the store than their "
+        "decisions saw, from 2024-01-02T00:00:00Z to 2024-01-02T00:00:00Z; their decisions stand"
+    ) in err
+    with open_store(db) as store:
+        assert store.decision("reads", FIRST_DAY + DAY).verdicts == {}

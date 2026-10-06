@@ -117,7 +117,7 @@ contrib/uniswap_v3/
   chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee；
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
                         fork run 的錢包（wallet.py）
-  store/                SQLite schema（含版本號與 migration）與讀寫
+  store/                SQLite schema（含版本號與 migration）與讀寫；bar 與判斷（verdict）的載入
   backfill.py           把一段 bar 從 archive 節點讀進 store
   paper.py              paper 的一次 visit
   fork_run.py           fork run，以及未結 send 與錢包的對照
@@ -137,6 +137,12 @@ contrib/uniswap_v3/
 會簽名的 run 另寫 `sends`（每根開始送的 bar 一列，記下中斷的原因與已知花掉的 gas）與 `sent_legs`
 （每一腿成交就寫），fork run 在 `runs.fork_block` 記下建立當時分叉所在的區塊（schema v5；status／report 的標頭會印，
 但成交不在那一塊——每根要交易的 bar 都重設到自己的成交區塊，成交記錄的 `block` 才是實際的區塊）。
+`verdicts` 是外部判斷：某個 source 對某代幣在某根 bar 的五級評等（`Buy`／`Overweight`／`Hold`／`Underweight`／`Sell`，
+讀不出評等時是 `REVIEW`）＋模型、prompt 版本、問的時間、原文 digest 與 sidecar 位置；同 `bars` 不屬於任何 run，
+寫入後不改。設定檔有 `verdicts.source` 的 run，策略拿到的 view 帶該 source 對交易代幣（計價代幣除外）的判斷（只到被決策的那根為止），
+每筆 decision 在 `verdict_digests` 記下當時看到的判斷 digest——`{}` 是「有讀判斷但那天沒有」，NULL 是「這個 run 不讀判斷」
+（schema v6）。重放時已決策的 bar 若 store 裡的判斷與記下的 digest 不同，像 bar 讀數變了一樣只計數、警告，決策不改。
+目前沒有指令會寫判斷，寫入端（問 TradingAgents）是下一張 PR。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---
@@ -149,7 +155,7 @@ contrib/uniswap_v3/
 | 指令 | 做什麼 | 讀鏈 |
 |---|---|---|
 | `backfill --config C --db D --from 2022-01-01 [--to …] [--dry-run]` | 把一段 bar 讀進 store；可重複執行，已有的不重讀 | 是（archive） |
-| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間）；paper run 另印跟不跟得上時鐘 | 否 |
+| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts` 區塊時另印最近 N 根有判斷的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到哪些代幣的判斷）；paper run 另印跟不跟得上時鐘 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
 | `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策 | 是 |
 | `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |

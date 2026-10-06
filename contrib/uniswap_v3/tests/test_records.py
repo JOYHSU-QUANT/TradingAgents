@@ -375,3 +375,26 @@ def test_a_malformed_open_send_is_refused(changes, match):
     assert OpenSend(time=100, started_at=160).legs == ()
     with pytest.raises(ValueError, match=match):
         OpenSend(**{**fields, **changes})
+
+
+def test_a_decision_keeps_the_digests_of_the_verdicts_it_saw_or_none_when_it_read_none():
+    assert _decision().verdicts is None
+    assert _decision(verdicts={}).verdicts == {}
+    kept = _decision(verdicts={"WETH": "ab" * 32})
+    assert kept.verdicts == {"WETH": "ab" * 32}
+    with pytest.raises(TypeError):
+        kept.verdicts["WBTC"] = "cd" * 32  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "match"),
+    [
+        ("WETH", "must map token symbol to verdict digest"),
+        ({"": "ab" * 32}, "must be a token symbol"),
+        ({"WETH": "AB" * 32}, "64 lowercase hex"),
+        ({"WETH": None}, "64 lowercase hex"),
+    ],
+)
+def test_malformed_verdict_digests_are_refused(verdicts, match):
+    with pytest.raises(ValueError, match=match):
+        _decision(verdicts=verdicts)

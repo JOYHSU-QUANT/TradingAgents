@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -28,6 +29,11 @@ from contrib.uniswap_v3.tests.fakes.engine import (
     config as _config,
     ledger as _ledger,
     weights,
+)
+from contrib.uniswap_v3.tests.fakes.verdicts import (
+    SOURCE,
+    config as _verdict_config,
+    verdict,
 )
 
 D = Decimal
@@ -471,3 +477,28 @@ def test_a_run_with_an_open_send_is_not_opened_nor_stepped_and_nothing_is_sent_a
         engine.step(_view(0, 1))
     assert len(signer.swaps) == sent
     assert len(engine.strategy.calls) == 1
+
+
+def test_a_signed_decision_keeps_the_verdicts_the_view_carried(tmp_path):
+    reading = _verdict_config()
+    with open_store(tmp_path / "store.db") as store:
+        start_run(
+            store,
+            reading,
+            run_id=_RUN,
+            mode=RunMode.FORK,
+            ledger=_ledger(),
+            created_at=FIRST_DAY,
+            fills=FillSource.CHAIN,
+            fork_block=900,
+        )
+        wallet = _Wallet()
+        engine = replace(_engine(store, _Signer(wallet), wallet), config=reading)
+        said = verdict("WETH", 0)
+
+        view = MarketView((bar(0),), {FIRST_DAY: {"WETH": said}}, SOURCE)
+        decision = engine.step(view).decision
+
+        assert decision.outcome is Outcome.FILLED
+        assert decision.verdicts == {"WETH": said.digest}
+        assert store.decision(_RUN, FIRST_DAY).verdicts == {"WETH": said.digest}

@@ -30,6 +30,8 @@
       deadline_seconds: 300
     rpc:                        # optional
       url_env: ETH_RPC_URL
+    verdicts:                   # optional
+      source: tradingagents-rating-v1
 
 Tokens and pools are named by their keys in :mod:`.constants`; a config
 cannot supply an address, and :class:`UniswapConfig` itself refuses a token
@@ -57,6 +59,13 @@ no ``fork`` key, so a run started before the section existed is carried on
 under it; a config with the section, even at its defaults, is another
 snapshot.
 
+``verdicts`` is read into a :class:`~.domain.verdicts.VerdictSettings`: the
+one source whose stored verdicts the run's view carries
+(:mod:`.store.verdict_source`). A config without the section reads no
+verdicts, and, as with ``fork``, its snapshot has no ``verdicts`` key; a
+config with the section is another snapshot, so a run reads verdicts from
+its first bar or not at all.
+
 A file named ``*.local.yaml`` is gitignored inside this package. The config
 holds no secret. ``rpc.url_env`` is the name of the environment variable
 that holds the endpoint URL, never the URL; left out, the chain reader
@@ -82,6 +91,7 @@ from .domain.decimal_context import parse_decimal, plain
 from .domain.execution import ExecutionSettings, ForkSettings
 from .domain.routing import find_route
 from .domain.types import Pool, Token
+from .domain.verdicts import VerdictSettings
 
 __all__ = [
     "ConfigError",
@@ -94,8 +104,9 @@ __all__ = [
 ]
 
 _REQUIRED_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
-_KEYS: Final = _REQUIRED_KEYS | {"bars", "execution", "fork", "rpc"}
+_KEYS: Final = _REQUIRED_KEYS | {"bars", "execution", "fork", "rpc", "verdicts"}
 _FORK_KEYS: Final = frozenset({"account", "deadline_seconds"})
+_VERDICT_KEYS: Final = frozenset({"source"})
 _STRATEGY_KEYS: Final = frozenset({"name", "params"})
 _BARS_INTEGERS: Final = frozenset({"interval_seconds", "twap_window_seconds"})
 _BARS_DECIMALS: Final = frozenset({"max_twap_deviation", "max_move"})
@@ -176,6 +187,8 @@ class UniswapConfig:
     # How a fork run signs; ``None`` when the config has no ``fork`` section,
     # which a fork run reads as the defaults.
     fork: ForkSettings | None = None
+    # Whose verdicts the run's view carries; ``None`` when it carries none.
+    verdicts: VerdictSettings | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -194,6 +207,10 @@ class UniswapConfig:
             raise ConfigError(f"execution must be an ExecutionSettings, got {self.execution!r}")
         if self.fork is not None and not isinstance(self.fork, ForkSettings):
             raise ConfigError(f"fork must be a ForkSettings or None, got {self.fork!r}")
+        if self.verdicts is not None and not isinstance(self.verdicts, VerdictSettings):
+            raise ConfigError(
+                f"verdicts must be a VerdictSettings or None, got {self.verdicts!r}"
+            )
         if self.rpc_url_env is not None and (
             not isinstance(self.rpc_url_env, str) or not _ENV_NAME.fullmatch(self.rpc_url_env)
         ):
@@ -250,6 +267,11 @@ class UniswapConfig:
                 f"pools must form a tree over the tokens: {len(self.tokens)} tokens are "
                 f"joined by {len(self.tokens) - 1} pools, and {keys} form a loop"
             )
+
+    @property
+    def traded_symbols(self) -> frozenset[str]:
+        """The symbols of the tokens a strategy may weight: every configured token but the quote."""
+        return frozenset(token.symbol for token in self.tokens if token != self.quote)
 
 
 def _names(value: object, key: str) -> list[object]:
@@ -325,6 +347,18 @@ def _fork_settings(document: dict[Any, Any]) -> ForkSettings | None:
         raise ConfigError(f"fork: {exc}") from exc
 
 
+def _verdict_settings(document: dict[Any, Any]) -> VerdictSettings | None:
+    if "verdicts" not in document:
+        return None
+    section = _section(document, "verdicts", _VERDICT_KEYS)
+    if "source" not in section:
+        raise ConfigError("verdicts: the section names a source, and has none")
+    try:
+        return VerdictSettings(**section)
+    except ValueError as exc:
+        raise ConfigError(f"verdicts: {exc}") from exc
+
+
 def _execution_document(settings: ExecutionSettings) -> dict[str, object]:
     """``settings`` in the shape a config file writes them: a section's keys under its name."""
     document: dict[str, object] = {
@@ -362,9 +396,9 @@ def config_snapshot(config: UniswapConfig) -> str:
     comparison is of the whole text: a key a later version adds, even at its
     default, makes a new snapshot, and so a new run. The snapshot has the
     config file's own shape, with every default written out. Where the
-    node's URL comes from is left out: it changes no decision. So is the
-    ``fork`` section when the config has none, which keeps the snapshot of
-    every config written before the section existed as it was.
+    node's URL comes from is left out: it changes no decision. So are the
+    ``fork`` and ``verdicts`` sections when the config has none, which keeps
+    the snapshot of every config written before each section existed as it was.
     """
     document: dict[str, object] = {
         "chain_id": config.chain_id,
@@ -380,6 +414,8 @@ def config_snapshot(config: UniswapConfig) -> str:
     }
     if config.fork is not None:
         document["fork"] = asdict(config.fork)
+    if config.verdicts is not None:
+        document["verdicts"] = asdict(config.verdicts)
     try:
         return json.dumps(
             document,
@@ -440,6 +476,7 @@ def parse_config(document: object) -> UniswapConfig:
         execution=_execution_settings(document),
         rpc_url_env=_section(document, "rpc", _RPC_KEYS).get("url_env"),
         fork=_fork_settings(document),
+        verdicts=_verdict_settings(document),
     )
 
 

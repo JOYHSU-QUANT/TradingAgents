@@ -20,6 +20,7 @@ from typing import Final
 from .bars import Finality
 from .ledger import Ledger
 from .types import Fill, RunMode, TargetWeights
+from .verdicts import require_digest
 
 __all__ = [
     "FILLED_OUTCOMES",
@@ -158,6 +159,13 @@ class Decision:
     ``close_block`` names. ``decided_at`` is when the call that decided the
     bar was made, in epoch seconds (a paper visit's time, or a backtest's),
     and ``None`` for a decision stored before that was kept.
+
+    ``verdicts`` is what the decision saw of the verdicts at its bar: the
+    digest of each token's (:attr:`~.verdicts.Verdict.digest`), by symbol.
+    It is empty for a run that reads verdicts and a bar that had none,
+    which is what a strategy's policy for a missing verdict answers to, and
+    ``None`` for a run that reads no verdicts, or a decision stored before
+    this was kept.
     """
 
     time: int
@@ -168,6 +176,7 @@ class Decision:
     reason_code: RejectionCode | SkipCode | None = None
     seen: BarSeen | None = None
     decided_at: int | None = None
+    verdicts: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not _is_count(self.time) or not _is_count(self.close_block):
@@ -176,6 +185,16 @@ class Decision:
             raise ValueError(
                 f"decided_at must be a non-negative integer or None, got {self.decided_at!r}"
             )
+        if self.verdicts is not None:
+            if not isinstance(self.verdicts, Mapping):
+                raise ValueError(
+                    f"verdicts must map token symbol to verdict digest, got {self.verdicts!r}"
+                )
+            for symbol, digest in self.verdicts.items():
+                if not isinstance(symbol, str) or not symbol.strip():
+                    raise ValueError(f"a verdicts key must be a token symbol, got {symbol!r}")
+                require_digest(digest, f"verdicts[{symbol!r}]")
+            object.__setattr__(self, "verdicts", MappingProxyType(dict(self.verdicts)))
         if not isinstance(self.outcome, Outcome):
             raise ValueError(f"outcome must be an Outcome, got {self.outcome!r}")
         targeted = self.outcome in (

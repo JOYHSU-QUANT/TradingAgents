@@ -49,6 +49,11 @@ from contrib.uniswap_v3.tests.fakes.engine import (
     ledger as _ledger,
     weights,
 )
+from contrib.uniswap_v3.tests.fakes.verdicts import (
+    SOURCE,
+    config as _verdict_config,
+    verdict,
+)
 
 D = Decimal
 _RUN = "run-1"
@@ -672,3 +677,58 @@ def test_an_engine_is_opened_only_for_a_time_of_whole_seconds(store, now):
     start_run(store, _CONFIG, run_id=_RUN, mode=RunMode.BACKTEST, ledger=_ledger(), created_at=0)
     with pytest.raises(EngineError, match="now must be a non-negative integer of seconds"):
         open_engine(store, _CONFIG, ModelExecutor("USDC", _CONFIG.execution), run_id=_RUN, now=now)
+
+
+# --- verdicts ----------------------------------------------------------------
+
+
+def test_a_decision_keeps_what_the_view_carried_of_the_verdicts_at_its_bar(store):
+    engine = _engine(store, ScriptedStrategy({}), config=_verdict_config())
+    said = verdict("WETH", 0)
+    first = engine.step(MarketView((bar(0),), {FIRST_DAY: {"WETH": said}}, SOURCE)).decision
+    assert first.verdicts == {"WETH": said.digest}
+    # The earlier verdict is still in view; the bar being decided has none.
+    second = engine.step(
+        MarketView((bar(0), bar(1)), {FIRST_DAY: {"WETH": said}}, SOURCE)
+    ).decision
+    assert second.verdicts == {}
+    assert store.decision(_RUN, FIRST_DAY + DAY).verdicts == {}
+
+
+def test_a_skipped_bar_keeps_what_the_view_carried_too(store):
+    engine = _engine(store, ScriptedStrategy({}), config=_verdict_config())
+    said = verdict("WETH", 0)
+    view = MarketView((bar(0, suspect=True),), {FIRST_DAY: {"WETH": said}}, SOURCE)
+    skipped = engine.step(view).decision
+    assert skipped.outcome is Outcome.SKIPPED_SUSPECT
+    assert skipped.verdicts == {"WETH": said.digest}
+
+
+def test_a_view_whose_verdicts_are_of_another_source_than_the_run_reads_stops_the_run(store):
+    engine = _engine(store, ScriptedStrategy({}), config=_verdict_config())
+    other = verdict("WETH", 0, source="another-judge")
+    with pytest.raises(
+        EngineError,
+        match="reads the verdicts of 'test-judge', and the view at .* carries the verdicts of "
+        "'another-judge'",
+    ):
+        engine.step(MarketView((bar(0),), {FIRST_DAY: {"WETH": other}}, "another-judge"))
+    assert store.decision(_RUN, FIRST_DAY) is None
+    # So does a view that names no source: it was not built for a run that reads one.
+    with pytest.raises(
+        EngineError,
+        match="reads the verdicts of 'test-judge', and the view at .* carries no verdicts",
+    ):
+        engine.step(MarketView((bar(0),)))
+    assert store.decision(_RUN, FIRST_DAY) is None
+
+
+def test_a_view_that_carries_verdicts_for_a_run_that_reads_none_stops_the_run(store):
+    engine = _engine(store, ScriptedStrategy({}))
+    with pytest.raises(
+        EngineError, match="reads no verdicts, and the view at .* carries the verdicts of 'test-judge'"
+    ):
+        engine.step(MarketView((bar(0),), {FIRST_DAY: {"WETH": verdict("WETH", 0)}}, SOURCE))
+    assert store.decision(_RUN, FIRST_DAY) is None
+    # A view that carries none is what such a run is handed, and it keeps none.
+    assert engine.step(MarketView((bar(0),))).decision.verdicts is None

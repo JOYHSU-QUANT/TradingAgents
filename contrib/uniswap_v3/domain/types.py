@@ -21,6 +21,7 @@ from types import MappingProxyType
 from typing import Final
 
 from .decimal_context import DECIMAL_CONTEXT, MAX_MAGNITUDE
+from .verdicts import Verdict, require_source
 
 __all__ = [
     "ETH_DECIMALS",
@@ -228,6 +229,9 @@ class Bar:
         object.__setattr__(self, "prices", prices)
 
 
+_NO_VERDICTS: Final[Mapping[str, Verdict]] = MappingProxyType({})
+
+
 @dataclass(frozen=True)
 class MarketView:
     """The bars a strategy may see: oldest first, ending at the bar being decided.
@@ -236,9 +240,20 @@ class MarketView:
     handed nothing else, which is what keeps it from looking ahead. The type
     itself holds only the order: times strictly increase, and a later bar
     does not close on an earlier block.
+
+    ``verdict_source`` names the outside source whose verdicts the view
+    carries, and is ``None`` for a view built for a run that reads none.
+    ``verdicts`` are what that source said of the tokens, by the boundary
+    of the bar each was said at and then by token
+    (:class:`~.verdicts.Verdict`); empty when it said nothing at any bar
+    in view. Every boundary in it is one of the view's bars, so a verdict is
+    seen no earlier than its bar; every token in it is one that bar prices,
+    so a strategy could act on it; and every verdict is the named source's.
     """
 
     bars: tuple[Bar, ...]
+    verdicts: Mapping[int, Mapping[str, Verdict]] = MappingProxyType({})
+    verdict_source: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.bars, tuple) or not self.bars:
@@ -256,11 +271,58 @@ class MarketView:
                     f"a later bar cannot close on an earlier block: {later.close_block} "
                     f"follows {earlier.close_block}"
                 )
+        if self.verdict_source is not None:
+            require_source(self.verdict_source, "verdict_source")
+        object.__setattr__(self, "verdicts", self._frozen_verdicts())
+
+    def _frozen_verdicts(self) -> Mapping[int, Mapping[str, Verdict]]:
+        """A read-only copy of ``verdicts``, every entry checked against the bars and the source."""
+        if not isinstance(self.verdicts, Mapping):
+            raise ValueError(
+                f"verdicts must map a bar time to the verdicts at it, got {self.verdicts!r}"
+            )
+        if self.verdicts and self.verdict_source is None:
+            raise ValueError("the view carries verdicts and names no source for them")
+        priced = {bar.time: bar.prices for bar in self.bars}
+        frozen: dict[int, Mapping[str, Verdict]] = {}
+        for time, at_time in self.verdicts.items():
+            if time not in priced:
+                raise ValueError(f"the view holds no bar at {time!r} to carry verdicts at")
+            if not isinstance(at_time, Mapping) or not at_time:
+                raise ValueError(
+                    f"the verdicts at {time} must be a non-empty mapping of token symbol to "
+                    f"Verdict, got {at_time!r}"
+                )
+            for symbol, verdict in at_time.items():
+                if not isinstance(verdict, Verdict):
+                    raise ValueError(f"the verdicts at {time} hold Verdict values, got {verdict!r}")
+                if verdict.symbol != symbol or verdict.time != time:
+                    raise ValueError(
+                        f"the verdict filed under {symbol!r} at {time} is of {verdict.symbol!r} "
+                        f"at {verdict.time}"
+                    )
+                if symbol not in priced[time]:
+                    raise ValueError(
+                        f"the bar at {time} does not price {symbol!r}, so a verdict on it is "
+                        f"not carried"
+                    )
+                if verdict.source != self.verdict_source:
+                    raise ValueError(
+                        f"the verdict on {symbol} at {time} is of source {verdict.source!r}, and "
+                        f"the view carries those of {self.verdict_source!r}"
+                    )
+            frozen[time] = MappingProxyType(dict(at_time))
+        return MappingProxyType(frozen)
 
     @property
     def latest(self) -> Bar:
         """The bar being decided."""
         return self.bars[-1]
+
+    @property
+    def latest_verdicts(self) -> Mapping[str, Verdict]:
+        """The verdicts at the bar being decided, by token; empty when there are none."""
+        return self.verdicts.get(self.latest.time, _NO_VERDICTS)
 
 
 @dataclass(frozen=True)

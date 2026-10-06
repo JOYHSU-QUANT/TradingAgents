@@ -21,6 +21,7 @@ from contrib.uniswap_v3.domain.types import (
     eth_from_wei,
     tokens_along,
 )
+from contrib.uniswap_v3.domain.verdicts import Rating, Verdict
 
 LOW = "0x" + "0" * 39 + "1"
 HIGH = "0x" + "0" * 39 + "2"
@@ -308,3 +309,64 @@ def test_eth_from_wei_is_whole_eth_to_the_last_wei_whatever_the_ambient_context(
 def test_eth_from_wei_refuses_what_is_not_a_uint256(wei):
     with pytest.raises(ValueError, match="fits a uint256"):
         eth_from_wei(wei)
+
+
+# --- verdicts in the view ---------------------------------------------------
+
+_DIGEST = "ab" * 32
+# Bars that price both tokens the verdicts below are on.
+_PRICED = {"A": D("2"), "B": D("3")}
+
+
+def _verdict(symbol: str = "A", time: int = 100, source: str = "judge") -> Verdict:
+    return Verdict(source=source, symbol=symbol, time=time, rating=Rating.BUY, digest=_DIGEST)
+
+
+def test_a_market_view_carries_verdicts_at_its_bars_and_tells_the_latest():
+    bars = tuple(_bar(time, prices=_PRICED) for time in (100, 200, 300))
+    first, latest_a, latest_b = _verdict(), _verdict(time=300), _verdict("B", 300)
+    view = MarketView(
+        bars, {100: {"A": first}, 300: {"A": latest_a, "B": latest_b}}, "judge"
+    )
+    assert view.latest_verdicts == {"A": latest_a, "B": latest_b}
+    assert view.verdict_source == "judge"
+    assert dict(view.verdicts[100]) == {"A": first}
+    # Cut before the latest verdict, the view does not carry it.
+    assert MarketView(bars[:2], {100: {"A": first}}, "judge").latest_verdicts == {}
+    plain = MarketView(bars)
+    assert (plain.verdicts, plain.latest_verdicts, plain.verdict_source) == ({}, {}, None)
+    # A view for a run that reads a source the source said nothing to.
+    silent = MarketView(bars, verdict_source="judge")
+    assert (silent.verdicts, silent.latest_verdicts, silent.verdict_source) == ({}, {}, "judge")
+    with pytest.raises(TypeError):
+        view.verdicts[200] = {}  # type: ignore[index]
+    with pytest.raises(TypeError):
+        view.verdicts[100]["B"] = latest_b  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "match"),
+    [
+        ("A: Buy", "must map a bar time"),
+        ({150: {"A": _verdict(time=150)}}, "holds no bar at 150"),
+        ({100: {}}, "non-empty mapping"),
+        ({100: {"A": "Buy"}}, "Verdict values"),
+        ({100: {"B": _verdict("B")}}, "the bar at 100 does not price 'B'"),
+        ({100: {"B": _verdict()}}, "filed under 'B' at 100 is of 'A' at 100"),
+        ({200: {"A": _verdict()}}, "filed under 'A' at 200 is of 'A' at 100"),
+        (
+            {200: {"A": _verdict(time=200, source="other")}},
+            "is of source 'other', and the view carries those of 'judge'",
+        ),
+    ],
+)
+def test_a_view_whose_verdicts_do_not_fit_its_bars_or_source_is_refused(verdicts, match):
+    with pytest.raises(ValueError, match=match):
+        MarketView((_bar(100), _bar(200)), verdicts, "judge")
+
+
+def test_a_view_names_the_source_of_the_verdicts_it_carries():
+    with pytest.raises(ValueError, match="carries verdicts and names no source"):
+        MarketView((_bar(100),), {100: {"A": _verdict()}})
+    with pytest.raises(ValueError, match="verdict_source must be letters"):
+        MarketView((_bar(100),), verdict_source="two words")

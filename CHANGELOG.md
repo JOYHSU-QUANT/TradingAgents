@@ -842,6 +842,26 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **`contrib/uniswap_v3`: a rule strategy, `trend_vol_weights`
+  (`strategies/trend_vol_weights.py`).** A second strategy next to the
+  `fixed_weights` placeholder, through the same `Strategy` port and the
+  registry: a token is held while its close is above the simple moving
+  average of its last `trend_window` closes, at a weight of `target_vol`
+  over its realised volatility (the sample standard deviation of its last
+  `vol_window` log returns, annualised by `bars_per_year`), capped at
+  `max_weight`; weights that add up to more than 1 are scaled down to 1,
+  the rest stays in the quote token, and the portfolio is rebalanced when
+  a share drifts more than `band` from its target. Suspect bars are left
+  out of the series, and with too few bars for the windows the target is
+  all quote. `target_vol` is a budget per token, and the windows count bars
+  and go with the bar length. The band check and the exact-params check
+  both strategies share now live in `strategies/rebalance.py`, and
+  `domain/decimal_context.py` gains `decimal_sum`. On the backfilled daily
+  bars from 2022-04-01 to 2026-10-04 with modelled fills, the example's
+  50/20/0.40/0.5/0.05 returns +197.61% against the placeholder's +28.67%,
+  at the same drawdown (about 43%) and five times the rebalances; one
+  cycle, untuned, so only "not plainly bad".
+
 - **`contrib/uniswap_v3`: an executor that signs, on a local anvil fork
   only (`chain/swaps.py`).** `ChainExecutor` quotes a swap at the latest
   block and refuses it, sending nothing, when the quote is below the swap's

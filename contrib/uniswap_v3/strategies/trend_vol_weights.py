@@ -9,8 +9,8 @@ view, suspect bars left out:
 - In trend, its weight is ``target_vol`` over its realised volatility,
   capped at ``max_weight``. Realised volatility is the sample standard
   deviation of the last ``vol_window`` log returns, annualised by the
-  square root of ``bars_per_year``. A token whose closes did not move at
-  all gets ``max_weight``.
+  square root of ``bars_per_year``. A token whose returns in the window
+  are all equal, so that no volatility is measured, gets ``max_weight``.
 - When the weights of the tokens in trend add up to more than 1, they are
   scaled down to add up to 1. What is left goes to the quote token.
 
@@ -23,27 +23,29 @@ bars joined across any gap: after a suspect or missing stretch the window
 reaches further back, and the one return across the gap is larger than a
 bar's. With fewer bars than the longer window needs, no trend can be
 confirmed and no volatility measured: every token is out of trend and the
-target is all quote, which sells whatever the portfolio holds. The target
-is answered only when some token's share has drifted more than ``band``
-from it (:func:`.rebalance.rebalance_or_hold`), so a weight moving a
-little as volatility changes does not trade every bar, and a trend that
-flips while a token weighs less than ``band`` is not traded either.
+target is all quote, which sells any holding whose share is above
+``band``. The target is answered only when some token's share has drifted
+more than ``band`` from it (:func:`.rebalance.rebalance_or_hold`), so a
+weight moving a little as volatility changes does not trade every bar,
+and a trend that flips while a token weighs less than ``band`` is not
+traded either.
 
 Params, as a config writes them, every one of them required::
 
     trend_window: 50      # bars in the moving average, at least 2
     vol_window: 20        # log returns in the volatility, at least 2
-    bars_per_year: 365    # for annualising; 365 for daily bars
-    target_vol: "0.40"    # annualised, as a fraction: 40%
-    max_weight: "0.5"     # the most one token may weigh
-    band: "0.05"
+    bars_per_year: 365    # for annualising, at least 1; 365 for daily bars
+    target_vol: "0.40"    # annualised, as a fraction: 40%; above 0
+    max_weight: "0.5"     # the most one token may weigh, in (0, 1]
+    band: "0.05"          # in [0, 1)
 
-The windows and ``bars_per_year`` all go with the config's bar length: a
-config with hourly bars wants them given in hours, and 8760 to the year.
+The windows and ``bars_per_year`` all go with the bar length, from the
+config's ``bars.interval_seconds`` or the ``--interval-seconds`` flag: a
+run on hourly bars wants them given in hours, and 8760 to the year.
 
-Numbers are quoted: a YAML float has already lost digits by the time it is
-read, so one is refused rather than rounded. Weights are cut to four
-decimal places.
+The decimals are quoted: a YAML float has already lost digits by the time
+it is read, so one is refused rather than rounded, while a whole number
+such as ``1`` is read as itself. Weights are cut to four decimal places.
 """
 
 from __future__ import annotations
@@ -130,9 +132,9 @@ class TrendVolWeights:
         The engine hands a portfolio holding the quote and exactly the
         tokens the bar prices, which are the tokens the target covers.
         """
-        return rebalance_or_hold(portfolio, self.target(view, portfolio.quote), self.band)
+        return rebalance_or_hold(portfolio, self.target_for(view, portfolio.quote), self.band)
 
-    def target(self, view: MarketView, quote: str) -> TargetWeights:
+    def target_for(self, view: MarketView, quote: str) -> TargetWeights:
         """The weights the view calls for, whatever the portfolio holds."""
         symbols = sorted(view.latest.prices)
         recent = _recent(view, self.bars_needed)

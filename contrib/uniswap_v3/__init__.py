@@ -22,10 +22,12 @@ SQLite store of each pool's reading at every bar boundary and of what each
 run decided (:mod:`.store`), the step that decides one bar, an executor
 that fills from the bar alone, one that fills from the pools' quotes, and
 the loop that replays stored bars through the step (:mod:`.engine`), a
-paper run's visit (:mod:`.paper`), and five commands (:mod:`.cli`):
+paper run's visit (:mod:`.paper`), and six commands (:mod:`.cli`):
 ``backfill`` fills the store from an archive node, ``status`` prints what
 it holds, ``backtest`` replays stored bars through the engine, ``paper``
-reads and decides the bars the chain has closed since a run's last, and
-``report`` prints a run's return, drawdown and costs. Nothing here holds a
-key or signs a transaction.
+reads and decides the bars the chain has closed since a run's last,
+``fork`` replays stored bars signing each swap on a local anvil fork, and
+``report`` prints a run's return, drawdown and costs. Only a fork run
+signs, and only with anvil's development accounts on a fork it has
+checked (:mod:`.chain`); nothing here holds a key of its own.
 """

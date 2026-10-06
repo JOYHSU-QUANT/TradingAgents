@@ -72,6 +72,8 @@ strategy:
 # trend_vol_weights is a rule strategy: hold a token while its close is above
 # its moving average, sized to a volatility target. Every param is required;
 # the rule and the params are defined in strategies/trend_vol_weights.py.
+# To use it, replace the strategy block above with this one (a file with two
+# strategy keys is refused).
 #
 # strategy:
 #   name: trend_vol_weights

@@ -111,7 +111,8 @@ contrib/uniswap_v3/
   constants.py          以 chain ID 分表的代幣、池子、QuoterV2 與 SwapRouter02 地址
   ports.py              上表的 Protocol
   domain/               純邏輯：價格換算、bar、路徑、帳本、紀錄、績效（只 import 標準函式庫）
-  strategies/           registry、佔位策略 fixed_weights、規則策略 trend_vol_weights
+  strategies/           registry、佔位策略 fixed_weights、規則策略 trend_vol_weights、
+                        兩者共用的 rebalance（參數集檢查、band、再平衡觸發）
   engine/               step、回測迴圈 replay、兩個 executor
   chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee；
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
@@ -189,7 +190,9 @@ contrib/uniswap_v3/
    （涵蓋設定的全部代幣、非負、總和恰為 1）或 `Hold`。
    答案只能取決於這兩個參數——不讀時鐘、不用亂數、不保留上次呼叫的狀態、不讀外部資料——
    這樣同樣的 bar 在回測、paper、分叉上才會做出同樣的決策。
-2. 給它一個 `from_params(params)` 工廠，自己檢查參數（參考 `FixedWeights.from_params`）。
+2. 給它一個 `from_params(params)` 工廠，自己檢查參數（參考 `FixedWeights.from_params`；
+   `strategies/rebalance.py` 有現成的 `require_params`、`require_band`，要「偏離超過 band 才再平衡」
+   就用 `rebalance_or_hold`，別自己再寫一份）。
 3. 在 `strategies/registry.py` 的 `_FACTORIES` 登記名字。
 4. 設定檔寫 `strategy: {name: <名字>, params: {...}}`。
 

@@ -72,7 +72,9 @@ Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/
 ```
 
 要改的只有 `strategy`（`fixed_weights` 是佔位策略；要跑規則策略就把 example 裡註解掉的
-`trend_vol_weights` 區塊換上去）。其餘照預設：一天一根 bar、
+`trend_vol_weights` 區塊換上去；要跑 AI 閘門策略 `ai_gated_weights` 則換上它的區塊，**並把 `verdicts` 區塊打開**——
+沒有判斷來源的 run 第一根就 `failed: the strategy refused the bar at …`，而且 run 列已經寫進 store，補上區塊後要換一個
+run id；它的 `rule` 要與對照 run 的 `trend_vol_weights` 參數一字不差，兩個 run 才比得起來）。其餘照預設：一天一根 bar、
 成交在邊界後 25 塊（`execution.delay_blocks`）——排程時間是照這個值排的，
 改大到超過 45 塊（約 9 分鐘）就要把排程一起往後挪。
 
@@ -200,7 +202,13 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
   每筆附「邊界後多久決策的」——準時的應該是 `00:10:xx`；`1d ...` 表示是隔天補決策的。
 - 設定檔有 `verdicts` 區塊時，bar 列表後多一行 `verdicts from <source>: N of the latest M bar(s) have one for every token (...)`，
   是最近 M 根**成得了 bar 的**邊界裡每個代幣都有判斷的根數與各代幣各自的根數（列表裡 `incomplete` 的邊界不算，策略永遠不會決策它）；
-  每筆決策另附 `verdicts: WBTC, WETH` 或 `verdicts: none`（none＝那根 bar 沒有判斷，策略走的是「沒判斷」的政策）。
+  每筆決策另附 `verdicts: WBTC=none, WETH=Buy`：每個交易代幣當時 view 帶的判斷（只有 `ai_gated_weights` 會照它行動，
+  run 那行印的策略名說是哪個）。`none`＝那根 bar 這個代幣沒有判斷，`REVIEW`＝判斷沒給出評等；兩者 `ai_gated_weights`
+  都走「沒判斷」的政策（覆蓋率行把 `REVIEW` 算成有判斷）。`changed`＝store 裡現在的判斷與決策看到的不同（事後補進、改了或刪了，與 §5 的
+  `now have other verdicts` warning 同一件事）。評等照 run 自己的設定快照查；`--config` 給別的 run 的設定時，上面的覆蓋率行查的是
+  那份設定的 source，所以 `status --run-id` 要給該 run 自己的設定檔。
+  `ai_gated_weights` 的 band 沿用規則的：判斷把目標砍到持倉 band 以內（例如 4% 的持倉收到 Sell）要等別的代幣漂出 band
+  才一起賣，`status` 會看到 `WETH=Sell` 旁邊還有持倉，是設計。
   沒有 `verdicts` 區塊的 run 不印這些。
 - 這兩個指令不讀鏈，隨時可以跑。
 
@@ -221,6 +229,7 @@ python -m contrib.uniswap_v3 report --db contrib/uniswap_v3/data/paper.db --run-
 | `failed: there is no run 'paper-1', and a new run needs opening balances` | `RUN_ID` 或 `DB` 打錯，或 run 還沒開 | 對照 §2、§3.1 |
 | `failed: the run 'paper-1' was started under another config` | 設定檔改了，或新版程式改了預設值 | run 只能在開它的設定下接續：見 §6 開新 run |
 | `failed: ... the clock is behind` | 這台機器的時鐘早於 run 已走到的邊界 | 校時 |
+| `failed: the strategy refused the bar at ... (ai_gated_weights reads verdicts, and the view carries none ...)` | 策略讀判斷，設定檔卻沒有 `verdicts` 區塊 | 設定補上 `verdicts`，用新的 run id 開 run（原 run 已開在沒有判斷的設定下） |
 | `failed: paper needs the packages in contrib/uniswap_v3/requirements.txt` | 排程用的 Python 不是裝了相依的那個 | 改 §3.1 的 `PYTHON` |
 | `'python' is not recognized ...`（中文 Windows 是「不是內部或外部命令」）接 `==== exit 9009` | 排程找不到 `PYTHON` | 改 §3.1 的 `PYTHON` 成完整路徑 |
 | `==== there is no "...python.exe": fix PYTHON ...` 接 `==== exit 4` | §3.1 的 `PYTHON` 路徑打錯 | 改 `paper-visit.local.cmd` |

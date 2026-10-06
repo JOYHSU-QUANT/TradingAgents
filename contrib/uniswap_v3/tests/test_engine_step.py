@@ -338,6 +338,18 @@ def test_a_strategy_that_raises_stops_the_run_and_leaves_the_bar_undecided(store
     assert engine.step(_view(bar(0))).decision.outcome is Outcome.FILLED
 
 
+def test_a_strategy_that_cannot_decide_is_reported_as_the_engines_failure(store):
+    # A ValueError is the strategy saying it cannot decide this bar; another exception keeps its type.
+    strategy = ScriptedStrategy({FIRST_DAY: ValueError("the view carries no verdicts")})
+    engine = _engine(store, strategy)
+    with pytest.raises(
+        EngineError,
+        match=rf"the strategy refused the bar at {FIRST_DAY} \(the view carries no verdicts\)",
+    ):
+        engine.step(_view(bar(0)))
+    assert store.decision(_RUN, FIRST_DAY) is None
+
+
 @pytest.mark.parametrize(
     ("answer", "match"),
     [

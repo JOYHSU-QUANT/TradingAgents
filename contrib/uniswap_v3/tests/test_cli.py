@@ -498,7 +498,7 @@ def test_status_counts_the_latest_boundaries_with_a_verdict_for_every_token(node
     assert code == cli.EXIT_OK and not any("verdicts" in line for line in plain)
 
 
-def test_status_of_a_run_says_which_tokens_each_decision_saw_a_verdict_for(node, tmp_path):
+def test_status_of_a_run_says_what_each_decision_saw_of_each_tokens_verdict(node, tmp_path):
     db = tmp_path / "store.db"
     _backfill(db)
     with open_store(db) as store:
@@ -514,7 +514,29 @@ def test_status_of_a_run_says_which_tokens_each_decision_saw_a_verdict_for(node,
 
     assert code == cli.EXIT_OK
     decided = [line for line in lines if "  decided 20" in line]
-    assert [line.split("  verdicts: ")[1] for line in decided] == ["WBTC, WETH", "none", "WBTC"]
+    assert [line.split("  verdicts: ")[1] for line in decided] == [
+        "WBTC=Buy, WETH=Buy",
+        "WBTC=none, WETH=none",
+        "WBTC=Buy, WETH=none",
+    ]
+    # The store now differs from what the decisions saw: a verdict deleted, and one added since.
+    connection = sqlite3.connect(db)
+    with connection:
+        connection.execute(
+            "DELETE FROM verdicts WHERE symbol = 'WBTC' AND time = ?", (FIRST_DAY + 2 * DAY,)
+        )
+    connection.close()
+    with open_store(db) as store:
+        store.insert_verdict(record("WETH", 1, Rating.SELL))
+    code, lines = _run(
+        "status", "--config", str(reading), "--db", str(db), "--run-id", "reads", "--bars", "2"
+    )
+    assert code == cli.EXIT_OK
+    decided = [line for line in lines if "  decided 20" in line]
+    assert [line.split("  verdicts: ")[1] for line in decided] == [
+        "WBTC=none, WETH=changed",
+        "WBTC=changed, WETH=none",
+    ]
     # A run that reads no verdicts says nothing of them.
     code, plain = _status(db, "--run-id", "plain", "--bars", "3")
     assert code == cli.EXIT_OK

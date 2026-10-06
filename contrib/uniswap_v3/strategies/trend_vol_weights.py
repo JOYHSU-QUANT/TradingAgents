@@ -50,22 +50,27 @@ such as ``1`` is read as itself. Weights are cut to four decimal places.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
 
-from ..domain.decimal_context import DECIMAL_CONTEXT, decimal_sum, floor_to_places, parse_decimal
+from ..domain.decimal_context import DECIMAL_CONTEXT, decimal_sum, parse_decimal
 from ..domain.types import Bar, Hold, MarketView, Portfolio, TargetWeights
-from .rebalance import rebalance_or_hold, require_band, require_params
+from .rebalance import (
+    floor_weight,
+    rebalance_or_hold,
+    require_band,
+    require_decimal,
+    require_params,
+    weights_with_quote,
+)
 
 __all__ = ["TrendVolWeights"]
 
 _PARAMS: Final = frozenset(
     {"trend_window", "vol_window", "bars_per_year", "target_vol", "max_weight", "band"}
 )
-# A weight's decimal places: finer than any band or trade threshold worth setting.
-_WEIGHT_PLACES: Final = 4
 _ZERO: Final = Decimal(0)
 _ONE: Final = Decimal(1)
 
@@ -74,14 +79,6 @@ def _require_count(value: object, what: str, *, at_least: int) -> None:
     """Refuse a number of bars that is not an integer of at least ``at_least``."""
     if isinstance(value, bool) or not isinstance(value, int) or value < at_least:
         raise ValueError(f"{what} must be an integer of at least {at_least}, got {value!r}")
-
-
-def _require_decimal(
-    value: object, what: str, within: Callable[[Decimal], bool], bounds: str
-) -> None:
-    """Refuse a value that is not a finite ``Decimal`` ``within`` the ``bounds`` named."""
-    if not isinstance(value, Decimal) or not value.is_finite() or not within(value):
-        raise ValueError(f"{what} must be a Decimal {bounds}, got {value!r}")
 
 
 def _mean(values: Sequence[Decimal]) -> Decimal:
@@ -103,8 +100,8 @@ class TrendVolWeights:
         _require_count(self.trend_window, "trend_window", at_least=2)
         _require_count(self.vol_window, "vol_window", at_least=2)
         _require_count(self.bars_per_year, "bars_per_year", at_least=1)
-        _require_decimal(self.target_vol, "target_vol", lambda value: value > 0, "above 0")
-        _require_decimal(self.max_weight, "max_weight", lambda value: 0 < value <= 1, "in (0, 1]")
+        require_decimal(self.target_vol, "target_vol", lambda value: value > 0, "above 0")
+        require_decimal(self.max_weight, "max_weight", lambda value: 0 < value <= 1, "in (0, 1]")
         require_band(self.band)
 
     @classmethod
@@ -148,12 +145,10 @@ class TrendVolWeights:
         invested = decimal_sum(risky.values())
         if invested > _ONE:
             risky = {
-                symbol: floor_to_places(DECIMAL_CONTEXT.divide(weight, invested), _WEIGHT_PLACES)
+                symbol: floor_weight(DECIMAL_CONTEXT.divide(weight, invested))
                 for symbol, weight in risky.items()
             }
-            invested = decimal_sum(risky.values())
-        # The weights have four places, so the remainder is exact and never negative.
-        return TargetWeights({**risky, quote: DECIMAL_CONTEXT.subtract(_ONE, invested)})
+        return weights_with_quote(risky, quote)
 
     def _weight(self, closes: Sequence[Decimal], annualiser: Decimal) -> Decimal:
         """One token's weight from its closes, the latest last; zero out of trend."""
@@ -176,7 +171,7 @@ class TrendVolWeights:
             if volatility == 0
             else DECIMAL_CONTEXT.divide(self.target_vol, volatility)
         )
-        return floor_to_places(min(sized, self.max_weight), _WEIGHT_PLACES)
+        return floor_weight(min(sized, self.max_weight))
 
 
 def _recent(view: MarketView, count: int) -> list[Bar]:

@@ -520,11 +520,33 @@ def _decided_span(decisions: Sequence[Decision]) -> str:
     )
 
 
-def _saw(decision: Decision) -> str:
-    """Which tokens the decision saw a verdict for; nothing for a run that reads none."""
+def _saw(store: Store, config: UniswapConfig, decision: Decision) -> str:
+    """What the decision saw of each traded token's verdict, as ``<token>=<rating>``; nothing for a run that reads none.
+
+    The rating is read back from the store at the decision's bar and matched
+    by the digest the decision kept.
+    A token the decision saw no verdict on reads ``none``, and one whose
+    verdict the store now holds differently from what the decision saw, or
+    did not hold then, or does not hold now, reads ``changed``: the same
+    difference a replay warns of.
+    """
     if decision.verdicts is None:
         return ""
-    return f"  verdicts: {', '.join(sorted(decision.verdicts)) or 'none'}"
+    if config.verdicts is None:
+        raise StoreError(
+            f"the decision at {decision.time} saw verdicts, and the run's config reads none"
+        )
+    now = load_verdicts(store, config, decision.time)
+    seen = []
+    for symbol in sorted(config.traded_symbols):
+        kept, held = decision.verdicts.get(symbol), now.get(symbol)
+        if kept is None and held is None:
+            seen.append(f"{symbol}=none")
+        elif kept is not None and held is not None and held.digest == kept:
+            seen.append(f"{symbol}={held.rating.value}")
+        else:
+            seen.append(f"{symbol}=changed")
+    return f"  verdicts: {', '.join(seen)}"
 
 
 def _why(decision: Decision) -> str:
@@ -609,7 +631,8 @@ def _run_status_lines(store: Store, run_id: str, latest: int, now: int) -> list[
         else:
             when = f"decided {_iso(decision.decided_at)}"
         lines.append(
-            f"{_iso(decision.time)}  {decision.outcome.value}  {when}{_saw(decision)}"
+            f"{_iso(decision.time)}  {decision.outcome.value}  {when}"
+            f"{_saw(store, config, decision)}"
             f"{_why(decision)}"
         )
     return lines

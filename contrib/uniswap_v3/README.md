@@ -3,11 +3,17 @@
 Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，引擎負責把目標變成 swap。
 同一個引擎換接線，就能跑歷史回測、紙上交易，之後是主網分叉沙盒與實盤。
 
-這個套件**不決定策略**：策略只透過 `Strategy` port 進來。內建兩個：
+這個套件**不決定策略**：策略只透過 `Strategy` port 進來。內建三個：
 
 - `fixed_weights`：佔位策略（固定比例＋偏離帶），用途是驅動引擎與測試；它不讀價格走勢、不做預測。
 - `trend_vol_weights`：規則策略。代幣收盤在均線之上才持有，持有比例照波動率目標配置，其餘留在計價代幣。
   規則與參數的定義在 `strategies/trend_vol_weights.py` 的 docstring。
+- `ai_gated_weights`：AI 閘門策略。拿 `trend_vol_weights` 的目標當護欄，每個代幣再乘上該代幣在這根 bar 的判斷
+  （store 的 `verdicts`，見下）評等對應的倍率（範例：Buy 1／Overweight 0.75／Hold 0.5／Underweight 0.25／Sell 0）。
+  沒判斷或 `REVIEW` 時不加新風險：目標＝目前佔比（截到權重的四位精度）、上限是規則的權重，該賣的照賣；不在趨勢上的代幣一律 0，
+  所以每個代幣的目標永遠 ≤ 規則的目標。band 沿用規則的：判斷把目標砍到持倉 band 以內（例如小持倉收到 Sell）要等下次
+  再平衡才一起賣。設定檔要有 `verdicts` 區塊，沒有的話第一根就 `failed: the strategy refused the bar at …`。
+  政策與參數的定義在 `strategies/ai_gated_weights.py` 的 docstring。
 
 它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay` 完全隔離：
 互不 import（`tests/test_isolation.py` 釘住），store 是自己的 SQLite 檔，也不碰
@@ -85,7 +91,7 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 
 | Port | 做什麼 | 實作 |
 |---|---|---|
-| `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py`、`strategies/trend_vol_weights.py` |
+| `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py`、`strategies/trend_vol_weights.py`、`strategies/ai_gated_weights.py` |
 | `Executor` | `execute(swap, bar) -> Fill \| Rejection`，並宣告成交來源 | `engine/executors.py` 的 `ModelExecutor`、`QuoteExecutor`；`chain/swaps.py` 的 `ChainExecutor`（分叉上簽名） |
 | `Wallet` | `prepare(bar, ledger)`、`holdings()`：會簽名的 executor 從哪個錢包交易，引擎拿它對帳 | `chain/wallet.py` 的 `ForkWallet` |
 | `Journal` | run、decision、帳本、send 的讀寫 | `store/repository.py` 的 `Store` |
@@ -111,8 +117,8 @@ contrib/uniswap_v3/
   constants.py          以 chain ID 分表的代幣、池子、QuoterV2 與 SwapRouter02 地址
   ports.py              上表的 Protocol
   domain/               純邏輯：價格換算、bar、路徑、帳本、紀錄、績效（只 import 標準函式庫）
-  strategies/           registry、佔位策略 fixed_weights、規則策略 trend_vol_weights、
-                        兩者共用的 rebalance（參數集檢查、band、再平衡觸發）
+  strategies/           registry、佔位策略 fixed_weights、規則策略 trend_vol_weights、AI 閘門策略 ai_gated_weights、
+                        三者共用的 rebalance（參數集檢查、band、權重位數、再平衡觸發）
   engine/               step、回測迴圈 replay、兩個 executor
   chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee；
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
@@ -142,7 +148,7 @@ contrib/uniswap_v3/
 寫入後不改。設定檔有 `verdicts.source` 的 run，策略拿到的 view 帶該 source 對交易代幣（計價代幣除外）的判斷（只到被決策的那根為止），
 每筆 decision 在 `verdict_digests` 記下當時看到的判斷 digest——`{}` 是「有讀判斷但那天沒有」，NULL 是「這個 run 不讀判斷」
 （schema v6）。重放時已決策的 bar 若 store 裡的判斷與記下的 digest 不同，像 bar 讀數變了一樣只計數、警告，決策不改。
-目前沒有指令會寫判斷，寫入端（問 TradingAgents）是下一張 PR。
+讀判斷的策略是 `ai_gated_weights`；目前沒有指令會寫判斷，寫入端（問 TradingAgents）是下一張 PR。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---
@@ -155,7 +161,7 @@ contrib/uniswap_v3/
 | 指令 | 做什麼 | 讀鏈 |
 |---|---|---|
 | `backfill --config C --db D --from 2022-01-01 [--to …] [--dry-run]` | 把一段 bar 讀進 store；可重複執行，已有的不重讀 | 是（archive） |
-| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts` 區塊時另印最近 N 根有判斷的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到哪些代幣的判斷）；paper run 另印跟不跟得上時鐘 | 否 |
+| `status --config C --db D [--bars N] [--run-id R]` | store 的範圍與最近 N 根 bar；設定檔有 `verdicts` 區塊時另印最近 N 根有判斷的覆蓋率；加 `--run-id` 再印該 run 的持倉、價值、報酬與最近 N 筆決策（含決策時間，讀判斷的 run 附每筆看到每個交易代幣的評等：`WBTC=none, WETH=Buy`，store 裡的判斷與決策看到的不同——事後補進、改了或刪了——印 `changed`）；paper run 另印跟不跟得上時鐘 | 否 |
 | `backtest --config C --db D --run-id R --from … [--to …] [--fills model\|quoter] [--balance USDC=10000 … --gas-eth 0.5]` | 用 store 的 bar 跑回測；新 run 要給起始餘額 | 只有 `--fills quoter` |
 | `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策 | 是 |
 | `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |
@@ -197,12 +203,14 @@ contrib/uniswap_v3/
    答案只能取決於這兩個參數——不讀時鐘、不用亂數、不保留上次呼叫的狀態、不讀外部資料——
    這樣同樣的 bar 在回測、paper、分叉上才會做出同樣的決策。
 2. 給它一個 `from_params(params)` 工廠，自己檢查參數（參考 `FixedWeights.from_params`；
-   `strategies/rebalance.py` 有現成的 `require_params`、`require_band`，要「偏離超過 band 才再平衡」
+   `strategies/rebalance.py` 有現成的 `require_params`、`require_band`、`require_decimal`（有界 Decimal），
+   權重要截到四位、餘數給計價代幣就用 `floor_weight`／`weights_with_quote`，要「偏離超過 band 才再平衡」
    就用 `rebalance_or_hold`，別自己再寫一份）。
 3. 在 `strategies/registry.py` 的 `_FACTORIES` 登記名字。
 4. 設定檔寫 `strategy: {name: <名字>, params: {...}}`。
 
-策略拋例外或回答不合格，run 會停在那根 bar、不記 decision，修好後重跑會從那根接著決策。
+策略拋 `ValueError`（不能決策）或回答不合格，run 會以 `failed: …` 停在那根 bar（不能決策時是
+`the strategy refused the bar at …`）、不記 decision，修好後重跑會從那根接著決策；其他例外原樣冒出。
 
 ---
 

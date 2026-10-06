@@ -291,7 +291,11 @@ class Engine:
             return self._record(
                 view, seen, Outcome.SKIPPED_SUSPECT, ledger, reason=why.reason, reason_code=why.code
             )
-        answer = self.strategy.decide(view, portfolio)
+        try:
+            answer = self.strategy.decide(view, portfolio)
+        except ValueError as exc:
+            # The strategy could not decide: the bar is left undecided, and the run stops.
+            raise EngineError(f"the strategy refused the bar at {bar.time} ({exc})") from exc
         if isinstance(answer, Hold):
             return self._record(view, seen, Outcome.HOLD, ledger)
         if not isinstance(answer, TargetWeights):

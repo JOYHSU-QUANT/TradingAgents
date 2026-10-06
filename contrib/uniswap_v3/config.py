@@ -32,6 +32,12 @@
       url_env: ETH_RPC_URL
     verdicts:                   # optional
       source: tradingagents-rating-v1
+    agent:                      # optional, and so is each key in it
+      llm_provider: openrouter
+      deep_think_llm: "anthropic/claude-sonnet-4-6"
+      quick_think_llm: "deepseek/deepseek-chat"
+      selected_analysts: [market, social, news]
+      max_tokens: 8192
 
 Tokens and pools are named by their keys in :mod:`.constants`; a config
 cannot supply an address, and :class:`UniswapConfig` itself refuses a token
@@ -66,6 +72,11 @@ verdicts, and, as with ``fork``, its snapshot has no ``verdicts`` key; a
 config with the section is another snapshot, so a run reads verdicts from
 its first bar or not at all.
 
+``agent`` is read into an :class:`~.agent.settings.AgentSettings`: which
+judge the ``verdict`` command asks, and how. Only that command reads it,
+and it is not part of the snapshot: the verdicts a run reads are data in
+the store, each naming the model that gave it.
+
 A file named ``*.local.yaml`` is gitignored inside this package. The config
 holds no secret. ``rpc.url_env`` is the name of the environment variable
 that holds the endpoint URL, never the URL; left out, the chain reader
@@ -85,6 +96,7 @@ from typing import Any, Final, TypeVar
 
 import yaml
 
+from .agent.settings import AgentSettings
 from .constants import POOLS, TOKENS, pool_key
 from .domain.bars import BarSettings
 from .domain.decimal_context import parse_decimal, plain
@@ -104,7 +116,10 @@ __all__ = [
 ]
 
 _REQUIRED_KEYS: Final = frozenset({"chain_id", "quote_token", "tokens", "pools", "strategy"})
-_KEYS: Final = _REQUIRED_KEYS | {"bars", "execution", "fork", "rpc", "verdicts"}
+_KEYS: Final = _REQUIRED_KEYS | {"agent", "bars", "execution", "fork", "rpc", "verdicts"}
+_AGENT_KEYS: Final = frozenset(
+    {"llm_provider", "deep_think_llm", "quick_think_llm", "selected_analysts", "max_tokens"}
+)
 _FORK_KEYS: Final = frozenset({"account", "deadline_seconds"})
 _VERDICT_KEYS: Final = frozenset({"source"})
 _STRATEGY_KEYS: Final = frozenset({"name", "params"})
@@ -189,6 +204,8 @@ class UniswapConfig:
     fork: ForkSettings | None = None
     # Whose verdicts the run's view carries; ``None`` when it carries none.
     verdicts: VerdictSettings | None = None
+    # Which judge ``verdict`` asks; the defaults when the config says nothing.
+    agent: AgentSettings = AgentSettings()
 
     def __post_init__(self) -> None:
         if (
@@ -211,6 +228,8 @@ class UniswapConfig:
             raise ConfigError(
                 f"verdicts must be a VerdictSettings or None, got {self.verdicts!r}"
             )
+        if not isinstance(self.agent, AgentSettings):
+            raise ConfigError(f"agent must be an AgentSettings, got {self.agent!r}")
         if self.rpc_url_env is not None and (
             not isinstance(self.rpc_url_env, str) or not _ENV_NAME.fullmatch(self.rpc_url_env)
         ):
@@ -359,6 +378,14 @@ def _verdict_settings(document: dict[Any, Any]) -> VerdictSettings | None:
         raise ConfigError(f"verdicts: {exc}") from exc
 
 
+def _agent_settings(document: dict[Any, Any]) -> AgentSettings:
+    section = _section(document, "agent", _AGENT_KEYS)
+    try:
+        return AgentSettings(**section)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"agent: {exc}") from exc
+
+
 def _execution_document(settings: ExecutionSettings) -> dict[str, object]:
     """``settings`` in the shape a config file writes them: a section's keys under its name."""
     document: dict[str, object] = {
@@ -396,7 +423,9 @@ def config_snapshot(config: UniswapConfig) -> str:
     comparison is of the whole text: a key a later version adds, even at its
     default, makes a new snapshot, and so a new run. The snapshot has the
     config file's own shape, with every default written out. Where the
-    node's URL comes from is left out: it changes no decision. So are the
+    node's URL comes from is left out: it changes no decision, and so is
+    the ``agent`` section: which judge is asked next changes none already
+    made, and the verdicts read are data that name their model. So are the
     ``fork`` and ``verdicts`` sections when the config has none, which keeps
     the snapshot of every config written before each section existed as it was.
     """
@@ -477,6 +506,7 @@ def parse_config(document: object) -> UniswapConfig:
         rpc_url_env=_section(document, "rpc", _RPC_KEYS).get("url_env"),
         fork=_fork_settings(document),
         verdicts=_verdict_settings(document),
+        agent=_agent_settings(document),
     )
 
 

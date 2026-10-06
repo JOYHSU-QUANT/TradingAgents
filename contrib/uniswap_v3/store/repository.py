@@ -537,6 +537,14 @@ class Store:
                 records.append(_verdict_record(row))
         return records
 
+    def verdict_models(self, source: str) -> list[str]:
+        """Every model that gave a stored verdict of ``source``, sorted; empty when it has none."""
+        with _sqlite_errors("reading verdicts"):
+            rows = self._connection.execute(
+                "SELECT DISTINCT model FROM verdicts WHERE source = ? ORDER BY model", (source,)
+            ).fetchall()
+        return [model for (model,) in rows]
+
     def insert_run(self, run: RunRecord) -> None:
         """Start ``run``; a run with its id that is already stored raises :class:`StoreError`."""
         with _sqlite_errors("starting a run"):

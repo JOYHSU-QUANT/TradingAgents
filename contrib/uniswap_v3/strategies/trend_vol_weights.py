@@ -55,7 +55,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
 
-from ..domain.decimal_context import DECIMAL_CONTEXT, decimal_sum, parse_decimal
+from ..domain.decimal_context import (
+    DECIMAL_CONTEXT,
+    decimal_sum,
+    log_returns,
+    mean,
+    parse_decimal,
+    sample_volatility,
+)
 from ..domain.types import Bar, Hold, MarketView, Portfolio, TargetWeights
 from .rebalance import (
     floor_weight,
@@ -79,10 +86,6 @@ def _require_count(value: object, what: str, *, at_least: int) -> None:
     """Refuse a number of bars that is not an integer of at least ``at_least``."""
     if isinstance(value, bool) or not isinstance(value, int) or value < at_least:
         raise ValueError(f"{what} must be an integer of at least {at_least}, got {value!r}")
-
-
-def _mean(values: Sequence[Decimal]) -> Decimal:
-    return DECIMAL_CONTEXT.divide(decimal_sum(values), Decimal(len(values)))
 
 
 @dataclass(frozen=True)
@@ -152,20 +155,9 @@ class TrendVolWeights:
 
     def _weight(self, closes: Sequence[Decimal], annualiser: Decimal) -> Decimal:
         """One token's weight from its closes, the latest last; zero out of trend."""
-        if closes[-1] <= _mean(closes[-self.trend_window :]):
+        if closes[-1] <= mean(closes[-self.trend_window :]):
             return _ZERO
-        window = closes[-(self.vol_window + 1) :]
-        returns = [
-            DECIMAL_CONTEXT.ln(DECIMAL_CONTEXT.divide(later, earlier))
-            for earlier, later in zip(window, window[1:], strict=False)
-        ]
-        mean = _mean(returns)
-        deviations = [DECIMAL_CONTEXT.subtract(value, mean) for value in returns]
-        variance = DECIMAL_CONTEXT.divide(
-            decimal_sum(DECIMAL_CONTEXT.multiply(each, each) for each in deviations),
-            Decimal(len(returns) - 1),
-        )
-        volatility = DECIMAL_CONTEXT.multiply(DECIMAL_CONTEXT.sqrt(variance), annualiser)
+        volatility = sample_volatility(log_returns(closes[-(self.vol_window + 1) :]), annualiser)
         sized = (
             self.max_weight
             if volatility == 0

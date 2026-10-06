@@ -35,8 +35,10 @@ __all__ = [
     "Verdict",
     "VerdictRecord",
     "VerdictSettings",
+    "require_count",
     "require_digest",
     "require_source",
+    "require_text",
     "text_digest",
 ]
 
@@ -79,14 +81,19 @@ def text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _require_text(value: object, what: str) -> None:
+def require_text(value: object, what: str) -> None:
+    """Refuse a ``value`` that is not a non-empty string."""
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{what} must be a non-empty string, got {value!r}")
 
 
-def _require_count(value: object, what: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{what} must be a non-negative integer, got {value!r}")
+def require_count(value: object, what: str, *, at_least: int = 0) -> None:
+    """Refuse a ``value`` that is not an integer of at least ``at_least``; a bool is not one."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < at_least:
+        bound = "a non-negative integer" if at_least == 0 else f"an integer of at least {at_least}"
+        if at_least == 1:
+            bound = "a positive integer"
+        raise ValueError(f"{what} must be {bound}, got {value!r}")
 
 
 def require_source(value: object, what: str = "source") -> None:
@@ -122,8 +129,8 @@ class Verdict:
 
     def __post_init__(self) -> None:
         require_source(self.source)
-        _require_text(self.symbol, "symbol")
-        _require_count(self.time, "time")
+        require_text(self.symbol, "symbol")
+        require_count(self.time, "time")
         if not isinstance(self.rating, Rating):
             raise ValueError(f"rating must be a Rating, got {self.rating!r}")
         require_digest(self.digest, "digest")
@@ -150,16 +157,16 @@ class VerdictRecord:
     def __post_init__(self) -> None:
         if not isinstance(self.verdict, Verdict):
             raise ValueError(f"verdict must be a Verdict, got {self.verdict!r}")
-        _require_text(self.model, "model")
-        _require_text(self.prompt_version, "prompt_version")
-        _require_count(self.asked_at, "asked_at")
+        require_text(self.model, "model")
+        require_text(self.prompt_version, "prompt_version")
+        require_count(self.asked_at, "asked_at")
         if (self.sidecar_path is None) != (self.sidecar_digest is None):
             raise ValueError(
                 "a sidecar is named with its digest, or not at all: got path "
                 f"{self.sidecar_path!r} and digest {self.sidecar_digest!r}"
             )
         if self.sidecar_path is not None:
-            _require_text(self.sidecar_path, "sidecar_path")
+            require_text(self.sidecar_path, "sidecar_path")
             require_digest(self.sidecar_digest, "sidecar_digest")
 
 

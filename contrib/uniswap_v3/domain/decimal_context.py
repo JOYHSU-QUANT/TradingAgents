@@ -18,7 +18,7 @@ wide that does not trap, since dropping digits is the point of a cut.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from decimal import (
     ROUND_DOWN,
     ROUND_HALF_EVEN,
@@ -36,8 +36,13 @@ __all__ = [
     "EXACT_CONTEXT",
     "MAX_MAGNITUDE",
     "decimal_sum",
+    "fixed_text",
     "floor_to_places",
+    "log_returns",
+    "mean",
     "parse_decimal",
+    "price_text",
+    "sample_volatility",
     "plain",
 ]
 
@@ -79,6 +84,47 @@ def decimal_sum(values: Iterable[Decimal]) -> Decimal:
     for value in values:
         total = DECIMAL_CONTEXT.add(total, value)
     return total
+
+
+def mean(values: Sequence[Decimal]) -> Decimal:
+    """The arithmetic mean of ``values``, which are at least one."""
+    return DECIMAL_CONTEXT.divide(decimal_sum(values), Decimal(len(values)))
+
+
+def log_returns(closes: Sequence[Decimal]) -> list[Decimal]:
+    """The log return from each close to the next, one fewer than the closes."""
+    return [
+        DECIMAL_CONTEXT.ln(DECIMAL_CONTEXT.divide(later, earlier))
+        for earlier, later in zip(closes, closes[1:], strict=False)
+    ]
+
+
+def sample_volatility(returns: Sequence[Decimal], annualiser: Decimal) -> Decimal:
+    """The sample standard deviation of ``returns`` (at least two), times ``annualiser``.
+
+    The one estimator the rule strategy sizes on and the judge is shown;
+    the annualiser is the square root of the bars in a year.
+    """
+    centre = mean(returns)
+    deviations = [DECIMAL_CONTEXT.subtract(value, centre) for value in returns]
+    variance = DECIMAL_CONTEXT.divide(
+        decimal_sum(DECIMAL_CONTEXT.multiply(each, each) for each in deviations),
+        Decimal(len(returns) - 1),
+    )
+    return DECIMAL_CONTEXT.multiply(DECIMAL_CONTEXT.sqrt(variance), annualiser)
+
+
+def fixed_text(value: Decimal, *, signed: bool = False) -> str:
+    """``value`` to two decimal places, with its sign when ``signed``, and never a negative zero."""
+    text = f"{value:+.2f}" if signed else f"{value:.2f}"
+    if text.strip("+-0."):
+        return text
+    return ("+" if signed else "") + text.lstrip("+-")
+
+
+def price_text(value: Decimal) -> str:
+    """A price as a line prints it: two decimal places from 1 up, six significant digits below."""
+    return f"{value:.2f}" if value >= 1 else f"{value:.6g}"
 
 
 def floor_to_places(value: Decimal, places: int) -> Decimal:

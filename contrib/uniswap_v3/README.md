@@ -17,7 +17,8 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
 
 它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay` 完全隔離：
 互不 import（`tests/test_isolation.py` 釘住），store 是自己的 SQLite 檔，也不碰
-`deploy/paper` 的部署。
+`deploy/paper` 的部署。上游的 `tradingagents` 引擎只有 `agent/` 這一層會 import（同一個測試釘住），
+而且是用到時才載入：`verdict` 以外的指令都不等它的相依。
 
 操作步驟（開 run、掛排程、出事怎麼辦）見 [RUNBOOK.md](./RUNBOOK.md)。
 
@@ -112,7 +113,7 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 
 ```
 contrib/uniswap_v3/
-  cli.py, __main__.py   python -m contrib.uniswap_v3 <backfill|status|backtest|paper|fork|report>
+  cli.py, __main__.py   python -m contrib.uniswap_v3 <backfill|status|backtest|paper|fork|report|verdict>
   config.py             讀 YAML（凍結 dataclass）；run 會存一份設定快照
   constants.py          以 chain ID 分表的代幣、池子、QuoterV2 與 SwapRouter02 地址
   ports.py              上表的 Protocol
@@ -124,6 +125,9 @@ contrib/uniswap_v3/
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、
                         fork run 的錢包（wallet.py）
   store/                SQLite schema（含版本號與 migration）與讀寫；bar 與判斷（verdict）的載入
+  agent/                問 TradingAgents 要判斷的那一層（唯一 import 上游引擎的地方）：設定（agent 區塊）、
+                        代幣→ticker、現貨脈絡、judge（上游 graph 的包裝＋不打模型的 fake）、sidecar 與列的寫入、
+                        一次 visit 的問法
   backfill.py           把一段 bar 從 archive 節點讀進 store
   paper.py              paper 的一次 visit
   fork_run.py           fork run，以及未結 send 與錢包的對照
@@ -148,7 +152,10 @@ contrib/uniswap_v3/
 寫入後不改。設定檔有 `verdicts.source` 的 run，策略拿到的 view 帶該 source 對交易代幣（計價代幣除外）的判斷（只到被決策的那根為止），
 每筆 decision 在 `verdict_digests` 記下當時看到的判斷 digest——`{}` 是「有讀判斷但那天沒有」，NULL 是「這個 run 不讀判斷」
 （schema v6）。重放時已決策的 bar 若 store 裡的判斷與記下的 digest 不同，像 bar 讀數變了一樣只計數、警告，決策不改。
-讀判斷的策略是 `ai_gated_weights`；目前沒有指令會寫判斷，寫入端（問 TradingAgents）是下一張 PR。
+讀判斷的策略是 `ai_gated_weights`；寫判斷的是 `verdict` 指令：對設定交易的每個代幣問一次 TradingAgents graph，
+以設定的 `verdicts.source` 寫列，judge 的原文（最終決策、各分析師與辯論的報告、給它看的現貨脈絡、模型、耗時）另存成
+sidecar `verdicts/<source>/<代幣>-<bar 時間>.json`，放在 store 檔的同一個目錄下（列裡存相對路徑與檔案 digest，
+store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就不再問；`--fake-rating` 寫的列 `model=fake`、沒有 sidecar。
 舊版的 store 會在任何指令第一次打開時自動升級。
 
 ---
@@ -166,15 +173,16 @@ contrib/uniswap_v3/
 | `paper --config C --db D --run-id R [--balance … --gas-eth …]` | paper 的一次 visit：補讀上次之後的 bar 並逐根決策 | 是 |
 | `fork --config C --db D --run-id R --from … [--to …] [--fork-url http://127.0.0.1:8545] [--balance … --gas-eth …]` | 用 store 的 bar 跑 fork run：每根要交易的 bar 在本機 anvil 分叉上簽名送出，前後對帳；有未結 send 時印出對照、結束碼 1 | 只讀分叉（分叉向 archive 節點取狀態） |
 | `report --db D --run-id R` | 報酬、最大回撤、周轉、成本拆解，並列「起始持倉不動」與「全放 USDC」兩個對照組 | 否 |
+| `verdict --config C --db D [--at 2024-01-01] [--fake-rating Buy]` | 對設定交易的每個代幣問 judge（TradingAgents graph）在**最近一個已過邊界**那根 bar 的判斷並寫進 store；問過的不再問；bar 還沒進 store 就結束碼 3。judge 讀的資料到問的那天為止，所以只問最新一根才誠實：`--at` 指更早的邊界只能配 `--fake-rating`（不打模型、直接寫該評等，只准用在沒有真判斷的 store） | 否（打 LLM；`agent` 區塊的供應商要有 key，見下） |
 
 結束碼：
 
 | 碼 | 意思 | 排程該怎麼做 |
 |---|---|---|
-| 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告） | 不用動 |
-| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send | 看 log、修好 |
+| 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告；`verdict` 的「問過了」、bar 是 suspect 所以沒問、judge 回 `REVIEW`——最後一個 stderr 有警告） | 不用動 |
+| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send；`verdict` 的設定沒有 `verdicts` 區塊、judge 建不起來（沒有 key）、`--fake-rating` 遇到有真判斷的 store | 看 log、修好 |
 | 2 | 命令列打錯（argparse） | 修排程的指令 |
-| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住 | 稍後再跑（排程一天三次就是為了這個） |
+| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答（已答的代幣保留，下次只問剩下的） | 稍後再跑（排程一天三次就是為了這個） |
 | 4 | 只有排程的 visit 腳本會給：進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit 沒有跑 | 看 RUNBOOK §5 |
 
 ---
@@ -188,11 +196,13 @@ contrib/uniswap_v3/
 | 環境變數 | 用途 |
 |---|---|
 | `ETH_RPC_URL` | 節點 URL（含 API key，程式不會印出來）。設定的 `rpc.url_env` 可以改成別的變數名稱 |
+| `OPENROUTER_API_KEY` | `verdict` 用的 LLM 供應商 key（`agent.llm_provider` 預設 openrouter；換供應商就換成上游引擎為它定的變數名，例如 `ANTHROPIC_API_KEY`）。上游的分析師另會讀它們自己的資料源 key（`FRED_API_KEY`、`SOSOVALUE_API_KEY` 等），沒有就少那一段輸入 |
 
 回補、`backtest --fills quoter`、以及漏跑過幾天的 paper visit 都要 **archive** 節點。
 
 相依：`pip install -r contrib/uniswap_v3/requirements.txt`（PyYAML、web3；刻意不放進 repo 根目錄的
-`requirements.txt`，那份是 Hyperliquid paper 伺服器在裝的）。
+`requirements.txt`，那份是 Hyperliquid paper 伺服器在裝的）。`verdict` 另外要上游引擎本身的相依
+（langgraph、各 LLM client；repo 根目錄 `pip install -e ".[dev]"` 就有），其他指令不載入它。
 
 ---
 

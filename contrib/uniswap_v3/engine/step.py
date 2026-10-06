@@ -293,7 +293,7 @@ class Engine:
             )
         try:
             answer = self.strategy.decide(view, portfolio)
-        except (ValueError, ArithmeticError) as exc:
+        except ValueError as exc:
             # The strategy could not decide: the bar is left undecided, and the run stops.
             raise EngineError(f"the strategy refused the bar at {bar.time} ({exc})") from exc
         if isinstance(answer, Hold):

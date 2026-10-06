@@ -209,8 +209,8 @@ contrib/uniswap_v3/
 3. 在 `strategies/registry.py` 的 `_FACTORIES` 登記名字。
 4. 設定檔寫 `strategy: {name: <名字>, params: {...}}`。
 
-策略拋 `ValueError`（不能決策）或回答不合格，run 會以 `failed: the strategy refused the bar at …` 停在那根 bar、
-不記 decision，修好後重跑會從那根接著決策；其他例外是 bug，原樣冒出。
+策略拋 `ValueError`（不能決策）或回答不合格，run 會以 `failed: …` 停在那根 bar（不能決策時是
+`the strategy refused the bar at …`）、不記 decision，修好後重跑會從那根接著決策；其他例外是 bug，原樣冒出。
 
 ---
 

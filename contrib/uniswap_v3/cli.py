@@ -523,7 +523,8 @@ def _decided_span(decisions: Sequence[Decision]) -> str:
 def _saw(store: Store, config: UniswapConfig, decision: Decision) -> str:
     """What the decision saw of each traded token's verdict, as ``<token>=<rating>``; nothing for a run that reads none.
 
-    The rating is read back from the store by the digest the decision kept.
+    The rating is read back from the store at the decision's bar and matched
+    by the digest the decision kept.
     A token the decision saw no verdict on reads ``none``, and one whose
     verdict the store now holds differently from what the decision saw, or
     did not hold then, or does not hold now, reads ``changed``: the same

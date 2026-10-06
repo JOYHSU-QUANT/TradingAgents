@@ -98,9 +98,9 @@ strategy:
 # it; copy the control run's trend_vol_weights params verbatim, or the two runs
 # do not compare) cut by what an outside judge said of each token at the bar:
 # the view's verdicts, read by the verdicts section above, which this strategy
-# needs (uncomment it, or the run fails on its first bar). A
-# token with a verdict is held at the rule's weight times its rating's
-# multiplier; one with no verdict at the bar, or a REVIEW one, takes no new
+# needs (uncomment it, or the run fails on its first bar). A token with a
+# verdict is held at the rule's weight times its rating's multiplier; one with
+# no verdict at the bar, or a REVIEW one, takes no new
 # risk, held at its present share capped at the rule's weight; one out of
 # trend is at zero whatever was said. Every param is required; the policy is
 # defined in strategies/ai_gated_weights.py. Multipliers are in [0, 1] and do

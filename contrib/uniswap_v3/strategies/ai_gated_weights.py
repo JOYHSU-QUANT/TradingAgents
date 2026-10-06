@@ -22,13 +22,13 @@ never more. The targets are cut to four decimal places, as the rule's are,
 and whatever they leave goes to the quote token. A share left where it is
 is cut too, so it sits up to 0.0001 below the holding: the sliver is sold
 only when another token takes the portfolio out of its band, and then only
-when it is worth the execution's ``min_trade_value``, which on a portfolio
-under some 100,000 of the quote it never is. The band is the rule's, and
-the target is answered only when some share has drifted more than it
-(:func:`.rebalance.rebalance_or_hold`): a verdict that cuts a token's
-target to below the band of its share, a ``Sell`` on a small holding
-among them, is acted on when something next drifts out of band, not at
-once, as a trend that flips under the rule is.
+when it is worth the execution's ``min_trade_value``, which, at the example's
+10, a portfolio under some 100,000 of the quote never reaches. The band is
+the rule's, and the target is answered only when some share has drifted
+more than it (:func:`.rebalance.rebalance_or_hold`): a verdict that cuts a
+token's target to below the band of its share, a ``Sell`` on a small
+holding among them, is acted on when something next drifts out of band,
+not at once, as a trend that flips under the rule is.
 
 The verdicts are those of the source the run's config names
 (``verdicts.source``). A config that names none hands the strategy a view
@@ -126,7 +126,12 @@ class AiGatedWeights:
                     f"{self.multipliers[bearish]} is above {bullish.value} "
                     f"{self.multipliers[bullish]}"
                 )
-        object.__setattr__(self, "multipliers", MappingProxyType(dict(self.multipliers)))
+        # Keyed by the ratings themselves, in their order, whatever keys were handed in.
+        object.__setattr__(
+            self,
+            "multipliers",
+            MappingProxyType({rating: self.multipliers[rating] for rating in RATINGS}),
+        )
 
     @classmethod
     def from_params(cls, params: Mapping[str, object]) -> AiGatedWeights:

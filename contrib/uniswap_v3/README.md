@@ -12,7 +12,7 @@ Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，
   （store 的 `verdicts`，見下）評等對應的倍率（範例：Buy 1／Overweight 0.75／Hold 0.5／Underweight 0.25／Sell 0）。
   沒判斷或 `REVIEW` 時不加新風險：目標＝目前佔比（截到權重的四位精度）、上限是規則的權重，該賣的照賣；不在趨勢上的代幣一律 0，
   所以每個代幣的目標永遠 ≤ 規則的目標。band 沿用規則的：判斷把目標砍到持倉 band 以內（例如小持倉收到 Sell）要等下次
-  再平衡才一起賣。設定檔要有 `verdicts` 區塊，沒有的話第一根就 `failed: the strategy refused the bar …`。
+  再平衡才一起賣。設定檔要有 `verdicts` 區塊，沒有的話第一根就 `failed: the strategy refused the bar at …`。
   政策與參數的定義在 `strategies/ai_gated_weights.py` 的 docstring。
 
 它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay` 完全隔離：
@@ -210,7 +210,7 @@ contrib/uniswap_v3/
 4. 設定檔寫 `strategy: {name: <名字>, params: {...}}`。
 
 策略拋 `ValueError`（不能決策）或回答不合格，run 會以 `failed: …` 停在那根 bar（不能決策時是
-`the strategy refused the bar at …`）、不記 decision，修好後重跑會從那根接著決策；其他例外是 bug，原樣冒出。
+`the strategy refused the bar at …`）、不記 decision，修好後重跑會從那根接著決策；其他例外原樣冒出。
 
 ---
 

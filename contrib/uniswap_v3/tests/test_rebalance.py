@@ -1,4 +1,4 @@
-"""What the strategies share: the params check, the band, and the rebalance trigger.
+"""What the strategies share: the params and decimal checks, the weight places, the band, and the trigger.
 
 Every portfolio below is worth 1000 USDC at the fakes' prices, WETH = 2000
 and WBTC = 40000, so a share can be read off the balance: 0.005 WBTC is
@@ -15,9 +15,12 @@ import pytest
 from contrib.uniswap_v3.domain.ledger import Ledger
 from contrib.uniswap_v3.domain.types import Hold, TargetWeights
 from contrib.uniswap_v3.strategies.rebalance import (
+    floor_weight,
     rebalance_or_hold,
     require_band,
+    require_decimal,
     require_params,
+    weights_with_quote,
 )
 from contrib.uniswap_v3.tests.fakes.engine import PRICES, ledger, weights
 
@@ -107,3 +110,38 @@ def test_a_target_naming_a_token_the_portfolio_does_not_hold_raises():
     )
     with pytest.raises(ValueError, match="does not hold 'WBTC'"):
         rebalance_or_hold(two_tokens, wbtc_first, BAND)
+
+
+@pytest.mark.parametrize(
+    ("value", "within"),
+    [(Decimal("0.5"), lambda v: v > 0), (Decimal(1), lambda v: 0 < v <= 1)],
+)
+def test_a_finite_decimal_within_its_bounds_passes(value, within):
+    require_decimal(value, "x", within, "above 0")
+
+
+@pytest.mark.parametrize(
+    "value", [Decimal(0), Decimal("NaN"), Decimal("Infinity"), 0.5, "0.5", None]
+)
+def test_a_decimal_outside_its_bounds_or_not_a_finite_decimal_is_refused(value):
+    with pytest.raises(ValueError, match=re.escape(f"x must be a Decimal above 0, got {value!r}")):
+        require_decimal(value, "x", lambda v: v > 0, "above 0")
+
+
+def test_a_weight_is_cut_down_to_four_places():
+    assert floor_weight(Decimal("0.123456")) == Decimal("0.1234")
+    assert floor_weight(Decimal("0.99999")) == Decimal("0.9999")
+    assert floor_weight(Decimal("0.5")) == Decimal("0.5000")
+
+
+def test_the_quote_gets_exactly_what_the_cut_weights_leave():
+    assert weights_with_quote({"WETH": Decimal("0.6832"), "WBTC": Decimal("0.3167")}, "USDC") == (
+        weights("0.0001", "0.6832", "0.3167")
+    )
+    assert weights_with_quote({"WETH": Decimal("0.5"), "WBTC": Decimal("0.5")}, "USDC") == (
+        weights("0", "0.5", "0.5")
+    )
+    assert weights_with_quote({}, "USDC") == TargetWeights({"USDC": Decimal(1)})
+    # Weights that add up to more than 1 leave the quote nothing to hold, and are refused.
+    with pytest.raises(ValueError, match="non-negative"):
+        weights_with_quote({"WETH": Decimal("0.7"), "WBTC": Decimal("0.4")}, "USDC")

@@ -14,11 +14,20 @@ view, suspect bars left out:
 - When the weights of the tokens in trend add up to more than 1, they are
   scaled down to add up to 1. What is left goes to the quote token.
 
-With fewer bars than the longer window needs, no trend can be confirmed
-and no volatility measured: every token is out of trend and the target is
-all quote. The target is answered only when some token's share has drifted
-more than ``band`` from it (:func:`.rebalance.rebalance_or_hold`), so a
-weight moving a little as volatility changes does not trade every bar.
+``target_vol`` is a risk budget per token, not for the portfolio: two
+tokens in trend together, each sized to it, leave the portfolio more
+volatile than it when they move together, up to the sum of their weights.
+
+The windows count bars, not time, and the series is the view's unsuspect
+bars joined across any gap: after a suspect or missing stretch the window
+reaches further back, and the one return across the gap is larger than a
+bar's. With fewer bars than the longer window needs, no trend can be
+confirmed and no volatility measured: every token is out of trend and the
+target is all quote, which sells whatever the portfolio holds. The target
+is answered only when some token's share has drifted more than ``band``
+from it (:func:`.rebalance.rebalance_or_hold`), so a weight moving a
+little as volatility changes does not trade every bar, and a trend that
+flips while a token weighs less than ``band`` is not traded either.
 
 Params, as a config writes them, every one of them required::
 
@@ -28,6 +37,9 @@ Params, as a config writes them, every one of them required::
     target_vol: "0.40"    # annualised, as a fraction: 40%
     max_weight: "0.5"     # the most one token may weigh
     band: "0.05"
+
+The windows and ``bars_per_year`` all go with the config's bar length: a
+config with hourly bars wants them given in hours, and 8760 to the year.
 
 Numbers are quoted: a YAML float has already lost digits by the time it is
 read, so one is refused rather than rounded. Weights are cut to four

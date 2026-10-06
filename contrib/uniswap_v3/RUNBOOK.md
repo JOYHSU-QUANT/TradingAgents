@@ -91,6 +91,11 @@ python -m dotenv run -- python -m contrib.uniswap_v3 backfill --config contrib/u
 paper 當時看到的與事後回測看到的就不一樣了。所以：**歷史在開 run 之前補完，之後不要在
 跑著的 run 後面再 backfill**（visit 自己會補新的 bar）。
 
+跑 `trend_vol_weights` 還有一件事：它的視窗要夠長的歷史才會進場（`max(trend_window, vol_window + 1)` 根，
+預設 50 根），歷史不夠時目標是全 USDC——開 run 時若 `--balance` 給了 WETH／WBTC，第一根就會賣掉。
+所以要嘛歷史補到開 run 前至少 50 根（照上面從 2022 年補就夠），要嘛開 run 只給 USDC。
+`bars_per_year`、`trend_window`、`vol_window` 都以 bar 為單位，改了 `interval_seconds` 要一起改。
+
 ---
 
 ## 2. 開一個新的 run（手動，一次）

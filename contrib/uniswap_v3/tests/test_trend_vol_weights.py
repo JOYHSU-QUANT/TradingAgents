@@ -13,8 +13,8 @@ from decimal import ROUND_DOWN, Decimal
 import pytest
 
 from contrib.uniswap_v3.domain.types import Bar, Hold, MarketView, Portfolio
-from contrib.uniswap_v3.strategies.trend_vol_weights import TrendVolWeights
-from contrib.uniswap_v3.tests.fakes.engine import DAY, FIRST_DAY, bar, ledger, weights
+from contrib.uniswap_v3.strategies.trend_vol_weights import TrendVolWeights, _recent
+from contrib.uniswap_v3.tests.fakes.engine import FIRST_DAY, bar, ledger, weights
 
 PARAMS = {
     "trend_window": 3,
@@ -73,6 +73,7 @@ def test_from_params_reads_quoted_decimals_and_integer_windows():
         ({**PARAMS, "trend_window": True}, "trend_window must be an integer"),
         ({**PARAMS, "vol_window": 1}, "vol_window must be an integer of at least 2"),
         ({**PARAMS, "bars_per_year": 0}, "bars_per_year must be an integer of at least 1"),
+        ({**PARAMS, "bars_per_year": True}, "bars_per_year must be an integer"),
         ({**PARAMS, "target_vol": 0.05}, "quoted decimal"),
         ({**PARAMS, "target_vol": "0"}, "target_vol must be a Decimal above 0"),
         ({**PARAMS, "target_vol": "-0.1"}, "target_vol must be a Decimal above 0"),
@@ -89,10 +90,40 @@ def test_malformed_params_are_refused(params, match):
         TrendVolWeights.from_params(params)
 
 
+@pytest.mark.parametrize(
+    ("fields", "match"),
+    [
+        ({"target_vol": Decimal("Infinity")}, "target_vol must be a Decimal above 0"),
+        ({"max_weight": 1}, "max_weight must be a Decimal"),
+        ({"bars_per_year": 1.0}, "bars_per_year must be an integer"),
+        ({"band": Decimal("NaN")}, r"band must be a Decimal in \[0, 1\)"),
+    ],
+)
+def test_direct_construction_is_checked_too(fields, match):
+    by_hand = {
+        "trend_window": 3,
+        "vol_window": 2,
+        "bars_per_year": 1,
+        "target_vol": Decimal("0.05"),
+        "max_weight": Decimal("0.5"),
+        "band": Decimal("0.05"),
+    }
+    with pytest.raises(ValueError, match=match):
+        TrendVolWeights(**{**by_hand, **fields})
+
+
+def test_the_bars_needed_are_the_longer_of_the_trend_window_and_the_returns_window():
+    long_vol = TrendVolWeights.from_params({**PARAMS, "trend_window": 2, "vol_window": 4})
+    assert long_vol.bars_needed == 5  # four returns need five closes
+    rising = ["100", "110", "121", "133"]
+    assert long_vol.target(_view(rising), "USDC") == ALL_QUOTE
+    assert long_vol.target(_view([*rising, "146"]), "USDC") == HALF_WETH
+
+
 def test_a_max_weight_of_one_lets_a_token_take_the_whole_portfolio():
     whole = TrendVolWeights.from_params({**PARAMS, "max_weight": "1"})
-    # Geometric growth: two equal returns, so no volatility, so the cap.
-    view = _view(["100", "110", "121"])
+    # Doubling every bar: two equal returns, so no volatility, so the cap.
+    view = _view(["100", "200", "400"])
     assert whole.target(view, "USDC") == weights("0", "1.0000", "0")
 
 
@@ -110,9 +141,18 @@ def test_a_token_closing_at_or_below_its_average_is_out_of_trend():
     assert STRATEGY.target(_view(["100", "130", "110"]), "USDC") == ALL_QUOTE
     # 90, 110, 100 average 100: at the average is not above it.
     assert STRATEGY.target(_view(["90", "110", "100"]), "USDC") == ALL_QUOTE
+    # The average is over the last three closes only: 100, 90, 95 average 95, and the
+    # earlier 10 would have pulled a four-close average below the latest close.
+    assert STRATEGY.target(_view(["10", "100", "90", "95"]), "USDC") == ALL_QUOTE
 
 
 def test_a_trending_token_with_no_volatility_takes_the_cap():
+    # Doubling every bar: the returns are exactly equal and the variance exactly zero.
+    assert STRATEGY.target(_view(["100", "200", "400"]), "USDC") == HALF_WETH
+
+
+def test_a_trending_token_with_next_to_no_volatility_is_capped_too():
+    # Growing a tenth a bar: the returns agree to 28 digits, and the size is enormous.
     assert STRATEGY.target(_view(["100", "110", "121"]), "USDC") == HALF_WETH
 
 
@@ -152,6 +192,14 @@ def test_weights_in_trend_that_add_up_to_more_than_one_are_scaled_down():
     assert wide.target(view, "USDC") == weights("0", "0.5000", "0.5000")
 
 
+def test_scaling_down_keeps_the_proportions_and_cutting_leaves_the_rest_to_the_quote():
+    wide = TrendVolWeights.from_params({**PARAMS, "max_weight": "0.8"})
+    # WETH at the cap, WBTC sized by its volatility: 0.8 + 0.3709 scaled to 1 and cut
+    # to four places each, so the quote keeps the 0.0001 the cuts leave.
+    view = _view(["100", "110", "121"], ["1000", "1000", "1210"])
+    assert wide.target(view, "USDC") == weights("0.0001", "0.6832", "0.3167")
+
+
 def test_two_tokens_in_trend_within_the_cap_are_both_held():
     view = _view(["100", "110", "121"], ["1000", "1100", "1210"])
     assert STRATEGY.target(view, "USDC") == weights("0", "0.5000", "0.5000")
@@ -178,6 +226,13 @@ def test_suspect_bars_are_left_out_of_the_series():
     assert STRATEGY.target(_view(["100", "110", "121"], suspect={0}), "USDC") == ALL_QUOTE
 
 
+def test_the_recent_bars_are_the_last_unsuspect_ones_and_no_more():
+    view = _view(["1", "2", "3", "4", "5"], suspect={0, 3})
+    assert _recent(view, 2) == [view.bars[2], view.bars[4]]
+    assert _recent(view, 3) == [view.bars[1], view.bars[2], view.bars[4]]
+    assert _recent(view, 9) == [view.bars[1], view.bars[2], view.bars[4]]
+
+
 def test_a_portfolio_worth_nothing_is_held():
     view = _view(["100", "110", "121"])
     assert STRATEGY.decide(view, _portfolio(view, "0", "0", "0")) == Hold()
@@ -190,10 +245,10 @@ def test_a_bar_in_the_window_without_a_price_for_a_token_raises():
         STRATEGY.target(view, "USDC")
 
 
-def test_the_same_view_and_portfolio_give_the_same_answer():
+def test_the_same_view_and_portfolio_give_the_same_answer_whatever_was_decided_before():
     view = _view(["100", "100", "121"], ["1000", "900", "1300"])
     portfolio = _portfolio(view, "1000", "0", "0")
     first = STRATEGY.decide(view, portfolio)
-    assert first == STRATEGY.decide(view, portfolio)
-    assert first == TrendVolWeights.from_params(PARAMS).decide(view, portfolio)
-    assert view.bars[0].time == FIRST_DAY and view.bars[1].time == FIRST_DAY + DAY
+    STRATEGY.decide(_view(["121", "110", "100"]), _portfolio(view, "0", "8", "0.01"))
+    assert STRATEGY.decide(view, portfolio) == first
+    assert TrendVolWeights.from_params(PARAMS).decide(view, portfolio) == first

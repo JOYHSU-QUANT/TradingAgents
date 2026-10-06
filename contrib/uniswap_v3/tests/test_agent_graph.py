@@ -8,6 +8,7 @@ from contrib.uniswap_v3.agent.errors import AgentError, JudgeUnavailable
 from contrib.uniswap_v3.agent.graph import (
     FAKE_MODEL,
     REPORT_KEYS,
+    Answer,
     FakeJudge,
     TradingAgentsJudge,
     _answer,
@@ -142,9 +143,13 @@ def test_a_graph_that_does_not_answer_is_judge_unavailable(tmp_path, stub):
 
 
 class _ProviderError(Exception):
-    def __init__(self, status_code, message="refused"):
+    def __init__(self, status_code, message="refused", *, spelled="status_code"):
         super().__init__(message)
-        self.status_code = status_code
+        setattr(self, spelled, status_code)
+
+
+class APIConnectionError(Exception):
+    """Named as the provider SDKs name their transport error."""
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404])
@@ -153,35 +158,87 @@ def test_a_provider_refusal_that_a_retry_would_meet_again_is_an_agent_error(
 ):
     stub.answer_error = _ProviderError(status, "No endpoints found for vendor/model")
     judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
-    with pytest.raises(AgentError, match=r"refused the question on ETH-USD for good .*No endpoints"):
+    with pytest.raises(AgentError, match=r"failed on ETH-USD for good .*No endpoints"):
         judge.ask("ETH-USD", "2024-01-03", "context")
 
 
-@pytest.mark.parametrize("status", [408, 429, 500, 502, 503])
-def test_a_rate_limit_a_timeout_or_a_server_error_is_judge_unavailable(tmp_path, stub, status):
+@pytest.mark.parametrize("status", [402, 408, 429, 500, 502, 503])
+def test_an_empty_balance_a_rate_limit_a_timeout_or_a_server_error_may_pass(
+    tmp_path, stub, status
+):
     stub.answer_error = _ProviderError(status)
     judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
     with pytest.raises(JudgeUnavailable, match="did not answer on ETH-USD"):
         judge.ask("ETH-USD", "2024-01-03", "context")
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionResetError("reset"),
+        TimeoutError("timed out"),
+        APIConnectionError("the gateway is down"),
+        _ProviderError(503, spelled="code"),
+    ],
+)
+def test_a_network_error_or_a_status_spelled_code_may_pass(tmp_path, stub, error):
+    stub.answer_error = error
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    with pytest.raises(JudgeUnavailable):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [KeyError("market_report"), TypeError("bad state"), _ProviderError(404, spelled="code")],
+)
+def test_an_error_of_the_engines_own_or_a_refusal_spelled_code_is_for_good(
+    tmp_path, stub, error
+):
+    stub.answer_error = error
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
+    with pytest.raises(AgentError, match="for good"):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+
+
 def test_the_provider_status_is_read_through_the_exception_chain(tmp_path, stub):
     try:
         try:
-            raise _ProviderError(404)
+            raise _ProviderError(429)
         except _ProviderError as inner:
             raise RuntimeError("the graph failed") from inner
     except RuntimeError as wrapped:
         stub.answer_error = wrapped
     judge = TradingAgentsJudge(AgentSettings(), tmp_path, graph_class=stub)
-    with pytest.raises(AgentError, match="for good"):
+    with pytest.raises(JudgeUnavailable):
         judge.ask("ETH-USD", "2024-01-03", "context")
-    # A status that is not a number, or a boolean, is no status.
+    # A status that is not a number, or a boolean, is no status, and the error is for good.
     odd = RuntimeError("odd")
     odd.status_code = True  # type: ignore[attr-defined]
     stub.answer_error = odd
-    with pytest.raises(JudgeUnavailable):
+    with pytest.raises(AgentError, match="for good"):
         judge.ask("ETH-USD", "2024-01-03", "context")
+
+
+def test_an_engine_that_cannot_be_set_up_is_an_agent_error(tmp_path, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "tradingagents.graph.trading_graph", None)
+    judge = TradingAgentsJudge(AgentSettings(), tmp_path)
+    with pytest.raises(AgentError, match=r"cannot be set up \(ModuleNotFoundError"):
+        judge.ask("ETH-USD", "2024-01-03", "context")
+
+
+def test_the_judge_tells_its_settings_and_an_answer_checks_its_fields(tmp_path, stub):
+    judge = TradingAgentsJudge(AgentSettings(max_tokens=99), tmp_path, graph_class=stub)
+    assert judge.settings["max_tokens"] == 99 and judge.settings["llm_provider"] == "openrouter"
+    assert FakeJudge(Rating.BUY).settings == {}
+    with pytest.raises(ValueError, match="decision must be a string"):
+        Answer(decision=None, rating=Rating.BUY, reports=None, elapsed_seconds=0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="elapsed_seconds must be a non-negative"):
+        Answer(decision="x", rating=Rating.BUY, reports=None, elapsed_seconds=-1)
+    with pytest.raises(ValueError, match="reports must be a mapping"):
+        Answer(decision="x", rating=Rating.BUY, reports=[], elapsed_seconds=0)  # type: ignore[arg-type]
 
 
 def test_the_fake_judge_answers_at_once_and_keeps_no_words():

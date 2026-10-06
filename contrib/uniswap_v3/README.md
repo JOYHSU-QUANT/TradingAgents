@@ -180,9 +180,9 @@ store 與 sidecar 要一起搬）。同一（source、代幣、bar）問過就�
 | 碼 | 意思 | 排程該怎麼做 |
 |---|---|---|
 | 0 | 跑完了（含「這根已經決策過」、成交被拒、邊界沒答案；後兩者 stderr 有警告；`verdict` 的「問過了」、bar 是 suspect 所以沒問、judge 回 `REVIEW`——最後一個 stderr 有警告） | 不用動 |
-| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send；`verdict` 的設定沒有 `verdicts` 區塊、judge 建不起來（沒有 key）、`--fake-rating` 遇到有真判斷的 store | 看 log、修好 |
+| 1 | 跑不下去，原樣重跑也不會好：設定、store、範圍、節點設定、時鐘落後於 run；fork 的錢包與帳本不符、run 有未結 send；`verdict` 的設定沒有 `verdicts` 區塊、代幣沒有 ticker、judge 建不起來（沒有 key）、供應商拒絕或引擎自己出錯（模型名打錯的 4xx、KeyError 之類）、`--at` 指舊邊界卻沒配 `--fake-rating`、`--fake-rating` 遇到有真判斷的 store、sidecar 寫不進去 | 看 log、修好 |
 | 2 | 命令列打錯（argparse） | 修排程的指令 |
-| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答（已答的代幣保留，下次只問剩下的） | 稍後再跑（排程一天三次就是為了這個） |
+| 3 | 稍後再跑可能就好：節點連不上、落後（還沒到邊界或成交區塊）、回了錯誤，或 store 被別的程式鎖住；`verdict` 的 bar 還沒進 store、judge 沒答而原因可能會過（閘道／網路／額度：402、408、429、5xx 或連線逾時；已答的代幣保留，下次只問剩下的） | 稍後再跑（排程一天三次就是為了這個） |
 | 4 | 只有排程的 visit 腳本會給：進不了 repo 目錄、寫不了 log，或 `PYTHON` 的路徑不存在，visit 沒有跑 | 看 RUNBOOK §5 |
 
 ---

@@ -6,6 +6,8 @@ import hashlib
 import json
 from decimal import Decimal
 
+import pytest
+
 from contrib.uniswap_v3.agent.graph import Answer
 from contrib.uniswap_v3.agent.record import (
     sidecar_path,
@@ -35,6 +37,7 @@ def _record(answer: Answer, **changes):
         "trade_date": "2024-01-03",
         "context": "the spot context",
         "model": "vendor/model",
+        "settings": {"llm_provider": "vendor", "max_tokens": 8192},
         "asked_at": _ASKED_AT,
     }
     return sidecar_record(answer, **{**arguments, **changes})
@@ -54,7 +57,8 @@ def test_the_sidecar_record_keeps_what_was_asked_and_everything_that_came_back()
         "time": _AT,
         "trade_date": "2024-01-03",
         "model": "vendor/model",
-        "prompt_version": "spot-context-v1",
+        "judge": {"llm_provider": "vendor", "max_tokens": 8192},
+        "prompt_version": "spot-context-v2",
         "asked_at": _ASKED_AT,
         "elapsed_seconds": 12.346,
         "rating": "Buy",
@@ -81,6 +85,18 @@ def test_write_sidecar_writes_the_json_whole_and_returns_the_digest_of_the_bytes
     assert json.loads(path.read_bytes()) == {"b": 2}
 
 
+def test_a_write_that_fails_leaves_no_partial_file(tmp_path, monkeypatch):
+    import os
+
+    def refuse(source, target):
+        raise PermissionError("the target is held open")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    with pytest.raises(PermissionError):
+        write_sidecar(tmp_path, "verdicts/j/WETH-x.json", {"b": 1})
+    assert list((tmp_path / "verdicts" / "j").iterdir()) == []
+
+
 def test_a_verdict_record_names_its_sidecar_or_none():
     kept = verdict_record(
         _answer(),
@@ -97,7 +113,7 @@ def test_a_verdict_record_names_its_sidecar_or_none():
     )
     assert (kept.model, kept.prompt_version, kept.asked_at) == (
         "vendor/model",
-        "spot-context-v1",
+        "spot-context-v2",
         _ASKED_AT,
     )
     assert (kept.sidecar_path, kept.sidecar_digest) == (

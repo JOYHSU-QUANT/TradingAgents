@@ -9,7 +9,7 @@
   layer and nowhere else, and a command that asks no judge waits on none
   of the engine's dependencies.
 
-Both read every import statement in a file, at any depth: a lazy import
+All three read every import statement in a file, at any depth: a lazy import
 inside a function and one under ``TYPE_CHECKING`` are the same dependency
 here. A dynamic import (``import_module`` or ``__import__``) is read when
 its module name is a string literal; one built at run time is not seen.

@@ -127,6 +127,7 @@ from .store.repository import Store, StoreBusy, StoreError, open_store
 from .store.verdict_source import load_verdicts
 
 if TYPE_CHECKING:
+    from .agent.graph import Judge
     from .agent.verdicts import Asked
     from .backfill import BackfillSummary
     from .chain.rpc import Rpc
@@ -201,8 +202,8 @@ def _balance(text: str) -> tuple[str, Decimal]:
     return symbol, _amount(amount)
 
 
-def _iso(time: int) -> str:
-    return utc_text(time)
+_iso = utc_text
+_fixed = fixed_text
 
 
 def _one_ascii_line(text: object) -> str:
@@ -1036,6 +1037,7 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
 
     source = verdict_source(config)
     home = args.db.resolve().parent
+    judge: Judge
     if args.fake_rating is not None:
         from .agent.graph import FakeJudge
 
@@ -1044,32 +1046,27 @@ def _verdict(args: argparse.Namespace, out: Callable[[str], None], now: Callable
         from .agent.graph import TradingAgentsJudge
 
         judge = TradingAgentsJudge(config.agent, home / "tradingagents")
+
+    def recorded(asked: Asked) -> None:
+        # Told as each verdict lands, so that a later token's failure loses no line.
+        out(_asked_line(asked))
+        if asked.asked_now and asked.record.verdict.rating.is_review:
+            print(
+                f"warning: the judge gave no rating on {asked.symbol} (REVIEW); the verdict is "
+                f"kept as such, a strategy treats it as none, and it is not asked again",
+                file=sys.stderr,
+            )
+
     out(f"verdicts of {_one_ascii_line(source)} at {_iso(at)} (trade date {trade_date_of(at)}):")
     with open_store(args.db, create=False) as store:
         summary = ask_verdicts(
-            store,
-            config,
-            judge,
-            time=at,
-            home=home,
-            now=present,
-            report=lambda asked: out(_asked_line(asked)),
+            store, config, judge, time=at, home=home, now=present, report=recorded
         )
     if summary.suspect:
         out(f"the bar at {_iso(at)} is suspect, which no run decides; no judge was asked")
         return EXIT_OK
     out(f"{len(summary.asked)} asked, {len(summary.already_stored)} already stored")
-    review = [asked.symbol for asked in summary.asked if asked.record.verdict.rating.is_review]
-    if review:
-        print(
-            f"warning: the judge gave no rating on {', '.join(review)} (REVIEW); the verdict "
-            f"is kept as such, a strategy treats it as none, and it is not asked again",
-            file=sys.stderr,
-        )
     return EXIT_OK
-
-
-_fixed = fixed_text
 
 
 def _curve_line(name: str, curve: Curve) -> str:
@@ -1170,7 +1167,9 @@ def main(
         ConfigError,
         EngineError,
         MetricsError,
+        OSError,
         StoreError,
     ) as exc:
+        # OSError: a sidecar that could not be written beside the store.
         print(f"failed: {_one_ascii_line(exc)}", file=sys.stderr)
         return EXIT_FAILED

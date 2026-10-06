@@ -22,7 +22,7 @@ from decimal import Decimal
 import pytest
 
 from contrib.uniswap_v3.agent.context import BARS_NEEDED, spot_context
-from contrib.uniswap_v3.agent.graph import PROMPT_VERSION, TradingAgentsJudge
+from contrib.uniswap_v3.agent.graph import TradingAgentsJudge
 from contrib.uniswap_v3.agent.record import sidecar_path, sidecar_record, write_sidecar
 from contrib.uniswap_v3.agent.settings import AgentSettings
 from contrib.uniswap_v3.agent.verdicts import trade_date_of
@@ -37,7 +37,7 @@ def test_the_judge_answers_on_eth_usd_with_a_rating_and_its_reports(tmp_path):
         pytest.skip("OPENROUTER_API_KEY is not set")
     now = int(datetime.now(tz=timezone.utc).timestamp())
     time = now - now % 86_400
-    # A flat series stands in for the store's closes: the plumbing is what is tried here.
+    # A made-up series stands in for the store's closes: the plumbing is what is tried here.
     closes = [Decimal("2000") + Decimal(step) for step in range(BARS_NEEDED)]
     context = spot_context(
         closes,
@@ -77,10 +77,11 @@ def test_the_judge_answers_on_eth_usd_with_a_rating_and_its_reports(tmp_path):
             trade_date=trade_date_of(time),
             context=context,
             model=judge.model,
-            prompt_version=PROMPT_VERSION,
+            settings=judge.settings,
             asked_at=now,
         ),
     )
     written = json.loads((tmp_path / relative).read_text(encoding="utf-8"))
     assert written["rating"] == answer.rating.value and len(digest) == 64
+    assert written["judge"]["deep_think_llm"] == judge.model
     print(f"sidecar: {tmp_path / relative}")

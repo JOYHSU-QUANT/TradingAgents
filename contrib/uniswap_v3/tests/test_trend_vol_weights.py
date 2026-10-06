@@ -74,8 +74,8 @@ def test_from_params_reads_quoted_decimals_and_integer_windows():
         ({**PARAMS, "trend_window": 3.0}, "trend_window must be an integer"),
         ({**PARAMS, "trend_window": True}, "trend_window must be an integer"),
         ({**PARAMS, "vol_window": 1}, "vol_window must be an integer of at least 2"),
-        ({**PARAMS, "bars_per_year": 0}, "bars_per_year must be an integer of at least 1"),
-        ({**PARAMS, "bars_per_year": True}, "bars_per_year must be an integer"),
+        ({**PARAMS, "bars_per_year": 0}, "bars_per_year must be a positive integer"),
+        ({**PARAMS, "bars_per_year": True}, "bars_per_year must be a positive integer"),
         ({**PARAMS, "target_vol": 0.05}, "quoted decimal"),
         ({**PARAMS, "target_vol": "0"}, "target_vol must be a Decimal above 0"),
         ({**PARAMS, "target_vol": "-0.1"}, "target_vol must be a Decimal above 0"),
@@ -97,7 +97,7 @@ def test_malformed_params_are_refused(params, match):
     [
         ({"target_vol": Decimal("Infinity")}, "target_vol must be a Decimal above 0"),
         ({"max_weight": 1}, "max_weight must be a Decimal"),
-        ({"bars_per_year": 1.0}, "bars_per_year must be an integer"),
+        ({"bars_per_year": 1.0}, "bars_per_year must be a positive integer"),
         ({"band": Decimal("NaN")}, r"band must be a Decimal in \[0, 1\)"),
     ],
 )

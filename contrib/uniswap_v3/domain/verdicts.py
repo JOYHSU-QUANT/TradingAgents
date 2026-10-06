@@ -90,9 +90,9 @@ def require_text(value: object, what: str) -> None:
 def require_count(value: object, what: str, *, at_least: int = 0) -> None:
     """Refuse a ``value`` that is not an integer of at least ``at_least``; a bool is not one."""
     if isinstance(value, bool) or not isinstance(value, int) or value < at_least:
-        bound = "a non-negative integer" if at_least == 0 else f"an integer of at least {at_least}"
-        if at_least == 1:
-            bound = "a positive integer"
+        bound = {0: "a non-negative integer", 1: "a positive integer"}.get(
+            at_least, f"an integer of at least {at_least}"
+        )
         raise ValueError(f"{what} must be {bound}, got {value!r}")
 
 

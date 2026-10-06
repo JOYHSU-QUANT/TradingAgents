@@ -6,11 +6,15 @@ __all__ = ["AgentError", "BarNotStored", "JudgeUnavailable"]
 
 
 class AgentError(Exception):
-    """The judge cannot be asked, or what it said cannot be used, and asking again unchanged will not help."""
+    """Anything the agent layer raises: the judge could not be asked, or what it said cannot be used.
+
+    Raised as is, it says asking again unchanged will not help; the two
+    subclasses are the cases where a later visit may do better.
+    """
 
 
 class JudgeUnavailable(AgentError):
-    """The judge was asked and did not answer: the model, its gateway or the data it fetches failed.
+    """The judge was asked and did not answer, for a reason that may pass: the gateway, the network, a quota.
 
     Nothing of that answer is recorded; a later visit asks again.
     """

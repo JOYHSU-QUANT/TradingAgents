@@ -148,7 +148,7 @@ def test_review_is_recorded_as_a_verdict_with_its_words(store, tmp_path):
 
 def test_the_bar_must_be_in_the_store_before_the_judge_is_asked(store, tmp_path):
     judge = ScriptedJudge()
-    with pytest.raises(BarNotStored, match=r"no bar at 2024-01-04 \(1704326400\)"):
+    with pytest.raises(BarNotStored, match=r"no bar at 2024-01-04 \(2024-01-04T00:00:00Z\)"):
         _ask(store, judge, tmp_path, time=FIRST_DAY + 3 * DAY)
     assert judge.asked == []
 
@@ -181,10 +181,10 @@ def test_suspect_bars_are_left_out_of_the_closes(store, tmp_path, monkeypatch):
     monkeypatch.setattr(_verdicts, "load_bar", suspect)
     judge = ScriptedJudge()
     _ask(store, judge, tmp_path)
-    # The bar before the latest is the suspect one: no change over one bar, and the one
-    # return that would cross it is left out.
+    # The bar before the latest is the suspect one: no change over one bar, and the two
+    # returns that touch it are left out.
     assert "over 1 bar(s): not measured (no bar 1 bar(s) back)" in judge.asked[1][2]
-    assert "not measured (0 of 20 return(s) measured)" in judge.asked[1][2]
+    assert "not measured (0 of 20 returns measured)" in judge.asked[1][2]
 
 
 def test_a_config_that_reads_no_verdicts_is_refused(store, tmp_path):
@@ -231,6 +231,36 @@ def test_a_fake_judge_keeps_no_words_and_is_refused_once_real_verdicts_exist(sto
         _ask(store, judge, tmp_path, time=FIRST_DAY)
     assert judge.asked == [] and store.verdict(SOURCE, "WBTC", FIRST_DAY) is None
     assert store.verdict_models(SOURCE) == ["fake", "synthetic"]
+
+
+def test_a_verdict_another_visit_recorded_meanwhile_is_kept_and_this_ones_dropped(
+    store, tmp_path
+):
+    class Meanwhile(ScriptedJudge):
+        def ask(self, ticker, trade_date, context):
+            if ticker == "WBTC-NEVER":
+                raise AssertionError
+            # Another visit lands the same token's verdict while this judge thinks.
+            store.insert_verdict(_record("WBTC" if ticker == "BTC-USD" else "WETH", 2))
+            return super().ask(ticker, trade_date, context)
+
+    summary = _ask(store, Meanwhile(), tmp_path)
+    assert summary.asked == () and [a.symbol for a in summary.already_stored] == ["WBTC", "WETH"]
+    assert all(a.record.model == "synthetic" for a in summary.verdicts)
+    assert not (tmp_path / "verdicts").exists()
+
+
+def test_the_record_types_hold_their_invariants():
+    from contrib.uniswap_v3.agent.verdicts import Asked, AskSummary
+
+    held = _record("WETH", 2)
+    with pytest.raises(ValueError, match="the record is of WETH, and the token is WBTC"):
+        Asked(symbol="WBTC", ticker="BTC-USD", record=held, asked_now=False)
+    with pytest.raises(ValueError, match="took this visit no time"):
+        Asked(symbol="WETH", ticker="ETH-USD", record=held, asked_now=False, elapsed_seconds=1)
+    found = Asked(symbol="WETH", ticker="ETH-USD", record=held, asked_now=False)
+    with pytest.raises(ValueError, match="a suspect bar has no verdicts"):
+        AskSummary(time=_DAY2, source=SOURCE, verdicts=(found,), suspect=True)
 
 
 def test_the_trade_date_is_the_boundarys_utc_date():

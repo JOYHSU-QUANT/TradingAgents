@@ -223,6 +223,49 @@ def test_a_review_is_recorded_and_warned_of(config, db, monkeypatch, capsys):
 
 
 def test_the_engine_is_not_imported_for_a_fake_rating(config, db, monkeypatch):
-    # A module set to None in sys.modules raises ImportError on import.
-    monkeypatch.setitem(sys.modules, "tradingagents.graph.trading_graph", None)
+    # A module set to None in sys.modules raises ImportError on import: the engine and
+    # every module of it another test may have cached are made unimportable.
+    for name in [name for name in sys.modules if name.split(".")[0] == "tradingagents"]:
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setitem(sys.modules, "tradingagents", None)
     assert _verdict(config, db, "--fake-rating", "Buy")[0] == cli.EXIT_OK
+
+
+def test_a_review_is_warned_of_even_when_a_later_token_fails(config, db, monkeypatch, capsys):
+    judge = ScriptedJudge({"BTC-USD": Rating.REVIEW, "ETH-USD": JudgeUnavailable("down")})
+    _judging(monkeypatch, judge)
+    code, lines = _verdict(config, db)
+    assert code == cli.EXIT_RETRY
+    err = capsys.readouterr().err
+    assert "warning: the judge gave no rating on WBTC (REVIEW)" in err
+    assert "try again later: down; 1 verdict(s) at 2024-01-03 stay recorded" in err
+
+
+def test_a_judge_that_fails_for_good_on_a_later_token_keeps_the_earlier_and_fails(
+    config, db, monkeypatch, capsys
+):
+    _judging(monkeypatch, ScriptedJudge({"ETH-USD": AgentError("the judge failed for good")}))
+    code, lines = _verdict(config, db)
+    assert code == cli.EXIT_FAILED and len(lines) == 2
+    assert (
+        "failed: the judge failed for good; 1 verdict(s) at 2024-01-03 stay recorded"
+        in capsys.readouterr().err
+    )
+
+
+def test_a_sidecar_that_cannot_be_written_fails_without_a_traceback(
+    config, db, monkeypatch, capsys
+):
+    import os
+
+    _judging(monkeypatch, ScriptedJudge())
+
+    def refuse(source, target):
+        raise PermissionError("the target is held open")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    code, lines = _verdict(config, db)
+    assert code == cli.EXIT_FAILED and len(lines) == 1
+    assert "failed: " in capsys.readouterr().err
+    with open_store(db, create=False) as store:
+        assert store.verdicts_at("judge-v1", _DAY2) == []

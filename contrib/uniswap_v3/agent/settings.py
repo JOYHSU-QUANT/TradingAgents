@@ -14,14 +14,17 @@ that the two scorecards compare. ``llm_provider`` is a provider the
 engine's client registry knows (``openrouter``, ``anthropic``, ``openai``
 and so on); its API key is read from the environment variable the engine
 names for it (``OPENROUTER_API_KEY`` for OpenRouter), never from a config.
-``selected_analysts`` are the analysts the graph runs before its debate;
-the crypto pipeline has no fundamentals to read, so the default leaves that
-one out. ``max_tokens`` caps every completion: a gateway asked for no cap
-may refuse every call, so a cap is always sent.
+``selected_analysts`` are the analysts the graph runs before its debate,
+any of ``market``, ``social`` and ``news``; the engine's fourth, the
+fundamentals analyst, reads a company's statements and has no crypto
+branch, so it is refused here, where every ticker is a crypto asset.
+``max_tokens`` caps every completion: a gateway asked for no cap may
+refuse every call, so a cap is always sent.
 
 None of this enters a run's config snapshot: the verdicts a run reads are
 data in the store, which record the model that gave each one, and which
-judge is asked next changes no decision already made.
+judge is asked next changes no decision already made. The sidecar of each
+verdict keeps the settings its judge ran under.
 """
 
 from __future__ import annotations
@@ -33,8 +36,9 @@ from ..domain.verdicts import require_count, require_text
 
 __all__ = ["ANALYSTS", "AgentSettings"]
 
-# The analysts the engine's graph can be set up with, in its own order.
-ANALYSTS: Final = ("market", "social", "news", "fundamentals")
+# The analysts the engine's graph can be set up with for a crypto asset, in its own order.
+ANALYSTS: Final = ("market", "social", "news")
+_STOCK_ONLY: Final = "fundamentals"
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,12 @@ class AgentSettings:
                 f"{self.selected_analysts!r}"
             )
         for analyst in analysts:
+            if analyst == _STOCK_ONLY:
+                raise ValueError(
+                    f"selected_analysts names {analyst!r}, and the engine's fundamentals "
+                    f"analyst reads a company's statements, which a crypto asset has none of; "
+                    f"the analysts are {list(ANALYSTS)}"
+                )
             if analyst not in ANALYSTS:
                 raise ValueError(
                     f"selected_analysts names {analyst!r}, and the analysts are {list(ANALYSTS)}"

@@ -6,8 +6,8 @@ verdict to the store and its sidecar as soon as it is given. A token whose
 verdict the store already holds is not asked again: a judge whose answers
 cannot be reproduced is asked once per bar, and a verdict is never
 rewritten. A judge that fails on a later token leaves the earlier verdicts
-stored and raises :class:`~.errors.JudgeUnavailable`; the next visit asks
-only what is missing.
+stored and raises :class:`~.errors.JudgeUnavailable` or
+:class:`~.errors.AgentError`; the next visit asks only what is missing.
 
 The bar must be in the store (:class:`~.errors.BarNotStored` otherwise):
 its close is what the judge is shown, and a bar the store never gets is one
@@ -20,6 +20,12 @@ what came after it.
 The judge's words are kept for every token it is asked about, whatever
 the rating, ``REVIEW`` included: that the judge was asked and gave no
 rating is itself a verdict, which a strategy treats as none.
+
+Two visits asking at once are not guarded against beyond a second look at
+the store just before each verdict is written: the one that writes second
+is refused by the store, and may have replaced the other's sidecar in the
+window between that look and its own write, a few milliseconds against the
+minutes a judge takes. The schedule runs one visit at a time.
 """
 
 from __future__ import annotations
@@ -30,12 +36,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from ..config import ConfigError, UniswapConfig
-from ..domain.times import DATE, utc_text
+from ..domain.times import DATE_ONLY, utc_text
 from ..domain.verdicts import VerdictRecord
 from ..store.bar_source import StoredBar, load_bar
 from ..store.repository import Store
 from .context import BARS_NEEDED, spot_context
-from .errors import BarNotStored, JudgeUnavailable
+from .errors import AgentError, BarNotStored
 from .graph import FAKE_MODEL, Judge
 from .record import sidecar_path, sidecar_record, verdict_record, write_sidecar
 from .tickers import tickers_for
@@ -54,6 +60,14 @@ class Asked:
     asked_now: bool
     elapsed_seconds: float = 0.0
 
+    def __post_init__(self) -> None:
+        if self.record.verdict.symbol != self.symbol:
+            raise ValueError(
+                f"the record is of {self.record.verdict.symbol}, and the token is {self.symbol}"
+            )
+        if not self.asked_now and self.elapsed_seconds:
+            raise ValueError("a verdict found stored took this visit no time")
+
 
 @dataclass(frozen=True)
 class AskSummary:
@@ -66,6 +80,10 @@ class AskSummary:
     source: str
     verdicts: tuple[Asked, ...] = ()
     suspect: bool = False
+
+    def __post_init__(self) -> None:
+        if self.suspect and self.verdicts:
+            raise ValueError("a suspect bar has no verdicts asked or found")
 
     @property
     def asked(self) -> tuple[Asked, ...]:
@@ -80,7 +98,7 @@ class AskSummary:
 
 def trade_date_of(time: int) -> str:
     """The UTC date of the boundary ``time``, as the engine takes a trade date."""
-    return utc_text(time, DATE)
+    return utc_text(time, DATE_ONLY)
 
 
 def verdict_source(config: UniswapConfig) -> str:
@@ -132,14 +150,14 @@ def ask_verdicts(
     ``home`` is the store's directory, where the sidecars go. ``now`` is
     when the asking is done, kept as each verdict's ``asked_at``, and what
     the latest boundary is reckoned from. ``report`` is handed each token's
-    :class:`Asked` as it is done.
+    :class:`Asked` as soon as it is recorded.
 
     The config names the source the verdicts are written under
     (:func:`verdict_source`), and every traded token must have a ticker
     (:func:`~.tickers.tickers_for`). A rehearsal judge is refused when the
-    store already holds a verdict of the source from any model: a fake
-    verdict blocks the real one at its bar for good, so a rehearsal is for
-    a store that holds no real verdicts.
+    store already holds a verdict of the source from any model but the
+    fake: a fake verdict blocks the real one at its bar for good, so a
+    rehearsal is for a store that holds no real verdicts.
     """
     source = verdict_source(config)
     tickers = tickers_for(config.traded_symbols)
@@ -163,8 +181,8 @@ def ask_verdicts(
     stored = load_bar(store, config, time)
     if stored is None:
         raise BarNotStored(
-            f"the store has no bar at {trade_date} ({time}) to show the judge; backfill or a "
-            f"paper visit reads it"
+            f"the store has no bar at {trade_date} ({utc_text(time)}) to show the judge; "
+            f"backfill or a paper visit reads it"
         )
     if stored.bar.suspect:
         return AskSummary(time=time, source=source, suspect=True)
@@ -189,11 +207,17 @@ def ask_verdicts(
         )
         try:
             answer = judge.ask(ticker, trade_date, context)
-        except JudgeUnavailable as exc:
-            raise JudgeUnavailable(
+        except AgentError as exc:
+            raise type(exc)(
                 f"{exc}; {len(done)} verdict(s) at {trade_date} stay recorded, and a later "
                 f"visit asks about the rest"
             ) from exc
+        # Another visit may have recorded this token while the judge was thinking.
+        meanwhile = store.verdict(source, symbol, time)
+        if meanwhile is not None:
+            done.append(Asked(symbol=symbol, ticker=ticker, record=meanwhile, asked_now=False))
+            report(done[-1])
+            continue
         relative = digest = None
         if answer.reports is not None:
             relative = sidecar_path(source, symbol, time)
@@ -209,6 +233,7 @@ def ask_verdicts(
                     trade_date=trade_date,
                     context=context,
                     model=judge.model,
+                    settings=judge.settings,
                     asked_at=now,
                 ),
             )

@@ -49,3 +49,11 @@ def test_the_analysts_are_the_ones_the_graph_setup_names():
     setup = (_REPO_ROOT / "tradingagents" / "graph" / "setup.py").read_text(encoding="utf-8")
     missing = [name for name in ANALYSTS if f'"{name}"' not in setup]
     assert not missing, f"not named in the graph setup: {missing}"
+
+
+def test_the_fundamentals_analyst_is_still_stock_only_upstream():
+    # The reason the settings refuse it: the day it gains a crypto branch, reconsider.
+    analyst = (
+        _REPO_ROOT / "tradingagents" / "agents" / "analysts" / "fundamentals_analyst.py"
+    ).read_text(encoding="utf-8")
+    assert "crypto" not in analyst.lower(), "the fundamentals analyst now knows crypto"

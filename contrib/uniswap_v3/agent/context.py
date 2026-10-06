@@ -6,8 +6,10 @@ trades in, the Uniswap v3 pools, whose closes are what the strategy acts
 on; nor what a rating does once given. Both go into the instrument context
 every agent reads. Nothing else does: no holding, which belongs to a run
 while a verdict belongs to none, and no verdict of the rule strategy, which
-the rating is not to second-guess. The text gives context and asks for no
-answer format: the rating is read out of the graph's own decision.
+the rating is not to second-guess; nor the multipliers, which are each
+run's own while a verdict is shared by every run that reads the source.
+The text gives context and asks for no answer format: the rating is read
+out of the graph's own decision.
 
 The closes come one per boundary, with ``None`` where a bar is missing or
 suspect, and a gap is told as a gap: a change is given only when the bar
@@ -69,14 +71,19 @@ def _volatility(closes: Sequence[Decimal | None], interval_seconds: int) -> str:
         for earlier, later in zip(window, window[1:], strict=False)
         if earlier is not None and later is not None
     ]
+    measured = f"{len(returns)} of {VOL_WINDOW} returns measured"
     if len(returns) < 2:
-        return f"not measured ({len(returns)} of {VOL_WINDOW} return(s) measured)"
+        return f"not measured ({measured})"
     bars_per_year = DECIMAL_CONTEXT.divide(_SECONDS_PER_YEAR, Decimal(interval_seconds))
     annualised = sample_volatility(returns, DECIMAL_CONTEXT.sqrt(bars_per_year))
-    measured = (
-        "" if len(returns) == VOL_WINDOW else f" ({len(returns)} of {VOL_WINDOW} returns measured)"
-    )
-    return f"{DECIMAL_CONTEXT.multiply(annualised, _HUNDRED):.1f}% annualised{measured}"
+    note = "" if len(returns) == VOL_WINDOW else f" ({measured})"
+    return f"{DECIMAL_CONTEXT.multiply(annualised, _HUNDRED):.1f}% annualised{note}"
+
+
+def _listed(quote: str, traded: Sequence[str]) -> str:
+    """``USDC and WETH``, or ``USDC, WBTC and WETH``: the quote first, the rest sorted."""
+    *rest, last = sorted(traded)
+    return f"{', '.join([quote, *rest])} and {last}"
 
 
 def spot_context(
@@ -100,21 +107,20 @@ def spot_context(
         raise ValueError("the spot context takes at least the close of the bar being judged")
     if any(close is not None and close <= 0 for close in closes):
         raise ValueError("a close is a positive price")
+    if not traded:
+        raise ValueError("the spot context names at least one traded token")
     changes = "; ".join(_change(closes, span) for span in CHANGE_SPANS)
-    *rest, last = sorted(traded)
-    tokens = f"{', '.join(rest)} and {last}" if rest else last
     return (
         f"Spot context from the Uniswap v3 pools on Ethereum mainnet, where {ticker} is traded "
-        f"as {symbol} against {quote}. A bar closes every {interval_seconds} seconds, at a "
-        f"multiple of that since the epoch; the bar being judged closed at {utc_text(time)}.\n"
+        f"as {symbol} against {quote}. A bar closes every {interval_seconds} seconds (at a "
+        f"multiple of that since the epoch); the bar being judged closed at {utc_text(time)}.\n"
         f"- Close: {price_text(closes[-1])} {quote}.\n"
         f"- Change of the close {changes}.\n"
         f"- Realised volatility over the last {VOL_WINDOW} bar(s): "
         f"{_volatility(closes, interval_seconds)} (sample standard deviation of the log "
         f"returns, annualised).\n"
-        f"The verdict feeds a spot rebalance between {quote}, {tokens} that trades once per "
-        f"bar, at these closes. A rule decides whether {symbol} is held at all and caps its "
-        f"weight; the rating sets how much of that cap is held, all of it on Buy and none on "
-        f"Sell. A rating cannot open a position the rule holds at zero. Rate {ticker} on its "
-        f"own; the other tokens are rated separately."
+        f"The verdict feeds a spot rebalance between {_listed(quote, traded)} that trades once "
+        f"per bar, at these closes. The rating sets how much of a rule-capped position in "
+        f"{symbol} is held, the most on Buy and the least on Sell. Rate {ticker} on its own; "
+        f"the other tokens are rated separately."
     )

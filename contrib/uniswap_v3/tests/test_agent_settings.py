@@ -41,6 +41,12 @@ def test_the_defaults_are_the_judge_of_the_hyperliquid_paper_run():
 def test_a_list_of_analysts_is_kept_as_a_tuple():
     assert AgentSettings(selected_analysts=["market"]).selected_analysts == ("market",)
     assert AgentSettings(selected_analysts=list(ANALYSTS)).selected_analysts == ANALYSTS
+    assert ANALYSTS == ("market", "social", "news")
+
+
+def test_the_fundamentals_analyst_is_refused_as_stock_only():
+    with pytest.raises(ValueError, match="reads a company's statements"):
+        AgentSettings(selected_analysts=["market", "fundamentals"])
 
 
 @pytest.mark.parametrize(

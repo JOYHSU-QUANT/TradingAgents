@@ -33,17 +33,17 @@ from typing import Final
 
 __all__ = [
     "DECIMAL_CONTEXT",
-    "EXACT_CONTEXT",
-    "MAX_MAGNITUDE",
     "decimal_sum",
+    "EXACT_CONTEXT",
     "fixed_text",
     "floor_to_places",
     "log_returns",
+    "MAX_MAGNITUDE",
     "mean",
     "parse_decimal",
+    "plain",
     "price_text",
     "sample_volatility",
-    "plain",
 ]
 
 DECIMAL_CONTEXT: Final = Context(
@@ -88,6 +88,8 @@ def decimal_sum(values: Iterable[Decimal]) -> Decimal:
 
 def mean(values: Sequence[Decimal]) -> Decimal:
     """The arithmetic mean of ``values``, which are at least one."""
+    if not values:
+        raise ValueError("a mean is taken of at least one value")
     return DECIMAL_CONTEXT.divide(decimal_sum(values), Decimal(len(values)))
 
 
@@ -105,6 +107,8 @@ def sample_volatility(returns: Sequence[Decimal], annualiser: Decimal) -> Decima
     The one estimator the rule strategy sizes on and the judge is shown;
     the annualiser is the square root of the bars in a year.
     """
+    if len(returns) < 2:
+        raise ValueError(f"a sample deviation is taken of at least two returns, got {len(returns)}")
     centre = mean(returns)
     deviations = [DECIMAL_CONTEXT.subtract(value, centre) for value in returns]
     variance = DECIMAL_CONTEXT.divide(

@@ -64,6 +64,7 @@ from ..domain.decimal_context import (
     sample_volatility,
 )
 from ..domain.types import Bar, Hold, MarketView, Portfolio, TargetWeights
+from ..domain.verdicts import require_count
 from .rebalance import (
     floor_weight,
     rebalance_or_hold,
@@ -82,12 +83,6 @@ _ZERO: Final = Decimal(0)
 _ONE: Final = Decimal(1)
 
 
-def _require_count(value: object, what: str, *, at_least: int) -> None:
-    """Refuse a number of bars that is not an integer of at least ``at_least``."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < at_least:
-        raise ValueError(f"{what} must be an integer of at least {at_least}, got {value!r}")
-
-
 @dataclass(frozen=True)
 class TrendVolWeights:
     """Weight each token in trend at ``target_vol`` over its volatility, the rest in the quote."""
@@ -100,9 +95,9 @@ class TrendVolWeights:
     band: Decimal
 
     def __post_init__(self) -> None:
-        _require_count(self.trend_window, "trend_window", at_least=2)
-        _require_count(self.vol_window, "vol_window", at_least=2)
-        _require_count(self.bars_per_year, "bars_per_year", at_least=1)
+        require_count(self.trend_window, "trend_window", at_least=2)
+        require_count(self.vol_window, "vol_window", at_least=2)
+        require_count(self.bars_per_year, "bars_per_year", at_least=1)
         require_decimal(self.target_vol, "target_vol", lambda value: value > 0, "above 0")
         require_decimal(self.max_weight, "max_weight", lambda value: 0 < value <= 1, "in (0, 1]")
         require_band(self.band)

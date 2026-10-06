@@ -76,6 +76,7 @@ class ScriptedJudge:
     """
 
     model = "scripted-model"
+    settings: Mapping[str, object] = {"llm_provider": "scripted"}
     rehearsal = False
     point_in_time = False
 

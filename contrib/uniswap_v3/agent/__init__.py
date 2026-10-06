@@ -17,4 +17,5 @@ engine type: a verdict leaves this layer as the stdlib
 - :mod:`.record` — the sidecar beside the store, and the stored row.
 - :mod:`.verdicts` — one visit's asking: which tokens, in what order,
   what is kept when a later one fails.
+- :mod:`.errors` — what the layer raises, by what the caller should do.
 """

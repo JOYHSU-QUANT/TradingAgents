@@ -16,7 +16,7 @@ D = Decimal
 _AT = 1_704_067_200
 
 
-def _context(closes, **changes):
+def _context(closes, **overrides):
     arguments = {
         "symbol": "WETH",
         "ticker": "ETH-USD",
@@ -25,7 +25,7 @@ def _context(closes, **changes):
         "time": _AT,
         "interval_seconds": 86_400,
     }
-    return spot_context([D(close) for close in closes], **{**arguments, **changes})
+    return spot_context([D(close) for close in closes], **{**arguments, **overrides})
 
 
 def test_the_tickers_are_the_assets_the_wrapped_tokens_stand_for():
@@ -48,10 +48,16 @@ def test_the_context_names_the_market_the_bar_the_close_and_the_role():
     assert "the bar being judged closed at 2024-01-01T00:00:00Z" in text
     assert "- Close: 2000.00 USDC." in text
     assert "a spot rebalance between USDC, WBTC and WETH that trades once per bar" in text
-    assert "whether WETH is held at all and caps its weight" in text
+    assert (
+        "The rating sets how much of a rule-capped position in WETH is held, the most on Buy "
+        "and the least on Sell." in text
+    )
     assert "Rate ETH-USD on its own; the other tokens are rated separately." in text
-    # The context gives no answer format: the rating is read from the graph's own decision.
+    # The context gives no answer format, no multipliers (each run's own) and nothing of the
+    # rule's state: the rating is read from the graph's own decision.
     assert "format" not in text.lower() and "JSON" not in text
+    assert "zero" not in text and "trend" not in text and "0.75" not in text
+    assert "a spot rebalance between USDC and WETH that trades" in _context(["1"], traded=["WETH"])
 
 
 def test_the_spans_and_the_window_are_what_the_context_measures_over():
@@ -59,12 +65,11 @@ def test_the_spans_and_the_window_are_what_the_context_measures_over():
 
 
 def test_the_changes_are_measured_over_the_spans_and_the_volatility_over_the_window():
-    # Rising 1% a bar: every log return is the same, so no volatility is measured.
+    # Rising 1% a bar: every log return is the same, so the volatility measured is zero.
     closes = [D("1000") * D("1.01") ** step for step in range(BARS_NEEDED)]
     text = _context(closes, traded=["WETH"])
     assert "over 1 bar(s): +1.00%; over 7 bar(s): +7.21%; over 30 bar(s): +34.78%" in text
-    assert "over the last 20 bar(s): 0.0% annualised" in text
-    assert "rebalance between USDC, WETH that trades" in text
+    assert "over the last 20 bar(s): 0.0% annualised (sample" in text
 
 
 def test_alternating_returns_give_the_sample_deviation_annualised_by_the_bar_length():
@@ -81,9 +86,9 @@ def test_too_few_closes_leave_a_span_or_the_volatility_unmeasured():
     assert "over 1 bar(s): -1.00%" in text
     assert "over 7 bar(s): not measured (no bar 7 bar(s) back)" in text
     assert "over 30 bar(s): not measured (no bar 30 bar(s) back)" in text
-    assert "over the last 20 bar(s): not measured (1 of 20 return(s) measured)" in text
+    assert "over the last 20 bar(s): not measured (1 of 20 returns measured)" in text
     assert "over 1 bar(s): not measured (no bar 1 bar(s) back)" in _context(["100"])
-    assert "(0 of 20 return(s) measured)" in _context(["100"])
+    assert "(0 of 20 returns measured)" in _context(["100"])
 
 
 def test_a_gap_in_the_closes_is_told_as_a_gap():
@@ -132,3 +137,5 @@ def test_closes_that_are_not_prices_are_refused():
         _context([])
     with pytest.raises(ValueError, match="positive price"):
         _context(["100", "0"])
+    with pytest.raises(ValueError, match="at least one traded token"):
+        _context(["100"], traded=[])

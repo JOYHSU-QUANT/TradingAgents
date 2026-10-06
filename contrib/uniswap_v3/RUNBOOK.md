@@ -71,7 +71,8 @@ repo 的 `.venv` 不一定裝了 web3。
 Copy-Item contrib/uniswap_v3/configs/uniswap_v3.example.yaml contrib/uniswap_v3/configs/paper.local.yaml
 ```
 
-要改的只有 `strategy`（目前只有佔位策略 `fixed_weights`）。其餘照預設：一天一根 bar、
+要改的只有 `strategy`（`fixed_weights` 是佔位策略；要跑規則策略就把 example 裡註解掉的
+`trend_vol_weights` 區塊換上去）。其餘照預設：一天一根 bar、
 成交在邊界後 25 塊（`execution.delay_blocks`）——排程時間是照這個值排的，
 改大到超過 45 塊（約 9 分鐘）就要把排程一起往後挪。
 

@@ -3,8 +3,11 @@
 Uniswap v3 現貨的執行架構：策略只回答「目標比例是多少」，引擎負責把目標變成 swap。
 同一個引擎換接線，就能跑歷史回測、紙上交易，之後是主網分叉沙盒與實盤。
 
-這個套件**不決定策略**。內建的只有一個佔位策略 `fixed_weights`（固定比例＋偏離帶），
-用途是驅動引擎與測試；它不讀價格走勢、不做預測。
+這個套件**不決定策略**：策略只透過 `Strategy` port 進來。內建兩個：
+
+- `fixed_weights`：佔位策略（固定比例＋偏離帶），用途是驅動引擎與測試；它不讀價格走勢、不做預測。
+- `trend_vol_weights`：規則策略。代幣收盤在均線之上才持有，持有比例照波動率目標配置，其餘留在計價代幣。
+  規則與參數的定義在 `strategies/trend_vol_weights.py` 的 docstring。
 
 它與 `contrib/hyperliquid_perp`、`contrib/autoresearch`、`contrib/replay` 完全隔離：
 互不 import（`tests/test_isolation.py` 釘住），store 是自己的 SQLite 檔，也不碰
@@ -82,7 +85,7 @@ backtest 與 paper 沒有私鑰、不簽交易。會簽名的只有 `ChainExecut
 
 | Port | 做什麼 | 實作 |
 |---|---|---|
-| `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py` |
+| `Strategy` | `decide(view, portfolio) -> TargetWeights \| Hold`。**策略進入系統的唯一入口** | `strategies/fixed_weights.py`、`strategies/trend_vol_weights.py` |
 | `Executor` | `execute(swap, bar) -> Fill \| Rejection`，並宣告成交來源 | `engine/executors.py` 的 `ModelExecutor`、`QuoteExecutor`；`chain/swaps.py` 的 `ChainExecutor`（分叉上簽名） |
 | `Wallet` | `prepare(bar, ledger)`、`holdings()`：會簽名的 executor 從哪個錢包交易，引擎拿它對帳 | `chain/wallet.py` 的 `ForkWallet` |
 | `Journal` | run、decision、帳本、send 的讀寫 | `store/repository.py` 的 `Store` |
@@ -108,7 +111,7 @@ contrib/uniswap_v3/
   constants.py          以 chain ID 分表的代幣、池子、QuoterV2 與 SwapRouter02 地址
   ports.py              上表的 Protocol
   domain/               純邏輯：價格換算、bar、路徑、帳本、紀錄、績效（只 import 標準函式庫）
-  strategies/           registry 與佔位策略 fixed_weights
+  strategies/           registry、佔位策略 fixed_weights、規則策略 trend_vol_weights
   engine/               step、回測迴圈 replay、兩個 executor
   chain/                web3 讀取：區塊、池子價格與 TWAP、QuoterV2、base fee；
                         分叉防線與開發帳戶（fork.py）、簽名送出（transactions.py）、ChainExecutor（swaps.py）、

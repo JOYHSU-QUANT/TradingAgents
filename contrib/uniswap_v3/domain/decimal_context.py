@@ -18,6 +18,7 @@ wide that does not trap, since dropping digits is the point of a cut.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from decimal import (
     ROUND_DOWN,
     ROUND_HALF_EVEN,
@@ -34,6 +35,7 @@ __all__ = [
     "DECIMAL_CONTEXT",
     "EXACT_CONTEXT",
     "MAX_MAGNITUDE",
+    "decimal_sum",
     "floor_to_places",
     "parse_decimal",
     "plain",
@@ -69,6 +71,14 @@ EXACT_CONTEXT: Final = Context(
 # As wide, without the trap: cutting digits off is the point of a cut.
 _CUTTING: Final = EXACT_CONTEXT.copy()
 _CUTTING.traps[Inexact] = False
+
+
+def decimal_sum(values: Iterable[Decimal]) -> Decimal:
+    """The sum of ``values`` under :data:`DECIMAL_CONTEXT`, zero when there are none."""
+    total = Decimal(0)
+    for value in values:
+        total = DECIMAL_CONTEXT.add(total, value)
+    return total
 
 
 def floor_to_places(value: Decimal, places: int) -> Decimal:

@@ -8,8 +8,9 @@ which adapters are wired behind :mod:`.ports`.
 The package is isolated: it imports no other package under ``contrib/`` and
 none of them imports it (``tests/test_isolation.py`` reads the sources to
 hold that). It is also strategy-agnostic: a strategy enters only through
-:class:`~.ports.Strategy`, and the one strategy shipped here,
-``fixed_weights``, is a placeholder that drives the engine and its tests.
+:class:`~.ports.Strategy`. Two ship here: ``fixed_weights``, a placeholder
+that drives the engine and its tests, and ``trend_vol_weights``, a rule
+strategy that holds a token while it trends, sized to a volatility target.
 
 What exists so far is the skeleton, the chain reader, the bar store, the
 engine's step, the backtest and the paper run: the value types, the pool price conversion,

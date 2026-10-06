@@ -14,11 +14,15 @@ from typing import Final
 
 from ..ports import Strategy
 from .fixed_weights import FixedWeights
+from .trend_vol_weights import TrendVolWeights
 
 __all__ = ["build_strategy", "strategy_names"]
 
 _FACTORIES: Final[Mapping[str, Callable[[Mapping[str, object]], Strategy]]] = MappingProxyType(
-    {"fixed_weights": FixedWeights.from_params}
+    {
+        "fixed_weights": FixedWeights.from_params,
+        "trend_vol_weights": TrendVolWeights.from_params,
+    }
 )
 
 
